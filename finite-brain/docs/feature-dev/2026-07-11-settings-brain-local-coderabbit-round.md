@@ -3,7 +3,7 @@
 ## Scope
 
 - Repository: `finitecomputer/finite-mono`
-- Branch: `feature/finitebrain-settings-vault-ui`
+- Branch: `feature/finitebrain-settings-brain-ui`
 - Base: `main`
 - Review target: committed branch diff
 

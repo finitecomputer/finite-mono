@@ -192,7 +192,7 @@ pub(crate) async fn product_client_config_handler(
             public_base_url: state.public_base_url.to_string(),
             auth_scheme: "Nostr".to_owned(),
             http_auth_kind: 27_235,
-            default_vault_id: "personal".to_owned(),
+            default_brain_id: "personal".to_owned(),
         }),
     )
 }

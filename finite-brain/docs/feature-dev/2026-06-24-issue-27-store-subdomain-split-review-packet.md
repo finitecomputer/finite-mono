@@ -5,7 +5,7 @@
 - `crates/finite-brain-store/src/lib.rs`
 - `crates/finite-brain-store/src/schema.rs`
 - `crates/finite-brain-store/src/loading.rs`
-- `crates/finite-brain-store/src/vaults.rs`
+- `crates/finite-brain-store/src/brains.rs`
 - `crates/finite-brain-store/src/folder_access.rs`
 - `crates/finite-brain-store/src/links.rs`
 - `crates/finite-brain-store/src/shared_folders.rs`

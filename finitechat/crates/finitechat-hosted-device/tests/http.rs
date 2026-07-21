@@ -604,7 +604,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
     assert!(identify["npub"].as_str().unwrap().starts_with("npub1"));
 
     let now = test_now_unix_seconds();
-    let protected_url = "https://finite.computer/_admin/vaults";
+    let protected_url = "https://finite.computer/_admin/brains";
     let authorized = hosted
         .clone()
         .oneshot(provider_request(
@@ -636,16 +636,16 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
 
     let member_npub = identify["npub"].as_str().unwrap().to_owned();
     let access_change_content = format!(
-        "{{\"version\":\"finite-vault-admin-access-change-v1\",\"vaultId\":\"personal\",\"changeId\":\"provider-access-change\",\"action\":\"add-member\",\"adminNpub\":\"{member_npub}\",\"targetNpub\":\"{member_npub}\",\"createdAt\":\"2026-07-13T12:00:00Z\"}}"
+        "{{\"version\":\"finite-brain-admin-access-change-v1\",\"brainId\":\"personal\",\"changeId\":\"provider-access-change\",\"action\":\"add-member\",\"adminNpub\":\"{member_npub}\",\"targetNpub\":\"{member_npub}\",\"createdAt\":\"2026-07-13T12:00:00Z\"}}"
     );
     let access_change_input = serde_json::json!({
-        "intent": "vault-access-change",
+        "intent": "brain-access-change",
         "eventTemplate": {
             "kind": 30_078,
             "created_at": now,
             "tags": [
-                ["d", "finite-vault-admin-access-change:personal:provider-access-change"],
-                ["vault", "personal"],
+                ["d", "finite-brain-admin-access-change:personal:provider-access-change"],
+                ["brain", "personal"],
                 ["action", "add-member"],
                 ["p", public_key_hex],
             ],
@@ -683,7 +683,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "wrapGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "vaultId": "personal",
+                "brainId": "personal",
                 "folderId": "restricted",
                 "keyVersion": 1,
                 "recipientNpub": member_npub.clone(),
@@ -704,7 +704,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "openGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "vaultId": "personal",
+                "brainId": "personal",
                 "folderId": "restricted",
                 "keyVersion": 1,
                 "recipientNpub": member_npub.clone(),
@@ -716,7 +716,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
     assert_eq!(opened.status(), StatusCode::OK);
     let opened: Value =
         serde_json::from_slice(&opened.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(opened["plaintext"]["vaultId"], "personal");
+    assert_eq!(opened["plaintext"]["brainId"], "personal");
     assert_eq!(opened["plaintext"]["folderId"], "restricted");
     assert_eq!(opened["plaintext"]["keyVersion"], 1);
     assert_eq!(opened["plaintext"]["recipientNpub"], member_npub);
@@ -727,7 +727,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "openGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "vaultId": "personal",
+                "brainId": "personal",
                 "folderId": "getting-started",
                 "keyVersion": 1,
                 "recipientNpub": member_npub.clone(),
@@ -756,7 +756,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "openGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "vaultId": "personal",
+                "brainId": "personal",
                 "folderId": "restricted",
                 "keyVersion": 1,
                 "recipientNpub": member_npub.clone(),

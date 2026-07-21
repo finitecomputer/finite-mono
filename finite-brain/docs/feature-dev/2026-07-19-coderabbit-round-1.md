@@ -14,10 +14,10 @@
 
 | Finding | Severity | Decision | Notes |
 | --- | --- | --- | --- |
-| Production acceptance still described Folder-bounded Personal Agent access | major | fixed | Acceptance now proves Personal Vault-wide Agent and owner readback across restart. |
+| Production acceptance still described Folder-bounded Personal Agent access | major | fixed | Acceptance now proves Personal Brain-wide Agent and owner readback across restart. |
 | ADR stated deferred Core deletion integration as implemented | major | fixed | Future integration is explicitly separated from current owner removal/replacement. |
 | Local Brain process sourced Core-only credentials | major | fixed | Brain now receives a dedicated mode-0600 file containing only `FC_CORE_API_TOKEN`. |
-| CLI reference omitted `vault bootstrap-personal` | major | fixed | Command map and setup guidance now name the account-bound bootstrap command. |
+| CLI reference omitted `brain bootstrap-personal` | major | fixed | Command map and setup guidance now name the account-bound bootstrap command. |
 | Managed-skill reference comparison could crash on a missing canonical file | minor | fixed | Static validation now reports either missing file before comparing them. |
 | Organization creation example passed a literal sender variable name | major | fixed | Both managed skill copies use quoted `"$AUTHENTICATED_SENDER_ID"`. |
 | Product Client delete verification was not scoped to its handler | major | fixed | Static smoke now verifies authority and signed action inside the delete-Folder handler. |

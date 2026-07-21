@@ -11,7 +11,7 @@
 ## Inputs
 
 - PRD issue: finitecomputer/finite-brain#23
-- Relevant glossary terms: BrainStore, Vault, Folder Access, Folder Key Grant, Vault Invitation, Share Link, Shared Folder Mount, Current-State Projection
+- Relevant glossary terms: BrainStore, Brain, Folder Access, Folder Key Grant, Brain Invitation, Share Link, Shared Folder Mount, Current-State Projection
 - Relevant ADRs:
   - `docs/adr/0002-use-sqlite-from-day-one.md`
   - `docs/adr/0005-keep-folder-access-binary.md`
@@ -22,10 +22,10 @@
 - Public interface used: existing `BrainStore` facade.
 - Behaviors covered:
   - Schema and migrations moved to `schema.rs`.
-  - Vault loading and projection helpers moved to `loading.rs`.
-  - Vault bootstrap/member/admin mutation moved to `vaults.rs`.
+  - Brain loading and projection helpers moved to `loading.rs`.
+  - Brain bootstrap/member/admin mutation moved to `brains.rs`.
   - Folder creation, grants, setup repair, and rotation moved to `folder_access.rs`.
-  - Vault invitations and share links moved to `links.rs`.
+  - Brain invitations and share links moved to `links.rs`.
   - Shared folder invitations, mounts, delegated members, and revocation moved to `shared_folders.rs`.
   - Sync records remained in `sync_records.rs`.
   - `lib.rs` keeps shared types, conversion helpers, validation helpers, sync facade methods, export facade methods, and tests.

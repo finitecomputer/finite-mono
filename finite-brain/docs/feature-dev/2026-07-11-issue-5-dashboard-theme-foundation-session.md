@@ -25,7 +25,7 @@
 - Public interface used: the real Rust-served `/client`, `/client/app.css`,
   and explicit `/client/fonts/*.ttf` routes
 - Behaviors covered: exact local font delivery; system light/dark presentation;
-  shell, ribbon, Vault controls, Session Lock, common control/focus/disabled
+  shell, ribbon, Brain controls, Session Lock, common control/focus/disabled
   states, and locked workspace presentation; preservation of the existing DOM,
   JavaScript, geometry, and responsive breakpoint behavior
 - `tdd` used: yes. The font asset route test failed with `404` before the

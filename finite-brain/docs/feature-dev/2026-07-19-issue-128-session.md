@@ -12,7 +12,7 @@
 
 - Spec issue: #127
 - Ticket: #128
-- Relevant glossary terms: Folder Access, Vault Admin, Personal Agent, Folder
+- Relevant glossary terms: Folder Access, Brain Admin, Personal Agent, Folder
   Key Grant
 - Relevant ADRs: none; this slice exposes existing policy without changing it
 - Prototype answer and source branch, if any: none
@@ -21,7 +21,7 @@
 
 - Public interface used: `fbrain access list` text and JSON output
 - Behaviors covered: explicit Folder identities remain available; effective
-  identities include Organization admins and the Personal Vault owner and
+  identities include Organization admins and the Personal Brain owner and
   Personal Agent according to the existing Folder Key recipient policy
 - `tdd` used: yes; public CLI tests were written before the implementation
 - Commands run during implementation: focused `access_list` tests,

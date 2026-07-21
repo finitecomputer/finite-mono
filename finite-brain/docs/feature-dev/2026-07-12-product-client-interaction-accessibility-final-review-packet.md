@@ -4,7 +4,7 @@
 
 - Issue: #24, with implementation tickets #25, #26, #27, and #28
 - Slice type: cross-ticket final Product Client review
-- Acceptance criteria: visible actions are truthful; Vault navigation has one
+- Acceptance criteria: visible actions are truthful; Brain navigation has one
   canonical home per task; clipboard feedback is safe and short-lived; keyboard
   paths are complete; Graph exposes only working controls; Session Lock keeps
   client-only material and focus returns safe.
@@ -13,7 +13,7 @@
 
 ## Implementation Summary
 
-The Product Client now communicates only actions that work, routes each Vault
+The Product Client now communicates only actions that work, routes each Brain
 task through a canonical surface, keeps clipboard/status feedback safe and
 temporary, and provides usable keyboard/focus behavior across the menus and
 modals. The Graph View has no hidden filter or fake playback/history controls.
@@ -21,12 +21,12 @@ modals. The Graph View has no hidden filter or fake playback/history controls.
 ## Implementation Evidence
 
 - `implement` sessions: `/root/ticket_25_truthful_page_affordances`,
-  `/root/ticket_26_vault_legacy_cleanup`,
+  `/root/ticket_26_brain_legacy_cleanup`,
   `/root/ticket_27_clipboard_invitation_feedback`, and
   `/root/ticket_28_keyboard_navigation`
 - `tdd` used: deterministic Product Client public-client seams added for the
   affected behavior, including feedback expiry/race, focus wrapping, and
-  nested Manage Vault return paths
+  nested Manage Brain return paths
 - Red/green follow-up: independent review found six P2 interaction issues;
   `8d41bc7` fixed them. A final independent review found one stale-error
   expiry P2; `39f1ab8` fixed it with a timer-expiry regression seam.
@@ -42,7 +42,7 @@ found. Keep standards and specification findings separate.
 
 Check:
 
-- Acceptance criteria are met without weakening Session Lock, NIP-07, Vault,
+- Acceptance criteria are met without weakening Session Lock, NIP-07, Brain,
   Folder Key, or encrypted-content boundaries.
 - Deterministic tests exercise public Product Client behavior rather than only
   private implementation details.

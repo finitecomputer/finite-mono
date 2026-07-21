@@ -6,7 +6,7 @@
 - Slice type: AFK tracer bullet
 - Acceptance criteria: local Funnel Sans, Funnel Display, and JetBrains Mono;
   exact public font contracts; shared light/dark presentation tokens; themed
-  shell, ribbon, Vault controls, Session Lock, common controls and locked
+  shell, ribbon, Brain controls, Session Lock, common controls and locked
   workspace; unchanged geometry, DOM hooks, behavior, and responsive structure;
   desktop/mobile light/dark visual evidence; targeted checks green
 - Baseline: `6c32dbb`

@@ -30,7 +30,7 @@ CREATE TABLE smoke_backup_probe (
   created_at TEXT NOT NULL
 );
 INSERT INTO smoke_backup_probe (label, created_at)
-VALUES ('vaults-grants-sync-invitations', '2026-06-27T00:00:00Z'),
+VALUES ('brains-grants-sync-invitations', '2026-06-27T00:00:00Z'),
        ('cutover-rollback-check', '2026-06-27T00:00:01Z');
 PRAGMA wal_checkpoint(TRUNCATE);
 SQL
@@ -58,7 +58,7 @@ if [[ "$source_rows" != "$restored_rows" ]]; then
   exit 1
 fi
 
-expected_labels="cutover-rollback-check|vaults-grants-sync-invitations"
+expected_labels="cutover-rollback-check|brains-grants-sync-invitations"
 restored_labels="$(
   sqlite3 "$RESTORED_DB" \
     "SELECT group_concat(label, '|') FROM (SELECT label FROM smoke_backup_probe ORDER BY label);"

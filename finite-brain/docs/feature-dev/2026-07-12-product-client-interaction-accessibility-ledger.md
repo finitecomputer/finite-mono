@@ -6,7 +6,7 @@
 - Loop: Feature Dev continuation
 - Target repo: finitecomputer/finite-mono
 - Base branch: `main` (explicitly chosen for the existing Product Client PR)
-- Feature branch: `feature/finitebrain-settings-vault-ui`
+- Feature branch: `feature/finitebrain-settings-brain-ui`
 - Human owner: Austin
 - Started: 2026-07-12
 - Current status: all AFK tickets and post-review fixes are committed; local
@@ -51,14 +51,14 @@ undefined.
 - Test: `scripts/with-dev-env node finite-brain/crates/finite-brain-server/src/product-client.test.js`
 - Build: `scripts/with-dev-env cargo build -p finite-brain-app --locked`
 - Visual verification: isolated local Rust-served `/client` with disposable
-  Vault and Member Identities through headless Chromium/CDP
+  Brain and Member Identities through headless Chromium/CDP
 
 ## Ticket Ledger
 
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
 | #25 | AFK | complete | scoped review complete | truthful Page and Folder affordances | targeted client, asset, build, and browser checks |
-| #26 | AFK | complete | scoped review + post-review P2 complete | canonical Vault navigation and legacy-control hard cut | targeted client, asset, and build checks |
+| #26 | AFK | complete | scoped review + post-review P2 complete | canonical Brain navigation and legacy-control hard cut | targeted client, asset, and build checks |
 | #27 | AFK | complete | scoped review + post-review P2 complete | clipboard and invitation handoff feedback | deterministic lifecycle/race, asset, and build checks |
 | #28 | AFK | complete | scoped review + post-review P2 complete | keyboard and focus semantics | deterministic keyboard/focus, asset, and build checks |
 
@@ -73,14 +73,14 @@ undefined.
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- |
 | #25 | `c7ca3ef` | `/root/ticket_25_truthful_page_affordances` | `7bf2581`, `5d46c75` | accepted | targeted client, asset, build, browser |
-| #26 | `2c6de13` | `/root/ticket_26_vault_legacy_cleanup` | `3a2f3c9`, `539ad30`, `8a58f70` | accepted; post-review follow-up | targeted client, asset, build |
+| #26 | `2c6de13` | `/root/ticket_26_brain_legacy_cleanup` | `3a2f3c9`, `539ad30`, `8a58f70` | accepted; post-review follow-up | targeted client, asset, build |
 | #27 | `8a58f70` | `/root/ticket_27_clipboard_invitation_feedback` | `398236d`, `44c669e` | accepted; post-review follow-up | deterministic client, asset, build |
 | #28 | `44c669e` | `/root/ticket_28_keyboard_navigation` | `341df32` | accepted; post-review follow-up | deterministic client, asset, build |
 | #26–#28 follow-up | `341df32` | `/root/post_review_interaction_fixes` | `8d41bc7` + final branch follow-up | independent P2 audit fixed | deterministic client, asset, build |
 
 ## Open Questions
 
-- None. The source audits and prior Settings/Vault spec resolve the user-facing
+- None. The source audits and prior Settings/Brain spec resolve the user-facing
   choices without an additional product decision:
   - Graph nodes stay hover-only and non-clickable.
   - Folder deletion remains absent until a separate server contract exists.
@@ -88,14 +88,14 @@ undefined.
     signed Save, rather than starting background writes.
   - The raw reader source mode is removed; the retained editor is named
     `Edit Markdown` to avoid overloading the accepted Source Note term.
-  - The footer remains the compact switcher; Manage Vaults retains the detailed
+  - The footer remains the compact switcher; Manage Brains retains the detailed
     list and explicit Load/Unlock; Settings loses its obsolete embedded picker.
   - Invitation Enter is non-consuming; Accept and Revoke remain explicit.
 
 ## Ticket Plan
 
 - #25: truthful Page and Folder affordances — no blockers.
-- #26: canonical Vault navigation and legacy-control hard cut — no blockers.
+- #26: canonical Brain navigation and legacy-control hard cut — no blockers.
 - #27: clipboard and invitation handoff feedback — no blockers.
 - #28: keyboard semantics — blocked by #25 and #26 so keyboard behavior lands
   against the final menu/editor/navigation surfaces.

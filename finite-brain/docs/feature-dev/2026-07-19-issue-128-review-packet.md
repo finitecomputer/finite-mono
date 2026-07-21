@@ -19,7 +19,7 @@ same recipient policy already used to distribute Folder Keys.
 
 - `implement` session: `/root/ticket_128_effective_access`
 - `tdd` used: yes
-- Red test, if applicable: Organization and Personal Vault public CLI cases
+- Red test, if applicable: Organization and Personal Brain public CLI cases
 - Green implementation, if applicable: additive JSON fields and labeled text
   fields backed by the existing recipient policy
 - Refactor, if applicable: shared Folder row rendering retained compatibility

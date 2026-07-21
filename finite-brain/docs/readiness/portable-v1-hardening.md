@@ -18,7 +18,7 @@ staging PR.
 | Hash inputs | `rejects_revision_ciphertext_hash_mismatch`; server route coverage for bad ciphertext hash |
 | Duplicate sync submit | `finite-brain-store::tests::sync_duplicate_event_returns_existing_sequence`; `finite-brain-server::tests::object_write_duplicate_retry_returns_original_sequence` |
 | Base revision conflicts | `sync_rejects_stale_base_revision_and_existing_create`; server object write conflict test coverage |
-| Bootstrap/pull visibility | `sync_projection_survives_restart_and_can_rebuild`; `encrypted_vault_export_filters_payloads_grants_and_access_state`; server sync bootstrap/pull route tests |
+| Bootstrap/pull visibility | `sync_projection_survives_restart_and_can_rebuild`; `encrypted_brain_export_filters_payloads_grants_and_access_state`; server sync bootstrap/pull route tests |
 
 ## Explicit Limits
 
@@ -28,7 +28,7 @@ staging PR.
 | Request body size | Axum `DefaultBodyLimit` caps extracted request bodies at `1 MiB`. | `protected_create_rejects_oversized_request_body` |
 | Sync pull page size | Store clamps client `limit` to `MAX_PULL_LIMIT = 1000`. | `sync_pull_caps_large_client_limits` |
 | Retention floor | Cursors below the retained floor return `410 Gone` and require rebootstrap. | `sync_cursor_expiry_requires_rebootstrap`; server route coverage |
-| Retry/idempotency | Duplicate sync writes are keyed by event id and return the original sequence. Invitation/share accepts are retry-safe only for the same target npub. | duplicate sync, Vault Invitation, Share Link, and Shared Folder tests |
+| Retry/idempotency | Duplicate sync writes are keyed by event id and return the original sequence. Invitation/share accepts are retry-safe only for the same target npub. | duplicate sync, Brain Invitation, Share Link, and Shared Folder tests |
 | Protected route rate limits | Authenticated routes are counted per signer, method, and path. Portable v1 defaults to 120 requests per 60 seconds. Deployments can override the in-process bounds through `ServerState::with_rate_limit`. | `protected_routes_enforce_configured_rate_limits` |
 
 ## Backup And Restore
@@ -40,7 +40,7 @@ store paths once those exist.
 Restore requirements:
 
 - Open the restored SQLite database.
-- Verify Vault metadata and sync sequence monotonicity.
+- Verify Brain metadata and sync sequence monotonicity.
 - Verify current encrypted projection.
 - If projection rows are missing or stale, rebuild them from the append log.
 
@@ -57,7 +57,7 @@ Evidence:
 | Signer mismatch | Core validates revision, tombstone, and access-change signer fields. Server route tests cover signer mismatch on object writes. |
 | Nonce uniqueness | Core encryption generates a fresh 12-byte AES-GCM nonce with `OsRng`. Deterministic nonce helper is public only for fixtures/tests and named as such. |
 | NIP-07 trust boundary | Browser/provider signing and NIP-44 encryption remain trusted-client responsibilities. The Product Client owns signer discovery, auth signing, Folder Key Grant opening, and local plaintext indexes. The development Smoke UI never holds production keys and only accepts pasted signed payloads. |
-| Product Client Session Lock | The browser client starts locked. Resume reopens encrypted grants through the connected Member Identity; lock, Vault switching, page navigation/back-forward caching, and signer mismatch clear Session Folder Keys, opened-grant metadata, decrypted projections, drafts, prepared writes, import/invite state, and rendered plaintext. Runtime tests guard against raw keys or decrypted content entering Web Storage, IndexedDB, Cache Storage, cookies, or browser history. |
+| Product Client Session Lock | The browser client starts locked. Resume reopens encrypted grants through the connected Member Identity; lock, Brain switching, page navigation/back-forward caching, and signer mismatch clear Session Folder Keys, opened-grant metadata, decrypted projections, drafts, prepared writes, import/invite state, and rendered plaintext. Runtime tests guard against raw keys or decrypted content entering Web Storage, IndexedDB, Cache Storage, cookies, or browser history. |
 | Plaintext egress | The first-party client denies unprompted plaintext egress. Explicit controller exports remain allowed, and authorized third-party behavior after decryption is outside protocol enforcement. |
 | Smoke UI plaintext/XSS | Smoke UI is development-only and can display encrypted payloads, route errors, and pasted payload bodies. It must not be deployed as a product client or used with production secrets. |
 | CORS/cookies | Rust server relies on Nostr auth headers only. It accepts `Authorization`, `X-Nostr-Authorization`, and `X-FiniteBrain-Nostr`. It does not trust cookies for auth. Browser CORS is allowlist-driven and defaults to the configured public base URL origin. |
@@ -75,8 +75,8 @@ Evidence:
 | Protected route rate limit exceeded | `429`, `protected route rate limit exceeded` | `protected_routes_enforce_configured_rate_limits` |
 | Disallowed CORS preflight origin | `403`, `CORS origin is not allowed` | `cors_preflight_is_allowlist_driven` |
 | Oversized body | `413 Payload Too Large` | `protected_create_rejects_oversized_request_body` |
-| Vault access missing | `403`, `vault access required` | `metadata_requires_vault_membership` |
-| Missing folder/object | `404` for missing current object/folder/vault paths | secure object route tests |
+| Brain access missing | `403`, `brain access required` | `metadata_requires_brain_membership` |
+| Missing folder/object | `404` for missing current object/folder/brain paths | secure object route tests |
 | Missing required grant | `400`, `missing required grant` | store grant transaction tests |
 | Setup incomplete | Metadata exposes `setupIncomplete`; finish setup rejects non-empty folders | setup repair/reject tests |
 | Conflict | `409`, `sync conflict: ...` | store and server stale base tests |
@@ -106,11 +106,11 @@ Evidence:
 
 | Flow | Evidence |
 | --- | --- |
-| Vault bootstrap | core bootstrap tests; server `POST /_admin/vaults`; Smoke UI create vault control |
+| Brain bootstrap | core bootstrap tests; server `POST /_admin/brains`; Smoke UI create brain control |
 | Folder creation | store transactional folder tests; server restricted Folder route; Smoke UI create Folder control |
 | Encrypted object write/read/sync pull | core crypto tests; server object create/update/move/delete/pull test; Smoke UI object/sync controls |
 | Access grant/removal/rotation | store grant/removal rotation tests; server admin route test |
-| Vault Invitation accept | store and server singleton npub-bound invitation tests; Smoke UI invitation controls |
+| Brain Invitation accept | store and server singleton npub-bound invitation tests; Smoke UI invitation controls |
 | Share Link accept | store and server singleton npub-scoped Share Link tests; Smoke UI Share Link controls |
 | Mounted Folder projection | shared Folder connection store/server tests; Smoke UI mount/connection controls |
 | Export/import | encrypted export route/store tests; core OKF export/import/search tests; Product Client OKF import execution tests |

@@ -10,15 +10,15 @@
 
 ## Implementation Summary
 
-The Product Client now generates email invite links to `/client#inviteCode=...&inviteEmail=...&inviteSecret=...`, hydrates invite state from that fragment, routes the recipient directly to the Access invite panel, offers an in-panel signer connection step, preserves the invite-selected Vault after claim, and supports local browser smoke verification with a second smoke signer plus an explicit smoke email-proof allowlist.
+The Product Client now generates email invite links to `/client#inviteCode=...&inviteEmail=...&inviteSecret=...`, hydrates invite state from that fragment, routes the recipient directly to the Access invite panel, offers an in-panel signer connection step, preserves the invite-selected Brain after claim, and supports local browser smoke verification with a second smoke signer plus an explicit smoke email-proof allowlist.
 
 ## Implementation Evidence
 
 - `implement` session: current feature-dev thread
 - `tdd` used: targeted tests were added for smoke email proof allowlisting, clock-skew tolerance, generated email invite client URL, and Product Client shell markers
-- Red test, if applicable: browser smoke initially exposed invite landing, signer connection, timestamp, and post-claim active Vault gaps
+- Red test, if applicable: browser smoke initially exposed invite landing, signer connection, timestamp, and post-claim active Brain gaps
 - Green implementation, if applicable: final browser smoke claimed an email invite and opened authorized content
-- Refactor, if applicable: `loadVaultMetadata` gained a `preserveActive` option for post-accept/post-claim flows
+- Refactor, if applicable: `loadBrainMetadata` gained a `preserveActive` option for post-accept/post-claim flows
 - Commands run:
   - `node --check crates/finite-brain-server/src/product-client.js`
   - `node crates/finite-brain-server/src/product-client.test.js`

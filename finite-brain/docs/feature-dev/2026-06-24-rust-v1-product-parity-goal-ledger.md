@@ -24,7 +24,7 @@ This is a hard-cut continuation from the Rust Portable v1 core PR.
 
 - CONTEXT updates: root `CONTEXT.md` now distinguishes `Product Client`,
   `Product Client Spine`, `Graph View`, `Graph Replay`, `OKF Import
-  Execution`, `Vault Working Tree`, `Smoke UI`, and `Hard Cut`.
+  Execution`, `Brain Working Tree`, `Smoke UI`, and `Hard Cut`.
 - ADRs: `docs/adr/0004-build-a-first-party-product-client.md`,
   `docs/adr/0005-derive-graph-and-replay-from-client-decrypted-indexes.md`,
   `docs/adr/0006-keep-okf-import-execution-client-owned.md`
@@ -34,7 +34,7 @@ This is a hard-cut continuation from the Rust Portable v1 core PR.
   - `finitecomputer/finite-brain#18` Client-side Page decrypt edit encrypt sync loop
   - `finitecomputer/finite-brain#19` Graph View and replay from decrypted client index
   - `finitecomputer/finite-brain#20` Product OKF import execution
-  - `finitecomputer/finite-brain#21` Agent Vault Working Tree materialization
+  - `finitecomputer/finite-brain#21` Agent Brain Working Tree materialization
   - `finitecomputer/finite-brain#22` Portable v1 product hardening and runbook
 - Issue sessions: `finite-brain#17`, `finite-brain#18`,
   `finite-brain#19`, `finite-brain#20`, `finite-brain#21`, and
@@ -63,7 +63,7 @@ This is a hard-cut continuation from the Rust Portable v1 core PR.
 In scope:
 
 - Product Client: a real trusted browser client, not the development Smoke UI.
-- Product Client Spine: connect NIP-07 signer, load a Vault, open Folder Key
+- Product Client Spine: connect NIP-07 signer, load a Brain, open Folder Key
   Grants, decrypt/read accessible Pages, edit one Page, encrypt/write a signed
   revision, and pull/apply sync without discarding unresolved local edits.
 - NIP-07 workflow: signer discovery, auth signing, NIP-44 encrypt/decrypt,
@@ -109,7 +109,7 @@ Out of scope:
 | `finite-brain#18` | `14ceb56` | Orchestrator direct implementation | `26fd2540bf89d374bf02f17d5c7d465b1b801b44` | Standards/spec direct review passed after fixing prepared-write target drift; Product Client now has in-memory Folder Key opening, AES-GCM Folder Object encrypt/decrypt, signed revision request preparation, protected save path wiring, sync bootstrap merge, dirty draft conflict preservation, and duplicate event de-dupe seams | `node --check crates/finite-brain-server/src/product-client.js`; `node crates/finite-brain-server/src/product-client.test.js`; `cargo fmt --check`; `cargo test -p finite-brain-server product_client_serves_spine_assets_and_config -- --nocapture`; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo build`; `git diff --check`; local curl smoke |
 | `finite-brain#19` | `e111755` | Orchestrator direct implementation | `e61bd85f4afee7352aea662ec71164f8280db3e3` | Standards/spec direct review passed; Product Client now builds graph nodes/edges from decrypted ready Pages only, omits locked content, extracts wiki/Markdown links, renders an SVG graph surface, and derives replay frames from ordered de-duplicated local Page changes | `node --check crates/finite-brain-server/src/product-client.js`; `node crates/finite-brain-server/src/product-client.test.js`; `cargo fmt --check`; `cargo test -p finite-brain-server product_client_serves_spine_assets_and_config -- --nocapture`; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo build`; `git diff --check`; local curl smoke |
 | `finite-brain#20` | `ceb000f` | Orchestrator direct implementation | `6422105ccf7f8f0bd80d897bc519e9224b954dd9` | Standards/spec direct review passed; Product Client now parses readable OKF bundles, plans skip/copy/overwrite conflicts, rewrites imported relative links when copied targets move, rejects locked destination Folders without opened Folder Keys, prepares encrypted signed Folder Object revisions, and uploads through normal secure object routes | `node --check crates/finite-brain-server/src/product-client.js`; `node crates/finite-brain-server/src/product-client.test.js`; `cargo fmt --check`; `cargo test -p finite-brain-server product_client_serves_spine_assets_and_config -- --nocapture`; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo build`; `git diff --check`; local `/health`, `/client`, `/client/app.js`, and `/client/app.css` curl smoke |
-| `finite-brain#21` | `7773ee6` | Orchestrator direct implementation | `9ae12cbd9a167b14faf9f2d7ce093bc70c0705a6` | Standards/spec direct review passed; core portability now projects accessible decrypted Pages into Vault Working Tree manifests/files, emits `AGENTS.md`, `_index.md`, `_wiki/`, `raw/`, `compiled/`, and `output/` conventions, represents locked Folders as safe metadata, preserves object revision/key version, and maps upsert/rename/delete file changes to Product Client encrypted object write/move/delete intents | `cargo fmt --check`; `cargo test -p finite-brain-core portability::tests::working_tree -- --nocapture`; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo build`; `git diff --check` |
+| `finite-brain#21` | `7773ee6` | Orchestrator direct implementation | `9ae12cbd9a167b14faf9f2d7ce093bc70c0705a6` | Standards/spec direct review passed; core portability now projects accessible decrypted Pages into Brain Working Tree manifests/files, emits `AGENTS.md`, `_index.md`, `_wiki/`, `raw/`, `compiled/`, and `output/` conventions, represents locked Folders as safe metadata, preserves object revision/key version, and maps upsert/rename/delete file changes to Product Client encrypted object write/move/delete intents | `cargo fmt --check`; `cargo test -p finite-brain-core portability::tests::working_tree -- --nocapture`; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo build`; `git diff --check` |
 | `finite-brain#22` | `30d0a4b` | Orchestrator direct implementation | `87fc3dd11a7bc7849c0f4040a6799e7512521b60` | Standards/spec direct review passed; server now rejects replayed Nostr auth events, rate-limits protected routes, enforces allowlist-driven CORS, normalizes path-based public base URLs to origins, and documents Product Client local/staging verification plus hard-cut production handoff boundaries | `node --check crates/finite-brain-server/src/product-client.js`; `node crates/finite-brain-server/src/product-client.test.js`; `cargo fmt --check`; `cargo test -p finite-brain-server protected_routes -- --nocapture`; `cargo test -p finite-brain-server cors_preflight_is_allowlist_driven -- --nocapture`; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo build`; `git diff --check`; local curl smoke |
 | Local CodeRabbit product parity | `87fc3dd` | Orchestrator direct cleanup | `455ad643d792c6c9e7cb0013d966e39025b90347` | All 3 local CodeRabbit findings addressed: app binary metadata, OKF omission reason sanitization, and bounded Product Client OKF import object-id allocation | `node --check crates/finite-brain-server/src/product-client.js`; `node crates/finite-brain-server/src/product-client.test.js`; `cargo fmt --check`; targeted OKF omission test; `cargo test`; `cargo clippy --all-targets -- -D warnings`; `cargo build`; `git diff --check`; local Product Client curl smoke |
 

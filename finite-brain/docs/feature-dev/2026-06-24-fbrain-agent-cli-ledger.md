@@ -15,14 +15,14 @@
 ## Goal
 
 Build the `fbrain` interface for agents end to end. Agents should work in a
-Vault Working Tree as ordinary files while `fbrain` controls identity, daemon
+Brain Working Tree as ordinary files while `fbrain` controls identity, daemon
 state, local signer setup, automatic sync health, Folder Key opening, blocked
 sync states, activity, and access explanations.
 
 ## Alignment Decisions
 
 - Invocation name: `fbrain`.
-- Discarded term: `Volumes`; use `Vault Working Tree` for the local readable
+- Discarded term: `Volumes`; use `Brain Working Tree` for the local readable
   agent workspace.
 - Sync model: automatic by default through an Agent Sync Daemon. Manual
   push/pull is not the happy path.
@@ -36,7 +36,7 @@ sync states, activity, and access explanations.
 
 - CONTEXT updates: Agent CLI, Agent Sync Daemon, Local Agent Signer, Blocked Sync State
 - ADRs: none yet; current decisions are prototype-facing and reversible
-- PRD issue: `#37` PRD: fbrain agent CLI for Vault Working Trees
+- PRD issue: `#37` PRD: fbrain agent CLI for Brain Working Trees
 - Slice issues: `#38`, `#39`, `#40`, `#41`
 - Issue sessions: `docs/feature-dev/2026-06-24-issue-38-fbrain-agent-cli-session.md`
 - Agent briefs: pending
@@ -55,7 +55,7 @@ sync states, activity, and access explanations.
 - Build: `cargo build`
 - Diff hygiene: `git diff --check`
 - Live smoke: local app on `127.0.0.1:4017` with temp SQLite; verified auth,
-  Vault create, duplicate personal Vault creation for same owner, open auto-sync,
+  Brain create, duplicate personal Brain creation for same owner, open auto-sync,
   status JSON, Folder create, and repeated metadata requests.
 - Visual verification: not applicable for CLI; use command output and JSON contracts
 

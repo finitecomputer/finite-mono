@@ -3,14 +3,14 @@ use crate::*;
 impl BrainStore {
     pub fn create_folder(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         folder: &Folder,
         access_user_ids: &BTreeSet<UserId>,
         grants: &[FolderKeyGrantMetadata],
     ) -> Result<(), StoreError> {
         let was_deleted = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM deleted_folder_identities WHERE vault_id = ?1 AND folder_id = ?2)",
-            params![vault_id.as_str(), folder.id.as_str()],
+            "SELECT EXISTS(SELECT 1 FROM deleted_folder_identities WHERE brain_id = ?1 AND folder_id = ?2)",
+            params![brain_id.as_str(), folder.id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         if was_deleted {
@@ -24,43 +24,43 @@ impl BrainStore {
             });
         }
 
-        let mut vault = self.load_core_vault(vault_id)?;
-        let adds_personal_members = vault.kind == VaultKind::Personal;
+        let mut brain = self.load_core_brain(brain_id)?;
+        let adds_personal_members = brain.kind == BrainKind::Personal;
         if adds_personal_members {
-            if vault
+            if brain
                 .owner_user_id
                 .as_ref()
                 .is_some_and(|owner| access_user_ids.contains(owner))
             {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "Personal Vault owner cannot be an ordinary Folder member".to_owned(),
+                    reason: "Personal Brain owner cannot be an ordinary Folder member".to_owned(),
                 });
             }
             for user_id in access_user_ids {
-                if !vault
+                if !brain
                     .members
                     .iter()
                     .any(|member| member.user_id == *user_id)
                 {
-                    vault.members.push(VaultMember {
+                    brain.members.push(BrainMember {
                         user_id: user_id.clone(),
                         folder_access: BTreeSet::from([folder.id.clone()]),
                     });
                 }
             }
         }
-        self.validate_folder_request(&vault, folder, access_user_ids, grants)?;
+        self.validate_folder_request(&brain, folder, access_user_ids, grants)?;
 
         let tx = self.conn.transaction()?;
         if adds_personal_members {
             for user_id in access_user_ids {
-                insert_member_if_missing(&tx, vault_id, user_id)?;
+                insert_member_if_missing(&tx, brain_id, user_id)?;
             }
         }
-        insert_folder(&tx, vault_id, folder, false)?;
-        insert_folder_access(&tx, vault_id, &folder.id, access_user_ids)?;
+        insert_folder(&tx, brain_id, folder, false)?;
+        insert_folder_access(&tx, brain_id, &folder.id, access_user_ids)?;
         for grant in grants {
-            insert_grant(&tx, vault_id, grant)?;
+            insert_grant(&tx, brain_id, grant)?;
         }
         tx.commit()?;
         Ok(())
@@ -69,13 +69,13 @@ impl BrainStore {
     /// Insert an empty legacy Folder that can later be repaired by Finish Setup.
     pub fn insert_setup_incomplete_folder_for_repair(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         folder: &Folder,
         access_user_ids: &BTreeSet<UserId>,
     ) -> Result<(), StoreError> {
         let was_deleted = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM deleted_folder_identities WHERE vault_id = ?1 AND folder_id = ?2)",
-            params![vault_id.as_str(), folder.id.as_str()],
+            "SELECT EXISTS(SELECT 1 FROM deleted_folder_identities WHERE brain_id = ?1 AND folder_id = ?2)",
+            params![brain_id.as_str(), folder.id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         if was_deleted {
@@ -83,14 +83,14 @@ impl BrainStore {
                 reason: "deleted Folder identities cannot be reused".to_owned(),
             });
         }
-        let vault = self.load_core_vault(vault_id)?;
-        validate_hierarchy(&self.conn, vault_id, folder)?;
+        let brain = self.load_core_brain(brain_id)?;
+        validate_hierarchy(&self.conn, brain_id, folder)?;
         validate_access_list_shape(folder, access_user_ids)?;
-        validate_access_membership(&vault, access_user_ids)?;
+        validate_access_membership(&brain, access_user_ids)?;
 
         let tx = self.conn.transaction()?;
-        insert_folder(&tx, vault_id, folder, true)?;
-        insert_folder_access(&tx, vault_id, &folder.id, access_user_ids)?;
+        insert_folder(&tx, brain_id, folder, true)?;
+        insert_folder_access(&tx, brain_id, &folder.id, access_user_ids)?;
         tx.commit()?;
         Ok(())
     }
@@ -98,13 +98,13 @@ impl BrainStore {
     /// Finish setup for an empty Folder by writing the required current grants.
     pub fn finish_folder_setup(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         folder_id: &FolderId,
         grants: &[FolderKeyGrantMetadata],
     ) -> Result<(), StoreError> {
-        let stored = self.load_vault(vault_id)?;
+        let stored = self.load_brain(brain_id)?;
         let folder = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == *folder_id)
@@ -118,7 +118,7 @@ impl BrainStore {
             });
         }
         if self
-            .load_current_objects(vault_id)?
+            .load_current_objects(brain_id)?
             .iter()
             .any(|object| object.folder_id == *folder_id)
         {
@@ -137,16 +137,16 @@ impl BrainStore {
             .as_ref()
             .map(|relationship| &relationship.agent_npub);
         let required =
-            required_recipients(&stored.vault, folder, &access_user_ids, personal_agent)?;
-        validate_folder_grants(&stored.vault, folder, &required, grants, personal_agent)?;
+            required_recipients(&stored.brain, folder, &access_user_ids, personal_agent)?;
+        validate_folder_grants(&stored.brain, folder, &required, grants, personal_agent)?;
 
         let tx = self.conn.transaction()?;
         for grant in grants {
-            insert_grant(&tx, vault_id, grant)?;
+            insert_grant(&tx, brain_id, grant)?;
         }
         tx.execute(
-            "UPDATE folders SET setup_incomplete = 0 WHERE vault_id = ?1 AND id = ?2",
-            params![vault_id.as_str(), folder_id.as_str()],
+            "UPDATE folders SET setup_incomplete = 0 WHERE brain_id = ?1 AND id = ?2",
+            params![brain_id.as_str(), folder_id.as_str()],
         )?;
         tx.commit()?;
         Ok(())
@@ -158,15 +158,15 @@ impl BrainStore {
     /// already grant metadata access to every member, so this path only records the missing key.
     pub fn grant_folder_access_with_control_records(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         folder_id: &FolderId,
         user_id: &UserId,
         grant: &FolderKeyGrantMetadata,
         control_records: &[SyncRecordInput],
     ) -> Result<GrantFolderAccessOutcome, StoreError> {
-        let mut stored = self.load_vault(vault_id)?;
+        let mut stored = self.load_brain(brain_id)?;
         let folder = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == *folder_id)
@@ -174,32 +174,32 @@ impl BrainStore {
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: folder_id.to_string(),
             })?;
-        let adds_personal_member = stored.vault.kind == VaultKind::Personal
+        let adds_personal_member = stored.brain.kind == BrainKind::Personal
             && !stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .any(|member| member.user_id == *user_id);
         if adds_personal_member {
             if folder.access != FolderAccessMode::Restricted {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "Personal Vault shared access requires a restricted Folder".to_owned(),
+                    reason: "Personal Brain shared access requires a restricted Folder".to_owned(),
                 });
             }
-            if stored.vault.owner_user_id.as_ref() == Some(user_id) {
+            if stored.brain.owner_user_id.as_ref() == Some(user_id) {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "Personal Vault owner cannot be an ordinary Folder member".to_owned(),
+                    reason: "Personal Brain owner cannot be an ordinary Folder member".to_owned(),
                 });
             }
-            stored.vault.members.push(VaultMember {
+            stored.brain.members.push(BrainMember {
                 user_id: user_id.clone(),
                 folder_access: BTreeSet::from([folder_id.clone()]),
             });
         }
-        validate_access_membership(&stored.vault, &BTreeSet::from([user_id.clone()]))?;
+        validate_access_membership(&stored.brain, &BTreeSet::from([user_id.clone()]))?;
         validate_grant_metadata(grant)?;
         validate_grant_issuer(
-            &stored.vault,
+            &stored.brain,
             grant,
             stored
                 .personal_agent
@@ -228,7 +228,7 @@ impl BrainStore {
             .cloned()
             .unwrap_or_default();
         let effective_access = required_recipients(
-            &stored.vault,
+            &stored.brain,
             &folder,
             &current_access,
             stored
@@ -251,9 +251,9 @@ impl BrainStore {
             FolderAccessMode::Restricted => !current_access.contains(user_id),
             FolderAccessMode::AllMembers => false,
             FolderAccessMode::AdminOnly => {
-                if !stored.vault.admins.iter().any(|admin| admin == user_id) {
+                if !stored.brain.admins.iter().any(|admin| admin == user_id) {
                     return Err(StoreError::BrokenInvariant {
-                        reason: "admin-only folder grants require a vault admin target".to_owned(),
+                        reason: "admin-only folder grants require a brain admin target".to_owned(),
                     });
                 }
                 false
@@ -268,19 +268,19 @@ impl BrainStore {
 
         let tx = self.conn.transaction()?;
         if adds_personal_member {
-            insert_member_if_missing(&tx, vault_id, user_id)?;
+            insert_member_if_missing(&tx, brain_id, user_id)?;
         }
         if inserts_access_row {
             tx.execute(
-                "INSERT INTO folder_access (vault_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
-                params![vault_id.as_str(), folder_id.as_str(), user_id.as_str()],
+                "INSERT INTO folder_access (brain_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
+                params![brain_id.as_str(), folder_id.as_str(), user_id.as_str()],
             )?;
         }
-        insert_grant(&tx, vault_id, grant)?;
+        insert_grant(&tx, brain_id, grant)?;
         for input in control_records {
-            sync_records::validate_sync_conflict(&tx, vault_id, input)?;
-            let sequence = sync_records::next_sequence(&tx, vault_id)?;
-            sync_records::insert_sync_record(&tx, vault_id, sequence, input)?;
+            sync_records::validate_sync_conflict(&tx, brain_id, input)?;
+            let sequence = sync_records::next_sequence(&tx, brain_id)?;
+            sync_records::insert_sync_record(&tx, brain_id, sequence, input)?;
         }
         tx.commit()?;
         Ok(GrantFolderAccessOutcome::Granted)
@@ -290,7 +290,7 @@ impl BrainStore {
     #[allow(clippy::too_many_arguments)]
     pub fn rotate_folder_key_for_access_removal(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         folder_id: &FolderId,
         removed_user_id: &UserId,
         new_key_version: u32,
@@ -305,9 +305,9 @@ impl BrainStore {
                 reencrypted_records: reencrypted_records.len(),
             }],
         )?;
-        let stored = self.load_vault(vault_id)?;
+        let stored = self.load_brain(brain_id)?;
         let folder = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == *folder_id)
@@ -342,13 +342,13 @@ impl BrainStore {
             .as_ref()
             .map(|relationship| &relationship.agent_npub);
         let required = required_recipients(
-            &stored.vault,
+            &stored.brain,
             &rotated_folder,
             &remaining_access,
             personal_agent,
         )?;
         validate_folder_grants(
-            &stored.vault,
+            &stored.brain,
             &rotated_folder,
             &required,
             grants,
@@ -356,7 +356,7 @@ impl BrainStore {
         )?;
 
         let live_objects = self
-            .load_current_objects(vault_id)?
+            .load_current_objects(brain_id)?
             .into_iter()
             .filter(|object| object.folder_id == *folder_id && !object.deleted)
             .collect::<Vec<_>>();
@@ -364,43 +364,43 @@ impl BrainStore {
 
         let tx = self.conn.transaction()?;
         tx.execute(
-            "DELETE FROM folder_access WHERE vault_id = ?1 AND folder_id = ?2 AND user_id = ?3",
+            "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
             params![
-                vault_id.as_str(),
+                brain_id.as_str(),
                 folder_id.as_str(),
                 removed_user_id.as_str()
             ],
         )?;
-        if stored.vault.kind == VaultKind::Personal {
+        if stored.brain.kind == BrainKind::Personal {
             let has_remaining_scope = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM folder_access WHERE vault_id = ?1 AND user_id = ?2)",
-                params![vault_id.as_str(), removed_user_id.as_str()],
+                "SELECT EXISTS(SELECT 1 FROM folder_access WHERE brain_id = ?1 AND user_id = ?2)",
+                params![brain_id.as_str(), removed_user_id.as_str()],
                 |row| row.get::<_, bool>(0),
             )?;
             if !has_remaining_scope {
                 tx.execute(
-                    "DELETE FROM vault_members WHERE vault_id = ?1 AND user_id = ?2",
-                    params![vault_id.as_str(), removed_user_id.as_str()],
+                    "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
+                    params![brain_id.as_str(), removed_user_id.as_str()],
                 )?;
             }
         }
         tx.execute(
-            "UPDATE folders SET current_key_version = ?3 WHERE vault_id = ?1 AND id = ?2",
-            params![vault_id.as_str(), folder_id.as_str(), new_key_version],
+            "UPDATE folders SET current_key_version = ?3 WHERE brain_id = ?1 AND id = ?2",
+            params![brain_id.as_str(), folder_id.as_str(), new_key_version],
         )?;
         invalidate_pending_email_bootstraps_for_rotated_folder(
-            &tx, vault_id, folder_id, updated_at,
+            &tx, brain_id, folder_id, updated_at,
         )?;
         for grant in grants {
-            insert_grant(&tx, vault_id, grant)?;
+            insert_grant(&tx, brain_id, grant)?;
         }
         for record in reencrypted_records {
             let input = SyncRecordInput::FolderObjectRevision(record.clone());
             sync_records::validate_sync_input(&input)?;
-            sync_records::validate_sync_conflict(&tx, vault_id, &input)?;
-            let sequence = sync_records::next_sequence(&tx, vault_id)?;
-            sync_records::insert_sync_record(&tx, vault_id, sequence, &input)?;
-            sync_records::project_sync_record(&tx, vault_id, &input)?;
+            sync_records::validate_sync_conflict(&tx, brain_id, &input)?;
+            let sequence = sync_records::next_sequence(&tx, brain_id)?;
+            sync_records::insert_sync_record(&tx, brain_id, sequence, &input)?;
+            sync_records::project_sync_record(&tx, brain_id, &input)?;
         }
         tx.commit()?;
         Ok(())
@@ -420,7 +420,7 @@ fn validate_folder_grant_control_records(
     }
     let expected_types = [
         SyncRecordType::FolderKeyGrant,
-        SyncRecordType::VaultAdminAccessChange,
+        SyncRecordType::BrainAdminAccessChange,
     ];
     for (input, expected_type) in control_records.iter().zip(expected_types) {
         sync_records::validate_sync_input(input)?;

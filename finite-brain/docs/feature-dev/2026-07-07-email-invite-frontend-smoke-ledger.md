@@ -19,7 +19,7 @@ Integrate the email invite flow into the Product Client frontend end to end, the
 ## Durable Artifacts
 
 - CONTEXT updates: existing email invite terms in `CONTEXT.md`
-- ADRs: `docs/adr/0009-use-email-invite-bootstraps-for-email-targeted-vault-invitations.md`
+- ADRs: `docs/adr/0009-use-email-invite-bootstraps-for-email-targeted-brain-invitations.md`
 - PRD issue: finitecomputer/finite-brain#77
 - Slice issues: finitecomputer/finite-brain#84, finitecomputer/finite-brain#85
 - Issue sessions: existing local commits through current `main`
@@ -44,7 +44,7 @@ Integrate the email invite flow into the Product Client frontend end to end, the
 - Changed Product Client email invite URLs from API claim paths to `/client#inviteCode=...&inviteEmail=...&inviteSecret=...`, keeping invite data client-side in the fragment.
 - Product Client invite landing now hydrates invite code, invited email, and Invite Secret from the fragment, opens the Access invite panel, shows a local connect-signer action, and keeps the panel visible before org metadata is loaded.
 - Fixed email proof timestamp handling for browser-created proof timestamps and allowed a small server-side future clock-skew tolerance while preserving the one-day freshness cap and not-before-invitation rule.
-- Fixed post-accept/post-claim metadata loading so the newly accepted or claimed Vault remains active instead of being overwritten by stale selector state.
+- Fixed post-accept/post-claim metadata loading so the newly accepted or claimed Brain remains active instead of being overwritten by stale selector state.
 
 ## Slice Ledger
 
@@ -68,10 +68,10 @@ Integrate the email invite flow into the Product Client frontend end to end, the
 ## Browser Smoke Evidence
 
 - Local app command: `FINITE_BRAIN_ADDR=127.0.0.1:4029 FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:4029 FINITE_BRAIN_DB=/tmp/finite-brain-email-invite-ui-smoke-20260707h.sqlite3 FINITE_BRAIN_SMOKE_NIP07_SECRET=... FINITE_BRAIN_SMOKE_EMAIL_PROOFS=friend@example.com cargo run -p finite-brain-app`
-- Admin browser flow created organization Vault `org-email-invite-smoke-ship-20260707-mraz0n9z`.
+- Admin browser flow created organization Brain `org-email-invite-smoke-ship-20260707-mraz0n9z`.
 - Admin browser flow created email invite for `friend@example.com`; generated invite URL path was `http://127.0.0.1:4029/client` and the fragment contained `inviteCode`, `inviteEmail`, and `inviteSecret`.
 - Recipient browser flow opened that URL with a second smoke signer, landed on the invite panel with code/email/secret hydrated, connected signer from the panel, and claimed the invite.
-- Claim result: `Email invite claimed`; active Vault became `org-email-invite-smoke-ship-20260707-mraz0n9z`; opened keys count was `4`; Files view showed `getting-started` and `restricted`.
+- Claim result: `Email invite claimed`; active Brain became `org-email-invite-smoke-ship-20260707-mraz0n9z`; opened keys count was `4`; Files view showed `getting-started` and `restricted`.
 
 ## Open Questions
 

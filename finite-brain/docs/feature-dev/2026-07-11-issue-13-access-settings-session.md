@@ -12,13 +12,13 @@
 
 - Spec issue: #10
 - Ticket: #13
-- Relevant glossary terms: Vault, Member Identity, Session Lock, Session Folder Key, Ephemeral Client Plaintext
+- Relevant glossary terms: Brain, Member Identity, Session Lock, Session Folder Key, Ephemeral Client Plaintext
 - Relevant ADRs: 0010, 0013, 0014, 0016
 
 ## Implementation
 
 - Public interface used: real Rust-served Product Client `/client`; existing access/share/member/invitation request functions
-- Behaviors covered: Settings → Access & sharing tab, Access ribbon/context deep links, Folder access inspector, Vault member administration, share-link actions, shared-Folder state, busy/result status, and existing disabled/error semantics
+- Behaviors covered: Settings → Access & sharing tab, Access ribbon/context deep links, Folder access inspector, Brain member administration, share-link actions, shared-Folder state, busy/result status, and existing disabled/error semantics
 - The existing Access panel is reparented into the Settings mount before binding, preserving its IDs, event handlers, and crypto/request lifecycle seams without duplicating controls
 - Commands run during implementation: JS syntax check, deterministic Product Client test, `cargo test -p finite-brain-server`, `cargo fmt --check`, `git diff --check`
 - Full suite command: pending final integration ticket
@@ -32,4 +32,4 @@
 
 ## Risks
 
-- The source HTML still contains the historical sidebar location as a relocation anchor. Final integration should verify the rendered DOM has no Access panel under the file sidebar and should hide stale top-level Vault controls.
+- The source HTML still contains the historical sidebar location as a relocation anchor. Final integration should verify the rendered DOM has no Access panel under the file sidebar and should hide stale top-level Brain controls.

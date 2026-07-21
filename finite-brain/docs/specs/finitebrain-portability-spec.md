@@ -17,22 +17,22 @@ behavior that exists now but should be revisited before production hardening.
 ## 1. Product Boundary
 
 FiniteBrain is a personal and organizational knowledge system built from
-Markdown-like file content. The top-level namespace container is a Vault. A
-Vault contains Folders. A Folder is the access boundary and the default LLM wiki
+Markdown-like file content. The top-level namespace container is a Brain. A
+Brain contains Folders. A Folder is the access boundary and the default LLM wiki
 scope. A Folder contains Folder Objects. A Folder Object decrypts into a Page,
 attachment, asset, generated file, or future content type.
 
 FiniteBrain is a hard cut from the earlier SilverBullet-based prototype. The
 active Rust implementation and first-party Product Client use FiniteBrain
-product language: Vault, Folder, and Page rather than SilverBullet Space.
+product language: Brain, Folder, and Page rather than SilverBullet Space.
 
-The server stores and syncs encrypted Vault state. It does not need to decrypt
+The server stores and syncs encrypted Brain state. It does not need to decrypt
 Page paths, Page titles, links, backlinks, wiki indexes, wiki logs, or Page
 contents. The trusted client or Agent Runtime opens Folder Key Grants, decrypts
-accessible Folder Objects, and materializes readable content into a Vault
+accessible Folder Objects, and materializes readable content into a Brain
 Working Tree.
 
-A FiniteBrain Vault is not one wiki with folders. It is one Vault namespace
+A Brain is not one wiki with folders. It is one Brain namespace
 containing many Folder-scoped LLM wikis. Indexes and logs live at the same
 Folder scope as the knowledge they describe.
 
@@ -55,9 +55,9 @@ Trusted local client:
 
 Trusted Agent Runtime:
 
-- May read and write the Vault Working Tree as ordinary files when operating
+- May read and write the Brain Working Tree as ordinary files when operating
   with a Member Identity that has Folder Access.
-- Receives no authority merely from being an agent; Vault Membership, Folder
+- Receives no authority merely from being an agent; Brain Membership, Folder
   Access, grants, and attribution belong to the signing npub.
 - FiniteBrain does not classify whether a human, agent, shared client, or
   several clients control that npub.
@@ -65,9 +65,9 @@ Trusted Agent Runtime:
 FiniteBrain server:
 
 - Authenticates HTTP writes and secure reads with Nostr HTTP authorization.
-- Stores Vault metadata, access state, Folder Key Grant envelopes, Share Links,
+- Stores Brain metadata, access state, Folder Key Grant envelopes, Share Links,
   Invitation Links, Folder Mounts, encrypted Folder Objects, and sync records.
-- Gates access by Vault Membership, Vault Admin status, and Folder Access.
+- Gates access by Brain Membership, Brain Admin status, and Folder Access.
 - MUST NOT require Page plaintext for authorization or sync.
 - Cannot recover a User's Folder Keys after Nostr key loss.
 
@@ -136,14 +136,14 @@ The hosted compatibility adapter MUST bind HTTP authorization to the official
 Brain origin, a protected Brain route, the exact method, and the exact request
 body. Event authorization MUST validate canonical typed payloads and exact tags,
 not only an event kind or `d` prefix. `openGrantPayload` MUST open a complete
-NIP-59 Folder Key Grant only when its recipient, issuer, Vault, Folder, key
+NIP-59 Folder Key Grant only when its recipient, issuer, Brain, Folder, key
 version, payload, and tags agree. `wrapGrantPayload` MUST accept a typed Folder
 Key Grant or Email Invite Bootstrap contract, never arbitrary peer/ciphertext
 input.
 
 ### 3.3 HTTP Authorization
 
-Secure Vault API calls use a Nostr authorization header:
+Secure Brain API calls use a Nostr authorization header:
 
 ```http
 Authorization: Nostr <base64-json-event>
@@ -165,7 +165,7 @@ The signed authorization event has:
   "kind": 27235,
   "created_at": 1780000000,
   "tags": [
-    ["u", "https://host/_admin/vaults/..."],
+    ["u", "https://host/_admin/brains/..."],
     ["method", "POST"],
     ["payload", "<sha256 hex of request body, only when body is non-empty>"]
   ],
@@ -187,21 +187,21 @@ Server validation rules:
 - The actor npub is derived from the event pubkey.
 
 Rust hard-cut behavior: protected API routes derive the actor from Nostr HTTP
-authorization. Metadata, Vault creation, secure object, sync, folder grant,
+authorization. Metadata, Brain creation, secure object, sync, folder grant,
 access, sharing, and invitation routes do not accept `X-Actor-User-Id` as an
 authorization bridge.
 
-Creating a Vault with `POST /_admin/vaults` requires Nostr authorization. An
-owner-signed bootstrap names the signer as the Personal Vault owner; the sole
+Creating a Brain with `POST /_admin/brains` requires Nostr authorization. An
+owner-signed bootstrap names the signer as the Personal Brain owner; the sole
 exception is the explicitly user-approved delegated bootstrap in Section 4.8,
 which names its authorized User Nostr Identity as owner. No route accepts an
 arbitrary caller-supplied `userId` as authority.
 
 ## 4. Core Domain Model
 
-### 4.1 Vault
+### 4.1 Brain
 
-A Vault is the top-level privacy container.
+A Brain is the top-level privacy container.
 
 ```json
 {
@@ -216,7 +216,7 @@ A Vault is the top-level privacy container.
 }
 ```
 
-Personal Vault:
+Personal Brain:
 
 - Has exactly one owner identity in `ownerUserId` and starts empty.
 - May have exactly one distinct Personal Agent. Brain automatically issues the
@@ -224,18 +224,18 @@ Personal Vault:
 - Does not use ordinary organization membership/admin lists for its owner or
   Personal Agent. Explicit restricted-Folder sharing remains separate.
 
-Organization Vault:
+Organization Brain:
 
-- Has Vault Members.
-- Has Vault Admins.
-- Every Vault Admin MUST also be a Vault Member.
+- Has Brain Members.
+- Has Brain Admins.
+- Every Brain Admin MUST also be a Brain Member.
 - Starts with no Folders or Folder Objects.
 - Additional team or domain knowledge SHOULD be created as explicit Folders.
 - Sensitive or limited-audience org knowledge SHOULD be created as restricted
   Folders rather than hidden local directories inside an all-member Folder.
-- Organization Vaults MUST keep at least one Vault Admin.
+- Organization Brains MUST keep at least one Brain Admin.
 
-### 4.2 Vault Member
+### 4.2 Brain Member
 
 ```json
 {
@@ -255,7 +255,7 @@ current model.
 {
   "id": "strategy",
   "name": "Strategy",
-  "role": "personal_home | vault_ops | general | folder",
+  "role": "personal_home | brain_ops | general | folder",
   "access": "owner | admin_only | all_members | restricted",
   "parentFolderId": "parent-folder",
   "path": "Parent/Strategy",
@@ -266,12 +266,12 @@ current model.
 Folder rules:
 
 - Every Folder has its own independent Folder Key.
-- There is no Vault Root Key.
+- There is no Brain Root Key.
 - A Child Folder is a real Folder, not a subdirectory access shortcut.
 - Parent Folder access does not imply Child Folder access.
 - Child Folder access does not imply Parent Folder access.
 - Folder names need only be unique among sibling folders from the product point
-  of view. Current route IDs must still be unique per Vault.
+  of view. Current route IDs must still be unique per Brain.
 - Moving or renaming a Folder changes metadata only. It does not change Folder
   Keys, Folder Object ids, or Folder Access.
 - Creating a local directory inside a Folder does not create a Child Folder.
@@ -280,10 +280,10 @@ Folder rules:
 
 Access modes:
 
-- `owner`: personal Vault owner only.
-- `admin_only`: Vault Admins only.
-- `all_members`: all organization Vault Members and Vault Admins.
-- `restricted`: personal Vault owner, organization Vault Admins, plus members
+- `owner`: personal Brain owner only.
+- `admin_only`: Brain Admins only.
+- `all_members`: all organization Brain Members and Brain Admins.
+- `restricted`: personal Brain owner, organization Brain Admins, plus members
   listed in `folderAccess`.
 
 ### 4.3.1 Folder-scoped LLM Wiki Profile
@@ -312,7 +312,7 @@ Scope rules:
 - `_index.md` MUST describe only the Folder it lives in.
 - `log.md` MUST record only meaningful writes and maintenance work inside that
   Folder.
-- A Vault-wide or root-level index MUST NOT reveal titles, summaries, activity,
+- A Brain-wide or root-level index MUST NOT reveal titles, summaries, activity,
   or source hints from Folders the active User cannot access.
 - Trusted clients and Agent Runtimes MUST filter by Folder access before
   reading, querying, compiling, indexing, or answering with content.
@@ -355,7 +355,7 @@ A Folder Object is an encrypted item addressed by an opaque object id.
 }
 ```
 
-Server-visible Folder Object identity is `vaultId + folderId + objectId`.
+Server-visible Folder Object identity is `brainId + folderId + objectId`.
 Server-visible metadata includes object ids, Folder ids, key versions, cipher,
 ciphertext size, revisions, authors, update times, and deletion state. It does
 not include Page path, Page title, links, backlinks, or content.
@@ -421,13 +421,13 @@ Rules:
 - Compatible clients MUST tolerate future plaintext types they do not
   understand by preserving encrypted records and avoiding lossy rewrites.
 
-### 4.6 Vault Metadata Response
+### 4.6 Brain Metadata Response
 
 The metadata API exposes server-visible metadata:
 
 ```json
 {
-  "vaultId": "acme",
+  "brainId": "acme",
   "folders": [
     {
       "id": "strategy",
@@ -494,25 +494,25 @@ Slug/display-name guidance:
 - UI-created object ids SHOULD be random path-safe identifiers, not a hash of
   the Page path or title.
 
-### 4.8 Vault Bootstrap
+### 4.8 Brain Bootstrap
 
-Vault bootstrap is the first atomic access-control boundary.
+Brain bootstrap is the first atomic access-control boundary.
 
-Personal Vault bootstrap:
+Personal Brain bootstrap:
 
-- Atomically create one empty `kind: "personal"` Vault, with the User Nostr
+- Atomically create one empty `kind: "personal"` Brain, with the User Nostr
   Identity as sole owner and one distinct Personal Agent.
 - User-first setup resolves the Managed Agent Email before writing state.
-- Agent-first setup uses `POST /_admin/personal-vault-bootstrap`; Brain derives
+- Agent-first setup uses `POST /_admin/personal-brain-bootstrap`; Brain derives
   the owner through Core account association and Finite Identity. The caller
   cannot supply an owner, and Chat supplies no Brain authorization.
-- Both paths converge on the same Vault and relationship. Exact retries by the
+- Both paths converge on the same Brain and relationship. Exact retries by the
   established Personal Agent are idempotent; another agent fails closed.
 
-Organization Vault bootstrap:
+Organization Brain bootstrap:
 
-- Atomically create one empty Vault with `kind: "organization"`.
-- Add every initial admin as both Vault Member and Vault Admin. Agent-created
+- Atomically create one empty Brain with `kind: "organization"`.
+- Add every initial admin as both Brain Member and Brain Admin. Agent-created
   bootstrap includes both the signing Agent Principal and authenticated human
   requester; direct Product Client creation includes the signing human.
 - Create no Folder Keys or Folder Key Grants until an authorized admin creates
@@ -549,7 +549,7 @@ Folder content encryption uses AES-256-GCM.
 
 Input:
 
-- Folder Key for `(vaultId, folderId, keyVersion)`.
+- Folder Key for `(brainId, folderId, keyVersion)`.
 - A 12-byte random nonce.
 - Folder Object plaintext JSON.
 - Additional authenticated data.
@@ -559,7 +559,7 @@ AAD is the UTF-8 bytes of this JSON object:
 ```json
 {
   "version": "finite-folder-object-v1",
-  "vaultId": "acme",
+  "brainId": "acme",
   "folderId": "strategy",
   "objectId": "obj_0123456789abcdef",
   "keyVersion": 1
@@ -594,14 +594,14 @@ string they submit and hash that same byte string in the revision event.
 ### 5.3 Folder Key Grant
 
 A Folder Key Grant gives one recipient npub the raw Folder Key for one
-`vaultId + folderId + keyVersion`.
+`brainId + folderId + keyVersion`.
 
 The plaintext grant is:
 
 ```json
 {
   "version": "finite-folder-key-grant-v1",
-  "vaultId": "acme",
+  "brainId": "acme",
   "folderId": "strategy",
   "keyVersion": 1,
   "issuerNpub": "npub-admin",
@@ -616,7 +616,7 @@ The stored grant envelope is:
 ```json
 {
   "id": "folder-key-grant-1",
-  "vaultId": "acme",
+  "brainId": "acme",
   "folderId": "strategy",
   "keyVersion": 1,
   "issuerNpub": "npub-admin",
@@ -641,8 +641,8 @@ Grant creation:
   "kind": 30078,
   "created_at": 1780000000,
   "tags": [
-    ["d", "finite-folder-key-grant:<vaultId>:<folderId>"],
-    ["vault", "<vaultId>"],
+    ["d", "finite-folder-key-grant:<brainId>:<folderId>"],
+    ["brain", "<brainId>"],
     ["folder", "<folderId>"],
     ["keyVersion", "1"],
     ["p", "<recipient pubkey hex>"]
@@ -680,7 +680,7 @@ Grant creation:
 
 Grant opening:
 
-1. Check the envelope context matches expected `vaultId`, `folderId`,
+1. Check the envelope context matches expected `brainId`, `folderId`,
    `keyVersion`, `issuerNpub`, and `recipientNpub`.
 2. Check `format` is `NIP-59`.
 3. Verify wrapped event kind `1059`, signature, and recipient `p` tag.
@@ -706,7 +706,7 @@ Payload:
 ```json
 {
   "version": "finite-folder-object-revision-v1",
-  "vaultId": "acme",
+  "brainId": "acme",
   "folderId": "strategy",
   "objectId": "obj_0123456789abcdef",
   "operation": "create | update | move",
@@ -724,8 +724,8 @@ Tags:
 
 ```json
 [
-  ["d", "finite-folder-object-revision:<vaultId>:<folderId>:<objectId>:<revision>"],
-  ["vault", "<vaultId>"],
+  ["d", "finite-folder-object-revision:<brainId>:<folderId>:<objectId>:<revision>"],
+  ["brain", "<brainId>"],
   ["folder", "<folderId>"],
   ["object", "<objectId>"],
   ["operation", "create"],
@@ -751,7 +751,7 @@ Payload:
 ```json
 {
   "version": "finite-folder-object-tombstone-v1",
-  "vaultId": "acme",
+  "brainId": "acme",
   "folderId": "strategy",
   "objectId": "obj_0123456789abcdef",
   "operation": "delete",
@@ -766,8 +766,8 @@ Tags:
 
 ```json
 [
-  ["d", "finite-folder-object-tombstone:<vaultId>:<folderId>:<objectId>:<revision>"],
-  ["vault", "<vaultId>"],
+  ["d", "finite-folder-object-tombstone:<brainId>:<folderId>:<objectId>:<revision>"],
+  ["brain", "<brainId>"],
   ["folder", "<folderId>"],
   ["object", "<objectId>"],
   ["operation", "delete"]
@@ -776,7 +776,7 @@ Tags:
 
 Validation rules mirror revision events, but the operation is always `delete`.
 
-### 5.6 Vault Admin Access Change
+### 5.6 Brain Admin Access Change
 
 Admin access changes are signed Nostr event kind `30078`.
 
@@ -795,8 +795,8 @@ Payload:
 
 ```json
 {
-  "version": "finite-vault-admin-access-change-v1",
-  "vaultId": "acme",
+  "version": "finite-brain-admin-access-change-v1",
+  "brainId": "acme",
   "changeId": "grant-strategy-bob-1",
   "action": "grant-folder-access",
   "adminNpub": "npub-admin",
@@ -812,8 +812,8 @@ Tags:
 
 ```json
 [
-  ["d", "finite-vault-admin-access-change:<vaultId>:<changeId>"],
-  ["vault", "<vaultId>"],
+  ["d", "finite-brain-admin-access-change:<brainId>:<changeId>"],
+  ["brain", "<brainId>"],
   ["action", "<action>"],
   ["folder", "<folderId>"],
   ["p", "<target pubkey hex>"],
@@ -909,9 +909,9 @@ Access is binary:
   that Folder.
 - If a member lacks Folder Access, they can see visible Folder metadata but
   cannot open content.
-- Vault Admins have full access to all Folders in an Organization Vault.
-- A Personal Vault owner has access to owner Folders.
-- A limited Personal Vault Member can read and write only explicitly shared
+- Brain Admins have full access to all Folders in an Organization Brain.
+- A Personal Brain owner has access to owner Folders.
+- A limited Personal Brain Member can read and write only explicitly shared
   restricted Folders for which it holds a current Folder Key Grant. Its metadata
   view MUST omit owner-only and otherwise inaccessible Folder metadata.
 
@@ -919,11 +919,11 @@ Access is binary:
 
 For any current Folder Key version, recipients are:
 
-- `all_members`: all Vault Members plus all Vault Admins.
-- `restricted`: the Personal Vault owner, plus members listed for that Folder,
-  plus all Organization Vault Admins.
-- `owner`: the Personal Vault owner.
-- `admin_only`: all Vault Admins. In the current helper this is satisfied by
+- `all_members`: all Brain Members plus all Brain Admins.
+- `restricted`: the Personal Brain owner, plus members listed for that Folder,
+  plus all Organization Brain Admins.
+- `owner`: the Personal Brain owner.
+- `admin_only`: all Brain Admins. In the current helper this is satisfied by
   always adding admins after mode-specific recipients.
 
 Recipients are unique and sorted when computed by the server/client helpers.
@@ -932,17 +932,17 @@ Recipients are unique and sorted when computed by the server/client helpers.
 
 Organization Folder creation is an atomic cryptographic action:
 
-1. Vault Admin creates a new Folder Key.
+1. Brain Admin creates a new Folder Key.
 2. Client computes required recipients.
 3. Client creates a Folder Key Grant for each required recipient at
    `keyVersion: 1`.
 4. Client submits Folder metadata and all Folder Key Grants together.
-5. Server validates the actor is a Vault Admin, the hierarchy is valid, and the
+5. Server validates the actor is a Brain Admin, the hierarchy is valid, and the
    grants cover every required recipient.
 6. Server stores Folder metadata and grants together.
 
 A Folder without current grants is `setupIncomplete`. Empty legacy Folders may
-be repaired by Vault Admins with Finish Setup. Finish Setup generates current
+be repaired by Brain Admins with Finish Setup. Finish Setup generates current
 grants for required recipients, stores them, and leaves content unchanged.
 
 ### 6.4 Granting Access
@@ -951,22 +951,22 @@ Adding Folder Access:
 
 - Does not require Folder Key Rotation.
 - Requires Folder Key Grants for each newly added recipient.
-- Requires a signed access-change authorization from the controlling Vault
-  authority: a Vault Admin for an Organization Vault, or the Personal Vault
-  owner for Personal Vault scope.
+- Requires a signed access-change authorization from the controlling Brain
+  authority: a Brain Admin for an Organization Brain, or the Personal Brain
+  owner for Personal Brain scope.
 
 Removing Folder Access:
 
 - Requires Folder Key Rotation.
 - Must re-encrypt every live Folder Object under a new Folder Key version.
 - Must issue Folder Key Grants for every remaining required recipient.
-- Requires a signed access-change authorization from the same controlling Vault
+- Requires a signed access-change authorization from the same controlling Brain
   authority.
 
 ### 6.5 Personal Agent Access
 
 The Personal Agent has full operational access to every current and future
-Personal Vault Folder, but is never the owner. New Folder creation always wraps
+Personal Brain Folder, but is never the owner. New Folder creation always wraps
 the key for the owner and current Personal Agent. Only the human owner can
 replace or remove the Personal Agent. That operation rotates every current
 Folder Key, re-encrypts live objects, swaps or vacates the role, and commits
@@ -1008,26 +1008,26 @@ Server validation:
 After validation, the server applies every object update and appends all new
 Folder Key Grants.
 
-## 7. Vault Working Tree
+## 7. Brain Working Tree
 
-A Vault Directory is the portable local directory shape:
+A Brain Directory is the portable local directory shape:
 
 ```text
 <root>/
   .finitebrain/
-    vault-directory.json
+    brain-directory.json
     working-tree-state.json
     encrypted-sync/
       folders/<folderId>/<objectId>.json
   <folder roots and plaintext files for accessible folders>
 ```
 
-`vault-directory.json`:
+`brain-directory.json`:
 
 ```json
 {
-  "version": "finite-vault-directory-v1",
-  "vault": {
+  "version": "finite-brain-directory-v1",
+  "brain": {
     "id": "acme",
     "kind": "organization",
     "name": "Acme",
@@ -1048,7 +1048,7 @@ A Vault Directory is the portable local directory shape:
 
 ```json
 {
-  "version": "finite-vault-working-tree-state-v1",
+  "version": "finite-brain-working-tree-state-v1",
   "folderRoots": [
     {
       "folderId": "strategy",
@@ -1097,7 +1097,7 @@ Materialization rules:
 - A decrypted object path MUST NOT collide with another child Folder root.
 - Working-tree creates/edits/moves/deletes are detected from
   `working-tree-state.json`.
-- Cross-Folder moves require Vault Admin authority. Otherwise they are
+- Cross-Folder moves require Brain Admin authority. Otherwise they are
   unresolved changes.
 
 ## 8. Server Storage
@@ -1110,7 +1110,7 @@ finite-brain.sqlite3-wal   # when SQLite WAL mode leaves a live WAL file
 finite-brain.sqlite3-shm   # when SQLite WAL mode leaves a live SHM file
 ```
 
-The Rust implementation uses SQLite as the authoritative store for Vault
+The Rust implementation uses SQLite as the authoritative store for Brain
 metadata, Folder hierarchy and access state, Folder Key Grants, sync append log,
 current encrypted object projection, Invitations, Share Links, Shared Folder
 Connections, and Mounts.
@@ -1126,7 +1126,7 @@ A complete server backup MUST include:
 - The configured SQLite database file, default `finite-brain.sqlite3`.
 - SQLite WAL/SHM files if WAL mode is active and the database has not been
   checkpointed.
-- Any separate local Product Client or Vault Working Tree projections only when
+- Any separate local Product Client or Brain Working Tree projections only when
   the backup is meant to preserve local decrypted/agent workspace state.
 
 Backup consistency:
@@ -1142,11 +1142,11 @@ Restore order:
 
 1. Restore the database into an isolated server data path.
 2. Run schema migrations before serving traffic.
-3. Validate every Vault id, Folder id, member npub, mount source, invitation,
+3. Validate every Brain id, Folder id, member npub, mount source, invitation,
    Share Link, and connection reference.
-4. Validate sync sequences are monotonic per Vault.
-5. Rebuild or verify `current_encrypted_vault_objects` from
-   `vault_record_index` when the current projection is missing or suspect.
+4. Validate sync sequences are monotonic per Brain.
+5. Rebuild or verify `current_encrypted_brain_objects` from
+   `brain_record_index` when the current projection is missing or suspect.
 6. Start serving only after metadata and current encrypted state agree.
 
 Migration policy:
@@ -1160,18 +1160,18 @@ Migration policy:
 
 Retention:
 
-- `vault_record_index` is the authoritative append log until a configured
+- `brain_record_index` is the authoritative append log until a configured
   retention floor.
-- `current_encrypted_vault_objects` is the latest-state projection and MUST be
+- `current_encrypted_brain_objects` is the latest-state projection and MUST be
   enough to bootstrap clients after old records are compacted.
 - If a client cursor is older than the retained floor, the server returns
   `410 rebootstrap_required`.
 - Retention MUST NOT remove current Folder Key Grants, current object state,
   live Share Links, live Invitations, live Mounts, or active access state.
 
-## 9. Vault Record Index And Sync
+## 9. Brain Record Index And Sync
 
-The Vault Record Index is an ordered, Vault-scoped index of accepted encrypted
+The Brain Record Index is an ordered, Brain-scoped index of accepted encrypted
 records.
 
 Record types:
@@ -1179,15 +1179,15 @@ Record types:
 - `folder_object_revision`
 - `folder_object_tombstone`
 - `folder_key_grant`
-- `vault_admin_access_change`
+- `brain_admin_access_change`
 
-Each accepted record receives a monotonic server `sequence` per Vault.
+Each accepted record receives a monotonic server `sequence` per Brain.
 
 SQLite tables are conceptually:
 
 ```text
-vault_record_index(
-  vault_id,
+brain_record_index(
+  brain_id,
   sequence,
   record_event_id,
   record_type,
@@ -1201,8 +1201,8 @@ vault_record_index(
   record_event_kind
 )
 
-current_encrypted_vault_objects(
-  vault_id,
+current_encrypted_brain_objects(
+  brain_id,
   folder_id,
   object_id,
   payload_json,
@@ -1217,43 +1217,43 @@ Acceptance transaction:
 1. Validate Nostr HTTP auth.
 2. Validate actor can write/delete the target Folder.
 3. Validate encrypted object envelope and signed revision/tombstone event.
-4. If event id was already accepted for this Vault, return duplicate=true and
+4. If event id was already accepted for this Brain, return duplicate=true and
    the existing sequence.
 5. Compute the next sequence.
-6. Append payload to `vault_record_index`.
-7. Project latest object state into `current_encrypted_vault_objects`.
+6. Append payload to `brain_record_index`.
+7. Project latest object state into `current_encrypted_brain_objects`.
 8. Commit atomically.
 
 Bootstrap:
 
 ```http
-GET /_admin/vaults/{vaultId}/sync/bootstrap
+GET /_admin/brains/{brainId}/sync/bootstrap
 ```
 
 Response:
 
 ```json
 {
-  "vaultId": "acme",
+  "brainId": "acme",
   "latestSequence": 42,
   "objects": [],
   "objectCount": 0,
   "controlRecords": [],
-  "currentStateKind": "current_encrypted_vault_state"
+  "currentStateKind": "current_encrypted_brain_state"
 }
 ```
 
 Incremental pull:
 
 ```http
-GET /_admin/vaults/{vaultId}/sync/records?after=42&limit=100
+GET /_admin/brains/{brainId}/sync/records?after=42&limit=100
 ```
 
 Response:
 
 ```json
 {
-  "vaultId": "acme",
+  "brainId": "acme",
   "afterSequence": 42,
   "latestSequence": 50,
   "records": [],
@@ -1266,7 +1266,7 @@ Response:
 Submit:
 
 ```http
-POST /_admin/vaults/{vaultId}/sync/records
+POST /_admin/brains/{brainId}/sync/records
 ```
 
 Revision body:
@@ -1300,9 +1300,9 @@ Visibility filtering:
 
 - Bootstrap and incremental pulls return content records only for Folders the
   actor can read.
-- Folder Key Grant control records are visible to the recipient and Vault
+- Folder Key Grant control records are visible to the recipient and Brain
   Admins.
-- Vault Admin Access Change control records are visible to Vault Admins.
+- Brain Admin Access Change control records are visible to Brain Admins.
 
 Cursor behavior:
 
@@ -1336,11 +1336,11 @@ Update/move/delete:
 
 Duplicate events:
 
-- If the same record event id has already been accepted for the same Vault, the
+- If the same record event id has already been accepted for the same Brain, the
   server returns the existing sequence and marks the response duplicate.
 - Duplicate handling is by event id, not by object id, hash, or body equality.
-- Replaying an accepted event against another Vault is invalid because the
-  signed payload and tags bind `vaultId`.
+- Replaying an accepted event against another Brain is invalid because the
+  signed payload and tags bind `brainId`.
 
 Client behavior:
 
@@ -1369,7 +1369,7 @@ Cursor expiry and rebootstrap:
 
 Current-state projection:
 
-- For each `(vaultId, folderId, objectId)`, the highest accepted non-deleted
+- For each `(brainId, folderId, objectId)`, the highest accepted non-deleted
   revision is current.
 - A tombstone with the highest accepted revision marks the object deleted.
 - Current-state projection MUST be derived from accepted records only.
@@ -1382,10 +1382,10 @@ Current-state projection:
 Primary secure object routes:
 
 ```http
-PUT    /_admin/vaults/{vaultId}/folders/{folderId}/objects/{objectId}
-GET    /_admin/vaults/{vaultId}/folders/{folderId}/objects/{objectId}
-DELETE /_admin/vaults/{vaultId}/folders/{folderId}/objects/{objectId}
-POST   /_admin/vaults/{vaultId}/folders/{folderId}/objects/{objectId}/move
+PUT    /_admin/brains/{brainId}/folders/{folderId}/objects/{objectId}
+GET    /_admin/brains/{brainId}/folders/{folderId}/objects/{objectId}
+DELETE /_admin/brains/{brainId}/folders/{folderId}/objects/{objectId}
+POST   /_admin/brains/{brainId}/folders/{folderId}/objects/{objectId}/move
 ```
 
 These routes require Nostr auth and encrypted Folder Object payloads. The
@@ -1393,12 +1393,12 @@ server stores ciphertext only.
 
 Rust hard-cut behavior: legacy plaintext file routes are not part of the
 default server route surface. Readable Page content enters through trusted
-Product Client, OKF import, or Vault Working Tree flows and is uploaded through
+Product Client, OKF import, or Brain Working Tree flows and is uploaded through
 encrypted object routes.
 
-## 11. Vault Invitations
+## 11. Brain Invitations
 
-A Vault Invitation lets one targeted npub become a Vault Member. It does not by
+A Brain Invitation lets one targeted npub become a Brain Member. It does not by
 itself grant Folder Keys.
 
 Invitation shape:
@@ -1410,20 +1410,20 @@ Invitation shape:
   "status": "pending | accepted | revoked",
   "initialFolderAccess": [{ "folderId": "strategy" }],
   "inviteCode": "invite-<32 hex chars>",
-  "acceptPath": "/_admin/vault-invitation-links/invite-.../accept",
+  "acceptPath": "/_admin/brain-invitation-links/invite-.../accept",
   "expiresAt": "2026-06-30T00:00:00Z"
 }
 ```
 
 Rules:
 
-- Only Vault Admins invite organization members.
+- Only Brain Admins invite organization members.
 - Invitation Links are singleton handles for one npub. They are not reusable
   public join links.
 - The target User must authorize with Nostr before viewing or accepting.
 - Opening a link as the wrong User returns unavailable, not organization
   details.
-- Accepting the link adds the target as a Vault Member and applies initial
+- Accepting the link adds the target as a Brain Member and applies initial
   Folder Access metadata.
 - Folder Key Grants for restricted Folders still need to be issued through the
   normal grant flow.
@@ -1437,7 +1437,7 @@ States:
 - `pending`: link can be viewed only by the targeted npub and accepted before
   `expiresAt`.
 - `accepted`: target npub has accepted; the link MUST NOT be accepted again.
-- `revoked`: a Vault Admin has invalidated the link; the link MUST NOT reveal
+- `revoked`: a Brain Admin has invalidated the link; the link MUST NOT reveal
   organization details to the target after revocation.
 - `expired`: derived state when `expiresAt` is in the past; expired links MUST
   behave like unavailable links.
@@ -1470,10 +1470,10 @@ setting:
 
 The source Folder remains canonical:
 
-- One source Vault Record Index.
+- One source Brain Record Index.
 - One current Folder Key.
 - One access history.
-- Writes to mounted content go to the source Vault, not the destination Vault.
+- Writes to mounted content go to the source Brain, not the destination Brain.
 
 ### 12.2 Personal Folder Mount
 
@@ -1483,7 +1483,7 @@ A Personal Folder Mount is a visible reference for one User.
 {
   "id": "personal-mount-<hash>",
   "ownerNpub": "npub...",
-  "sourceVaultId": "shared-vault",
+  "sourceBrainId": "shared-brain",
   "sourceFolderId": "strategy",
   "displayName": "Strategy",
   "displayParentFolderId": "optional",
@@ -1495,16 +1495,16 @@ A Personal Folder Mount is a visible reference for one User.
 Mount ids are deterministic:
 
 ```text
-personal-mount-<first 8 bytes sha256(ownerNpub + "\n" + sourceVaultId + "\n" + sourceFolderId)>
+personal-mount-<first 8 bytes sha256(ownerNpub + "\n" + sourceBrainId + "\n" + sourceFolderId)>
 ```
 
 A Personal Folder Mount does not grant Folder Access. The User must still be a
-member of the source Vault for that Shared Folder and have a valid Folder Key
+member of the source Brain for that Shared Folder and have a valid Folder Key
 Grant.
 
 Prototype boundary: the current server-side Personal Folder Mount validator
-accepts organization source Vaults only. ADR 0043 and the domain model allow
-vault-native Shared Folder Sources, including Personal Vault sources, but that
+accepts organization source Brains only. ADR 0043 and the domain model allow
+brain-native Shared Folder Sources, including Personal Brain sources, but that
 route still carries older organization-source assumptions.
 
 ### 12.3 Share Link
@@ -1515,7 +1515,7 @@ Folder Key Grant.
 ```json
 {
   "id": "share-link-<hash>",
-  "vaultId": "acme",
+  "brainId": "acme",
   "folderId": "strategy",
   "recipientNpub": "npub-recipient",
   "createdByNpub": "npub-admin",
@@ -1534,12 +1534,12 @@ The private server-side record also stores:
 
 Rules:
 
-- Only Vault Admins create Share Links.
-- Current server validation supports Share Links from organization Vaults only.
+- Only Brain Admins create Share Links.
+- Current server validation supports Share Links from organization Brains only.
 - Link is scoped to `recipientNpub`.
 - Recipient must authorize with the matching Nostr key.
 - Accepting may optionally create a Personal Folder Mount.
-- Accepting adds the recipient as a limited Vault Member if needed, grants
+- Accepting adds the recipient as a limited Brain Member if needed, grants
   restricted Folder Access, stores the Folder Key Grant, and marks the link
   accepted.
 - Expired or revoked links cannot be accepted.
@@ -1557,14 +1557,14 @@ as legacy and requires single-use npub-bound Share Links.
 ### 12.4 Shared Folder Invitation
 
 A Shared Folder Invitation connects a source Shared Folder to a destination
-Organization Vault.
+Organization Brain.
 
 ```json
 {
   "id": "shared-folder-invitation-<hash>",
-  "sourceVaultId": "source",
+  "sourceBrainId": "source",
   "sourceFolderId": "strategy",
-  "destinationVaultId": "destination-org",
+  "destinationBrainId": "destination-org",
   "destinationAdminNpub": "npub-dest-admin",
   "createdByNpub": "npub-source-admin",
   "status": "pending | accepted | revoked",
@@ -1582,12 +1582,12 @@ Private server-side invitation record also stores:
 
 Creation rules:
 
-- Source actor MUST be able to manage source Vault Folders.
+- Source actor MUST be able to manage source Brain Folders.
 - Source Folder MUST exist, be `sharedFolderSource: true`, and be
   `restricted`.
 - Source Folder setup MUST be complete.
-- Destination Vault MUST be an organization Vault.
-- `destinationAdminNpub` MUST be an admin of the destination Vault.
+- Destination Brain MUST be an organization Brain.
+- `destinationAdminNpub` MUST be an admin of the destination Brain.
 - A current Folder Key Grant for the destination admin is required.
 
 Acceptance rules:
@@ -1596,7 +1596,7 @@ Acceptance rules:
 - Invitation must be pending.
 - Server creates or reuses a Shared Folder Connection.
 - Server creates or reuses an Organization Folder Mount.
-- Server adds destination admin as a limited member of the source Vault if
+- Server adds destination admin as a limited member of the source Brain if
   needed.
 - Server grants source Folder Access and stores the Folder Key Grant.
 
@@ -1605,9 +1605,9 @@ Acceptance rules:
 ```json
 {
   "id": "shared-folder-connection-<hash>",
-  "sourceVaultId": "source",
+  "sourceBrainId": "source",
   "sourceFolderId": "strategy",
-  "destinationVaultId": "destination-org",
+  "destinationBrainId": "destination-org",
   "destinationAdminNpub": "npub-dest-admin",
   "status": "active | revoked",
   "createdAt": "2026-06-23T00:00:00Z",
@@ -1618,12 +1618,12 @@ Acceptance rules:
 Connection ids are deterministic:
 
 ```text
-shared-folder-connection-<first 8 bytes sha256(sourceVaultId + "\n" + sourceFolderId + "\n" + destinationVaultId)>
+shared-folder-connection-<first 8 bytes sha256(sourceBrainId + "\n" + sourceFolderId + "\n" + destinationBrainId)>
 ```
 
 Destination admins may update participating destination members for their
 connection, but they can only manage source Folder Access for members of their
-own destination Organization Vault. They must keep their own access because
+own destination Organization Brain. They must keep their own access because
 issuing Folder Key Grants requires the current Folder Key.
 
 ### 12.6 Organization Folder Mount
@@ -1631,8 +1631,8 @@ issuing Folder Key Grants requires the current Folder Key.
 ```json
 {
   "id": "organization-mount-<hash>",
-  "organizationVaultId": "destination-org",
-  "sourceVaultId": "source",
+  "organizationBrainId": "destination-org",
+  "sourceBrainId": "source",
   "sourceFolderId": "strategy",
   "connectionId": "shared-folder-connection-...",
   "displayName": "Strategy",
@@ -1646,7 +1646,7 @@ issuing Folder Key Grants requires the current Folder Key.
 Mount ids are deterministic:
 
 ```text
-organization-mount-<first 8 bytes sha256(organizationVaultId + "\n" + sourceVaultId + "\n" + sourceFolderId)>
+organization-mount-<first 8 bytes sha256(organizationBrainId + "\n" + sourceBrainId + "\n" + sourceFolderId)>
 ```
 
 Removing a Shared Folder Connection or Organization Mount revokes the
@@ -1655,22 +1655,22 @@ access is removed.
 
 ### 12.7 Mounted Shared Folder Client Projection
 
-A mounted Shared Folder is a client-visible entry that points at source Vault
-content. It is not a copy in the destination Vault.
+A mounted Shared Folder is a client-visible entry that points at source Brain
+content. It is not a copy in the destination Brain.
 
 Projection rules:
 
 - Personal Folder Mounts appear in the owner's sidebar/tree as a Folder-like
   entry at `displayName` and optional `displayParentFolderId`.
-- Organization Folder Mounts appear in the destination Organization Vault's
+- Organization Folder Mounts appear in the destination Organization Brain's
   sidebar/tree as a Folder-like entry for destination members who have source
   Folder Access and an openable Folder Key Grant.
 - Clients SHOULD visually distinguish mounted/shared Folders from native
   destination Folders.
-- Opening a mounted Folder reads from the source Vault Record Index and source
+- Opening a mounted Folder reads from the source Brain Record Index and source
   Folder Object state.
 - Creating, editing, moving, or deleting a Page in a mounted Folder writes to
-  the source Vault and source Folder. The destination Vault receives no copied
+  the source Brain and source Folder. The destination Brain receives no copied
   Folder Object.
 - Destination Organization Admins may manage which members of their own
   Organization participate in a Shared Folder Connection, but the resulting
@@ -1687,12 +1687,12 @@ Projection rules:
 
 ## 13. Export
 
-Encrypted Vault Export:
+Encrypted Brain Export:
 
 ```json
 {
-  "version": "finite-vault-export-v1",
-  "vault": {
+  "version": "finite-brain-export-v1",
+  "brain": {
     "id": "acme",
     "kind": "organization",
     "name": "Acme",
@@ -1711,7 +1711,7 @@ Encrypted Vault Export:
 ```
 
 Export includes accessible encrypted Folder Objects and key grants visible to
-the actor. Vault Admins may see broader access state and grants. Non-admins see
+the actor. Brain Admins may see broader access state and grants. Non-admins see
 only accessible material and their own grants.
 
 Opening an export:
@@ -1725,7 +1725,7 @@ Opening an export:
 
 ### 13.1 Readable OKF Export
 
-Readable OKF Export is separate from Encrypted Vault Export. It contains
+Readable OKF Export is separate from Encrypted Brain Export. It contains
 decrypted Markdown Pages and readable asset files for accessible Folders and
 intentionally excludes Folder Keys, Folder Key Grants, encrypted sync state, and
 inaccessible ciphertext.
@@ -1734,7 +1734,7 @@ An OKF bundle has this shape:
 
 ```text
 okf-export/
-  okf-vault.json
+  okf-brain.json
   content/
     <folder display path>/
       <page path>.md
@@ -1749,14 +1749,14 @@ okf-export/
     tags.md
 ```
 
-`okf-vault.json`:
+`okf-brain.json`:
 
 ```json
 {
-  "version": "finite-okf-vault-export-v1",
+  "version": "finite-okf-brain-export-v1",
   "exportedAt": "2026-06-23T00:00:00.000Z",
   "exportedByNpub": "npub...",
-  "sourceVault": {
+  "sourceBrain": {
     "id": "acme",
     "kind": "organization",
     "name": "Acme"
@@ -1812,9 +1812,9 @@ Markdown link conventions:
 
 Round-trip expectations:
 
-- Encrypted Vault Export is the lossless encrypted portability format.
+- Encrypted Brain Export is the lossless encrypted portability format.
 - OKF Export is a readable portability format for accessible plaintext.
-- OKF export followed by OKF import into a new Vault SHOULD preserve Page
+- OKF export followed by OKF import into a new Brain SHOULD preserve Page
   content, relative paths, Markdown links, generated wiki reports, and
   attachment files for accessible content.
 - OKF round-trip is not expected to preserve Folder ids, object ids, revision
@@ -1824,7 +1824,7 @@ Round-trip expectations:
 ### 13.2 OKF Import
 
 OKF import turns readable Markdown back into encrypted Folder Objects in a
-destination Vault.
+destination Brain.
 
 Import rules:
 
@@ -1838,7 +1838,7 @@ Import rules:
   MUST either skip, create a copy with a clear suffix, or require an explicit
   overwrite decision.
 - Imported content receives new object ids unless the import is an explicitly
-  trusted restore flow using Encrypted Vault Export.
+  trusted restore flow using Encrypted Brain Export.
 - Imported links are resolved best-effort against imported Page paths and
   existing accessible destination Page paths.
 - Omission entries are advisory and MUST NOT create inaccessible placeholder
@@ -1869,7 +1869,7 @@ datasets/
 output/
 ```
 
-- `AGENTS.md` gives local agent instructions for the Vault or Folder subtree.
+- `AGENTS.md` gives local agent instructions for the Brain or Folder subtree.
 - `_index.md` is a human/agent navigation page for a Folder or bundle.
 - `raw/` contains source captures or immutable imported references.
 - `raw/assets/` contains non-Markdown source Assets.
@@ -1882,7 +1882,7 @@ output/
 Agent discovery rules:
 
 - Agents discover the nearest `AGENTS.md` by walking from the target Page path
-  toward the Folder root, then the Vault root.
+  toward the Folder root, then the Brain root.
 - Agents may read and write only materialized accessible Folders.
 - Agent writes are User writes. They are signed, encrypted, synced, and audited
   as the acting User.
@@ -1905,49 +1905,49 @@ Agent discovery rules:
 Admin and metadata:
 
 ```http
-POST   /_admin/vaults
-GET    /_admin/vaults/{vaultId}/metadata
-GET    /_admin/vaults/{vaultId}/export
-GET    /_admin/vaults/{vaultId}/search
+POST   /_admin/brains
+GET    /_admin/brains/{brainId}/metadata
+GET    /_admin/brains/{brainId}/export
+GET    /_admin/brains/{brainId}/search
 ```
 
-Vault membership and invitations:
+Brain membership and invitations:
 
 ```http
-POST   /_admin/vaults/{vaultId}/members
-DELETE /_admin/vaults/{vaultId}/members/{memberNpub}
-POST   /_admin/vaults/{vaultId}/admins
-DELETE /_admin/vaults/{vaultId}/admins/{adminNpub}
-POST   /_admin/vaults/{vaultId}/invitations
-DELETE /_admin/vaults/{vaultId}/invitations/{invitationId}
-POST   /_admin/vaults/{vaultId}/invitations/{invitationId}/accept
-GET    /_admin/vault-invitation-links/{inviteCode}
-POST   /_admin/vault-invitation-links/{inviteCode}/accept
+POST   /_admin/brains/{brainId}/members
+DELETE /_admin/brains/{brainId}/members/{memberNpub}
+POST   /_admin/brains/{brainId}/admins
+DELETE /_admin/brains/{brainId}/admins/{adminNpub}
+POST   /_admin/brains/{brainId}/invitations
+DELETE /_admin/brains/{brainId}/invitations/{invitationId}
+POST   /_admin/brains/{brainId}/invitations/{invitationId}/accept
+GET    /_admin/brain-invitation-links/{inviteCode}
+POST   /_admin/brain-invitation-links/{inviteCode}/accept
 ```
 
 Folders and access:
 
 ```http
-POST   /_admin/vaults/{vaultId}/folders
-POST   /_admin/vaults/{vaultId}/folders/{folderId}/finish-setup
-POST   /_admin/vaults/{vaultId}/folders/{folderId}/access
-DELETE /_admin/vaults/{vaultId}/folders/{folderId}/access/{targetNpub}
-POST   /_admin/vaults/{vaultId}/folders/{folderId}/share-links
-POST   /_admin/vaults/{vaultId}/folders/{folderId}/share-source
-POST   /_admin/vaults/{vaultId}/folders/{folderId}/shared-folder-invitations
-GET    /_admin/vaults/{vaultId}/organization-folder-mounts
+POST   /_admin/brains/{brainId}/folders
+POST   /_admin/brains/{brainId}/folders/{folderId}/finish-setup
+POST   /_admin/brains/{brainId}/folders/{folderId}/access
+DELETE /_admin/brains/{brainId}/folders/{folderId}/access/{targetNpub}
+POST   /_admin/brains/{brainId}/folders/{folderId}/share-links
+POST   /_admin/brains/{brainId}/folders/{folderId}/share-source
+POST   /_admin/brains/{brainId}/folders/{folderId}/shared-folder-invitations
+GET    /_admin/brains/{brainId}/organization-folder-mounts
 ```
 
 Secure content and sync:
 
 ```http
-PUT    /_admin/vaults/{vaultId}/folders/{folderId}/objects/{objectId}
-GET    /_admin/vaults/{vaultId}/folders/{folderId}/objects/{objectId}
-DELETE /_admin/vaults/{vaultId}/folders/{folderId}/objects/{objectId}
-POST   /_admin/vaults/{vaultId}/folders/{folderId}/objects/{objectId}/move
-GET    /_admin/vaults/{vaultId}/sync/bootstrap
-GET    /_admin/vaults/{vaultId}/sync/records?after=0&limit=100
-POST   /_admin/vaults/{vaultId}/sync/records
+PUT    /_admin/brains/{brainId}/folders/{folderId}/objects/{objectId}
+GET    /_admin/brains/{brainId}/folders/{folderId}/objects/{objectId}
+DELETE /_admin/brains/{brainId}/folders/{folderId}/objects/{objectId}
+POST   /_admin/brains/{brainId}/folders/{folderId}/objects/{objectId}/move
+GET    /_admin/brains/{brainId}/sync/bootstrap
+GET    /_admin/brains/{brainId}/sync/records?after=0&limit=100
+POST   /_admin/brains/{brainId}/sync/records
 ```
 
 Sharing:
@@ -1988,25 +1988,25 @@ User-facing framing:
 
 Compatible implementations MUST preserve these invariants:
 
-- Page plaintext is produced only inside a trusted Vault Client or Agent
+- Page plaintext is produced only inside a trusted Brain Client or Agent
   Runtime.
 - The server never needs a Folder Key to authorize, sync, store, or export
   encrypted state.
 - Every Folder has an independent Folder Key.
 - Folder Key Grants are addressed to Member Identity npubs, not devices.
 - Folder Access is binary.
-- A Personal Vault agent signs as its distinct Agent Principal Key and receives
+- A Personal Brain agent signs as its distinct Agent Principal Key and receives
   only its own explicit Folder Key Grants; it never uses the owner's identity
   secret or becomes the owner through a delegation.
 - Removing access requires Folder Key Rotation for future access control.
 - Folder Key Rotation does not promise retroactive erasure of content already
   decrypted, copied, exported, or retained as old ciphertext.
-- Server-visible metadata may include Vault names, Folder names, Folder
+- Server-visible metadata may include Brain names, Folder names, Folder
   hierarchy, membership, access lists, current key versions, object ids,
   ciphertext sizes, revisions, timestamps, and author npubs.
 - Server-visible metadata MUST NOT include Page paths, Page titles, links,
   backlinks, or content for secure object records.
-- Share Links and Vault Invitation Links are delivery handles, not independent
+- Share Links and Brain Invitation Links are delivery handles, not independent
   cryptographic permissions.
 - Folder Mounts are display references, not access grants and not sync copies.
 
@@ -2021,7 +2021,7 @@ Replay resistance:
 - Servers SHOULD reject already-seen authorization event ids within the skew
   window for state-changing requests.
 - Signed revision, tombstone, access-change, grant, invite, and share payloads
-  MUST bind Vault id and relevant Folder/object/user ids.
+  MUST bind Brain id and relevant Folder/object/user ids.
 
 Clock skew:
 
@@ -2079,7 +2079,7 @@ Payload and rate limits:
 - Servers SHOULD enforce maximum request body sizes for encrypted object
   writes, grant batches, imports, exports, and sync pulls.
 - Servers SHOULD rate-limit auth failures, invitation/share creation, grant
-  generation, and large sync/export operations per actor and per Vault.
+  generation, and large sync/export operations per actor and per Brain.
 - Error responses SHOULD avoid revealing whether inaccessible Page paths or
   Page titles exist.
 
@@ -2162,7 +2162,7 @@ A compatible implementation in another language should implement, in order:
    - NIP-59-shaped rumor/seal/gift-wrap creation.
    - Grant opening and context validation.
 4. Domain model:
-   - Vault, Folder, Member, Admin, Invitation, Share Link, Mount, and Access
+   - Brain, Folder, Member, Admin, Invitation, Share Link, Mount, and Access
      Log data shapes.
    - Folder hierarchy validation and path decoration.
    - Required recipient computation.
@@ -2176,12 +2176,12 @@ A compatible implementation in another language should implement, in order:
    - Revision and tombstone signing checks.
    - Base revision conflict checks.
 7. Sync:
-   - Append accepted records with monotonic per-Vault sequence.
+   - Append accepted records with monotonic per-Brain sequence.
    - Idempotency by event id.
    - Current encrypted state projection.
    - Bootstrap and incremental filtering by actor access.
 8. Client working tree:
-   - Open current Folder Key Grants on Vault load.
+   - Open current Folder Key Grants on Brain load.
    - Materialize accessible Folders.
    - Store opaque inaccessible ciphertext.
    - Detect and prepare local file changes.
@@ -2192,7 +2192,7 @@ A compatible implementation in another language should implement, in order:
    - Remove access with rotation.
    - Add/remove admins and members with required grants/rotations.
 10. Sharing:
-    - Singleton Vault Invitation Links.
+    - Singleton Brain Invitation Links.
     - Singleton npub-scoped Share Links.
     - Shared Folder Source conversion.
     - Personal Folder Mounts.
@@ -2200,7 +2200,7 @@ A compatible implementation in another language should implement, in order:
       Organization Folder Mounts.
 11. OKF portability:
     - Readable OKF Export bundle layout.
-    - `okf-vault.json` manifest.
+    - `okf-brain.json` manifest.
     - Markdown link rewriting and omission handling.
     - OKF Import conflict modes.
 12. LLM Wiki and agent layer:
@@ -2256,7 +2256,7 @@ Route compatibility:
 
 - Secure object, grant, invitation, share, and sync routes are the normative
   Portable v1 route surface.
-- Metadata and Vault creation routes are protected API routes and derive actor
+- Metadata and Brain creation routes are protected API routes and derive actor
   identity from Nostr authorization.
 - Plaintext file compatibility routes are not part of the Rust Portable v1
   default route surface.
@@ -2289,7 +2289,7 @@ The current implementation source of truth is spread across:
 - `crates/finite-brain-core/src/lib.rs`: domain model, validation, signed
   payload checks, encrypted Folder Object helpers, and core bootstrap rules.
 - `crates/finite-brain-core/src/portability.rs`: OKF export/import planning,
-  local search/agent discovery helpers, and Vault Working Tree intent shaping.
+  local search/agent discovery helpers, and Brain Working Tree intent shaping.
 - `crates/finite-brain-store/src/lib.rs`: SQLite schema, migrations,
   transaction boundary, grants, sync append log, current projection,
   invitations, shares, mounts, backup/rebuild tests, and retention behavior.

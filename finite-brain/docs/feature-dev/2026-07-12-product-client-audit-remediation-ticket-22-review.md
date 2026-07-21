@@ -9,7 +9,7 @@
 
 ## Implementation Summary
 
-The Product Client resolves an optional parent from current Vault metadata and
+The Product Client resolves an optional parent from current Brain metadata and
 uses a pure hierarchy helper for the Folder-create request. The existing key
 generation, grants, role, and access defaults remain unchanged.
 

@@ -11,7 +11,7 @@ use crate::AGENT_STATE_VERSION;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentState {
     pub(crate) version: String,
-    pub(crate) vault_id: String,
+    pub(crate) brain_id: String,
     pub(crate) server_url: Option<String>,
     pub(crate) auth_npub: Option<String>,
     pub(crate) daemon: DaemonState,
@@ -23,10 +23,10 @@ pub(crate) struct AgentState {
 }
 
 impl AgentState {
-    pub(crate) fn new(vault_id: &str, now: &str) -> Self {
+    pub(crate) fn new(brain_id: &str, now: &str) -> Self {
         Self {
             version: AGENT_STATE_VERSION.to_owned(),
-            vault_id: vault_id.to_owned(),
+            brain_id: brain_id.to_owned(),
             server_url: None,
             auth_npub: None,
             daemon: DaemonState {
@@ -135,28 +135,28 @@ pub(crate) struct SessionFolderKeyring {
 impl SessionFolderKeyring {
     pub(crate) fn insert(
         &mut self,
-        vault_id: impl Into<String>,
+        brain_id: impl Into<String>,
         folder_id: impl Into<String>,
         key_version: u32,
         folder_key: FolderKey,
     ) -> bool {
         self.keys
-            .insert((vault_id.into(), folder_id.into(), key_version), folder_key)
+            .insert((brain_id.into(), folder_id.into(), key_version), folder_key)
             .is_none()
     }
 
     pub(crate) fn get(
         &self,
-        vault_id: &str,
+        brain_id: &str,
         folder_id: &str,
         key_version: u32,
     ) -> Option<&FolderKey> {
         self.keys
-            .get(&(vault_id.to_owned(), folder_id.to_owned(), key_version))
+            .get(&(brain_id.to_owned(), folder_id.to_owned(), key_version))
     }
 
-    pub(crate) fn contains(&self, vault_id: &str, folder_id: &str, key_version: u32) -> bool {
-        self.get(vault_id, folder_id, key_version).is_some()
+    pub(crate) fn contains(&self, brain_id: &str, folder_id: &str, key_version: u32) -> bool {
+        self.get(brain_id, folder_id, key_version).is_some()
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -253,7 +253,7 @@ pub(crate) struct SyncChangeReport {
     pub(crate) path: Option<String>,
     pub(crate) from_path: Option<String>,
     pub(crate) folder_id: Option<String>,
-    pub(crate) source_vault_id: Option<String>,
+    pub(crate) source_brain_id: Option<String>,
     pub(crate) object_id: Option<String>,
     pub(crate) route: String,
     pub(crate) reason: Option<String>,
@@ -262,7 +262,7 @@ pub(crate) struct SyncChangeReport {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StatusReport {
-    pub(crate) vault_id: Option<String>,
+    pub(crate) brain_id: Option<String>,
     pub(crate) working_tree_path: Option<String>,
     pub(crate) auth: AuthStatus,
     pub(crate) daemon: DaemonStatus,
@@ -347,7 +347,7 @@ pub(crate) struct AccessExplanation {
 pub(crate) struct AccessRemovalBlockedReport {
     pub(crate) state: String,
     pub(crate) operation: String,
-    pub(crate) vault_id: String,
+    pub(crate) brain_id: String,
     pub(crate) folder_id: String,
     pub(crate) target_npub: String,
     pub(crate) route: String,
@@ -358,7 +358,7 @@ pub(crate) struct AccessRemovalBlockedReport {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccessSummaryReport {
-    pub(crate) vault_id: String,
+    pub(crate) brain_id: String,
     pub(crate) members: Vec<String>,
     pub(crate) admins: Vec<String>,
     pub(crate) folders: Vec<FolderAccessSummary>,
@@ -390,8 +390,8 @@ pub(crate) struct HttpResponse {
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct VaultMetadataView {
-    pub(crate) vault_id: String,
+pub(crate) struct BrainMetadataView {
+    pub(crate) brain_id: String,
     pub(crate) kind: String,
     pub(crate) name: String,
     pub(crate) owner_user_id: Option<String>,
@@ -435,8 +435,8 @@ pub(crate) struct FolderMetadataView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MountedFolderMetadataView {
     pub(crate) mount_id: String,
-    pub(crate) organization_vault_id: String,
-    pub(crate) source_vault_id: String,
+    pub(crate) organization_brain_id: String,
+    pub(crate) source_brain_id: String,
     pub(crate) source_folder_id: String,
     pub(crate) connection_id: String,
     pub(crate) display_name: String,

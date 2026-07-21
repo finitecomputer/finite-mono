@@ -18,14 +18,14 @@
 
 Make `fbrain` clearly report who already has effective Folder Access, return a
 truthful already-has-access result for redundant Folder Key Grants, and guide
-the managed FiniteBrain agent to attribute concurrent Vault changes to the
+the managed FiniteBrain agent to attribute concurrent Brain changes to the
 recorded actor instead of guessing that its own failed command caused them.
 Keep the work on the existing Brain mega-branch and PR #121.
 
 ## Durable Artifacts
 
-- CONTEXT updates: none; existing Folder Access, Vault Admin, Folder Key Grant,
-  and Vault Working Tree terms already resolve the behavior
+- CONTEXT updates: none; existing Folder Access, Brain Admin, Folder Key Grant,
+  and Brain Working Tree terms already resolve the behavior
 - ADRs: none; this restores existing access and audit semantics
 - Prototype source branch, if any: none
 - Spec issue: #127 — https://github.com/finitecomputer/finite-mono/issues/127
@@ -44,7 +44,7 @@ Keep the work on the existing Brain mega-branch and PR #121.
 - Test: focused `finite-brain-store`, `finite-brain-server`, and `finite-brain-cli`
   tests; managed-skill static checks; full workspace suite at the final gate
 - Build: root workspace build through the existing CI command surface
-- Visual verification: synthetic two-principal Organization Vault CLI flow with
+- Visual verification: synthetic two-principal Organization Brain CLI flow with
   a concurrent access mutation and actor-attributed activity output
 
 ## Ticket Ledger
@@ -78,12 +78,12 @@ Keep the work on the existing Brain mega-branch and PR #121.
 ## Whole-Branch Review
 
 - The first standards/specification review found ten issues spanning canonical
-  Personal Vault recipients, atomic Folder grants, bounded rotation fanout,
+  Personal Brain recipients, atomic Folder grants, bounded rotation fanout,
   truthful access fields, Personal Agent lifecycle preservation, and verified
   user-first setup. Commits `1e7ecfe`, `ae28c20`, `50b1eee`, and `e055bfc`
   addressed them.
-- The re-review found two remaining gaps: Personal Vault collaborator removal
-  could omit the owner and Personal Agent, and one-Personal-Vault-per-owner was
+- The re-review found two remaining gaps: Personal Brain collaborator removal
+  could omit the owner and Personal Agent, and one-Personal-Brain-per-owner was
   not database-enforced across connections. Commit `b1ba347` centralized the
   recipient calculation, added a partial unique index, serialized creation, and
   added repeatable two-connection coverage with rollback assertions.
@@ -99,7 +99,7 @@ Keep the work on the existing Brain mega-branch and PR #121.
 
 - Focused Brain suites passed: Product Client JavaScript, store (54), server
   (60), CLI (97), core (33), static skills (47), and repeated competing
-  Personal Vault bootstrap tests.
+  Personal Brain bootstrap tests.
 - `cargo fmt --all -- --check`, workspace clippy with warnings denied, managed
   skill/reference byte equality, JavaScript syntax checks, and `git diff
   --check` passed after review remediation.

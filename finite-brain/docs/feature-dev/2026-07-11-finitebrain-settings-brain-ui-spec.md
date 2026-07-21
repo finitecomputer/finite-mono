@@ -1,27 +1,27 @@
-# Spec: Obsidian-Style FiniteBrain Settings, Vault, And Access Shell
+# Spec: Obsidian-Style FiniteBrain Settings, Brain, And Access Shell
 
 ## Problem Statement
 
-The FiniteBrain Product Client currently puts Vault selection, signer/session
-controls, organization creation, Folder access, sharing, invitations, and Vault
+The FiniteBrain Product Client currently puts Brain selection, signer/session
+controls, organization creation, Folder access, sharing, invitations, and Brain
 member administration into a dense file-sidebar surface. This makes the file
-explorer compete with management tasks and makes the session/Vault identity
+explorer compete with management tasks and makes the session/Brain identity
 hard to discover. The supplied Obsidian references show a clearer pattern:
-the bottom sidebar row owns identity and Vault context, the Vault name opens a
-small switcher, Manage Vaults is a dedicated modal, and a gear opens a settings
+the bottom sidebar row owns identity and Brain context, the Brain name opens a
+small switcher, Manage Brains is a dedicated modal, and a gear opens a settings
 modal with a navigable left rail.
 
 ## Solution
 
 Refactor the Product Client shell around three presentation surfaces:
 
-1. A compact bottom account/Vault footer with a Vault switcher trigger, session
+1. A compact bottom account/Brain footer with a Brain switcher trigger, session
    identity/status summary, and a gear Settings trigger.
-2. A Vault switcher popover that lists the current Member Identity's visible
-   Vaults, marks the selected and loaded Vault, and links to a dedicated Manage
-   Vaults modal.
+2. A Brain switcher popover that lists the current Member Identity's visible
+   Brains, marks the selected and loaded Brain, and links to a dedicated Manage
+   Brains modal.
 3. A Settings modal with a left navigation rail and sections for Session,
-   Vault, Access & sharing, and Invitations. The Access ribbon opens this modal
+   Brain, Access & sharing, and Invitations. The Access ribbon opens this modal
    directly to Access & sharing. The Files sidebar remains focused on file
    browsing and Search remains focused on page search.
 
@@ -33,24 +33,24 @@ or data behavior.
 ## User Stories
 
 1. As a Product Client user, I want the bottom sidebar row to show my current
-   Vault, Member Identity, and session status, so that context is visible where
+   Brain, Member Identity, and session status, so that context is visible where
    I expect account controls.
 2. As a Product Client user, I want a gear icon beside the bottom row, so that
    settings are discoverable without opening the file explorer controls.
-3. As a Product Client user, I want clicking the Vault name to open a compact
-   switcher, so that I can see and choose visible Vaults without a large form.
+3. As a Product Client user, I want clicking the Brain name to open a compact
+   switcher, so that I can see and choose visible Brains without a large form.
 4. As a Product Client user, I want the switcher to distinguish selected,
-   loaded, locked, and unavailable states, so that choosing a Vault never
+   loaded, locked, and unavailable states, so that choosing a Brain never
    implies that its encrypted content is already open.
-5. As a Product Client user, I want a Manage Vaults action in the switcher,
-   so that Vault administration has a dedicated surface.
-6. As a Product Client user, I want Manage Vaults to list visible Vaults with
-   role and kind metadata, so that personal and organization Vaults are easy to
+5. As a Product Client user, I want a Manage Brains action in the switcher,
+   so that Brain administration has a dedicated surface.
+6. As a Product Client user, I want Manage Brains to list visible Brains with
+   role and kind metadata, so that personal and organization Brains are easy to
    distinguish.
-7. As a Vault owner, I want to create an organization Vault from Manage Vaults,
+7. As a Brain owner, I want to create an organization Brain from Manage Brains,
    so that creation is not mixed into file browsing.
 8. As a Product Client user, I want the existing explicit Load/Resume behavior
-   to remain available from Manage Vaults, so that selecting a Vault does not
+   to remain available from Manage Brains, so that selecting a Brain does not
    silently reopen encrypted grants.
 9. As a Product Client user, I want Settings to open as a modal over the
    workspace, so that management tasks do not permanently consume sidebar
@@ -64,16 +64,16 @@ or data behavior.
     obvious.
 13. As an unlocked-session user, I want the Settings modal to expose Lock
     session, so that I can clear Session Folder Keys and temporary plaintext.
-14. As a Product Client user, I want a Vault section with the current Vault
-    summary and Manage Vaults entry point, so that Vault context has one home.
-15. As a Vault administrator, I want Access & sharing to contain Folder
+14. As a Product Client user, I want a Brain section with the current Brain
+    summary and Manage Brains entry point, so that Brain context has one home.
+15. As a Brain administrator, I want Access & sharing to contain Folder
     selection, access summaries, people, Folder Key state, and share-link
     actions, so that permissions are managed together.
-16. As a Vault administrator, I want existing Folder grant, remove, create
+16. As a Brain administrator, I want existing Folder grant, remove, create
     share link, accept link, and revoke link actions to work from the new
     Settings surface, so that the refactor does not weaken access workflows.
-17. As a Vault administrator, I want organization member and administrator
-    controls to remain available in Access & sharing, so that existing Vault
+17. As a Brain administrator, I want organization member and administrator
+    controls to remain available in Access & sharing, so that existing Brain
     administration remains complete.
 18. As a Product Client user, I want Invitations to contain create, inspect,
     accept, revoke, and email-invite flows, so that invite work is separated
@@ -97,32 +97,32 @@ or data behavior.
     Product Client state and request interfaces, so that UI changes remain
     local to the presentation module.
 25. As a reviewer, I want deterministic browser captures of locked, unlocked,
-    switcher, Manage Vaults, Settings, Access, and Invitations states, so that
+    switcher, Manage Brains, Settings, Access, and Invitations states, so that
     the end-to-end result is judged from evidence rather than markup alone.
 
 ## Implementation Decisions
 
 - Keep the Product Client's existing `FiniteBrainProductClient` state and
-  request functions as the authoritative interface for Vaults, Folder access,
+  request functions as the authoritative interface for Brains, Folder access,
   invitations, sharing, and Session Lock.
 - Add a small presentation state for the active Settings section and the open
-  overlay surface (Vault switcher, Settings modal, or Manage Vaults modal).
+  overlay surface (Brain switcher, Settings modal, or Manage Brains modal).
   Close overlays on explicit close, Escape, or backdrop activation.
 - Replace the footer's details-only interaction with a compact row that has a
-  dedicated Vault switcher trigger and a dedicated Settings trigger while
+  dedicated Brain switcher trigger and a dedicated Settings trigger while
   retaining the identity/status summary and session controls.
-- Render the Vault switcher from the same normalized visible-Vault data used by
-  the current select and Vault list. Selection updates the active Vault through
+- Render the Brain switcher from the same normalized visible-Brain data used by
+  the current select and Brain list. Selection updates the active Brain through
   the existing reset/lock path; it does not silently bypass explicit Load or
   Resume semantics.
-- Give Manage Vaults a modal surface for visible Vaults, role/kind/status
+- Give Manage Brains a modal surface for visible Brains, role/kind/status
   metadata, signer connection, explicit Load/Resume, and organization creation.
-- Move the dense Vault, Folder access, sharing, member, invitation, and shared
+- Move the dense Brain, Folder access, sharing, member, invitation, and shared
   Folder controls out of the file sidebar and into modal sections. Preserve
   existing element identity where it is already part of Product Client tests or
   event binding, or introduce one new stable hook where a surface needs a
   distinct presentation seam.
-- The Settings modal uses a left rail with Session, Vault, Access & sharing,
+- The Settings modal uses a left rail with Session, Brain, Access & sharing,
   and Invitations sections. Its content area remains independently scrollable
   so long access and invitation forms do not resize the workspace.
 - The Access ribbon targets Settings → Access & sharing. Files and Search stay
@@ -132,7 +132,7 @@ or data behavior.
   neutral surfaces, blue accents, semantic status tones, local Funnel fonts,
   restrained depth, visible focus, and reduced-motion support.
 - Keep modal labels and summaries explicit about encrypted state. A selected
-  Vault is not necessarily a loaded Vault, and a locked session never implies
+  Brain is not necessarily a loaded Brain, and a locked session never implies
   readable content is present.
 - Do not add durable browser storage, new backend routes, schema changes,
   cryptographic operations, authorization policy, or production configuration.
@@ -140,11 +140,11 @@ or data behavior.
 ## Testing Decisions
 
 - The primary seam is the real Rust-served Product Client at `/client`, using
-  the existing local smoke signer and seeded local Vault data. Browser checks
+  the existing local smoke signer and seeded local Brain data. Browser checks
   should exercise the complete interaction paths rather than inspect private
   DOM implementation details.
-- Browser verification must cover: bottom-row rendering; Vault switcher open,
-  selection, outside-click, and Escape; Manage Vaults open/close, role/status
+- Browser verification must cover: bottom-row rendering; Brain switcher open,
+  selection, outside-click, and Escape; Manage Brains open/close, role/status
   display, creation and explicit Load/Resume; Settings navigation and close;
   Access & sharing actions; Invitations; Session Lock/Resume; and desktop and
   narrow-mobile layouts.
@@ -161,7 +161,7 @@ or data behavior.
 
 ## Out of Scope
 
-- Changing Vault, Folder, Member Identity, invitation, share-link, sync, or
+- Changing Brain, Folder, Member Identity, invitation, share-link, sync, or
   cryptographic semantics.
 - Adding new backend routes, database fields, persistent client settings, or
   production deployment/configuration.
@@ -171,12 +171,12 @@ or data behavior.
 - Redesigning the dashboard shell, ribbon icon inventory, Page editor, Graph
   View, or Smoke UI beyond the navigation integration needed for the new modal
   surfaces.
-- Removing security status language or implying that a selected Vault is loaded
+- Removing security status language or implying that a selected Brain is loaded
   when it is only selected.
 
 ## Further Notes
 
-- This spec uses the FiniteBrain glossary terms `Vault`, `Folder`, `Member
+- This spec uses the FiniteBrain glossary terms `Brain`, `Folder`, `Member
   Identity`, `Session Lock`, `Session Folder Key`, and `Ephemeral Client
   Plaintext` as defined by `finite-brain/CONTEXT.md` and its accepted ADRs.
 - The branch targets `main` because this monorepo has no `staging` branch. It

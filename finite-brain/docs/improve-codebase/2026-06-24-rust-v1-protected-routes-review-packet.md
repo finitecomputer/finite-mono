@@ -13,7 +13,7 @@ Concentrate protected-route mechanics behind one server module without changing
 the FiniteBrain product behavior.
 
 The route catalog in `crates/finite-brain-server/src/lib.rs` should describe
-vault, folder, sharing, object, and sync operations. Nostr HTTP auth parsing,
+brain, folder, sharing, object, and sync operations. Nostr HTTP auth parsing,
 expected URL/body validation, replay checks, route rate limits, and CORS
 allowlist response shaping should live together in
 `crates/finite-brain-server/src/protected_routes.rs`.

@@ -140,14 +140,14 @@ else:
         'SERVER="${FINITE_BRAIN_SERVER_URL:?',
         'FBRAIN_CONFIG_DIR',
         'FBRAIN_WORKING_TREE_ROOT',
-        'VAULT="replace-with-vault-id"',
+        'BRAIN="replace-with-brain-id"',
         "A Working Tree remembers the server",
         "bootstrap-personal",
         "role `personal_agent`",
         "do not require exact",
         "`remoteChanges[].actorNpub`",
         "signed actor evidence",
-        "different actor means another principal changed the Vault",
+        "different actor means another principal changed the Brain",
         "otherwise report",
         "the cause as unknown",
     ):
@@ -180,7 +180,7 @@ else:
             )
     for retired_contract in (
         "/brain setup",
-        "personal-vault-bootstrap-authorizations",
+        "personal-brain-bootstrap-authorizations",
         "role `member`",
     ):
         if retired_contract in brain_text:

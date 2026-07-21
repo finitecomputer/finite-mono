@@ -29,5 +29,5 @@
 - Escalate: no.
 - Notes: the independent fallback reviewed the committed post-review interaction
   diff. It found the P2 above and no additional P1/P2 issue in feedback races,
-  nested Manage Vault returns, focus trapping, or context-menu focus handoff.
+  nested Manage Brain returns, focus trapping, or context-menu focus handoff.
   The targeted Product Client and server asset checks were rerun after the fix.

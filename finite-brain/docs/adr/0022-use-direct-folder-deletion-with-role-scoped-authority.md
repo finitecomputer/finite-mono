@@ -3,9 +3,9 @@
 Status: accepted 2026-07-16.
 
 FiniteBrain Folder deletion is a direct hard-delete operation; the product has
-no intermediate Trash or restore lifecycle. In a Personal Vault, the owner may
+no intermediate Trash or restore lifecycle. In a Personal Brain, the owner may
 hard-delete any Folder and a **Personal Agent** may hard-delete any Folder under
-its full operational Vault access. In an Organization Vault, any Vault admin
+its full operational Brain access. In an Organization Brain, any Brain admin
 may hard-delete a Folder, including an admin Member Identity controlled by an
 agent; ordinary members may not. Direct deletion must not claim erasure from
 backups, snapshots, retained client plaintext, or storage history.
@@ -15,12 +15,12 @@ Assets, nested Folders, and folder-local metadata; a failed operation leaves the
 live subtree intact. Pages, Assets, and other Folder content also remain
 individually deletable without deleting their containing Folder.
 
-In an Organization Vault, direct deletion of both individual content and whole
+In an Organization Brain, direct deletion of both individual content and whole
 Folders is admin-only. A non-admin member with write access may create and edit
 content, but cannot permanently delete a Page, Asset, other content item, or
 Folder.
 
-In a Personal Vault, direct deletion of both individual content and whole
+In a Personal Brain, direct deletion of both individual content and whole
 Folders is limited to the owner and Personal Agent. Other collaborators with
 write access may create and edit content inside their granted Folder scope but
 cannot permanently delete content or Folders.

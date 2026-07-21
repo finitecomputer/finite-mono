@@ -10,7 +10,7 @@ Global flags:
   signing identity is not stored here (see Identity below).
 - `--json`: return machine-readable output where the command supports it.
 - `--server <url>`: command-specific server override. Server resolution is
-  explicit `--server`, saved Vault Working Tree server, `FINITE_BRAIN_SERVER_URL`,
+  explicit `--server`, saved Brain Working Tree server, `FINITE_BRAIN_SERVER_URL`,
   then legacy `FINITE_BRAIN_PUBLIC_BASE_URL`.
 
 Transport accepts `https://` endpoints and `http://` only for localhost,
@@ -34,14 +34,14 @@ fbrain auth status|import [--file <path>]
 fbrain signer status|public-key|sign|encrypt|decrypt
 fbrain daemon status|start|stop|logs|tick|watch
 fbrain sync status|now [--summary]
-fbrain open <vault-id> [path]
+fbrain open <brain-id> [path]
 fbrain status [--json]
 fbrain conflicts
 fbrain resolve <id>
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list|grant|revoke
-fbrain vault list|create|bootstrap-personal|metadata|export
+fbrain brain list|create|bootstrap-personal|metadata|export
 fbrain folder create|list
 fbrain mount list
 fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
@@ -49,10 +49,10 @@ fbrain invites create|show|accept|revoke
 fbrain share link|accept|revoke|source|folder-invite|folder-accept
 ```
 
-Use `vault bootstrap-personal` for first-time Personal Vault setup. It creates
-the empty user-owned Personal Vault and establishes the authenticated agent as
-its Personal Agent through Brain's account-bound authority. Direct `vault
-create` is for Organization Vaults and is not a substitute for this Personal
+Use `brain bootstrap-personal` for first-time Personal Brain setup. It creates
+the empty user-owned Personal Brain and establishes the authenticated agent as
+its Personal Agent through Brain's account-bound authority. Direct `brain
+create` is for Organization Brains and is not a substitute for this Personal
 Agent bootstrap flow.
 
 ## Identity
@@ -88,8 +88,8 @@ directory. Do not print or request secrets during normal agent work.
 
 ```sh
 fbrain doctor --server "$SERVER"
-fbrain vault list --server "$SERVER" --json
-fbrain open <vault-id> <tree-path> --server "$SERVER"
+fbrain brain list --server "$SERVER" --json
+fbrain open <brain-id> <tree-path> --server "$SERVER"
 cd <tree-path>
 fbrain status --json
 fbrain sync status --json
@@ -106,8 +106,8 @@ the daemon running, and attempts an initial sync. `sync now` fetches the encrypt
 export, opens available grants, pushes local markdown changes, bootstraps latest
 state, and materializes readable Folders back into the tree.
 
-When the path is omitted, `open` uses `$FBRAIN_WORKING_TREE_ROOT/<vault-id>` if
-configured, otherwise `<current-directory>/<vault-id>`. The hosted runtime sets
+When the path is omitted, `open` uses `$FBRAIN_WORKING_TREE_ROOT/<brain-id>` if
+configured, otherwise `<current-directory>/<brain-id>`. The hosted runtime sets
 `FBRAIN_CONFIG_DIR=/data/agent/fbrain` and
 `FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain`.
 
@@ -157,7 +157,7 @@ fbrain daemon stop
 
 `daemon watch` is foreground and should run under tmux, systemd, or an agent
 supervisor for long-running work. The default strategy is file-aware:
-initial sync, sync when readable Vault Working Tree markdown changes are
+initial sync, sync when readable Brain Working Tree markdown changes are
 detected, and bounded periodic remote polling. Use `--remote-poll-ticks 0` to
 disable periodic remote polling and `--poll-only` for legacy every-tick syncing.
 
@@ -169,10 +169,10 @@ disable periodic remote polling and `--poll-only` for legacy every-tick syncing.
 
 ```sh
 fbrain access explain <folder-id>
-fbrain access list --vault <vault-id>
-fbrain access grant --vault <vault-id> --folder <folder-id> --target <npub>
-fbrain access revoke --vault <vault-id> --folder <folder-id> --target <npub>
-fbrain access revoke --vault <vault-id> --folder <folder-id> --target <npub> --rotation-body rotation.json
+fbrain access list --brain <brain-id>
+fbrain access grant --brain <brain-id> --folder <folder-id> --target <npub>
+fbrain access revoke --brain <brain-id> --folder <folder-id> --target <npub>
+fbrain access revoke --brain <brain-id> --folder <folder-id> --target <npub> --rotation-body rotation.json
 ```
 
 `access grant` delegates to `permissions grant-folder` and requires the current
@@ -182,54 +182,54 @@ contains `newKeyVersion`, `grants`, `reencryptedRecords`, and
 `accessChangeEvent`.
 
 ```sh
-fbrain vault bootstrap-personal --server "$SERVER" --json
-fbrain vault create <vault-id> --kind organization --name "Org Vault"
-fbrain vault create <vault-id> --kind organization --name "Org Vault" --requesting-user-npub <npub|hex>
-fbrain vault metadata --vault <vault-id>
-fbrain vault export --vault <vault-id>
+fbrain brain bootstrap-personal --server "$SERVER" --json
+fbrain brain create <brain-id> --kind organization --name "Org Brain"
+fbrain brain create <brain-id> --kind organization --name "Org Brain" --requesting-user-npub <npub|hex>
+fbrain brain metadata --brain <brain-id>
+fbrain brain export --brain <brain-id>
 
-fbrain folder list --vault <vault-id>
-fbrain folder create <folder-id> --vault <vault-id> --name Notes --path Notes
-fbrain folder create <folder-id> --vault <vault-id> --role folder --access restricted --member <npub>
-fbrain mount list --vault <vault-id>
+fbrain folder list --brain <brain-id>
+fbrain folder create <folder-id> --brain <brain-id> --name Notes --path Notes
+fbrain folder create <folder-id> --brain <brain-id> --role folder --access restricted --member <npub>
+fbrain mount list --brain <brain-id>
 ```
 
-`--requesting-user-npub` is Organization Vault-only. It atomically makes the
+`--requesting-user-npub` is Organization Brain-only. It atomically makes the
 distinct signing creator and authenticated requester initial members and
-admins. The new Vault starts empty, so it creates no Folder Key Grants until an
+admins. The new Brain starts empty, so it creates no Folder Key Grants until an
 admin creates a Folder. Pass only authenticated sender metadata; the option
 does not resolve email or NIP-05 input.
 
-Folder roles are `personal_home`, `vault_ops`, `general`, and `folder` (hyphen
+Folder roles are `personal_home`, `brain_ops`, `general`, and `folder` (hyphen
 aliases are accepted). Folder access modes are `owner`, `admin_only`,
 `all_members`, and `restricted` (hyphen aliases are accepted). For organization
-vaults, `folder create` defaults to restricted access; for personal vaults it
+brains, `folder create` defaults to restricted access; for personal brains it
 defaults to owner access.
 
 ```sh
-fbrain permissions add-member --vault <vault-id> --target <npub>
-fbrain permissions remove-member --vault <vault-id> --target <npub>
-fbrain permissions add-admin --vault <vault-id> --target <npub>
-fbrain permissions remove-admin --vault <vault-id> --target <npub>
-fbrain permissions grant-folder --vault <vault-id> --folder <folder-id> --target <npub>
+fbrain permissions add-member --brain <brain-id> --target <npub>
+fbrain permissions remove-member --brain <brain-id> --target <npub>
+fbrain permissions add-admin --brain <brain-id> --target <npub>
+fbrain permissions remove-admin --brain <brain-id> --target <npub>
+fbrain permissions grant-folder --brain <brain-id> --folder <folder-id> --target <npub>
 ```
 
 ## Invitations And Sharing
 
 ```sh
-fbrain invites create --vault <vault-id> --target <npub> --folder <folder-id>
-fbrain invites create --vault <vault-id> --target <npub> --expires 2099-01-01T00:00:00Z
+fbrain invites create --brain <brain-id> --target <npub> --folder <folder-id>
+fbrain invites create --brain <brain-id> --target <npub> --expires 2099-01-01T00:00:00Z
 fbrain invites show --code <invite-code>
 fbrain invites accept --code <invite-code>
-fbrain invites accept --vault <vault-id> --id <invitation-id>
-fbrain invites revoke --vault <vault-id> --id <invitation-id>
+fbrain invites accept --brain <brain-id> --id <invitation-id>
+fbrain invites revoke --brain <brain-id> --id <invitation-id>
 
-fbrain share link --vault <vault-id> --folder <folder-id> --target <npub>
-fbrain share link --vault <vault-id> --folder <folder-id> --target <npub> --personal-mount
+fbrain share link --brain <brain-id> --folder <folder-id> --target <npub>
+fbrain share link --brain <brain-id> --folder <folder-id> --target <npub> --personal-mount
 fbrain share accept --id <share-link-id>
 fbrain share revoke --id <share-link-id>
-fbrain share source --vault <vault-id> --folder <folder-id>
-fbrain share folder-invite --vault <vault-id> --folder <folder-id> --destination-vault <vault-id> --destination-admin <npub>
+fbrain share source --brain <brain-id> --folder <folder-id>
+fbrain share folder-invite --brain <brain-id> --folder <folder-id> --destination-brain <brain-id> --destination-admin <npub>
 fbrain share folder-accept --id <shared-folder-invitation-id>
 ```
 

@@ -7,7 +7,7 @@
 ## Scope
 
 - Make the Quick Switcher, context menu, Folder selector, relevant share and
-  invitation forms, and Vault switcher predictable with keyboard input.
+  invitation forms, and Brain switcher predictable with keyboard input.
 - Preserve the existing Settings and Access tab behavior while making focus
   movement, activation, Escape, and Tab semantics match the advertised UI
   roles.
@@ -22,7 +22,7 @@
   Enter/Space selection, and Escape close/restore.
 - Enter invokes only non-destructive primary share or invite actions;
   invitation Accept and Revoke remain explicit.
-- Vault-switcher Tab and Shift+Tab leave in the natural direction, and Escape
+- Brain-switcher Tab and Shift+Tab leave in the natural direction, and Escape
   restores focus to its trigger.
 
 ## Constraints
@@ -39,7 +39,7 @@ The issue acceptance criteria pre-agree the following deterministic Product
 Client seams for this slice:
 
 - Keyboard-list index movement for the Quick Switcher, context menu, Folder
-  selector, and Vault switcher.
+  selector, and Brain switcher.
 - Declarative Enter-to-primary-action routing for the supported share and
   invitation inputs, including composition and disabled-control guards.
 - The served HTML/JS accessibility contract: combobox/listbox/menu roles,
@@ -65,7 +65,7 @@ authorization or invitation lifecycle operations.
 - Supported share and invitation fields route Enter only to their explicit,
   non-destructive primary action. IME composition and disabled controls do
   nothing; Accept and Revoke keep their explicit buttons.
-- Vault switcher Escape still restores its trigger; Tab and Shift+Tab now
+- Brain switcher Escape still restores its trigger; Tab and Shift+Tab now
   close the popup and move in the corresponding surrounding document order.
 
 ## Verification
@@ -91,7 +91,7 @@ browser smoke remains required once the parent task restarts the shared server.
   control flow, accessibility roles, and deterministic tests meet the local
   guides; no secret persistence or logging was introduced.
 - Spec review: clean against #28. Each Quick Switcher, context menu, Folder
-  selector, Enter-routing, Vault switcher, and existing Settings-nav criterion
+  selector, Enter-routing, Brain switcher, and existing Settings-nav criterion
   has a direct implementation and regression contract. The keyboard context
   invocation is necessary to make the advertised menu semantics reachable,
   not unrelated scope expansion.

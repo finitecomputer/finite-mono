@@ -8,8 +8,8 @@ import vm from "node:vm";
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const dbPath = process.env.FINITE_BRAIN_DB || "/tmp/finite-brain-smoke-test.sqlite3";
 const keyManifestPath =
-  process.env.FINITE_BRAIN_SMOKE_KEYS || "/tmp/finite-brain-smoke-vault-keys.json";
-const vaultId = process.env.FINITE_BRAIN_SMOKE_VAULT || "smoke";
+  process.env.FINITE_BRAIN_SMOKE_KEYS || "/tmp/finite-brain-smoke-brain-keys.json";
+const brainId = process.env.FINITE_BRAIN_SMOKE_BRAIN || "smoke";
 const createdAtUnix = 1782320400;
 const createdAtIso = new Date(createdAtUnix * 1000).toISOString();
 
@@ -75,7 +75,7 @@ function sqlQuote(value) {
 function eventIdFor(page) {
   return crypto
     .createHash("sha256")
-    .update(`finite-brain-smoke-doc-page:${vaultId}:${page.folderId}:${page.objectId}`)
+    .update(`finite-brain-smoke-doc-page:${brainId}:${page.folderId}:${page.objectId}`)
     .digest("hex");
 }
 
@@ -86,7 +86,7 @@ function fakeSignedEvent(template, page, authorNpub) {
     pubkey: crypto.createHash("sha256").update(authorNpub).digest("hex"),
     sig: crypto
       .createHash("sha256")
-      .update(`signature-placeholder:${vaultId}:${page.folderId}:${page.objectId}`)
+      .update(`signature-placeholder:${brainId}:${page.folderId}:${page.objectId}`)
       .digest("hex")
       .repeat(2),
   };
@@ -97,20 +97,20 @@ const pages = [
     folderId: "general",
     objectId: "fb_smoke_home_0001",
     path: "index.md",
-    title: "FiniteBrain Smoke Vault",
-    text: `# FiniteBrain Smoke Vault
+    title: "FiniteBrain Smoke Brain",
+    text: `# FiniteBrain Smoke Brain
 
-This smoke vault is a small, real-content FiniteBrain workspace for local testing.
+This smoke brain is a small, real-content FiniteBrain workspace for local testing.
 
 It is organized around the Portable v1 model:
 
-- Vaults are the top-level privacy container.
+- Brains are the top-level privacy container.
 - Folders are independent access and crypto boundaries.
 - Pages and Assets are encrypted Folder Objects.
 - Asset Source Notes make non-Markdown source files usable by agents.
 - The Product Client opens Folder Key Grants, decrypts readable Pages, and builds local views.
 
-Start with [[Vault Model]], [[Product Client]], [[Asset Source Notes]], [[Folder Keys]], and [[Sync Append Log]].
+Start with [[Brain Model]], [[Product Client]], [[Asset Source Notes]], [[Folder Keys]], and [[Sync Append Log]].
 `,
   },
   {
@@ -137,22 +137,22 @@ Related pages: [[OKF and Agent Wiki]], [[Working Tree Projection]], and [[Graph 
   },
   {
     folderId: "general",
-    objectId: "fb_vault_model_0001",
-    path: "vault-model.md",
-    title: "Vault Model",
-    text: `# Vault Model
+    objectId: "fb_brain_model_0001",
+    path: "brain-model.md",
+    title: "Brain Model",
+    text: `# Brain Model
 
-A Vault is the top-level container for a personal or organization knowledge space.
+A Brain is the top-level container for a personal or organization knowledge space.
 
-New Personal and Organization Vaults start empty. Folders and content appear
+New Personal and Organization Brains start empty. Folders and content appear
 only after an explicit user action or authorized product workflow.
 
-This smoke/demo Vault deliberately adds Folders like general, agent-wiki,
-graph-smoke, and vault-ops so local testing has enough content to inspect.
+This smoke/demo Brain deliberately adds Folders like general, agent-wiki,
+graph-smoke, and brain-ops so local testing has enough content to inspect.
 
 Folder access is binary in Portable v1. A member either has access to a Folder or they do not. There are no read-only or editor roles yet.
 
-Related pages: [[Folder Keys]], [[Vault Invites]], and [[Shared Folder Mounts]].
+Related pages: [[Folder Keys]], [[Brain Invites]], and [[Shared Folder Mounts]].
 `,
   },
   {
@@ -164,7 +164,7 @@ Related pages: [[Folder Keys]], [[Vault Invites]], and [[Shared Folder Mounts]].
 
 Every Folder has its own Folder Key.
 
-There is no Vault Root Key. Parent Folder access does not imply Child Folder access, and Child Folder access does not imply Parent Folder access.
+There is no Brain Root Key. Parent Folder access does not imply Child Folder access, and Child Folder access does not imply Parent Folder access.
 
 The Product Client opens Folder Key Grants into an in-memory session keyring. Once a Folder Key is open, the client can decrypt the current encrypted objects for that Folder.
 
@@ -184,7 +184,7 @@ It owns the normal loop:
 
 - connect a NIP-07 signer;
 - prepare signed Nostr HTTP authorization;
-- load Vault metadata;
+- load Brain metadata;
 - open Folder Key Grants;
 - decrypt readable Pages;
 - edit and encrypt Page writes;
@@ -206,7 +206,7 @@ Portable v1 is the hard-cut Rust implementation target.
 
 It covers:
 
-- Vault, Folder, and Page domain rules;
+- Brain, Folder, and Page domain rules;
 - Folder Object encryption;
 - Folder Key Grants;
 - signed object revisions and tombstones;
@@ -229,7 +229,7 @@ FiniteBrain sync is built from ordered records.
 
 The server keeps:
 
-- a Vault Record Index with monotonic sequence numbers;
+- a Brain Record Index with monotonic sequence numbers;
 - current encrypted object projection for fast bootstrap;
 - duplicate event detection;
 - tombstones for deletes;
@@ -267,13 +267,13 @@ See [[Graph View Visibility]] and [[Replay Frames]].
 
 FiniteBrain sharing has two related flows.
 
-Vault invitations add a specific npub as a member of one Vault.
+Brain invitations add a specific npub as a member of one Brain.
 
 Shared Folder invitations let a source Folder appear inside another organization without copying ownership. This is closer to shared channels than email attachments.
 
 The crypto primitive stays the same: recipients need Folder Key Grants for the source Folder.
 
-Read [[Vault Invites]], [[Shared Folder Mounts]], and [[Mounted Folder Routing]].
+Read [[Brain Invites]], [[Shared Folder Mounts]], and [[Mounted Folder Routing]].
 `,
   },
   {
@@ -307,7 +307,7 @@ The server remains blind to readable OKF and wiki content unless a trusted clien
 Current hardening themes:
 
 - Nostr HTTP auth validates method, URL, timestamp, payload hash, event id, and signature.
-- Folder Object AAD binds ciphertext to vaultId, folderId, objectId, and keyVersion.
+- Folder Object AAD binds ciphertext to brainId, folderId, objectId, and keyVersion.
 - Payload limits, CORS allowlists, rate limits, and replay checks are server concerns.
 - Plaintext Page content belongs in trusted clients, not server-side search or import routes.
 
@@ -326,7 +326,7 @@ Local smoke path:
 - start finite-brain-app with FINITE_BRAIN_DB pointing at the smoke SQLite file;
 - open /client;
 - connect the NIP-07 signer;
-- load the smoke Vault;
+- load the smoke Brain;
 - open accessible Folder Key Grants;
 - click each Folder and Page;
 - render Graph View from decrypted Pages;
@@ -342,7 +342,7 @@ Expected result: all seeded Folders have Pages, and locked states are explained 
     title: "FiniteBrain Context Map",
     text: `# FiniteBrain Context Map
 
-FiniteBrain Rust v1 is organized around a small product hierarchy: Vault -> Folder -> Page.
+FiniteBrain Rust v1 is organized around a small product hierarchy: Brain -> Folder -> Page.
 
 The current workspace keeps the implementation split into four crates:
 
@@ -353,7 +353,7 @@ The current workspace keeps the implementation split into four crates:
 
 Useful entry points:
 
-- [[Vault Model]] explains the product object hierarchy.
+- [[Brain Model]] explains the product object hierarchy.
 - [[Folder Keys]] explains why readable content stays client-side.
 - [[Product Client]] explains the browser workflow used for smoke testing.
 `,
@@ -398,7 +398,7 @@ The crate boundary is a design tool:
 - server is the route and validation shell;
 - app is the runtime binary.
 
-Reusable Nostr primitives live in finite-nostr so other Finite repos can share NIP helpers without inheriting FiniteBrain Vault or Folder concepts.
+Reusable Nostr primitives live in finite-nostr so other Finite repos can share NIP helpers without inheriting Brain or Folder concepts.
 
 This keeps the rebuild production-shaped while still letting the Product Client move quickly.
 `,
@@ -410,7 +410,7 @@ This keeps the rebuild production-shaped while still letting the Product Client 
     title: "Server and Store Boundary",
     text: `# Server and Store Boundary
 
-The server validates protected requests, checks Vault membership, checks Folder visibility, and delegates durable state changes to the store.
+The server validates protected requests, checks Brain membership, checks Folder visibility, and delegates durable state changes to the store.
 
 The store owns:
 
@@ -436,7 +436,7 @@ FiniteBrain Page content is encrypted as Folder Objects.
 
 The current envelope uses AES-256-GCM with associated data that binds ciphertext to:
 
-- vaultId;
+- brainId;
 - folderId;
 - objectId;
 - keyVersion.
@@ -473,7 +473,7 @@ The important invariant stays the same:
 
 FiniteBrain sync has two related shapes:
 
-- an append-only Vault Record Index;
+- an append-only Brain Record Index;
 - a current encrypted object projection.
 
 Clients bootstrap from the current projection, then pull later records by sequence. Duplicate event ids are ignored. Stale base revisions are rejected by the store.
@@ -503,16 +503,16 @@ See [[Sync Append Log]] for the broader model.
   {
     folderId: "sharing",
     objectId: "fb_sharing_invites_0001",
-    path: "vault-invites.md",
-    title: "Vault Invites",
-    text: `# Vault Invites
+    path: "brain-invites.md",
+    title: "Brain Invites",
+    text: `# Brain Invites
 
-Vault Invitations are npub-bound and single use.
+Brain Invitations are npub-bound and single use.
 
 They are intentionally different from Folder shares.
 
-An organization invite answers: can this npub join this Vault?
-A Folder share answers: can this npub or destination Vault see this one Folder?
+An organization invite answers: can this npub join this Brain?
+A Folder share answers: can this npub or destination Brain see this one Folder?
 
 An invitation has a lifecycle:
 
@@ -521,7 +521,7 @@ An invitation has a lifecycle:
 - revoked;
 - expired.
 
-Accepting an invite makes the recipient a Vault member and grants the initial Folder access selected by the admin. The invite is bound to one npub, so forwarding the link should not let a different identity claim it.
+Accepting an invite makes the recipient a Brain member and grants the initial Folder access selected by the admin. The invite is bound to one npub, so forwarding the link should not let a different identity claim it.
 
 This keeps organization membership separate from Folder-level sharing.
 
@@ -539,7 +539,7 @@ Mounted shared folders are source-backed projections, not copies.
 
 That means:
 
-- the source Vault keeps owning the Folder;
+- the source Brain keeps owning the Folder;
 - writes route back to the source Folder;
 - destination organization members need source access and Folder Key Grants;
 - revocation changes what the destination can continue to read.
@@ -558,7 +558,7 @@ FiniteBrain portability uses an OKF-style bundle for readable export.
 
 The export shape includes:
 
-- okf-vault.json metadata;
+- okf-brain.json metadata;
 - Markdown Pages;
 - link rewriting for present Pages;
 - omissions for inaccessible Folders;
@@ -589,7 +589,7 @@ Conventions include:
 - wiki/ for durable synthesized pages;
 - inventory/, datasets/, and output/ for agent workflows.
 
-The projection is a client-side convenience. Authoritative server sync remains encrypted and ordered through the Vault Record Index.
+The projection is a client-side convenience. Authoritative server sync remains encrypted and ordered through the Brain Record Index.
 `,
   },
   {
@@ -642,8 +642,8 @@ This Page exists to exercise the graph view.
 
 Links:
 
-- [[FiniteBrain Smoke Vault]]
-- [[Vault Model]]
+- [[FiniteBrain Smoke Brain]]
+- [[Brain Model]]
 - [[Folder Keys]]
 - [[Sync Append Log]]
 - [[Shared Folder Mounts]]
@@ -686,7 +686,7 @@ Useful related notes:
 `,
   },
   {
-    folderId: "vault-ops",
+    folderId: "brain-ops",
     objectId: "fb_ops_smoke_admin_0001",
     path: "smoke-admin-checklist.md",
     title: "Smoke Admin Checklist",
@@ -700,7 +700,7 @@ Before handing the local client back to a human:
 - verify /client serves the Product Client;
 - open accessible Folder Key Grants;
 - pull sync bootstrap;
-- click folders and Pages in the Vault Reader;
+- click folders and Pages in the Brain Reader;
 - confirm restricted content is visible only when the right Folder Key is open.
 
 This Page is intentionally admin-only to keep the access model visible during demos.
@@ -740,7 +740,7 @@ That means:
 - no legacy route compatibility as a product promise;
 - no old runtime migration shims hidden inside the new client;
 - explicit import/export paths for portable data;
-- Product Client language based on Vault, Folder, and Page.
+- Product Client language based on Brain, Folder, and Page.
 
 The hard cut keeps the Rust implementation small enough to reason about while still preserving the useful product ideas from v1.
 `,
@@ -765,7 +765,7 @@ Required checks:
 - prepare encrypted Page writes;
 - build graph, replay, OKF, and sync projections locally.
 
-This smoke vault is intentionally docs-heavy so those flows have enough content to inspect.
+This smoke brain is intentionally docs-heavy so those flows have enough content to inspect.
 `,
   },
   {
@@ -787,7 +787,7 @@ Good candidates:
 
 Not candidates:
 
-- Vault policy;
+- Brain policy;
 - Folder access rules;
 - Folder Object AAD;
 - OKF import behavior;
@@ -838,7 +838,7 @@ The event binds:
 
 The server verifies the event id and Schnorr signature, then derives the actor npub from the signer.
 
-This avoids trusting caller-supplied user ids for protected Vault operations.
+This avoids trusting caller-supplied user ids for protected Brain operations.
 `,
   },
   {
@@ -854,7 +854,7 @@ The signature covers the intent of the revision, while the encrypted payload hol
 
 Create/update/move writes include:
 
-- vaultId;
+- brainId;
 - folderId;
 - objectId;
 - operation;
@@ -954,7 +954,7 @@ This is intentionally simpler than real-time collaborative editing.
     title: "Invite Lifecycle",
     text: `# Invite Lifecycle
 
-Vault invites are singleton and npub-bound.
+Brain invites are singleton and npub-bound.
 
 They should behave like a traditional one-person invite link in a business app: only the intended recipient can accept it, it cannot be reused after success, and an admin can revoke it before acceptance.
 
@@ -969,7 +969,7 @@ An accepted invite cannot be accepted again by another npub. Revoking a pending 
 
 Folder access after joining still depends on the initial Folder choices and grants.
 
-That final point matters for demos: being a Vault member does not automatically mean every restricted Folder opens.
+That final point matters for demos: being a Brain member does not automatically mean every restricted Folder opens.
 `,
   },
   {
@@ -979,14 +979,14 @@ That final point matters for demos: being a Vault member does not automatically 
     title: "Mounted Folder Routing",
     text: `# Mounted Folder Routing
 
-A mounted shared Folder appears in a destination Vault but remains owned by the source Vault.
+A mounted shared Folder appears in a destination Brain but remains owned by the source Brain.
 
 Client behavior:
 
 - display the mount where the destination org expects it;
 - read source metadata and source encrypted objects;
 - open source Folder Key Grants;
-- send writes back to the source Vault and Folder;
+- send writes back to the source Brain and Folder;
 - remove or lock the mount when access is revoked.
 
 This avoids copying private content between organizations while still supporting shared-channel style collaboration.
@@ -1070,7 +1070,7 @@ Portable v1 backup is mostly a server-state concern.
 The backup shape should preserve:
 
 - SQLite metadata tables;
-- Vault Record Index order;
+- Brain Record Index order;
 - current encrypted object projection;
 - Folder Key Grant metadata;
 - invitations, share links, mounts, and access state.
@@ -1139,7 +1139,7 @@ Visibility rules:
 - tags and backlinks are local client indexes;
 - server-visible object metadata is not enough to build a readable graph.
 
-This smoke folder links across the vault so graph filtering can be tested.
+This smoke folder links across the brain so graph filtering can be tested.
 `,
   },
   {
@@ -1178,7 +1178,7 @@ This Folder is restricted to make access behavior visible during smoke testing.
 
 It should demonstrate:
 
-- restricted metadata can appear in the Vault tree;
+- restricted metadata can appear in the Brain tree;
 - Page content only opens when the current user has a Folder Key Grant;
 - removing access requires key rotation;
 - stale local plaintext must not become server-visible.
@@ -1206,7 +1206,7 @@ That framing is much clearer than saying the Folder is broken.
 `,
   },
   {
-    folderId: "vault-ops",
+    folderId: "brain-ops",
     objectId: "fb_ops_bootstrap_0001",
     path: "bootstrap-seed-expectations.md",
     title: "Bootstrap Seed Expectations",
@@ -1227,7 +1227,7 @@ This page exists so future seed changes have a checklist.
 `,
   },
   {
-    folderId: "vault-ops",
+    folderId: "brain-ops",
     objectId: "fb_ops_hardening_0001",
     path: "hardening-watchlist.md",
     title: "Hardening Watchlist",
@@ -1250,7 +1250,7 @@ The smoke client should make these boundaries visible without pretending the pro
 
 The goal is not to scare users with crypto internals. The goal is to keep engineering honest while the UI says simple things like "access missing", "key opened", "write rejected because the page changed", or "server cannot read this page".
 
-This Folder is admin-only so operational notes can exist in the same Vault without leaking into ordinary member views.
+This Folder is admin-only so operational notes can exist in the same Brain without leaking into ordinary member views.
 `,
   },
 ];
@@ -1269,7 +1269,7 @@ async function main() {
   for (const [folderId, folderKey] of Object.entries(manifest.folderKeys || {})) {
     await client.openFolderKeyGrantPlaintext(keyring, {
       version: "finite-folder-key-grant-v1",
-      vaultId,
+      brainId,
       folderId,
       keyVersion: 1,
       issuerNpub: adminNpub,
@@ -1284,28 +1284,28 @@ async function main() {
   const statements = ["BEGIN;"];
   try {
     statements.push(
-      `DELETE FROM current_encrypted_vault_objects WHERE vault_id = ${sqlQuote(
-        vaultId
+      `DELETE FROM current_encrypted_brain_objects WHERE brain_id = ${sqlQuote(
+        brainId
       )} AND object_id IN (${quotedIds});`
     );
     statements.push(
-      `DELETE FROM vault_record_index WHERE vault_id = ${sqlQuote(
-        vaultId
+      `DELETE FROM brain_record_index WHERE brain_id = ${sqlQuote(
+        brainId
       )} AND object_id IN (${quotedIds});`
     );
 
     let sequence = Number(
       sqliteValue(
         `SELECT COALESCE(MAX(sequence), 0)
-         FROM vault_record_index
-         WHERE vault_id = ${sqlQuote(vaultId)};`
+         FROM brain_record_index
+         WHERE brain_id = ${sqlQuote(brainId)};`
       )
     );
 
     for (const [index, page] of pages.entries()) {
       const nonceBytes = crypto
         .createHash("sha256")
-        .update(`finite-brain-smoke-doc-page-nonce:${vaultId}:${page.folderId}:${page.objectId}`)
+        .update(`finite-brain-smoke-doc-page-nonce:${brainId}:${page.folderId}:${page.objectId}`)
         .digest()
         .subarray(0, 12);
       const write = await client.buildPageWriteRequest(keyring, {
@@ -1318,7 +1318,7 @@ async function main() {
         objectId: page.objectId,
         plaintext: page.text,
         signEvent: (event) => fakeSignedEvent(event, page, adminNpub),
-        vaultId,
+        brainId,
       });
       const payloadJson = JSON.stringify({
         recordType: "folder_object_revision",
@@ -1333,22 +1333,22 @@ async function main() {
       const acceptedAt = new Date((createdAtUnix + index) * 1000).toISOString();
       sequence += 1;
       statements.push(
-        `INSERT INTO vault_record_index (
-          vault_id, sequence, record_event_id, record_type, folder_id, object_id,
+        `INSERT INTO brain_record_index (
+          brain_id, sequence, record_event_id, record_type, folder_id, object_id,
           revision, actor_npub, client_created_at, payload_json, accepted_at,
           record_event_kind
         ) VALUES (
-          ${sqlQuote(vaultId)}, ${sequence}, ${sqlQuote(write.revisionEvent.id)},
+          ${sqlQuote(brainId)}, ${sequence}, ${sqlQuote(write.revisionEvent.id)},
           'folder_object_revision', ${sqlQuote(page.folderId)}, ${sqlQuote(page.objectId)},
           1, ${sqlQuote(adminNpub)}, ${sqlQuote(acceptedAt)}, ${sqlQuote(payloadJson)},
           ${sqlQuote(acceptedAt)}, ${write.revisionEvent.kind}
         );`
       );
       statements.push(
-        `INSERT INTO current_encrypted_vault_objects (
-          vault_id, folder_id, object_id, payload_json, revision, updated_at, deleted
+        `INSERT INTO current_encrypted_brain_objects (
+          brain_id, folder_id, object_id, payload_json, revision, updated_at, deleted
         ) VALUES (
-          ${sqlQuote(vaultId)}, ${sqlQuote(page.folderId)}, ${sqlQuote(page.objectId)},
+          ${sqlQuote(brainId)}, ${sqlQuote(page.folderId)}, ${sqlQuote(page.objectId)},
           ${sqlQuote(payloadJson)}, 1, ${sqlQuote(acceptedAt)}, 0
         );`
       );
@@ -1372,7 +1372,7 @@ async function main() {
   fs.writeFileSync(keyManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
   console.log(
-    `Seeded ${pages.length} FiniteBrain smoke doc Pages into ${dbPath} for vault ${vaultId}.`
+    `Seeded ${pages.length} FiniteBrain smoke doc Pages into ${dbPath} for brain ${brainId}.`
   );
 }
 

@@ -2,7 +2,7 @@
 
 ## Issue
 
-- Issue: #10 — FiniteBrain Settings, Vault, and Access UI
+- Issue: #10 — FiniteBrain Settings, Brain, and Access UI
 - Slice type: AFK continuation
 - Acceptance criteria: Settings remains truthful to the session, signer,
   invitation, and Folder Key boundaries; locked state offers only Session;
@@ -13,7 +13,7 @@
 
 ## Implementation Summary
 
-Settings now presents Session and signer, Vault context, Folder access, and
+Settings now presents Session and signer, Brain context, Folder access, and
 Invitations as a coherent four-section surface. A locked or resuming client
 has only the Session surface. The copy distinguishes a Member Identity invite
 from the email bootstrap path, keeps the explicit Folder Key boundary, and
@@ -31,7 +31,7 @@ action/card treatment across Settings.
 - Green implementation: `scripts/with-dev-env node
   finite-brain/crates/finite-brain-server/src/product-client.test.js`
 - Refactor: locked return focus now targets a visible Session control rather
-  than a hidden Vault tab; visual CSS details are not asserted as contracts.
+  than a hidden Brain tab; visual CSS details are not asserted as contracts.
 - Commands run: `node --check`; deterministic Product Client test; `cargo
   build -p finite-brain-app --locked`; previously scoped `cargo test -p
   finite-brain-server --locked`, Clippy, formatting, workspace check, and
@@ -60,7 +60,7 @@ STANDARDS_FINDINGS:
 
 SPEC_STATUS: pass
 SPEC_FINDINGS:
-- Initial locked nested-return focus issue was corrected so a hidden Vault tab
+- Initial locked nested-return focus issue was corrected so a hidden Brain tab
   cannot receive focus.
 - Decorative CSS regex tests were removed; browser evidence now records the
   actual rendered states.

@@ -11,7 +11,7 @@ helpers, and NIP-98-style HTTP authorization helpers.
 
 ### Product Policy
 
-Application-specific behavior owned by a consuming repo. FiniteBrain Vaults,
+Application-specific behavior owned by a consuming repo. Brains,
 Folders, Folder Key Grants, sync, sharing, and OKF behavior are Product Policy
 and must not be implemented inside `finite-nostr`.
 

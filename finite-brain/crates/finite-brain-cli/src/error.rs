@@ -29,7 +29,7 @@ pub enum CliError {
         reason: String,
     },
     GrantOpening {
-        vault_id: String,
+        brain_id: String,
         folder_id: String,
         key_version: u32,
         reason: String,
@@ -53,7 +53,7 @@ impl fmt::Display for CliError {
             Self::Identity(reason) => write!(f, "finite identity error: {reason}"),
             Self::InsecureWorkingTree { path, reason } => write!(
                 f,
-                "insecure Vault Working Tree boundary at {}: {reason}; run `fbrain repair` from the Working Tree",
+                "insecure Brain Working Tree boundary at {}: {reason}; run `fbrain repair` from the Working Tree",
                 path.display()
             ),
             Self::InsecureWorkingTreePermissions {
@@ -62,12 +62,12 @@ impl fmt::Display for CliError {
                 expected_mode,
             } => write!(
                 f,
-                "insecure Vault Working Tree permissions at {}: mode is {actual_mode:04o}, expected {expected_mode:04o}; run `fbrain repair` from the Working Tree",
+                "insecure Brain Working Tree permissions at {}: mode is {actual_mode:04o}, expected {expected_mode:04o}; run `fbrain repair` from the Working Tree",
                 path.display()
             ),
             Self::InsecureWorkingTreeOwnership { path } => write!(
                 f,
-                "insecure Vault Working Tree ownership at {}: path is not owned by the current operating-system account; move it to current-account ownership before running `fbrain repair`",
+                "insecure Brain Working Tree ownership at {}: path is not owned by the current operating-system account; move it to current-account ownership before running `fbrain repair`",
                 path.display()
             ),
             Self::AgentStateMigration { path, reason } => write!(
@@ -76,16 +76,16 @@ impl fmt::Display for CliError {
                 path.display()
             ),
             Self::GrantOpening {
-                vault_id,
+                brain_id,
                 folder_id,
                 key_version,
                 reason,
             } => write!(
                 f,
-                "encrypted Folder Key Grant for {vault_id}/{folder_id} v{key_version} could not be opened: {reason}"
+                "encrypted Folder Key Grant for {brain_id}/{folder_id} v{key_version} could not be opened: {reason}"
             ),
             Self::MissingServer => write!(f, "no FiniteBrain server URL configured"),
-            Self::MissingWorkingTree => write!(f, "no Vault Working Tree found"),
+            Self::MissingWorkingTree => write!(f, "no Brain Working Tree found"),
             Self::MissingArgument(argument) => write!(f, "missing required argument: {argument}"),
             Self::NotFound(item) => write!(f, "not found: {item}"),
             Self::Unsupported(reason) => write!(f, "unsupported: {reason}"),

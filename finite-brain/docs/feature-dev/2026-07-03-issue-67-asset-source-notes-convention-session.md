@@ -13,7 +13,7 @@
 - Spec defines canonical Page and Asset local object shapes without requiring
   server plaintext parsing.
 - Spec documents `raw/assets/` plus Markdown Source Note pairing.
-- Default Vault and generated working-tree agent instructions teach agents to
+- Default Brain and generated working-tree agent instructions teach agents to
   store non-Markdown files under `raw/assets/` and pair every Asset with a
   Source Note.
 - Product Client seeded onboarding copy matches the Rust-seeded copy.
@@ -26,7 +26,7 @@
   the current versioned Markdown Page compatibility note, `raw/assets/`
   materialization guidance, OKF readable asset language, and agent-layer Source
   Note rules.
-- Updated Rust and Product Client default vault pages so new vaults explain
+- Updated Rust and Product Client default brain pages so new brains explain
   Assets and Source Notes from `AGENTS.md`, `HUMANS.md`, Folder config, Folder
   index, and Getting Started wiki pages.
 - Updated working-tree and CLI fallback folder instructions to create
@@ -40,7 +40,7 @@
 - `node --check crates/finite-brain-server/src/product-client.js`
 - `git diff --check`
 - `cargo fmt --check`
-- `cargo test -p finite-brain-core exposes_default_vault_pages -- --nocapture`
+- `cargo test -p finite-brain-core exposes_default_brain_pages -- --nocapture`
 - `cargo test -p finite-brain-core working_tree_materializes_accessible_pages_and_safe_agent_conventions -- --nocapture`
 - `cargo test -p finite-brain-cli empty_readable_folders_stay_materialized -- --nocapture`
 - `node crates/finite-brain-server/src/product-client.test.js`

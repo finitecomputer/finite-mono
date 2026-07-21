@@ -79,7 +79,7 @@ pub struct BrainEventAuthorizationIntent {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BrainEmailInviteAuthorizationPayload {
     version: String,
-    vault_id: String,
+    brain_id: String,
     invited_email: String,
     invite_unwrap_npub: String,
     bootstrap_payload_hash: String,
@@ -98,9 +98,9 @@ struct BrainEmailInviteAuthorizationFolder {
 impl BrainEmailInviteAuthorizationPayload {
     fn canonical_json(&self) -> String {
         format!(
-            "{{\"version\":{},\"vaultId\":{},\"invitedEmail\":{},\"inviteUnwrapNpub\":{},\"bootstrapPayloadHash\":{},\"expiresAt\":{},\"folders\":{}}}",
+            "{{\"version\":{},\"brainId\":{},\"invitedEmail\":{},\"inviteUnwrapNpub\":{},\"bootstrapPayloadHash\":{},\"expiresAt\":{},\"folders\":{}}}",
             json_string(&self.version),
-            json_string(&self.vault_id),
+            json_string(&self.brain_id),
             json_string(&self.invited_email),
             json_string(&self.invite_unwrap_npub),
             json_string(&self.bootstrap_payload_hash),
@@ -116,7 +116,7 @@ impl BrainEmailInviteAuthorizationPayload {
 #[serde(rename_all = "camelCase")]
 pub struct BrainGrantIntent {
     pub purpose: String,
-    pub vault_id: String,
+    pub brain_id: String,
     pub recipient_npub: String,
     #[serde(default)]
     pub folder_id: Option<String>,
@@ -142,7 +142,7 @@ pub enum CoreError {
     Collision { field: &'static str, value: String },
     /// A folder hierarchy operation is invalid.
     InvalidHierarchy { reason: String },
-    /// Bootstrap input is incomplete or violates the Vault kind rules.
+    /// Bootstrap input is incomplete or violates the Brain kind rules.
     InvalidBootstrapInput { reason: String },
     /// Folder access metadata cannot produce a valid current key recipient set.
     InvalidAccessPolicy { reason: String },
@@ -192,14 +192,14 @@ impl fmt::Display for CoreError {
 
 impl Error for CoreError {}
 
-/// Stable Vault id.
+/// Stable Brain id.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-pub struct VaultId(String);
+pub struct BrainId(String);
 
-impl VaultId {
-    /// Validate and create a Vault id.
+impl BrainId {
+    /// Validate and create a Brain id.
     pub fn new(value: impl Into<String>) -> Result<Self, CoreError> {
-        validate_stable_id("vault_id", value.into(), 1, 128).map(Self)
+        validate_stable_id("brain_id", value.into(), 1, 128).map(Self)
     }
 
     /// Borrow the normalized id.
@@ -208,7 +208,7 @@ impl VaultId {
     }
 }
 
-impl fmt::Display for VaultId {
+impl fmt::Display for BrainId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -292,7 +292,7 @@ impl fmt::Display for UserId {
     }
 }
 
-/// User-facing Folder or Vault display name.
+/// User-facing Folder or Brain display name.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct DisplayName(String);
 
@@ -371,13 +371,13 @@ impl fmt::Display for SafeRelativePath {
     }
 }
 
-/// Vault kind.
+/// Brain kind.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VaultKind {
-    /// Personal Vault owned by one user.
+pub enum BrainKind {
+    /// Personal Brain owned by one user.
     Personal,
-    /// Organization Vault with members and admins.
+    /// Organization Brain with members and admins.
     Organization,
 }
 
@@ -388,7 +388,7 @@ pub enum FolderRole {
     /// Personal home folder.
     PersonalHome,
     /// Organization operations/admin folder.
-    VaultOps,
+    BrainOps,
     /// Organization general folder.
     General,
     /// Ordinary folder.
@@ -399,19 +399,19 @@ pub enum FolderRole {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderAccessMode {
-    /// Personal Vault owner only.
+    /// Personal Brain owner only.
     Owner,
-    /// Organization Vault admins only.
+    /// Organization Brain admins only.
     AdminOnly,
     /// Organization members and admins.
     AllMembers,
-    /// Vault admins, the personal owner for personal Vaults, plus explicitly listed members.
+    /// Brain admins, the personal owner for personal Brains, plus explicitly listed members.
     Restricted,
 }
 
-/// Vault member metadata.
+/// Brain member metadata.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct VaultMember {
+pub struct BrainMember {
     /// Member user id.
     pub user_id: UserId,
     /// Explicit restricted Folder Access entries.
@@ -450,21 +450,21 @@ pub struct FolderObject {
     pub plaintext_path: SafeRelativePath,
 }
 
-/// Vault metadata.
+/// Brain metadata.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Vault {
-    /// Stable Vault id.
-    pub id: VaultId,
-    /// Vault kind.
-    pub kind: VaultKind,
-    /// User-facing Vault name.
+pub struct Brain {
+    /// Stable Brain id.
+    pub id: BrainId,
+    /// Brain kind.
+    pub kind: BrainKind,
+    /// User-facing Brain name.
     pub name: DisplayName,
-    /// Personal Vault owner, if this is a personal Vault.
+    /// Personal Brain owner, if this is a personal Brain.
     pub owner_user_id: Option<UserId>,
-    /// Folders in this Vault.
+    /// Folders in this Brain.
     pub folders: Vec<Folder>,
     /// Organization members.
-    pub members: Vec<VaultMember>,
+    pub members: Vec<BrainMember>,
     /// Organization admins.
     pub admins: Vec<UserId>,
 }
@@ -472,15 +472,15 @@ pub struct Vault {
 /// Typed inputs for computing the complete current Folder Key recipient set.
 #[derive(Debug, Clone, Copy)]
 pub struct FolderKeyRecipientPolicy<'a> {
-    /// Personal Vault or Organization Vault semantics.
-    pub vault_kind: VaultKind,
+    /// Personal Brain or Organization Brain semantics.
+    pub brain_kind: BrainKind,
     /// Folder access mode.
     pub folder_access: FolderAccessMode,
-    /// Sole owner for a Personal Vault.
+    /// Sole owner for a Personal Brain.
     pub owner_user_id: Option<&'a UserId>,
-    /// Organization Vault admins.
+    /// Organization Brain admins.
     pub admins: &'a [UserId],
-    /// Organization Vault members.
+    /// Organization Brain members.
     pub members: &'a [UserId],
     /// Explicit restricted-Folder recipients.
     pub explicit_access_user_ids: &'a BTreeSet<UserId>,
@@ -494,11 +494,11 @@ pub fn required_folder_key_recipients(
 ) -> Result<BTreeSet<UserId>, CoreError> {
     let mut recipients = BTreeSet::new();
 
-    if policy.vault_kind == VaultKind::Personal {
+    if policy.brain_kind == BrainKind::Personal {
         let owner = policy
             .owner_user_id
             .ok_or_else(|| CoreError::InvalidAccessPolicy {
-                reason: "Personal Vault Folder access requires an owner".to_owned(),
+                reason: "Personal Brain Folder access requires an owner".to_owned(),
             })?;
         recipients.insert(owner.clone());
         recipients.extend(policy.personal_agent_npub.cloned());
@@ -509,7 +509,7 @@ pub fn required_folder_key_recipients(
             let owner = policy
                 .owner_user_id
                 .ok_or_else(|| CoreError::InvalidAccessPolicy {
-                    reason: "owner access requires a Personal Vault owner".to_owned(),
+                    reason: "owner access requires a Personal Brain owner".to_owned(),
                 })?;
             recipients.insert(owner.clone());
         }
@@ -633,25 +633,25 @@ pub struct RequiredFolderKeyGrant {
     pub key_version: u32,
 }
 
-/// Bootstrap output for an initial Vault.
+/// Bootstrap output for an initial Brain.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BootstrapOutput {
-    /// Created Vault metadata.
-    pub vault: Vault,
+    /// Created Brain metadata.
+    pub brain: Brain,
     /// Required current key grants.
     pub required_key_grants: Vec<RequiredFolderKeyGrant>,
 }
 
 /// Mutable pure-domain collection used to enforce hierarchy collisions.
 #[derive(Debug, Clone, Default)]
-pub struct VaultDraft {
+pub struct BrainDraft {
     folders_by_id: BTreeMap<FolderId, Folder>,
     sibling_names: BTreeSet<(Option<FolderId>, DisplayName)>,
     object_paths: BTreeSet<(FolderId, SafeRelativePath)>,
     object_ids: BTreeSet<(FolderId, ObjectId)>,
 }
 
-impl VaultDraft {
+impl BrainDraft {
     /// Add a Folder while enforcing id, parent, and sibling-name uniqueness.
     pub fn add_folder(&mut self, folder: Folder) -> Result<(), CoreError> {
         if self.folders_by_id.contains_key(&folder.id) {
@@ -718,19 +718,19 @@ impl VaultDraft {
     }
 }
 
-/// Build the initial personal Vault shape.
-pub fn bootstrap_personal_vault(
-    vault_id: impl Into<String>,
+/// Build the initial personal Brain shape.
+pub fn bootstrap_personal_brain(
+    brain_id: impl Into<String>,
     name: impl Into<String>,
     owner_user_id: impl Into<String>,
 ) -> Result<BootstrapOutput, CoreError> {
-    let vault_id = VaultId::new(vault_id)?;
-    let name = DisplayName::new("vault_name", name)?;
+    let brain_id = BrainId::new(brain_id)?;
+    let name = DisplayName::new("brain_name", name)?;
     let owner_user_id = UserId::new(owner_user_id)?;
 
-    let vault = Vault {
-        id: vault_id,
-        kind: VaultKind::Personal,
+    let brain = Brain {
+        id: brain_id,
+        kind: BrainKind::Personal,
         name,
         owner_user_id: Some(owner_user_id),
         folders: Vec::new(),
@@ -739,24 +739,24 @@ pub fn bootstrap_personal_vault(
     };
 
     Ok(BootstrapOutput {
-        vault,
+        brain,
         required_key_grants: Vec::new(),
     })
 }
 
-/// Build the initial organization Vault shape.
-pub fn bootstrap_organization_vault(
-    vault_id: impl Into<String>,
+/// Build the initial organization Brain shape.
+pub fn bootstrap_organization_brain(
+    brain_id: impl Into<String>,
     name: impl Into<String>,
     admin_user_id: impl Into<String>,
 ) -> Result<BootstrapOutput, CoreError> {
-    bootstrap_organization_vault_with_admins(vault_id, name, vec![admin_user_id.into()])
+    bootstrap_organization_brain_with_admins(brain_id, name, vec![admin_user_id.into()])
 }
 
-/// Build an organization Vault created by an agent for an authenticated human
+/// Build an organization Brain created by an agent for an authenticated human
 /// requester. Both distinct Member Identities are initial admins.
-pub fn bootstrap_organization_vault_with_requester(
-    vault_id: impl Into<String>,
+pub fn bootstrap_organization_brain_with_requester(
+    brain_id: impl Into<String>,
     name: impl Into<String>,
     creator_user_id: impl Into<String>,
     requesting_user_id: impl Into<String>,
@@ -765,38 +765,38 @@ pub fn bootstrap_organization_vault_with_requester(
     let requesting_user_id = requesting_user_id.into();
     if creator_user_id == requesting_user_id {
         return Err(CoreError::InvalidBootstrapInput {
-            reason: "organization Vault creator and requester must be distinct Member Identities"
+            reason: "organization Brain creator and requester must be distinct Member Identities"
                 .to_owned(),
         });
     }
-    bootstrap_organization_vault_with_admins(
-        vault_id,
+    bootstrap_organization_brain_with_admins(
+        brain_id,
         name,
         vec![creator_user_id, requesting_user_id],
     )
 }
 
-fn bootstrap_organization_vault_with_admins(
-    vault_id: impl Into<String>,
+fn bootstrap_organization_brain_with_admins(
+    brain_id: impl Into<String>,
     name: impl Into<String>,
     admin_user_ids: Vec<String>,
 ) -> Result<BootstrapOutput, CoreError> {
-    let vault_id = VaultId::new(vault_id)?;
-    let name = DisplayName::new("vault_name", name)?;
+    let brain_id = BrainId::new(brain_id)?;
+    let name = DisplayName::new("brain_name", name)?;
     let admin_user_ids = admin_user_ids
         .into_iter()
         .map(UserId::new)
         .collect::<Result<Vec<_>, _>>()?;
 
-    let vault = Vault {
-        id: vault_id,
-        kind: VaultKind::Organization,
+    let brain = Brain {
+        id: brain_id,
+        kind: BrainKind::Organization,
         name,
         owner_user_id: None,
         folders: Vec::new(),
         members: admin_user_ids
             .iter()
-            .map(|admin_user_id| VaultMember {
+            .map(|admin_user_id| BrainMember {
                 user_id: admin_user_id.clone(),
                 folder_access: BTreeSet::new(),
             })
@@ -805,7 +805,7 @@ fn bootstrap_organization_vault_with_admins(
     };
 
     Ok(BootstrapOutput {
-        vault,
+        brain,
         required_key_grants: Vec::new(),
     })
 }
@@ -813,30 +813,30 @@ fn bootstrap_organization_vault_with_admins(
 /// Development-only deterministic bootstrap summary used by the smoke server.
 pub fn smoke_bootstrap_summary() -> Result<BootstrapSmokeSummary, CoreError> {
     let personal =
-        bootstrap_personal_vault("personal-smoke", "Personal Smoke", "npub-smoke-owner")?;
+        bootstrap_personal_brain("personal-smoke", "Personal Smoke", "npub-smoke-owner")?;
     let organization =
-        bootstrap_organization_vault("org-smoke", "Organization Smoke", "npub-smoke-admin")?;
+        bootstrap_organization_brain("org-smoke", "Organization Smoke", "npub-smoke-admin")?;
 
     Ok(BootstrapSmokeSummary {
-        personal: BootstrapVaultSummary::from_output(&personal),
-        organization: BootstrapVaultSummary::from_output(&organization),
+        personal: BootstrapBrainSummary::from_output(&personal),
+        organization: BootstrapBrainSummary::from_output(&organization),
     })
 }
 
 /// Development smoke summary for both bootstrap shapes.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BootstrapSmokeSummary {
-    /// Personal Vault summary.
-    pub personal: BootstrapVaultSummary,
-    /// Organization Vault summary.
-    pub organization: BootstrapVaultSummary,
+    /// Personal Brain summary.
+    pub personal: BootstrapBrainSummary,
+    /// Organization Brain summary.
+    pub organization: BootstrapBrainSummary,
 }
 
 /// Compact bootstrap summary safe to return from smoke endpoints.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct BootstrapVaultSummary {
-    /// Vault kind.
-    pub kind: VaultKind,
+pub struct BootstrapBrainSummary {
+    /// Brain kind.
+    pub kind: BrainKind,
     /// Folder ids created by bootstrap.
     pub folder_ids: Vec<String>,
     /// Number of current required Folder Key Grants.
@@ -847,19 +847,19 @@ pub struct BootstrapVaultSummary {
     pub member_count: usize,
 }
 
-impl BootstrapVaultSummary {
+impl BootstrapBrainSummary {
     fn from_output(output: &BootstrapOutput) -> Self {
         Self {
-            kind: output.vault.kind,
+            kind: output.brain.kind,
             folder_ids: output
-                .vault
+                .brain
                 .folders
                 .iter()
                 .map(|folder| folder.id.to_string())
                 .collect(),
             required_grants: output.required_key_grants.len(),
-            admin_count: output.vault.admins.len(),
-            member_count: output.vault.members.len(),
+            admin_count: output.brain.admins.len(),
+            member_count: output.brain.members.len(),
         }
     }
 }
@@ -969,8 +969,8 @@ impl FolderKey {
 /// Folder Object encryption context used as AES-GCM AAD.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FolderObjectAad {
-    /// Vault id.
-    pub vault_id: VaultId,
+    /// Brain id.
+    pub brain_id: BrainId,
     /// Folder id.
     pub folder_id: FolderId,
     /// Object id.
@@ -983,9 +983,9 @@ impl FolderObjectAad {
     /// Build the canonical AAD JSON string.
     pub fn canonical_json(&self) -> String {
         format!(
-            "{{\"version\":{},\"vaultId\":{},\"folderId\":{},\"objectId\":{},\"keyVersion\":{}}}",
+            "{{\"version\":{},\"brainId\":{},\"folderId\":{},\"objectId\":{},\"keyVersion\":{}}}",
             json_string(FOLDER_OBJECT_VERSION),
-            json_string(self.vault_id.as_str()),
+            json_string(self.brain_id.as_str()),
             json_string(self.folder_id.as_str()),
             json_string(self.object_id.as_str()),
             self.key_version
@@ -1160,9 +1160,9 @@ impl TryFrom<&str> for FolderObjectOperation {
 pub struct FolderObjectRevisionPayload {
     /// Payload version.
     pub version: String,
-    /// Vault id.
-    #[serde(rename = "vaultId")]
-    pub vault_id: String,
+    /// Brain id.
+    #[serde(rename = "brainId")]
+    pub brain_id: String,
     /// Folder id.
     #[serde(rename = "folderId")]
     pub folder_id: String,
@@ -1197,7 +1197,7 @@ impl FolderObjectRevisionPayload {
     pub fn new(input: &RevisionValidation) -> Self {
         Self {
             version: "finite-folder-object-revision-v1".to_owned(),
-            vault_id: input.vault_id.to_string(),
+            brain_id: input.brain_id.to_string(),
             folder_id: input.folder_id.to_string(),
             object_id: input.object_id.as_str().to_owned(),
             operation: input.operation.as_str().to_owned(),
@@ -1214,9 +1214,9 @@ impl FolderObjectRevisionPayload {
     /// Canonical JSON in spec field order.
     pub fn canonical_json(&self) -> String {
         format!(
-            "{{\"version\":{},\"vaultId\":{},\"folderId\":{},\"objectId\":{},\"operation\":{},\"revision\":{},\"baseRevision\":{},\"keyVersion\":{},\"cipher\":{},\"ciphertextHash\":{},\"authorNpub\":{},\"createdAt\":{}}}",
+            "{{\"version\":{},\"brainId\":{},\"folderId\":{},\"objectId\":{},\"operation\":{},\"revision\":{},\"baseRevision\":{},\"keyVersion\":{},\"cipher\":{},\"ciphertextHash\":{},\"authorNpub\":{},\"createdAt\":{}}}",
             json_string(&self.version),
-            json_string(&self.vault_id),
+            json_string(&self.brain_id),
             json_string(&self.folder_id),
             json_string(&self.object_id),
             json_string(&self.operation),
@@ -1234,8 +1234,8 @@ impl FolderObjectRevisionPayload {
 /// Expected values for validating a signed revision event.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RevisionValidation {
-    /// Vault id.
-    pub vault_id: VaultId,
+    /// Brain id.
+    pub brain_id: BrainId,
     /// Folder id.
     pub folder_id: FolderId,
     /// Object id.
@@ -1293,7 +1293,7 @@ pub fn validate_revision_event(
 fn validate_revision_envelope(expected: &RevisionValidation) -> Result<(), CryptoRecordError> {
     let envelope = EncryptedFolderObjectEnvelope::from_json(&expected.envelope_json)?;
     let aad = FolderObjectAad {
-        vault_id: expected.vault_id.clone(),
+        brain_id: expected.brain_id.clone(),
         folder_id: expected.folder_id.clone(),
         object_id: expected.object_id.clone(),
         key_version: expected.key_version,
@@ -1306,9 +1306,9 @@ fn validate_revision_envelope(expected: &RevisionValidation) -> Result<(), Crypt
 pub struct FolderObjectTombstonePayload {
     /// Payload version.
     pub version: String,
-    /// Vault id.
-    #[serde(rename = "vaultId")]
-    pub vault_id: String,
+    /// Brain id.
+    #[serde(rename = "brainId")]
+    pub brain_id: String,
     /// Folder id.
     #[serde(rename = "folderId")]
     pub folder_id: String,
@@ -1335,7 +1335,7 @@ impl FolderObjectTombstonePayload {
     pub fn new(input: &TombstoneValidation) -> Self {
         Self {
             version: "finite-folder-object-tombstone-v1".to_owned(),
-            vault_id: input.vault_id.to_string(),
+            brain_id: input.brain_id.to_string(),
             folder_id: input.folder_id.to_string(),
             object_id: input.object_id.as_str().to_owned(),
             operation: "delete".to_owned(),
@@ -1349,9 +1349,9 @@ impl FolderObjectTombstonePayload {
     /// Canonical JSON in spec field order.
     pub fn canonical_json(&self) -> String {
         format!(
-            "{{\"version\":{},\"vaultId\":{},\"folderId\":{},\"objectId\":{},\"operation\":{},\"revision\":{},\"baseRevision\":{},\"authorNpub\":{},\"deletedAt\":{}}}",
+            "{{\"version\":{},\"brainId\":{},\"folderId\":{},\"objectId\":{},\"operation\":{},\"revision\":{},\"baseRevision\":{},\"authorNpub\":{},\"deletedAt\":{}}}",
             json_string(&self.version),
-            json_string(&self.vault_id),
+            json_string(&self.brain_id),
             json_string(&self.folder_id),
             json_string(&self.object_id),
             json_string(&self.operation),
@@ -1366,8 +1366,8 @@ impl FolderObjectTombstonePayload {
 /// Expected values for validating a signed tombstone event.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TombstoneValidation {
-    /// Vault id.
-    pub vault_id: VaultId,
+    /// Brain id.
+    pub brain_id: BrainId,
     /// Folder id.
     pub folder_id: FolderId,
     /// Object id.
@@ -1475,14 +1475,14 @@ impl TryFrom<&str> for AdminAccessAction {
     }
 }
 
-/// Signed Vault admin access-change payload.
+/// Signed Brain admin access-change payload.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 pub struct AdminAccessChangePayload {
     /// Payload version.
     pub version: String,
-    /// Vault id.
-    #[serde(rename = "vaultId")]
-    pub vault_id: String,
+    /// Brain id.
+    #[serde(rename = "brainId")]
+    pub brain_id: String,
     /// Change id.
     #[serde(rename = "changeId")]
     pub change_id: String,
@@ -1511,8 +1511,8 @@ impl AdminAccessChangePayload {
     /// Create an access-change payload.
     pub fn new(input: &AdminAccessChangeValidation) -> Self {
         Self {
-            version: "finite-vault-admin-access-change-v1".to_owned(),
-            vault_id: input.vault_id.to_string(),
+            version: "finite-brain-admin-access-change-v1".to_owned(),
+            brain_id: input.brain_id.to_string(),
             change_id: input.change_id.clone(),
             action: input.action.as_str().to_owned(),
             admin_npub: input.admin_npub.clone(),
@@ -1528,7 +1528,7 @@ impl AdminAccessChangePayload {
     pub fn canonical_json(&self) -> String {
         let mut fields = vec![
             format!("\"version\":{}", json_string(&self.version)),
-            format!("\"vaultId\":{}", json_string(&self.vault_id)),
+            format!("\"brainId\":{}", json_string(&self.brain_id)),
             format!("\"changeId\":{}", json_string(&self.change_id)),
             format!("\"action\":{}", json_string(&self.action)),
             format!("\"adminNpub\":{}", json_string(&self.admin_npub)),
@@ -1555,8 +1555,8 @@ impl AdminAccessChangePayload {
 /// Expected values for validating an admin access-change event.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AdminAccessChangeValidation {
-    /// Vault id.
-    pub vault_id: VaultId,
+    /// Brain id.
+    pub brain_id: BrainId,
     /// Change id.
     pub change_id: String,
     /// Action.
@@ -1575,7 +1575,7 @@ pub struct AdminAccessChangeValidation {
     pub created_at: String,
 }
 
-/// Validate a signed Vault admin access-change event.
+/// Validate a signed Brain admin access-change event.
 pub fn validate_admin_access_change_event(
     event: &Event,
     expected: &AdminAccessChangeValidation,
@@ -1602,7 +1602,7 @@ pub fn validate_admin_access_change_event(
     Ok(payload)
 }
 
-/// Issue one canonical Vault admin access-change event from its typed validation contract.
+/// Issue one canonical Brain admin access-change event from its typed validation contract.
 pub fn issue_admin_access_change_event(
     admin_keys: &Keys,
     input: &AdminAccessChangeValidation,
@@ -1615,7 +1615,7 @@ pub fn issue_admin_access_change_event(
         })?;
     if signer_npub != input.admin_npub {
         return brain_identity_provider_error(
-            "access-change signer does not match the named Vault admin",
+            "access-change signer does not match the named Brain admin",
         );
     }
     let payload = AdminAccessChangePayload::new(input);
@@ -1721,7 +1721,7 @@ pub fn validate_brain_event_authorization_intent(
                     reason: "Brain revision payload did not parse".to_owned(),
                 })?;
             let operation = FolderObjectOperation::try_from(payload.operation.as_str())?;
-            let vault_id = VaultId::new(payload.vault_id.clone())?;
+            let brain_id = BrainId::new(payload.brain_id.clone())?;
             let folder_id = FolderId::new(payload.folder_id.clone())?;
             let object_id = ObjectId::new(payload.object_id.clone())?;
             if payload.version != "finite-folder-object-revision-v1"
@@ -1744,12 +1744,12 @@ pub fn validate_brain_event_authorization_intent(
                     vec![
                         "d".to_owned(),
                         format!(
-                            "finite-folder-object-revision:{vault_id}:{folder_id}:{}:{}",
+                            "finite-folder-object-revision:{brain_id}:{folder_id}:{}:{}",
                             object_id.as_str(),
                             payload.revision
                         ),
                     ],
-                    vec!["vault".to_owned(), vault_id.to_string()],
+                    vec!["brain".to_owned(), brain_id.to_string()],
                     vec!["folder".to_owned(), folder_id.to_string()],
                     vec!["object".to_owned(), object_id.as_str().to_owned()],
                     vec!["operation".to_owned(), operation.as_str().to_owned()],
@@ -1762,7 +1762,7 @@ pub fn validate_brain_event_authorization_intent(
                 .map_err(|_| CryptoRecordError::EventMismatch {
                     reason: "Brain tombstone payload did not parse".to_owned(),
                 })?;
-            let vault_id = VaultId::new(payload.vault_id.clone())?;
+            let brain_id = BrainId::new(payload.brain_id.clone())?;
             let folder_id = FolderId::new(payload.folder_id.clone())?;
             let object_id = ObjectId::new(payload.object_id.clone())?;
             if payload.version != "finite-folder-object-tombstone-v1"
@@ -1779,25 +1779,25 @@ pub fn validate_brain_event_authorization_intent(
                     vec![
                         "d".to_owned(),
                         format!(
-                            "finite-folder-object-tombstone:{vault_id}:{folder_id}:{}:{}",
+                            "finite-folder-object-tombstone:{brain_id}:{folder_id}:{}:{}",
                             object_id.as_str(),
                             payload.revision
                         ),
                     ],
-                    vec!["vault".to_owned(), vault_id.to_string()],
+                    vec!["brain".to_owned(), brain_id.to_string()],
                     vec!["folder".to_owned(), folder_id.to_string()],
                     vec!["object".to_owned(), object_id.as_str().to_owned()],
                     vec!["operation".to_owned(), "delete".to_owned()],
                 ],
             )?;
         }
-        "vault-access-change" => {
+        "brain-access-change" => {
             let payload: AdminAccessChangePayload = serde_json::from_str(&template.content)
                 .map_err(|_| CryptoRecordError::EventMismatch {
                     reason: "Brain access-change payload did not parse".to_owned(),
                 })?;
             let action = AdminAccessAction::try_from(payload.action.as_str())?;
-            let vault_id = VaultId::new(payload.vault_id.clone())?;
+            let brain_id = BrainId::new(payload.brain_id.clone())?;
             let folder_id = payload
                 .folder_id
                 .as_ref()
@@ -1810,14 +1810,14 @@ pub fn validate_brain_event_authorization_intent(
                     }
                 })?;
             }
-            if payload.version != "finite-vault-admin-access-change-v1"
+            if payload.version != "finite-brain-admin-access-change-v1"
                 || payload.admin_npub != signer_npub
                 || payload.canonical_json() != template.content
             {
                 return brain_identity_provider_error("Brain access-change payload is invalid");
             }
             let expected = AdminAccessChangeValidation {
-                vault_id,
+                brain_id,
                 change_id: payload.change_id,
                 action,
                 admin_npub: payload.admin_npub,
@@ -1829,7 +1829,7 @@ pub fn validate_brain_event_authorization_intent(
             };
             require_exact_template_tags(template, admin_access_change_tags(&expected)?)?;
         }
-        "vault-invite-authorization" => {
+        "brain-invite-authorization" => {
             let payload: BrainEmailInviteAuthorizationPayload =
                 serde_json::from_str(&template.content).map_err(|_| {
                     CryptoRecordError::EventMismatch {
@@ -1841,7 +1841,7 @@ pub fn validate_brain_event_authorization_intent(
                     "Brain email-invite Folder scope exceeds the supported limit",
                 );
             }
-            let vault_id = VaultId::new(payload.vault_id.clone())?;
+            let brain_id = BrainId::new(payload.brain_id.clone())?;
             NostrPublicKey::parse(&payload.invite_unwrap_npub).map_err(|error| {
                 CryptoRecordError::EventMismatch {
                     reason: error.to_string(),
@@ -1874,11 +1874,11 @@ pub fn validate_brain_event_authorization_intent(
                     vec![
                         "d".to_owned(),
                         format!(
-                            "finite-email-invite-bootstrap-authorization:{vault_id}:{}",
+                            "finite-email-invite-bootstrap-authorization:{brain_id}:{}",
                             payload.invited_email
                         ),
                     ],
-                    vec!["vault".to_owned(), vault_id.to_string()],
+                    vec!["brain".to_owned(), brain_id.to_string()],
                     vec!["email".to_owned(), payload.invited_email],
                 ],
             )?;
@@ -1902,7 +1902,7 @@ fn require_exact_template_tags(
 pub fn validate_brain_grant_intent(
     input: &BrainGrantIntent,
 ) -> Result<NostrPublicKey, CryptoRecordError> {
-    VaultId::new(input.vault_id.clone())?;
+    BrainId::new(input.brain_id.clone())?;
     let recipient = NostrPublicKey::parse(&input.recipient_npub).map_err(|error| {
         CryptoRecordError::EventMismatch {
             reason: error.to_string(),
@@ -1924,7 +1924,7 @@ pub fn validate_brain_grant_intent(
                 );
             }
         }
-        "vault-invite-bootstrap" => {
+        "brain-invite-bootstrap" => {
             if input.folder_id.is_some() || input.key_version.is_some() {
                 return brain_identity_provider_error(
                     "Brain invite bootstrap cannot name one Folder Key",
@@ -2030,7 +2030,7 @@ pub struct IssuedFolderKeyGrant {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FolderKeyGrantPayload {
     pub version: String,
-    pub vault_id: String,
+    pub brain_id: String,
     pub folder_id: String,
     pub key_version: u32,
     pub folder_key: String,
@@ -2043,7 +2043,7 @@ pub struct FolderKeyGrantPayload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BrainInviteBootstrapPayload {
     version: String,
-    vault_id: String,
+    brain_id: String,
     invited_email: String,
     invite_unwrap_npub: String,
     folders: Vec<BrainEmailInviteAuthorizationFolder>,
@@ -2060,9 +2060,9 @@ struct BrainInviteBootstrapGrant {
 impl BrainInviteBootstrapPayload {
     fn canonical_json(&self) -> String {
         format!(
-            "{{\"version\":{},\"vaultId\":{},\"invitedEmail\":{},\"inviteUnwrapNpub\":{},\"folders\":{},\"grants\":{}}}",
+            "{{\"version\":{},\"brainId\":{},\"invitedEmail\":{},\"inviteUnwrapNpub\":{},\"folders\":{},\"grants\":{}}}",
             json_string(&self.version),
-            json_string(&self.vault_id),
+            json_string(&self.brain_id),
             json_string(&self.invited_email),
             json_string(&self.invite_unwrap_npub),
             serde_json::to_string(&self.folders)
@@ -2076,9 +2076,9 @@ impl FolderKeyGrantPayload {
     /// Canonical JSON signed inside the NIP-59 rumor.
     pub fn canonical_json(&self) -> String {
         format!(
-            "{{\"version\":{},\"vaultId\":{},\"folderId\":{},\"keyVersion\":{},\"folderKey\":{},\"issuerNpub\":{},\"recipientNpub\":{},\"createdAt\":{}}}",
+            "{{\"version\":{},\"brainId\":{},\"folderId\":{},\"keyVersion\":{},\"folderKey\":{},\"issuerNpub\":{},\"recipientNpub\":{},\"createdAt\":{}}}",
             json_string(&self.version),
-            json_string(&self.vault_id),
+            json_string(&self.brain_id),
             json_string(&self.folder_id),
             self.key_version,
             json_string(&self.folder_key),
@@ -2135,7 +2135,7 @@ pub fn open_folder_key_grant(
                 reason: error.to_string(),
             })?;
     if payload.version != "finite-folder-key-grant-v1"
-        || payload.vault_id != intent.vault_id
+        || payload.brain_id != intent.brain_id
         || payload.folder_id != expected_folder_id
         || payload.key_version != expected_key_version
         || payload.recipient_npub != intent.recipient_npub
@@ -2158,10 +2158,10 @@ pub fn open_folder_key_grant(
             "d".to_owned(),
             format!(
                 "finite-folder-key-grant:{}:{expected_folder_id}:{expected_key_version}",
-                intent.vault_id
+                intent.brain_id
             ),
         ],
-        vec!["vault".to_owned(), intent.vault_id.clone()],
+        vec!["brain".to_owned(), intent.brain_id.clone()],
         vec!["folder".to_owned(), expected_folder_id.to_owned()],
         vec!["keyVersion".to_owned(), expected_key_version.to_string()],
     ];
@@ -2178,7 +2178,7 @@ pub fn wrap_brain_invite_bootstrap(
     plaintext: &str,
     created_at_unix_seconds: u64,
 ) -> Result<Event, CryptoRecordError> {
-    if intent.purpose != "vault-invite-bootstrap" {
+    if intent.purpose != "brain-invite-bootstrap" {
         return brain_identity_provider_error("only an Email Invite Bootstrap can be wrapped");
     }
     let recipient = validate_brain_grant_intent(intent)?;
@@ -2194,7 +2194,7 @@ pub fn wrap_brain_invite_bootstrap(
         );
     }
     if payload.version != "finite-email-invite-bootstrap-payload-v1"
-        || payload.vault_id != intent.vault_id
+        || payload.brain_id != intent.brain_id
         || payload.invite_unwrap_npub != intent.recipient_npub
         || payload.invited_email.trim().is_empty()
         || payload.folders.len() != payload.grants.len()
@@ -2251,9 +2251,9 @@ pub fn wrap_brain_invite_bootstrap(
     let tags = vec![
         Tag::parse(vec![
             "d".to_owned(),
-            format!("finite-email-invite-bootstrap:{}", intent.vault_id),
+            format!("finite-email-invite-bootstrap:{}", intent.brain_id),
         ]),
-        Tag::parse(vec!["vault".to_owned(), intent.vault_id.clone()]),
+        Tag::parse(vec!["brain".to_owned(), intent.brain_id.clone()]),
     ]
     .into_iter()
     .collect::<Result<Vec<_>, _>>()
@@ -2277,7 +2277,7 @@ pub fn wrap_brain_invite_bootstrap(
 pub fn issue_folder_key_grant(
     issuer_keys: &Keys,
     grant_id: impl Into<String>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
     key_version: u32,
     recipient_npub: impl Into<String>,
@@ -2299,7 +2299,7 @@ pub fn issue_folder_key_grant(
     let created_at = created_at.into();
     let content = FolderKeyGrantPayload {
         version: "finite-folder-key-grant-v1".to_owned(),
-        vault_id: vault_id.to_string(),
+        brain_id: brain_id.to_string(),
         folder_id: folder_id.to_string(),
         key_version,
         folder_key: folder_key.to_base64(),
@@ -2311,9 +2311,9 @@ pub fn issue_folder_key_grant(
     let tags = vec![
         vec![
             "d".to_owned(),
-            format!("finite-folder-key-grant:{vault_id}:{folder_id}:{key_version}"),
+            format!("finite-folder-key-grant:{brain_id}:{folder_id}:{key_version}"),
         ],
-        vec!["vault".to_owned(), vault_id.to_string()],
+        vec!["brain".to_owned(), brain_id.to_string()],
         vec!["folder".to_owned(), folder_id.to_string()],
         vec!["keyVersion".to_owned(), key_version.to_string()],
     ]
@@ -2430,13 +2430,13 @@ fn revision_tags(input: &RevisionValidation) -> Vec<Vec<String>> {
             "d".to_owned(),
             format!(
                 "finite-folder-object-revision:{}:{}:{}:{}",
-                input.vault_id,
+                input.brain_id,
                 input.folder_id,
                 input.object_id.as_str(),
                 input.revision
             ),
         ],
-        vec!["vault".to_owned(), input.vault_id.to_string()],
+        vec!["brain".to_owned(), input.brain_id.to_string()],
         vec!["folder".to_owned(), input.folder_id.to_string()],
         vec!["object".to_owned(), input.object_id.as_str().to_owned()],
         vec!["operation".to_owned(), input.operation.as_str().to_owned()],
@@ -2450,13 +2450,13 @@ fn tombstone_tags(input: &TombstoneValidation) -> Vec<Vec<String>> {
             "d".to_owned(),
             format!(
                 "finite-folder-object-tombstone:{}:{}:{}:{}",
-                input.vault_id,
+                input.brain_id,
                 input.folder_id,
                 input.object_id.as_str(),
                 input.revision
             ),
         ],
-        vec!["vault".to_owned(), input.vault_id.to_string()],
+        vec!["brain".to_owned(), input.brain_id.to_string()],
         vec!["folder".to_owned(), input.folder_id.to_string()],
         vec!["object".to_owned(), input.object_id.as_str().to_owned()],
         vec!["operation".to_owned(), "delete".to_owned()],
@@ -2470,11 +2470,11 @@ fn admin_access_change_tags(
         vec![
             "d".to_owned(),
             format!(
-                "finite-vault-admin-access-change:{}:{}",
-                input.vault_id, input.change_id
+                "finite-brain-admin-access-change:{}:{}",
+                input.brain_id, input.change_id
             ),
         ],
-        vec!["vault".to_owned(), input.vault_id.to_string()],
+        vec!["brain".to_owned(), input.brain_id.to_string()],
         vec!["action".to_owned(), input.action.as_str().to_owned()],
     ];
 
@@ -2579,36 +2579,36 @@ mod tests {
     }
 
     #[test]
-    fn bootstraps_personal_vault() {
-        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+    fn bootstraps_personal_brain() {
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
 
-        assert_eq!(output.vault.kind, VaultKind::Personal);
+        assert_eq!(output.brain.kind, BrainKind::Personal);
         assert_eq!(
-            output.vault.owner_user_id,
+            output.brain.owner_user_id,
             Some(UserId::new("npub-owner").unwrap())
         );
-        assert!(output.vault.members.is_empty());
-        assert!(output.vault.admins.is_empty());
-        assert!(output.vault.folders.is_empty());
+        assert!(output.brain.members.is_empty());
+        assert!(output.brain.admins.is_empty());
+        assert!(output.brain.folders.is_empty());
         assert!(output.required_key_grants.is_empty());
     }
 
     #[test]
-    fn bootstraps_organization_vault() {
-        let output = bootstrap_organization_vault("org", "Finite", "npub-admin").unwrap();
+    fn bootstraps_organization_brain() {
+        let output = bootstrap_organization_brain("org", "Finite", "npub-admin").unwrap();
 
-        assert_eq!(output.vault.kind, VaultKind::Organization);
-        assert_eq!(output.vault.owner_user_id, None);
+        assert_eq!(output.brain.kind, BrainKind::Organization);
+        assert_eq!(output.brain.owner_user_id, None);
         assert_eq!(
-            output.vault.admins,
+            output.brain.admins,
             vec![UserId::new("npub-admin").unwrap()]
         );
-        assert_eq!(output.vault.members.len(), 1);
+        assert_eq!(output.brain.members.len(), 1);
         assert_eq!(
-            output.vault.members[0].user_id,
+            output.brain.members[0].user_id,
             UserId::new("npub-admin").unwrap()
         );
-        assert!(output.vault.folders.is_empty());
+        assert!(output.brain.folders.is_empty());
         assert!(output.required_key_grants.is_empty());
     }
 
@@ -2627,7 +2627,7 @@ mod tests {
             FolderAccessMode::Restricted,
         ] {
             let recipients = required_folder_key_recipients(FolderKeyRecipientPolicy {
-                vault_kind: VaultKind::Personal,
+                brain_kind: BrainKind::Personal,
                 folder_access: access,
                 owner_user_id: Some(&owner),
                 admins: std::slice::from_ref(&admin),
@@ -2653,7 +2653,7 @@ mod tests {
         ] {
             assert_eq!(
                 required_folder_key_recipients(FolderKeyRecipientPolicy {
-                    vault_kind: VaultKind::Personal,
+                    brain_kind: BrainKind::Personal,
                     folder_access: access,
                     owner_user_id: Some(&owner),
                     admins: &[],
@@ -2674,7 +2674,7 @@ mod tests {
         let explicit = UserId::new("npub-explicit").unwrap();
         let explicit_users = BTreeSet::from([explicit.clone()]);
         let policy = |folder_access| FolderKeyRecipientPolicy {
-            vault_kind: VaultKind::Organization,
+            brain_kind: BrainKind::Organization,
             folder_access,
             owner_user_id: None,
             admins: std::slice::from_ref(&admin),
@@ -2821,7 +2821,7 @@ mod tests {
 
     #[test]
     fn folder_and_page_collisions_are_case_sensitive() {
-        let mut draft = VaultDraft::default();
+        let mut draft = BrainDraft::default();
         let root = root_folder(
             "root",
             "Root",
@@ -2884,7 +2884,7 @@ mod tests {
 
     #[test]
     fn child_access_is_independent_from_parent_access() {
-        let mut draft = VaultDraft::default();
+        let mut draft = BrainDraft::default();
         let parent = root_folder(
             "parent",
             "Parent",
@@ -2920,7 +2920,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_hierarchy() {
-        let mut draft = VaultDraft::default();
+        let mut draft = BrainDraft::default();
         let orphan = Folder {
             id: FolderId::new("orphan").unwrap(),
             name: DisplayName::new("folder_name", "Orphan").unwrap(),
@@ -2944,11 +2944,11 @@ mod tests {
     fn smoke_bootstrap_summary_is_stable() {
         let summary = smoke_bootstrap_summary().unwrap();
 
-        assert_eq!(summary.personal.kind, VaultKind::Personal);
+        assert_eq!(summary.personal.kind, BrainKind::Personal);
         assert!(summary.personal.folder_ids.is_empty());
         assert_eq!(summary.personal.required_grants, 0);
 
-        assert_eq!(summary.organization.kind, VaultKind::Organization);
+        assert_eq!(summary.organization.kind, BrainKind::Organization);
         assert!(summary.organization.folder_ids.is_empty());
         assert_eq!(summary.organization.required_grants, 0);
         assert_eq!(summary.organization.admin_count, 1);
@@ -3160,7 +3160,7 @@ mod tests {
     fn validates_signed_tombstone() {
         let keys = Keys::generate();
         let expected = TombstoneValidation {
-            vault_id: VaultId::new("acme").unwrap(),
+            brain_id: BrainId::new("acme").unwrap(),
             folder_id: FolderId::new("strategy").unwrap(),
             object_id: ObjectId::new("obj_0123456789abcdef").unwrap(),
             revision: 4,
@@ -3182,7 +3182,7 @@ mod tests {
         let admin_keys = Keys::generate();
         let target_keys = Keys::generate();
         let expected = AdminAccessChangeValidation {
-            vault_id: VaultId::new("acme").unwrap(),
+            brain_id: BrainId::new("acme").unwrap(),
             change_id: "change_0123456789abcdef".to_owned(),
             action: AdminAccessAction::GrantFolderAccess,
             admin_npub: npub(&admin_keys),
@@ -3219,7 +3219,7 @@ mod tests {
             .collect::<Vec<_>>();
         let authorization = BrainEmailInviteAuthorizationPayload {
             version: "finite-email-invite-bootstrap-authorization-v1".to_owned(),
-            vault_id: "personal".to_owned(),
+            brain_id: "personal".to_owned(),
             invited_email: "invitee@example.com".to_owned(),
             invite_unwrap_npub: recipient_npub.clone(),
             bootstrap_payload_hash: format!("sha256:{}", "1".repeat(64)),
@@ -3228,7 +3228,7 @@ mod tests {
         };
         let authorization_error = validate_brain_event_authorization_intent(
             &BrainEventAuthorizationIntent {
-                intent: "vault-invite-authorization".to_owned(),
+                intent: "brain-invite-authorization".to_owned(),
                 event_template: BrainEventTemplate {
                     kind: APP_SPECIFIC_KIND,
                     created_at: 1_784_000_000,
@@ -3262,7 +3262,7 @@ mod tests {
             .collect::<Vec<_>>();
         let bootstrap = serde_json::json!({
             "version": "finite-email-invite-bootstrap-payload-v1",
-            "vaultId": "personal",
+            "brainId": "personal",
             "invitedEmail": "invitee@example.com",
             "inviteUnwrapNpub": recipient_npub,
             "folders": folders,
@@ -3272,8 +3272,8 @@ mod tests {
         let bootstrap_error = wrap_brain_invite_bootstrap(
             &issuer,
             &BrainGrantIntent {
-                purpose: "vault-invite-bootstrap".to_owned(),
-                vault_id: "personal".to_owned(),
+                purpose: "brain-invite-bootstrap".to_owned(),
+                brain_id: "personal".to_owned(),
                 recipient_npub,
                 folder_id: None,
                 key_version: None,
@@ -3291,7 +3291,7 @@ mod tests {
 
     fn folder_object_aad(key_version: u32) -> FolderObjectAad {
         FolderObjectAad {
-            vault_id: VaultId::new("acme").unwrap(),
+            brain_id: BrainId::new("acme").unwrap(),
             folder_id: FolderId::new("strategy").unwrap(),
             object_id: ObjectId::new("obj_0123456789abcdef").unwrap(),
             key_version,
@@ -3314,7 +3314,7 @@ mod tests {
         envelope_json: String,
     ) -> RevisionValidation {
         RevisionValidation {
-            vault_id: VaultId::new("acme").unwrap(),
+            brain_id: BrainId::new("acme").unwrap(),
             folder_id: FolderId::new("strategy").unwrap(),
             object_id: ObjectId::new("obj_0123456789abcdef").unwrap(),
             operation,

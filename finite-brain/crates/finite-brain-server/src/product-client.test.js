@@ -131,16 +131,16 @@ const hostedStartupSource = source.slice(
 assert.match(
   hostedStartupSource,
   /if \(hostedState\) \{[\s\S]*await resumeSession\(\);\s*return;/u,
-  "Opening hosted Brain must explicitly resume its in-memory Vault session without replacing its connected signer state"
+  "Opening hosted Brain must explicitly resume its in-memory Brain session without replacing its connected signer state"
 );
 const hostedGrantResumeSource = source.slice(
   source.indexOf("async function openAvailableFolderKeyGrants"),
-  source.indexOf("async function loadVaultReader")
+  source.indexOf("async function loadBrainReader")
 );
 assert.match(
   hostedGrantResumeSource,
-  /openFolderKeyGrants\([\s\S]*expectedVaultId: vaultId/u,
-  "Hosted session resume must bind exported Folder Key Grants to their known active Vault"
+  /openFolderKeyGrants\([\s\S]*expectedBrainId: brainId/u,
+  "Hosted session resume must bind exported Folder Key Grants to their known active Brain"
 );
 const hostedGrantOpenSource = source.slice(
   source.indexOf("async function openFolderKeyGrants"),
@@ -148,8 +148,8 @@ const hostedGrantOpenSource = source.slice(
 );
 assert.match(
   hostedGrantOpenSource,
-  /options\.expectedVaultId \|\| exportedVault\?\.vault\?\.id/u,
-  "Scoped grant opening must preserve an explicit Vault ID and understand the current export shape"
+  /options\.expectedBrainId \|\| exportedBrain\?\.brain\?\.id/u,
+  "Scoped grant opening must preserve an explicit Brain ID and understand the current export shape"
 );
 vm.runInNewContext(source, context, { filename: "product-client.js" });
 
@@ -176,59 +176,59 @@ assert.equal(
   "An invalid navigation hint must not become a Personal Agent identity"
 );
 assert.equal(
-  JSON.stringify(client.vaultCreateBody({
-    vaultId: "personal-owner",
+  JSON.stringify(client.brainCreateBody({
+    brainId: "personal-owner",
     kind: "personal",
-    name: "Personal vault",
+    name: "Personal brain",
     bootstrapGrants: [],
     agentIdentity: client.suggestedAgentIdentityFromNavigation(
       `?agentEmail=cheater%40finite.vip&agentName=cheater&agentNpub=${suggestedAgentNpub}`
     ),
   })),
   JSON.stringify({
-    vaultId: "personal-owner",
+    brainId: "personal-owner",
     kind: "personal",
-    name: "Personal vault",
+    name: "Personal brain",
     bootstrapGrants: [],
     personalAgentEmail: "cheater@finite.vip",
   }),
-  "A readable Managed Agent Email must be the normal signed Personal Vault setup input"
+  "A readable Managed Agent Email must be the normal signed Personal Brain setup input"
 );
 assert.equal(
-  JSON.stringify(client.vaultCreateBody({
-    vaultId: "personal-owner",
+  JSON.stringify(client.brainCreateBody({
+    brainId: "personal-owner",
     kind: "personal",
-    name: "Personal vault",
+    name: "Personal brain",
     bootstrapGrants: [],
     agentIdentity: { email: null, name: null, npub: suggestedAgentNpub },
   })),
   JSON.stringify({
-    vaultId: "personal-owner",
+    brainId: "personal-owner",
     kind: "personal",
-    name: "Personal vault",
+    name: "Personal brain",
     bootstrapGrants: [],
     personalAgentNpub: suggestedAgentNpub,
   }),
   "Raw npub remains an advanced setup fallback when no Managed Agent Email is available"
 );
 assert.equal(
-  JSON.stringify(client.vaultCreateBody({
-    vaultId: "org-empty",
+  JSON.stringify(client.brainCreateBody({
+    brainId: "org-empty",
     kind: "organization",
     name: "Empty organization",
     bootstrapGrants: [],
   })),
   JSON.stringify({
-    vaultId: "org-empty",
+    brainId: "org-empty",
     kind: "organization",
     name: "Empty organization",
     bootstrapGrants: [],
   }),
-  "Organization Vault creation must not request starter folders or grants"
+  "Organization Brain creation must not request starter folders or grants"
 );
 assert.equal(
-  client.personalVaultAgentConfirmationMessage({ personalAgentEmail: "cheater@finite.vip" }),
-  "Create your Personal Vault and pair cheater@finite.vip as your Personal Agent?",
+  client.personalBrainAgentConfirmationMessage({ personalAgentEmail: "cheater@finite.vip" }),
+  "Create your Personal Brain and pair cheater@finite.vip as your Personal Agent?",
   "User-first setup must show the readable Managed Agent Email before creation"
 );
 assert.equal(
@@ -238,7 +238,7 @@ assert.equal(
     personalAgent: { agentNpub: suggestedAgentNpub },
   }).sort()),
   JSON.stringify([client.npubFromHex("11".repeat(32)), suggestedAgentNpub].sort()),
-  "Every Personal Vault Folder must wrap its key for both the owner and Personal Agent"
+  "Every Personal Brain Folder must wrap its key for both the owner and Personal Agent"
 );
 const personalOwner = client.npubFromHex("12".repeat(32));
 const personalReplacement = client.npubFromHex("13".repeat(32));
@@ -295,7 +295,7 @@ assert.equal(
 );
 assert.equal(
   JSON.stringify(client.settingsSectionsForSession("unlocked")),
-  JSON.stringify(["session", "vault", "access", "invitations"])
+  JSON.stringify(["session", "brain", "access", "invitations"])
 );
 assert.equal(client.normalizeSettingsSection("access", "locked"), "session");
 assert.equal(client.normalizeSettingsSection("invitations", "resuming"), "session");
@@ -324,7 +324,7 @@ function accessFailureTestSeams() {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__?.({ state, failAccessOperation, lockSession, lockSessionForVaultAccessChange, protectedRequest, reportClientActionFailure });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_TEST_SEAMS__?.({ state, failAccessOperation, lockSession, lockSessionForBrainAccessChange, protectedRequest, reportClientActionFailure });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(seamSource, source, "The access-failure test must capture the Product Client's real closure seams");
   vm.runInNewContext(seamSource, testContext, { filename: "product-client-access-failure.test.js" });
@@ -359,7 +359,7 @@ function invitationPanelTestSeams() {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, handleVaultInvitationInput, renderVaultInvitationPanel, revokeVaultInvitationById });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, handleBrainInvitationInput, renderBrainInvitationPanel, revokeBrainInvitationById });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(seamSource, source, "The invitation test must capture the Product Client's real panel seams");
   vm.runInNewContext(seamSource, testContext, { filename: "product-client-invitation-panel.test.js" });
@@ -400,7 +400,7 @@ function clipboardInvitationFeedbackTestSeams(navigatorValue, options = {}) {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__?.({ state, commandPaletteFocusableElements, copyToClipboard, copyVaultInviteUrl, documentFocusableElements, handleCommandPaletteKeydown, handleContextMenuAction, lockSession, openManageVaultsModal, closeManageVaultsModal, overlayFocusableElements, renderVaultInvitationPanel, resetVaultSessionState, saveActivePage, setActiveVaultId, settingsModalFocusableElements });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_CLIPBOARD_INVITATION_TEST_SEAMS__?.({ state, commandPaletteFocusableElements, copyToClipboard, copyBrainInviteUrl, documentFocusableElements, handleCommandPaletteKeydown, handleContextMenuAction, lockSession, openManageBrainsModal, closeManageBrainsModal, overlayFocusableElements, renderBrainInvitationPanel, resetBrainSessionState, saveActivePage, setActiveBrainId, settingsModalFocusableElements });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(
     seamSource,
@@ -446,7 +446,7 @@ function keyboardNavigationTestSeams() {
   return seams;
 }
 
-function vaultSwitcherTestSeams() {
+function brainSwitcherTestSeams() {
   const testElements = new Map();
   const loadCalls = [];
   const testContext = {
@@ -464,54 +464,54 @@ function vaultSwitcherTestSeams() {
     window: {
       ...context.window,
       __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
-      __FINITE_BRAIN_TEST_LOAD_VAULT__: (input) => {
+      __FINITE_BRAIN_TEST_LOAD_BRAIN__: (input) => {
         loadCalls.push(input);
       },
     },
   };
   testContext.globalThis = testContext;
   let seams = null;
-  testContext.window.__FINITE_BRAIN_CAPTURE_VAULT_SWITCHER_TEST_SEAMS__ = (value) => {
+  testContext.window.__FINITE_BRAIN_CAPTURE_BRAIN_SWITCHER_TEST_SEAMS__ = (value) => {
     seams = value;
   };
   const seamSource = source
     .replace(
-      "  async function loadVaultReader(options = {}) {",
-      "  async function loadVaultReader(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_LOAD_VAULT__) return window.__FINITE_BRAIN_TEST_LOAD_VAULT__({ activeVaultId: state.activeVaultId, options });"
+      "  async function loadBrainReader(options = {}) {",
+      "  async function loadBrainReader(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_LOAD_BRAIN__) return window.__FINITE_BRAIN_TEST_LOAD_BRAIN__({ activeBrainId: state.activeBrainId, options });"
     )
     .replace(
       "  return {\n    accessActionRoute,",
-      "  window.__FINITE_BRAIN_CAPTURE_VAULT_SWITCHER_TEST_SEAMS__?.({ state, vaultSwitchButton });\n\n  return {\n    accessActionRoute,"
+      "  window.__FINITE_BRAIN_CAPTURE_BRAIN_SWITCHER_TEST_SEAMS__?.({ state, brainSwitchButton });\n\n  return {\n    accessActionRoute,"
     );
-  assert.notEqual(seamSource, source, "The Vault switcher test must capture the real selection seam");
-  vm.runInNewContext(seamSource, testContext, { filename: "product-client-vault-switcher.test.js" });
-  assert.ok(seams, "The Product Client must expose the captured Vault switcher seam");
+  assert.notEqual(seamSource, source, "The Brain switcher test must capture the real selection seam");
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-brain-switcher.test.js" });
+  assert.ok(seams, "The Product Client must expose the captured Brain switcher seam");
   return { loadCalls, seams };
 }
 
-async function assertVaultSwitcherLoadsSelectedVault() {
-  const vaultSwitcher = vaultSwitcherTestSeams();
-  const state = vaultSwitcher.seams.state;
-  state.activeVaultId = "personal-fixture";
-  state.metadata = { vaultId: "personal-fixture" };
+async function assertBrainSwitcherLoadsSelectedBrain() {
+  const brainSwitcher = brainSwitcherTestSeams();
+  const state = brainSwitcher.seams.state;
+  state.activeBrainId = "personal-fixture";
+  state.metadata = { brainId: "personal-fixture" };
   state.sessionStatus = "unlocked";
-  state.vaultSwitcherOpen = true;
-  state.visibleVaults = [
-    { vaultId: "personal-fixture", kind: "personal", name: "Personal vault", role: "owner" },
-    { vaultId: "organization-fixture", kind: "organization", name: "Hermes Agent", role: "admin" },
+  state.brainSwitcherOpen = true;
+  state.visibleBrains = [
+    { brainId: "personal-fixture", kind: "personal", name: "Personal brain", role: "owner" },
+    { brainId: "organization-fixture", kind: "organization", name: "Hermes Agent", role: "admin" },
   ];
 
-  const organizationButton = vaultSwitcher.seams.vaultSwitchButton(
-    state.visibleVaults[1],
+  const organizationButton = brainSwitcher.seams.brainSwitchButton(
+    state.visibleBrains[1],
     "switcher"
   );
   await organizationButton.click();
 
-  assert.equal(state.activeVaultId, "organization-fixture");
+  assert.equal(state.activeBrainId, "organization-fixture");
   assert.deepEqual(
-    JSON.parse(JSON.stringify(vaultSwitcher.loadCalls)),
-    [{ activeVaultId: "organization-fixture", options: { allowResume: true } }],
-    "Choosing another Vault in the footer switcher must immediately unlock and load it"
+    JSON.parse(JSON.stringify(brainSwitcher.loadCalls)),
+    [{ activeBrainId: "organization-fixture", options: { allowResume: true } }],
+    "Choosing another Brain in the footer switcher must immediately unlock and load it"
   );
 }
 
@@ -533,13 +533,13 @@ for (const [inputId, buttonId] of [
   ["accessShareTargetInput", "createShareLinkButton"],
   ["accessShareExpiresAtInput", "createShareLinkButton"],
   ["accessShareLinkInput", "acceptShareLinkButton"],
-  ["vaultInviteTargetNpubInput", "createVaultInvitationButton"],
-  ["vaultInviteFoldersInput", "createVaultInvitationButton"],
-  ["vaultInviteExpiresAtInput", "createVaultInvitationButton"],
-  ["vaultInviteCodeInput", "getVaultInvitationButton"],
-  ["vaultInviteEmailInput", "getEmailInviteInstructionsButton"],
-  ["vaultInviteEmailProofCreatedAtInput", "getEmailInviteInstructionsButton"],
-  ["vaultInviteSecretInput", "getEmailInviteInstructionsButton"],
+  ["brainInviteTargetNpubInput", "createBrainInvitationButton"],
+  ["brainInviteFoldersInput", "createBrainInvitationButton"],
+  ["brainInviteExpiresAtInput", "createBrainInvitationButton"],
+  ["brainInviteCodeInput", "getBrainInvitationButton"],
+  ["brainInviteEmailInput", "getEmailInviteInstructionsButton"],
+  ["brainInviteEmailProofCreatedAtInput", "getEmailInviteInstructionsButton"],
+  ["brainInviteSecretInput", "getEmailInviteInstructionsButton"],
 ]) {
   assert.equal(
     keyboardNavigation.primaryFormActionForInput(inputId),
@@ -547,7 +547,7 @@ for (const [inputId, buttonId] of [
     `${inputId} must submit only its non-destructive primary action`
   );
 }
-for (const inputId of ["acceptVaultInvitationButton", "revokeVaultInvitationButton", "not-an-input"]) {
+for (const inputId of ["acceptBrainInvitationButton", "revokeBrainInvitationButton", "not-an-input"]) {
   assert.equal(
     keyboardNavigation.primaryFormActionForInput(inputId),
     null,
@@ -786,41 +786,41 @@ const failAccessOperationSource = source.slice(
   source.indexOf("function failAccessOperation(sessionEpoch, title, error, detail = (value) => value.message)"),
   source.indexOf("function finishAccessOperation(sessionEpoch)")
 );
-const createVaultInvitationFromPanelSource = source.slice(
-  source.indexOf("async function createVaultInvitationFromPanel()"),
-  source.indexOf("async function inspectVaultInvitationFromPanel()")
+const createBrainInvitationFromPanelSource = source.slice(
+  source.indexOf("async function createBrainInvitationFromPanel()"),
+  source.indexOf("async function inspectBrainInvitationFromPanel()")
 );
-const successfulVaultInvitationResultSource = createVaultInvitationFromPanelSource.slice(
-  createVaultInvitationFromPanelSource.indexOf('setAccessResult("ready", "Invitation created"'),
-  createVaultInvitationFromPanelSource.indexOf('log("Created Vault invitation."')
+const successfulBrainInvitationResultSource = createBrainInvitationFromPanelSource.slice(
+  createBrainInvitationFromPanelSource.indexOf('setAccessResult("ready", "Invitation created"'),
+  createBrainInvitationFromPanelSource.indexOf('log("Created Brain invitation."')
 );
-const inspectVaultInvitationFromPanelSource = source.slice(
-  source.indexOf("async function inspectVaultInvitationFromPanel()"),
+const inspectBrainInvitationFromPanelSource = source.slice(
+  source.indexOf("async function inspectBrainInvitationFromPanel()"),
   source.indexOf("async function loadEmailInviteInstructionsFromPanel()")
 );
 const loadEmailInviteInstructionsFromPanelSource = source.slice(
   source.indexOf("async function loadEmailInviteInstructionsFromPanel()"),
-  source.indexOf("async function acceptVaultInvitationFromPanel()")
+  source.indexOf("async function acceptBrainInvitationFromPanel()")
 );
-const acceptVaultInvitationFromPanelSource = source.slice(
-  source.indexOf("async function acceptVaultInvitationFromPanel()"),
-  source.indexOf("async function claimEmailVaultInvitationFromPanel(code)")
+const acceptBrainInvitationFromPanelSource = source.slice(
+  source.indexOf("async function acceptBrainInvitationFromPanel()"),
+  source.indexOf("async function claimEmailBrainInvitationFromPanel(code)")
 );
-const claimEmailVaultInvitationFromPanelSource = source.slice(
-  source.indexOf("async function claimEmailVaultInvitationFromPanel(code)"),
-  source.indexOf("async function revokeVaultInvitationFromPanel()")
+const claimEmailBrainInvitationFromPanelSource = source.slice(
+  source.indexOf("async function claimEmailBrainInvitationFromPanel(code)"),
+  source.indexOf("async function revokeBrainInvitationFromPanel()")
 );
-const revokeVaultInvitationFromPanelSource = source.slice(
-  source.indexOf("async function revokeVaultInvitationFromPanel()"),
+const revokeBrainInvitationFromPanelSource = source.slice(
+  source.indexOf("async function revokeBrainInvitationFromPanel()"),
   source.indexOf("async function prepareDraftWrite(options = {})")
 );
-const revokeVaultInvitationByIdSource = source.slice(
-  source.indexOf("async function revokeVaultInvitationById(invitationId)"),
+const revokeBrainInvitationByIdSource = source.slice(
+  source.indexOf("async function revokeBrainInvitationById(invitationId)"),
   source.indexOf("async function revokeShareLinkById(shareLinkId)")
 );
 const protectedRequestSource = source.slice(
   source.indexOf("async function protectedRequest(path, options = {})"),
-  source.indexOf("async function loadVisibleVaults()")
+  source.indexOf("async function loadVisibleBrains()")
 );
 const createFolderFromToolbarSource = source.slice(
   source.indexOf("async function createFolderFromToolbar("),
@@ -849,43 +849,43 @@ assert.match(
   "Access failures must stay in the existing access result and be suppressed before stale requests return"
 );
 assert.match(
-  createVaultInvitationFromPanelSource,
+  createBrainInvitationFromPanelSource,
   /catch \(error\) \{\s*markAccessFailureHandled\(error\);\s*if \(state\.sessionEpoch === sessionEpoch\)/s,
   "Invitation failures must be suppressed before a post-lock rethrow reaches global feedback"
 );
 for (const invitationAcceptanceSource of [
-  acceptVaultInvitationFromPanelSource,
-  claimEmailVaultInvitationFromPanelSource,
+  acceptBrainInvitationFromPanelSource,
+  claimEmailBrainInvitationFromPanelSource,
 ]) {
   assert.match(
     invitationAcceptanceSource,
-    /setActiveVaultId\(\w+\.vaultId\);\s*state\.sessionNotice\s*=[\s\S]{0,320}?\n\s*render\(\);/,
+    /setActiveBrainId\(\w+\.brainId\);\s*state\.sessionNotice\s*=[\s\S]{0,320}?\n\s*render\(\);/,
     "Accepting an invitation must render the newly locked Session and its safe unlock notice"
   );
 }
 assert.match(
   protectedRequestSource,
-  /const error = protectedRequestError\(path, response\.status, body\);\s*lockSessionForVaultAccessChange\(error, sessionEpoch\);\s*throw error;/s,
-  "Confirmed active-Vault authorization loss must lock before protected work can continue"
+  /const error = protectedRequestError\(path, response\.status, body\);\s*lockSessionForBrainAccessChange\(error, sessionEpoch\);\s*throw error;/s,
+  "Confirmed active-Brain authorization loss must lock before protected work can continue"
 );
 assert.match(
   htmlSource,
-  /id="vaultInviteUrlOutput"[^>]*hidden/,
+  /id="brainInviteUrlOutput"[^>]*hidden/,
   "The client-only invite URL output must stay hidden until an unlocked session creates it"
 );
 assert.match(
   htmlSource,
-  /id="vaultInviteUrlInput"[\s\S]{0,180}type="text"[\s\S]{0,180}readonly/,
+  /id="brainInviteUrlInput"[\s\S]{0,180}type="text"[\s\S]{0,180}readonly/,
   "A generated client-only invite URL must be readable local output rather than a masked field"
 );
 assert.match(
   htmlSource,
-  /id="copyVaultInviteUrlButton"[^>]*aria-label="Copy private invite link"/,
+  /id="copyBrainInviteUrlButton"[^>]*aria-label="Copy private invite link"/,
   "The generated invite URL must have an explicitly named copy action"
 );
 assert.match(
   htmlSource,
-  /id="vaultInviteSecretInput"[\s\S]{0,180}type="password"/,
+  /id="brainInviteSecretInput"[\s\S]{0,180}type="password"/,
   "Manually entered Invite Secrets must remain masked"
 );
 assert.match(
@@ -895,7 +895,7 @@ assert.match(
 );
 assert.match(
   source,
-  /async function copyVaultInviteUrl\(\)/,
+  /async function copyBrainInviteUrl\(\)/,
   "The client-only invite URL must have a session-gated copy action"
 );
 assert.doesNotMatch(
@@ -904,7 +904,7 @@ assert.doesNotMatch(
   "Copy actions must not write copied identifiers into client logs"
 );
 assert.doesNotMatch(
-  successfulVaultInvitationResultSource,
+  successfulBrainInvitationResultSource,
   /(?:inviteUrl|lastEmailInviteUrl)/,
   "Invitation result metadata must not repeat the client-only invite URL"
 );
@@ -1031,16 +1031,16 @@ assert.equal((htmlSource.match(/id="accessFolderButton"/g) || []).length, 1);
 assert.equal((htmlSource.match(/id="accessFolderDropdown"/g) || []).length, 1);
 assert.equal((htmlSource.match(/id="accessFolderList"/g) || []).length, 1);
 // Public Product Client shell seam: Settings exposes one Access surface and
-// delegates Vault selection/management to the dedicated Manage Vaults dialog.
+// delegates Brain selection/management to the dedicated Manage Brains dialog.
 for (const legacyMarker of [
-  "accessVaultViewButton",
-  "accessVaultPanel",
+  "accessBrainViewButton",
+  "accessBrainPanel",
   "accessFolderViewButton",
-  "vaultSwitchList",
+  "brainSwitchList",
   "accessConnectSignerButton",
-  "accessLoadVaultButton",
+  "accessLoadBrainButton",
   "accessCreateOrganizationPanel",
-  "accessOrganizationVaultNameInput",
+  "accessOrganizationBrainNameInput",
   "folderKeyInput",
   "okfDestinationFolderInput",
   "okfConflictModeInput",
@@ -1049,15 +1049,15 @@ for (const legacyMarker of [
 ]) {
   assert.doesNotMatch(htmlSource, new RegExp(`id="${legacyMarker}"`));
 }
-assert.match(htmlSource, /id="settingsManageVaultsButton"/);
-assert.match(htmlSource, />\s*Manage Vaults\s*</);
-const vaultAccessCommand = client.commandPaletteCommands().find((command) => command.id === "access");
+assert.match(htmlSource, /id="settingsManageBrainsButton"/);
+assert.match(htmlSource, />\s*Manage Brains\s*</);
+const brainAccessCommand = client.commandPaletteCommands().find((command) => command.id === "access");
 assert.deepEqual(
-  JSON.parse(JSON.stringify(vaultAccessCommand)),
+  JSON.parse(JSON.stringify(brainAccessCommand)),
   {
     id: "access",
     kind: "command",
-    label: "Vault access",
+    label: "Brain access",
     detail: "Settings",
     target: "access",
   }
@@ -1075,10 +1075,10 @@ assert.match(htmlSource, />\s*Restricted folder link\s*</);
 assert.match(htmlSource, /id="accessSidebarCount"/);
 assert.match(htmlSource, /id="accessShareHint"/);
 assert.match(htmlSource, /id="accessShareMountHint"/);
-assert.match(htmlSource, />\s*Add a shortcut to their Personal Vault\s*</);
+assert.match(htmlSource, />\s*Add a shortcut to their Personal Brain\s*</);
 assert.match(
   htmlSource,
-  /adds a shortcut to the shared Folder in their Personal Vault\. It does not copy data or change Folder access\./
+  /adds a shortcut to the shared Folder in their Personal Brain\. It does not copy data or change Folder access\./
 );
 assert.doesNotMatch(htmlSource, />\s*Create personal mount\s*</);
 assert.doesNotMatch(htmlSource, />\s*Folder \+ person\s*</);
@@ -1087,11 +1087,11 @@ assert.doesNotMatch(htmlSource, />\s*Share with link\s*</);
 assert.match(htmlSource, /placeholder="npub… or name@domain"/);
 assert.doesNotMatch(htmlSource, /id="accessShareTargetInput"[\s\S]{0,160}placeholder="name@example\.com"/);
 assert.match(htmlSource, /id="accessFolderPanel"/);
-assert.match(htmlSource, /id="vaultPeopleList"/);
-assert.match(htmlSource, /id="vaultPeopleSection"/);
+assert.match(htmlSource, /id="brainPeopleList"/);
+assert.match(htmlSource, /id="brainPeopleSection"/);
 assert.doesNotMatch(htmlSource, /agentWorkspacePairing/);
-assert.match(htmlSource, /id="vaultPeopleActionPanel"/);
-assert.match(htmlSource, /class="vault-access-action-grid"/);
+assert.match(htmlSource, /id="brainPeopleActionPanel"/);
+assert.match(htmlSource, /class="brain-access-action-grid"/);
 assert.match(htmlSource, />\s*Manage members\s*</);
 assert.match(htmlSource, />\s*Add or promote existing identities\s*</);
 assert.match(htmlSource, />\s*Invite someone\s*</);
@@ -1099,19 +1099,19 @@ assert.match(htmlSource, />\s*Email or Member Identity\s*</);
 assert.match(htmlSource, />\s*Folder access plan\s*</);
 assert.match(htmlSource, />\s*Add member now\s*</);
 assert.match(htmlSource, />\s*Make admin\s*</);
-assert.match(htmlSource, />\s*Join a Vault\s*</);
+assert.match(htmlSource, />\s*Join a Brain\s*</);
 assert.match(htmlSource, />\s*Verify email and load access\s*</);
-assert.match(htmlSource, />\s*Join Vault\s*</);
+assert.match(htmlSource, />\s*Join Brain\s*</);
 assert.doesNotMatch(htmlSource, />\s*Invite, add, or promote\s*</);
 assert.doesNotMatch(htmlSource, />\s*Accept received invite\s*</);
 assert.doesNotMatch(htmlSource, />\s*Choose folder and person\s*</);
-assert.doesNotMatch(htmlSource, />\s*Vault people\s*</);
+assert.doesNotMatch(htmlSource, />\s*Brain people\s*</);
 assert.doesNotMatch(source, /Invite, add, or promote/);
 assert.doesNotMatch(source, /Accept received invite/);
 assert.doesNotMatch(source, /Admin-only controls/);
 assert.match(source, /Member Identities or Links/);
 assert.match(htmlSource, /id="folderShareLinkListSection"/);
-assert.match(htmlSource, /id="vaultInvitationListSection"/);
+assert.match(htmlSource, /id="brainInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
 assert.doesNotMatch(source, /pairAgentWorkspace/);
 assert.match(
@@ -1119,16 +1119,16 @@ assert.match(
   /window\.addEventListener\?\.\("finite:account-session-ended", expireBrainIdentitySession\)/,
   "Account session expiry must immediately drop the Brain identity capability"
 );
-assert.match(htmlSource, /id="manageVaultCreateDetails"/);
-assert.doesNotMatch(htmlSource, /id="vaultControlDetails"/);
-assert.doesNotMatch(htmlSource, /id="vaultSelect"/);
+assert.match(htmlSource, /id="manageBrainCreateDetails"/);
+assert.doesNotMatch(htmlSource, /id="brainControlDetails"/);
+assert.doesNotMatch(htmlSource, /id="brainSelect"/);
 assert.doesNotMatch(htmlSource, /id="connectSignerButton"/);
 assert.match(htmlSource, /id="accessShareTargetInput"/);
-assert.match(htmlSource, /id="addVaultMemberButton"/);
-assert.match(htmlSource, /id="addVaultAdminButton"/);
-assert.match(htmlSource, /id="vaultInvitationPanel" class="access-vault-admin"/);
-assert.match(htmlSource, /id="vaultInvitationActionSection" class="access-admin-section vault-access-option primary settings-invitation-create"/);
-assert.doesNotMatch(htmlSource, /id="vaultInvitationPanel"[^>]*open/);
+assert.match(htmlSource, /id="addBrainMemberButton"/);
+assert.match(htmlSource, /id="addBrainAdminButton"/);
+assert.match(htmlSource, /id="brainInvitationPanel" class="access-brain-admin"/);
+assert.match(htmlSource, /id="brainInvitationActionSection" class="access-admin-section brain-access-option primary settings-invitation-create"/);
+assert.doesNotMatch(htmlSource, /id="brainInvitationPanel"[^>]*open/);
 assert.doesNotMatch(htmlSource, /id="accessChangeMode"/);
 assert.doesNotMatch(htmlSource, /id="accessManageToggle"/);
 assert.doesNotMatch(htmlSource, /id="accessManageSection"/);
@@ -1141,34 +1141,34 @@ assert.match(cssSource, /\.access-advanced-summary \.icon,\s*\.access-admin-summ
 assert.match(cssSource, /#accessAddPersonPanel\s+\.access-folder-selector\s*\{[^}]*margin:\s*0;/s);
 assert.match(cssSource, /#accessAddPersonPanel\s+\.access-advanced-content\s*\{[^}]*display:\s*grid;[^}]*gap:\s*12px;/s);
 assert.match(cssSource, /\.access-checkbox-hint\s*\{[^}]*margin:\s*-6px 0 0 23px;/s);
-assert.match(cssSource, /\.vault-management-section/);
+assert.match(cssSource, /\.brain-management-section/);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*overflow-x:\s*hidden;/s);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*--access-panel-inset:\s*10px;/s);
 assert.match(cssSource, /\.access-content-panel\s*\{[^}]*overflow-x:\s*hidden;/s);
 assert.match(cssSource, /\.access-who-has-list\s+li\s*\{[^}]*flex-wrap:\s*wrap;/s);
 assert.match(cssSource, /\.access-button-row\s*\{[^}]*display:\s*grid;/s);
-assert.doesNotMatch(cssSource, /\.vault-person-action\s*\{[^}]*min-width:\s*max-content/s);
-assert.match(cssSource, /\.vault-management-section\s+\.access-who-has-list\s+li\s*\{[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
-assert.match(cssSource, /\.vault-access-action-grid\s*\{[^}]*gap:\s*10px;/s);
-assert.match(cssSource, /#vaultPeopleActionPanel\s+\.access-inline-field\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
-assert.match(cssSource, /#vaultPeopleSection\s+\.access-person-name\s*\{[^}]*white-space:\s*normal;/s);
-assert.match(cssSource, /#vaultInvitationPanel\s+\.access-button-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
-assert.match(cssSource, /\.vault-switch-list/);
-assert.match(cssSource, /\.vault-switch-button/);
-assert.doesNotMatch(cssSource, /\.access-vault-create/);
-assert.match(cssSource, /\.vault-picker\s+\.vault-load-button/);
-assert.doesNotMatch(cssSource, /\.file-sidebar:has\(> \.vault-control-strip/);
+assert.doesNotMatch(cssSource, /\.brain-person-action\s*\{[^}]*min-width:\s*max-content/s);
+assert.match(cssSource, /\.brain-management-section\s+\.access-who-has-list\s+li\s*\{[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
+assert.match(cssSource, /\.brain-access-action-grid\s*\{[^}]*gap:\s*10px;/s);
+assert.match(cssSource, /#brainPeopleActionPanel\s+\.access-inline-field\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+assert.match(cssSource, /#brainPeopleSection\s+\.access-person-name\s*\{[^}]*white-space:\s*normal;/s);
+assert.match(cssSource, /#brainInvitationPanel\s+\.access-button-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+assert.match(cssSource, /\.brain-switch-list/);
+assert.match(cssSource, /\.brain-switch-button/);
+assert.doesNotMatch(cssSource, /\.access-brain-create/);
+assert.match(cssSource, /\.brain-picker\s+\.brain-load-button/);
+assert.doesNotMatch(cssSource, /\.file-sidebar:has\(> \.brain-control-strip/);
 assert.match(cssSource, /\.file-sidebar\s*>\s*#accessSidebarPanel\s*\{[^}]*display:\s*none;/s);
 assert.doesNotMatch(cssSource, /inset\s+2px\s+0/);
 assert.doesNotMatch(cssSource, /\.ribbon-button\.active::before/);
 assert.doesNotMatch(cssSource, /\.folder-dropdown\s*\{[^}]*position:\s*absolute/s);
 assert.match(cssSource, /\.folder-option-button/);
 assert.doesNotMatch(cssSource, /\.folder-dropdown-list\s+\.obsidian-folder-button/);
-assert.equal(client.hasOrganizationVaultControls({ kind: "personal" }), false);
-assert.equal(client.hasOrganizationVaultControls({ kind: "organization" }), true);
+assert.equal(client.hasOrganizationBrainControls({ kind: "personal" }), false);
+assert.equal(client.hasOrganizationBrainControls({ kind: "organization" }), true);
 assert.equal(client.showsCreateOrganizationControl({ kind: "personal" }), true);
 assert.equal(client.showsCreateOrganizationControl({ kind: "organization" }), false);
-const unresolvedOrgPeopleRows = client.vaultPeopleRows({
+const unresolvedOrgPeopleRows = client.brainPeopleRows({
   kind: "organization",
   members: ["npub-admin", "npub-member"],
   admins: ["npub-admin"],
@@ -1208,7 +1208,7 @@ assert.equal(
     { label: "Public key", value: "npub-admin" },
   ])
 );
-const unresolvedOwnerRows = client.vaultPeopleRows({
+const unresolvedOwnerRows = client.brainPeopleRows({
   kind: "personal",
   ownerUserId: "npub-owner",
 });
@@ -1233,7 +1233,7 @@ assert.equal(
   ])
 );
 assert.equal(
-  JSON.stringify(client.vaultHealthBadges(
+  JSON.stringify(client.brainHealthBadges(
     {
       kind: "organization",
       folders: [{ id: "getting-started" }],
@@ -1244,10 +1244,10 @@ assert.equal(
   ).map((badge) => badge.label)),
   JSON.stringify(["signer connected", "organization", "1 folders", "2 grants", "1 mounts"])
 );
-assert.equal(client.personalVaultIdForPubkey("ab".repeat(32)), "personal-abababababababab");
+assert.equal(client.personalBrainIdForPubkey("ab".repeat(32)), "personal-abababababababab");
 assert.equal(
-  client.normalizeVisibleVault({
-    vaultId: "acme",
+  client.normalizeVisibleBrain({
+    brainId: "acme",
     kind: "organization",
     name: "Acme",
     role: "invited",
@@ -1256,10 +1256,10 @@ assert.equal(
   "invite-acme"
 );
 assert.equal(
-  JSON.stringify(client.visibleVaultOptions([
-    { vaultId: "acme", kind: "organization", name: "Acme", role: "admin" },
-    { vaultId: "personal-ab", kind: "personal", name: "Personal vault", role: "owner" },
-  ]).map((vault) => [vault.vaultId, vault.kind, vault.role])),
+  JSON.stringify(client.visibleBrainOptions([
+    { brainId: "acme", kind: "organization", name: "Acme", role: "admin" },
+    { brainId: "personal-ab", kind: "personal", name: "Personal brain", role: "owner" },
+  ]).map((brain) => [brain.brainId, brain.kind, brain.role])),
   JSON.stringify([
     ["personal-ab", "personal", "owner"],
     ["acme", "organization", "admin"],
@@ -1280,11 +1280,11 @@ assert.equal(draftPages[0].status, "ready");
 assert.equal(client.readerPageRows("general", draftPages)[0].label, "Draft Page");
 
 const sessionKeyring = client.createSessionKeyring();
-sessionKeyring.keys.set("vault:general:1", { rawKey: "raw-folder-key-sentinel" });
+sessionKeyring.keys.set("brain:general:1", { rawKey: "raw-folder-key-sentinel" });
 sessionKeyring.openedGrants.push({
   folderId: "general",
   keyVersion: 1,
-  vaultId: "vault",
+  brainId: "brain",
 });
 const sessionProjection = client.createClientProjection();
 sessionProjection.pages.set("general/page", {
@@ -1308,13 +1308,13 @@ const sessionState = {
   lastEmailInvitePostProof: { invitedEmail: "invitee@example.com" },
   lastEmailInviteSecret: "invite-secret-sentinel",
   lastEmailInviteUrl: "https://finite.test/#inviteSecret=invite-secret-sentinel",
-  metadata: { name: "private-vault-sentinel" },
+  metadata: { name: "private-brain-sentinel" },
   preparedWrite: { envelopeJson: "encrypted-write", plaintext: "prepared-plaintext-sentinel" },
   preparedWriteTarget: { folderId: "general", objectId: "draft" },
   projection: sessionProjection,
   sessionStatus: "unlocked",
   signerStatus: "connected",
-  vaultInvitations: [{ invitedEmail: "invitee@example.com" }],
+  brainInvitations: [{ invitedEmail: "invitee@example.com" }],
 };
 client.clearSessionSecretsAndPlaintext(sessionState);
 assert.equal(sessionState.sessionStatus, "locked");
@@ -1331,7 +1331,7 @@ assert.equal(sessionState.preparedWriteTarget, null);
 assert.equal(sessionState.identityByNpub.size, 0);
 assert.equal(sessionState.accessResult, null);
 assert.equal(sessionState.clientActionFeedback, null);
-assert.equal(sessionState.vaultInvitations, null);
+assert.equal(sessionState.brainInvitations, null);
 assert.equal(sessionState.folderShareLinks, null);
 assert.equal(sessionState.lastEmailInviteSecret, null);
 assert.equal(sessionState.lastEmailInviteUrl, null);
@@ -1391,16 +1391,16 @@ async function assertClipboardInvitationFeedbackContracts() {
   clipboardFeedbackState.lastEmailInviteSecret = "invite-secret-fixture-sentinel";
   clipboardFeedbackState.lastEmailInviteUrl =
     "https://finite.test/client#inviteSecret=invite-secret-fixture-sentinel";
-  const inviteUrlInput = clipboardFeedback.context.document.getElementById("vaultInviteUrlInput");
-  const inviteUrlOutput = clipboardFeedback.context.document.getElementById("vaultInviteUrlOutput");
-  const copyInviteUrlButton = clipboardFeedback.context.document.getElementById("copyVaultInviteUrlButton");
-  const inviteSecretInput = clipboardFeedback.context.document.getElementById("vaultInviteSecretInput");
+  const inviteUrlInput = clipboardFeedback.context.document.getElementById("brainInviteUrlInput");
+  const inviteUrlOutput = clipboardFeedback.context.document.getElementById("brainInviteUrlOutput");
+  const copyInviteUrlButton = clipboardFeedback.context.document.getElementById("copyBrainInviteUrlButton");
+  const inviteSecretInput = clipboardFeedback.context.document.getElementById("brainInviteSecretInput");
   inviteSecretInput.value = "invite-secret-fixture-sentinel";
-  clipboardFeedback.seams.renderVaultInvitationPanel();
+  clipboardFeedback.seams.renderBrainInvitationPanel();
   assert.equal(inviteUrlOutput.hidden, false);
   assert.equal(inviteUrlInput.value, clipboardFeedbackState.lastEmailInviteUrl);
   assert.equal(copyInviteUrlButton.disabled, false);
-  assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), true);
+  assert.equal(await clipboardFeedback.seams.copyBrainInviteUrl(), true);
   assert.equal(copiedValues.at(-1), clipboardFeedbackState.lastEmailInviteUrl);
   assert.equal(clipboardFeedbackElement.textContent, "Private invite link copied.");
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
@@ -1419,7 +1419,7 @@ async function assertClipboardInvitationFeedbackContracts() {
     false
   );
   assert.equal(copiedValues.length, copiedBeforeLockedPageAttempt);
-  assert.equal(await clipboardFeedback.seams.copyVaultInviteUrl(), false);
+  assert.equal(await clipboardFeedback.seams.copyBrainInviteUrl(), false);
   assert.equal(clipboardFeedbackElement.textContent, "Could not copy private invite link. Try again.");
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /invite-secret-fixture-sentinel/);
   assert.equal(
@@ -1562,55 +1562,55 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.doesNotMatch(newerActionElement.textContent, /(?:copy-before-newer-action|newer-action-detail)-sentinel/);
 }
 
-function assertNestedManageVaultReturnContract() {
+function assertNestedManageBrainReturnContract() {
   const nestedManage = clipboardInvitationFeedbackTestSeams({});
   const nestedState = nestedManage.seams.state;
   const settingsTrigger = nestedManage.context.document.getElementById("sessionSettingsButton");
   const closeSettingsButton = nestedManage.context.document.getElementById("closeSettingsButton");
   const resumeButton = nestedManage.context.document.getElementById("resumeSessionButton");
   nestedManage.context.document.activeElement = settingsTrigger;
-  nestedState.activeVaultId = "personal";
+  nestedState.activeBrainId = "personal";
   nestedState.settingsModalOpen = true;
-  nestedState.settingsSection = "vault";
+  nestedState.settingsSection = "brain";
   nestedState.settingsModalPreviousFocus = settingsTrigger;
 
-  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
+  nestedManage.seams.openManageBrainsModal({ returnToSettings: true });
   assert.equal(nestedState.settingsModalOpen, false);
-  assert.equal(nestedState.manageVaultsModalOpen, true);
-  assert.equal(nestedState.manageVaultsReturnToSettings?.section, "vault");
+  assert.equal(nestedState.manageBrainsModalOpen, true);
+  assert.equal(nestedState.manageBrainsReturnToSettings?.section, "brain");
 
-  nestedManage.seams.setActiveVaultId("organization-fixture");
+  nestedManage.seams.setActiveBrainId("organization-fixture");
   assert.equal(nestedState.sessionStatus, "locked");
-  assert.equal(nestedState.manageVaultsReturnToSettings?.section, "vault");
-  nestedManage.seams.closeManageVaultsModal();
+  assert.equal(nestedState.manageBrainsReturnToSettings?.section, "brain");
+  nestedManage.seams.closeManageBrainsModal();
   assert.equal(nestedState.settingsModalOpen, true);
   assert.equal(
     nestedState.settingsSection,
     "session",
-    "A nested Manage Vaults return after Session Lock must reopen only the safe Session section"
+    "A nested Manage Brains return after Session Lock must reopen only the safe Session section"
   );
   assert.equal(
     nestedManage.context.document.activeElement,
     closeSettingsButton,
-    "A locked nested return without an available signer must focus the visible Settings close action rather than hidden Vault controls"
+    "A locked nested return without an available signer must focus the visible Settings close action rather than hidden Brain controls"
   );
   assert.equal(resumeButton.disabled, true);
 
-  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
-  nestedManage.seams.resetVaultSessionState();
+  nestedManage.seams.openManageBrainsModal({ returnToSettings: true });
+  nestedManage.seams.resetBrainSessionState();
   assert.equal(
-    nestedState.manageVaultsReturnToSettings?.section,
-    "vault",
-    "An unlock/reset failure started from nested Manage Vaults must retain its non-secret return token"
+    nestedState.manageBrainsReturnToSettings?.section,
+    "brain",
+    "An unlock/reset failure started from nested Manage Brains must retain its non-secret return token"
   );
-  nestedManage.seams.closeManageVaultsModal();
+  nestedManage.seams.closeManageBrainsModal();
   assert.equal(nestedState.settingsModalOpen, true);
   assert.equal(nestedState.settingsSection, "session");
 
-  nestedManage.seams.openManageVaultsModal({ returnToSettings: true });
+  nestedManage.seams.openManageBrainsModal({ returnToSettings: true });
   nestedManage.seams.lockSession();
   assert.equal(
-    nestedState.manageVaultsReturnToSettings,
+    nestedState.manageBrainsReturnToSettings,
     null,
     "A real Session Lock must discard the nested Manage return token"
   );
@@ -1644,7 +1644,7 @@ function assertModalFocusAndContextRouteContracts() {
   assert.equal(settingsFocusables.length, 1, "Settings modal focus trapping must ignore roving Folder options");
   assert.equal(settingsFocusables[0], settingsButton);
   const documentFocusables = modalFocus.seams.documentFocusableElements();
-  assert.equal(documentFocusables.length, 1, "Directional Vault switcher focus must ignore non-sequential roving options");
+  assert.equal(documentFocusables.length, 1, "Directional Brain switcher focus must ignore non-sequential roving options");
   assert.equal(documentFocusables[0], settingsButton);
 
   modalState.commandPaletteOpen = true;
@@ -1806,40 +1806,40 @@ assert.equal(
     title: "Unlocking session",
   })
 );
-const activeVaultAccessLoss = client.protectedRequestError(
-  "/_admin/vaults/acme/metadata",
+const activeBrainAccessLoss = client.protectedRequestError(
+  "/_admin/brains/acme/metadata",
   403,
-  { error: "vault access required" }
+  { error: "brain access required" }
 );
-assert.equal(activeVaultAccessLoss.status, 403);
-assert.equal(activeVaultAccessLoss.reason, "vault access required");
-assert.equal(activeVaultAccessLoss.path, "/_admin/vaults/acme/metadata");
+assert.equal(activeBrainAccessLoss.status, 403);
+assert.equal(activeBrainAccessLoss.reason, "brain access required");
+assert.equal(activeBrainAccessLoss.path, "/_admin/brains/acme/metadata");
 for (const path of [
-  "/_admin/vaults/acme/metadata",
-  "/_admin/vaults/acme/export",
-  "/_admin/vaults/acme/sync/bootstrap",
+  "/_admin/brains/acme/metadata",
+  "/_admin/brains/acme/export",
+  "/_admin/brains/acme/sync/bootstrap",
 ]) {
   assert.equal(
-    client.isActiveVaultAuthorizationLoss(
-      client.protectedRequestError(path, 403, { error: "vault access required" }),
+    client.isActiveBrainAuthorizationLoss(
+      client.protectedRequestError(path, 403, { error: "brain access required" }),
       "acme"
     ),
     true,
-    `A confirmed membership loss must lock for the active Vault state read ${path}`
+    `A confirmed membership loss must lock for the active Brain state read ${path}`
   );
 }
 for (const [status, reason, path] of [
-  [401, "vault access required", "/_admin/vaults/acme/metadata"],
-  [403, "replayed Nostr authorization event", "/_admin/vaults/acme/metadata"],
-  [403, "stale Nostr event timestamp", "/_admin/vaults/acme/metadata"],
-  [403, "vault admin access required", "/_admin/vaults/acme/invitations"],
-  [403, "folder access required", "/_admin/vaults/acme/folders/restricted/objects/page"],
-  [403, "vault access required", "/_admin/vaults/other/metadata"],
+  [401, "brain access required", "/_admin/brains/acme/metadata"],
+  [403, "replayed Nostr authorization event", "/_admin/brains/acme/metadata"],
+  [403, "stale Nostr event timestamp", "/_admin/brains/acme/metadata"],
+  [403, "brain admin access required", "/_admin/brains/acme/invitations"],
+  [403, "folder access required", "/_admin/brains/acme/folders/restricted/objects/page"],
+  [403, "brain access required", "/_admin/brains/other/metadata"],
 ]) {
   assert.equal(
-    client.isActiveVaultAuthorizationLoss(client.protectedRequestError(path, status, { error: reason }), "acme"),
+    client.isActiveBrainAuthorizationLoss(client.protectedRequestError(path, status, { error: reason }), "acme"),
     false,
-    `Only a confirmed active-Vault membership loss may lock the session (${status} ${reason} ${path})`
+    `Only a confirmed active-Brain membership loss may lock the session (${status} ${reason} ${path})`
   );
 }
 assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
@@ -1882,30 +1882,30 @@ assert.match(
 );
 assert.match(
   htmlSource,
-  /<header class="vault-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">[\s\S]*?id="ribbonFilesButton"[\s\S]*?id="ribbonGraphButton"[\s\S]*?id="ribbonSearchButton"[\s\S]*?id="ribbonCommandButton"[\s\S]*?id="ribbonAccessButton"[\s\S]*?<\/nav>/,
+  /<header class="brain-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">[\s\S]*?id="ribbonFilesButton"[\s\S]*?id="ribbonGraphButton"[\s\S]*?id="ribbonSearchButton"[\s\S]*?id="ribbonCommandButton"[\s\S]*?id="ribbonAccessButton"[\s\S]*?<\/nav>/,
   "Primary navigation must live with the File sidebar heading"
 );
 assert.doesNotMatch(htmlSource, /app-ribbon/, "The Product Client must not retain a second left navigation rail");
 assert.match(cssSource, /\.sidebar-primary-nav\s*\{[\s\S]*?display:\s*flex;/);
 assert.doesNotMatch(cssSource, /\.app-ribbon\s*\{/, "The Product Client CSS must remove the legacy rail");
 assert.doesNotMatch(source, /window\.alert/);
-assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-haspopup="menu"/);
-assert.match(htmlSource, /id="sessionAccountVaultButton"[^>]*aria-controls="vaultSwitcherMenu"/);
-assert.match(htmlSource, /id="vaultSwitcherMenu"[^>]*role="menu"/);
-assert.match(htmlSource, /id="vaultSwitcherList"/);
-assert.match(htmlSource, /id="manageVaultsButton"/);
-assert.match(source, /sessionAccountVaultButton[\s\S]{0,120}openVaultSwitcher\(\)/);
-assert.doesNotMatch(source, /sessionAccountVaultButton[\s\S]{0,180}openSettingsModal\("vault"\)/);
-assert.match(htmlSource, /id="manageVaultsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
-assert.match(htmlSource, /id="manageVaultsList"/);
-assert.match(htmlSource, /id="manageVaultsLoadButton"/);
-assert.match(htmlSource, /id="manageVaultsLoadButton"[^>]*>Unlock Vault</);
-assert.doesNotMatch(htmlSource, /id="accessLoadVaultButton"/);
-assert.match(htmlSource, /id="manageVaultsConnectSignerButton"/);
-assert.match(htmlSource, /id="manageCreateOrganizationVaultButton"/);
-assert.match(source, /manageVaultsButton[\s\S]{0,120}openManageVaultsModal\(\)/);
-assert.match(source, /manageVaultsLoadButton[\s\S]{0,120}manageVaultsLoadAction\(\)/);
-assert.doesNotMatch(source, /accessLoadVaultButton/);
+assert.match(htmlSource, /id="sessionAccountBrainButton"[^>]*aria-haspopup="menu"/);
+assert.match(htmlSource, /id="sessionAccountBrainButton"[^>]*aria-controls="brainSwitcherMenu"/);
+assert.match(htmlSource, /id="brainSwitcherMenu"[^>]*role="menu"/);
+assert.match(htmlSource, /id="brainSwitcherList"/);
+assert.match(htmlSource, /id="manageBrainsButton"/);
+assert.match(source, /sessionAccountBrainButton[\s\S]{0,120}openBrainSwitcher\(\)/);
+assert.doesNotMatch(source, /sessionAccountBrainButton[\s\S]{0,180}openSettingsModal\("brain"\)/);
+assert.match(htmlSource, /id="manageBrainsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
+assert.match(htmlSource, /id="manageBrainsList"/);
+assert.match(htmlSource, /id="manageBrainsLoadButton"/);
+assert.match(htmlSource, /id="manageBrainsLoadButton"[^>]*>Unlock Brain</);
+assert.doesNotMatch(htmlSource, /id="accessLoadBrainButton"/);
+assert.match(htmlSource, /id="manageBrainsConnectSignerButton"/);
+assert.match(htmlSource, /id="manageCreateOrganizationBrainButton"/);
+assert.match(source, /manageBrainsButton[\s\S]{0,120}openManageBrainsModal\(\)/);
+assert.match(source, /manageBrainsLoadButton[\s\S]{0,120}manageBrainsLoadAction\(\)/);
+assert.doesNotMatch(source, /accessLoadBrainButton/);
 assert.match(htmlSource, /id="sessionSettingsButton"[^>]*aria-haspopup="dialog"/);
 assert.match(
   htmlSource,
@@ -1914,19 +1914,19 @@ assert.match(
 assert.match(htmlSource, /id="settingsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
 assert.match(htmlSource, /id="settingsModalLayout"/);
 assert.match(htmlSource, /id="settingsNavSession"[^>]*role="tab"/);
-assert.match(htmlSource, /id="settingsNavVault"[^>]*role="tab"/);
+assert.match(htmlSource, /id="settingsNavBrain"[^>]*role="tab"/);
 assert.match(htmlSource, /id="settingsNavAccess"[^>]*role="tab"[^>]*aria-controls="settingsAccessPanel"/);
 assert.match(htmlSource, /id="settingsNavInvitations"[^>]*role="tab"[^>]*aria-controls="settingsInvitationsPanel"/);
 assert.match(htmlSource, /id="settingsSessionPanel"[^>]*role="tabpanel"[^>]*aria-labelledby="settingsSessionTitle"/);
 assert.match(htmlSource, /id="settingsSessionTitle"[^>]*>Session and signer</);
-assert.match(htmlSource, /id="settingsVaultPanel"[^>]*role="tabpanel"/);
+assert.match(htmlSource, /id="settingsBrainPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsAccessPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsAccessPanelMount"/);
 assert.match(htmlSource, /id="settingsInvitationsPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsInvitationsPanelMount"/);
 const settingsModalMarkup = htmlSource.slice(
   htmlSource.indexOf('id="settingsModal"'),
-  htmlSource.indexOf('id="manageVaultsModal"')
+  htmlSource.indexOf('id="manageBrainsModal"')
 );
 const accessSidebarMarkup = htmlSource.slice(
   htmlSource.indexOf('id="accessSidebarPanel"'),
@@ -1947,14 +1947,14 @@ assert.match(htmlSource, /id="settingsSignerTitle"/);
 assert.match(htmlSource, /id="settingsSignerDetail"/);
 assert.match(
   htmlSource,
-  /The server cannot reconstruct a lost Folder Key or sole signer\. Treat a Vault as durable only after a separate recovery path has reopened it on a replacement client\./,
+  /The server cannot reconstruct a lost Folder Key or sole signer\. Treat a Brain as durable only after a separate recovery path has reopened it on a replacement client\./,
   "Settings must disclose the current recovery limitation without inventing a recovery control"
 );
-assert.match(htmlSource, /id="settingsManageVaultsButton"/);
+assert.match(htmlSource, /id="settingsManageBrainsButton"/);
 assert.doesNotMatch(
-  htmlSource.slice(htmlSource.indexOf('id="settingsVaultPanel"'), htmlSource.indexOf('id="settingsAccessPanel"')),
+  htmlSource.slice(htmlSource.indexOf('id="settingsBrainPanel"'), htmlSource.indexOf('id="settingsAccessPanel"')),
   /id="settingsConnectSignerButton"/,
-  "Signer connection must live in Session rather than a duplicate Vault action"
+  "Signer connection must live in Session rather than a duplicate Brain action"
 );
 assert.match(source, /openSettingsModal\("session"\)/);
 assert.match(source, /settingsNavAccess[\s\S]{0,120}setSettingsSection\("access"\)/);
@@ -1969,12 +1969,12 @@ assert.match(source, /function settingsSectionsForSession\(sessionStatus = state
 assert.match(source, /settingsNav\.hidden = sessionOnly;/);
 assert.match(source, /panel\.hidden = false;[\s\S]{0,120}panel\.open = true;/);
 assert.match(
-  createVaultInvitationFromPanelSource,
+  createBrainInvitationFromPanelSource,
   /They can claim the encrypted Folder Key Grants in the invitation scope after proving the invited email\.[\s\S]{0,260}They can join with this one-time invite; grant any required Folder Keys after they join\./s,
   "Invitation creation must distinguish email grant claim from direct Member Identity membership"
 );
 assert.match(
-  acceptVaultInvitationFromPanelSource,
+  acceptBrainInvitationFromPanelSource,
   /An admin must grant any required Folder Keys before encrypted content can open\./,
   "Direct invitation acceptance must not promise Folder Keys"
 );
@@ -1987,9 +1987,9 @@ assert.match(source, /ribbonAccessButton[\s\S]{0,120}openSettingsModal\("access"
 assert.match(source, /row\.target === "access"[\s\S]{0,100}openSettingsModal\("access"\)/);
 assert.match(
   source,
-  /settingsManageVaultsButton[\s\S]{0,120}openManageVaultsModal\(\{ returnToSettings: true \}\)/
+  /settingsManageBrainsButton[\s\S]{0,120}openManageBrainsModal\(\{ returnToSettings: true \}\)/
 );
-assert.match(source, /closeManageVaultsModal\(\)[\s\S]{0,500}state\.settingsModalOpen = true;/);
+assert.match(source, /closeManageBrainsModal\(\)[\s\S]{0,500}state\.settingsModalOpen = true;/);
 assert.doesNotMatch(source, /\$\("accessSidebarPanel"\)\.hidden = mode !== "access"/);
 assert.match(source, /state\.settingsModalOpen && state\.settingsSection === "access"[\s\S]{0,100}refreshAccessManagementListsInBackground\(\)/);
 assert.match(source, /closeSettingsModal\(\)/);
@@ -2079,33 +2079,33 @@ assert.equal(client.sessionGrantOpeningAllowed("locked"), false);
 assert.equal(client.sessionGrantOpeningAllowed("resuming"), true);
 assert.equal(client.sessionGrantOpeningAllowed("unlocked"), true);
 assert.equal(
-  JSON.stringify(client.lockedVaultSelection("locked", "org-acme", [])),
-  JSON.stringify({ label: "Selected Vault (locked)", value: "org-acme" })
+  JSON.stringify(client.lockedBrainSelection("locked", "org-acme", [])),
+  JSON.stringify({ label: "Selected Brain (locked)", value: "org-acme" })
 );
-assert.equal(client.lockedVaultSelection("unlocked", "org-acme", []), null);
-assert.equal(client.lockedVaultSelection("locked", "org-acme", [{ vaultId: "org-acme" }]), null);
+assert.equal(client.lockedBrainSelection("unlocked", "org-acme", []), null);
+assert.equal(client.lockedBrainSelection("locked", "org-acme", [{ brainId: "org-acme" }]), null);
 assert.equal(
-  client.missingVisibleVaultFallback(
+  client.missingVisibleBrainFallback(
     "unlocked",
     "org-acme",
-    [{ vaultId: "personal-a", kind: "personal" }],
+    [{ brainId: "personal-a", kind: "personal" }],
     "aa".repeat(32),
     "personal"
   ),
   "personal-a"
 );
 assert.equal(
-  client.missingVisibleVaultFallback(
+  client.missingVisibleBrainFallback(
     "locked",
     "org-acme",
-    [{ vaultId: "personal-a", kind: "personal" }],
+    [{ brainId: "personal-a", kind: "personal" }],
     "aa".repeat(32),
     "personal"
   ),
   null
 );
 assert.equal(
-  client.missingVisibleVaultFallback(
+  client.missingVisibleBrainFallback(
     "unlocked",
     "personal-aaaaaaaaaaaaaaaa",
     [],
@@ -2115,10 +2115,10 @@ assert.equal(
   null
 );
 assert.equal(
-  client.missingVisibleVaultFallback(
+  client.missingVisibleBrainFallback(
     "resuming",
     "personal-aaaaaaaaaaaaaaaa",
-    [{ vaultId: "org-testr-mr9bmjs", kind: "organization" }],
+    [{ brainId: "org-testr-mr9bmjs", kind: "organization" }],
     "aa".repeat(32),
     "personal"
   ),
@@ -2140,12 +2140,12 @@ assert.equal(client.sessionOperationIsCurrent(4, 4, "unlocked"), true);
 assert.equal(client.sessionOperationIsCurrent(5, 4, "unlocked"), false);
 assert.equal(client.sessionOperationIsCurrent(4, 4, "locked"), false);
 const originalKeyring = client.createSessionKeyring();
-originalKeyring.keys.set("vault/folder@1", "key-sentinel");
+originalKeyring.keys.set("brain/folder@1", "key-sentinel");
 originalKeyring.openedGrants.push({ id: "grant-sentinel" });
 const clonedKeyring = client.cloneSessionKeyring(originalKeyring);
 originalKeyring.keys.clear();
 originalKeyring.openedGrants.length = 0;
-assert.equal(clonedKeyring.keys.get("vault/folder@1"), "key-sentinel");
+assert.equal(clonedKeyring.keys.get("brain/folder@1"), "key-sentinel");
 assert.equal(clonedKeyring.openedGrants[0].id, "grant-sentinel");
 assert.deepEqual(
   JSON.parse(JSON.stringify(client.inviteNavigationFromHash("#invite&code=invite-1&email=MEMBER%40Example.com&inviteSecret=secret-1"))),
@@ -2175,7 +2175,7 @@ context.window.history = {};
 assert.equal(client.populateInviteFromHash(), false);
 assert.equal(inviteFallbackUrl, "/client");
 assert.equal(client.applyPendingInviteNavigation(), false);
-assert.equal(context.document.getElementById("vaultInviteSecretInput").value, "");
+assert.equal(context.document.getElementById("brainInviteSecretInput").value, "");
 inviteFallbackUrl = null;
 context.window.location.hash =
   "#invite&inviteCode=invite-rejected-history&inviteSecret=second-secret-must-not-import";
@@ -2189,17 +2189,17 @@ context.window.history = {
 assert.equal(client.populateInviteFromHash(), false);
 assert.equal(inviteFallbackUrl, "/client");
 assert.equal(client.applyPendingInviteNavigation(), false);
-assert.equal(context.document.getElementById("vaultInviteSecretInput").value, "");
+assert.equal(context.document.getElementById("brainInviteSecretInput").value, "");
 context.window.location = originalWindowLocation;
 context.window.history = originalWindowHistory;
-assert.match(source, /return loadVaultReader\(\{ allowResume: true \}\);/);
+assert.match(source, /return loadBrainReader\(\{ allowResume: true \}\);/);
 assert.match(source, /window\.addEventListener\?\.\("pagehide", handlePageHide\)/);
 assert.match(source, /window\.addEventListener\?\.\("pageshow", handlePageShow\)/);
 assert.match(source, /openFolderKeyGrants\(keyring, exported, expectedRecipient, \{[\s\S]{0,120}assertCurrent/);
 assert.match(source, /state\.sessionStatus = SESSION_STATUS\.UNLOCKED;[\s\S]{0,160}applyPendingInviteNavigation\(\)/);
 assert.doesNotMatch(
   source,
-  /\b(?:accessManageToggle|connectSignerButton|loadVaultButton|createOrganizationVaultButton|organizationVaultNameInput)\b/
+  /\b(?:accessManageToggle|connectSignerButton|loadBrainButton|createOrganizationBrainButton|organizationBrainNameInput)\b/
 );
 for (const [surface, pattern] of [
   ["localStorage", /\blocalStorage\b/],
@@ -2222,7 +2222,7 @@ assert.match(source, /SESSION_PLAINTEXT_INPUT_IDS/);
 assert.doesNotMatch(source, /"folderKeyInput"/);
 assert.doesNotMatch(source, /"okfBundleInput"/);
 assert.match(source, /"pageDraftInput"/);
-assert.match(source, /"vaultInviteSecretInput"/);
+assert.match(source, /"brainInviteSecretInput"/);
 assert.match(
   htmlSource,
   /id="commandPaletteInput"[\s\S]{0,260}role="combobox"[\s\S]{0,260}aria-controls="commandPaletteList"[\s\S]{0,260}aria-expanded="false"/,
@@ -2270,19 +2270,19 @@ assert.match(
   /closeAccessFolderDropdown\(\);\s*selectAccessFolder\(folderId\);\s*\$\("accessFolderButton"\)\?\.focus\?\.\(\);/,
   "Selecting a Folder must return focus to the selector trigger after its list rerenders"
 );
-const vaultSwitcherKeyboardSource = source.slice(
-  source.lastIndexOf("if (state.vaultSwitcherOpen) {"),
-  source.indexOf("if (state.settingsModalOpen) {", source.lastIndexOf("if (state.vaultSwitcherOpen) {"))
+const brainSwitcherKeyboardSource = source.slice(
+  source.lastIndexOf("if (state.brainSwitcherOpen) {"),
+  source.indexOf("if (state.settingsModalOpen) {", source.lastIndexOf("if (state.brainSwitcherOpen) {"))
 );
-assert.doesNotMatch(vaultSwitcherKeyboardSource, /event\.key === "Escape" \|\| event\.key === "Tab"/);
+assert.doesNotMatch(brainSwitcherKeyboardSource, /event\.key === "Escape" \|\| event\.key === "Tab"/);
 assert.match(
-  vaultSwitcherKeyboardSource,
-  /if \(event\.key === "Tab"\) \{\s*event\.preventDefault\(\);\s*moveVaultSwitcherFocusOut\(\{ backwards: event\.shiftKey \}\);/s,
-  "Vault switcher Tab must leave in its direction instead of behaving like Escape"
+  brainSwitcherKeyboardSource,
+  /if \(event\.key === "Tab"\) \{\s*event\.preventDefault\(\);\s*moveBrainSwitcherFocusOut\(\{ backwards: event\.shiftKey \}\);/s,
+  "Brain switcher Tab must leave in its direction instead of behaving like Escape"
 );
 assert.doesNotMatch(
   source.slice(source.indexOf("function primaryFormActionForInput"), source.indexOf("function shouldRunPrimaryFormAction")),
-  /(?:acceptVaultInvitationButton|revokeVaultInvitationButton)/,
+  /(?:acceptBrainInvitationButton|revokeBrainInvitationButton)/,
   "Invitation acceptance and revocation must remain explicit actions"
 );
 
@@ -2645,14 +2645,14 @@ assert.equal(
   const personalOwnerNpub = client.npubFromHex("33".repeat(32));
   const personalMemberNpub = client.npubFromHex("44".repeat(32));
   assert.equal(
-    client.metadataVaultRole(
+    client.metadataBrainRole(
       { kind: "personal", ownerUserId: personalOwnerNpub },
       personalOwnerNpub
     ),
     "owner"
   );
   assert.equal(
-    client.metadataVaultRole(
+    client.metadataBrainRole(
       { kind: "personal", ownerUserId: personalOwnerNpub },
       personalMemberNpub
     ),
@@ -2790,7 +2790,7 @@ assert.equal(
   });
   client.configureBrainIdentityProvider(checkingHostedBrainIdentityProvider);
   const connectedHostedIdentity = await client.connectBrainIdentityProvider({
-    loadVisibleVaults: false,
+    loadVisibleBrains: false,
   });
   assert.equal(connectedHostedIdentity.publicKeyHex, "77".repeat(32));
   assert.deepEqual(hostedProbeCalls, ["identifyMember"]);
@@ -2801,7 +2801,7 @@ assert.equal(
   assert.deepEqual(
     await hostedBrainIdentityProvider.openGrantPayload({
       purpose: "folder-key-grant",
-      vaultId: "personal",
+      brainId: "personal",
       folderId: "restricted",
       keyVersion: 1,
       recipientNpub: client.npubFromHex("66".repeat(32)),
@@ -2812,7 +2812,7 @@ assert.equal(
   assert.deepEqual(
     await hostedBrainIdentityProvider.wrapGrantPayload({
       purpose: "folder-key-grant",
-      vaultId: "personal",
+      brainId: "personal",
       folderId: "restricted",
       keyVersion: 1,
       recipientNpub: client.npubFromHex("66".repeat(32)),
@@ -2859,7 +2859,7 @@ assert.equal(
     "ready"
   );
   const connectedBrainIdentity = await client.connectBrainIdentityProvider({
-    loadVisibleVaults: false,
+    loadVisibleBrains: false,
   });
   assert.equal(connectedBrainIdentity.publicKeyHex, "11".repeat(32));
   assert.match(connectedBrainIdentity.npub, /^npub1/);
@@ -2893,13 +2893,13 @@ assert.equal(
     () =>
       brainIdentityProvider.authorizeHttpRequest({
         method: "GET",
-        url: "http://attacker.test/_admin/vaults",
+        url: "http://attacker.test/_admin/brains",
         bodyText: "",
         eventTemplate: {
           kind: 27235,
           created_at: 1,
           tags: [
-            ["u", "http://attacker.test/_admin/vaults"],
+            ["u", "http://attacker.test/_admin/brains"],
             ["method", "GET"],
             ["nonce", "ab".repeat(16)],
           ],
@@ -2912,13 +2912,13 @@ assert.equal(
     () =>
       brainIdentityProvider.authorizeHttpRequest({
         method: "GET",
-        url: "http://finite.test/_admin/vaults",
+        url: "http://finite.test/_admin/brains",
         bodyText: "",
         eventTemplate: {
           kind: 27235,
           created_at: 1,
           tags: [
-            ["u", "http://attacker.test/_admin/vaults"],
+            ["u", "http://attacker.test/_admin/brains"],
             ["method", "GET"],
             ["nonce", "ab".repeat(16)],
           ],
@@ -2930,7 +2930,7 @@ assert.equal(
   const brainAuthHeader = await client.buildBrainAuthorizationHeader(
     brainIdentityProvider,
     { authScheme: "Nostr", publicBaseUrl: "http://finite.test" },
-    "/_admin/vaults",
+    "/_admin/brains",
     { method: "GET" }
   );
   assert.match(brainAuthHeader, /^Nostr /);
@@ -2945,15 +2945,15 @@ assert.equal(
   await assert.rejects(
     () =>
       brainIdentityProvider.authorizeBrainEvent({
-        intent: "vault-access-change",
+        intent: "brain-access-change",
         eventTemplate: { kind: 1, created_at: 1, tags: [], content: "wrong kind" },
       }),
-    /vault-access-change requires Nostr kind 30078/
+    /brain-access-change requires Nostr kind 30078/
   );
   await assert.rejects(
     () =>
       brainIdentityProvider.authorizeBrainEvent({
-        intent: "vault-access-change",
+        intent: "brain-access-change",
         eventTemplate: {
           kind: 30078,
           created_at: 1,
@@ -2981,7 +2981,7 @@ assert.equal(
   const localRecipientIdentity = await localRecipient.identifyMember();
   const locallyWrappedGrant = await localIssuer.wrapGrantPayload({
     purpose: "folder-key-grant",
-    vaultId: "personal",
+    brainId: "personal",
     folderId: "restricted",
     keyVersion: 1,
     recipientNpub: localRecipientIdentity.npub,
@@ -2992,7 +2992,7 @@ assert.equal(
   });
   const locallyOpenedGrant = await localRecipient.openGrantPayload({
     purpose: "folder-key-grant",
-    vaultId: "personal",
+    brainId: "personal",
     folderId: "restricted",
     keyVersion: 1,
     recipientNpub: localRecipientIdentity.npub,
@@ -3004,7 +3004,7 @@ assert.equal(
     () =>
       localRecipient.openGrantPayload({
         purpose: "folder-key-grant",
-        vaultId: "personal",
+        brainId: "personal",
         folderId: "different-folder",
         keyVersion: 1,
         recipientNpub: localRecipientIdentity.npub,
@@ -3019,7 +3019,7 @@ assert.equal(
     changeId: "provider-bound-access-change",
     createdAtUnix: 1_780_000_000,
     targetNpub: connectedBrainIdentity.npub,
-    vaultId: "personal",
+    brainId: "personal",
   });
   assert.equal(providerAuthorizedAccessEvent.kind, 30078);
   assert.equal(providerAuthorizedAccessEvent.id, "signed-event");
@@ -3029,24 +3029,24 @@ assert.equal(
   assert.equal(client.deriveBrainIdentityProviderState(null).canConnect, false);
 
   await assertClipboardInvitationFeedbackContracts();
-  await assertVaultSwitcherLoadsSelectedVault();
-  assertNestedManageVaultReturnContract();
+  await assertBrainSwitcherLoadsSelectedBrain();
+  assertNestedManageBrainReturnContract();
   assertModalFocusAndContextRouteContracts();
 
   const event = await client.buildAuthEventTemplate(
     "post",
-    "http://finite.test/_admin/vaults/smoke/metadata",
+    "http://finite.test/_admin/brains/smoke/metadata",
     "{\"name\":\"Smoke\"}"
   );
   const repeatedEvent = await client.buildAuthEventTemplate(
     "post",
-    "http://finite.test/_admin/vaults/smoke/metadata",
+    "http://finite.test/_admin/brains/smoke/metadata",
     "{\"name\":\"Smoke\"}"
   );
   assert.equal(event.kind, 27235);
   assert.deepEqual(Array.from(event.tags[0]), [
     "u",
-    "http://finite.test/_admin/vaults/smoke/metadata",
+    "http://finite.test/_admin/brains/smoke/metadata",
   ]);
   assert.deepEqual(Array.from(event.tags[1]), ["method", "POST"]);
   assert.equal(event.tags[2][0], "nonce");
@@ -3059,7 +3059,7 @@ assert.equal(
   const folderKey = Buffer.alloc(32, 7).toString("base64");
   await client.openFolderKeyGrantPlaintext(keyring, {
     version: "finite-folder-key-grant-v1",
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "general",
     keyVersion: 1,
     issuerNpub: "npub-issuer",
@@ -3070,7 +3070,7 @@ assert.equal(
   assert.equal(keyring.openedGrants.length, 1);
   await client.openFolderKeyGrantPlaintext(keyring, {
     version: "finite-folder-key-grant-v1",
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "general",
     keyVersion: 1,
     issuerNpub: "npub-issuer",
@@ -3097,7 +3097,7 @@ assert.equal(
   assert.equal(client.identityDisplay(authorNpub), "alice@example.com");
   assert.equal(client.identityDisplay(otherNpub), client.shortKey(otherNpub));
   assert.equal(
-    client.vaultPeopleRows({
+    client.brainPeopleRows({
       kind: "organization",
       members: [authorNpub, otherNpub],
       admins: [authorNpub],
@@ -3105,7 +3105,7 @@ assert.equal(
     "alice@example.com"
   );
   assert.equal(
-    client.vaultPeopleRows({
+    client.brainPeopleRows({
       kind: "organization",
       members: [authorNpub, otherNpub],
       admins: [authorNpub],
@@ -3122,7 +3122,7 @@ assert.equal(
       kind: 1059,
       content: JSON.stringify({
         version: "finite-folder-key-grant-v1",
-        vaultId: "smoke",
+        brainId: "smoke",
         folderId: "general",
         keyVersion: 1,
         issuerNpub: "npub-issuer",
@@ -3156,7 +3156,7 @@ assert.equal(
   assert.equal(devKeyring.openedGrants.length, 1);
 
   const accessPayload = {
-    vaultId: "smoke",
+    brainId: "smoke",
     changeId: "access-change-test",
     action: "grant-folder-access",
     adminNpub: authorNpub,
@@ -3167,13 +3167,13 @@ assert.equal(
   };
   assert.equal(
     client.canonicalAdminAccessChangePayload(accessPayload),
-    `{"version":"finite-vault-admin-access-change-v1","vaultId":"smoke","changeId":"access-change-test","action":"grant-folder-access","adminNpub":"${authorNpub}","folderId":"restricted","targetNpub":"${authorNpub}","keyVersion":2,"createdAt":"2026-06-23T00:02:00Z"}`
+    `{"version":"finite-brain-admin-access-change-v1","brainId":"smoke","changeId":"access-change-test","action":"grant-folder-access","adminNpub":"${authorNpub}","folderId":"restricted","targetNpub":"${authorNpub}","keyVersion":2,"createdAt":"2026-06-23T00:02:00Z"}`
   );
   assert.equal(
     JSON.stringify(client.adminAccessChangeTags(accessPayload)),
     JSON.stringify([
-      ["d", "finite-vault-admin-access-change:smoke:access-change-test"],
-      ["vault", "smoke"],
+      ["d", "finite-brain-admin-access-change:smoke:access-change-test"],
+      ["brain", "smoke"],
       ["action", "grant-folder-access"],
       ["folder", "restricted"],
       ["p", "00".repeat(32)],
@@ -3197,7 +3197,7 @@ assert.equal(
   const localSigned = await localSigner.signEvent({
     kind: 27235,
     created_at: 1780000000,
-    tags: [["u", "http://finite.test/_admin/vaults"]],
+    tags: [["u", "http://finite.test/_admin/brains"]],
     content: "",
   });
   assert.equal(localSigned.pubkey, localPublicKey);
@@ -3226,7 +3226,7 @@ assert.equal(
     },
   };
   client.configureBrainIdentityProvider(client.createNip07BrainIdentityProvider(context.window.nostr));
-  await client.connectBrainIdentityProvider({ loadVisibleVaults: false });
+  await client.connectBrainIdentityProvider({ loadVisibleBrains: false });
   const accessEvent = await client.buildAdminAccessChangeEvent({
     ...accessPayload,
     createdAtUnix: Date.parse(accessPayload.createdAt) / 1000,
@@ -3259,12 +3259,12 @@ assert.equal(
   assert.equal(providerSignedAccessEvent.id, "provider-bound-access-change");
 
   assert.equal(
-    JSON.stringify(client.initialVaultInvitationFolders("getting-started restricted getting-started")),
+    JSON.stringify(client.initialBrainInvitationFolders("getting-started restricted getting-started")),
     JSON.stringify(["getting-started", "restricted"])
   );
   assert.equal(
     JSON.stringify(
-      client.buildVaultInvitationRequest({
+      client.buildBrainInvitationRequest({
       targetNpub: otherNpub,
       initialFolderAccess: "getting-started,restricted getting-started",
       expiresAt: "2026-07-04T00:00:00.000Z",
@@ -3276,12 +3276,12 @@ assert.equal(
       expiresAt: "2026-07-04T00:00:00.000Z",
     })
   );
-  assert.equal(client.vaultInvitationCreatePath("smoke org"), "/_admin/vaults/smoke%20org/invitations");
-  assert.equal(client.vaultInvitationLinkPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode");
-  assert.equal(client.vaultInvitationAcceptPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode/accept");
-  assert.equal(client.emailInviteBootstrapPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode/bootstrap");
-  assert.equal(client.emailInviteInstructionsPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode/instructions");
-  assert.equal(client.emailInviteClaimPath("invite/code"), "/_admin/vault-invitation-links/invite%2Fcode/claim");
+  assert.equal(client.brainInvitationCreatePath("smoke org"), "/_admin/brains/smoke%20org/invitations");
+  assert.equal(client.brainInvitationLinkPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode");
+  assert.equal(client.brainInvitationAcceptPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode/accept");
+  assert.equal(client.emailInviteBootstrapPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode/bootstrap");
+  assert.equal(client.emailInviteInstructionsPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode/instructions");
+  assert.equal(client.emailInviteClaimPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode/claim");
   assert.equal(
     client.emailInviteClientUrl({
       publicBaseUrl: "https://finite.test/app/",
@@ -3291,32 +3291,32 @@ assert.equal(
     }),
     "https://finite.test/app/client#inviteCode=invite%2Fcode&inviteEmail=friend%40example.com&inviteSecret=secret-value"
   );
-  assert.equal(client.vaultInvitationIdentifierHint("invite-0fe6eda60e1bf6e662acb8e2b5c425d9"), null);
+  assert.equal(client.brainInvitationIdentifierHint("invite-0fe6eda60e1bf6e662acb8e2b5c425d9"), null);
   assert.match(
-    client.vaultInvitationIdentifierHint("invitation-4f82a37c1b82bcdd54973c466cdde914"),
+    client.brainInvitationIdentifierHint("invitation-4f82a37c1b82bcdd54973c466cdde914"),
     /invitation id/
   );
-  assert.match(client.vaultInvitationIdentifierHint("4f82a37c1b82bcdd54973c466cdde914"), /start with invite-/);
+  assert.match(client.brainInvitationIdentifierHint("4f82a37c1b82bcdd54973c466cdde914"), /start with invite-/);
   assert.match(
-    client.vaultInvitationUnavailableDetail(new Error("vault invitation unavailable")),
+    client.brainInvitationUnavailableDetail(new Error("brain invitation unavailable")),
     /Check the Invite Code, active signer/
   );
   assert.equal(
-    client.vaultInvitationRevokePath("smoke org", "invitation/one"),
-    "/_admin/vaults/smoke%20org/invitations/invitation%2Fone"
+    client.brainInvitationRevokePath("smoke org", "invitation/one"),
+    "/_admin/brains/smoke%20org/invitations/invitation%2Fone"
   );
-  assert.match(htmlSource, /id="vaultInviteUrlInput"/);
-  assert.match(htmlSource, /id="vaultInviteEmailInput"/);
-  assert.match(htmlSource, /id="vaultInviteEmailProofCreatedAtInput"/);
-  assert.match(htmlSource, /id="vaultInviteSecretInput"/);
-  assert.match(htmlSource, /id="vaultInviteConnectSignerButton"/);
+  assert.match(htmlSource, /id="brainInviteUrlInput"/);
+  assert.match(htmlSource, /id="brainInviteEmailInput"/);
+  assert.match(htmlSource, /id="brainInviteEmailProofCreatedAtInput"/);
+  assert.match(htmlSource, /id="brainInviteSecretInput"/);
+  assert.match(htmlSource, /id="brainInviteConnectSignerButton"/);
   assert.match(htmlSource, /id="getEmailInviteInstructionsButton"/);
 
-  const lockedInvitationControls = client.vaultInvitationPanelState({
+  const lockedInvitationControls = client.brainInvitationPanelState({
     code: "invite-pending",
     email: "member@example.com",
     inviteSecret: "manual-invite-secret",
-    organizationVault: true,
+    organizationBrain: true,
     sessionStatus: "locked",
     signerCanConnect: true,
     signerStatus: "unavailable",
@@ -3329,11 +3329,11 @@ assert.equal(
   assert.equal(lockedInvitationControls.acceptDisabled, true);
   assert.equal(lockedInvitationControls.revokeDisabled, true);
 
-  const unlockedInvitationControls = client.vaultInvitationPanelState({
+  const unlockedInvitationControls = client.brainInvitationPanelState({
     code: "invite-pending",
     email: "member@example.com",
     inviteSecret: "manual-invite-secret",
-    organizationVault: true,
+    organizationBrain: true,
     sessionStatus: "unlocked",
     signerCanConnect: true,
     signerStatus: "connected",
@@ -3346,63 +3346,63 @@ assert.equal(
 
   assert.equal(
     JSON.stringify(
-      client.vaultInvitationRevokeTarget({
-        activeVaultId: "vault-admin",
+      client.brainInvitationRevokeTarget({
+        activeBrainId: "brain-admin",
         input: "invitation-explicit",
         invitations: [],
       })
     ),
-    JSON.stringify({ invitationId: "invitation-explicit", vaultId: "vault-admin" })
+    JSON.stringify({ invitationId: "invitation-explicit", brainId: "brain-admin" })
   );
   assert.equal(
     JSON.stringify(
-      client.vaultInvitationRevokeTarget({
-        activeVaultId: "vault-admin",
+      client.brainInvitationRevokeTarget({
+        activeBrainId: "brain-admin",
         input: "invite-just-created",
-        lastVaultInvitationCode: "invite-just-created",
-        lastVaultInvitationId: "invitation-just-created",
+        lastBrainInvitationCode: "invite-just-created",
+        lastBrainInvitationId: "invitation-just-created",
       })
     ),
-    JSON.stringify({ invitationId: "invitation-just-created", vaultId: "vault-admin" })
+    JSON.stringify({ invitationId: "invitation-just-created", brainId: "brain-admin" })
   );
   assert.equal(
     JSON.stringify(
-      client.vaultInvitationRevokeTarget({
-        activeVaultId: "vault-admin",
+      client.brainInvitationRevokeTarget({
+        activeBrainId: "brain-admin",
         input: "invite-pending-row",
         invitations: [{ id: "invitation-pending-row", inviteCode: "invite-pending-row", status: "pending" }],
       })
     ),
-    JSON.stringify({ invitationId: "invitation-pending-row", vaultId: "vault-admin" })
+    JSON.stringify({ invitationId: "invitation-pending-row", brainId: "brain-admin" })
   );
   assert.throws(
-    () => client.vaultInvitationRevokeTarget({ activeVaultId: "vault-admin", input: "invite-unknown" }),
-    /created by this Vault admin|pending invitation list/
+    () => client.brainInvitationRevokeTarget({ activeBrainId: "brain-admin", input: "invite-unknown" }),
+    /created by this Brain admin|pending invitation list/
   );
 
   for (const actionSource of [
-    createVaultInvitationFromPanelSource,
-    inspectVaultInvitationFromPanelSource,
+    createBrainInvitationFromPanelSource,
+    inspectBrainInvitationFromPanelSource,
     loadEmailInviteInstructionsFromPanelSource,
-    acceptVaultInvitationFromPanelSource,
-    revokeVaultInvitationFromPanelSource,
-    revokeVaultInvitationByIdSource,
+    acceptBrainInvitationFromPanelSource,
+    revokeBrainInvitationFromPanelSource,
+    revokeBrainInvitationByIdSource,
   ]) {
     assert.match(
       actionSource,
-      /\{\s*requireUnlockedVaultInvitationAction\(/,
+      /\{\s*requireUnlockedBrainInvitationAction\(/,
       "Protected invitation actions must fail closed before capturing a session epoch"
     );
   }
-  assert.match(revokeVaultInvitationFromPanelSource, /vaultInvitationRevokeTarget\(/);
+  assert.match(revokeBrainInvitationFromPanelSource, /brainInvitationRevokeTarget\(/);
   assert.doesNotMatch(
-    revokeVaultInvitationFromPanelSource,
-    /vaultInvitationLinkPath/,
+    revokeBrainInvitationFromPanelSource,
+    /brainInvitationLinkPath/,
     "Admin revocation must not inspect a recipient-only invitation link"
   );
   assert.match(
     source,
-    /for \(const inputId of \[\s*"vaultInviteCodeInput",\s*"vaultInviteEmailInput",\s*"vaultInviteEmailProofCreatedAtInput",\s*"vaultInviteSecretInput",\s*\]\) \{[\s\S]{0,180}handleVaultInvitationInput\(inputId\)/,
+    /for \(const inputId of \[\s*"brainInviteCodeInput",\s*"brainInviteEmailInput",\s*"brainInviteEmailProofCreatedAtInput",\s*"brainInviteSecretInput",\s*\]\) \{[\s\S]{0,180}handleBrainInvitationInput\(inputId\)/,
     "Invitation inputs must update the panel as the Member changes code, email proof, or Invite Secret"
   );
 
@@ -3413,49 +3413,49 @@ assert.equal(
   invitationState.metadata = { kind: "organization" };
   invitationState.sessionStatus = "locked";
   invitationState.signerStatus = "unavailable";
-  invitationElement("vaultInviteCodeInput").value = "invite-old";
-  invitationElement("vaultInviteEmailInput").value = "member@example.com";
-  invitationElement("vaultInviteSecretInput").value = "manual-invite-secret";
-  invitationPanel.seams.renderVaultInvitationPanel();
-  assert.equal(invitationElement("vaultInviteConnectSignerButton").disabled, false);
-  assert.equal(invitationElement("getVaultInvitationButton").disabled, true);
-  assert.equal(invitationElement("acceptVaultInvitationButton").disabled, true);
-  assert.match(invitationElement("vaultInvitationHint").textContent, /Unlock the session/);
+  invitationElement("brainInviteCodeInput").value = "invite-old";
+  invitationElement("brainInviteEmailInput").value = "member@example.com";
+  invitationElement("brainInviteSecretInput").value = "manual-invite-secret";
+  invitationPanel.seams.renderBrainInvitationPanel();
+  assert.equal(invitationElement("brainInviteConnectSignerButton").disabled, false);
+  assert.equal(invitationElement("getBrainInvitationButton").disabled, true);
+  assert.equal(invitationElement("acceptBrainInvitationButton").disabled, true);
+  assert.match(invitationElement("brainInvitationHint").textContent, /Unlock the session/);
 
   invitationState.sessionStatus = "unlocked";
   invitationState.signerStatus = "connected";
-  invitationState.lastVaultInvitationCode = "invite-old";
-  invitationState.lastVaultInvitationId = "invitation-old";
+  invitationState.lastBrainInvitationCode = "invite-old";
+  invitationState.lastBrainInvitationId = "invitation-old";
   invitationState.lastEmailInviteSecret = "stored-invite-secret-sentinel";
   invitationState.lastEmailInviteUrl = "https://finite.test/#inviteSecret=stored-invite-secret-sentinel";
   invitationState.lastEmailInvitePostProof = { inviteCode: "invite-old" };
-  invitationElement("vaultInviteCodeInput").value = "invite-new";
-  invitationElement("vaultInviteSecretInput").value = "stored-invite-secret-sentinel";
-  invitationPanel.seams.handleVaultInvitationInput("vaultInviteCodeInput");
-  assert.equal(invitationState.lastVaultInvitationCode, "invite-new");
-  assert.equal(invitationState.lastVaultInvitationId, null);
+  invitationElement("brainInviteCodeInput").value = "invite-new";
+  invitationElement("brainInviteSecretInput").value = "stored-invite-secret-sentinel";
+  invitationPanel.seams.handleBrainInvitationInput("brainInviteCodeInput");
+  assert.equal(invitationState.lastBrainInvitationCode, "invite-new");
+  assert.equal(invitationState.lastBrainInvitationId, null);
   assert.equal(invitationState.lastEmailInvitePostProof, null);
   assert.equal(invitationState.lastEmailInviteSecret, null);
   assert.equal(invitationState.lastEmailInviteUrl, null);
-  assert.equal(invitationElement("vaultInviteSecretInput").value, "");
+  assert.equal(invitationElement("brainInviteSecretInput").value, "");
 
-  invitationElement("vaultInviteSecretInput").value = "manual-invite-secret";
-  invitationPanel.seams.handleVaultInvitationInput("vaultInviteSecretInput");
+  invitationElement("brainInviteSecretInput").value = "manual-invite-secret";
+  invitationPanel.seams.handleBrainInvitationInput("brainInviteSecretInput");
   assert.equal(invitationState.lastEmailInviteSecret, null, "Manual Invite Secrets must stay out of client state");
   assert.equal(invitationElement("getEmailInviteInstructionsButton").disabled, false);
 
-  invitationElement("vaultInviteCodeInput").value = "";
-  invitationPanel.seams.handleVaultInvitationInput("vaultInviteCodeInput");
-  assert.equal(invitationState.lastVaultInvitationCode, null);
-  assert.equal(invitationState.lastVaultInvitationId, null);
-  assert.equal(invitationElement("getVaultInvitationButton").disabled, true);
-  assert.equal(invitationElement("acceptVaultInvitationButton").disabled, true);
-  invitationPanel.seams.renderVaultInvitationPanel();
-  assert.equal(invitationElement("vaultInviteCodeInput").value, "");
+  invitationElement("brainInviteCodeInput").value = "";
+  invitationPanel.seams.handleBrainInvitationInput("brainInviteCodeInput");
+  assert.equal(invitationState.lastBrainInvitationCode, null);
+  assert.equal(invitationState.lastBrainInvitationId, null);
+  assert.equal(invitationElement("getBrainInvitationButton").disabled, true);
+  assert.equal(invitationElement("acceptBrainInvitationButton").disabled, true);
+  invitationPanel.seams.renderBrainInvitationPanel();
+  assert.equal(invitationElement("brainInviteCodeInput").value, "");
 
   invitationState.sessionStatus = "locked";
   await assert.rejects(
-    () => invitationPanel.seams.revokeVaultInvitationById("invitation-pending-row"),
+    () => invitationPanel.seams.revokeBrainInvitationById("invitation-pending-row"),
     /Session is locked\. Unlock the session before revoking an invitation/
   );
 
@@ -3484,8 +3484,8 @@ assert.equal(
         currentKeyVersion: 3,
       },
       {
-        id: "vault-ops",
-        path: "Vault Ops",
+        id: "brain-ops",
+        path: "Brain Ops",
         access: "admin_only",
         currentKeyVersion: 1,
       },
@@ -3505,13 +3505,13 @@ assert.equal(
       ["restricted", "restricted", 3],
     ])
   );
-  assert.throws(() => client.emailInviteScope(emailMetadata, "vault-ops"), /all-members and selected restricted/);
+  assert.throws(() => client.emailInviteScope(emailMetadata, "brain-ops"), /all-members and selected restricted/);
 
   const emailKeyring = client.createSessionKeyring();
   const restrictedEmailFolderKey = Buffer.alloc(32, 8).toString("base64");
   await client.openFolderKeyGrantPlaintext(emailKeyring, {
     version: "finite-folder-key-grant-v1",
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "getting-started",
     keyVersion: 1,
     issuerNpub: authorNpub,
@@ -3521,7 +3521,7 @@ assert.equal(
   });
   await client.openFolderKeyGrantPlaintext(emailKeyring, {
     version: "finite-folder-key-grant-v1",
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "restricted",
     keyVersion: 3,
     issuerNpub: authorNpub,
@@ -3537,7 +3537,7 @@ assert.equal(
     pubkey: "00".repeat(32),
     sig: "email-invite-signature",
   });
-  const emailInviteRequest = await client.buildEmailVaultInvitationRequest(emailKeyring, {
+  const emailInviteRequest = await client.buildEmailBrainInvitationRequest(emailKeyring, {
     createdAtUnix: 1780000400,
     expiresAt: "2026-07-04T00:00:00.000Z",
     grantIdFactory: (item) => `bootstrap-${item.folderId}`,
@@ -3548,7 +3548,7 @@ assert.equal(
     provider: { signEvent: emailInviteSigner, nip44: { encrypt: fakeEncrypt, decrypt: fakeDecrypt } },
     signEvent: emailInviteSigner,
     target: "FRIEND@EXAMPLE.COM",
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   assert.equal(emailInviteRequest.body.target, "friend@example.com");
   assert.equal(emailInviteRequest.body.inviteUnwrapNpub, inviteKeypair.npub);
@@ -3562,7 +3562,7 @@ assert.equal(
     ])
   );
   assert.doesNotMatch(JSON.stringify(emailInviteRequest.body), /inviteSecret/i);
-  const scopedEmailInviteRequest = await client.buildEmailVaultInvitationRequest(emailKeyring, {
+  const scopedEmailInviteRequest = await client.buildEmailBrainInvitationRequest(emailKeyring, {
     createdAtUnix: 1780000401,
     expiresAt: "2026-07-04T00:00:00.000Z",
     grantIdFactory: (item) => `scoped-bootstrap-${item.folderId}`,
@@ -3572,12 +3572,12 @@ assert.equal(
     scope: emailInviteRequest.scope,
     signEvent: emailInviteSigner,
     target: "friend@example.com",
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   assert.equal(JSON.stringify(scopedEmailInviteRequest.body.initialFolderAccess), JSON.stringify(["restricted"]));
 
   const emailInvitation = {
-    vaultId: "smoke",
+    brainId: "smoke",
     inviteCode: "invite-email",
     inviteUnwrapNpub: inviteKeypair.npub,
     bootstrapPayloadHash: emailInviteRequest.body.bootstrapPayloadHash,
@@ -3706,7 +3706,7 @@ assert.equal(
   assert.equal(claimedOpen.skipped.length, 0);
   assert.equal(claimedKeyring.keys.has("smoke:getting-started:1"), true);
   assert.equal(claimedKeyring.keys.has("smoke:restricted:3"), true);
-  assert.equal(claimedKeyring.keys.has("smoke:vault-ops:1"), false);
+  assert.equal(claimedKeyring.keys.has("smoke:brain-ops:1"), false);
 
   const claimedSharedWrite = await client.buildPageWriteRequest(claimedKeyring, {
     authorNpub: otherNpub,
@@ -3718,10 +3718,10 @@ assert.equal(
     objectId: "obj_email_shared01",
     plaintext: "# Shared Email Invite Page\n\nOpened through the claimed all-members grant.",
     signEvent: emailClaimSigner,
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   const openedClaimedShared = await client.openFolderObject(claimedKeyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "getting-started",
     objectId: "obj_email_shared01",
     revision: 1,
@@ -3740,10 +3740,10 @@ assert.equal(
     objectId: "obj_email_restricted01",
     plaintext: "# Restricted Email Invite Page\n\nOpened through the selected restricted grant.",
     signEvent: emailClaimSigner,
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   const openedClaimedRestricted = await client.openFolderObject(claimedKeyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "restricted",
     objectId: "obj_email_restricted01",
     revision: 1,
@@ -3757,20 +3757,20 @@ assert.equal(
         authorNpub: otherNpub,
         baseRevision: null,
         createdAtUnix: 1780000602,
-        folderId: "vault-ops",
+        folderId: "brain-ops",
         keyVersion: 1,
         nonceBytes: new Uint8Array(12).fill(6),
         objectId: "obj_email_locked01",
         plaintext: "# Locked\n\nThis should not encrypt.",
         signEvent: emailClaimSigner,
-        vaultId: "smoke",
+        brainId: "smoke",
       }),
     /No Folder Key opened/
   );
 
   const accessGrant = await client.buildFolderKeyGrantRequest({
     id: "grant-test",
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "restricted",
     keyVersion: 2,
     folderKey,
@@ -3833,7 +3833,7 @@ assert.equal(
   };
   const providerBoundGrant = await client.buildFolderKeyGrantRequest({
     id: "grant-provider-backed",
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "restricted",
     keyVersion: 2,
     folderKey,
@@ -3879,7 +3879,7 @@ assert.equal(
   };
   const boundWrapperGrant = await client.buildFolderKeyGrantRequest({
     id: "grant-bound-wrapper",
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "restricted",
     keyVersion: 2,
     folderKey,
@@ -3892,7 +3892,7 @@ assert.equal(
   assert.equal(boundWrapperGrant.id, "grant-bound-wrapper");
   assert.equal(boundProviderEncryptCalls, 2);
 
-  assert.match(htmlSource, /id="vaultInviteFoldersInput"(?![^>]*\svalue=)/);
+  assert.match(htmlSource, /id="brainInviteFoldersInput"(?![^>]*\svalue=)/);
   assert.match(htmlSource, />Invite code<\/span>/);
   assert.doesNotMatch(htmlSource, /Invite code or id/);
   assert.match(htmlSource, /id="pageFolderIdInput"(?![^>]*\svalue=)/);
@@ -4013,7 +4013,7 @@ assert.equal(
       pubkey: "00".repeat(32),
       sig: "revision-signature",
     }),
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   assert.equal(write.baseRevision, null);
   assert.equal(write.keyVersion, 1);
@@ -4023,7 +4023,7 @@ assert.equal(
     JSON.stringify(write.revisionEvent.tags),
     JSON.stringify([
       ["d", "finite-folder-object-revision:smoke:general:obj_000000000001:1"],
-      ["vault", "smoke"],
+      ["brain", "smoke"],
       ["folder", "general"],
       ["object", "obj_000000000001"],
       ["operation", "create"],
@@ -4045,7 +4045,7 @@ assert.equal(
       pubkey: "00".repeat(32),
       sig: "tombstone-signature",
     }),
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   assert.equal(deleteRequest.baseRevision, 3);
   assert.equal(deleteRequest.tombstoneEvent.kind, 30078);
@@ -4053,7 +4053,7 @@ assert.equal(
     JSON.stringify(deleteRequest.tombstoneEvent.tags),
     JSON.stringify([
       ["d", "finite-folder-object-tombstone:smoke:general:obj_000000000001:4"],
-      ["vault", "smoke"],
+      ["brain", "smoke"],
       ["folder", "general"],
       ["object", "obj_000000000001"],
       ["operation", "delete"],
@@ -4063,7 +4063,7 @@ assert.equal(
   assert.match(deleteRequest.tombstoneEvent.content, /"baseRevision":3/);
 
   const openedPage = await client.openFolderObject(keyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "general",
     objectId: "obj_000000000001",
     revision: 1,
@@ -4075,7 +4075,7 @@ assert.equal(
   const openedSync = await client.openSyncObjects(keyring, {
     objects: [
       {
-        vaultId: "smoke",
+        brainId: "smoke",
         folderId: "general",
         objectId: "obj_000000000001",
         revision: 1,
@@ -4105,10 +4105,10 @@ assert.equal(
       pubkey: "00".repeat(32),
       sig: "revision-signature",
     }),
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   const openedCliPage = await client.openFolderObject(keyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "general",
     objectId: "obj_cli_page0001",
     revision: 1,
@@ -4138,10 +4138,10 @@ assert.equal(
       pubkey: "00".repeat(32),
       sig: "revision-signature",
     }),
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   const openedAsset = await client.openFolderObject(keyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "general",
     objectId: "obj_cli_asset001",
     revision: 1,
@@ -4169,7 +4169,7 @@ assert.equal(
   const openedCliSync = await client.openSyncObjects(keyring, {
     objects: [
       {
-        vaultId: "smoke",
+        brainId: "smoke",
         folderId: "general",
         objectId: "obj_cli_page0001",
         revision: 1,
@@ -4185,7 +4185,7 @@ assert.equal(
   const restrictedOldKey = Buffer.alloc(32, 8).toString("base64");
   await client.openFolderKeyGrantPlaintext(keyring, {
     version: "finite-folder-key-grant-v1",
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "restricted",
     keyVersion: 1,
     issuerNpub: authorNpub,
@@ -4210,7 +4210,7 @@ assert.equal(
     objectId: "obj_restricted0001",
     plaintext: "# Restricted\n\nRotate this page.",
     signEvent: signDeterministically,
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   const restrictedAssetBytes = new TextEncoder().encode("%PDF restricted asset\n");
   const restrictedAssetWrite = await client.buildPageWriteRequest(keyring, {
@@ -4227,12 +4227,12 @@ assert.equal(
       "application/pdf"
     ),
     signEvent: signDeterministically,
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   const targetNpub = client.npubFromHex("11".repeat(32));
   const remainingNpub = client.npubFromHex("22".repeat(32));
   const removal = await client.buildFolderAccessRemovalRequest(keyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     metadata: {
       kind: "personal",
       ownerUserId: authorNpub,
@@ -4249,7 +4249,7 @@ assert.equal(
     targetNpub,
     objects: [
       {
-        vaultId: "smoke",
+        brainId: "smoke",
         folderId: "restricted",
         objectId: "obj_restricted0001",
         revision: 1,
@@ -4258,7 +4258,7 @@ assert.equal(
         ciphertext: restrictedWrite.ciphertext,
       },
       {
-        vaultId: "smoke",
+        brainId: "smoke",
         folderId: "restricted",
         objectId: "obj_restrictedasset1",
         revision: 1,
@@ -4284,7 +4284,7 @@ assert.equal(
   assert.equal(
     JSON.stringify(removal.recipientNpubs.sort()),
     JSON.stringify([authorNpub, remainingNpub].sort()),
-    "Removing the last explicit Personal Vault collaborator must retain owner and Personal Agent key access"
+    "Removing the last explicit Personal Brain collaborator must retain owner and Personal Agent key access"
   );
   assert.equal(removal.grants.some((grant) => grant.recipientNpub === targetNpub), false);
   assert.equal(removal.reencryptedRecords.length, 2);
@@ -4295,7 +4295,7 @@ assert.equal(
     JSON.stringify(removal.reencryptedRecords[0].revisionEvent.tags),
     JSON.stringify([
       ["d", "finite-folder-object-revision:smoke:restricted:obj_restricted0001:2"],
-      ["vault", "smoke"],
+      ["brain", "smoke"],
       ["folder", "restricted"],
       ["object", "obj_restricted0001"],
       ["operation", "update"],
@@ -4304,7 +4304,7 @@ assert.equal(
   );
   assert.match(removal.accessChangeEvent.content, /remove-folder-access/);
   const rotatedPage = await client.openFolderObject(keyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "restricted",
     objectId: "obj_restricted0001",
     revision: 2,
@@ -4315,7 +4315,7 @@ assert.equal(
     (record) => record.objectId === "obj_restrictedasset1"
   );
   const rotatedAsset = await client.openFolderObject(keyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "restricted",
     objectId: "obj_restrictedasset1",
     revision: 2,
@@ -4365,7 +4365,7 @@ assert.equal(
       JSON.stringify(
         client.readerEmptyStateCopy(
           {
-            vaultId: "empty-org",
+            brainId: "empty-org",
             kind: "organization",
             folders: [],
             admins: [emptyOrganizationAdmin],
@@ -4377,15 +4377,15 @@ assert.equal(
       )
     ),
     {
-      list: "This Vault is empty. Create a Folder to get started.",
+      list: "This Brain is empty. Create a Folder to get started.",
       path: "Create a Folder to add Pages.",
-      title: "This Vault is empty",
+      title: "This Brain is empty",
     }
   );
   assert.equal(
     client.readerEmptyStateCopy(
       {
-        vaultId: "empty-org",
+        brainId: "empty-org",
         kind: "organization",
         folders: [],
         admins: [emptyOrganizationAdmin],
@@ -4394,12 +4394,12 @@ assert.equal(
       null,
       client.npubFromHex("66".repeat(32))
     ).list,
-    "This Vault is empty. Ask a Vault admin to create the first Folder."
+    "This Brain is empty. Ask a Brain admin to create the first Folder."
   );
   assert.equal(
     client.readerEmptyStateCopy(
       {
-        vaultId: "empty-org",
+        brainId: "empty-org",
         kind: "organization",
         folders: [],
         admins: [emptyOrganizationAdmin],
@@ -4408,7 +4408,7 @@ assert.equal(
       null,
       client.npubFromHex("66".repeat(32))
     ).list,
-    "This Vault is empty. Ask a Vault admin to create the first Folder."
+    "This Brain is empty. Ask a Brain admin to create the first Folder."
   );
   assert.equal(
     client.actorCanCreateFolder(
@@ -4438,8 +4438,8 @@ assert.equal(
         shared_folder_source: false,
       },
       {
-        id: "vault-ops",
-        path: "vault-ops",
+        id: "brain-ops",
+        path: "brain-ops",
         accessMode: "AdminOnly",
         accessUserIds: [],
         currentKeyVersion: 1,
@@ -4473,7 +4473,7 @@ assert.equal(
     }),
     "Locked"
   );
-  assert.equal(client.workspaceTabTitle(null, null), "Open a Vault");
+  assert.equal(client.workspaceTabTitle(null, null), "Open a Brain");
   assert.equal(client.workspaceTabTitle({ name: "Smoke" }, null), "Smoke");
   assert.equal(
     client.workspaceTabTitle({ name: "Smoke" }, { title: "Folder Object Crypto" }),
@@ -4602,7 +4602,7 @@ assert.equal(
   assert.equal(
     folderMenu.some((item) => item.action === "delete-folder" || item.label === "Delete Folder"),
     true,
-    "A Personal Vault owner must see permanent Folder deletion"
+    "A Personal Brain owner must see permanent Folder deletion"
   );
   assert.equal(
     client.contextMenuItemsForTarget(
@@ -4666,7 +4666,7 @@ assert.equal(
   assert.match(
     createFolderFromToolbarSource,
     /const parentFolder = folderCreationParent\(parentFolderId, state\.metadata\?\.folders \|\| \[\]\);/,
-    "Folder creation must resolve the context parent from current Vault metadata"
+    "Folder creation must resolve the context parent from current Brain metadata"
   );
   assert.match(
     createFolderFromToolbarSource,
@@ -4784,7 +4784,7 @@ assert.equal(
     throw new Error("A local draft discard must not make a protected request");
   };
   draftDelete.context.window.confirm = () => true;
-  draftDeleteState.activeVaultId = "personal";
+  draftDeleteState.activeBrainId = "personal";
   draftDeleteState.selectedFolderId = "restricted";
   draftDeleteState.selectedPageKey = draftDeleteKey;
   draftDeleteState.sessionStatus = "unlocked";
@@ -4854,7 +4854,7 @@ assert.equal(
       persistedDelete.context.window.nostr
     )
   );
-  persistedDeleteState.activeVaultId = "personal";
+  persistedDeleteState.activeBrainId = "personal";
   persistedDeleteState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
   persistedDeleteState.pubkeyHex = persistedDeletePubkey;
   persistedDeleteState.selectedFolderId = "getting-started";
@@ -4958,13 +4958,13 @@ assert.equal(
       "encrypt",
       "decrypt",
     ]);
-    saveRaceState.activeVaultId = "personal";
+    saveRaceState.activeBrainId = "personal";
     saveRaceState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
     saveRaceState.keyring = {
       keys: new Map([
         [
           "personal:getting-started:1",
-          { cryptoKey, folderId: "getting-started", keyVersion: 1, rawKey, vaultId: "personal" },
+          { cryptoKey, folderId: "getting-started", keyVersion: 1, rawKey, brainId: "personal" },
         ],
       ]),
       openedGrants: [],
@@ -5047,7 +5047,7 @@ assert.equal(
   assert.ok(client.nextDraftObjectId().length >= 16);
 
   const lockedPage = await client.openFolderObject(client.createSessionKeyring(), {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: "general",
     objectId: "obj_000000000001",
     revision: 1,
@@ -5058,7 +5058,7 @@ assert.equal(
   const lockedSync = await client.openSyncObjects(client.createSessionKeyring(), {
     objects: [
       {
-        vaultId: "smoke",
+        brainId: "smoke",
         folderId: "general",
         objectId: "obj_000000000001",
         revision: 1,
@@ -5504,7 +5504,7 @@ assert.equal(
 
   const okfInput = {
     manifest: {
-      version: "finite-okf-vault-export-v1",
+      version: "finite-okf-brain-export-v1",
       objects: [
         {
           folderId: "source-concepts",
@@ -5686,7 +5686,7 @@ assert.equal(
       client.prepareOkfImportWrites(client.createSessionKeyring(), copyPlan, {
         authorNpub,
         signEvent: async (template) => template,
-        vaultId: "smoke",
+        brainId: "smoke",
       }),
     /Folder Key is not open for general/
   );
@@ -5701,11 +5701,11 @@ assert.equal(
       pubkey: "00".repeat(32),
       sig: "import-signature",
     }),
-    vaultId: "smoke",
+    brainId: "smoke",
   });
   assert.equal(preparedImport.writes.length, 3);
   assert.equal(preparedImport.skipped.length, 0);
-  assert.match(preparedImport.writes[0].path, /\/_admin\/vaults\/smoke\/folders\/general\/objects\/obj_/);
+  assert.match(preparedImport.writes[0].path, /\/_admin\/brains\/smoke\/folders\/general\/objects\/obj_/);
   assert.equal(preparedImport.writes[0].body.revisionEvent.kind, 30078);
 
   assert.throws(
@@ -5722,7 +5722,7 @@ assert.equal(
   assert.equal(explicitlyScopedOkf.pages[0].folderId, "general");
 
   const openedImportedAlpha = await client.openFolderObject(keyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: preparedImport.writes[0].folderId,
     objectId: preparedImport.writes[0].objectId,
     revision: 1,
@@ -5733,7 +5733,7 @@ assert.equal(
   assert.match(openedImportedAlpha.text, /\[Beta\]\(beta imported\.md\)/);
   const importedAssetWrite = preparedImport.writes.find((write) => write.targetPath === "raw/assets/source.pdf");
   const openedImportedAsset = await client.openFolderObject(keyring, {
-    vaultId: "smoke",
+    brainId: "smoke",
     folderId: importedAssetWrite.folderId,
     objectId: importedAssetWrite.objectId,
     revision: 1,
@@ -5840,7 +5840,7 @@ assert.equal(
   );
   assert.equal(client.graphViewBoxForZoom(0).zoom, 0.5);
 
-  const invitationRows = client.vaultInvitationRows([
+  const invitationRows = client.brainInvitationRows([
     {
       createdAt: "2026-07-01T00:00:00.000Z",
       expiresAt: "2026-07-30T00:00:00.000Z",
@@ -5872,7 +5872,7 @@ assert.equal(
   );
   assert.equal(invitationRows[0].revocable, true);
   assert.equal(invitationRows[1].revocable, false);
-  assert.equal(client.vaultInvitationRows(null).length, 0);
+  assert.equal(client.brainInvitationRows(null).length, 0);
 
   const shareLinkRows = client.folderShareLinkRows([
     {
@@ -5900,19 +5900,19 @@ assert.equal(
     {
       incoming: [
         {
-          destinationVaultId: "dest",
+          destinationBrainId: "dest",
           id: "sfi-incoming",
           sourceFolderId: "strategy",
-          sourceVaultId: "acme",
+          sourceBrainId: "acme",
           status: "pending",
         },
       ],
       outgoing: [
         {
-          destinationVaultId: "partner",
+          destinationBrainId: "partner",
           id: "sfi-outgoing",
           sourceFolderId: "playbooks",
-          sourceVaultId: "dest",
+          sourceBrainId: "dest",
           status: "revoked",
         },
       ],
@@ -5921,11 +5921,11 @@ assert.equal(
       incoming: [],
       outgoing: [
         {
-          destinationVaultId: "partner",
+          destinationBrainId: "partner",
           id: "sfc-outgoing",
           memberNpubs: ["npub1a", "npub1b"],
           sourceFolderId: "playbooks",
-          sourceVaultId: "dest",
+          sourceBrainId: "dest",
           status: "active",
         },
       ],
@@ -5937,10 +5937,10 @@ assert.equal(
   );
   const incomingInvitationRow = relationshipRows.find((row) => row.id === "sfi-incoming");
   assert.equal(incomingInvitationRow.acceptable, true);
-  assert.equal(incomingInvitationRow.counterpartVaultId, "acme");
+  assert.equal(incomingInvitationRow.counterpartBrainId, "acme");
   const outgoingConnectionRow = relationshipRows.find((row) => row.id === "sfc-outgoing");
   assert.equal(outgoingConnectionRow.memberCount, 2);
-  assert.equal(outgoingConnectionRow.counterpartVaultId, "partner");
+  assert.equal(outgoingConnectionRow.counterpartBrainId, "partner");
   assert.equal(outgoingConnectionRow.acceptable, false);
   assert.equal(client.sharedFolderRelationshipRows(null, null).length, 0);
 
@@ -5980,14 +5980,14 @@ assert.equal(
   accessLoss.context.fetch = async () => ({
     ok: false,
     status: 403,
-    text: async () => JSON.stringify({ error: "vault access required" }),
+    text: async () => JSON.stringify({ error: "brain access required" }),
   });
   const accessLossState = accessLoss.seams.state;
-  accessLossState.activeVaultId = "acme";
+  accessLossState.activeBrainId = "acme";
   accessLossState.config = { authScheme: "Nostr", publicBaseUrl: "http://finite.test" };
   accessLossState.keyring = accessLoss.context.window.FiniteBrainProductClient.createSessionKeyring();
   accessLossState.keyring.keys.set("acme/general@1", { rawKey: "folder-key-sentinel" });
-  accessLossState.keyring.openedGrants.push({ folderId: "general", keyVersion: 1, vaultId: "acme" });
+  accessLossState.keyring.openedGrants.push({ folderId: "general", keyVersion: 1, brainId: "acme" });
   accessLossState.metadata = { name: "Acme private metadata" };
   accessLossState.projection.pages.set("general/page", {
     folderId: "general",
@@ -6000,12 +6000,12 @@ assert.equal(
   accessLoss.context.document.getElementById("pageDraftInput").value = "plaintext-draft-sentinel";
   let capturedAccessLoss = null;
   await assert.rejects(
-    () => accessLoss.seams.protectedRequest("/_admin/vaults/acme/metadata"),
+    () => accessLoss.seams.protectedRequest("/_admin/brains/acme/metadata"),
     (error) => {
       capturedAccessLoss = error;
       assert.equal(error.status, 403);
-      assert.equal(error.reason, "vault access required");
-      assert.equal(error.path, "/_admin/vaults/acme/metadata");
+      assert.equal(error.reason, "brain access required");
+      assert.equal(error.path, "/_admin/brains/acme/metadata");
       return true;
     }
   );
@@ -6013,7 +6013,7 @@ assert.equal(
   assert.equal(accessLossState.sessionStatus, "locked");
   assert.equal(
     accessLossState.sessionNotice,
-    "Vault access changed. This session was locked. Select a Vault you can open, then unlock again."
+    "Brain access changed. This session was locked. Select a Brain you can open, then unlock again."
   );
   assert.equal(accessLossState.keyring, null);
   assert.equal(accessLossState.metadata, null);
@@ -6026,11 +6026,11 @@ assert.equal(
   assert.equal(accessLossFeedback.textContent, "");
 
   const staleAccessLoss = accessFailureTestSeams();
-  staleAccessLoss.seams.state.activeVaultId = "acme";
+  staleAccessLoss.seams.state.activeBrainId = "acme";
   staleAccessLoss.seams.state.sessionEpoch = 81;
   staleAccessLoss.seams.state.sessionStatus = "unlocked";
   assert.equal(
-    staleAccessLoss.seams.lockSessionForVaultAccessChange(activeVaultAccessLoss, 80),
+    staleAccessLoss.seams.lockSessionForBrainAccessChange(activeBrainAccessLoss, 80),
     false,
     "A stale request must not lock or overwrite a newer session"
   );
@@ -6038,7 +6038,7 @@ assert.equal(
   assert.equal(staleAccessLoss.seams.state.sessionStatus, "unlocked");
 
   context.document.getElementById("pageDraftInput").value = "runtime-draft-sentinel";
-  context.document.getElementById("vaultInviteSecretInput").value = "runtime-invite-secret-sentinel";
+  context.document.getElementById("brainInviteSecretInput").value = "runtime-invite-secret-sentinel";
   context.document.getElementById("graphStats").textContent = "12 nodes / 18 links";
   context.document.getElementById("obsidianNewPageButton");
   context.document.getElementById("obsidianNewFolderButton");
@@ -6058,7 +6058,7 @@ assert.equal(
   assert.doesNotMatch(elements.get("clientActionFeedback").textContent, /invite-secret-sentinel/);
   client.lockSession();
   assert.equal(elements.get("pageDraftInput").value, "");
-  assert.equal(elements.get("vaultInviteSecretInput").value, "");
+  assert.equal(elements.get("brainInviteSecretInput").value, "");
   assert.equal(elements.get("sessionSecurityTitle").textContent, "Session locked");
   assert.equal(
     elements.get("readerPageContent").textContent,

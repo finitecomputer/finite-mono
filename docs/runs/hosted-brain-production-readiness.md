@@ -5,8 +5,8 @@ Owner: Paul
 Opened: 2026-07-15
 Acceptance: a signed-in user can open the production Brain UI from an Agent,
 confirm that Agent by its canonical managed email, write anywhere in the empty
-Personal Vault as its one Personal Agent, and read the result as the Personal
-Vault owner after a service restart.
+Personal Brain as its one Personal Agent, and read the result as the Personal
+Brain owner after a service restart.
 Expiry: 2026-07-22; stop and rescope if the identity, release, or durable-data
 boundary changes before activation.
 
@@ -60,7 +60,7 @@ an incomplete production flow.
 5. Launch a disposable Agent and prove its canonical managed email binds
    immutably to its retained Agent Principal. Stop on a mismatch or failed
    authority call; do not bypass the fail-closed launch contract.
-6. Run the hosted Brain acceptance flow: initialize one empty Personal Vault,
+6. Run the hosted Brain acceptance flow: initialize one empty Personal Brain,
    establish the disposable Agent as its Personal Agent by managed email,
    write as the Agent, read as the owner, restart services, and repeat the
    readback.
@@ -73,12 +73,12 @@ an incomplete production flow.
   tests/browser/build, and `just dev smoke`.
 - Production evidence: exact Git revisions and image digests, healthy public
   authority and Brain endpoints, one immutable Agent Email binding, Personal
-  Vault-wide Agent write/read access, owner readback, and restart persistence.
+  Brain-wide Agent write/read access, owner readback, and restart persistence.
 - Before deployment, take consistent backups of Identity Authority and Brain
   state and record their hashes outside database contents. A NixOS rollback is
   not a data rollback; preserve both sides if either service accepts writes.
 - Fail closed on an unavailable authority, mismatched email/principal binding,
-  ambiguous Vault ownership, authority beyond the user's Personal Vault, or
+  ambiguous Brain ownership, authority beyond the user's Personal Brain, or
   UI/release revision mismatch. Keep Brain navigation disabled and return to
   the last known-good system generation.
 
@@ -91,10 +91,10 @@ an incomplete production flow.
 - **Time:** 10 minutes.
 - **Steps and observations:** open Brain from the Agent sidebar; confirm the
   reviewed Product Client UI; pair by canonical Agent Email; write and read in
-  multiple Personal Vault Folders as the Agent; read the same content as owner;
+  multiple Personal Brain Folders as the Agent; read the same content as owner;
   restart the named services; repeat both Agent and owner readback.
 - **Pass:** the same Agent Principal retains full operational access throughout
-  the Personal Vault, and the owner retains ownership and post-restart data.
+  the Personal Brain, and the owner retains ownership and post-restart data.
 - **Fail/stop:** capture read-only service health, deployed revisions, binding
   inspection, and Brain authorization output; keep navigation disabled and do
-  not rewrite identity or Vault state.
+  not rewrite identity or Brain state.

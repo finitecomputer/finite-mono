@@ -16,7 +16,7 @@
 | --- | --- | --- | --- |
 | Core identifiers and paths had no practical length ceilings. | medium | addressed | Added bounded `UserId`, `DisplayName`, and `SafeRelativePath` validation plus regression coverage. |
 | Store accepted link timestamps as arbitrary printable strings. | medium | addressed | Added RFC3339 parsing via `time` and a negative test for invalid expiration timestamps. |
-| Store used hard-coded runtime timestamps for sync/vault/folder creation. | medium | addressed | Added runtime UTC timestamps while keeping migration timestamps deterministic. |
+| Store used hard-coded runtime timestamps for sync/brain/folder creation. | medium | addressed | Added runtime UTC timestamps while keeping migration timestamps deterministic. |
 | Folder ID JSON serialization used `expect`. | low | addressed | Returned `StoreError::Database` instead of panicking. |
 | Bootstrap accepted unbounded folder/grant batches. | medium | addressed | Added explicit batch caps and an oversized-bootstrap regression test. |
 | OKF export duplicate path guard checked the output file map too late. | medium | addressed | Added a dedicated bundle-path set and duplicate export regression test. |

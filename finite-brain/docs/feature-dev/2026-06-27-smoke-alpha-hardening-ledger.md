@@ -17,7 +17,7 @@
 Make the first internal smoke alpha ready across the selected remaining gaps:
 replace/archive the old SilverBullet smoke route, harden Product Client Folder
 Key Grant opening, add a real agent sync daemon/file watcher path, productize
-organization Vault invite/admin UX, and add a backup/restore runbook.
+organization Brain invite/admin UX, and add a backup/restore runbook.
 
 ## Durable Artifacts
 
@@ -26,8 +26,8 @@ organization Vault invite/admin UX, and add a backup/restore runbook.
 - PRD issue: `finitecomputer/finite-brain#47`
 - Slice issues:
   - `finitecomputer/finite-brain#48` Harden Product Client Folder Key Grant wrapping and opening
-  - `finitecomputer/finite-brain#51` Add fbrain daemon watch loop for Vault Working Trees
-  - `finitecomputer/finite-brain#49` Productize organization Vault invitations in the Product Client
+  - `finitecomputer/finite-brain#51` Add fbrain daemon watch loop for Brain Working Trees
+  - `finitecomputer/finite-brain#49` Productize organization Brain invitations in the Product Client
   - `finitecomputer/finite-brain#50` Add smoke alpha backup, restore, and SilverBullet cutover handoff
 - Issue sessions: current thread
 - Agent briefs: in-thread Feature Dev artifacts
@@ -42,7 +42,7 @@ organization Vault invite/admin UX, and add a backup/restore runbook.
 - Test: `cargo test --workspace`
 - Build: `cargo build --workspace`
 - Product Client verification: `node crates/finite-brain-server/src/product-client.test.js`; `node scripts/verify-obsidian-product-client.mjs`
-- Smoke verification: local `finite-brain` server plus `fbrain` vault create/open/sync/status flow
+- Smoke verification: local `finite-brain` server plus `fbrain` brain create/open/sync/status flow
 
 ## Branch And Loop Notes
 
@@ -74,7 +74,7 @@ organization Vault invite/admin UX, and add a backup/restore runbook.
 | --- | --- | --- | --- | --- | --- |
 | `#48` | `7473dc95aa0fd2ac292f7485401896828bd93735` | current thread | branch tip | passed after one minor invite-panel fix | `node --check crates/finite-brain-server/src/product-client.js`; `node crates/finite-brain-server/src/product-client.test.js`; `cargo test --workspace` |
 | `#51` | `7473dc95aa0fd2ac292f7485401896828bd93735` | current thread | branch tip | passed | `cargo test -p finite-brain-cli`; `cargo test --workspace`; `cargo clippy --all-targets -- -D warnings` |
-| `#49` | `7473dc95aa0fd2ac292f7485401896828bd93735` | current thread | branch tip | passed after personal-vault create/revoke button disable fix | `node crates/finite-brain-server/src/product-client.test.js`; `cargo test -p finite-brain-server product_client_serves_spine_assets_and_config -- --nocapture`; `node scripts/verify-obsidian-product-client.mjs` |
+| `#49` | `7473dc95aa0fd2ac292f7485401896828bd93735` | current thread | branch tip | passed after personal-brain create/revoke button disable fix | `node crates/finite-brain-server/src/product-client.test.js`; `cargo test -p finite-brain-server product_client_serves_spine_assets_and_config -- --nocapture`; `node scripts/verify-obsidian-product-client.mjs` |
 | `#50` | `7473dc95aa0fd2ac292f7485401896828bd93735` | current thread | branch tip | passed | `scripts/verify-smoke-alpha-backup-restore.sh`; `git diff --check` |
 
 ## Open Questions

@@ -25,8 +25,8 @@
 
 | Finding | Artifact | Evidence | Decision |
 | --- | --- | --- | --- |
-| Spec still described `X-Actor-User-Id` and unauthenticated Vault creation as prototype bridges. | `docs/specs/finitebrain-portability-spec.md` | `create_vault_handler` and metadata routes call `validate_request_auth`; protected-route tests reject missing auth. | Update auth language to Rust hard-cut behavior. |
-| Spec still described JSON metadata plus SQLite sync backup shape. | `docs/specs/finitebrain-portability-spec.md` | ADR 0002 says SQLite from day one; `BrainStore` owns SQLite schema for Vaults, grants, sync, invitations, shares, and mounts. | Update storage and backup language to SQLite authoritative state. |
+| Spec still described `X-Actor-User-Id` and unauthenticated Brain creation as prototype bridges. | `docs/specs/finitebrain-portability-spec.md` | `create_brain_handler` and metadata routes call `validate_request_auth`; protected-route tests reject missing auth. | Update auth language to Rust hard-cut behavior. |
+| Spec still described JSON metadata plus SQLite sync backup shape. | `docs/specs/finitebrain-portability-spec.md` | ADR 0002 says SQLite from day one; `BrainStore` owns SQLite schema for Brains, grants, sync, invitations, shares, and mounts. | Update storage and backup language to SQLite authoritative state. |
 | Spec still listed legacy plaintext file routes. | `docs/specs/finitebrain-portability-spec.md` | `router_with_state` exposes encrypted object routes but no `/files/*` routes. | Remove legacy file route surface from Rust Portable v1 default flow. |
 | Spec source map pointed at the previous TypeScript/Go prototype. | `docs/specs/finitebrain-portability-spec.md` | Current repo is the Rust workspace with `crates/finite-brain-*`. | Replace source map with Rust crate/module pointers. |
 

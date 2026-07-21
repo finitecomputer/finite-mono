@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use finite_brain_core::portability::VaultWorkingTreeStateManifest;
+use finite_brain_core::portability::BrainWorkingTreeStateManifest;
 use serde::Deserialize;
 
 use crate::{
@@ -49,7 +49,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
     let root = find_agent_state(&env.cwd)?;
     let Some(root) = root else {
         return Ok(StatusReport {
-            vault_id: None,
+            brain_id: None,
             working_tree_path: None,
             auth,
             daemon: DaemonStatus {
@@ -70,7 +70,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
                 latest_sequence: 0,
             },
             conflicts: Vec::new(),
-            blocked: vec!["no Vault Working Tree found".to_owned()],
+            blocked: vec!["no Brain Working Tree found".to_owned()],
         });
     };
     let state = read_agent_state(&root)?;
@@ -95,7 +95,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
         blocked.push("unresolved conflicts".to_owned());
     }
     Ok(StatusReport {
-        vault_id: Some(state.vault_id.clone()),
+        brain_id: Some(state.brain_id.clone()),
         working_tree_path: Some(root.display().to_string()),
         auth,
         daemon: daemon_status_from_state(&state),
@@ -126,7 +126,7 @@ fn daemon_status_from_state(state: &AgentState) -> DaemonStatus {
 
 pub(crate) fn explain_access(
     folder: &str,
-    tree: &VaultWorkingTreeStateManifest,
+    tree: &BrainWorkingTreeStateManifest,
 ) -> AccessExplanation {
     if let Some(root) = tree
         .folder_roots
@@ -137,7 +137,7 @@ pub(crate) fn explain_access(
             AccessExplanation {
                 folder: folder.to_owned(),
                 state: "readable".to_owned(),
-                reason: "Folder is materialized and readable in this Vault Working Tree".to_owned(),
+                reason: "Folder is materialized and readable in this Brain Working Tree".to_owned(),
             }
         } else if root.metadata_only {
             AccessExplanation {
@@ -274,7 +274,7 @@ pub(crate) fn write_agent_state(root: &Path, state: &AgentState) -> Result<(), C
 
 pub(crate) fn read_working_tree_state(
     root: &Path,
-) -> Result<VaultWorkingTreeStateManifest, CliError> {
+) -> Result<BrainWorkingTreeStateManifest, CliError> {
     validate_private_working_tree(root)?;
     read_json_file(&root.join(".finitebrain/working-tree-state.json"))
 }
@@ -288,16 +288,16 @@ where
     serde_json::from_str(&body).map_err(CliError::from)
 }
 
-pub(crate) fn command_vault_id(args: &[String], env: &CliEnvironment) -> Result<String, CliError> {
-    if let Some(vault_id) = option_value(args, "--vault") {
-        return Ok(vault_id);
+pub(crate) fn command_brain_id(args: &[String], env: &CliEnvironment) -> Result<String, CliError> {
+    if let Some(brain_id) = option_value(args, "--brain") {
+        return Ok(brain_id);
     }
-    current_vault_id(env)?.ok_or(CliError::MissingArgument("vault-id or --vault"))
+    current_brain_id(env)?.ok_or(CliError::MissingArgument("brain-id or --brain"))
 }
 
-pub(crate) fn current_vault_id(env: &CliEnvironment) -> Result<Option<String>, CliError> {
+pub(crate) fn current_brain_id(env: &CliEnvironment) -> Result<Option<String>, CliError> {
     let Some(root) = find_agent_state(&env.cwd)? else {
         return Ok(None);
     };
-    Ok(Some(read_agent_state(&root)?.vault_id))
+    Ok(Some(read_agent_state(&root)?.brain_id))
 }

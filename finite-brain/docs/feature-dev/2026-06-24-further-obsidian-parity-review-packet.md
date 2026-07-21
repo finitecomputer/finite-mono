@@ -2,7 +2,7 @@
 
 ## Scope
 
-- Branch: `feature/guided-smoke-vault-reader`
+- Branch: `feature/guided-smoke-brain-reader`
 - Base: `staging`
 - PR: `finitecomputer/finite-brain#30`
 - Files reviewed:
@@ -19,7 +19,7 @@
 - Added Reading/Source toggle while keeping source inspection available.
 - Added right-rail Outgoing links and Backlinks panels derived from local
   decrypted Page links.
-- Added selected Page/Vault status details to the Obsidian-like status bar.
+- Added selected Page/Brain status details to the Obsidian-like status bar.
 - Fixed folder tree row layout so labels, details, and badges no longer run
   together.
 - Extended deterministic tests and seeded smoke verifier for the new seams.
@@ -43,7 +43,7 @@
   raw diagnostics dump.
 - The right rail now carries knowledge-base context: properties, mounts,
   outgoing links, backlinks, advanced tools, and activity.
-- The status bar now provides low-noise selected Page/Vault context.
+- The status bar now provides low-noise selected Page/Brain context.
 - Folder tree details and badges are visually separated after the row layout
   fix.
 

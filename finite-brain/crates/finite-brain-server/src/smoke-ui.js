@@ -4,8 +4,8 @@ function authHeader() {
   return $("authHeader").value.trim();
 }
 
-function vaultId() {
-  return $("vaultId").value.trim() || "smoke";
+function brainId() {
+  return $("brainId").value.trim() || "smoke";
 }
 
 function folderId() {
@@ -104,11 +104,11 @@ function renderMetadata(metadata) {
   setList(
     "summaryList",
     [
-      `${metadata.vaultId} (${metadata.kind})`,
+      `${metadata.brainId} (${metadata.kind})`,
       `${(metadata.members || []).length} members / ${(metadata.admins || []).length} admins`,
       `${metadata.grantCount || 0} visible grants`,
     ],
-    "No vault loaded"
+    "No brain loaded"
   );
   setList(
     "folderList",
@@ -135,7 +135,7 @@ function renderSync(sync) {
   setList(
     "summaryList",
     [
-      `${sync.vaultId} sync`,
+      `${sync.brainId} sync`,
       `latest sequence ${sync.latestSequence || 0}`,
       `${sync.objectCount || 0} current objects`,
     ],
@@ -173,7 +173,7 @@ function renderMounts(mounts) {
   setList(
     "mountList",
     (mounts || []).map((mount) => {
-      return `${mount.displayName} -> ${mount.sourceVaultId}/${mount.sourceFolderId} (${mount.state}, ${mount.connectionId})`;
+      return `${mount.displayName} -> ${mount.sourceBrainId}/${mount.sourceFolderId} (${mount.state}, ${mount.connectionId})`;
     }),
     "No mounts loaded"
   );
@@ -183,13 +183,13 @@ function rememberLifecycle(result) {
   if (!result || typeof result !== "object") return;
   if (result.inviteCode) {
     $("inviteCode").value = result.inviteCode;
-    appendList("invitationList", `vault invitation ${result.id} ${result.status}`);
+    appendList("invitationList", `brain invitation ${result.id} ${result.status}`);
   }
   if (result.recipientNpub && result.folderId && result.acceptPath) {
     $("shareLinkId").value = result.id;
     appendList("invitationList", `share link ${result.id} ${result.status}`);
   }
-  if (result.sourceVaultId && result.destinationVaultId && result.acceptPath) {
+  if (result.sourceBrainId && result.destinationBrainId && result.acceptPath) {
     $("sharedInvitationId").value = result.id;
     appendList("invitationList", `shared invitation ${result.id} ${result.status}`);
   }
@@ -225,50 +225,50 @@ $("bootstrapButton").addEventListener("click", () =>
 
 $("metadataButton").addEventListener("click", async () => {
   const result = await run("Loading metadata", () =>
-    request(`/_admin/vaults/${encodeURIComponent(vaultId())}/metadata`)
+    request(`/_admin/brains/${encodeURIComponent(brainId())}/metadata`)
   );
   if (result) renderMetadata(result);
 });
 
 $("syncButton").addEventListener("click", async () => {
   const result = await run("Loading sync bootstrap", () =>
-    request(`/_admin/vaults/${encodeURIComponent(vaultId())}/sync/bootstrap`)
+    request(`/_admin/brains/${encodeURIComponent(brainId())}/sync/bootstrap`)
   );
   if (result) renderSync(result);
 });
 
 $("mountsButton").addEventListener("click", async () => {
   const result = await run("Loading organization mounts", () =>
-    request(`/_admin/vaults/${encodeURIComponent(vaultId())}/organization-folder-mounts`)
+    request(`/_admin/brains/${encodeURIComponent(brainId())}/organization-folder-mounts`)
   );
   if (result) renderMounts(result);
 });
 
 $("exportButton").addEventListener("click", async () => {
   const result = await run("Loading encrypted export", () =>
-    request(`/_admin/vaults/${encodeURIComponent(vaultId())}/export`)
+    request(`/_admin/brains/${encodeURIComponent(brainId())}/export`)
   );
   if (result) renderExport(result);
 });
 
 $("searchButton").addEventListener("click", () =>
   run("Checking search privacy boundary", () =>
-    request(`/_admin/vaults/${encodeURIComponent(vaultId())}/search?q=smoke`)
+    request(`/_admin/brains/${encodeURIComponent(brainId())}/search?q=smoke`)
   )
 );
 
-$("createVaultButton").addEventListener("click", () =>
-  run("Creating vault", () =>
-    request("/_admin/vaults", {
+$("createBrainButton").addEventListener("click", () =>
+  run("Creating brain", () =>
+    request("/_admin/brains", {
       method: "POST",
-      body: $("createVaultBody").value,
+      body: $("createBrainBody").value,
     })
   )
 );
 
 $("createFolderButton").addEventListener("click", async () => {
   const result = await run("Creating folder", () =>
-    request(`/_admin/vaults/${encodeURIComponent(vaultId())}/folders`, {
+    request(`/_admin/brains/${encodeURIComponent(brainId())}/folders`, {
       method: "POST",
       body: $("createFolderBody").value,
     })
@@ -279,7 +279,7 @@ $("createFolderButton").addEventListener("click", async () => {
 $("putObjectButton").addEventListener("click", () =>
   run("Putting object", () =>
     request(
-      `/_admin/vaults/${encodeURIComponent(vaultId())}/folders/${encodeURIComponent(
+      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
       )}/objects/${encodeURIComponent(objectId())}`,
       {
@@ -293,7 +293,7 @@ $("putObjectButton").addEventListener("click", () =>
 $("getObjectButton").addEventListener("click", () =>
   run("Getting object", () =>
     request(
-      `/_admin/vaults/${encodeURIComponent(vaultId())}/folders/${encodeURIComponent(
+      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
       )}/objects/${encodeURIComponent(objectId())}`
     )
@@ -302,31 +302,31 @@ $("getObjectButton").addEventListener("click", () =>
 
 $("submitSyncButton").addEventListener("click", () =>
   run("Submitting sync record", () =>
-    request(`/_admin/vaults/${encodeURIComponent(vaultId())}/sync/records`, {
+    request(`/_admin/brains/${encodeURIComponent(brainId())}/sync/records`, {
       method: "POST",
       body: $("syncPayload").value,
     })
   )
 );
 
-$("createVaultInvitationButton").addEventListener("click", () =>
-  run("Creating vault invitation", () =>
-    request(`/_admin/vaults/${encodeURIComponent(vaultId())}/invitations`, {
+$("createBrainInvitationButton").addEventListener("click", () =>
+  run("Creating brain invitation", () =>
+    request(`/_admin/brains/${encodeURIComponent(brainId())}/invitations`, {
       method: "POST",
-      body: $("vaultInvitationBody").value,
+      body: $("brainInvitationBody").value,
     })
   )
 );
 
-$("getVaultInvitationButton").addEventListener("click", () =>
-  run("Getting vault invitation", () =>
-    request(`/_admin/vault-invitation-links/${encodeURIComponent(inviteCode())}`)
+$("getBrainInvitationButton").addEventListener("click", () =>
+  run("Getting brain invitation", () =>
+    request(`/_admin/brain-invitation-links/${encodeURIComponent(inviteCode())}`)
   )
 );
 
-$("acceptVaultInvitationButton").addEventListener("click", () =>
-  run("Accepting vault invitation", () =>
-    request(`/_admin/vault-invitation-links/${encodeURIComponent(inviteCode())}/accept`, {
+$("acceptBrainInvitationButton").addEventListener("click", () =>
+  run("Accepting brain invitation", () =>
+    request(`/_admin/brain-invitation-links/${encodeURIComponent(inviteCode())}/accept`, {
       method: "POST",
     })
   )
@@ -335,7 +335,7 @@ $("acceptVaultInvitationButton").addEventListener("click", () =>
 $("createShareLinkButton").addEventListener("click", () =>
   run("Creating share link", () =>
     request(
-      `/_admin/vaults/${encodeURIComponent(vaultId())}/folders/${encodeURIComponent(
+      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
       )}/share-links`,
       {
@@ -371,7 +371,7 @@ $("revokeShareLinkButton").addEventListener("click", () =>
 $("markShareSourceButton").addEventListener("click", async () => {
   const result = await run("Marking shared folder source", () =>
     request(
-      `/_admin/vaults/${encodeURIComponent(vaultId())}/folders/${encodeURIComponent(
+      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
       )}/share-source`,
       {
@@ -386,7 +386,7 @@ $("markShareSourceButton").addEventListener("click", async () => {
 $("createSharedInvitationButton").addEventListener("click", () =>
   run("Creating shared folder invitation", () =>
     request(
-      `/_admin/vaults/${encodeURIComponent(vaultId())}/folders/${encodeURIComponent(
+      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
       )}/shared-folder-invitations`,
       {
@@ -429,7 +429,7 @@ $("revokeConnectionButton").addEventListener("click", () =>
   )
 );
 
-emptyList("summaryList", "No vault loaded");
+emptyList("summaryList", "No brain loaded");
 emptyList("folderList", "No folders loaded");
 emptyList("objectList", "No sync state loaded");
 emptyList("grantList", "No grant state loaded");

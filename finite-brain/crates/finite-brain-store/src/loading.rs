@@ -3,7 +3,7 @@ use crate::*;
 impl BrainStore {
     pub fn load_personal_agent(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
     ) -> Result<Option<PersonalAgent>, StoreError> {
         let row = self
             .conn
@@ -11,9 +11,9 @@ impl BrainStore {
                 r#"
                 SELECT owner_npub, agent_npub, created_by_npub, created_at, updated_at
                 FROM personal_agents
-                WHERE vault_id = ?1 AND status = 'active'
+                WHERE brain_id = ?1 AND status = 'active'
                 "#,
-                params![vault_id.as_str()],
+                params![brain_id.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -28,7 +28,7 @@ impl BrainStore {
         row.map(
             |(owner_npub, agent_npub, created_by_npub, created_at, updated_at)| {
                 Ok(PersonalAgent {
-                    vault_id: vault_id.clone(),
+                    brain_id: brain_id.clone(),
                     owner_npub: UserId::new(owner_npub)?,
                     agent_npub: UserId::new(agent_npub)?,
                     created_by_npub: UserId::new(created_by_npub)?,
@@ -40,12 +40,12 @@ impl BrainStore {
         .transpose()
     }
 
-    pub(crate) fn load_core_vault(&self, vault_id: &VaultId) -> Result<Vault, StoreError> {
+    pub(crate) fn load_core_brain(&self, brain_id: &BrainId) -> Result<Brain, StoreError> {
         let row = self
             .conn
             .query_row(
-                "SELECT id, kind, name, owner_user_id FROM vaults WHERE id = ?1",
-                params![vault_id.as_str()],
+                "SELECT id, kind, name, owner_user_id FROM brains WHERE id = ?1",
+                params![brain_id.as_str()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -56,25 +56,25 @@ impl BrainStore {
                 },
             )
             .optional()?
-            .ok_or_else(|| StoreError::MissingVault {
-                vault_id: vault_id.to_string(),
+            .ok_or_else(|| StoreError::MissingBrain {
+                brain_id: brain_id.to_string(),
             })?;
 
-        let kind = parse_vault_kind(&row.1)?;
-        let mut vault = Vault {
-            id: VaultId::new(row.0)?,
+        let kind = parse_brain_kind(&row.1)?;
+        let mut brain = Brain {
+            id: BrainId::new(row.0)?,
             kind,
-            name: DisplayName::new("vault_name", row.2)?,
+            name: DisplayName::new("brain_name", row.2)?,
             owner_user_id: row.3.map(UserId::new).transpose()?,
-            folders: self.load_folders(vault_id)?,
-            members: self.load_members(vault_id)?,
-            admins: self.load_admins(vault_id)?,
+            folders: self.load_folders(brain_id)?,
+            members: self.load_members(brain_id)?,
+            admins: self.load_admins(brain_id)?,
         };
-        validate_loaded_vault(&vault)?;
+        validate_loaded_brain(&brain)?;
 
-        if vault.kind == VaultKind::Organization {
-            let folder_access = self.load_folder_access(vault_id)?;
-            for member in &mut vault.members {
+        if brain.kind == BrainKind::Organization {
+            let folder_access = self.load_folder_access(brain_id)?;
+            for member in &mut brain.members {
                 member.folder_access = folder_access
                     .iter()
                     .filter_map(|(folder_id, users)| {
@@ -84,20 +84,20 @@ impl BrainStore {
             }
         }
 
-        Ok(vault)
+        Ok(brain)
     }
 
-    pub(crate) fn load_folders(&self, vault_id: &VaultId) -> Result<Vec<Folder>, StoreError> {
+    pub(crate) fn load_folders(&self, brain_id: &BrainId) -> Result<Vec<Folder>, StoreError> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, name, role, access, parent_folder_id, path, current_key_version,
                    shared_folder_source
             FROM folders
-            WHERE vault_id = ?1
+            WHERE brain_id = ?1
             ORDER BY id
             "#,
         )?;
-        let rows = stmt.query_map(params![vault_id.as_str()], |row| {
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| {
             Ok(StoredFolderRow {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -117,15 +117,15 @@ impl BrainStore {
         Ok(folders)
     }
 
-    pub(crate) fn load_members(&self, vault_id: &VaultId) -> Result<Vec<VaultMember>, StoreError> {
+    pub(crate) fn load_members(&self, brain_id: &BrainId) -> Result<Vec<BrainMember>, StoreError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT user_id FROM vault_members WHERE vault_id = ?1 ORDER BY user_id")?;
-        let rows = stmt.query_map(params![vault_id.as_str()], |row| row.get::<_, String>(0))?;
+            .prepare("SELECT user_id FROM brain_members WHERE brain_id = ?1 ORDER BY user_id")?;
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| row.get::<_, String>(0))?;
 
         let mut members = Vec::new();
         for row in rows {
-            members.push(VaultMember {
+            members.push(BrainMember {
                 user_id: UserId::new(row?)?,
                 folder_access: BTreeSet::new(),
             });
@@ -133,11 +133,11 @@ impl BrainStore {
         Ok(members)
     }
 
-    pub(crate) fn load_admins(&self, vault_id: &VaultId) -> Result<Vec<UserId>, StoreError> {
+    pub(crate) fn load_admins(&self, brain_id: &BrainId) -> Result<Vec<UserId>, StoreError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT user_id FROM vault_admins WHERE vault_id = ?1 ORDER BY user_id")?;
-        let rows = stmt.query_map(params![vault_id.as_str()], |row| row.get::<_, String>(0))?;
+            .prepare("SELECT user_id FROM brain_admins WHERE brain_id = ?1 ORDER BY user_id")?;
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| row.get::<_, String>(0))?;
 
         let mut admins = Vec::new();
         for row in rows {
@@ -148,12 +148,12 @@ impl BrainStore {
 
     pub(crate) fn load_folder_access(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
     ) -> Result<BTreeMap<FolderId, BTreeSet<UserId>>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT folder_id, user_id FROM folder_access WHERE vault_id = ?1 ORDER BY folder_id, user_id",
+            "SELECT folder_id, user_id FROM folder_access WHERE brain_id = ?1 ORDER BY folder_id, user_id",
         )?;
-        let rows = stmt.query_map(params![vault_id.as_str()], |row| {
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
 
@@ -170,18 +170,18 @@ impl BrainStore {
 
     pub(crate) fn load_grants(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
     ) -> Result<Vec<FolderKeyGrantMetadata>, StoreError> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, folder_id, key_version, issuer_npub, recipient_npub, format,
                    wrapped_event_json, access_change_event_json, created_at
             FROM folder_key_grants
-            WHERE vault_id = ?1
+            WHERE brain_id = ?1
             ORDER BY folder_id, key_version, recipient_npub, id
             "#,
         )?;
-        let rows = stmt.query_map(params![vault_id.as_str()], |row| {
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| {
             Ok(StoredGrantRow {
                 id: row.get(0)?,
                 folder_id: row.get(1)?,
@@ -204,12 +204,12 @@ impl BrainStore {
 
     pub(crate) fn load_setup_incomplete_folder_ids(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
     ) -> Result<BTreeSet<FolderId>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id FROM folders WHERE vault_id = ?1 AND setup_incomplete = 1 ORDER BY id",
+            "SELECT id FROM folders WHERE brain_id = ?1 AND setup_incomplete = 1 ORDER BY id",
         )?;
-        let rows = stmt.query_map(params![vault_id.as_str()], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| row.get::<_, String>(0))?;
 
         let mut ids = BTreeSet::new();
         for row in rows {
@@ -218,21 +218,21 @@ impl BrainStore {
         Ok(ids)
     }
 
-    pub(crate) fn latest_sequence(&self, vault_id: &VaultId) -> Result<u64, StoreError> {
+    pub(crate) fn latest_sequence(&self, brain_id: &BrainId) -> Result<u64, StoreError> {
         let latest = self.conn.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) FROM vault_record_index WHERE vault_id = ?1",
-            params![vault_id.as_str()],
+            "SELECT COALESCE(MAX(sequence), 0) FROM brain_record_index WHERE brain_id = ?1",
+            params![brain_id.as_str()],
             |row| row.get::<_, u64>(0),
         )?;
         Ok(latest)
     }
 
-    pub(crate) fn retention_floor(&self, vault_id: &VaultId) -> Result<u64, StoreError> {
+    pub(crate) fn retention_floor(&self, brain_id: &BrainId) -> Result<u64, StoreError> {
         let floor = self
             .conn
             .query_row(
-                "SELECT retention_floor FROM vault_sync_retention WHERE vault_id = ?1",
-                params![vault_id.as_str()],
+                "SELECT retention_floor FROM brain_sync_retention WHERE brain_id = ?1",
+                params![brain_id.as_str()],
                 |row| row.get::<_, u64>(0),
             )
             .optional()?
@@ -242,17 +242,17 @@ impl BrainStore {
 
     pub(crate) fn load_current_objects(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
     ) -> Result<Vec<CurrentEncryptedObject>, StoreError> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT folder_id, object_id, payload_json, revision, updated_at, deleted
-            FROM current_encrypted_vault_objects
-            WHERE vault_id = ?1
+            FROM current_encrypted_brain_objects
+            WHERE brain_id = ?1
             ORDER BY folder_id, object_id
             "#,
         )?;
-        let rows = stmt.query_map(params![vault_id.as_str()], |row| {
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| {
             Ok(CurrentObjectRow {
                 folder_id: row.get(0)?,
                 object_id: row.get(1)?,

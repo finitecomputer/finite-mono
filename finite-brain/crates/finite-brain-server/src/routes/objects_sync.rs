@@ -5,7 +5,7 @@ pub(crate) async fn put_object_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((vault_id, folder_id, object_id)): AxumPath<(String, String, String)>,
+    AxumPath((brain_id, folder_id, object_id)): AxumPath<(String, String, String)>,
     body: Bytes,
 ) -> Result<Json<ObjectWriteResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
@@ -17,7 +17,7 @@ pub(crate) async fn put_object_handler(
         FolderObjectOperation::Create
     };
     accept_object_revision(
-        state, vault_id, folder_id, object_id, actor, request, operation,
+        state, brain_id, folder_id, object_id, actor, request, operation,
     )
     .map(Json)
 }
@@ -27,7 +27,7 @@ pub(crate) async fn move_object_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((vault_id, folder_id, object_id)): AxumPath<(String, String, String)>,
+    AxumPath((brain_id, folder_id, object_id)): AxumPath<(String, String, String)>,
     body: Bytes,
 ) -> Result<Json<ObjectWriteResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
@@ -35,7 +35,7 @@ pub(crate) async fn move_object_handler(
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     accept_object_revision(
         state,
-        vault_id,
+        brain_id,
         folder_id,
         object_id,
         actor,
@@ -50,13 +50,13 @@ pub(crate) async fn delete_object_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((vault_id, folder_id, object_id)): AxumPath<(String, String, String)>,
+    AxumPath((brain_id, folder_id, object_id)): AxumPath<(String, String, String)>,
     body: Bytes,
 ) -> Result<Json<ObjectWriteResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: ObjectDeleteRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    accept_object_tombstone(state, vault_id, folder_id, object_id, actor, request).map(Json)
+    accept_object_tombstone(state, brain_id, folder_id, object_id, actor, request).map(Json)
 }
 
 pub(crate) async fn get_object_handler(
@@ -64,20 +64,20 @@ pub(crate) async fn get_object_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((vault_id, folder_id, object_id)): AxumPath<(String, String, String)>,
+    AxumPath((brain_id, folder_id, object_id)): AxumPath<(String, String, String)>,
 ) -> Result<Json<ObjectResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let object_id = ObjectId::new(object_id)?;
     let stored = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.load_vault(&vault_id)?
+        store.load_brain(&brain_id)?
     };
     ensure_folder_visible(&stored, &folder_id, &actor)?;
     let bootstrap = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.sync_bootstrap(&vault_id)?
+        store.sync_bootstrap(&brain_id)?
     };
     let object = bootstrap
         .objects
@@ -89,7 +89,7 @@ pub(crate) async fn get_object_handler(
     }
 
     Ok(Json(ObjectResponse {
-        vault_id: vault_id.to_string(),
+        brain_id: brain_id.to_string(),
         folder_id: object.folder_id.to_string(),
         object_id: object.object_id.as_str().to_owned(),
         revision: object.revision,
@@ -103,25 +103,25 @@ pub(crate) async fn sync_bootstrap_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(vault_id): AxumPath<String>,
+    AxumPath(brain_id): AxumPath<String>,
 ) -> Result<Json<SyncBootstrapResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let stored = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.load_vault(&vault_id)?
+        store.load_brain(&brain_id)?
     };
     ensure_metadata_visible(&stored, &actor)?;
     let bootstrap = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.sync_bootstrap(&vault_id)?
+        store.sync_bootstrap(&brain_id)?
     };
     let objects = bootstrap
         .objects
         .into_iter()
         .filter(|object| folder_visible(&stored, &object.folder_id, &actor))
         .map(|object| ObjectResponse {
-            vault_id: vault_id.to_string(),
+            brain_id: brain_id.to_string(),
             folder_id: object.folder_id.to_string(),
             object_id: object.object_id.as_str().to_owned(),
             revision: object.revision,
@@ -137,7 +137,7 @@ pub(crate) async fn sync_bootstrap_handler(
         .collect::<Vec<_>>();
 
     Ok(Json(SyncBootstrapResponse {
-        vault_id: vault_id.to_string(),
+        brain_id: brain_id.to_string(),
         latest_sequence: bootstrap.latest_sequence,
         object_count: objects.len(),
         objects,
@@ -151,20 +151,20 @@ pub(crate) async fn sync_records_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(vault_id): AxumPath<String>,
+    AxumPath(brain_id): AxumPath<String>,
     Query(query): Query<SyncRecordsQuery>,
 ) -> Result<Json<SyncPullResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let stored = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.load_vault(&vault_id)?
+        store.load_brain(&brain_id)?
     };
     ensure_metadata_visible(&stored, &actor)?;
     let pull = {
         let store = state.store.lock().map_err(lock_error)?;
         let limit = query.limit.unwrap_or(100).clamp(1, MAX_SYNC_RECORDS_LIMIT);
-        store.pull_sync_records(&vault_id, query.after.unwrap_or(0), limit)?
+        store.pull_sync_records(&brain_id, query.after.unwrap_or(0), limit)?
     };
     let records = pull
         .records
@@ -173,7 +173,7 @@ pub(crate) async fn sync_records_handler(
         .map(sync_record_response)
         .collect::<Vec<_>>();
     Ok(Json(SyncPullResponse {
-        vault_id: vault_id.to_string(),
+        brain_id: brain_id.to_string(),
         after_sequence: pull.after_sequence,
         latest_sequence: pull.latest_sequence,
         count: records.len(),
@@ -188,7 +188,7 @@ pub(crate) async fn submit_sync_record_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(vault_id): AxumPath<String>,
+    AxumPath(brain_id): AxumPath<String>,
     body: Bytes,
 ) -> Result<Json<ObjectWriteResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
@@ -210,7 +210,7 @@ pub(crate) async fn submit_sync_record_handler(
                 FolderObjectOperation::Create
             };
             accept_object_revision(
-                state, vault_id, folder_id, object_id, actor, request, operation,
+                state, brain_id, folder_id, object_id, actor, request, operation,
             )
             .map(Json)
         }
@@ -219,7 +219,7 @@ pub(crate) async fn submit_sync_record_handler(
                 .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid tombstone record"))?;
             let folder_id = request_field(&body, "folderId")?;
             let object_id = request_field(&body, "objectId")?;
-            accept_object_tombstone(state, vault_id, folder_id, object_id, actor, request).map(Json)
+            accept_object_tombstone(state, brain_id, folder_id, object_id, actor, request).map(Json)
         }
         _ => Err(ApiError::new(
             StatusCode::BAD_REQUEST,

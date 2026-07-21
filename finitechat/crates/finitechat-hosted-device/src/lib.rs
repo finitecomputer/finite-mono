@@ -19,7 +19,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use finite_brain_core::{
     BRAIN_IDENTITY_PROVIDER_VERSION, BrainEventAuthorizationIntent, BrainGrantIntent,
-    BrainHttpAuthorizationIntent, FolderId, FolderKey, VaultId, issue_folder_key_grant,
+    BrainHttpAuthorizationIntent, BrainId, FolderId, FolderKey, issue_folder_key_grant,
     open_folder_key_grant, sign_brain_event_template, validate_brain_event_authorization_intent,
     validate_brain_grant_intent, validate_brain_http_authorization_intent,
     wrap_brain_invite_bootstrap,
@@ -1567,13 +1567,13 @@ async fn execute_brain_identity_provider_operation(
                                 "Folder Key Grant createdAt is required".to_owned(),
                             )
                         })?;
-                        let vault_id = VaultId::new(input.grant.vault_id).map_err(|error| {
+                        let brain_id = BrainId::new(input.grant.brain_id).map_err(|error| {
                             HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
                         })?;
                         let grant = issue_folder_key_grant(
                             &keys,
                             id,
-                            &vault_id,
+                            &brain_id,
                             &folder_id,
                             key_version,
                             input.grant.recipient_npub,
@@ -1586,7 +1586,7 @@ async fn execute_brain_identity_provider_operation(
                         })?;
                         Ok(json!({ "grant": grant }))
                     }
-                    "vault-invite-bootstrap" => {
+                    "brain-invite-bootstrap" => {
                         let plaintext = input.plaintext.ok_or_else(|| {
                             HostedDeviceError::InvalidBrainIdentityProvider(
                                 "Email Invite Bootstrap plaintext is required".to_owned(),

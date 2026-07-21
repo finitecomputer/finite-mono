@@ -44,7 +44,7 @@ Implement the frontend prototype remove-access flow completely end-to-end, using
 
 - `node --check crates/finite-brain-server/src/product-client.js`: pass.
 - `node crates/finite-brain-server/src/product-client.test.js`: pass, including deterministic Folder access removal package generation, v2 grant recipients, removed-target exclusion, re-encrypted object revision, and new-key decryption.
-- `node scripts/verify-obsidian-product-client.mjs`: pass with `{"folders":11,"graphEdges":37,"graphNodes":53,"pages":53,"readyPages":53,"vaultId":"smoke"}`.
+- `node scripts/verify-obsidian-product-client.mjs`: pass with `{"folders":11,"graphEdges":37,"graphNodes":53,"pages":53,"readyPages":53,"brainId":"smoke"}`.
 - `cargo fmt --check`: pass.
 - `git diff --check`: pass.
 - `cargo test -p finite-brain-server`: pass, 28 tests.

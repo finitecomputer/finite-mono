@@ -336,14 +336,14 @@ mod tests {
         assert_eq!(
             authorization_url_for_request(
                 "http://192.168.67.1:18790",
-                "/_admin/vaults",
+                "/_admin/brains",
                 Some(" http://127.0.0.1:13002 "),
             ),
-            "http://127.0.0.1:13002/_admin/vaults"
+            "http://127.0.0.1:13002/_admin/brains"
         );
         assert_eq!(
-            authorization_url_for_request("http://192.168.67.1:18790", "/_admin/vaults", None,),
-            "http://192.168.67.1:18790/_admin/vaults"
+            authorization_url_for_request("http://192.168.67.1:18790", "/_admin/brains", None,),
+            "http://192.168.67.1:18790/_admin/brains"
         );
     }
 }

@@ -2,27 +2,27 @@ use crate::*;
 
 pub(crate) fn accept_object_revision(
     state: ServerState,
-    vault_id: String,
+    brain_id: String,
     folder_id: String,
     object_id: String,
     actor_npub: String,
     request: ObjectWriteRequest,
     operation: FolderObjectOperation,
 ) -> Result<ObjectWriteResponse, ApiError> {
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let object_id = ObjectId::new(object_id)?;
 
     let stored = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.load_vault(&vault_id)?
+        store.load_brain(&brain_id)?
     };
     ensure_folder_visible(&stored, &folder_id, &actor_npub)?;
     ensure_folder_key_version(&stored, &folder_id, request.key_version)?;
     let request_key_version = request.key_version;
 
     let (record, revision) = validate_object_revision_record(
-        &vault_id,
+        &brain_id,
         &folder_id,
         &object_id,
         &actor_npub,
@@ -31,10 +31,10 @@ pub(crate) fn accept_object_revision(
     )?;
     let outcome = {
         let mut store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
+        let stored = store.load_brain(&brain_id)?;
         ensure_folder_visible(&stored, &folder_id, &actor_npub)?;
         ensure_folder_key_version(&stored, &folder_id, request_key_version)?;
-        store.submit_sync_record(&vault_id, &SyncRecordInput::FolderObjectRevision(record))?
+        store.submit_sync_record(&brain_id, &SyncRecordInput::FolderObjectRevision(record))?
     };
 
     Ok(ObjectWriteResponse {
@@ -45,7 +45,7 @@ pub(crate) fn accept_object_revision(
 }
 
 pub(crate) fn validate_object_revision_record(
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
     object_id: &ObjectId,
     actor_npub: &str,
@@ -65,7 +65,7 @@ pub(crate) fn validate_object_revision_record(
     let ciphertext = request.ciphertext;
     let event = event_from_value(request.revision_event)?;
     let expected = RevisionValidation {
-        vault_id: vault_id.clone(),
+        brain_id: brain_id.clone(),
         folder_id: folder_id.clone(),
         object_id: object_id.clone(),
         operation,
@@ -105,7 +105,7 @@ pub(crate) fn validate_object_revision_record(
 }
 
 pub(crate) fn rotation_records_from_requests(
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
     actor_npub: &str,
     new_key_version: u32,
@@ -128,7 +128,7 @@ pub(crate) fn rotation_records_from_requests(
             revision_event: request.revision_event,
         };
         let (record, _) = validate_object_revision_record(
-            vault_id,
+            brain_id,
             folder_id,
             &object_id,
             actor_npub,
@@ -142,13 +142,13 @@ pub(crate) fn rotation_records_from_requests(
 
 pub(crate) fn accept_object_tombstone(
     state: ServerState,
-    vault_id: String,
+    brain_id: String,
     folder_id: String,
     object_id: String,
     actor_npub: String,
     request: ObjectDeleteRequest,
 ) -> Result<ObjectWriteResponse, ApiError> {
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let object_id = ObjectId::new(object_id)?;
     let revision = request.base_revision + 1;
@@ -156,13 +156,13 @@ pub(crate) fn accept_object_tombstone(
 
     let stored = {
         let store = state.store.lock().map_err(lock_error)?;
-        store.load_vault(&vault_id)?
+        store.load_brain(&brain_id)?
     };
     ensure_folder_visible(&stored, &folder_id, &actor_npub)?;
     ensure_direct_delete_authority(&stored, &actor_npub)?;
 
     let expected = TombstoneValidation {
-        vault_id: vault_id.clone(),
+        brain_id: brain_id.clone(),
         folder_id: folder_id.clone(),
         object_id: object_id.clone(),
         revision,
@@ -181,11 +181,11 @@ pub(crate) fn accept_object_tombstone(
     .to_string();
     let outcome = {
         let mut store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
+        let stored = store.load_brain(&brain_id)?;
         ensure_folder_visible(&stored, &folder_id, &actor_npub)?;
         ensure_direct_delete_authority(&stored, &actor_npub)?;
         store.submit_sync_record(
-            &vault_id,
+            &brain_id,
             &SyncRecordInput::FolderObjectTombstone(FolderObjectTombstoneSyncRecord {
                 record_event_id: event.id.to_hex(),
                 folder_id,

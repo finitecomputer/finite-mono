@@ -3,26 +3,26 @@ use std::fs;
 
 use finite_brain_core::portability::WorkingTreeFolderRoot;
 use finite_brain_core::{
-    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, FolderAccessMode,
-    FolderId, FolderKey, FolderKeyGrantPayload, FolderKeyRecipientPolicy, SafeRelativePath, UserId,
-    VaultId, VaultKind, required_folder_key_recipients,
+    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, BrainId, BrainKind,
+    FolderAccessMode, FolderId, FolderKey, FolderKeyGrantPayload, FolderKeyRecipientPolicy,
+    SafeRelativePath, UserId, required_folder_key_recipients,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
 use nostr::{Kind, Tag};
 
 use crate::{
-    APP_SPECIFIC_KIND, CliEnvironment, CliError, LocalSigner, SessionFolderKeyring,
-    VaultMetadataView, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
+    APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
+    SessionFolderKeyring, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
     normalize_folder_access, read_working_tree_state, sign_event, signed_json_request, tag_vec,
     timestamp, unix_timestamp, write_json_file,
 };
 
-pub(crate) fn fetch_vault_metadata(
+pub(crate) fn fetch_brain_metadata(
     env: &CliEnvironment,
     args: &[String],
-    vault_id: &str,
-) -> Result<VaultMetadataView, CliError> {
-    let path = format!("/_admin/vaults/{vault_id}/metadata");
+    brain_id: &str,
+) -> Result<BrainMetadataView, CliError> {
+    let path = format!("/_admin/brains/{brain_id}/metadata");
     let response = signed_json_request(env, args, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
 }
@@ -60,16 +60,16 @@ pub(crate) fn resolve_identity_npub(
 }
 
 pub(crate) fn folder_required_recipients(
-    metadata: &VaultMetadataView,
+    metadata: &BrainMetadataView,
     access: &str,
     access_users: &[String],
 ) -> Result<Vec<String>, CliError> {
-    let vault_kind = match metadata.kind.as_str() {
-        "personal" => VaultKind::Personal,
-        "organization" => VaultKind::Organization,
+    let brain_kind = match metadata.kind.as_str() {
+        "personal" => BrainKind::Personal,
+        "organization" => BrainKind::Organization,
         other => {
             return Err(CliError::InvalidInput(format!(
-                "unknown vault kind {other}"
+                "unknown brain kind {other}"
             )));
         }
     };
@@ -118,7 +118,7 @@ pub(crate) fn folder_required_recipients(
         .map_err(|error| CliError::InvalidInput(error.to_string()))?;
 
     required_folder_key_recipients(FolderKeyRecipientPolicy {
-        vault_kind,
+        brain_kind,
         folder_access,
         owner_user_id: owner.as_ref(),
         admins: &admins,
@@ -137,7 +137,7 @@ pub(crate) fn folder_required_recipients(
 
 pub(crate) fn folder_key_grant_request(
     auth: &LocalSigner,
-    vault_id: &str,
+    brain_id: &str,
     folder_id: &str,
     key_version: u32,
     recipient_npub: &str,
@@ -151,7 +151,7 @@ pub(crate) fn folder_key_grant_request(
     let grant_id = deterministic_id(
         "grant",
         &[
-            vault_id,
+            brain_id,
             folder_id,
             &key_version.to_string(),
             recipient_npub,
@@ -160,7 +160,7 @@ pub(crate) fn folder_key_grant_request(
     );
     let content = FolderKeyGrantPayload {
         version: "finite-folder-key-grant-v1".to_owned(),
-        vault_id: vault_id.to_owned(),
+        brain_id: brain_id.to_owned(),
         folder_id: folder_id.to_owned(),
         key_version,
         folder_key: folder_key.to_base64(),
@@ -175,9 +175,9 @@ pub(crate) fn folder_key_grant_request(
         vec![
             tag_vec([
                 "d",
-                &format!("finite-folder-key-grant:{vault_id}:{folder_id}:{key_version}"),
+                &format!("finite-folder-key-grant:{brain_id}:{folder_id}:{key_version}"),
             ])?,
-            tag_vec(["vault", vault_id])?,
+            tag_vec(["brain", brain_id])?,
             tag_vec(["folder", folder_id])?,
             tag_vec(["keyVersion", &key_version.to_string()])?,
         ],
@@ -197,16 +197,16 @@ pub(crate) fn folder_key_grant_request(
 
 pub(crate) fn opened_folder_key(
     keyring: &SessionFolderKeyring,
-    vault_id: &str,
+    brain_id: &str,
     folder_id: &str,
     key_version: u32,
 ) -> Result<FolderKey, CliError> {
     keyring
-        .get(vault_id, folder_id, key_version)
+        .get(brain_id, folder_id, key_version)
         .cloned()
         .ok_or_else(|| {
             CliError::GrantOpening {
-                vault_id: vault_id.to_owned(),
+                brain_id: brain_id.to_owned(),
                 folder_id: folder_id.to_owned(),
                 key_version,
                 reason: "no usable current grant was available for this operation; ensure the acting Member Identity has a valid encrypted grant"
@@ -217,7 +217,7 @@ pub(crate) fn opened_folder_key(
 
 pub(crate) fn admin_access_change_event(
     env: &CliEnvironment,
-    vault_id: &str,
+    brain_id: &str,
     action: AdminAccessAction,
     folder_id: Option<&str>,
     target_npub: Option<&str>,
@@ -228,7 +228,7 @@ pub(crate) fn admin_access_change_event(
     let change_id = deterministic_id(
         "access-change",
         &[
-            vault_id,
+            brain_id,
             action.as_str(),
             folder_id.unwrap_or("-"),
             target_npub.unwrap_or("-"),
@@ -236,7 +236,7 @@ pub(crate) fn admin_access_change_event(
         ],
     );
     let validation = AdminAccessChangeValidation {
-        vault_id: VaultId::new(vault_id.to_owned())
+        brain_id: BrainId::new(brain_id.to_owned())
             .map_err(|error| CliError::InvalidInput(error.to_string()))?,
         change_id,
         action,
@@ -269,11 +269,11 @@ pub(crate) fn admin_access_change_tags(
         tag_vec([
             "d",
             &format!(
-                "finite-vault-admin-access-change:{}:{}",
-                input.vault_id, input.change_id
+                "finite-brain-admin-access-change:{}:{}",
+                input.brain_id, input.change_id
             ),
         ])?,
-        tag_vec(["vault", &input.vault_id.to_string()])?,
+        tag_vec(["brain", &input.brain_id.to_string()])?,
         tag_vec(["action", input.action.as_str()])?,
     ];
     if let Some(folder_id) = &input.folder_id {
@@ -308,7 +308,7 @@ pub(crate) fn update_local_folder_after_create(
     {
         tree.folder_roots.push(WorkingTreeFolderRoot {
             folder_id: folder_id.to_owned(),
-            source_vault_id: None,
+            source_brain_id: None,
             path: path.to_owned(),
             can_read: true,
             metadata_only: false,

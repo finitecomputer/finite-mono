@@ -13,20 +13,20 @@ FiniteBrain is an encrypted knowledge system where trusted clients and agent
 runtimes open Folder Keys locally, materialize readable Pages as markdown, and
 sync encrypted changes back to the server.
 
-A Vault is a namespace of many Folder-scoped LLM wikis. Folder access is the
+A Brain is a namespace of many Folder-scoped LLM wikis. Folder access is the
 wiki boundary: each top-level Folder owns its own `_index.md`, `config.md`,
 `log.md`, sources, compiled pages, outputs, and access-safe activity trail.
 
 Current v1 capabilities:
 
-- SQLite-backed Vaults, Folders, Folder Key Grants, invitations, shares, mounts,
+- SQLite-backed Brains, Folders, Folder Key Grants, invitations, shares, mounts,
   and encrypted sync records.
 - Nostr-authenticated protected HTTP routes.
 - Product Client at `/client` for browser-based trusted-client workflows.
 - Development Smoke UI at `/smoke/ui` for local inspection only.
-- `fbrain` CLI for agent-native Vault Working Trees.
+- `fbrain` CLI for agent-native Brain Working Trees.
 - Folder-scoped AGENTS/HUMANS guidance and LLM wiki conventions that trusted
-  clients or agents can add when a user explicitly asks for them. New Vaults
+  clients or agents can add when a user explicitly asks for them. New Brains
   start empty under ADR-0021.
 
 ## Official URLs
@@ -46,7 +46,7 @@ Repository and releases:
 
 | Crate | Ownership |
 | --- | --- |
-| `finite-brain-core` | Portable v1 domain model, validation, crypto-adjacent contracts, defaults, OKF, and Vault Working Tree projection |
+| `finite-brain-core` | Portable v1 domain model, validation, crypto-adjacent contracts, defaults, OKF, and Brain Working Tree projection |
 | `finite-brain-store` | SQLite schema, transactions, persistence, sync records, invitations, shares, and mounts |
 | `finite-brain-server` | HTTP router, protected routes, static Product Client assets, Smoke UI, CORS, and API tests |
 | `finite-brain-app` | `finite-brain` application server binary |
@@ -95,7 +95,7 @@ Or build once and use `target/debug/fbrain`.
 
 ## `fbrain` Agent Workflow
 
-Use `fbrain` as the agent-facing command. Agents work in a Vault Working Tree
+Use `fbrain` as the agent-facing command. Agents work in a Brain Working Tree
 with ordinary file tools; `fbrain` owns identity, server transport, Folder Key
 opening, local daemon state, sync, conflicts, access inspection, and safe
 administration commands.
@@ -105,15 +105,15 @@ Useful commands:
 ```sh
 fbrain doctor --server "$FINITE_BRAIN_SERVER_URL"
 fbrain auth status --json
-fbrain vault list --json
-fbrain open <vault-id>
-cd "${FBRAIN_WORKING_TREE_ROOT:-.}/<vault-id>"
+fbrain brain list --json
+fbrain open <brain-id>
+cd "${FBRAIN_WORKING_TREE_ROOT:-.}/<brain-id>"
 fbrain sync now --summary
 fbrain conflicts --json
 fbrain status --json
 fbrain activity
-fbrain folder list --vault <vault-id>
-fbrain access list --vault <vault-id>
+fbrain folder list --brain <brain-id>
+fbrain access list --brain <brain-id>
 ```
 
 Use global `--config-dir <path>` when an agent needs a dedicated signer/config
@@ -126,7 +126,7 @@ fbrain --config-dir "$HOME/.config/finitebrain" auth status --json
 `fbrain` resolves server URLs in this order:
 
 1. explicit `--server`
-2. saved Vault Working Tree server URL
+2. saved Brain Working Tree server URL
 3. `FINITE_BRAIN_SERVER_URL`
 4. legacy `FINITE_BRAIN_PUBLIC_BASE_URL`
 
@@ -147,7 +147,7 @@ loopback addresses, or the exact development host explicitly named by
   allowlist entry for an Apple Container host bridge.
 - `FINITE_BRAIN_DB`: SQLite database path, default `finite-brain.sqlite3`.
 - `FINITE_IDENTITY_AUTHORITY`: finite-identity Authority base URL used by
-  email-targeted Vault Invitation claims to verify current email proof.
+  email-targeted Brain Invitation claims to verify current email proof.
 - `FINITE_BRAIN_INVITE_MAILER`: optional Brain invite delivery mode: `dev`,
   `resend`, `postmark`, or `none`.
 - `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend` or `postmark`.

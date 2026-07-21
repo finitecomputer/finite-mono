@@ -13,7 +13,7 @@
 - Spec issue: [finitecomputer/finite-mono#4](https://github.com/finitecomputer/finite-mono/issues/4)
 - Ticket: `docs/feature-dev/2026-07-11-dashboard-theme-ticket-03-access-workflows.md`
 - Relevant glossary terms: Dashboard-Aligned Product Theme, Product Client,
-  Vault, Folder, Member Identity, Folder Key Grant, Session Lock
+  Brain, Folder, Member Identity, Folder Key Grant, Session Lock
 - Relevant ADRs: `docs/adr/0010-keep-opened-folder-keys-session-only.md`,
   `docs/adr/0014-keep-browser-and-desktop-plaintext-ephemeral.md`, and
   `docs/adr/0015-deny-plaintext-egress-by-default.md`
@@ -24,9 +24,9 @@
 
 - Public interface used: the real Rust-served `/client`, exercised against the
   seeded Product Client fixture and development NIP-07 signer
-- Behaviors covered: Vault and Access tabs; Folder selection and summaries;
-  people, grant, share-link, invitation, email-bootstrap, Vault-administration,
-  shared-Folder, cross-Vault, result, busy, warning, error, and destructive
+- Behaviors covered: Brain and Access tabs; Folder selection and summaries;
+  people, grant, share-link, invitation, email-bootstrap, Brain-administration,
+  shared-Folder, cross-Brain, result, busy, warning, error, and destructive
   surfaces; existing DOM and request behavior preservation
 - `tdd` used: the approved Product Client contract seam exposed one obsolete
   assertion coupled to the exact former purple decoration. It failed after the

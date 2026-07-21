@@ -82,7 +82,7 @@ test("WorkOS proxy protects app surfaces but leaves entry and callback routes pu
   assert.equal(workosProtectedPath("/dashboard/machines/smoke"), true);
   assert.equal(workosProtectedPath("/client"), true);
   assert.equal(workosProtectedPath("/client/app.js"), true);
-  assert.equal(workosProtectedPath("/_admin/vaults"), false);
+  assert.equal(workosProtectedPath("/_admin/brains"), false);
   assert.equal(workosProtectedPath("/api/pwa/manifest"), true);
   assert.equal(workosProtectedPath("/claim/token"), false);
 });
@@ -99,7 +99,7 @@ test("WorkOS proxy bypasses auth endpoints and unauthenticated runtime callbacks
   assert.equal(workosProxyBypassPath("/api/brain/session-proof"), false);
   assert.equal(workosProxyBypassPath("/health"), true);
   assert.equal(workosProxyBypassPath("/_admin"), true);
-  assert.equal(workosProxyBypassPath("/_admin/vaults"), true);
+  assert.equal(workosProxyBypassPath("/_admin/brains"), true);
   assert.equal(workosProxyBypassPath("/client"), false);
   assert.equal(workosProxyBypassPath("/api/finite/v1/heartbeat"), true);
   assert.equal(workosProxyBypassPath("/api/stripe/webhook"), true);

@@ -14,7 +14,7 @@
 
 ## Goal
 
-Make the Product Client Access sidebar simple enough to understand at a glance. The current Access UI is overwhelming, visually noisy, poorly segmented, and has overlapping styles. Re-approach it from zero while preserving the Obsidian-like theme and the core truths of Vault membership, Folder access, restricted sharing, invitations, and Folder-key state.
+Make the Product Client Access sidebar simple enough to understand at a glance. The current Access UI is overwhelming, visually noisy, poorly segmented, and has overlapping styles. Re-approach it from zero while preserving the Obsidian-like theme and the core truths of Brain membership, Folder access, restricted sharing, invitations, and Folder-key state.
 
 ## Durable Artifacts
 
@@ -64,7 +64,7 @@ Make the Product Client Access sidebar simple enough to understand at a glance. 
 ## Open Questions
 
 - PR target/base decision resolved as a stacked PR. The screenshot/live Smoke surface exists on `feature/asset-source-notes`, so PR #72 targets that branch and should land after/with #71 instead of dragging the whole stack into a UI-only review.
-- Recommended design direction implemented: keep the Access panel focused on one selected Folder, expose the three jobs as segmented modes (`Overview`, `People`, `Links`), move Vault invitations into a separate compact block, and make the Folder list a secondary selector rather than competing with the primary task.
+- Recommended design direction implemented: keep the Access panel focused on one selected Folder, expose the three jobs as segmented modes (`Overview`, `People`, `Links`), move Brain invitations into a separate compact block, and make the Folder list a secondary selector rather than competing with the primary task.
 
 ## Verification Notes
 

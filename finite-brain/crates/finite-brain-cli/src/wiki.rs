@@ -26,7 +26,7 @@ const MAX_WIKI_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 struct WikiPage {
     folder_id: String,
-    source_vault_id: Option<String>,
+    source_brain_id: Option<String>,
     display_path: String,
     page_path: String,
     title: String,
@@ -36,7 +36,7 @@ struct WikiPage {
 struct WikiScan<'a> {
     display_root: &'a Path,
     folder_id: &'a str,
-    source_vault_id: Option<&'a str>,
+    source_brain_id: Option<&'a str>,
     entry_count: &'a mut usize,
     body_bytes: &'a mut usize,
     pages: &'a mut Vec<WikiPage>,
@@ -81,7 +81,7 @@ pub(crate) fn check_wiki_links(root: &Path) -> Result<WikiLinkHealthReport, CliE
         let mut scan = WikiScan {
             display_root: &relative_root,
             folder_id: &folder.folder_id,
-            source_vault_id: folder.source_vault_id.as_deref(),
+            source_brain_id: folder.source_brain_id.as_deref(),
             entry_count: &mut entry_count,
             body_bytes: &mut body_bytes,
             pages: &mut pages,
@@ -336,7 +336,7 @@ fn resolve_page_reference<'a>(
         .iter()
         .copied()
         .filter(|page| {
-            page.folder_id == source.folder_id && page.source_vault_id == source.source_vault_id
+            page.folder_id == source.folder_id && page.source_brain_id == source.source_brain_id
         })
         .collect::<Vec<_>>();
     if local_matches.is_empty() {
@@ -504,7 +504,7 @@ fn push_wiki_page(relative: &Path, body: String, scan: &mut WikiScan<'_>) {
     let title = markdown_title(&body).unwrap_or_else(|| title_from_path(&page_path));
     scan.pages.push(WikiPage {
         folder_id: scan.folder_id.to_owned(),
-        source_vault_id: scan.source_vault_id.map(ToOwned::to_owned),
+        source_brain_id: scan.source_brain_id.map(ToOwned::to_owned),
         display_path,
         page_path,
         title,
@@ -585,7 +585,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path().join("vault");
+        let root = tmp.path().join("brain");
         let external = tmp.path().join("external");
         std::fs::create_dir_all(root.join("Notes")).unwrap();
         std::fs::create_dir_all(&external).unwrap();
@@ -608,7 +608,7 @@ mod tests {
         let mut scan = WikiScan {
             display_root: &relative_root,
             folder_id: "notes",
-            source_vault_id: None,
+            source_brain_id: None,
             entry_count: &mut entry_count,
             body_bytes: &mut body_bytes,
             pages: &mut pages,

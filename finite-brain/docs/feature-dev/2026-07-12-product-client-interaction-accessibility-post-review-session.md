@@ -7,8 +7,8 @@
 
 ## Scope
 
-- Preserve the non-secret Settings → Vault return token when a nested Manage
-  Vaults flow resets its Vault session, without retaining it through a real
+- Preserve the non-secret Settings → Brain return token when a nested Manage
+  Brains flow resets its Brain session, without retaining it through a real
   Session Lock or page lifecycle lock.
 - Make clipboard feedback kind-specific, short-lived, and race-safe without
   displaying copied IDs, invite fragments, or clipboard error details.
@@ -18,7 +18,7 @@
 
 ## Implementation
 
-- A reset initiated while the nested Manage Vaults dialog still owns its
+- A reset initiated while the nested Manage Brains dialog still owns its
   Settings return token restores that token after clearing session plaintext.
   Explicit Session Locks, pagehide, authorization-loss locks, and signer
   identity security locks opt out and discard it.
@@ -46,8 +46,8 @@
 
 ## Test seams
 
-- A nested Settings → Vault → Manage Vaults flow changes Vaults, resets, then
-  returns to Settings → Vault with focus on Manage Vaults; an explicit Session
+- A nested Settings → Brain → Manage Brains flow changes Brains, resets, then
+  returns to Settings → Brain with focus on Manage Brains; an explicit Session
   Lock clears that return token.
 - Deterministic clipboard seams cover kind labels, expiry with a stale timer,
   deferred-copy completion after a lock, and deferred-copy completion after a

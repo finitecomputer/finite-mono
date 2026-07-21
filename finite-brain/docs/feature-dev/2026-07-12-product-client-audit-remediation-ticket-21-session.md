@@ -1,6 +1,6 @@
 ## Issue
 
-- Issue: #21 — make Vault invitation actions match Session Lock
+- Issue: #21 — make Brain invitation actions match Session Lock
 - Fixed point before session: `fe577fc`
 - Worker session: `/root/ticket_21_invitations`
 - Commit: `dfc8a0b` + final integration correction `4909693`
@@ -10,7 +10,7 @@
 
 - Spec issue: #17
 - Ticket: #21
-- Relevant glossary terms: Vault invitation, Invite Code, Invite Secret, Member
+- Relevant glossary terms: Brain invitation, Invite Code, Invite Secret, Member
   Identity, Session Lock, Session Folder Key, Ephemeral Client Plaintext
 - Relevant ADRs: 0004, 0009, 0010, 0013, 0014, 0016
 - Product truth: normal invitation inspection remains recipient-bound; an admin
@@ -18,7 +18,7 @@
 
 ## Implementation
 
-- Public interface used: Vault invitation panel and pending invitation list
+- Public interface used: Brain invitation panel and pending invitation list
 - Behaviors covered: locked Session shows safe unlock guidance and disables
   protected invitation actions; every protected handler, including pending-list
   Revoke, fails closed before capturing a session epoch; code/email/proof/secret
@@ -28,9 +28,9 @@
   pending admin-row ID
 - Boundary preserved: normal inspect/accept still call the recipient-bound
   route, but the admin revoke resolver never calls it
-- Final integration correction: accepting a normal or email Vault invitation
+- Final integration correction: accepting a normal or email Brain invitation
   now renders the reset Session immediately, so stale unlocked chrome cannot
-  hide the required safe unlock notice after the active Vault changes
+  hide the required safe unlock notice after the active Brain changes
 - `tdd` used: yes; deterministic panel/seam tests cover controls, guards,
   input lifecycle, binding, resolver paths, and secret handling
 - Commands run during implementation:
@@ -49,7 +49,7 @@
   Invite Secret input remains DOM/session-only
 - Final browser proof: locked controls stayed disabled; an admin created an
   invite, a recipient accepted it through the visible panel and immediately
-  saw the locked Session/Unlock guidance, then unlocked the invited Vault.
+  saw the locked Session/Unlock guidance, then unlocked the invited Brain.
   The same disposable flow confirmed the admin-side revoke path remains
   available without recipient-link inspection.
 

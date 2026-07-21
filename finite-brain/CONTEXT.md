@@ -2,15 +2,35 @@
 
 ## Glossary
 
+### Brain
+
+One knowledge space inside the FiniteBrain product, containing Folders,
+content, membership, access, and cryptographic grants. A Brain is either the
+user's single Personal Brain or an Organization Brain commonly named in speech
+as, for example, “Acme Brain.” **Org Brain** is the accepted short form for an
+Organization Brain. _Avoid_: Vault, Personal Vault, Organization Vault,
+Organizational Brain.
+
+### FiniteBrain
+
+The product through which humans and agents create, open, organize, share, and
+sync Brains. FiniteBrain is the product name; Brain is the contained knowledge
+space.
+
+### Brain ID
+
+The stable product-facing identifier for one Brain across the Product Client,
+CLI, public API, sync, and sharing contracts. _Avoid_: Vault ID, `vaultId`.
+
 ### FiniteBrain Portable v1
 
 The hard-cut implementation target for the Rust rebuild. It is defined by
-`docs/specs/finitebrain-portability-spec.md` and covers Vaults, Folders, Folder
+`docs/specs/finitebrain-portability-spec.md` and covers Brains, Folders, Folder
 Objects, Folder Key Grants, sync, sharing, OKF import/export, and compatibility.
 
 ### FiniteBrain Policy
 
-Application-specific behavior for Vaults, Folders, access, sync, storage,
+Application-specific behavior for Brains, Folders, access, sync, storage,
 sharing, OKF, hardening rules, the Product Client, and the Smoke UI.
 FiniteBrain Policy belongs in the `finite-brain` workspace, not in
 `finite-nostr`.
@@ -18,7 +38,7 @@ FiniteBrain Policy belongs in the `finite-brain` workspace, not in
 ### Reusable Nostr Primitive
 
 A generic Nostr operation that can be reused across Finite repos without
-knowing about FiniteBrain Vaults or Folders. Examples include NIP-19 identity
+knowing about Brains or Folders. Examples include NIP-19 identity
 encoding, event serialization and verification, NIP-44 encryption adapters,
 NIP-59 gift-wrap helpers, and NIP-98-style HTTP authorization helpers.
 
@@ -26,13 +46,13 @@ NIP-59 gift-wrap helpers, and NIP-98-style HTTP authorization helpers.
 
 A development-only HTML/CSS interface served by the Rust app for local
 end-to-end verification. It is not the product client. It exists to inspect
-Vaults, Folders, encrypted objects, sync state, grants, invitations, shares,
+Brains, Folders, encrypted objects, sync state, grants, invitations, shares,
 and mounts while the Rust core and server mature.
 
 ### Product Client
 
 The trusted browser experience a Member Identity's controller uses to open a
-Vault, connect a Brain Identity Provider, open Folder Key Grants, decrypt accessible Folder Objects,
+Brain, connect a Brain Identity Provider, open Folder Key Grants, decrypt accessible Folder Objects,
 materialize Pages, edit content, sync changes, run local search/graph indexes,
 and perform OKF import/export. Unlike the Smoke UI, the Product Client owns the
 normal member workflow.
@@ -43,7 +63,7 @@ The versioned, product-facing capability contract through which the Product
 Client uses an acting Member Identity. FiniteBrain defines the allowed typed
 intents, such as identifying the Member, authorizing a Brain-bound request or
 revision, and opening or wrapping an appropriately scoped Folder Key Grant.
-FiniteBrain retains ownership of Vault, Folder, content-crypto, and grant
+FiniteBrain retains ownership of Brain, Folder, content-crypto, and grant
 policy. It also owns its own hosted-now/native-later adapter. The contract
 never exposes a raw identity secret or generic sign/decrypt operation to
 Product Client code. Hosted, Electron, and iOS adapters may implement the same
@@ -62,19 +82,19 @@ The Product Client's presentation language derived from the Finite dashboard:
 warm neutral surfaces, blue product accents, Funnel typography, restrained
 depth, rounded controls, and the dashboard's system-driven light and dark
 appearances. It changes presentation without changing the Product Client's
-Vault workspace layout, security state, or member workflows.
+Brain workspace layout, security state, or member workflows.
 
 ### Product Client Spine
 
 The minimum trusted-client workflow that later client features build on:
-connect the acting Member Identity's Brain Identity Provider, load Vault state, open current Folder Key
+connect the acting Member Identity's Brain Identity Provider, load Brain state, open current Folder Key
 Grants, decrypt readable Pages, edit one Page, encrypt and write the Page back
 as a signed revision, and pull/apply sync records without losing unresolved
 local edits.
 
 ### Member Identity
 
-A Nostr `npub` that can hold Vault Membership, receive Folder Access, and open
+A Nostr `npub` that can hold Brain Membership, receive Folder Access, and open
 Folder Key Grants. FiniteBrain does not classify whether a human, agent, shared
 client, or several clients control it; separate keypairs are separate Member
 Identities. A product or Agent Runtime may provision and label separate
@@ -82,16 +102,16 @@ keypairs, but that client-side policy does not create a different FiniteBrain
 authorization class. In particular, an Agent Principal Key receives no Brain
 access merely because it belongs to the same Project or dashboard account as a
 user; an authorized Member must explicitly grant it the required access and
-Folder Key Grants. In a Personal Vault, the owner or the first account-bound
+Folder Key Grants. In a Personal Brain, the owner or the first account-bound
 agent's bootstrap flow may establish one distinct Agent Principal as the
-Personal Agent; that relationship grants full operational Vault access without
+Personal Agent; that relationship grants full operational Brain access without
 transferring ownership. Other limited Member Identities receive only their
 explicit restricted-Folder access.
 
 ### User Nostr Identity
 
 The human-controlled Nostr `npub` used across Hosted Web, Electron, and iOS.
-In FiniteBrain it is a Member Identity and receives the appropriate Vault
+In FiniteBrain it is a Member Identity and receives the appropriate Brain
 ownership or membership, Folder Access, and Folder Key Grants. Hosted Web uses
 it through a server-held Brain Identity Provider; Electron and iOS use the same
 identity from protected local storage. The custody difference does not create
@@ -102,46 +122,46 @@ user-facing setup and custody entry point; Brain's adapter owns only
 Brain-specific operations. Hosted Brain assumes that setup already exists. If
 it does not, Brain fails closed with a basic setup-required state and never
 creates another User Nostr Identity. This is a Greenfield boundary: Brain
-carries no legacy Vault or user-key migration path into the first release.
+carries no legacy Brain or user-key migration path into the first release.
 
-### Organization Vault Requester
+### Organization Brain Requester
 
 The authenticated human whose direct request causes an Agent Principal to
-create an Organization Vault on the human's behalf. Organization Vault
-Bootstrap atomically creates the Vault and makes both the acting Agent
+create an Organization Brain on the human's behalf. Organization Brain
+Bootstrap atomically creates the Brain and makes both the acting Agent
 Principal and this requesting User Nostr Identity initial members and admins.
 It creates no Folder, Folder Key, or Folder Key Grant; those appear only when
 an admin explicitly creates a Folder. If either membership or admin role
-cannot be established, no Vault is created. This is a Brain-enforced
+cannot be established, no Brain is created. This is a Brain-enforced
 bootstrap, not a sequence of later membership mutations. The managed
 FiniteBrain skill passes the requester from authenticated message metadata,
 never from identity text supplied in the conversation. If that authenticated
 requester metadata is
-unavailable, the agent does not guess or create an agent-only Vault; it briefly
+unavailable, the agent does not guess or create an agent-only Brain; it briefly
 asks the user to retry from an authenticated chat context. This rule does not
-auto-enroll an agent when a human creates an Organization Vault directly in the
+auto-enroll an agent when a human creates an Organization Brain directly in the
 Product Client; agents are added explicitly in that path.
 
-A clear natural-language request to create the Organization Vault is sufficient
+A clear natural-language request to create the Organization Brain is sufficient
 authorization for this bootstrap. The agent does not add another confirmation
 step; after creation it reports that both requester and agent are admins.
 
 ### Personal Agent Access
 
 The explicit, revocable way a user's distinct Agent Principal Key works in that
-user's Personal Vault. The User Nostr Identity remains the Vault's sole owner.
+user's Personal Brain. The User Nostr Identity remains the Brain's sole owner.
 The **Personal Agent** has full operational access to every current and future
 Folder: it may read, write, organize, share, invite collaborators, and directly
 delete content or Folders on the user's behalf. Brain automatically maintains
-the Folder Key Grants needed for that access: every new Personal Vault Folder
+the Folder Key Grants needed for that access: every new Personal Brain Folder
 automatically grants its owner and current Personal Agent, regardless of which
 one creates it. There is no Agent Workspace or Folder-by-Folder agent delegation
 product flow. The Personal Agent cannot
-transfer or delete the Vault, change its owner or Recovery Principals, add or
+transfer or delete the Brain, change its owner or Recovery Principals, add or
 remove a Personal Agent, or use the user's Brain Identity Provider. Project or
 dashboard navigation alone never creates Personal Agent Access. An
 authenticated account-agent binding may establish the initial Personal Agent
-during Personal Vault Bootstrap; after bootstrap, an unpaired agent cannot
+during Personal Brain Bootstrap; after bootstrap, an unpaired agent cannot
 self-enroll and the owner controls removal or replacement.
 
 Personal Agent actions remain signed and audited as that Agent Principal, with
@@ -151,18 +171,18 @@ already shows history; Brain does not impersonate the human owner.
 ### Personal Agent
 
 The product role of an Agent Principal added by the owner or established during
-account-bound agent bootstrap in a Personal Vault. A Personal Agent has full
-operational and collaboration authority across all current and future Vault
-content, while ownership, recovery, Vault deletion, and post-bootstrap control
+account-bound agent bootstrap in a Personal Brain. A Personal Agent has full
+operational and collaboration authority across all current and future Brain
+content, while ownership, recovery, Brain deletion, and post-bootstrap control
 of the Personal Agent relationship remain exclusive to the human owner. A
-Personal Vault has exactly one Personal Agent in the current product scope;
-multi-agent operation belongs in Organization Vaults. The owner may replace the
+Personal Brain has exactly one Personal Agent in the current product scope;
+multi-agent operation belongs in Organization Brains. The owner may replace the
 Personal Agent through one atomic key-rotating relationship swap, but the
-removed agent cannot re-enroll itself. _Avoid_: Delegated Agent, Personal Vault
+removed agent cannot re-enroll itself. _Avoid_: Delegated Agent, Personal Brain
 Admin.
 
 Owner-initiated removal or replacement revokes the Personal Agent relationship
-and rotates current Folder Keys without deleting the Personal Vault or its
+and rotates current Folder Keys without deleting the Personal Brain or its
 content. Runtime stops and restarts leave the relationship intact. Automatic
 revocation after permanent Core-agent deletion is a future integration because
 Core does not yet expose that lifecycle event.
@@ -176,36 +196,42 @@ resurrecting the deleted identity; it does not claim erasure of downloaded
 plaintext, backups, snapshots, or storage history. _Avoid_: Secure Erasure,
 Trash.
 
-### Personal Vault Bootstrap
+### Personal Brain Bootstrap
 
-The creation of a user's single Personal Vault with that user's User Nostr
+The creation of a user's single Personal Brain with that user's User Nostr
 Identity as sole owner. It seeds no default Folders or Folder Objects; Folders
 appear only through an explicit user action or a product workflow the user
 authorizes. An account-bound agent may perform bootstrap under its standing
 Agent Bootstrap Authority and atomically establish itself as a Personal Agent
 without creating a Folder merely for the relationship. In user-first setup, the
-owner atomically creates the Vault and adds the currently selected,
+owner atomically creates the Brain and adds the currently selected,
 identity-resolved agent as the one Personal Agent; if that agent cannot be
 verified, neither relationship is created.
 
-### Organization Vault Bootstrap
+### Organization Brain Bootstrap
 
-The creation of an empty Organization Vault with its initial member-admin set.
-Direct Product Client creation starts with the signing human. Agent-created
+The creation of an empty Organization Brain with its initial member-admin set.
+Direct Product Client creation always starts with the signing human and may,
+through a user-visible default-on choice, atomically include the currently
+selected, identity-resolved agent as another initial admin. Agent-created
 bootstrap atomically includes both the signing Agent Principal and the
 authenticated human requester. It seeds no default Folders, Folder Objects,
 Folder Keys, or Folder Key Grants; those appear only when an admin explicitly
 creates a Folder.
 
+Initial Brain bootstrap relationships are active memberships and roles, not
+pending invitations. Invitations are reserved for adding a Member Identity
+after a Brain already exists.
+
 ### Agent Bootstrap Authority
 
 The standing authority of an authenticated account-bound Agent Principal to
-create its user's single Personal Vault and atomically establish itself in that
-Vault's one Personal Agent role. The FiniteBrain skill asks the user once in
+create its user's single Personal Brain and atomically establish itself in that
+Brain's one Personal Agent role. The FiniteBrain skill asks the user once in
 natural language before exercising this authority, but that confirmation is
-behavioral guidance, not a server-enforced authorization boundary. If the Vault
+behavioral guidance, not a server-enforced authorization boundary. If the Brain
 already exists, an unpaired agent cannot enroll itself. Agent Bootstrap
-Authority cannot create a second Personal Vault, transfer or delete the Vault,
+Authority cannot create a second Personal Brain, transfer or delete the Brain,
 change ownership or Recovery Principals, or manage another agent. _Avoid_: Setup
 Ticket, Bootstrap Approval.
 
@@ -220,20 +246,20 @@ public Principal facts and owns the resulting Personal Agent Access. Finite Chat
 Hosted Device remains the hosted human-key custodian and signer, not part of the
 Personal Agent bootstrap path or Brain access authority.
 
-The agent never supplies the Personal Vault owner. Brain derives the owning
+The agent never supplies the Personal Brain owner. Brain derives the owning
 account from Core's authenticated account-agent association and resolves that
 account's existing User Nostr Identity through Finite Identity; missing,
-ambiguous, or conflicting facts fail without creating or changing a Vault.
+ambiguous, or conflicting facts fail without creating or changing a Brain.
 
 In Hosted Web, the selected Runtime's Managed Agent Email and display name may
 prefill the owner's pairing input, but that navigation context carries no
 authority. Brain resolves the email through Finite Identity and grants the
 resolved Agent Principal Key Personal Agent Access after the owner pairs it from
-an unlocked Personal Vault or after that bound agent completes agent-first
+an unlocked Personal Brain or after that bound agent completes agent-first
 bootstrap. The raw `npub` is an advanced fallback, not the primary user
 experience. After pairing, the Agent Principal discovers the user-owned
-Personal Vault through the signed visible-Vault list and opens its accessible
-Folders in a durable Vault Working Tree below the Runtime's `/data/workspace`
+Personal Brain through the signed visible-Brain list and opens its accessible
+Folders in a durable Brain Working Tree below the Runtime's `/data/workspace`
 boundary.
 
 ### Local Data Security Baseline
@@ -254,7 +280,9 @@ session needs it.
 A trusted-client state in which Session Folder Keys and temporary plaintext
 state are unavailable and automatic grant reopening is blocked until the
 Member explicitly resumes the grant-opening flow. A Session Lock hides client
-content but does not claim to erase a separately created Vault Working Tree.
+content but does not claim to erase a separately created Brain Working Tree.
+An empty Brain with no Folders or Folder Key Grants may still have a normal
+unlocked session; having no grants to open is not itself a Session Lock.
 In Hosted Web, explicitly opening Brain from the authenticated dashboard is
 the Member's Resume action and may automatically reopen valid Folder Key
 Grants. After a lock, the Member must explicitly open Brain again; Account Auth
@@ -271,7 +299,7 @@ required Folder Key rotation.
 A newly delivered invitation fragment is handled as a one-shot pre-session
 capability: the client removes it from browser history immediately, holds it in
 memory outside the locked content session, and imports it only after explicit
-Resume. Explicit Lock, Vault switching, or a failed Resume discards it.
+Resume. Explicit Lock, Brain switching, or a failed Resume discards it.
 
 ### Ephemeral Client Plaintext
 
@@ -293,15 +321,15 @@ decryption; first-party clients deny automatic Plaintext Egress, while a Member
 Identity's controller remains responsible for explicitly initiated exports and
 for the behavior of third-party clients.
 
-### Paused Vault Working Tree
+### Paused Brain Working Tree
 
-A Vault Working Tree whose FiniteBrain sync, signing, and automatic Folder Key
+A Brain Working Tree whose FiniteBrain sync, signing, and automatic Folder Key
 opening are stopped while its existing plaintext files remain on the Trusted
 Device. _Avoid_: Locked Working Tree.
 
-### Vault Working Tree Removal
+### Brain Working Tree Removal
 
-The explicit deletion of a Vault Working Tree's local plaintext projection.
+The explicit deletion of a Brain Working Tree's local plaintext projection.
 It does not claim secure erasure from backups, snapshots, or storage history.
 
 ### Trusted Device Boundary
@@ -313,7 +341,7 @@ one Folder or Finite product.
 
 ### Folder-scoped LLM Wiki
 
-The FiniteBrain knowledge model. A Vault is a namespace of many LLM wikis, and
+The FiniteBrain knowledge model. A Brain is a namespace of many LLM wikis, and
 each Folder is the enforceable wiki scope because Folder Keys and Folder Access
 define who can read it. Folder-local `_index.md`, `config.md`, and `log.md`
 describe only that Folder. Root/global indexes must not leak private Folder
@@ -358,7 +386,7 @@ Folder Object revisions, and uploads those revisions through normal secure
 object routes. The Rust server does not parse readable OKF or receive
 plaintext Page content during import.
 
-### Vault Working Tree
+### Brain Working Tree
 
 A local agent-facing file projection built from already-decrypted accessible
 Pages. It materializes readable Folders as Folder-scoped LLM wiki roots with
@@ -373,7 +401,7 @@ intents.
 
 ### Agent CLI
 
-The terminal control surface for a trusted Agent Runtime working inside a Vault
+The terminal control surface for a trusted Agent Runtime working inside a Brain
 Working Tree. It explains and controls identity, local daemon state, automatic
 sync health, blocked edits, activity, and access reasons while the controller
 reads and writes ordinary files; each operation opens the Folder Key Grants it
@@ -381,7 +409,7 @@ needs without creating a durable CLI unlock state.
 
 ### Agent Sync Daemon
 
-The resident trusted-client process that watches a Vault Working Tree, opens
+The resident trusted-client process that watches a Brain Working Tree, opens
 available Folder Keys for the acting Member Identity, detects file changes,
 syncs with the server, and records blocked states that require controller
 resolution.
@@ -405,9 +433,9 @@ A distinct, narrowly authorized Principal whose Folder Key Grants provide an ind
 A revocable, Brain-owned product authorization connecting one verified email
 Principal's account context to one Agent Principal. It records the relationship
 for audit and revocation but does not make the two the same Principal or convey
-Folder Keys. In a Personal Vault it authorizes the Personal Agent Access
+Folder Keys. In a Personal Brain it authorizes the Personal Agent Access
 relationship; Brain separately and automatically maintains the Folder Key
-Grants that make the Vault's current and future Folders readable. The
+Grants that make the Brain's current and future Folders readable. The
 delegation is not itself a content key.
 
 ### Email Invite Bootstrap
@@ -439,31 +467,31 @@ member identity, or permission principal.
 
 A Nostr event signed by the Invite Unwrap Key during Email Invite Bootstrap
 Claim. It proves possession of the client-only Invite Secret without sending
-the secret to the server, and binds the claim to the invite code, Vault,
+the secret to the server, and binds the claim to the invite code, Brain,
 invited email, claimant npub, bootstrap payload hash, and email proof
 timestamp.
 
 ### Invite Instructions
 
-Agent-readable guidance for a Vault Invitation, analogous to Sites `llms.txt`
+Agent-readable guidance for a Brain Invitation, analogous to Sites `llms.txt`
 but split by proof level for Brain's encrypted access model.
 
 ### Public Invite Instructions
 
 Unauthenticated Invite Instructions that disclose only generic claim workflow
-guidance. They exclude invited email, Vault identity, Folder identity, access
+guidance. They exclude invited email, Brain identity, Folder identity, access
 scope, claim state, Folder Keys, and bootstrap plaintext.
 
 ### Post-Proof Invite Instructions
 
 Invite Instructions returned only after the invited email is proven through the
 Identity Authority. They may disclose the scoped workflow details needed to
-claim, open, and sync the Vault, including human-readable Vault and Folder
+claim, open, and sync the Brain, including human-readable Brain and Folder
 names, but never Folder Keys or bootstrap plaintext.
 
-### Email-Targeted Vault Invitation
+### Email-Targeted Brain Invitation
 
-A Vault Invitation addressed to an email instead of a known Native Principal
+A Brain Invitation addressed to an email instead of a known Native Principal
 npub. In v1,
 external email-shaped targets use an Email Invite Bootstrap even if they have
 prior email-only proof; only concrete npub/hex targets or active Finite VIP
@@ -487,11 +515,11 @@ required durable Folder Key Grant in one atomic operation.
 ### Email Invite Bootstrap Authorization
 
 An admin-signed authorization for a future email recipient whose User npub is
-not known yet. It fixes the invited email, Vault, authorized Folder scope,
+not known yet. It fixes the invited email, Brain, authorized Folder scope,
 Folder key versions, Invite Unwrap Key, bootstrap payload hash, expiry, and
 single-use claim bounds that a later Email Invite Bootstrap Claim must match.
-For email-targeted Vault Invitations, the authorized Folder scope includes
-current all-members Folders because the accepted recipient becomes a Vault
+For email-targeted Brain Invitations, the authorized Folder scope includes
+current all-members Folders because the accepted recipient becomes a Brain
 Member.
 
 ### Claim-Authorized Folder Key Grant
@@ -499,7 +527,7 @@ Member.
 A durable Folder Key Grant created by an invited recipient after a valid Email
 Invite Bootstrap Claim. The inviting admin authorized the access, while the
 recipient's User npub finalized the encrypted grant. The grant is valid only
-within the pending invitation's authorized email, Vault, Folder, key-version,
+within the pending invitation's authorized email, Brain, Folder, key-version,
 expiry, and single-use claim bounds.
 
 ### Blocked Sync State

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CoreError, FolderAccessMode, FolderId, ObjectId, SafeRelativePath, UserId, Vault, VaultId,
+    Brain, BrainId, CoreError, FolderAccessMode, FolderId, ObjectId, SafeRelativePath, UserId,
 };
 
 /// Maximum single Asset payload size handled by the v1 working-tree pipeline.
@@ -82,8 +82,8 @@ impl From<CoreError> for PortabilityError {
 pub struct OpenedPage {
     /// Folder containing the page.
     pub folder_id: FolderId,
-    /// Source Vault for mounted Folders. `None` means the opened Vault.
-    pub source_vault_id: Option<VaultId>,
+    /// Source Brain for mounted Folders. `None` means the opened Brain.
+    pub source_brain_id: Option<BrainId>,
     /// Current encrypted object id.
     pub object_id: ObjectId,
     /// Display path of the containing Folder in a readable bundle.
@@ -105,8 +105,8 @@ pub struct OpenedPage {
 pub struct OpenedAsset {
     /// Folder containing the asset.
     pub folder_id: FolderId,
-    /// Source Vault for mounted Folders. `None` means the opened Vault.
-    pub source_vault_id: Option<VaultId>,
+    /// Source Brain for mounted Folders. `None` means the opened Brain.
+    pub source_brain_id: Option<BrainId>,
     /// Current encrypted object id.
     pub object_id: ObjectId,
     /// Display path of the containing Folder in a readable bundle.
@@ -128,8 +128,8 @@ pub struct OpenedAsset {
 pub struct OkfOmittedFolder {
     /// Folder id.
     pub folder_id: FolderId,
-    /// Source Vault for mounted Folders. `None` means the opened Vault.
-    pub source_vault_id: Option<VaultId>,
+    /// Source Brain for mounted Folders. `None` means the opened Brain.
+    pub source_brain_id: Option<BrainId>,
     /// User-visible Folder path. Page-level details remain omitted.
     pub display_path: SafeRelativePath,
     /// Omission reason.
@@ -143,8 +143,8 @@ pub struct OkfExportInput {
     pub exported_at: String,
     /// Acting npub.
     pub exported_by_npub: UserId,
-    /// Source Vault metadata.
-    pub source_vault: Vault,
+    /// Source Brain metadata.
+    pub source_brain: Brain,
     /// Decrypted pages visible to the actor.
     pub opened_pages: Vec<OpenedPage>,
     /// Folder-level omissions. These must not contain page paths or snippets.
@@ -160,7 +160,7 @@ pub struct OkfBundle {
     pub files: BTreeMap<String, String>,
 }
 
-/// `okf-vault.json`.
+/// `okf-brain.json`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OkfManifest {
@@ -170,8 +170,8 @@ pub struct OkfManifest {
     pub exported_at: String,
     /// Acting npub.
     pub exported_by_npub: String,
-    /// Source Vault summary.
-    pub source_vault: OkfSourceVault,
+    /// Source Brain summary.
+    pub source_brain: OkfSourceBrain,
     /// Folder manifest entries.
     pub folders: Vec<OkfFolderManifestEntry>,
     /// Exported object entries.
@@ -180,19 +180,19 @@ pub struct OkfManifest {
     pub omissions: Vec<OkfOmissionManifestEntry>,
 }
 
-/// Source Vault summary in OKF.
+/// Source Brain summary in OKF.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OkfSourceVault {
-    /// Vault id.
+pub struct OkfSourceBrain {
+    /// Brain id.
     pub id: String,
-    /// Vault kind.
+    /// Brain kind.
     pub kind: String,
-    /// Vault name.
+    /// Brain name.
     pub name: String,
 }
 
-/// Folder entry in `okf-vault.json`.
+/// Folder entry in `okf-brain.json`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OkfFolderManifestEntry {
@@ -206,7 +206,7 @@ pub struct OkfFolderManifestEntry {
     pub omitted: bool,
 }
 
-/// Object entry in `okf-vault.json`.
+/// Object entry in `okf-brain.json`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OkfObjectManifestEntry {
@@ -222,7 +222,7 @@ pub struct OkfObjectManifestEntry {
     pub content_hash: String,
 }
 
-/// Omission entry in `okf-vault.json`.
+/// Omission entry in `okf-brain.json`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OkfOmissionManifestEntry {
@@ -317,15 +317,15 @@ pub struct OkfImportPlan {
     pub entries: Vec<OkfImportPlanEntry>,
 }
 
-/// Input for materializing a Vault Working Tree from already-opened content.
+/// Input for materializing a Brain Working Tree from already-opened content.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct WorkingTreeMaterializeInput {
     /// Materialization timestamp.
     pub generated_at: String,
     /// Acting npub.
     pub generated_by_npub: UserId,
-    /// Source Vault metadata.
-    pub vault: Vault,
+    /// Source Brain metadata.
+    pub brain: Brain,
     /// Decrypted pages visible to the actor.
     pub opened_pages: Vec<OpenedPage>,
     /// Decrypted assets visible to the actor.
@@ -336,64 +336,64 @@ pub struct WorkingTreeMaterializeInput {
     pub latest_sequence: u64,
 }
 
-/// File-map projection of a Vault Working Tree.
+/// File-map projection of a Brain Working Tree.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct WorkingTreeProjection {
     /// UTF-8 text files to write, keyed by safe relative path from the working-tree root.
     pub files: BTreeMap<String, String>,
     /// Binary files to write, keyed by safe relative path from the working-tree root.
     pub binary_files: BTreeMap<String, Vec<u8>>,
-    /// Parsed Vault Directory manifest.
-    pub directory: VaultDirectoryManifest,
+    /// Parsed Brain Directory manifest.
+    pub directory: BrainDirectoryManifest,
     /// Parsed working-tree state manifest.
-    pub state: VaultWorkingTreeStateManifest,
+    pub state: BrainWorkingTreeStateManifest,
 }
 
-/// `.finitebrain/vault-directory.json`.
+/// `.finitebrain/brain-directory.json`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultDirectoryManifest {
+pub struct BrainDirectoryManifest {
     /// Manifest version.
     pub version: String,
-    /// Vault summary.
-    pub vault: VaultDirectoryVaultSummary,
+    /// Brain summary.
+    pub brain: BrainDirectoryBrainSummary,
     /// Working-tree root marker.
-    pub working_tree: VaultDirectoryPath,
+    pub working_tree: BrainDirectoryPath,
     /// Encrypted sync mirror marker.
-    pub encrypted_sync: VaultDirectoryPath,
+    pub encrypted_sync: BrainDirectoryPath,
     /// Ownership flags.
-    pub portability: VaultDirectoryPortability,
+    pub portability: BrainDirectoryPortability,
     /// Creation timestamp.
     pub created_at: String,
     /// Update timestamp.
     pub updated_at: String,
 }
 
-/// Vault summary in a Vault Directory manifest.
+/// Brain summary in a Brain Directory manifest.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultDirectoryVaultSummary {
-    /// Vault id.
+pub struct BrainDirectoryBrainSummary {
+    /// Brain id.
     pub id: String,
-    /// Vault kind.
+    /// Brain kind.
     pub kind: String,
-    /// Vault name.
+    /// Brain name.
     pub name: String,
-    /// Owner npub for personal Vaults.
+    /// Owner npub for personal Brains.
     pub owner_npub: Option<String>,
 }
 
-/// Path entry in a Vault Directory manifest.
+/// Path entry in a Brain Directory manifest.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct VaultDirectoryPath {
+pub struct BrainDirectoryPath {
     /// Safe relative path.
     pub path: String,
 }
 
-/// Ownership flags in a Vault Directory manifest.
+/// Ownership flags in a Brain Directory manifest.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultDirectoryPortability {
+pub struct BrainDirectoryPortability {
     /// True when an Agent Runtime owns writes for this directory.
     pub owned_by_agent_runtime: bool,
     /// True when an app surface owns writes for this directory.
@@ -403,7 +403,7 @@ pub struct VaultDirectoryPortability {
 /// `.finitebrain/working-tree-state.json`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultWorkingTreeStateManifest {
+pub struct BrainWorkingTreeStateManifest {
     /// Manifest version.
     pub version: String,
     /// Folder roots materialized in the working tree.
@@ -420,9 +420,9 @@ pub struct VaultWorkingTreeStateManifest {
 pub struct WorkingTreeFolderRoot {
     /// Folder id.
     pub folder_id: String,
-    /// Source Vault for mounted Folders. Missing means the opened Vault.
+    /// Source Brain for mounted Folders. Missing means the opened Brain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_vault_id: Option<String>,
+    pub source_brain_id: Option<String>,
     /// Materialized Folder path.
     pub path: String,
     /// Whether plaintext files may be read.
@@ -437,9 +437,9 @@ pub struct WorkingTreeFolderRoot {
 pub struct WorkingTreeObjectManifestEntry {
     /// Folder id.
     pub folder_id: String,
-    /// Source Vault for mounted Folder Objects. Missing means the opened Vault.
+    /// Source Brain for mounted Folder Objects. Missing means the opened Brain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_vault_id: Option<String>,
+    pub source_brain_id: Option<String>,
     /// Plaintext path inside the Folder root.
     pub path: String,
     /// Folder Object id.
@@ -462,7 +462,7 @@ pub struct WorkingTreeSyncState {
     pub latest_sequence: u64,
 }
 
-/// Local file change detected in a Vault Working Tree.
+/// Local file change detected in a Brain Working Tree.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WorkingTreeChange {
     /// Create or update a plaintext file.
@@ -548,8 +548,8 @@ pub struct WorkingTreeChangeIntent {
     pub route: WorkingTreeIntentRoute,
     /// Destination/source Folder id when known.
     pub folder_id: Option<FolderId>,
-    /// Source Vault for mounted Folders. `None` means the opened Vault.
-    pub source_vault_id: Option<VaultId>,
+    /// Source Brain for mounted Folders. `None` means the opened Brain.
+    pub source_brain_id: Option<BrainId>,
     /// Existing or generated Object id when known.
     pub object_id: Option<ObjectId>,
     /// Path inside the Folder root when known.
@@ -572,7 +572,7 @@ mod working_tree;
 pub use agents::agent_discovery_paths;
 pub use okf::{export_okf_bundle, plan_okf_import};
 pub use search::build_local_search_index;
-pub use working_tree::{materialize_vault_working_tree, plan_working_tree_change_intents};
+pub use working_tree::{materialize_brain_working_tree, plan_working_tree_change_intents};
 
 fn safe_locked_reason(reason: &str) -> &'static str {
     match reason {
@@ -622,15 +622,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DisplayName, Folder, FolderRole, VaultId, VaultKind};
+    use crate::{BrainId, BrainKind, DisplayName, Folder, FolderRole};
 
     #[test]
     fn okf_export_omits_inaccessible_pages_and_rewrites_only_present_links() {
-        let vault = sample_vault();
+        let brain = sample_brain();
         let bundle = export_okf_bundle(OkfExportInput {
             exported_at: "2026-06-23T00:00:00.000Z".to_owned(),
             exported_by_npub: UserId::new("npub-admin").unwrap(),
-            source_vault: vault,
+            source_brain: brain,
             opened_pages: vec![
                 page(
                     "concepts",
@@ -656,7 +656,7 @@ mod tests {
             ],
             omissions: vec![OkfOmittedFolder {
                 folder_id: FolderId::new("board").unwrap(),
-                source_vault_id: None,
+                source_brain_id: None,
                 display_path: SafeRelativePath::new("folder_path", "Board").unwrap(),
                 reason: "missing key for Board/secret-plan.md".to_owned(),
             }],
@@ -688,7 +688,7 @@ mod tests {
             export_okf_bundle(OkfExportInput {
                 exported_at: "2026-06-23T00:00:00.000Z".to_owned(),
                 exported_by_npub: UserId::new("npub-admin").unwrap(),
-                source_vault: sample_vault(),
+                source_brain: sample_brain(),
                 opened_pages: vec![
                     page(
                         "concepts",
@@ -757,15 +757,15 @@ mod tests {
         );
         let opened_pages = vec![opened_page];
         let opened_assets = vec![opened_asset];
-        let projection = materialize_vault_working_tree(WorkingTreeMaterializeInput {
+        let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
-            vault: sample_vault(),
+            brain: sample_brain(),
             opened_pages: opened_pages.clone(),
             opened_assets,
             locked_folders: vec![OkfOmittedFolder {
                 folder_id: FolderId::new("board").unwrap(),
-                source_vault_id: None,
+                source_brain_id: None,
                 display_path: SafeRelativePath::new("folder_path", "Board").unwrap(),
                 reason: "inaccessible secret-plan".to_owned(),
             }],
@@ -776,7 +776,7 @@ mod tests {
         assert!(
             projection
                 .files
-                .contains_key(".finitebrain/vault-directory.json")
+                .contains_key(".finitebrain/brain-directory.json")
         );
         assert!(
             projection
@@ -876,10 +876,10 @@ mod tests {
             &vec![7; MAX_WORKING_TREE_ASSET_BYTES + 1],
         );
 
-        let error = materialize_vault_working_tree(WorkingTreeMaterializeInput {
+        let error = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
-            vault: sample_vault(),
+            brain: sample_brain(),
             opened_pages: Vec::new(),
             opened_assets: vec![opened_asset],
             locked_folders: Vec::new(),
@@ -910,10 +910,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let error = materialize_vault_working_tree(WorkingTreeMaterializeInput {
+        let error = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
-            vault: sample_vault(),
+            brain: sample_brain(),
             opened_pages: Vec::new(),
             opened_assets,
             locked_folders: Vec::new(),
@@ -931,17 +931,17 @@ mod tests {
 
     #[test]
     fn working_tree_prefers_real_convention_pages_over_generated_fallbacks() {
-        let projection = materialize_vault_working_tree(WorkingTreeMaterializeInput {
+        let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
-            vault: sample_vault(),
+            brain: sample_brain(),
             opened_pages: vec![
                 page(
                     "concepts",
                     "obj_000000000001",
                     "Concepts",
                     "AGENTS.md",
-                    "# Real Folder Agents\n\nUse the durable vault instructions.",
+                    "# Real Folder Agents\n\nUse the durable brain instructions.",
                 ),
                 page(
                     "concepts",
@@ -959,7 +959,7 @@ mod tests {
 
         assert_eq!(
             projection.files.get("Concepts/AGENTS.md").unwrap(),
-            "# Real Folder Agents\n\nUse the durable vault instructions."
+            "# Real Folder Agents\n\nUse the durable brain instructions."
         );
         assert_eq!(
             projection.files.get("Concepts/_index.md").unwrap(),
@@ -978,15 +978,15 @@ mod tests {
             "# Deep Module",
         );
         opened.revision = 7;
-        let projection = materialize_vault_working_tree(WorkingTreeMaterializeInput {
+        let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
-            vault: sample_vault(),
+            brain: sample_brain(),
             opened_pages: vec![opened],
             opened_assets: Vec::new(),
             locked_folders: vec![OkfOmittedFolder {
                 folder_id: FolderId::new("board").unwrap(),
-                source_vault_id: None,
+                source_brain_id: None,
                 display_path: SafeRelativePath::new("folder_path", "Board").unwrap(),
                 reason: "inaccessible".to_owned(),
             }],
@@ -1125,7 +1125,7 @@ mod tests {
     ) -> OpenedPage {
         OpenedPage {
             folder_id: FolderId::new(folder_id).unwrap(),
-            source_vault_id: None,
+            source_brain_id: None,
             object_id: ObjectId::new(object_id).unwrap(),
             folder_display_path: SafeRelativePath::new("folder_path", folder_display_path).unwrap(),
             page_path: SafeRelativePath::new("page_path", page_path).unwrap(),
@@ -1146,7 +1146,7 @@ mod tests {
     ) -> OpenedAsset {
         OpenedAsset {
             folder_id: FolderId::new(folder_id).unwrap(),
-            source_vault_id: None,
+            source_brain_id: None,
             object_id: ObjectId::new(object_id).unwrap(),
             folder_display_path: SafeRelativePath::new("folder_path", folder_display_path).unwrap(),
             asset_path: SafeRelativePath::new("asset_path", asset_path).unwrap(),
@@ -1157,11 +1157,11 @@ mod tests {
         }
     }
 
-    fn sample_vault() -> Vault {
-        Vault {
-            id: VaultId::new("acme").unwrap(),
-            kind: VaultKind::Organization,
-            name: DisplayName::new("vault_name", "Acme").unwrap(),
+    fn sample_brain() -> Brain {
+        Brain {
+            id: BrainId::new("acme").unwrap(),
+            kind: BrainKind::Organization,
+            name: DisplayName::new("brain_name", "Acme").unwrap(),
             owner_user_id: None,
             folders: vec![
                 Folder {

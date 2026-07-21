@@ -53,7 +53,7 @@
 - Review fixed point:
   - finite-brain: `13a4f1230add97969246a585f345e2e4a1c61716`
   - finite-nostr: `baaa13a05f3691cf207f78f640f99c8bbd76cb0b`
-- Standards findings: pass; finite-nostr remains free of FiniteBrain Vault, Folder, sync, sharing, or OKF policy.
+- Standards findings: pass; finite-nostr remains free of Brain, Folder, sync, sharing, or OKF policy.
 - Spec findings: pass; issue #25 and finite-nostr#3 acceptance criteria are covered.
 - Worthy fixes applied:
   - Removed a non-test unused helper re-export after clippy surfaced it.

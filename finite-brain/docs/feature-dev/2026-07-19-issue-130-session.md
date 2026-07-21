@@ -2,7 +2,7 @@
 
 ## Issue
 
-- Issue: #130 — fbrain: attribute concurrent Vault changes to their signed actor
+- Issue: #130 — fbrain: attribute concurrent Brain changes to their signed actor
 - Fixed point before session: `eedb5d7`
 - Worker session: `/root/ticket_130_concurrent_actor`
 - Commit: `ae96d5ad95be2d7794a824d23034c3d6e637e9fd`
@@ -12,7 +12,7 @@
 
 - Spec issue: #127
 - Ticket: #130
-- Relevant glossary terms: Member Identity, Agent Principal, sync record, Vault
+- Relevant glossary terms: Member Identity, Agent Principal, sync record, Brain
   Working Tree
 - Relevant ADRs: existing signed-sync and managed-skill behavior; no new ADR
   required

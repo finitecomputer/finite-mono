@@ -8,7 +8,7 @@ Issues covered:
 
 - `finitecomputer/finite-brain#48` Product Client Folder Key Grant hardening
 - `finitecomputer/finite-brain#51` `fbrain daemon watch`
-- `finitecomputer/finite-brain#49` Product Client organization Vault invitations
+- `finitecomputer/finite-brain#49` Product Client organization Brain invitations
 - `finitecomputer/finite-brain#50` smoke alpha backup, restore, and SilverBullet cutover handoff
 
 ## Summary
@@ -22,9 +22,9 @@ Implemented:
 - Product Client Folder Key Grants now default to gift-wrapped NIP-44 open and
   creation paths, with plaintext development grants kept behind explicit test
   fallback helpers.
-- `fbrain daemon watch` runs the real Vault Working Tree sync path in a
+- `fbrain daemon watch` runs the real Brain Working Tree sync path in a
   foreground loop with bounded smoke/test options.
-- Product Client Access sidebar now supports organization Vault invitation
+- Product Client Access sidebar now supports organization Brain invitation
   create, inspect, accept, and revoke flows.
 - Smoke backup/restore/cutover runbook and local SQLite backup verifier were
   added.
@@ -33,7 +33,7 @@ Implemented:
 
 | Finding | Severity | Result |
 | --- | --- | --- |
-| Product Client enabled Vault invitation create/revoke controls while the active Vault was personal. Server-side authorization would reject the operation, but smoke users would get a confusing client path. | minor | Fixed by enabling create/revoke only when the active metadata kind is `organization`; inspect/accept stay available anywhere. |
+| Product Client enabled Brain invitation create/revoke controls while the active Brain was personal. Server-side authorization would reject the operation, but smoke users would get a confusing client path. | minor | Fixed by enabling create/revoke only when the active metadata kind is `organization`; inspect/accept stay available anywhere. |
 
 No remaining blocking review findings are known.
 

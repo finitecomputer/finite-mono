@@ -90,7 +90,7 @@ Rust-served client and includes:
 - `dark-mobile-quick-switcher.png`
 
 All matrix states had zero horizontal page overflow and zero JavaScript page
-errors. Keyboard traversal exposed visible focus outlines on ribbon, Vault,
+errors. Keyboard traversal exposed visible focus outlines on ribbon, Brain,
 signer, and Resume controls. Mobile retained the existing 44px ribbon plus
 sidebar and intentionally hidden workspace; tablet retained the ribbon,
 sidebar, and workspace columns. Lock cleared rendered Pages and Resume restored

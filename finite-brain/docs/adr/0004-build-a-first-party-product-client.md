@@ -19,6 +19,6 @@ client-side decryption, local indexes, OKF flows, and working-tree projection.
 - The Smoke UI can remain a development harness, but it is not the product
   workflow.
 - Product parity work can define client modules around FiniteBrain terms:
-  Vault, Folder, Page, Folder Key Grant, Graph View, Replay, OKF, and Vault
+  Brain, Folder, Page, Folder Key Grant, Graph View, Replay, OKF, and Brain
   Working Tree.
 - Legacy editor/runtime behavior is not a compatibility requirement.

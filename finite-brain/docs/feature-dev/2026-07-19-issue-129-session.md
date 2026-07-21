@@ -12,7 +12,7 @@
 
 - Spec issue: #127
 - Ticket: #129
-- Relevant glossary terms: effective Folder Access, Folder Key Grant, Vault
+- Relevant glossary terms: effective Folder Access, Folder Key Grant, Brain
   Admin, sync record
 - Relevant ADRs: none; this slice restores truthful idempotency at the existing
   signed mutation boundary

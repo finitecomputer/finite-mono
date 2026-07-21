@@ -11,7 +11,7 @@
 ## Inputs
 
 - PRD issue: finitecomputer/finite-brain#23
-- Relevant glossary terms: Product Client, Secure Encrypted Object Routes, Vault, Folder, Share Link, Shared Folder Mount
+- Relevant glossary terms: Product Client, Secure Encrypted Object Routes, Brain, Folder, Share Link, Shared Folder Mount
 - Relevant ADRs:
   - `docs/adr/0001-adopt-rust-workspace-and-finite-nostr.md`
   - `docs/adr/0002-use-sqlite-from-day-one.md`
@@ -21,7 +21,7 @@
 - Public interface used: existing `finite-brain-server` routes and `ServerState`.
 - Behaviors covered:
   - Static public routes moved to `routes/public.rs`.
-  - Vault bootstrap, creation, metadata, and invitation routes moved to `routes/vaults.rs`.
+  - Brain bootstrap, creation, metadata, and invitation routes moved to `routes/brains.rs`.
   - Folder creation, setup repair, and access rotation routes moved to `routes/folders.rs`.
   - Share link and shared folder connection routes moved to `routes/sharing.rs`.
   - Secure object and sync routes moved to `routes/objects_sync.rs`.

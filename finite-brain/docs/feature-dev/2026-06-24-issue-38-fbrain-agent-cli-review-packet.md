@@ -8,16 +8,16 @@ Direct review in current thread. Subagent review was skipped because the user di
 
 - Checked Nostr HTTP auth event generation against `finite_nostr::validate_http_auth_event`.
 - Added a nonce tag to CLI auth events after live smoke exposed same-second replay collisions on repeated signed GET requests.
-- Verified signed server routes for Vault create, metadata, open sync, and Folder create against a live local app server.
+- Verified signed server routes for Brain create, metadata, open sync, and Folder create against a live local app server.
 - Verified local signer supports public key, signing, NIP-44 encrypt, and NIP-44 decrypt.
 - Verified local signer state uses Unix `0600` file permissions.
-- Fixed server bootstrap grant-id collision across multiple personal Vaults for the same owner.
+- Fixed server bootstrap grant-id collision across multiple personal Brains for the same owner.
 - Fixed server personal-owner authorization for owner Folder creation.
 
 ## Domain/API Review
 
 - Command name is `fbrain`.
-- Terminology uses Vault Working Tree, not Volumes.
+- Terminology uses Brain Working Tree, not Volumes.
 - Normal flow attempts automatic sync on `open` and `daemon start`; `sync now` is diagnostic/recovery.
 - Agents keep using normal filesystem tools for wiki reads/writes while `fbrain` owns identity, sync, grants, permissions, invites, and sharing controls.
 - JSON output exists for status-bearing and server-response commands through `--json`.

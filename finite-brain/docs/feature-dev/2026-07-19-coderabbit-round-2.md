@@ -15,7 +15,7 @@
 | Finding | Severity | Decision | Notes |
 | --- | --- | --- | --- |
 | Delete-Folder smoke did not prove the authority guard precedes the request | major | fixed | Verification now matches the fail-fast guard and checks its order before `protectedRequest`. |
-| A later CLI example still used direct Personal Vault creation | minor | fixed | Both reference copies now use `vault bootstrap-personal`. |
+| A later CLI example still used direct Personal Brain creation | minor | fixed | Both reference copies now use `brain bootstrap-personal`. |
 
 ## Findings Not Addressed
 

@@ -1,7 +1,7 @@
 use super::*;
 
-/// Materialize already-opened content into a Vault Working Tree file map.
-pub fn materialize_vault_working_tree(
+/// Materialize already-opened content into a Brain Working Tree file map.
+pub fn materialize_brain_working_tree(
     input: WorkingTreeMaterializeInput,
 ) -> Result<WorkingTreeProjection, PortabilityError> {
     if input.opened_assets.len() > MAX_WORKING_TREE_ASSET_COUNT {
@@ -12,10 +12,10 @@ pub fn materialize_vault_working_tree(
     }
     let mut files = BTreeMap::new();
     let mut binary_files = BTreeMap::new();
-    let mut folder_roots = BTreeMap::<(Option<VaultId>, FolderId), WorkingTreeFolderRoot>::new();
+    let mut folder_roots = BTreeMap::<(Option<BrainId>, FolderId), WorkingTreeFolderRoot>::new();
     let mut objects = Vec::new();
     let mut folder_paths = input
-        .vault
+        .brain
         .folders
         .iter()
         .map(|folder| folder.path.to_string())
@@ -41,10 +41,10 @@ pub fn materialize_vault_working_tree(
 
     for page in &input.opened_pages {
         folder_roots
-            .entry((page.source_vault_id.clone(), page.folder_id.clone()))
+            .entry((page.source_brain_id.clone(), page.folder_id.clone()))
             .or_insert_with(|| WorkingTreeFolderRoot {
                 folder_id: page.folder_id.to_string(),
-                source_vault_id: page.source_vault_id.as_ref().map(ToString::to_string),
+                source_brain_id: page.source_brain_id.as_ref().map(ToString::to_string),
                 path: page.folder_display_path.to_string(),
                 can_read: true,
                 metadata_only: false,
@@ -57,7 +57,7 @@ pub fn materialize_vault_working_tree(
         insert_working_tree_file(&mut files, &full_path, page.markdown.clone())?;
         objects.push(WorkingTreeObjectManifestEntry {
             folder_id: page.folder_id.to_string(),
-            source_vault_id: page.source_vault_id.as_ref().map(ToString::to_string),
+            source_brain_id: page.source_brain_id.as_ref().map(ToString::to_string),
             path: page.page_path.to_string(),
             object_id: page.object_id.as_str().to_owned(),
             revision: page.revision,
@@ -69,10 +69,10 @@ pub fn materialize_vault_working_tree(
 
     for asset in &input.opened_assets {
         folder_roots
-            .entry((asset.source_vault_id.clone(), asset.folder_id.clone()))
+            .entry((asset.source_brain_id.clone(), asset.folder_id.clone()))
             .or_insert_with(|| WorkingTreeFolderRoot {
                 folder_id: asset.folder_id.to_string(),
-                source_vault_id: asset.source_vault_id.as_ref().map(ToString::to_string),
+                source_brain_id: asset.source_brain_id.as_ref().map(ToString::to_string),
                 path: asset.folder_display_path.to_string(),
                 can_read: true,
                 metadata_only: false,
@@ -97,7 +97,7 @@ pub fn materialize_vault_working_tree(
         )?;
         objects.push(WorkingTreeObjectManifestEntry {
             folder_id: asset.folder_id.to_string(),
-            source_vault_id: asset.source_vault_id.as_ref().map(ToString::to_string),
+            source_brain_id: asset.source_brain_id.as_ref().map(ToString::to_string),
             path: asset.asset_path.to_string(),
             object_id: asset.object_id.as_str().to_owned(),
             revision: asset.revision,
@@ -109,10 +109,10 @@ pub fn materialize_vault_working_tree(
 
     for locked in &input.locked_folders {
         folder_roots
-            .entry((locked.source_vault_id.clone(), locked.folder_id.clone()))
+            .entry((locked.source_brain_id.clone(), locked.folder_id.clone()))
             .or_insert_with(|| WorkingTreeFolderRoot {
                 folder_id: locked.folder_id.to_string(),
-                source_vault_id: locked.source_vault_id.as_ref().map(ToString::to_string),
+                source_brain_id: locked.source_brain_id.as_ref().map(ToString::to_string),
                 path: locked.display_path.to_string(),
                 can_read: false,
                 metadata_only: true,
@@ -135,41 +135,41 @@ pub fn materialize_vault_working_tree(
 
     let mut roots = folder_roots.into_values().collect::<Vec<_>>();
     objects.sort_by(|left, right| {
-        left.source_vault_id
-            .cmp(&right.source_vault_id)
+        left.source_brain_id
+            .cmp(&right.source_brain_id)
             .then(left.folder_id.cmp(&right.folder_id))
             .then(left.path.cmp(&right.path))
     });
     roots.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
-            .then(left.source_vault_id.cmp(&right.source_vault_id))
+            .then(left.source_brain_id.cmp(&right.source_brain_id))
             .then(left.folder_id.cmp(&right.folder_id))
     });
 
-    let directory = VaultDirectoryManifest {
-        version: "finite-vault-directory-v1".to_owned(),
-        vault: VaultDirectoryVaultSummary {
-            id: input.vault.id.to_string(),
-            kind: format!("{:?}", input.vault.kind).to_lowercase(),
-            name: input.vault.name.to_string(),
-            owner_npub: input.vault.owner_user_id.as_ref().map(ToString::to_string),
+    let directory = BrainDirectoryManifest {
+        version: "finite-brain-directory-v1".to_owned(),
+        brain: BrainDirectoryBrainSummary {
+            id: input.brain.id.to_string(),
+            kind: format!("{:?}", input.brain.kind).to_lowercase(),
+            name: input.brain.name.to_string(),
+            owner_npub: input.brain.owner_user_id.as_ref().map(ToString::to_string),
         },
-        working_tree: VaultDirectoryPath {
+        working_tree: BrainDirectoryPath {
             path: ".".to_owned(),
         },
-        encrypted_sync: VaultDirectoryPath {
+        encrypted_sync: BrainDirectoryPath {
             path: ".finitebrain/encrypted-sync".to_owned(),
         },
-        portability: VaultDirectoryPortability {
+        portability: BrainDirectoryPortability {
             owned_by_agent_runtime: false,
             owned_by_app_surface: false,
         },
         created_at: input.generated_at.clone(),
         updated_at: input.generated_at.clone(),
     };
-    let state = VaultWorkingTreeStateManifest {
-        version: "finite-vault-working-tree-state-v1".to_owned(),
+    let state = BrainWorkingTreeStateManifest {
+        version: "finite-brain-working-tree-state-v1".to_owned(),
         folder_roots: roots,
         objects,
         sync: WorkingTreeSyncState {
@@ -179,7 +179,7 @@ pub fn materialize_vault_working_tree(
 
     insert_working_tree_file(
         &mut files,
-        ".finitebrain/vault-directory.json",
+        ".finitebrain/brain-directory.json",
         serde_json::to_string_pretty(&directory).expect("directory manifest serializes"),
     )?;
     insert_working_tree_file(
@@ -251,7 +251,7 @@ pub fn materialize_vault_working_tree(
 
 /// Translate local working-tree changes into Product Client encrypted-sync intents.
 pub fn plan_working_tree_change_intents(
-    state: &VaultWorkingTreeStateManifest,
+    state: &BrainWorkingTreeStateManifest,
     changes: &[WorkingTreeChange],
 ) -> Vec<WorkingTreeChangeIntent> {
     changes
@@ -357,7 +357,7 @@ fn folder_agents_file(folder_id: &str) -> String {
     )
 }
 
-fn root_working_tree_index(state: &VaultWorkingTreeStateManifest) -> String {
+fn root_working_tree_index(state: &BrainWorkingTreeStateManifest) -> String {
     let folders = state
         .folder_roots
         .iter()
@@ -370,13 +370,13 @@ fn root_working_tree_index(state: &VaultWorkingTreeStateManifest) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!("# Vault Working Tree\n\n## Folders\n\n{folders}\n")
+    format!("# Brain Working Tree\n\n## Folders\n\n{folders}\n")
 }
 
 fn root_wiki_index(
     generated_at: &str,
     generated_by: &UserId,
-    state: &VaultWorkingTreeStateManifest,
+    state: &BrainWorkingTreeStateManifest,
 ) -> String {
     let readable_count = state
         .folder_roots
@@ -389,7 +389,7 @@ fn root_wiki_index(
     )
 }
 
-fn root_orphans_report(state: &VaultWorkingTreeStateManifest) -> String {
+fn root_orphans_report(state: &BrainWorkingTreeStateManifest) -> String {
     let pages = state
         .objects
         .iter()
@@ -409,7 +409,7 @@ fn root_tags_report(files: &BTreeMap<String, String>) -> String {
 
 fn folder_index_file(
     root: &WorkingTreeFolderRoot,
-    state: &VaultWorkingTreeStateManifest,
+    state: &BrainWorkingTreeStateManifest,
 ) -> String {
     let pages = state
         .objects
@@ -425,7 +425,7 @@ fn folder_wiki_index(
     root: &WorkingTreeFolderRoot,
     generated_at: &str,
     generated_by: &UserId,
-    state: &VaultWorkingTreeStateManifest,
+    state: &BrainWorkingTreeStateManifest,
 ) -> String {
     let count = state
         .objects
@@ -439,7 +439,7 @@ fn folder_wiki_index(
 }
 
 fn plan_working_tree_upsert(
-    state: &VaultWorkingTreeStateManifest,
+    state: &BrainWorkingTreeStateManifest,
     path: &SafeRelativePath,
     markdown: &str,
 ) -> WorkingTreeChangeIntent {
@@ -449,8 +449,8 @@ fn plan_working_tree_upsert(
     if !root.can_read {
         return unresolved_intent("Folder is locked in this working tree");
     }
-    let source_vault_id = match source_vault_id_for_root(root) {
-        Ok(source_vault_id) => source_vault_id,
+    let source_brain_id = match source_brain_id_for_root(root) {
+        Ok(source_brain_id) => source_brain_id,
         Err(reason) => return unresolved_intent(&reason),
     };
     let existing = object_for_local_path(state, root, &local_path);
@@ -465,7 +465,7 @@ fn plan_working_tree_upsert(
         },
         route: WorkingTreeIntentRoute::EncryptedObjectWrite,
         folder_id: FolderId::new(root.folder_id.clone()).ok(),
-        source_vault_id,
+        source_brain_id,
         object_id: Some(object_id),
         target_path: Some(local_path),
         from_path: None,
@@ -476,7 +476,7 @@ fn plan_working_tree_upsert(
 }
 
 fn plan_working_tree_asset_upsert(
-    state: &VaultWorkingTreeStateManifest,
+    state: &BrainWorkingTreeStateManifest,
     path: &SafeRelativePath,
     bytes: &[u8],
     content_type: &str,
@@ -497,8 +497,8 @@ fn plan_working_tree_asset_upsert(
     if bytes.len() > MAX_WORKING_TREE_ASSET_BYTES {
         return unresolved_intent("Asset exceeds the v1 working-tree size limit");
     }
-    let source_vault_id = match source_vault_id_for_root(root) {
-        Ok(source_vault_id) => source_vault_id,
+    let source_brain_id = match source_brain_id_for_root(root) {
+        Ok(source_brain_id) => source_brain_id,
         Err(reason) => return unresolved_intent(&reason),
     };
     let existing = object_for_local_path(state, root, &local_path);
@@ -513,7 +513,7 @@ fn plan_working_tree_asset_upsert(
         },
         route: WorkingTreeIntentRoute::EncryptedObjectWrite,
         folder_id: FolderId::new(root.folder_id.clone()).ok(),
-        source_vault_id,
+        source_brain_id,
         object_id: Some(object_id),
         target_path: Some(local_path),
         from_path: None,
@@ -527,7 +527,7 @@ fn plan_working_tree_asset_upsert(
 }
 
 fn plan_working_tree_rename(
-    state: &VaultWorkingTreeStateManifest,
+    state: &BrainWorkingTreeStateManifest,
     from_path: &SafeRelativePath,
     to_path: &SafeRelativePath,
 ) -> WorkingTreeChangeIntent {
@@ -541,13 +541,13 @@ fn plan_working_tree_rename(
         return unresolved_intent("Folder is locked in this working tree");
     }
     if from_root.folder_id != to_root.folder_id {
-        return unresolved_intent("cross-Folder moves require Vault Admin handling");
+        return unresolved_intent("cross-Folder moves require Brain Admin handling");
     }
-    if from_root.source_vault_id != to_root.source_vault_id {
-        return unresolved_intent("cross-Vault moves require Vault Admin handling");
+    if from_root.source_brain_id != to_root.source_brain_id {
+        return unresolved_intent("cross-Brain moves require Brain Admin handling");
     }
-    let source_vault_id = match source_vault_id_for_root(from_root) {
-        Ok(source_vault_id) => source_vault_id,
+    let source_brain_id = match source_brain_id_for_root(from_root) {
+        Ok(source_brain_id) => source_brain_id,
         Err(reason) => return unresolved_intent(&reason),
     };
     let Some(existing) = object_for_local_path(state, from_root, &from_local_path) else {
@@ -557,7 +557,7 @@ fn plan_working_tree_rename(
         action: WorkingTreeIntentAction::Move,
         route: WorkingTreeIntentRoute::EncryptedObjectMove,
         folder_id: FolderId::new(from_root.folder_id.clone()).ok(),
-        source_vault_id,
+        source_brain_id,
         object_id: ObjectId::new(existing.object_id.clone()).ok(),
         target_path: Some(to_local_path),
         from_path: Some(from_local_path),
@@ -568,7 +568,7 @@ fn plan_working_tree_rename(
 }
 
 fn plan_working_tree_delete(
-    state: &VaultWorkingTreeStateManifest,
+    state: &BrainWorkingTreeStateManifest,
     path: &SafeRelativePath,
 ) -> WorkingTreeChangeIntent {
     let Some((root, local_path)) = resolve_working_tree_folder(state, path) else {
@@ -577,8 +577,8 @@ fn plan_working_tree_delete(
     if !root.can_read {
         return unresolved_intent("Folder is locked in this working tree");
     }
-    let source_vault_id = match source_vault_id_for_root(root) {
-        Ok(source_vault_id) => source_vault_id,
+    let source_brain_id = match source_brain_id_for_root(root) {
+        Ok(source_brain_id) => source_brain_id,
         Err(reason) => return unresolved_intent(&reason),
     };
     let Some(existing) = object_for_local_path(state, root, &local_path) else {
@@ -588,7 +588,7 @@ fn plan_working_tree_delete(
         action: WorkingTreeIntentAction::Delete,
         route: WorkingTreeIntentRoute::EncryptedObjectDelete,
         folder_id: FolderId::new(root.folder_id.clone()).ok(),
-        source_vault_id,
+        source_brain_id,
         object_id: ObjectId::new(existing.object_id.clone()).ok(),
         target_path: Some(local_path),
         from_path: None,
@@ -599,7 +599,7 @@ fn plan_working_tree_delete(
 }
 
 fn resolve_working_tree_folder<'a>(
-    state: &'a VaultWorkingTreeStateManifest,
+    state: &'a BrainWorkingTreeStateManifest,
     path: &SafeRelativePath,
 ) -> Option<(&'a WorkingTreeFolderRoot, SafeRelativePath)> {
     state
@@ -619,7 +619,7 @@ fn resolve_working_tree_folder<'a>(
 }
 
 fn object_for_local_path<'a>(
-    state: &'a VaultWorkingTreeStateManifest,
+    state: &'a BrainWorkingTreeStateManifest,
     root: &WorkingTreeFolderRoot,
     local_path: &SafeRelativePath,
 ) -> Option<&'a WorkingTreeObjectManifestEntry> {
@@ -632,14 +632,14 @@ fn object_belongs_to_root(
     object: &WorkingTreeObjectManifestEntry,
     root: &WorkingTreeFolderRoot,
 ) -> bool {
-    object.folder_id == root.folder_id && object.source_vault_id == root.source_vault_id
+    object.folder_id == root.folder_id && object.source_brain_id == root.source_brain_id
 }
 
-fn source_vault_id_for_root(root: &WorkingTreeFolderRoot) -> Result<Option<VaultId>, String> {
-    root.source_vault_id
+fn source_brain_id_for_root(root: &WorkingTreeFolderRoot) -> Result<Option<BrainId>, String> {
+    root.source_brain_id
         .as_ref()
-        .map(|source_vault_id| {
-            VaultId::new(source_vault_id.clone()).map_err(|error| error.to_string())
+        .map(|source_brain_id| {
+            BrainId::new(source_brain_id.clone()).map_err(|error| error.to_string())
         })
         .transpose()
 }
@@ -659,7 +659,7 @@ fn unresolved_intent(reason: &str) -> WorkingTreeChangeIntent {
         action: WorkingTreeIntentAction::Unresolved,
         route: WorkingTreeIntentRoute::Unresolved,
         folder_id: None,
-        source_vault_id: None,
+        source_brain_id: None,
         object_id: None,
         target_path: None,
         from_path: None,

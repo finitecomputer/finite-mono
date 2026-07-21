@@ -5,9 +5,9 @@ pub(crate) async fn replace_personal_agent_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(vault_id): AxumPath<String>,
+    AxumPath(brain_id): AxumPath<String>,
     body: Bytes,
-) -> Result<Json<VaultMetadataResponse>, ApiError> {
+) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: ReplacePersonalAgentRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
@@ -21,17 +21,17 @@ pub(crate) async fn replace_personal_agent_handler(
                 reencrypted_records: rotation.reencrypted_records.len(),
             }),
     )?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let actor_id = UserId::new(actor.clone())?;
     {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
-        if stored.vault.kind != VaultKind::Personal
-            || stored.vault.owner_user_id.as_ref() != Some(&actor_id)
+        let stored = store.load_brain(&brain_id)?;
+        if stored.brain.kind != BrainKind::Personal
+            || stored.brain.owner_user_id.as_ref() != Some(&actor_id)
         {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
-                "only the Personal Vault owner may replace its Personal Agent",
+                "only the Personal Brain owner may replace its Personal Agent",
             ));
         }
     }
@@ -49,7 +49,7 @@ pub(crate) async fn replace_personal_agent_handler(
         let folder_id = FolderId::new(rotation.folder_id)?;
         let (event, payload) = validate_admin_access_change_value(
             rotation.access_change_event,
-            &vault_id,
+            &brain_id,
             &actor,
             AdminAccessAction::RotateFolderKey,
             Some(&folder_id),
@@ -64,7 +64,7 @@ pub(crate) async fn replace_personal_agent_handler(
             &server_timestamp(&state),
         )?;
         let records = rotation_records_from_requests(
-            &vault_id,
+            &brain_id,
             &folder_id,
             &actor,
             rotation.new_key_version,
@@ -99,43 +99,43 @@ pub(crate) async fn replace_personal_agent_handler(
     let updated_at = server_timestamp(&state);
     let mut store = state.store.lock().map_err(lock_error)?;
     store.replace_personal_agent(
-        &vault_id,
+        &brain_id,
         &actor_id,
         replacement.as_ref(),
         &rotations,
         &updated_at,
     )?;
-    let stored = store.load_vault(&vault_id)?;
+    let stored = store.load_brain(&brain_id)?;
     let mut response = metadata_response(stored);
     enrich_metadata_identities(&store, &mut response)?;
     Ok(Json(response))
 }
 
-pub(crate) async fn bootstrap_personal_vault_for_agent_handler(
+pub(crate) async fn bootstrap_personal_brain_for_agent_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
     body: Bytes,
-) -> Result<Json<BootstrapPersonalVaultForAgentResponse>, ApiError> {
+) -> Result<Json<BootstrapPersonalBrainForAgentResponse>, ApiError> {
     let agent_actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let _request: BootstrapPersonalVaultForAgentRequest = serde_json::from_slice(&body)
+    let _request: BootstrapPersonalBrainForAgentRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let agent_npub = UserId::new(agent_actor)?;
     let principals = resolve_account_agent_principals(&state, &agent_npub)?;
     let owner_key =
         NostrPublicKey::parse(principals.owner_npub.as_str()).map_err(nostr_identity_error)?;
-    let vault_id = VaultId::new(format!("personal-{}", &owner_key.to_hex()[..16]))?;
-    let output = bootstrap_personal_vault(
-        vault_id.as_str(),
-        "Personal vault",
+    let brain_id = BrainId::new(format!("personal-{}", &owner_key.to_hex()[..16]))?;
+    let output = bootstrap_personal_brain(
+        brain_id.as_str(),
+        "Personal brain",
         principals.owner_npub.to_string(),
     )?;
     let created_at = server_timestamp(&state);
     let identity_aliases = account_agent_identity_aliases(&principals, &created_at)?;
     {
         let mut store = state.store.lock().map_err(lock_error)?;
-        store.create_personal_vault_bootstrap_with_identities(
+        store.create_personal_brain_bootstrap_with_identities(
             &output,
             &[],
             &principals.agent_npub,
@@ -145,15 +145,15 @@ pub(crate) async fn bootstrap_personal_vault_for_agent_handler(
         )?;
     }
 
-    let mut vault = {
+    let mut brain = {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
+        let stored = store.load_brain(&brain_id)?;
         let mut response = metadata_response(stored);
         enrich_metadata_identities(&store, &mut response)?;
         response
     };
-    vault
+    brain
         .identities
         .sort_by(|left, right| left.npub.cmp(&right.npub));
-    Ok(Json(BootstrapPersonalVaultForAgentResponse { vault }))
+    Ok(Json(BootstrapPersonalBrainForAgentResponse { brain }))
 }

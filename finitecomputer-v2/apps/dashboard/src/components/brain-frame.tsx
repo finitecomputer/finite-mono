@@ -58,7 +58,7 @@ export function BrainFrame({
           confirmed = Boolean(
             agentLabel &&
               window.confirm(
-                `Create your Personal Vault and pair ${agentLabel} as your Personal Agent?`,
+                `Create your Personal Brain and pair ${agentLabel} as your Personal Agent?`,
               ),
           );
           if (confirmationResultsRef.current.size >= 32) confirmationResultsRef.current.clear();

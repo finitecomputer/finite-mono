@@ -3,7 +3,7 @@ use crate::*;
 impl BrainStore {
     pub fn folder_deletion_replay(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         folder_id: &FolderId,
     ) -> Result<Option<FolderDeletionReplay>, StoreError> {
         self.conn
@@ -11,8 +11,8 @@ impl BrainStore {
                 r#"SELECT deletion_event_id, actor_npub, root_key_version,
                           folder_count, object_count
                    FROM deleted_folder_identities
-                   WHERE vault_id = ?1 AND folder_id = ?2"#,
-                params![vault_id.as_str(), folder_id.as_str()],
+                   WHERE brain_id = ?1 AND folder_id = ?2"#,
+                params![brain_id.as_str(), folder_id.as_str()],
                 |row| {
                     Ok(FolderDeletionReplay {
                         deletion_event_id: row.get(0)?,
@@ -31,7 +31,7 @@ impl BrainStore {
     #[allow(clippy::too_many_arguments)]
     pub fn delete_folder_subtree(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         root_folder_id: &FolderId,
         actor_npub: &UserId,
         expected_key_version: u32,
@@ -40,13 +40,13 @@ impl BrainStore {
         deleted_at: &str,
         record_event_kind: u16,
     ) -> Result<FolderSubtreeDeletion, StoreError> {
-        let stored = self.load_vault(vault_id)?;
-        if !has_vault_operational_authority(&stored, actor_npub) {
+        let stored = self.load_brain(brain_id)?;
+        if !has_brain_operational_authority(&stored, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "Folder deletion requires vault destructive authority".to_owned(),
+                reason: "Folder deletion requires brain destructive authority".to_owned(),
             });
         }
-        if let Some(existing) = self.folder_deletion_replay(vault_id, root_folder_id)? {
+        if let Some(existing) = self.folder_deletion_replay(brain_id, root_folder_id)? {
             if existing.deletion_event_id != deletion_event_id
                 || existing.actor_npub != *actor_npub
                 || existing.root_key_version != expected_key_version
@@ -56,8 +56,8 @@ impl BrainStore {
                 });
             }
             let sequence = self.conn.query_row(
-                "SELECT sequence FROM vault_record_index WHERE vault_id = ?1 AND record_event_id = ?2",
-                params![vault_id.as_str(), deletion_event_id],
+                "SELECT sequence FROM brain_record_index WHERE brain_id = ?1 AND record_event_id = ?2",
+                params![brain_id.as_str(), deletion_event_id],
                 |row| row.get::<_, u64>(0),
             )?;
             return Ok(FolderSubtreeDeletion {
@@ -69,7 +69,7 @@ impl BrainStore {
         }
 
         let root_folder = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == *root_folder_id)
@@ -86,7 +86,7 @@ impl BrainStore {
         let mut subtree = BTreeSet::from([root_folder_id.clone()]);
         loop {
             let before = subtree.len();
-            for folder in &stored.vault.folders {
+            for folder in &stored.brain.folders {
                 if folder
                     .parent_folder_id
                     .as_ref()
@@ -100,7 +100,7 @@ impl BrainStore {
             }
         }
         let mut folders = stored
-            .vault
+            .brain
             .folders
             .iter()
             .filter(|folder| subtree.contains(&folder.id))
@@ -112,7 +112,7 @@ impl BrainStore {
             while let Some(parent_id) = parent {
                 depth += 1;
                 parent = stored
-                    .vault
+                    .brain
                     .folders
                     .iter()
                     .find(|candidate| candidate.id == *parent_id)
@@ -121,24 +121,24 @@ impl BrainStore {
             std::cmp::Reverse(depth)
         });
         let objects = self
-            .load_current_objects(vault_id)?
+            .load_current_objects(brain_id)?
             .into_iter()
             .filter(|object| subtree.contains(&object.folder_id))
             .collect::<Vec<_>>();
         let live_object_count = objects.iter().filter(|object| !object.deleted).count();
 
         let tx = self.conn.transaction()?;
-        let sequence = sync_records::next_sequence(&tx, vault_id)?;
+        let sequence = sync_records::next_sequence(&tx, brain_id)?;
 
         for object in &objects {
             tx.execute(
                 r#"INSERT INTO deleted_object_identities (
-                    vault_id, folder_id, object_id, root_folder_id,
+                    brain_id, folder_id, object_id, root_folder_id,
                     deletion_event_id, actor_npub, deleted_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                ON CONFLICT(vault_id, folder_id, object_id) DO NOTHING"#,
+                ON CONFLICT(brain_id, folder_id, object_id) DO NOTHING"#,
                 params![
-                    vault_id.as_str(),
+                    brain_id.as_str(),
                     object.folder_id.as_str(),
                     object.object_id.as_str(),
                     root_folder_id.as_str(),
@@ -151,12 +151,12 @@ impl BrainStore {
         for folder in &folders {
             tx.execute(
                 r#"INSERT INTO deleted_folder_identities (
-                    vault_id, folder_id, root_folder_id, deletion_event_id,
+                    brain_id, folder_id, root_folder_id, deletion_event_id,
                     actor_npub, deleted_at, payload_json, root_key_version,
                     folder_count, object_count
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
                 params![
-                    vault_id.as_str(),
+                    brain_id.as_str(),
                     folder.id.as_str(),
                     root_folder_id.as_str(),
                     deletion_event_id,
@@ -173,16 +173,16 @@ impl BrainStore {
         let mut invitation_ids = Vec::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT id, initial_folder_access_json FROM vault_invitations WHERE vault_id = ?1 AND status = 'pending'",
+                "SELECT id, initial_folder_access_json FROM brain_invitations WHERE brain_id = ?1 AND status = 'pending'",
             )?;
-            let rows = stmt.query_map(params![vault_id.as_str()], |row| {
+            let rows = stmt.query_map(params![brain_id.as_str()], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             for row in rows {
                 let (id, scope_json) = row?;
                 let scope = serde_json::from_str::<Vec<String>>(&scope_json).map_err(|_| {
                     StoreError::InvalidRecord {
-                        reason: "stored Vault Invitation Folder scope is invalid".to_owned(),
+                        reason: "stored Brain Invitation Folder scope is invalid".to_owned(),
                     }
                 })?;
                 if scope
@@ -195,30 +195,30 @@ impl BrainStore {
         }
         for invitation_id in invitation_ids {
             tx.execute(
-                "DELETE FROM vault_invitations WHERE id = ?1",
+                "DELETE FROM brain_invitations WHERE id = ?1",
                 params![invitation_id],
             )?;
         }
         for folder in &folders {
             tx.execute(
-                "DELETE FROM vault_record_index WHERE vault_id = ?1 AND folder_id = ?2",
-                params![vault_id.as_str(), folder.id.as_str()],
+                "DELETE FROM brain_record_index WHERE brain_id = ?1 AND folder_id = ?2",
+                params![brain_id.as_str(), folder.id.as_str()],
             )?;
         }
         for folder in &folders {
             tx.execute(
-                "DELETE FROM folders WHERE vault_id = ?1 AND id = ?2",
-                params![vault_id.as_str(), folder.id.as_str()],
+                "DELETE FROM folders WHERE brain_id = ?1 AND id = ?2",
+                params![brain_id.as_str(), folder.id.as_str()],
             )?;
         }
         tx.execute(
-            r#"INSERT INTO vault_record_index (
-                vault_id, sequence, record_event_id, record_type, folder_id, object_id,
+            r#"INSERT INTO brain_record_index (
+                brain_id, sequence, record_event_id, record_type, folder_id, object_id,
                 revision, actor_npub, client_created_at, payload_json, accepted_at,
                 record_event_kind
-            ) VALUES (?1, ?2, ?3, 'vault_admin_access_change', NULL, NULL, NULL, ?4, ?5, ?6, ?5, ?7)"#,
+            ) VALUES (?1, ?2, ?3, 'brain_admin_access_change', NULL, NULL, NULL, ?4, ?5, ?6, ?5, ?7)"#,
             params![
-                vault_id.as_str(),
+                brain_id.as_str(),
                 sequence,
                 deletion_event_id,
                 actor_npub.as_str(),

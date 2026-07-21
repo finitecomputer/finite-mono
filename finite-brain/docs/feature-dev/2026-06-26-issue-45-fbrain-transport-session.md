@@ -12,7 +12,7 @@
 
 - PRD issue: `finitecomputer/finite-brain#43`
 - Slice issue: `finitecomputer/finite-brain#45`
-- Relevant glossary terms: Agent CLI, Vault Working Tree, Local Agent Signer, Blocked Sync State
+- Relevant glossary terms: Agent CLI, Brain Working Tree, Local Agent Signer, Blocked Sync State
 - Relevant ADRs/specs: `AGENTS.md`, `CONTEXT.md`, `docs/specs/finitebrain-portability-spec.md`, `docs/adr/0001-adopt-rust-workspace-and-finite-nostr.md`
 - Prototype answer, if any: none
 
@@ -21,7 +21,7 @@
 - Public interface used: `fbrain` command seam through `run_with_env`, `http_request`, signed JSON requests, and live `target/debug/fbrain`.
 - Behaviors covered:
   - `FINITE_BRAIN_SERVER_URL` added as the agent transport URL.
-  - URL precedence is explicit `--server`, saved Vault Working Tree URL, `FINITE_BRAIN_SERVER_URL`, then legacy `FINITE_BRAIN_PUBLIC_BASE_URL`.
+  - URL precedence is explicit `--server`, saved Brain Working Tree URL, `FINITE_BRAIN_SERVER_URL`, then legacy `FINITE_BRAIN_PUBLIC_BASE_URL`.
   - The CLI HTTP client now supports both `http://` and `https://` via `ureq`.
   - `doctor`, command requests, `open`, `daemon start`, `daemon tick`, and `sync now` use the same resolver path.
   - Signed HTTP auth remains bound to the absolute request URL used by the request.

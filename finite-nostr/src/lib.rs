@@ -1,7 +1,7 @@
 //! Reusable Nostr primitives for Finite Rust projects.
 //!
 //! This crate intentionally owns generic protocol helpers only. Product
-//! policies such as FiniteBrain Vault Access or Folder Key Grants belong in
+//! policies such as Brain Access or Folder Key Grants belong in
 //! application crates.
 
 pub mod auth;

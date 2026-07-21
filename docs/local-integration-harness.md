@@ -82,7 +82,7 @@ just dev saas-smoke
 That check creates or reuses the local Project, waits for the Apple runtime,
 opens the real Hosted Web Device chat, requires a real Hermes response, has the
 owner establish the runtime Agent Principal as the one Personal Agent,
-proves the agent can discover and write the Personal Vault through a Working
+proves the agent can discover and write the Personal Brain through a Working
 Tree under `/data/workspace`, reads the note back as the owner, restarts
 the chat services and Agent Runtime, and repeats the identity, access, Working
 Tree, and readback checks before requiring the final chat response.

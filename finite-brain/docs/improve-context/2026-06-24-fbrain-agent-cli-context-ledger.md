@@ -36,7 +36,7 @@
 
 | Finding | Artifact | Evidence | Decision |
 | --- | --- | --- | --- |
-| Agent CLI examples used repo-root `cargo run ...` commands even after entering a Vault Working Tree. | `README.md` | `README.md` Agent CLI block; `crates/finite-brain-cli/Cargo.toml` defines binary `fbrain`; `fbrain --help` runs with the command surface. | Use canonical `fbrain` examples and keep repo-development Cargo invocation as a short note. |
+| Agent CLI examples used repo-root `cargo run ...` commands even after entering a Brain Working Tree. | `README.md` | `README.md` Agent CLI block; `crates/finite-brain-cli/Cargo.toml` defines binary `fbrain`; `fbrain --help` runs with the command surface. | Use canonical `fbrain` examples and keep repo-development Cargo invocation as a short note. |
 | fbrain feature ledger still said PR URL was pending after PR creation. | `docs/feature-dev/2026-06-24-fbrain-agent-cli-ledger.md` | `gh pr view` returned open non-draft PR `#42` targeting `staging`. | Record the PR URL and concrete feature commit SHA. |
 | CLI crate module depth is structural friction, not context drift. | Improve Codebase handoff | `crates/finite-brain-cli/src/lib.rs` contains the full command parser, local state, signer, HTTP client, sync, and admin command handling. | Park for the subsequent Improve Codebase round. |
 
@@ -50,7 +50,7 @@
 - Source-of-truth conflicts: none.
 - Grilling sessions: none needed; the command name and terminology were already
   settled by the user and recorded in feature-dev artifacts.
-- Human decisions: use `fbrain`; use `Vault Working Tree`, not `Volumes`;
+- Human decisions: use `fbrain`; use `Brain Working Tree`, not `Volumes`;
   automatic sync is the normal model.
 
 ## Patch Packet
@@ -74,7 +74,7 @@
 | Links | pass | Referenced repo files exist. |
 | Paths | pass | `crates/finite-brain-cli/Cargo.toml` and referenced run artifacts exist. |
 | Commands | pass | `cargo run -p finite-brain-cli --bin fbrain -- --help` and `git diff --check` passed. |
-| Contradictions | pass | Old `cargo run` examples remain only in development notes, not as Vault Working Tree commands. |
+| Contradictions | pass | Old `cargo run` examples remain only in development notes, not as Brain Working Tree commands. |
 | Docs-only scope | pass | Patch touches README and docs only. |
 
 ## PR And Handoff

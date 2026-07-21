@@ -2,7 +2,7 @@
 
 ## Issue
 
-- Issue: #14 — Vault invitations in Settings
+- Issue: #14 — Brain invitations in Settings
 - Slice type: AFK
 - Acceptance criteria: dedicated Invitations section with create/inspect/accept/revoke/email-invite controls; pending invitation/shared-Folder status; existing validation and fail-closed behavior; invite hash deep link
 - Baseline: `18d0b10`

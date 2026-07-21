@@ -36,7 +36,7 @@ detail. It should stay short enough to scan before making a change.
 | Work on legacy dashboard relay/chat or box1/TRF operations | `../../finitecomputer/docs/README.md` and `../../finitecomputer/docs/chat-local-dev.md` | Legacy `finitecomputer` remains the shipped whiteglove product until users migrate |
 | Work on encrypted chat protocol or native clients | `../finitechat/docs/architecture.md` and `../finitechat/README.md` | `finitechat` owns protocol, server, iOS, and Rust client state |
 | Work on Hermes chat bridge behavior | `../finitechat/integrations/hermes/README.md` | Bridge code lives with `finitechat`; SaaS deployment handoff crosses into `finitecomputer-v2` |
-| Work on encrypted knowledge, Vault Working Trees, or the Product Client | `../../finite-brain/README.md`, `../../finite-brain/development.md`, and `../../finite-brain/docs/specs/finitebrain-portability-spec.md` | `finite-brain` owns Vaults, Folders, `fbrain`, Product Client policy, access, sync, and asset/source-note behavior |
+| Work on encrypted knowledge, Brain Working Trees, or the Product Client | `../../finite-brain/README.md`, `../../finite-brain/development.md`, and `../../finite-brain/docs/specs/finitebrain-portability-spec.md` | `finite-brain` owns Brains, Folders, `fbrain`, Product Client policy, access, sync, and asset/source-note behavior |
 | Add or change shared Hermes skills | `../finite-skills/README.md`, `../finite-skills/skills/AGENTS.md`, and `../finite-skills/docs/runtime-delivery-contract.md` | One editable source, a fresh-agent bundled baseline, and the explicit `finite skills sync` compatibility contract |
 | Work on web search/extract tools | `../../finite-search/README.md` | Search/extract ops and smokes live there |
 | Use reusable Nostr primitives | `../../finite-nostr/README.md` | Product-neutral Nostr helpers only |
@@ -52,7 +52,7 @@ detail. It should stay short enough to scan before making a change.
 | `finitecomputer` chat-local harness | Legacy dashboard chat iteration, relay behavior, runtime connector checks, local Hermes/plugin smoke | v2 product acceptance, full production host behavior, Google OAuth, k3s/TLS/DNS assumptions |
 | `finitechat` local server/simulator | Protocol, server, iOS, Rust client, native chat behavior | Hosted dashboard runtime provisioning |
 | `finitechat` phone/Docker canaries | Promotion evidence for real Hermes chat behavior | Fast inner-loop UI development |
-| `finite-brain` local server/Product Client | Vault, Folder, access, sync, Product Client, Smoke UI, and `fbrain` CLI work | Product-neutral Nostr helpers, hosted SaaS runtime provisioning |
+| `finite-brain` local server/Product Client | Brain, Folder, access, sync, Product Client, Smoke UI, and `fbrain` CLI work | Product-neutral Nostr helpers, hosted SaaS runtime provisioning |
 | `finite-search` SSH tunnel smokes | Proving deployed search/extract service behavior | Local product UI iteration |
 | Hosted production/staging boxes | Deployment, OAuth, k3s, backups, real runtime rollouts | First-pass code iteration |
 

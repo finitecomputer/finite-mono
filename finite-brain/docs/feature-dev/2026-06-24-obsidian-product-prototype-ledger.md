@@ -4,11 +4,11 @@
 
 - Target repo: `finitecomputer/finite-brain`
 - Base branch: `staging`
-- Feature branch: `feature/guided-smoke-vault-reader`
+- Feature branch: `feature/guided-smoke-brain-reader`
 - Staging PR: `finitecomputer/finite-brain#30`
 - Human goal: evolve the Product Client from a smoke-test dashboard into a
   lightweight but complete Obsidian-like prototype that preserves FiniteBrain
-  Vault, Folder, Page, access, sharing, sync, graph, and crypto behavior.
+  Brain, Folder, Page, access, sharing, sync, graph, and crypto behavior.
 
 ## Skill Setup
 
@@ -25,7 +25,7 @@
   do not introduce server plaintext search/import/graph behavior.
 - UI scope: left ribbon, file explorer sidebar, top workspace tabs, Page view,
   Graph view, right-click menus, top buttons, status/access affordances, and
-  FiniteBrain-specific Vault/Folder/share/access controls.
+  FiniteBrain-specific Brain/Folder/share/access controls.
 - Prototype boundary: static Rust-served HTML/CSS/JS remains acceptable for the
   internal prototype. A full rich Markdown editor and mobile parity are out of
   scope for this feature-dev run.
@@ -69,7 +69,7 @@
     id, access/share, graph, and disabled delete affordances.
   - Kept advanced crypto/OKF/Page-loop controls available in a collapsed
     developer drawer rather than making them the primary product workflow.
-  - Expanded `scripts/seed-smoke-doc-pages.mjs` so local smoke vaults can be
+  - Expanded `scripts/seed-smoke-doc-pages.mjs` so local smoke brains can be
     deterministically filled with 53 real FiniteBrain docs-themed encrypted
     Pages across every seeded Folder.
 - Verification:
@@ -331,7 +331,7 @@
     still need to inspect plaintext source.
   - Added right-rail Outgoing links and Backlinks panels derived from the same
     decrypted Page link extraction used by Graph View.
-  - Added status-bar Page/Vault detail for selected path, word count, link
+  - Added status-bar Page/Brain detail for selected path, word count, link
     count, readable Page count, and open key count.
   - Fixed folder tree row layout so Folder labels, page-count details, and
     access badges do not run together.
@@ -352,7 +352,7 @@
   - Local server rebuilt and running on `http://127.0.0.1:4015/client` with
     `FINITE_BRAIN_DB=/tmp/finite-brain-smoke-test.sqlite3`.
   - Chromium Computer Use verification confirmed the refreshed shell markers.
-  - Playwright fixture smoke against the live client opened the seeded Vault
+  - Playwright fixture smoke against the live client opened the seeded Brain
     with 11 folders, rendered Markdown headings in the Page surface, and
     confirmed the page content host is no longer a raw `<pre>`.
 - Review:

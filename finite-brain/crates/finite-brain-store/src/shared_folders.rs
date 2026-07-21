@@ -3,12 +3,12 @@ use crate::*;
 impl BrainStore {
     pub fn mark_shared_folder_source(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         folder_id: &FolderId,
     ) -> Result<(), StoreError> {
-        let stored = self.load_vault(vault_id)?;
+        let stored = self.load_brain(brain_id)?;
         let folder = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == *folder_id)
@@ -26,8 +26,8 @@ impl BrainStore {
             });
         }
         self.conn.execute(
-            "UPDATE folders SET shared_folder_source = 1 WHERE vault_id = ?1 AND id = ?2",
-            params![vault_id.as_str(), folder_id.as_str()],
+            "UPDATE folders SET shared_folder_source = 1 WHERE brain_id = ?1 AND id = ?2",
+            params![brain_id.as_str(), folder_id.as_str()],
         )?;
         Ok(())
     }
@@ -36,9 +36,9 @@ impl BrainStore {
     #[allow(clippy::too_many_arguments)]
     pub fn create_shared_folder_invitation(
         &mut self,
-        source_vault_id: &VaultId,
+        source_brain_id: &BrainId,
         source_folder_id: &FolderId,
-        destination_vault_id: &VaultId,
+        destination_brain_id: &BrainId,
         id: &str,
         destination_admin_npub: &UserId,
         created_by_npub: &UserId,
@@ -46,18 +46,18 @@ impl BrainStore {
         grant: &FolderKeyGrantMetadata,
         created_at: &str,
     ) -> Result<StoredSharedFolderInvitation, StoreError> {
-        let source = self.load_vault(source_vault_id)?;
+        let source = self.load_brain(source_brain_id)?;
         let source_folder = source
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == *source_folder_id)
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: source_folder_id.to_string(),
             })?;
-        if !has_vault_operational_authority(&source, created_by_npub) {
+        if !has_brain_operational_authority(&source, created_by_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitations require source vault operational authority"
+                reason: "shared folder invitations require source brain operational authority"
                     .to_owned(),
             });
         }
@@ -77,22 +77,22 @@ impl BrainStore {
                 reason: "shared folder source setup must be complete".to_owned(),
             });
         }
-        let destination = self.load_vault(destination_vault_id)?;
-        if destination.vault.kind != VaultKind::Organization {
+        let destination = self.load_brain(destination_brain_id)?;
+        if destination.brain.kind != BrainKind::Organization {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder destination must be an organization vault".to_owned(),
+                reason: "shared folder destination must be an organization brain".to_owned(),
             });
         }
-        if !destination.vault.admins.contains(destination_admin_npub) {
+        if !destination.brain.admins.contains(destination_admin_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitation target must be a destination vault admin"
+                reason: "shared folder invitation target must be a destination brain admin"
                     .to_owned(),
             });
         }
         validate_link_id("shared_folder_invitation_id", id)?;
         validate_grant_metadata(grant)?;
         validate_grant_issuer(
-            &source.vault,
+            &source.brain,
             grant,
             source
                 .personal_agent
@@ -121,7 +121,7 @@ impl BrainStore {
             .execute(
                 r#"
                 INSERT INTO shared_folder_invitations (
-                    id, source_vault_id, source_folder_id, destination_vault_id,
+                    id, source_brain_id, source_folder_id, destination_brain_id,
                     destination_admin_npub, created_by_npub, status, current_key_version,
                     accept_path, created_at, updated_at, grant_id, grant_wrapped_event_json,
                     access_change_event_json
@@ -130,9 +130,9 @@ impl BrainStore {
                 "#,
                 params![
                     id,
-                    source_vault_id.as_str(),
+                    source_brain_id.as_str(),
                     source_folder_id.as_str(),
-                    destination_vault_id.as_str(),
+                    destination_brain_id.as_str(),
                     destination_admin_npub.as_str(),
                     created_by_npub.as_str(),
                     source_folder.current_key_version,
@@ -156,7 +156,7 @@ impl BrainStore {
         self.conn
             .query_row(
                 r#"
-                SELECT id, source_vault_id, source_folder_id, destination_vault_id,
+                SELECT id, source_brain_id, source_folder_id, destination_brain_id,
                        destination_admin_npub, created_by_npub, status, current_key_version,
                        accept_path, created_at, updated_at, accepted_at, grant_id,
                        grant_wrapped_event_json, access_change_event_json
@@ -172,21 +172,21 @@ impl BrainStore {
             })
     }
 
-    /// List Shared Folder Invitations for one Vault as source or destination,
+    /// List Shared Folder Invitations for one Brain as source or destination,
     /// newest first, bounded by MAX_LINK_LIST_ROWS.
     pub fn list_shared_folder_invitations(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         direction: SharedFolderDirection,
     ) -> Result<Vec<StoredSharedFolderInvitation>, StoreError> {
-        self.require_vault_exists(vault_id)?;
+        self.require_brain_exists(brain_id)?;
         let column = match direction {
-            SharedFolderDirection::Source => "source_vault_id",
-            SharedFolderDirection::Destination => "destination_vault_id",
+            SharedFolderDirection::Source => "source_brain_id",
+            SharedFolderDirection::Destination => "destination_brain_id",
         };
         let mut stmt = self.conn.prepare(&format!(
             r#"
-            SELECT id, source_vault_id, source_folder_id, destination_vault_id,
+            SELECT id, source_brain_id, source_folder_id, destination_brain_id,
                    destination_admin_npub, created_by_npub, status, current_key_version,
                    accept_path, created_at, updated_at, accepted_at, grant_id,
                    grant_wrapped_event_json, access_change_event_json
@@ -197,7 +197,7 @@ impl BrainStore {
             "#
         ))?;
         let rows = stmt.query_map(
-            params![vault_id.as_str(), MAX_LINK_LIST_ROWS],
+            params![brain_id.as_str(), MAX_LINK_LIST_ROWS],
             shared_folder_invitation_from_row,
         )?;
         let mut invitations = Vec::new();
@@ -207,17 +207,17 @@ impl BrainStore {
         Ok(invitations)
     }
 
-    /// List Shared Folder Connections for one Vault as source or destination,
+    /// List Shared Folder Connections for one Brain as source or destination,
     /// newest first, bounded by MAX_LINK_LIST_ROWS. Members are included per connection.
     pub fn list_shared_folder_connections(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         direction: SharedFolderDirection,
     ) -> Result<Vec<StoredSharedFolderConnection>, StoreError> {
-        self.require_vault_exists(vault_id)?;
+        self.require_brain_exists(brain_id)?;
         let column = match direction {
-            SharedFolderDirection::Source => "source_vault_id",
-            SharedFolderDirection::Destination => "destination_vault_id",
+            SharedFolderDirection::Source => "source_brain_id",
+            SharedFolderDirection::Destination => "destination_brain_id",
         };
         let connection_ids = {
             let mut stmt = self.conn.prepare(&format!(
@@ -229,7 +229,7 @@ impl BrainStore {
                 LIMIT ?2
                 "#
             ))?;
-            let rows = stmt.query_map(params![vault_id.as_str(), MAX_LINK_LIST_ROWS], |row| {
+            let rows = stmt.query_map(params![brain_id.as_str(), MAX_LINK_LIST_ROWS], |row| {
                 row.get::<_, String>(0)
             })?;
             let mut ids = Vec::new();
@@ -253,10 +253,10 @@ impl BrainStore {
         updated_at: &str,
     ) -> Result<StoredSharedFolderInvitation, StoreError> {
         let invitation = self.load_shared_folder_invitation(invitation_id)?;
-        let source = self.load_vault(&invitation.source_vault_id)?;
-        if !has_vault_operational_authority(&source, actor_npub) {
+        let source = self.load_brain(&invitation.source_brain_id)?;
+        if !has_brain_operational_authority(&source, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitation revocation requires source vault operational authority"
+                reason: "shared folder invitation revocation requires source brain operational authority"
                     .to_owned(),
             });
         }
@@ -292,9 +292,9 @@ impl BrainStore {
             });
         }
 
-        let source = self.load_vault(&invitation.source_vault_id)?;
+        let source = self.load_brain(&invitation.source_brain_id)?;
         let source_folder = source
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == invitation.source_folder_id)
@@ -313,7 +313,7 @@ impl BrainStore {
         }
         validate_grant_metadata(&invitation.folder_key_grant)?;
         validate_grant_issuer(
-            &source.vault,
+            &source.brain,
             &invitation.folder_key_grant,
             source
                 .personal_agent
@@ -331,18 +331,18 @@ impl BrainStore {
         tx.execute(
             r#"
             INSERT INTO shared_folder_connections (
-                id, source_vault_id, source_folder_id, destination_vault_id,
+                id, source_brain_id, source_folder_id, destination_brain_id,
                 destination_admin_npub, status, created_at, updated_at
             )
             VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)
-            ON CONFLICT(source_vault_id, source_folder_id, destination_vault_id)
+            ON CONFLICT(source_brain_id, source_folder_id, destination_brain_id)
             DO UPDATE SET status = 'active', updated_at = excluded.updated_at
             "#,
             params![
                 connection_id,
-                invitation.source_vault_id.as_str(),
+                invitation.source_brain_id.as_str(),
                 invitation.source_folder_id.as_str(),
-                invitation.destination_vault_id.as_str(),
+                invitation.destination_brain_id.as_str(),
                 destination_admin_npub.as_str(),
                 now
             ],
@@ -350,17 +350,17 @@ impl BrainStore {
         tx.execute(
             r#"
             INSERT INTO organization_folder_mounts (
-                id, organization_vault_id, source_vault_id, source_folder_id, connection_id,
+                id, organization_brain_id, source_brain_id, source_folder_id, connection_id,
                 display_name, display_parent_folder_id, created_by_npub, created_at, updated_at
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?8)
-            ON CONFLICT(organization_vault_id, source_vault_id, source_folder_id)
+            ON CONFLICT(organization_brain_id, source_brain_id, source_folder_id)
             DO UPDATE SET connection_id = excluded.connection_id, updated_at = excluded.updated_at
             "#,
             params![
                 mount_id,
-                invitation.destination_vault_id.as_str(),
-                invitation.source_vault_id.as_str(),
+                invitation.destination_brain_id.as_str(),
+                invitation.source_brain_id.as_str(),
                 invitation.source_folder_id.as_str(),
                 connection_id,
                 source_folder.name.as_str(),
@@ -368,16 +368,16 @@ impl BrainStore {
                 now
             ],
         )?;
-        insert_member_if_missing(&tx, &invitation.source_vault_id, destination_admin_npub)?;
+        insert_member_if_missing(&tx, &invitation.source_brain_id, destination_admin_npub)?;
         insert_folder_access_if_missing(
             &tx,
-            &invitation.source_vault_id,
+            &invitation.source_brain_id,
             &invitation.source_folder_id,
             destination_admin_npub,
         )?;
         insert_grant_or_ignore(
             &tx,
-            &invitation.source_vault_id,
+            &invitation.source_brain_id,
             &invitation.folder_key_grant,
         )?;
         tx.execute(
@@ -402,7 +402,7 @@ impl BrainStore {
         self.conn
             .query_row(
                 r#"
-                SELECT id, source_vault_id, source_folder_id, destination_vault_id,
+                SELECT id, source_brain_id, source_folder_id, destination_brain_id,
                        destination_admin_npub, status, created_at, updated_at
                 FROM shared_folder_connections
                 WHERE id = ?1
@@ -416,24 +416,24 @@ impl BrainStore {
             })
     }
 
-    /// Load Organization Folder Mounts for one destination Vault.
+    /// Load Organization Folder Mounts for one destination Brain.
     pub fn load_organization_folder_mounts(
         &self,
-        organization_vault_id: &VaultId,
+        organization_brain_id: &BrainId,
     ) -> Result<Vec<StoredOrganizationFolderMount>, StoreError> {
-        self.require_vault_exists(organization_vault_id)?;
+        self.require_brain_exists(organization_brain_id)?;
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, organization_vault_id, source_vault_id, source_folder_id,
+            SELECT id, organization_brain_id, source_brain_id, source_folder_id,
                    connection_id, display_name, display_parent_folder_id,
                    created_by_npub, created_at, updated_at
             FROM organization_folder_mounts
-            WHERE organization_vault_id = ?1
+            WHERE organization_brain_id = ?1
             ORDER BY id
             "#,
         )?;
         let rows = stmt.query_map(
-            params![organization_vault_id.as_str()],
+            params![organization_brain_id.as_str()],
             organization_mount_from_row,
         )?;
         let mut mounts = Vec::new();
@@ -446,17 +446,17 @@ impl BrainStore {
     /// Project Organization Folder Mounts as client-visible source-backed Folders.
     pub fn mounted_folder_projection(
         &self,
-        organization_vault_id: &VaultId,
+        organization_brain_id: &BrainId,
         actor_npub: &UserId,
     ) -> Result<Vec<MountedFolderProjection>, StoreError> {
-        let mounts = self.load_organization_folder_mounts(organization_vault_id)?;
+        let mounts = self.load_organization_folder_mounts(organization_brain_id)?;
         let mut projections = Vec::new();
         for mount in mounts {
             let connection = self.load_shared_folder_connection(&mount.connection_id)?;
             let state = if connection.status == SharedFolderConnectionStatus::Revoked {
                 MountedFolderState::Revoked
             } else if self.actor_has_current_source_access_and_grant(
-                &mount.source_vault_id,
+                &mount.source_brain_id,
                 &mount.source_folder_id,
                 actor_npub,
             )? {
@@ -466,8 +466,8 @@ impl BrainStore {
             };
             projections.push(MountedFolderProjection {
                 mount_id: mount.id,
-                organization_vault_id: mount.organization_vault_id,
-                source_vault_id: mount.source_vault_id,
+                organization_brain_id: mount.organization_brain_id,
+                source_brain_id: mount.source_brain_id,
                 source_folder_id: mount.source_folder_id,
                 connection_id: mount.connection_id,
                 display_name: mount.display_name,
@@ -489,10 +489,10 @@ impl BrainStore {
     ) -> Result<StoredSharedFolderConnection, StoreError> {
         let connection = self.load_shared_folder_connection(connection_id)?;
         self.validate_destination_admin_for_connection(&connection, actor_npub)?;
-        self.validate_destination_member(&connection.destination_vault_id, target_npub)?;
-        let source = self.load_vault(&connection.source_vault_id)?;
+        self.validate_destination_member(&connection.destination_brain_id, target_npub)?;
+        let source = self.load_brain(&connection.source_brain_id)?;
         let source_folder = source
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == connection.source_folder_id)
@@ -508,14 +508,14 @@ impl BrainStore {
         )?;
 
         let tx = self.conn.transaction()?;
-        insert_member_if_missing(&tx, &connection.source_vault_id, target_npub)?;
+        insert_member_if_missing(&tx, &connection.source_brain_id, target_npub)?;
         insert_folder_access_if_missing(
             &tx,
-            &connection.source_vault_id,
+            &connection.source_brain_id,
             &connection.source_folder_id,
             target_npub,
         )?;
-        insert_grant(&tx, &connection.source_vault_id, grant)?;
+        insert_grant(&tx, &connection.source_brain_id, grant)?;
         tx.execute(
             "INSERT OR IGNORE INTO shared_folder_connection_members (connection_id, member_npub, created_at) VALUES (?1, ?2, ?3)",
             params![connection_id, target_npub.as_str(), created_at],
@@ -584,10 +584,10 @@ impl BrainStore {
         updated_at: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
         let connection = self.load_shared_folder_connection(connection_id)?;
-        let source = self.load_vault(&connection.source_vault_id)?;
-        if !has_vault_operational_authority(&source, actor_npub) {
+        let source = self.load_brain(&connection.source_brain_id)?;
+        if !has_brain_operational_authority(&source, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder connection revocation requires source vault operational authority"
+                reason: "shared folder connection revocation requires source brain operational authority"
                     .to_owned(),
             });
         }

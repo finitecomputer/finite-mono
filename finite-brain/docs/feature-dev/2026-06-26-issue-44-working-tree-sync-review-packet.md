@@ -1,4 +1,4 @@
-# Issue #44 Review Packet: Vault Working Tree Sync
+# Issue #44 Review Packet: Brain Working Tree Sync
 
 ## Issue
 
@@ -7,7 +7,7 @@
 - Acceptance criteria:
   - Sync pulls metadata/export/bootstrap or records and persists encrypted sync evidence.
   - Sync opens real NIP-59 Folder Key Grants addressed to the local signer.
-  - Accessible objects decrypt into the existing `materialize_vault_working_tree` projection.
+  - Accessible objects decrypt into the existing `materialize_brain_working_tree` projection.
   - Local markdown creates/updates/deletes inside readable folders are encrypted, signed, and submitted through secure routes.
   - Unsafe or unmappable changes are recorded as open conflicts.
   - Focused tests prove materialization, writeback submission shape, and conflict recording through the CLI public seam.
@@ -46,5 +46,5 @@ STANDARDS_FINDINGS:
 
 SPEC_STATUS: pass
 SPEC_FINDINGS:
-- None. The implementation satisfies issue #44 and PRD #43 command-driven Vault Working Tree sync criteria. Resident file watching and OS daemon supervision are correctly left out of scope.
+- None. The implementation satisfies issue #44 and PRD #43 command-driven Brain Working Tree sync criteria. Resident file watching and OS daemon supervision are correctly left out of scope.
 ```

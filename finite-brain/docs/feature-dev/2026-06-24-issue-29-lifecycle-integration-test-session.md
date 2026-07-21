@@ -11,7 +11,7 @@
 ## Inputs
 
 - PRD issue: finitecomputer/finite-brain#23
-- Relevant glossary terms: SQLite Store, Vault Invitation, Shared Folder Mount, Sync Bootstrap, Filtered Export
+- Relevant glossary terms: SQLite Store, Brain Invitation, Shared Folder Mount, Sync Bootstrap, Filtered Export
 - Relevant ADRs:
   - `docs/adr/0002-use-sqlite-from-day-one.md`
   - `docs/adr/0005-keep-folder-access-binary.md`
@@ -21,7 +21,7 @@
 
 - Public interface used: `BrainStore` with a real temp SQLite database.
 - Behaviors covered:
-  - Create a source org vault and destination org vault.
+  - Create a source org brain and destination org brain.
   - Invite a destination member into the destination org.
   - Mark a restricted source Folder as shareable.
   - Write a secure object revision and verify sync projection.

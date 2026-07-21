@@ -17,7 +17,7 @@ This is a single-context repo: read root `CONTEXT.md` and root `docs/adr/` when 
 ### Packaged FiniteBrain agent skill
 
 The repo-packaged FiniteBrain agent skill lives at `skills/finitebrain/SKILL.md`.
-Keep it aligned with `fbrain` CLI ergonomics and Vault Working Tree conventions
+Keep it aligned with `fbrain` CLI ergonomics and Brain Working Tree conventions
 until it moves into the shared `finite-skills` packaging path.
 
 ### Asset source notes

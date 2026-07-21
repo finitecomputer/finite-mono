@@ -592,28 +592,28 @@ brain_browser_smoke() {
   )
 }
 
-personal_agent_vault_id() {
-  container exec "$container_machine_id" fbrain vault list --json >"$brain_vaults_json"
-  node - "$brain_vaults_json" <<'JS'
+personal_agent_brain_id() {
+  container exec "$container_machine_id" fbrain brain list --json >"$brains_json"
+  node - "$brains_json" <<'JS'
 const fs = require("node:fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const personal = (response.vaults || []).find(
-  (vault) => vault.kind === "personal" && vault.role === "personal_agent"
+const personal = (response.brains || []).find(
+  (brain) => brain.kind === "personal" && brain.role === "personal_agent"
 );
-if (!personal?.vaultId) {
-  throw new Error("Agent Principal cannot discover its user-owned Personal Vault as Personal Agent");
+if (!personal?.brainId) {
+  throw new Error("Agent Principal cannot discover its user-owned Personal Brain as Personal Agent");
 }
-process.stdout.write(personal.vaultId);
+process.stdout.write(personal.brainId);
 JS
 }
 
-open_and_sync_personal_vault() {
+open_and_sync_personal_brain() {
   container exec "$container_machine_id" fbrain folder create agent-notes \
-    --vault "$brain_vault_id" \
+    --brain "$brain_id" \
     --name "Agent notes" \
     --path agent-notes \
     --json >/dev/null
-  container exec "$container_machine_id" fbrain open "$brain_vault_id" --json >"$brain_open_json"
+  container exec "$container_machine_id" fbrain open "$brain_id" --json >"$brain_open_json"
   node - "$brain_open_json" "$brain_tree" <<'JS'
 const fs = require("node:fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -638,30 +638,30 @@ JS
 
 assert_personal_agent_scope() {
   container exec "$container_machine_id" cat \
-    "$brain_tree/.finitebrain/vault-directory.json" >"$brain_directory_json"
+    "$brain_tree/.finitebrain/brain-directory.json" >"$brain_directory_json"
   container exec "$container_machine_id" cat \
     "$brain_tree/.finitebrain/working-tree-state.json" >"$brain_tree_state_json"
   node - \
     "$brain_directory_json" \
     "$brain_tree_state_json" \
-    "$brain_vault_id" \
+    "$brain_id" \
     "$agent_npub_before" <<'JS'
 const fs = require("node:fs");
 const directory = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const treeState = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
-const expectedVaultId = process.argv[4];
+const expectedBrainId = process.argv[4];
 const agentNpub = process.argv[5];
-if (directory.vault?.id !== expectedVaultId || directory.vault?.kind !== "personal") {
-  throw new Error("Agent Working Tree is not the user-owned Personal Vault");
+if (directory.brain?.id !== expectedBrainId || directory.brain?.kind !== "personal") {
+  throw new Error("Agent Working Tree is not the user-owned Personal Brain");
 }
-if (!directory.vault.ownerNpub || directory.vault.ownerNpub === agentNpub) {
+if (!directory.brain.ownerNpub || directory.brain.ownerNpub === agentNpub) {
   throw new Error("Agent Working Tree must name the distinct user owner, never the Agent Principal");
 }
 const roots = treeState.folderRoots || [];
 const notes = roots.find((root) => root.folderId === "agent-notes" && root.path === "agent-notes");
 if (!notes || roots.some((root) => root.canRead !== true || root.metadataOnly !== false)) {
   throw new Error(
-    `Personal Agent must read every Personal Vault Folder; unexpected roots: ${JSON.stringify(roots)}`
+    `Personal Agent must read every Personal Brain Folder; unexpected roots: ${JSON.stringify(roots)}`
   );
 }
 JS
@@ -935,7 +935,7 @@ dashboard_dir="$(pwd)/finitecomputer-v2/apps/dashboard"
 me_json="$state_dir/saas-smoke-core-me.json"
 chat_state_json="$state_dir/saas-smoke-chat-state.json"
 chat_action_json="$state_dir/saas-smoke-chat-action.json"
-brain_vaults_json="$state_dir/saas-smoke-brain-vaults.json"
+brains_json="$state_dir/saas-smoke-brains.json"
 brain_open_json="$state_dir/saas-smoke-brain-open.json"
 brain_sync_json="$state_dir/saas-smoke-brain-sync.json"
 brain_directory_json="$state_dir/saas-smoke-brain-directory.json"
@@ -1020,10 +1020,10 @@ fi
 agent_npub_before="$(runtime_agent_npub)"
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
   brain_browser_smoke bootstrap
-  brain_vault_id="$(personal_agent_vault_id)"
-  brain_tree="/data/workspace/finitebrain/$brain_vault_id"
+  brain_id="$(personal_agent_brain_id)"
+  brain_tree="/data/workspace/finitebrain/$brain_id"
   brain_proof="Devfinity Agent Brain Proof $(date +%s)-$$"
-  open_and_sync_personal_vault
+  open_and_sync_personal_brain
   write_personal_agent_note
   brain_browser_smoke assert-note "$brain_proof"
   publish_private_requesting_user_site
@@ -1078,8 +1078,8 @@ fi
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
   container exec "$container_machine_id" test -f \
     "$brain_tree/agent-notes/devfinity-agent-proof.md"
-  if [[ "$(personal_agent_vault_id)" != "$brain_vault_id" ]]; then
-    echo "Personal Agent lost its Personal Vault across Apple Container restart" >&2
+  if [[ "$(personal_agent_brain_id)" != "$brain_id" ]]; then
+    echo "Personal Agent lost its Personal Brain across Apple Container restart" >&2
     exit 1
   fi
   container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \

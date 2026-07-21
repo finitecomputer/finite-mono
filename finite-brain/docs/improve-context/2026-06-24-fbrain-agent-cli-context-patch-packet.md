@@ -15,7 +15,7 @@
 
 | Finding | Evidence | Routed artifact | Action |
 | --- | --- | --- | --- |
-| Agent-facing examples should invoke `fbrain`, not require repo-root Cargo commands inside a Vault Working Tree. | The binary is named `fbrain`; `fbrain --help` returns the command surface; the user explicitly selected `fbrain` as invocation. | `README.md` | Replace Agent CLI examples with canonical `fbrain` commands and keep a short repo-development Cargo note. |
+| Agent-facing examples should invoke `fbrain`, not require repo-root Cargo commands inside a Brain Working Tree. | The binary is named `fbrain`; `fbrain --help` returns the command surface; the user explicitly selected `fbrain` as invocation. | `README.md` | Replace Agent CLI examples with canonical `fbrain` commands and keep a short repo-development Cargo note. |
 | Feature ledger PR evidence was stale. | `gh pr view` returned open non-draft PR `#42` from `feature/fbrain-agent-cli` to `staging`. | `docs/feature-dev/2026-06-24-fbrain-agent-cli-ledger.md` | Record the PR URL and concrete feature commit. |
 | CLI crate module depth is real, but not a context patch. | `crates/finite-brain-cli/src/lib.rs` owns command parsing, state, signer, HTTP, sync, and admin flows. | Improve Codebase handoff | Park for the next loop. |
 
@@ -71,7 +71,7 @@
 - Commands: `cargo run -p finite-brain-cli --bin fbrain -- --help` and
   `git diff --check` passed.
 - Contradictions: old `cargo run` examples remain only in development notes,
-  not as Vault Working Tree commands.
+  not as Brain Working Tree commands.
 - Documentation-only scope: patch touches README and docs only.
 
 ## Parked Work

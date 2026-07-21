@@ -33,7 +33,7 @@ synthesized wiki pages cite the source notes.
 - Defaults/Smoke follow-up: default Getting Started and AGENTS guidance, CLI
   empty-folder skeletons, Smoke seed content, and Smoke reset runbook now all
   describe the Asset Source Note paradigm.
-- Personal restricted bootstrap follow-up: new personal Vaults now bootstrap the
+- Personal restricted bootstrap follow-up: new personal Brains now bootstrap the
   default `restricted` Folder with restricted access while treating the owner as
   the implicit restricted recipient.
 
@@ -70,7 +70,7 @@ hard-cut branch. Final PR target: main.
 
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
-| #67 | 578b68c948533d1b5b297737b4eb87e6a2880c22 | current thread | de1ec24 | local review passed, no findings | node --check product-client.js; git diff --check; cargo fmt --check; cargo test -p finite-brain-core exposes_default_vault_pages; cargo test -p finite-brain-core working_tree_materializes_accessible_pages_and_safe_agent_conventions; cargo test -p finite-brain-cli empty_readable_folders_stay_materialized; node product-client.test.js; cargo test -p finite-brain-core; cargo test -p finite-brain-cli; cargo test -p finite-brain-server |
+| #67 | 578b68c948533d1b5b297737b4eb87e6a2880c22 | current thread | de1ec24 | local review passed, no findings | node --check product-client.js; git diff --check; cargo fmt --check; cargo test -p finite-brain-core exposes_default_brain_pages; cargo test -p finite-brain-core working_tree_materializes_accessible_pages_and_safe_agent_conventions; cargo test -p finite-brain-cli empty_readable_folders_stay_materialized; node product-client.test.js; cargo test -p finite-brain-core; cargo test -p finite-brain-cli; cargo test -p finite-brain-server |
 | #68 | de1ec24 | current thread | 1f80c57 | local review passed, no findings | cargo fmt --check; git diff --check; cargo test -p finite-brain-core working_tree_materializes_accessible_pages_and_safe_agent_conventions; cargo test -p finite-brain-core; cargo test -p finite-brain-cli |
 | #69 | 1f80c57 | current thread | 63abd59 | local review passed, no findings | cargo fmt --check; git diff --check; cargo test -p finite-brain-cli scan_detects_asset_pairs_and_reports_invalid_assets; cargo test -p finite-brain-cli asset_plaintext_round_trips_with_hash_and_content_type; cargo test -p finite-brain-cli scan_detects_markdown_create_update_and_delete; cargo test -p finite-brain-core working_tree_change_intents_use_encrypted_product_client_routes; cargo test -p finite-brain-core; cargo test -p finite-brain-cli |
 | #70 | 63abd59 | current thread | 191e22b | local review passed, no findings | node --check product-client.js; node product-client.test.js; cargo test -p finite-brain-server product_client_serves_spine_assets_and_config; git diff --check; cargo fmt --check; cargo test --workspace; cargo check --workspace; cargo clippy --all-targets -- -D warnings; cargo build --workspace |

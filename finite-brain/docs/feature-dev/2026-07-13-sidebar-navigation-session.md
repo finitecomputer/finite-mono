@@ -15,7 +15,7 @@
   its icons at the top of the File sidebar.
 - Ticket: no separate ticket; this is a bounded continuation of the existing
   Settings/Product Client PR.
-- Relevant glossary terms: Product Client, Graph View, Vault, Folder, Session
+- Relevant glossary terms: Product Client, Graph View, Brain, Folder, Session
   Lock.
 - Relevant ADRs: 0004 (first-party Product Client), 0005 (client-decrypted
   Graph View).
@@ -25,7 +25,7 @@
 ## Implementation
 
 - Public interface used: the Rust-served `/client` Product Client shell and
-  its existing Files, Graph View, Search, Quick switcher, and Vault access
+  its existing Files, Graph View, Search, Quick switcher, and Brain access
   controls.
 - Behaviors covered: a single sidebar header navigation landmark contains all
   five controls; no `.app-ribbon` remains; existing click, active-state,

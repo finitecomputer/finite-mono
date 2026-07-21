@@ -4,7 +4,7 @@ version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Agent-native CLI for FiniteBrain Vault Working Trees."
+description = "Agent-native CLI for Brain Working Trees."
 
 [lib]
 path = "src/lib.rs"

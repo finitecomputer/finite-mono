@@ -14,7 +14,7 @@ custody. The bridge forwards only the named Brain operations to the Hosted Devic
 trusted public Brain origin. The executor loads an existing Hosted Device User
 Key without generating one, applies validation owned by `finite-brain-core`,
 and returns only signed events or complete, resource-bound grant results. A
-grant open validates the NIP-59 wrapper, recipient, issuer, Vault, Folder, key
+grant open validates the NIP-59 wrapper, recipient, issuer, Brain, Folder, key
 version, payload, and tags; grant wrapping accepts typed grant or invite
 metadata rather than arbitrary NIP-44 plaintext. Missing Chat setup
 returns setup-required, and arbitrary sign/decrypt operations are not routes.
@@ -48,7 +48,7 @@ product's adapter to the client environment.
   adapter. Its operations are typed, validated product intents, never arbitrary
   event signing or ciphertext decryption.
 - FiniteBrain owns the first such contract, the **Brain Identity Provider**.
-  It retains ownership of Vault, Folder, Folder Key Grant, content-crypto, and
+  It retains ownership of Brain, Folder, Folder Key Grant, content-crypto, and
   authorization policy.
 - Finite Identity owns reusable key-storage and key-lifecycle primitives. It
   does not own a universal product adapter, product grants, content policy, or
@@ -71,7 +71,7 @@ product's adapter to the client environment.
   access. Stopping that agent requires Brain access revocation and the required
   Folder Key rotation.
 - A product's hosted adapter is its server-side stand-in for the product's
-  future native adapter. This is Greenfield work: no legacy Brain Vault or
+  future native adapter. This is Greenfield work: no legacy Brain Brain or
   user-key migration/compatibility path is in scope. Future native custody and
   recovery design remain separate decisions.
 - Brain's adapter may open a validated Folder Key Grant, but the Brain Product
@@ -100,8 +100,8 @@ product's adapter to the client environment.
   the agent's access and Folder Key Grants explicitly, except for Brain's one
   narrow initial Personal Agent bootstrap defined by ADR-0024. In that case,
   Brain derives the account-bound human owner and Agent Principal from Core and
-  Finite Identity and atomically creates the user's first Personal Vault; the
-  standing authority cannot join an existing Vault or broaden later access.
+  Finite Identity and atomically creates the user's first Personal Brain; the
+  standing authority cannot join an existing Brain or broaden later access.
 
 ## Consequences
 

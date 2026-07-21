@@ -1,7 +1,7 @@
 use crate::*;
 
 impl BrainStore {
-    pub fn create_personal_vault_bootstrap(
+    pub fn create_personal_brain_bootstrap(
         &mut self,
         output: &BootstrapOutput,
         grants: &[FolderKeyGrantMetadata],
@@ -9,7 +9,7 @@ impl BrainStore {
         created_by_npub: &UserId,
         created_at: &str,
     ) -> Result<(), StoreError> {
-        self.create_personal_vault_bootstrap_with_identities(
+        self.create_personal_brain_bootstrap_with_identities(
             output,
             grants,
             agent_npub,
@@ -19,8 +19,8 @@ impl BrainStore {
         )
     }
 
-    /// Atomically create a Personal Vault, its Personal Agent, and both verified display aliases.
-    pub fn create_personal_vault_bootstrap_with_identities(
+    /// Atomically create a Personal Brain, its Personal Agent, and both verified display aliases.
+    pub fn create_personal_brain_bootstrap_with_identities(
         &mut self,
         output: &BootstrapOutput,
         grants: &[FolderKeyGrantMetadata],
@@ -30,19 +30,19 @@ impl BrainStore {
         identity_aliases: &[IdentityAlias],
     ) -> Result<(), StoreError> {
         validate_bootstrap_output(output)?;
-        validate_required_grants(&output.vault, &output.required_key_grants, grants)?;
-        if output.vault.kind != VaultKind::Personal {
+        validate_required_grants(&output.brain, &output.required_key_grants, grants)?;
+        if output.brain.kind != BrainKind::Personal {
             return Err(StoreError::BrokenInvariant {
-                reason: "Personal Agent bootstrap requires a personal vault".to_owned(),
+                reason: "Personal Agent bootstrap requires a personal brain".to_owned(),
             });
         }
         let owner_npub =
             output
-                .vault
+                .brain
                 .owner_user_id
                 .as_ref()
                 .ok_or_else(|| StoreError::BrokenInvariant {
-                    reason: "Personal Agent bootstrap requires a vault owner".to_owned(),
+                    reason: "Personal Agent bootstrap requires a brain owner".to_owned(),
                 })?;
         if owner_npub == agent_npub {
             return Err(StoreError::BrokenInvariant {
@@ -73,50 +73,50 @@ impl BrainStore {
             }
         }
 
-        // Serialize Personal Vault creation before checking the one-owner invariant. The partial
+        // Serialize Personal Brain creation before checking the one-owner invariant. The partial
         // unique index remains the final database guard for every writer.
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing_vault_id = tx
+        let existing_brain_id = tx
             .query_row(
-                "SELECT id FROM vaults WHERE kind = 'personal' AND owner_user_id = ?1",
+                "SELECT id FROM brains WHERE kind = 'personal' AND owner_user_id = ?1",
                 params![owner_npub.as_str()],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        if let Some(existing_vault_id) = existing_vault_id {
-            if existing_vault_id != output.vault.id.as_str() {
+        if let Some(existing_brain_id) = existing_brain_id {
+            if existing_brain_id != output.brain.id.as_str() {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "user already has a personal vault".to_owned(),
+                    reason: "user already has a personal brain".to_owned(),
                 });
             }
             let existing_agent = tx
                 .query_row(
-                    "SELECT agent_npub FROM personal_agents WHERE vault_id = ?1 AND status = 'active'",
-                    params![output.vault.id.as_str()],
+                    "SELECT agent_npub FROM personal_agents WHERE brain_id = ?1 AND status = 'active'",
+                    params![output.brain.id.as_str()],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
             return match existing_agent {
                 Some(existing_agent) if existing_agent == agent_npub.as_str() => Ok(()),
                 Some(_) => Err(StoreError::BrokenInvariant {
-                    reason: "personal vault already has a different personal agent".to_owned(),
+                    reason: "personal brain already has a different personal agent".to_owned(),
                 }),
                 None => Err(StoreError::BrokenInvariant {
-                    reason: "personal vault already exists without a personal agent".to_owned(),
+                    reason: "personal brain already exists without a personal agent".to_owned(),
                 }),
             };
         }
 
-        let audit_id = format!("{}-personal-agent-established", output.vault.id);
-        insert_vault(&tx, &output.vault)?;
-        insert_members_and_admins(&tx, &output.vault)?;
-        for folder in &output.vault.folders {
-            insert_folder(&tx, &output.vault.id, folder, false)?;
+        let audit_id = format!("{}-personal-agent-established", output.brain.id);
+        insert_brain(&tx, &output.brain)?;
+        insert_members_and_admins(&tx, &output.brain)?;
+        for folder in &output.brain.folders {
+            insert_folder(&tx, &output.brain.id, folder, false)?;
         }
         for grant in grants {
-            insert_grant(&tx, &output.vault.id, grant)?;
+            insert_grant(&tx, &output.brain.id, grant)?;
         }
         for alias in identity_aliases {
             upsert_identity_alias(&tx, alias)?;
@@ -124,12 +124,12 @@ impl BrainStore {
         tx.execute(
             r#"
             INSERT INTO personal_agents (
-                vault_id, owner_npub, agent_npub, status, created_by_npub,
+                brain_id, owner_npub, agent_npub, status, created_by_npub,
                 created_at, updated_at
             ) VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?5)
             "#,
             params![
-                output.vault.id.as_str(),
+                output.brain.id.as_str(),
                 owner_npub.as_str(),
                 agent_npub.as_str(),
                 created_by_npub.as_str(),
@@ -139,13 +139,13 @@ impl BrainStore {
         tx.execute(
             r#"
             INSERT INTO personal_agent_audit (
-                id, vault_id, action, actor_npub, previous_agent_npub,
+                id, brain_id, action, actor_npub, previous_agent_npub,
                 agent_npub, occurred_at
             ) VALUES (?1, ?2, 'established', ?3, NULL, ?4, ?5)
             "#,
             params![
                 audit_id,
-                output.vault.id.as_str(),
+                output.brain.id.as_str(),
                 created_by_npub.as_str(),
                 agent_npub.as_str(),
                 created_at,
@@ -155,12 +155,12 @@ impl BrainStore {
         Ok(())
     }
 
-    pub fn create_vault_bootstrap(
+    pub fn create_brain_bootstrap(
         &mut self,
         output: &BootstrapOutput,
         grants: &[FolderKeyGrantMetadata],
     ) -> Result<(), StoreError> {
-        if output.vault.folders.len() > MAX_BOOTSTRAP_FOLDERS {
+        if output.brain.folders.len() > MAX_BOOTSTRAP_FOLDERS {
             return Err(StoreError::BrokenInvariant {
                 reason: format!("bootstrap folder count exceeds limit {MAX_BOOTSTRAP_FOLDERS}"),
             });
@@ -171,27 +171,27 @@ impl BrainStore {
             });
         }
         validate_bootstrap_output(output)?;
-        validate_required_grants(&output.vault, &output.required_key_grants, grants)?;
-        if output.vault.kind == VaultKind::Personal {
+        validate_required_grants(&output.brain, &output.required_key_grants, grants)?;
+        if output.brain.kind == BrainKind::Personal {
             return Err(StoreError::BrokenInvariant {
-                reason: "Personal Vault bootstrap requires a Personal Agent".to_owned(),
+                reason: "Personal Brain bootstrap requires a Personal Agent".to_owned(),
             });
         }
 
         let tx = self.conn.transaction()?;
-        insert_vault(&tx, &output.vault)?;
-        insert_members_and_admins(&tx, &output.vault)?;
-        for folder in &output.vault.folders {
-            insert_folder(&tx, &output.vault.id, folder, false)?;
+        insert_brain(&tx, &output.brain)?;
+        insert_members_and_admins(&tx, &output.brain)?;
+        for folder in &output.brain.folders {
+            insert_folder(&tx, &output.brain.id, folder, false)?;
         }
         for grant in grants {
-            insert_grant(&tx, &output.vault.id, grant)?;
+            insert_grant(&tx, &output.brain.id, grant)?;
         }
         tx.commit()?;
         Ok(())
     }
 
-    pub fn list_visible_vaults(&self, actor: &UserId) -> Result<Vec<VisibleVault>, StoreError> {
+    pub fn list_visible_brains(&self, actor: &UserId) -> Result<Vec<VisibleBrain>, StoreError> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, kind, name, role, invite_code
@@ -204,13 +204,13 @@ impl BrainStore {
                            ELSE 'member'
                        END AS role,
                        NULL AS invite_code
-                FROM vaults v
-                LEFT JOIN vault_admins va
-                  ON va.vault_id = v.id AND va.user_id = ?1
+                FROM brains v
+                LEFT JOIN brain_admins va
+                  ON va.brain_id = v.id AND va.user_id = ?1
                 LEFT JOIN personal_agents pa
-                  ON pa.vault_id = v.id AND pa.agent_npub = ?1 AND pa.status = 'active'
-                LEFT JOIN vault_members vm
-                  ON vm.vault_id = v.id AND vm.user_id = ?1
+                  ON pa.brain_id = v.id AND pa.agent_npub = ?1 AND pa.status = 'active'
+                LEFT JOIN brain_members vm
+                  ON vm.brain_id = v.id AND vm.user_id = ?1
                 WHERE v.owner_user_id = ?1
                    OR pa.agent_npub = ?1
                    OR (
@@ -220,7 +220,7 @@ impl BrainStore {
                            OR EXISTS (
                                SELECT 1
                                FROM folder_access fa
-                               WHERE fa.vault_id = v.id AND fa.user_id = ?1
+                               WHERE fa.brain_id = v.id AND fa.user_id = ?1
                            )
                        )
                    )
@@ -228,11 +228,11 @@ impl BrainStore {
                 UNION ALL
 
                 SELECT v.id, v.kind, v.name, 'invited' AS role, vi.invite_code
-                FROM vault_invitations vi
-                JOIN vaults v
-                  ON v.id = vi.vault_id
-                LEFT JOIN vault_members vm
-                  ON vm.vault_id = v.id AND vm.user_id = ?1
+                FROM brain_invitations vi
+                JOIN brains v
+                  ON v.id = vi.brain_id
+                LEFT JOIN brain_members vm
+                  ON vm.brain_id = v.id AND vm.user_id = ?1
                 WHERE vi.user_id = ?1
                   AND vi.status = 'pending'
                   AND vi.expires_at > ?2
@@ -256,117 +256,117 @@ impl BrainStore {
             ))
         })?;
 
-        let mut vaults = Vec::new();
+        let mut brains = Vec::new();
         for row in rows {
             let (id, kind, name, role, invite_code) = row?;
-            vaults.push(VisibleVault {
-                id: VaultId::new(id)?,
-                kind: parse_vault_kind(&kind)?,
+            brains.push(VisibleBrain {
+                id: BrainId::new(id)?,
+                kind: parse_brain_kind(&kind)?,
                 name,
                 role: match role.as_str() {
-                    "owner" => VisibleVaultRole::Owner,
-                    "personal_agent" => VisibleVaultRole::PersonalAgent,
-                    "admin" => VisibleVaultRole::Admin,
-                    "member" => VisibleVaultRole::Member,
-                    "invited" => VisibleVaultRole::Invited,
+                    "owner" => VisibleBrainRole::Owner,
+                    "personal_agent" => VisibleBrainRole::PersonalAgent,
+                    "admin" => VisibleBrainRole::Admin,
+                    "member" => VisibleBrainRole::Member,
+                    "invited" => VisibleBrainRole::Invited,
                     _ => {
                         return Err(StoreError::BrokenInvariant {
-                            reason: format!("unknown visible vault role: {role}"),
+                            reason: format!("unknown visible brain role: {role}"),
                         });
                     }
                 },
                 invite_code,
             });
         }
-        Ok(vaults)
+        Ok(brains)
     }
 
-    /// Add an organization Vault Member.
-    pub fn add_member(&mut self, vault_id: &VaultId, user_id: &UserId) -> Result<(), StoreError> {
-        self.require_organization_vault(vault_id)?;
+    /// Add an organization Brain Member.
+    pub fn add_member(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
+        self.require_organization_brain(brain_id)?;
         self.conn.execute(
-            "INSERT INTO vault_members (vault_id, user_id) VALUES (?1, ?2)",
-            params![vault_id.as_str(), user_id.as_str()],
+            "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
+            params![brain_id.as_str(), user_id.as_str()],
         )?;
         Ok(())
     }
 
-    /// Add an organization Vault Admin. The user must already be a member.
-    pub fn add_admin(&mut self, vault_id: &VaultId, user_id: &UserId) -> Result<(), StoreError> {
-        self.require_organization_vault(vault_id)?;
-        if !self.member_exists(vault_id, user_id)? {
+    /// Add an organization Brain Admin. The user must already be a member.
+    pub fn add_admin(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
+        self.require_organization_brain(brain_id)?;
+        if !self.member_exists(brain_id, user_id)? {
             return Err(StoreError::BrokenInvariant {
-                reason: "vault admin must already be a vault member".to_owned(),
+                reason: "brain admin must already be a brain member".to_owned(),
             });
         }
         self.conn.execute(
-            "INSERT INTO vault_admins (vault_id, user_id) VALUES (?1, ?2)",
-            params![vault_id.as_str(), user_id.as_str()],
+            "INSERT INTO brain_admins (brain_id, user_id) VALUES (?1, ?2)",
+            params![brain_id.as_str(), user_id.as_str()],
         )?;
         Ok(())
     }
 
-    /// Remove an organization Vault Admin while preserving at least one admin.
-    pub fn remove_admin(&mut self, vault_id: &VaultId, user_id: &UserId) -> Result<(), StoreError> {
-        let vault = self.load_core_vault(vault_id)?;
-        if vault.kind != VaultKind::Organization {
+    /// Remove an organization Brain Admin while preserving at least one admin.
+    pub fn remove_admin(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
+        let brain = self.load_core_brain(brain_id)?;
+        if brain.kind != BrainKind::Organization {
             return Err(StoreError::BrokenInvariant {
-                reason: "member/admin mutation requires an organization vault".to_owned(),
+                reason: "member/admin mutation requires an organization brain".to_owned(),
             });
         }
-        if !vault.admins.contains(user_id) {
+        if !brain.admins.contains(user_id) {
             return Err(StoreError::BrokenInvariant {
-                reason: "vault admin does not exist".to_owned(),
+                reason: "brain admin does not exist".to_owned(),
             });
         }
-        if vault.admins.len() == 1 {
+        if brain.admins.len() == 1 {
             return Err(StoreError::BrokenInvariant {
-                reason: "organization vault must keep at least one admin".to_owned(),
+                reason: "organization brain must keep at least one admin".to_owned(),
             });
         }
 
         self.conn.execute(
-            "DELETE FROM vault_admins WHERE vault_id = ?1 AND user_id = ?2",
-            params![vault_id.as_str(), user_id.as_str()],
+            "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+            params![brain_id.as_str(), user_id.as_str()],
         )?;
         Ok(())
     }
 
-    /// Remove an organization Vault Member after admin and restricted access cleanup.
+    /// Remove an organization Brain Member after admin and restricted access cleanup.
     pub fn remove_member(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         user_id: &UserId,
     ) -> Result<(), StoreError> {
-        let vault = self.load_core_vault(vault_id)?;
-        if vault.kind != VaultKind::Organization {
+        let brain = self.load_core_brain(brain_id)?;
+        if brain.kind != BrainKind::Organization {
             return Err(StoreError::BrokenInvariant {
-                reason: "member/admin mutation requires an organization vault".to_owned(),
+                reason: "member/admin mutation requires an organization brain".to_owned(),
             });
         }
-        if vault.admins.contains(user_id) {
+        if brain.admins.contains(user_id) {
             return Err(StoreError::BrokenInvariant {
                 reason: "remove admin role before removing member".to_owned(),
             });
         }
-        if !vault
+        if !brain
             .members
             .iter()
             .any(|member| &member.user_id == user_id)
         {
             return Err(StoreError::BrokenInvariant {
-                reason: "vault member does not exist".to_owned(),
+                reason: "brain member does not exist".to_owned(),
             });
         }
-        if self.member_has_restricted_access(vault_id, user_id)? {
+        if self.member_has_restricted_access(brain_id, user_id)? {
             return Err(StoreError::BrokenInvariant {
                 reason: "remove restricted folder access before removing member".to_owned(),
             });
         }
 
         self.conn.execute(
-            "DELETE FROM vault_members WHERE vault_id = ?1 AND user_id = ?2",
-            params![vault_id.as_str(), user_id.as_str()],
+            "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
+            params![brain_id.as_str(), user_id.as_str()],
         )?;
         Ok(())
     }

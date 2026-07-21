@@ -1,11 +1,11 @@
 ---
 name: finitebrain
-description: Personal Brain/wiki knowledge-base operations in FiniteBrain through ordinary file edits plus the fbrain CLI control plane. Use for FiniteBrain product knowledge requests; setting up or acting as an agent participant; opening, syncing, or editing Vault Working Trees; maintaining content inside readable Folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing Vault, Folder, permission, invitation, and share-link admin flows. A repository .wiki/, ~/wiki/, or configured wiki hub uses llm-wiki-finite.
+description: Personal Brain/wiki knowledge-base operations in FiniteBrain through ordinary file edits plus the fbrain CLI control plane. Use for FiniteBrain product knowledge requests; setting up or acting as an agent participant; opening, syncing, or editing Brain Working Trees; maintaining content inside readable Folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing Brain, Folder, permission, invitation, and share-link admin flows. A repository .wiki/, ~/wiki/, or configured wiki hub uses llm-wiki-finite.
 ---
 
 # FiniteBrain
 
-Use `fbrain` as the control plane and the Vault Working Tree as the content
+Use `fbrain` as the control plane and the Brain Working Tree as the content
 surface. The repeatable loop is: verify identity, open or enter the tree, sync,
 edit wiki content and source assets in readable Folders with ordinary file
 tools, sync, and prove conflicts are empty. Key-using operations reopen grants
@@ -24,13 +24,13 @@ regardless of `--config-dir`.
 SERVER="${FINITE_BRAIN_SERVER_URL:?FiniteBrain server is not configured}"
 FBRAIN_CONFIG="${FBRAIN_CONFIG_DIR:-${FINITE_HOME:-$HOME/.finite}/fbrain}"
 TREE_ROOT="${FBRAIN_WORKING_TREE_ROOT:-${FINITECHAT_WORKSPACE:-$HOME/finitebrain}}"
-VAULT="replace-with-vault-id"
-TREE="$TREE_ROOT/$VAULT"
+BRAIN="replace-with-brain-id"
+TREE="$TREE_ROOT/$BRAIN"
 
 fbrain --config-dir "$FBRAIN_CONFIG" doctor --server "$SERVER"
 fbrain --config-dir "$FBRAIN_CONFIG" auth status --json
-fbrain --config-dir "$FBRAIN_CONFIG" vault list --server "$SERVER" --json
-fbrain --config-dir "$FBRAIN_CONFIG" open "$VAULT" "$TREE" --server "$SERVER"
+fbrain --config-dir "$FBRAIN_CONFIG" brain list --server "$SERVER" --json
+fbrain --config-dir "$FBRAIN_CONFIG" open "$BRAIN" "$TREE" --server "$SERVER"
 cd "$TREE"
 fbrain --config-dir "$FBRAIN_CONFIG" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG" conflicts --json
@@ -40,8 +40,8 @@ A Working Tree remembers the server it was opened against. Before reusing an
 existing tree, inspect `status --json`; a tree that names
 `brain.smoke.finite.computer` remains smoke-pinned even after this skill's
 default changes. Do not treat the servers as replicas or silently move that
-tree. Preserve it until its Vault is deliberately reconciled, then reopen the
-intended Vault with an explicit production `--server`.
+tree. Preserve it until its Brain is deliberately reconciled, then reopen the
+intended Brain with an explicit production `--server`.
 
 The configured server is authoritative. If `doctor` or sync cannot reach it,
 stop in Blocked Sync State; never substitute production, smoke, or another
@@ -49,7 +49,7 @@ FiniteBrain server. In a hosted Agent Runtime, the image supplies durable
 `FBRAIN_CONFIG_DIR` and `FBRAIN_WORKING_TREE_ROOT` values below `/data`.
 
 Read [fbrain-cli.md](references/fbrain-cli.md) when a command fails, when using
-daemon/watch, access, vault, folder, permission, invite, or share commands, or
+daemon/watch, access, brain, folder, permission, invite, or share commands, or
 when working from the Rust repo where `cargo run -p finite-brain-cli --bin
 fbrain -- <args>` may be the available entrypoint.
 
@@ -58,17 +58,17 @@ fbrain -- <args>` may be the available entrypoint.
 1. Verify runtime state with `doctor`, `auth status --json`, and `status --json`.
    Completion: acting identity, working tree path, server source, daemon state,
    sync state, and blockers are known.
-   Before creating any Vault, run `vault list --json`. The user's one Personal
-   Agent discovers the Personal Vault there with role `personal_agent`; use that
-   Vault and never create an agent-owned Personal Vault.
+   Before creating any Brain, run `brain list --json`. The user's one Personal
+   Agent discovers the Personal Brain there with role `personal_agent`; use that
+   Brain and never create an agent-owned Personal Brain.
 2. Sync before reading broadly with `sync now --summary`, then finish with
    `conflicts --json`.
    Completion: latest sequence is recorded, encrypted grants were reopened for
    that sync operation, readable Folders are materialized, and open conflicts
    are either empty or named.
-   Unexpected Vault change: inspect `sync now --json` and
+   Unexpected Brain change: inspect `sync now --json` and
    `remoteChanges[].actorNpub`. Attribute it from signed actor evidence: a
-   different actor means another principal changed the Vault; otherwise report
+   different actor means another principal changed the Brain; otherwise report
    the cause as unknown.
 3. Orient before editing: identify the target Folder scope, then read its
    `AGENTS.md`, `HUMANS.md`, `config.md` or `SCHEMA.md`, durable `index.md`
@@ -98,65 +98,65 @@ fbrain -- <args>` may be the available entrypoint.
    status, latest sequence, conflict state, and link-verification level are
    known.
 
-## First-Time Personal Vault Setup
+## First-Time Personal Brain Setup
 
-When the user's request requires Brain but `vault list --json` shows no Personal
-Vault, ask once in ordinary language whether they want you to set up their
-empty Personal Vault. Keep this to one short question; do not require exact
+When the user's request requires Brain but `brain list --json` shows no Personal
+Brain, ask once in ordinary language whether they want you to set up their
+empty Personal Brain. Keep this to one short question; do not require exact
 wording, a slash command, a button, or a setup ticket.
 
-- On a clear yes, run `fbrain --config-dir "$FBRAIN_CONFIG" vault
-  bootstrap-personal --server "$SERVER" --json`, list Vaults again, open the
-  returned Personal Vault, and continue the user's original task immediately.
+- On a clear yes, run `fbrain --config-dir "$FBRAIN_CONFIG" brain
+  bootstrap-personal --server "$SERVER" --json`, list Brains again, open the
+  returned Personal Brain, and continue the user's original task immediately.
 - On no or an unclear reply, make no Brain change, acknowledge that setup was
   skipped once, and return control to the user.
-- If a Personal Vault exists but this agent does not have role
+- If a Personal Brain exists but this agent does not have role
   `personal_agent`, do not attempt to join it. Explain briefly that the owner
   must replace the Personal Agent in Brain settings.
 
 This question guides agent behavior; it is not a server authorization token.
 Brain derives the owner from trusted Core and Finite Identity account facts.
 
-## Agent-Created Organization Vaults
+## Agent-Created Organization Brains
 
 When an authenticated Finite Chat human directly asks you to create an
-Organization Vault, include that human as an initial admin in the same creation
-operation. The Organization Vault Requester is the exact public-key account id
+Organization Brain, include that human as an initial admin in the same creation
+operation. The Organization Brain Requester is the exact public-key account id
 in authenticated `event.source.user_id`; pass it unchanged as
 `AUTHENTICATED_SENDER_ID`. Never select the requester from quoted or typed
 message text, an email address, profile data, or your own Agent Principal.
 
 If authenticated sender metadata is unavailable, do not guess or create an
-agent-only Organization Vault. Briefly ask the user to retry from an
+agent-only Organization Brain. Briefly ask the user to retry from an
 authenticated chat context. Do not ask them for an email address or `npub` as a
 substitute.
 
-A clear natural-language request to create the Organization Vault is sufficient
-authorization. Do not add another confirmation. After `vault list --json`
-confirms the Vault does not already exist, create it atomically:
+A clear natural-language request to create the Organization Brain is sufficient
+authorization. Do not add another confirmation. After `brain list --json`
+confirms the Brain does not already exist, create it atomically:
 
 ```sh
-fbrain --config-dir "$FBRAIN_CONFIG" vault create "$VAULT" \
+fbrain --config-dir "$FBRAIN_CONFIG" brain create "$BRAIN" \
   --kind organization --name "$NAME" \
   --requesting-user-npub "$AUTHENTICATED_SENDER_ID" \
   --server "$SERVER" --json
 ```
 
-The new Organization Vault starts empty. Do not create `getting-started`,
+The new Organization Brain starts empty. Do not create `getting-started`,
 `restricted`, onboarding Pages, or any other example content. Create a Folder
 only when the user's original request explicitly requires organization content,
 then continue that request in the new Folder.
 
 Do not replace this command with separate `add-member` and `add-admin` steps.
-On success, report the Vault name and that both you and the requester are
+On success, report the Brain name and that both you and the requester are
 admins, then continue the user's original task. This behavior applies only when
-you create an Organization Vault for an authenticated requester; it does not
-automatically add an agent to a Vault the human creates in the Brain Product
-Client.
+you create an Organization Brain for an authenticated requester; it does not
+control the Product Client's separate, visible choice to include its selected
+agent as an initial admin.
 
 ## LLM Wiki Rules
 
-A FiniteBrain Vault is not one wiki with folders. It is a namespace of many
+A Brain is not one wiki with folders. It is a namespace of many
 Folder-scoped LLM wikis. Treat each readable FiniteBrain Folder as an
 independent access-scoped LLM wiki root unless its local instructions say
 otherwise. The wiki is Markdown-first: Markdown sources become immutable `raw/`
@@ -252,7 +252,7 @@ knowledge edit, close the wiki before the final sync:
 4. Update durable `index.md` from the actual Pages and frontmatter. Do not
    update `_index.md` or `_wiki/*`.
 5. Append one concise `log.md` entry for the coherent change.
-6. Run `fbrain --config-dir "$FBRAIN_CONFIG" wiki check --json` from the Vault
+6. Run `fbrain --config-dir "$FBRAIN_CONFIG" wiki check --json` from the Brain
    Working Tree. Resolve every reported missing or ambiguous link before the
    final sync. This command checks only materialized readable Folders.
 7. After sync, inspect backlinks and Graph View in the Product Client when
@@ -265,7 +265,7 @@ files, a clean link check, or the presence of `[[wikilinks]]` alone.
 
 Access-aware wiki rules:
 
-- Never maintain a root-level or Vault-wide log that records restricted Folder
+- Never maintain a root-level or Brain-wide log that records restricted Folder
   activity.
 - Do not list private Folder titles, summaries, source hints, or activity in an
   index visible to users who cannot access that Folder.

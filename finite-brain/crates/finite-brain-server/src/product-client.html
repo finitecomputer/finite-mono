@@ -11,8 +11,8 @@
   </head>
   <body>
     <div class="obsidian-shell" data-workspace-view="page">
-      <aside class="file-sidebar" aria-label="Vault file explorer">
-        <header class="vault-header">
+      <aside class="file-sidebar" aria-label="Brain file explorer">
+        <header class="brain-header">
           <div>
             <p class="eyebrow">FiniteBrain</p>
             <h1 id="sidebarModeTitle">Files</h1>
@@ -48,13 +48,13 @@
               </svg>
               <span class="sr-only">Quick switcher</span>
             </button>
-            <button class="ribbon-button" id="ribbonAccessButton" type="button" title="Vault access" aria-label="Vault access" aria-pressed="false">
+            <button class="ribbon-button" id="ribbonAccessButton" type="button" title="Brain access" aria-label="Brain access" aria-pressed="false">
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M7 11V8a5 5 0 0 1 10 0v3" />
                 <rect x="5" y="11" width="14" height="10" rx="2" />
                 <path d="M12 15v3" />
               </svg>
-              <span class="sr-only">Vault access</span>
+              <span class="sr-only">Brain access</span>
             </button>
           </nav>
         </header>
@@ -73,7 +73,7 @@
             </svg>
           </button>
           <span class="toolbar-spacer"></span>
-          <button id="refreshReaderButton" class="sidebar-icon-button" type="button" title="Refresh Vault" aria-label="Refresh Vault">
+          <button id="refreshReaderButton" class="sidebar-icon-button" type="button" title="Refresh Brain" aria-label="Refresh Brain">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M20 7v5h-5M4 17v-5h5" />
               <path d="M18.2 9A7 7 0 0 0 6.4 6.8M5.8 15A7 7 0 0 0 17.6 17.2" />
@@ -111,7 +111,7 @@
               <div id="accessBasicView" class="access-basic-view">
                 <div class="access-header">
                   <h3 id="accessCurrentFolder">No folder selected</h3>
-                  <p id="accessSummaryLine" class="access-summary">Load a Vault and select a Folder to inspect access.</p>
+                  <p id="accessSummaryLine" class="access-summary">Load a Brain and select a Folder to inspect access.</p>
                 </div>
               </div>
             </div>
@@ -140,7 +140,7 @@
                       </button>
                     </div>
                     <div id="accessFolderDropdown" class="folder-dropdown" hidden>
-                      <ol id="accessFolderList" class="folder-dropdown-list" role="listbox" aria-label="Vault folders"></ol>
+                      <ol id="accessFolderList" class="folder-dropdown-list" role="listbox" aria-label="Brain folders"></ol>
                     </div>
                   </div>
 
@@ -193,10 +193,10 @@
                       </label>
                       <label class="access-checkbox">
                         <input id="accessShareMountInput" type="checkbox" aria-describedby="accessShareMountHint" />
-                        <span>Add a shortcut to their Personal Vault</span>
+                        <span>Add a shortcut to their Personal Brain</span>
                       </label>
                       <p id="accessShareMountHint" class="access-field-hint access-checkbox-hint">
-                        When accepted, this adds a shortcut to the shared Folder in their Personal Vault. It does not copy data or change Folder access.
+                        When accepted, this adds a shortcut to the shared Folder in their Personal Brain. It does not copy data or change Folder access.
                       </p>
                       <button id="createShareLinkButton" type="button" class="access-primary-button">Create share link</button>
                     </div>
@@ -220,7 +220,7 @@
                 </div>
               </details>
 
-              <details id="vaultPeopleActionPanel" class="access-vault-admin" hidden>
+              <details id="brainPeopleActionPanel" class="access-brain-admin" hidden>
                 <summary class="access-admin-summary">
                   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                     <circle cx="9" cy="8" r="3" />
@@ -229,12 +229,12 @@
                     <path d="M15 11h6" />
                   </svg>
                   <span>Manage members</span>
-                  <small id="vaultPeopleActionHint">Add or promote existing identities</small>
+                  <small id="brainPeopleActionHint">Add or promote existing identities</small>
                 </summary>
                 <div class="access-admin-content">
-                  <div class="vault-access-action-grid">
-                    <section id="vaultInvitationActionSection" class="access-admin-section vault-access-option primary settings-invitation-create">
-                      <div class="vault-access-option-heading">
+                  <div class="brain-access-action-grid">
+                    <section id="brainInvitationActionSection" class="access-admin-section brain-access-option primary settings-invitation-create">
+                      <div class="brain-access-option-heading">
                         <h4>Invite someone</h4>
                         <span class="pill ready">email or npub</span>
                       </div>
@@ -242,7 +242,7 @@
                       <label class="access-field">
                         <span>Email or Member Identity</span>
                         <input
-                          id="vaultInviteTargetNpubInput"
+                          id="brainInviteTargetNpubInput"
                           placeholder="name@example.com or npub…"
                           autocomplete="off"
                           spellcheck="false"
@@ -251,30 +251,30 @@
                       <label class="access-field">
                         <span>Folder access plan</span>
                         <input
-                          id="vaultInviteFoldersInput"
+                          id="brainInviteFoldersInput"
                           autocomplete="off"
                           spellcheck="false"
-                          aria-describedby="vaultInviteFolderPlanHint"
+                          aria-describedby="brainInviteFolderPlanHint"
                         />
                       </label>
-                      <p id="vaultInviteFolderPlanHint" class="access-field-hint">For an email invite, these Folders are included in the encrypted claim scope. For an existing Member Identity, grant any required Folder Keys after they join.</p>
+                      <p id="brainInviteFolderPlanHint" class="access-field-hint">For an email invite, these Folders are included in the encrypted claim scope. For an existing Member Identity, grant any required Folder Keys after they join.</p>
                       <label class="access-field">
                         <span>Expires</span>
                         <input
-                          id="vaultInviteExpiresAtInput"
+                          id="brainInviteExpiresAtInput"
                           type="datetime-local"
                           autocomplete="off"
                         />
                       </label>
                       <div class="access-button-row">
-                        <button id="createVaultInvitationButton" type="button">Create invite</button>
-                        <button id="revokeVaultInvitationButton" class="danger-action" type="button">Revoke invite</button>
+                        <button id="createBrainInvitationButton" type="button">Create invite</button>
+                        <button id="revokeBrainInvitationButton" class="danger-action" type="button">Revoke invite</button>
                       </div>
-                      <div id="vaultInviteUrlOutput" class="vault-invite-url-output" hidden>
+                      <div id="brainInviteUrlOutput" class="brain-invite-url-output" hidden>
                         <label class="access-field">
                           <span>Private invite link</span>
                           <input
-                            id="vaultInviteUrlInput"
+                            id="brainInviteUrlInput"
                             type="text"
                             autocomplete="off"
                             spellcheck="false"
@@ -282,7 +282,7 @@
                           />
                         </label>
                         <button
-                          id="copyVaultInviteUrlButton"
+                          id="copyBrainInviteUrlButton"
                           class="access-primary-button"
                           type="button"
                           aria-label="Copy private invite link"
@@ -294,52 +294,52 @@
                       </div>
                     </section>
 
-                    <section class="access-admin-section vault-access-option">
-                      <div class="vault-access-option-heading">
+                    <section class="access-admin-section brain-access-option">
+                      <div class="brain-access-option-heading">
                         <h4>Add member now</h4>
                         <span class="pill muted">existing identity</span>
                       </div>
                       <label class="access-inline-field">
                         <span class="sr-only">Member Identity</span>
                         <input
-                          id="vaultMemberNpubInput"
+                          id="brainMemberNpubInput"
                           placeholder="npub… or name@domain"
                           autocomplete="off"
                           spellcheck="false"
                         />
-                        <button id="addVaultMemberButton" type="button" class="access-add-button">Add member</button>
+                        <button id="addBrainMemberButton" type="button" class="access-add-button">Add member</button>
                       </label>
                     </section>
 
-                    <section class="access-admin-section vault-access-option">
-                      <div class="vault-access-option-heading">
+                    <section class="access-admin-section brain-access-option">
+                      <div class="brain-access-option-heading">
                         <h4>Make admin</h4>
                         <span class="pill muted">existing member</span>
                       </div>
                       <label class="access-inline-field">
                         <span class="sr-only">Member Identity</span>
                         <input
-                          id="vaultAdminNpubInput"
+                          id="brainAdminNpubInput"
                           placeholder="npub… or name@domain"
                           autocomplete="off"
                           spellcheck="false"
                         />
-                        <button id="addVaultAdminButton" type="button" class="access-add-button">Add admin</button>
+                        <button id="addBrainAdminButton" type="button" class="access-add-button">Add admin</button>
                       </label>
-                      <p id="vaultPeopleHint" class="access-field-hint">Admins must already be Vault members.</p>
+                      <p id="brainPeopleHint" class="access-field-hint">Admins must already be Brain members.</p>
                     </section>
                   </div>
                 </div>
               </details>
 
-              <details id="vaultInvitationPanel" class="access-vault-admin">
+              <details id="brainInvitationPanel" class="access-brain-admin">
                 <summary class="access-admin-summary">
                   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                     <rect x="3" y="5" width="18" height="14" rx="2" />
                     <path d="M3 7l9 6 9-6" />
                   </svg>
-                  <span>Join a Vault</span>
-                  <small id="vaultInvitationHint">Use a one-time Invite Code</small>
+                  <span>Join a Brain</span>
+                  <small id="brainInvitationHint">Use a one-time Invite Code</small>
                 </summary>
                 <div class="access-admin-content">
                   <div class="access-admin-section">
@@ -347,7 +347,7 @@
                     <label class="access-field">
                       <span>Invite code</span>
                       <input
-                        id="vaultInviteCodeInput"
+                        id="brainInviteCodeInput"
                         placeholder="invite-..."
                         autocomplete="off"
                         spellcheck="false"
@@ -356,7 +356,7 @@
                     <label class="access-field">
                       <span>Email for an email invite</span>
                       <input
-                        id="vaultInviteEmailInput"
+                        id="brainInviteEmailInput"
                         placeholder="name@example.com"
                         autocomplete="off"
                         spellcheck="false"
@@ -365,7 +365,7 @@
                     <label class="access-field">
                       <span>Private Invite Secret</span>
                       <input
-                        id="vaultInviteSecretInput"
+                        id="brainInviteSecretInput"
                         type="password"
                         autocomplete="off"
                         spellcheck="false"
@@ -378,17 +378,17 @@
                       <label class="access-field">
                         <span>Email proof time</span>
                         <input
-                          id="vaultInviteEmailProofCreatedAtInput"
+                          id="brainInviteEmailProofCreatedAtInput"
                           type="datetime-local"
                           autocomplete="off"
                         />
                       </label>
                     </details>
                     <div class="access-button-row">
-                      <button id="vaultInviteConnectSignerButton" type="button">Connect signer</button>
-                      <button id="getVaultInvitationButton" type="button">Inspect invite</button>
+                      <button id="brainInviteConnectSignerButton" type="button">Connect signer</button>
+                      <button id="getBrainInvitationButton" type="button">Inspect invite</button>
                       <button id="getEmailInviteInstructionsButton" type="button">Verify email and load access</button>
-                      <button id="acceptVaultInvitationButton" type="button">Join Vault</button>
+                      <button id="acceptBrainInvitationButton" type="button">Join Brain</button>
                     </div>
                   </div>
                 </div>
@@ -396,7 +396,7 @@
             </div>
 
             <div class="access-state-stack" aria-label="Access details">
-              <section id="personalAgentSection" class="vault-management-section" hidden>
+              <section id="personalAgentSection" class="brain-management-section" hidden>
                 <div class="access-section-header">
                   <span class="section-title">Personal Agent</span>
                 </div>
@@ -405,14 +405,14 @@
                   <span>Replacement agent email</span>
                   <input id="personalAgentEmailInput" type="email" autocomplete="off" placeholder="agent@finite.computer" />
                 </label>
-                <p class="access-field-hint">Replacing or removing rotates every Folder Key. Your Vault and content stay intact.</p>
+                <p class="access-field-hint">Replacing or removing rotates every Folder Key. Your Brain and content stay intact.</p>
                 <div class="access-button-row">
                   <button id="replacePersonalAgentButton" type="button">Replace agent</button>
                   <button id="removePersonalAgentButton" type="button" class="danger">Remove agent</button>
                 </div>
               </section>
 
-              <section id="accessWhoHasSection" class="access-who-has-section vault-management-section">
+              <section id="accessWhoHasSection" class="access-who-has-section brain-management-section">
                 <div class="access-section-header">
                   <span class="section-title">Who has access</span>
                 </div>
@@ -421,45 +421,45 @@
                 </ol>
               </section>
 
-              <section id="folderShareLinkListSection" class="vault-management-section">
+              <section id="folderShareLinkListSection" class="brain-management-section">
                 <div class="access-section-header">
                   <span class="section-title">Folder share links</span>
                   <span id="folderShareLinkCount" class="pill muted">0</span>
                 </div>
                 <ol id="folderShareLinkList" class="access-who-has-list">
-                  <li class="access-empty-state">Vault admins see this Folder's share links here.</li>
+                  <li class="access-empty-state">Brain admins see this Folder's share links here.</li>
                 </ol>
               </section>
 
-              <section id="vaultPeopleSection" class="vault-management-section">
+              <section id="brainPeopleSection" class="brain-management-section">
                 <div class="access-section-header">
-                  <span class="section-title">Vault Member Identities</span>
-                  <span id="vaultPeopleCount" class="pill muted">0</span>
+                  <span class="section-title">Brain Member Identities</span>
+                  <span id="brainPeopleCount" class="pill muted">0</span>
                 </div>
-                <ol id="vaultPeopleList" class="access-who-has-list">
-                  <li class="access-empty-state">Load an organization Vault to manage Member Identities.</li>
+                <ol id="brainPeopleList" class="access-who-has-list">
+                  <li class="access-empty-state">Load an organization Brain to manage Member Identities.</li>
                 </ol>
               </section>
 
-              <section id="vaultInvitationListSection" class="vault-management-section">
+              <section id="brainInvitationListSection" class="brain-management-section">
                 <div class="access-section-header">
                   <span class="section-title">Invitations</span>
-                  <span id="vaultInvitationCount" class="pill muted">0</span>
+                  <span id="brainInvitationCount" class="pill muted">0</span>
                 </div>
-                <ol id="vaultInvitationList" class="access-who-has-list">
-                  <li class="access-empty-state">Vault admins see pending invitations here.</li>
+                <ol id="brainInvitationList" class="access-who-has-list">
+                  <li class="access-empty-state">Brain admins see pending invitations here.</li>
                 </ol>
               </section>
 
-              <section id="sharedFolderSection" class="vault-management-section">
+              <section id="sharedFolderSection" class="brain-management-section">
                 <div class="access-section-header">
                   <span class="section-title">Shared folders</span>
                   <span id="sharedFolderCount" class="pill muted">0</span>
                 </div>
                 <ol id="sharedFolderList" class="access-who-has-list">
-                  <li class="access-empty-state">Vault admins see cross-Vault shared Folders here.</li>
+                  <li class="access-empty-state">Brain admins see cross-Brain shared Folders here.</li>
                 </ol>
-                <p class="access-field-hint">Connections mount a source Folder into this Vault. Disconnecting rotates the source Folder Key and is not yet available in this client.</p>
+                <p class="access-field-hint">Connections mount a source Folder into this Brain. Disconnecting rotates the source Folder Key and is not yet available in this client.</p>
               </section>
             </div>
           </div>
@@ -469,14 +469,14 @@
         <footer class="sidebar-account-footer">
           <div class="session-account-row">
             <button
-              id="sessionAccountVaultButton"
-              class="session-account-vault-button"
+              id="sessionAccountBrainButton"
+              class="session-account-brain-button"
               type="button"
-              title="Switch Vault"
-              aria-label="Switch Vault"
+              title="Switch Brain"
+              aria-label="Switch Brain"
               aria-haspopup="menu"
               aria-expanded="false"
-              aria-controls="vaultSwitcherMenu"
+              aria-controls="brainSwitcherMenu"
             >
               <span class="session-account-avatar" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24">
@@ -485,7 +485,7 @@
                 </svg>
               </span>
               <span class="session-account-summary">
-                <strong id="sessionAccountVault">Personal vault</strong>
+                <strong id="sessionAccountBrain">Personal brain</strong>
                 <span>
                   <span id="sessionAccountIdentity">Signer unavailable</span>
                   <span aria-hidden="true"> · </span>
@@ -512,30 +512,30 @@
             </button>
           </div>
           <div
-            id="vaultSwitcherMenu"
-            class="vault-switcher-menu"
+            id="brainSwitcherMenu"
+            class="brain-switcher-menu"
             role="menu"
-            aria-label="Switch Vault"
-            aria-labelledby="sessionAccountVaultButton"
+            aria-label="Switch Brain"
+            aria-labelledby="sessionAccountBrainButton"
             hidden
           >
-            <div class="vault-switcher-header">
+            <div class="brain-switcher-header">
               <div>
-                <p class="eyebrow">Vaults</p>
-                <strong>Switch Vault</strong>
+                <p class="eyebrow">Brains</p>
+                <strong>Switch Brain</strong>
               </div>
-              <span id="vaultSwitcherCount" class="pill muted">0</span>
+              <span id="brainSwitcherCount" class="pill muted">0</span>
             </div>
-            <ol id="vaultSwitcherList" class="vault-switcher-list" aria-label="Available Vaults"></ol>
-            <div class="vault-switcher-footer">
-              <button id="manageVaultsButton" class="vault-switcher-manage" type="button" role="menuitem">
+            <ol id="brainSwitcherList" class="brain-switcher-list" aria-label="Available Brains"></ol>
+            <div class="brain-switcher-footer">
+              <button id="manageBrainsButton" class="brain-switcher-manage" type="button" role="menuitem">
                 <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M4 7h16M4 12h16M4 17h16" />
                   <circle cx="8" cy="7" r="1.5" />
                   <circle cx="15" cy="12" r="1.5" />
                   <circle cx="10" cy="17" r="1.5" />
                 </svg>
-                <span>Manage Vaults</span>
+                <span>Manage Brains</span>
               </button>
             </div>
           </div>
@@ -569,7 +569,7 @@
               </div>
             </header>
             <div id="readerPageContent" class="note-content note-markdown">
-              Open a vault to read pages.
+              Open a brain to read pages.
             </div>
             <div id="editorSlashMenu" class="editor-slash-menu" role="listbox" aria-label="Editor slash commands" hidden></div>
             <details id="editorDrawer" class="editor-drawer">
@@ -608,7 +608,7 @@ Start writing here.</textarea>
             <div id="graphEmptyState" class="graph-empty-state">
               <p class="eyebrow">Graph View</p>
               <h3 id="graphEmptyTitle">No graph yet</h3>
-              <p id="graphEmptyCopy">Open a vault to build the local graph.</p>
+              <p id="graphEmptyCopy">Open a brain to build the local graph.</p>
             </div>
             <div class="graph-floating-controls" aria-label="Graph controls">
               <span id="graphZoomValue" class="graph-zoom-value" aria-live="polite">100%</span>
@@ -721,12 +721,12 @@ Start writing here.</textarea>
                   <small>Signer and lock</small>
                 </span>
               </button>
-              <button id="settingsNavVault" class="settings-nav-item" type="button" role="tab" aria-selected="false" aria-controls="settingsVaultPanel" tabindex="-1">
+              <button id="settingsNavBrain" class="settings-nav-item" type="button" role="tab" aria-selected="false" aria-controls="settingsBrainPanel" tabindex="-1">
                 <span class="settings-nav-icon" aria-hidden="true">
                   <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h6l2 2h10v11H3z" /><path d="M3 10h18" /></svg>
                 </span>
                 <span>
-                  <strong>Vault</strong>
+                  <strong>Brain</strong>
                   <small>Current context</small>
                 </span>
               </button>
@@ -796,42 +796,42 @@ Start writing here.</textarea>
                   <span class="settings-info-icon" aria-hidden="true">
                     <svg class="icon" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.4-2.9 8-7 10-4.1-2-7-5.6-7-10V6z" /><path d="M9 12l2 2 4-4" /></svg>
                   </span>
-                  <p>The server cannot reconstruct a lost Folder Key or sole signer. Treat a Vault as durable only after a separate recovery path has reopened it on a replacement client.</p>
+                  <p>The server cannot reconstruct a lost Folder Key or sole signer. Treat a Brain as durable only after a separate recovery path has reopened it on a replacement client.</p>
                 </div>
               </section>
 
-              <section id="settingsVaultPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsNavVault" hidden>
+              <section id="settingsBrainPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsNavBrain" hidden>
                 <header class="settings-section-header">
-                  <p class="eyebrow">Vault</p>
-                  <h3>Vault context</h3>
-                  <p>Review the selected Vault and active signer. Switching, loading, and organization creation stay explicit in Manage Vaults.</p>
+                  <p class="eyebrow">Brain</p>
+                  <h3>Brain context</h3>
+                  <p>Review the selected Brain and active signer. Switching, loading, and organization creation stay explicit in Manage Brains.</p>
                 </header>
-                <div class="settings-card settings-vault-summary">
+                <div class="settings-card settings-brain-summary">
                   <div>
-                    <span class="settings-card-label">Selected Vault</span>
-                    <strong id="settingsVaultName">Personal vault</strong>
+                    <span class="settings-card-label">Selected Brain</span>
+                    <strong id="settingsBrainName">Personal brain</strong>
                   </div>
                   <dl>
                     <div>
                       <dt>Connected signer</dt>
-                      <dd id="settingsVaultIdentity">Signer unavailable</dd>
+                      <dd id="settingsBrainIdentity">Signer unavailable</dd>
                     </div>
                     <div>
                       <dt>Session</dt>
-                      <dd id="settingsVaultStatus">Session locked</dd>
+                      <dd id="settingsBrainStatus">Session locked</dd>
                     </div>
                   </dl>
                 </div>
-                <button id="settingsManageVaultsButton" class="settings-secondary-action" type="button">
+                <button id="settingsManageBrainsButton" class="settings-secondary-action" type="button">
                   <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M4 7h16M4 12h16M4 17h16" />
                     <circle cx="8" cy="7" r="1.5" />
                     <circle cx="15" cy="12" r="1.5" />
                     <circle cx="10" cy="17" r="1.5" />
                   </svg>
-                  <span>Manage Vaults</span>
+                  <span>Manage Brains</span>
                 </button>
-                <p class="settings-field-hint">Vault switching, loading, and organization management remain explicit actions and never silently reopen encrypted grants.</p>
+                <p class="settings-field-hint">Brain switching, loading, and organization management remain explicit actions and never silently reopen encrypted grants.</p>
               </section>
 
               <section id="settingsAccessPanel" class="settings-section settings-access-section" role="tabpanel" aria-labelledby="settingsNavAccess" hidden>
@@ -846,7 +846,7 @@ Start writing here.</textarea>
               <section id="settingsInvitationsPanel" class="settings-section settings-invitations-section" role="tabpanel" aria-labelledby="settingsNavInvitations" hidden>
                 <header class="settings-section-header">
                   <p class="eyebrow">Invitations</p>
-                  <h3>Invite or join a Vault</h3>
+                  <h3>Invite or join a Brain</h3>
                   <p>Invite an email or Member Identity, join with a one-time Invite Code, and review pending invitations or shared-Folder relationships.</p>
                 </header>
                 <div id="settingsInvitationsPanelMount"></div>
@@ -857,57 +857,57 @@ Start writing here.</textarea>
       </div>
 
       <div
-        id="manageVaultsModal"
+        id="manageBrainsModal"
         class="settings-modal-backdrop"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="manageVaultsModalTitle"
+        aria-labelledby="manageBrainsModalTitle"
         aria-hidden="true"
         hidden
       >
-        <section class="settings-modal-panel manage-vaults-modal-panel">
+        <section class="settings-modal-panel manage-brains-modal-panel">
           <header class="settings-modal-header">
             <div>
               <p class="eyebrow">Workspace</p>
-              <h2 id="manageVaultsModalTitle">Manage Vaults</h2>
+              <h2 id="manageBrainsModalTitle">Manage Brains</h2>
             </div>
-            <button id="closeManageVaultsButton" class="sidebar-icon-button" type="button" title="Close Vault management" aria-label="Close Vault management">
+            <button id="closeManageBrainsButton" class="sidebar-icon-button" type="button" title="Close Brain management" aria-label="Close Brain management">
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m7 7 10 10M17 7 7 17" />
               </svg>
             </button>
           </header>
-          <div class="manage-vaults-modal-content">
-            <section class="manage-vaults-summary settings-card">
+          <div class="manage-brains-modal-content">
+            <section class="manage-brains-summary settings-card">
               <div>
-                <span class="settings-card-label">Selected Vault</span>
-                <strong id="manageVaultsCurrentName">Personal vault</strong>
+                <span class="settings-card-label">Selected Brain</span>
+                <strong id="manageBrainsCurrentName">Personal brain</strong>
               </div>
-              <p id="manageVaultsCurrentDetail">Session locked. Select a Vault, then unlock it to open encrypted content.</p>
+              <p id="manageBrainsCurrentDetail">Session locked. Select a Brain, then unlock it to open encrypted content.</p>
             </section>
 
-            <section class="manage-vaults-list-section">
+            <section class="manage-brains-list-section">
               <div class="settings-section-header compact">
-                <p class="eyebrow">Visible Vaults</p>
-                <h3>Vaults you can open</h3>
+                <p class="eyebrow">Visible Brains</p>
+                <h3>Brains you can open</h3>
               </div>
-              <ol id="manageVaultsList" class="vault-switch-list manage-vaults-list" aria-label="Manage available Vaults"></ol>
+              <ol id="manageBrainsList" class="brain-switch-list manage-brains-list" aria-label="Manage available Brains"></ol>
             </section>
 
-            <div class="manage-vault-actions">
-              <button id="manageVaultsConnectSignerButton" type="button" class="secondary-action">Connect signer</button>
-              <button id="manageVaultsLoadButton" type="button" class="access-add-button manage-vault-unlock-button">Unlock Vault</button>
+            <div class="manage-brain-actions">
+              <button id="manageBrainsConnectSignerButton" type="button" class="secondary-action">Connect signer</button>
+              <button id="manageBrainsLoadButton" type="button" class="access-add-button manage-brain-unlock-button">Unlock Brain</button>
             </div>
 
-            <details id="manageVaultCreateDetails" class="manage-vault-create">
-              <summary>Create organization Vault</summary>
-              <div class="manage-vault-create-body">
-                <label class="sr-only" for="manageOrganizationVaultNameInput">New organization Vault</label>
-                <div class="manage-vault-create-row">
-                  <input id="manageOrganizationVaultNameInput" placeholder="New organization" autocomplete="off" spellcheck="false" />
-                  <button id="manageCreateOrganizationVaultButton" type="button" class="access-add-button">Create</button>
+            <details id="manageBrainCreateDetails" class="manage-brain-create">
+              <summary>Create organization Brain</summary>
+              <div class="manage-brain-create-body">
+                <label class="sr-only" for="manageOrganizationBrainNameInput">New organization Brain</label>
+                <div class="manage-brain-create-row">
+                  <input id="manageOrganizationBrainNameInput" placeholder="New organization" autocomplete="off" spellcheck="false" />
+                  <button id="manageCreateOrganizationBrainButton" type="button" class="access-add-button">Create</button>
                 </div>
-                <p class="settings-field-hint">Create an organization Vault with the active signer as administrator.</p>
+                <p class="settings-field-hint">Create an organization Brain with the active signer as administrator.</p>
               </div>
             </details>
           </div>

@@ -14,13 +14,13 @@
 
 ## Goal
 
-Do missing rollout items 3 and 6 end to end: harden `fbrain` server transport configuration and wire the agent Vault Working Tree sync loop so agents can use normal files while `fbrain` pulls, decrypts, encrypts, signs, and pushes FiniteBrain object changes.
+Do missing rollout items 3 and 6 end to end: harden `fbrain` server transport configuration and wire the agent Brain Working Tree sync loop so agents can use normal files while `fbrain` pulls, decrypts, encrypts, signs, and pushes FiniteBrain object changes.
 
 ## Alignment
 
 - Product intent: preserve the trusted-client plaintext boundary. The Agent Runtime may decrypt accessible Pages locally; the server remains encrypted-object only.
 - Base branch note: `main` is currently ahead of `staging` in Product Client files, but CLI/core files are identical for this feature scope.
-- Human gate: none. The requested items map directly to existing `CONTEXT.md` terms: Agent CLI, Agent Sync Daemon, Vault Working Tree, Local Agent Signer, and Blocked Sync State.
+- Human gate: none. The requested items map directly to existing `CONTEXT.md` terms: Agent CLI, Agent Sync Daemon, Brain Working Tree, Local Agent Signer, and Blocked Sync State.
 
 ## Durable Artifacts
 
@@ -29,7 +29,7 @@ Do missing rollout items 3 and 6 end to end: harden `fbrain` server transport co
 - PRD issue: `finitecomputer/finite-brain#43`
 - Slice issues:
   - `finitecomputer/finite-brain#45` fbrain transport config and HTTPS
-  - `finitecomputer/finite-brain#44` Vault Working Tree materialize/writeback sync
+  - `finitecomputer/finite-brain#44` Brain Working Tree materialize/writeback sync
 - Issue sessions:
   - `docs/feature-dev/2026-06-26-issue-45-fbrain-transport-session.md`
   - `docs/feature-dev/2026-06-26-issue-44-working-tree-sync-session.md`
@@ -51,10 +51,10 @@ Do missing rollout items 3 and 6 end to end: harden `fbrain` server transport co
 - Live smoke:
   - Temp DB: `/tmp/fbrain-sync-smoke.oC4srw/finite-brain.sqlite3`
   - Server: `http://127.0.0.1:4016`
-  - Commands proved: `auth login`, `vault create personal-beta`, `open`, readable `home`, create/update/delete `home/smoke.md` through `sync now`, empty conflicts, final latest sequence `3`
-  - Rerun after local CodeRabbit fixes used temp DB `/tmp/fbrain-sync-smoke.WWDQFD/finite-brain.sqlite3`, vault `personal-gamma`, and final latest sequence `3`
-  - Rerun after local CodeRabbit round-two fixes used temp DB `/tmp/fbrain-sync-smoke-round2.BzarH1/finite-brain.sqlite3`, server `http://127.0.0.1:4018`, vault `personal-round2`, and final latest sequence `3` with `conflicts=[]`
-  - Final rerun after local CodeRabbit round-three fixes used temp DB `/tmp/fbrain-sync-smoke-final.LlHQ5M/finite-brain.sqlite3`, server `http://127.0.0.1:4019`, vault `personal-final`, and final latest sequence `3` with `conflicts=[]`
+  - Commands proved: `auth login`, `brain create personal-beta`, `open`, readable `home`, create/update/delete `home/smoke.md` through `sync now`, empty conflicts, final latest sequence `3`
+  - Rerun after local CodeRabbit fixes used temp DB `/tmp/fbrain-sync-smoke.WWDQFD/finite-brain.sqlite3`, brain `personal-gamma`, and final latest sequence `3`
+  - Rerun after local CodeRabbit round-two fixes used temp DB `/tmp/fbrain-sync-smoke-round2.BzarH1/finite-brain.sqlite3`, server `http://127.0.0.1:4018`, brain `personal-round2`, and final latest sequence `3` with `conflicts=[]`
+  - Final rerun after local CodeRabbit round-three fixes used temp DB `/tmp/fbrain-sync-smoke-final.LlHQ5M/finite-brain.sqlite3`, server `http://127.0.0.1:4019`, brain `personal-final`, and final latest sequence `3` with `conflicts=[]`
 
 ## Slice Ledger
 
