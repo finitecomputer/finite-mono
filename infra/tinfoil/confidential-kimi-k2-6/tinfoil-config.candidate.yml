@@ -1,6 +1,6 @@
 # Staging copy for the next measured release in
 # finitecomputer/confidential-kimi-k2-6. This file is intentionally not
-# releasable until the placeholder mono limiter digest is replaced.
+# releasable without the explicit downtime approval named in the runbook.
 cvm-version: 0.10.8
 cpus: 32
 memory: 524288
@@ -77,9 +77,8 @@ containers:
       start_period: 120m
 
   - name: "finite-private-limiter"
-    # Release blocker: replace with the digest produced from the exact merged
-    # mono commit by Service Images (image=private-limiter).
-    image: "ghcr.io/finitecomputer/private-limiter@sha256:REPLACE_WITH_MONO_LIMITER_DIGEST"
+    # 2026-07-21.1, source cafe85246bce88201c23a46ec7b33c8e28cc25e4.
+    image: "ghcr.io/finitecomputer/private-limiter@sha256:5d57ecf462fcb105eae2160dd01493efd825532fb61ee286098bdc1b485ec84b"
     restart: always
     env:
       - LISTEN_ADDR: "0.0.0.0:8002"

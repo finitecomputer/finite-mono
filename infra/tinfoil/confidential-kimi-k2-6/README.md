@@ -35,8 +35,10 @@ the Finite API key and perform reserve/settle accounting. Making the outer shim
 authenticated would replace, not strengthen, that product boundary. Metrics
 therefore retain the existing public behavior in this release candidate.
 
-The `REPLACE_WITH_MONO_LIMITER_DIGEST` value is an intentional release blocker.
-It may only be replaced by the pinned digest produced from the exact merged
-mono source commit after the parity and image smoke gates pass. Do not copy the
-candidate to the satellite, create a measured release, or relaunch the enclave
-without explicit approval for the downtime operation.
+The limiter is pinned to mono image `2026-07-21.1`, digest
+`sha256:5d57ecf462fcb105eae2160dd01493efd825532fb61ee286098bdc1b485ec84b`,
+from source `cafe85246bce88201c23a46ec7b33c8e28cc25e4`. CI verified the OCI
+revision label, and an independent exact-digest pull passed `/live` with the
+expected Finite configuration. Do not copy the candidate to the satellite,
+create a measured release, or relaunch the enclave without explicit approval
+for the downtime operation.
