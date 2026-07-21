@@ -3520,10 +3520,7 @@ where
                  runner_id = NULL,
                  lease_token = NULL,
                  lease_expires_at = NULL,
-                 failure_message = CASE
-                   WHEN request.kind = 'destroy' THEN request.failure_message
-                   ELSE NULL
-                 END,
+                 failure_message = NULL,
                  updated_at = $2::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
