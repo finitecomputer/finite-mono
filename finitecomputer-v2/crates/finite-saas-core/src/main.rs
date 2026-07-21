@@ -130,7 +130,7 @@ enum Command {
         /// Optional WorkOS user id. Omit for pre-product friend keys.
         #[arg(long)]
         workos_user_id: Option<String>,
-        /// Optional limit profile id. Defaults to finite-private-generous.
+        /// Optional limit profile id. Defaults to finite-private-generous-v2.
         #[arg(long)]
         limit_profile_id: Option<String>,
         /// Optional RFC3339 timestamp for deterministic tests/operator dry runs.
@@ -151,7 +151,7 @@ enum Command {
         /// Optional WorkOS user id. Omit until the friend signs into finite.computer.
         #[arg(long)]
         workos_user_id: Option<String>,
-        /// Optional limit profile id. Defaults to finite-private-generous.
+        /// Optional limit profile id. Defaults to finite-private-generous-v2.
         #[arg(long)]
         limit_profile_id: Option<String>,
         /// Optional project id scope for the key.

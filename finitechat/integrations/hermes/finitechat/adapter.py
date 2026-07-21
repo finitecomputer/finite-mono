@@ -45,6 +45,8 @@ STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
 SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
+DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
+FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 # Hermes 0.18.2 does not pass a semantic progress flag to platform adapters.
@@ -293,6 +295,40 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._mark_disconnected()
         self._write_bridge_status("disconnected")
         logger.info("[finitechat] disconnected")
+
+    async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
+        """Surface a claimed quota notice after Hermes' final response delivery.
+
+        Hermes 0.18.2 invokes this hook once after the final response (including
+        streamed delivery), and not after each model/tool subcall. Core claims a
+        threshold before returning it, so delivery is intentionally at-most-once:
+        a process crash between the Core response and Finite Chat send can omit a
+        transient notice, while the dashboard continues to show authoritative state.
+        """
+        outcome_name = str(getattr(outcome, "value", getattr(outcome, "name", outcome))).lower()
+        if outcome_name != "success":
+            return
+        status = await asyncio.to_thread(_finite_private_control_request, "usage", "GET")
+        if not isinstance(status, dict):
+            return
+        notice = status.get("notice")
+        if not isinstance(notice, dict):
+            return
+        message = str(notice.get("message") or "").strip()
+        if not message:
+            return
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        metadata = self._route_metadata(
+            _string_or_none(raw_message.get("conversation_id")),
+            _string_or_none(raw_message.get("segment_id")),
+        )
+        result = await self.send(
+            chat_id=str(getattr(event.source, "chat_id", "") or raw_message.get("room_id") or ""),
+            content=message,
+            metadata=metadata,
+        )
+        if not result.success:
+            logger.warning("[finitechat] could not deliver Finite Private usage notice: %s", result.error)
 
     async def send(
         self,
@@ -1527,6 +1563,33 @@ def _stream_reconnect_delay(attempt: int) -> float:
 def _is_retryable_cli_error(message: str) -> bool:
     lowered = message.lower()
     return any(token in lowered for token in ("timed out", "connection", "temporarily", "busy"))
+
+
+def _finite_private_control_request(path: str, method: str) -> dict[str, Any] | None:
+    api_key = os.getenv("FINITE_PRIVATE_API_KEY", "").strip()
+    if not api_key:
+        return None
+    base_url = (
+        os.getenv("FINITE_PRIVATE_CONTROL_URL", "").strip()
+        or DEFAULT_FINITE_PRIVATE_CONTROL_URL
+    ).rstrip("/")
+    request = urllib.request.Request(
+        f"{base_url}/{path.lstrip('/')}",
+        method=method,
+        data=b"{}" if method != "GET" else None,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=FINITE_PRIVATE_CONTROL_TIMEOUT_SECS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.debug("[finitechat] Finite Private control request failed: %s", exc)
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _finite_platform() -> Platform:

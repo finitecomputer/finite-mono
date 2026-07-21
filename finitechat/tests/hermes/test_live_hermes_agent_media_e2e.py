@@ -103,6 +103,12 @@ class RecordingPluginContext:
     def register_platform(self, **kwargs):
         self.entries.append(kwargs)
 
+    def register_command(self, _name, **_kwargs):
+        # This smoke exercises the real platform/media path. Command behavior
+        # is covered by test_finite_platform_adapter; accepting registration
+        # here keeps the context faithful to Hermes 0.18.2's plugin contract.
+        return None
+
 
 @unittest.skipUnless(
     os.environ.get("FINITE_HERMES_AGENT_MEDIA_E2E") == "1",

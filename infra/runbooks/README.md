@@ -34,6 +34,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [deploy-brain.md](deploy-brain.md) | finite-brain on lat1 at `brain.finite.computer`, with the dashboard-embedded WorkOS client; SQLite migration and rollback |
 | [stripe-billing.md](stripe-billing.md) | Live Stripe readiness, webhook/Core reconciliation, dunning, cancellation/refund, and secret rotation |
 | [runtime-image.md](runtime-image.md) | Building and promoting the agent runtime image for the Kata runner on lat1 |
+| [finite-private-limiter-mono-switch.md](finite-private-limiter-mono-switch.md) | Planned-downtime switch from the legacy limiter image to a mono-built limiter plus upstream GLM 5.2 v0.0.17 |
 | [phala-confidential-runner.md](phala-confidential-runner.md) | Dark, separately fenced Phala worker and API-only preflight/lifecycle/recovery/inventory/cost procedures; no CLI or delete path |
 | [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 runner, smoke rollback source, clawland legacy) |
 
@@ -49,10 +50,11 @@ Two rules apply to **every** release and promotion, no exceptions:
 
 2. **Rung-ladder: local proof → Docker proof → Kata → Phala/Tinfoil.**
    Nothing is promoted to a confidential-compute lane without a recorded
-   proof at the rung below it. This is the champagne-test discipline encoded
-   in `.github/workflows/hermes-runtime-smoke.yml`, which is a test-only proof
-   of the canonical image; `.github/workflows/runtime-image.yml` is the sole
-   publication path. Use the same source SHA in both. Concretely:
+   proof at the rung below it. `.github/workflows/runtime-image.yml` builds the
+   canonical image once, smokes that immutable local image ID, then publishes
+   those exact bytes. The separate `.github/workflows/hermes-runtime-smoke.yml`
+   rebuild is optional source preflight, never publication or exact-image
+   promotion evidence. Concretely:
    - local: devfinity / `cargo test` / local smoke scripts pass;
    - Docker: the relevant Docker smoke lane passes and its report artifact
      is kept;

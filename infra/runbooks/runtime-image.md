@@ -24,30 +24,35 @@ definitions map: `infra/images/README.md`. Rung-ladder discipline: see
 
 ## STEPS
 
-### 1. Prove the source revision
+### 1. Optional preflight of the source revision
 
 Dispatch **Hermes runtime smoke**
 (`.github/workflows/hermes-runtime-smoke.yml`) on the revision to promote. It
 is test-only and builds the same canonical monorepo Agent Runtime Dockerfile as
-the publication path; it cannot publish a second Hermes-only image. Run the
-Docker message/restart lane and the durable-home lane as appropriate for the
-cohort.
+the publication path; it cannot publish a second Hermes-only image. This is a
+useful early source-level failure detector, but because it performs a separate
+build it is not the promotion proof for the final digest.
 
 ### 2. Build and publish the one runtime image
 
-1. On that same successful revision, dispatch **Agent Runtime Image**
+1. On the reviewed revision, dispatch **Agent Runtime Image**
    (`.github/workflows/runtime-image.yml`) with
    `version=<date-based, e.g. 2026-07-08.1>`. Hermes is repository-pinned to
    `0.18.2`, the same version exercised by every smoke lane. For future
    upgrades, move the reviewed pin in the image and all smoke lanes together;
    do not add a dispatch-time override.
-2. The publication workflow builds via
+2. The publication workflow builds exactly once via
    `finitecomputer-v2/scripts/build_runtime_image.py` from one staged
    finite-mono checkout and root Cargo lockfile, embeds the Finite Skills
-   baseline, validates the exact image, pushes `:$VERSION` +
+   baseline, captures and cross-checks the immutable local image ID, and runs
+   the durable Add/Welcome chat plus `/home/node` restart smoke against that
+   image ID before any
+   push. Only after that smoke passes does it push `:$VERSION` +
    `:sha-<sha>`, uploads `runtime-image-report.json`, and prints the pinned
    `ghcr.io/finitecomputer/agent-runtime:<version>@sha256:...` in
-   the summary. Copy that pinned ref — it is the only thing you promote.
+   summary. The uploaded durable-smoke report is evidence for the exact image
+   that was tagged and pushed; copy the pinned ref — it is the only thing you
+   promote.
 
 **Recovery boundary:** the canonical image now has the narrow, one-shot
 `recover_known_good` boot receiver and the snapshot-root contract covers all of
@@ -148,14 +153,28 @@ scripts/rollout-lat1-runtime-artifact \
   --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
   --roll-admin-email operator@example.com \
   --roll-admin-workos-user-id user_operator \
-  --roll-project-id project_canary \
-  --roll-project-id project_next
+  --roll-project-id project_canary
 ```
 
 The command stops before enqueueing if any planned Runtime has no canonical
 container. It stops before the next Runtime on an operation failure, timeout,
 wrong artifact, or non-online postcondition. Do not use this rollout path to
 reconstruct missing compute.
+
+For the Finite Private quota-notice rollout, keep this first wave to exactly
+one explicitly named canary project. Before enqueueing, prove the new narrow
+edge routes exist without consuming a real reset: invalid bearer requests to
+both `GET /api/core/v1/finite-private/usage` and
+`POST /api/core/v1/finite-private/usage/reset` must reach Core and return 401,
+not an edge 404. After completion, inspect the one canonical Runtime and any
+operation-scoped helper containers: exactly one running container may mount
+that Runtime's `/data`, the old rollback helper must be stopped, `/contact`
+must report the unchanged Agent Principal, and the runtime must successfully
+reach the status control route after a successful turn. Exact notice routing
+at synthetic 25%/10% thresholds is a Core/adapter integration-test gate; do not
+mutate a real account toward a threshold merely to demonstrate it in production.
+Do not enqueue a roster wave until this evidence is recorded. Each later Runtime is upgraded once directly to the same digest;
+do not restart it separately for these batched adapter changes.
 
 Core accepts the request only when all of these are true:
 

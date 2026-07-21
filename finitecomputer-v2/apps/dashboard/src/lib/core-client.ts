@@ -169,6 +169,29 @@ export type CoreFinitePrivateAdminStateResult = CoreBridgeStatus & {
   error: string | null;
 };
 
+export type CoreFinitePrivateUsageStatus = {
+  burstLimitUnits: number;
+  burstUsedUnits: number;
+  burstRemainingUnits: number;
+  burstResetAt: string;
+  freeDailyResetAvailable: boolean;
+  freeDailyResetAvailableAgainAt: string;
+  notice?: {
+    thresholdRemainingPercent: number;
+    message: string;
+  } | null;
+};
+
+export type CoreFinitePrivateDailyResetResult = {
+  performed: boolean;
+  status: CoreFinitePrivateUsageStatus;
+};
+
+export type CoreFinitePrivateUsageResult = CoreBridgeStatus & {
+  usage: CoreFinitePrivateUsageStatus | null;
+  error: string | null;
+};
+
 export type CoreAdminRuntimeOverview = {
   project_id: string;
   project_display_name: string;
@@ -732,6 +755,55 @@ export async function loadCoreFinitePrivateAdminState(
   }
 }
 
+export async function loadCoreFinitePrivateUsageStatus(): Promise<CoreFinitePrivateUsageResult> {
+  const status = coreBridgeStatus();
+  const account = await getAccountAuthContext();
+  if (!status.configured) {
+    return { ...status, usage: null, error: null };
+  }
+  if (!coreAccountReady(account)) {
+    return { ...status, usage: null, error: "Sign in again to view Finite Private usage." };
+  }
+  try {
+    return {
+      ...status,
+      usage: await coreFetch<CoreFinitePrivateUsageStatus>(
+        "/api/core/v1/me/finite-private/usage",
+        account
+      ),
+      error: null,
+    };
+  } catch (error) {
+    // Additive rollout compatibility: an N-1 Core does not expose this route.
+    if (error instanceof CoreFetchError && error.status === 404) {
+      return { ...status, usage: null, error: null };
+    }
+    return {
+      ...status,
+      usage: null,
+      error: error instanceof Error ? error.message : "Finite Core is unavailable.",
+    };
+  }
+}
+
+export async function claimCoreFinitePrivateDailyReset() {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("Sign in again to reset Finite Private usage.");
+  }
+  const result = await coreFetch<CoreFinitePrivateDailyResetResult>(
+    "/api/core/v1/me/finite-private/usage/reset",
+    account,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  invalidateCoreReadCache();
+  return result;
+}
+
 export async function approveCoreFinitePrivateGrant(input: {
   verifiedEmail: string;
   workosUserId?: string | null;
@@ -1291,7 +1363,7 @@ async function coreFetch<T>(
       parsed && typeof parsed === "object" && "error" in parsed && typeof parsed.error === "string"
         ? parsed.error
         : `Finite Core returned ${response.status}`;
-    throw new Error(message);
+    throw new CoreFetchError(message, response.status);
   }
   return parsed as T;
 }

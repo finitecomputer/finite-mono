@@ -289,8 +289,9 @@ that final operation read-only unless the tester explicitly intends a write.
 | 9100 | 127.0.0.1 | node-exporter | new |
 | 2019 | 127.0.0.1 | caddy admin API | lat1/lat2 |
 
-Caddy vhost → backend: `finite.computer` → 4200 (`/internal/finite-private/*`)
-else 3000; `chat.finite.computer` → 8788; `api./*.finite.chat` +
+Caddy vhost → backend: `finite.computer` → 4200 for
+`/internal/finite-private/*` and the exact API-key usage/reset paths under
+`/api/core/v1/finite-private/`, else 3000; `chat.finite.computer` → 8788; `api./*.finite.chat` +
 `*.docs.finite.chat` → 8787 (Cloudflare Origin CA). Brain has no independent
 edge: authenticated `/client` and `/_admin/*` requests go through the dashboard
 to loopback :3015, then Brain applies its Nostr authorization.

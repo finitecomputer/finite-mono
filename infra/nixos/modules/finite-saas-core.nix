@@ -1,7 +1,8 @@
 # finite-saas-core — the control plane API (was k3s Deployment
 # finite-system/finite-saas-core on old lat1). Binds 127.0.0.1:4200; Caddy
-# routes finite.computer/internal/finite-private/* here (the limiter's usage
-# API — the protected invariant of the cutover).
+# routes finite.computer/internal/finite-private/* and the two API-key
+# self-service usage/reset paths here. All other /api/core routes stay off the
+# public Core edge.
 { finitePackages, ... }:
 {
   environment.systemPackages = [ finitePackages.finite-saas-core ];

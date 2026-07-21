@@ -129,12 +129,16 @@ class MockPluginContext:
     def __init__(self):
         self.registered: list[dict[str, Any]] = []
         self.registered_tools: list[dict[str, Any]] = []
+        self.registered_commands: list[dict[str, Any]] = []
 
     def register_platform(self, **kwargs):
         self.registered.append(kwargs)
 
     def register_tool(self, **kwargs):
         self.registered_tools.append(kwargs)
+
+    def register_command(self, name, **kwargs):
+        self.registered_commands.append({"name": name, **kwargs})
 
 
 class FinitePlatformAdapterTests(unittest.TestCase):
@@ -158,6 +162,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(entry["required_env"], ["FINITECHAT_HOME"])
         self.assertEqual(entry["allowed_users_env"], "FINITECHAT_ALLOWED_USERS")
         self.assertEqual(ctx.registered_tools, [])
+        self.assertEqual(ctx.registered_commands, [])
         self.assertEqual(
             entry["max_message_length"], self.module.FiniteChatAdapter.MAX_MESSAGE_LENGTH
         )
@@ -175,6 +180,64 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
     def test_adapter_disables_edit_streaming_for_ios_rendering_compatibility(self):
         self.assertFalse(self.module.FiniteChatAdapter.SUPPORTS_MESSAGE_EDITING)
+
+    def test_post_turn_notice_uses_the_exact_inbound_conversation_and_chat(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        original = self.module._finite_private_control_request
+        self.module._finite_private_control_request = lambda path, method: {
+            "notice": {
+                "thresholdRemainingPercent": 25,
+                "message": (
+                    "You have 25% remaining. Your usage resets at "
+                    "2026-07-21T18:00:00Z (in 5h)."
+                ),
+            }
+        }
+        event = MessageEvent(
+            text="hello",
+            source=types.SimpleNamespace(chat_id="room-agent-1"),
+            raw_message={
+                "room_id": "room-agent-1",
+                "conversation_id": "topic-build",
+                "segment_id": "chat-build-1",
+            },
+        )
+        try:
+            asyncio.run(
+                adapter.on_processing_complete(
+                    event,
+                    types.SimpleNamespace(value="success"),
+                )
+            )
+        finally:
+            self.module._finite_private_control_request = original
+        self.assertEqual([call[0] for call in calls], ["send"])
+        payload = calls[0][1]
+        self.assertEqual(payload["conversation_id"], "topic-build")
+        self.assertEqual(payload["segment_id"], "chat-build-1")
+        self.assertIn("2026-07-21T18:00:00Z", payload["text"])
+
+    def test_failed_or_cancelled_turn_does_not_claim_a_usage_notice(self):
+        adapter = self.adapter()
+        called = []
+        original = self.module._finite_private_control_request
+        self.module._finite_private_control_request = lambda path, method: called.append(
+            (path, method)
+        )
+        event = MessageEvent(text="hello", source=types.SimpleNamespace(chat_id="room-agent-1"))
+        try:
+            for outcome in ("failure", "cancelled"):
+                asyncio.run(
+                    adapter.on_processing_complete(
+                        event,
+                        types.SimpleNamespace(value=outcome),
+                    )
+                )
+        finally:
+            self.module._finite_private_control_request = original
+        self.assertEqual(called, [])
 
     def test_check_requirements_uses_finitechat_bin_not_finitecomputer(self):
         old_value = os.environ.get("FINITECHAT_BIN")
