@@ -9,19 +9,42 @@ NixOS and now runs the whole coupled cluster (Core, dashboard, native
 Postgres, chat, sites, search, one Caddy edge). This tree IS lat1's current
 config; copying and directly switching to the exact closure prebuilt on lat2
 is the deploy.
-Rebuild/recover procedure + the hard-won gotchas (single-disk/no-mdadm, disks
-by-id, WAN-by-MAC) are in `infra/runbooks/lat1-nixos-reinstall.md`. Brain is
-served under the WorkOS-protected dashboard origin; a disk mirror and proven
-offsite backups remain deferred. The Hosted Web Chat offsite destination is
-configured, but credentials, deployment, first archive, and restore evidence
-are still outstanding.
+The historical cutover and its hard-won gotchas (single-disk/no-mdadm, disks
+by-id, WAN-by-MAC) are in `infra/runbooks/lat1-nixos-reinstall.md`; its
+destructive procedure is paused and is not current recovery authority. Brain is
+served under the WorkOS-protected dashboard origin. The Hosted Web Chat
+offsite-health jobs and first archive now pass; its complete empty-target
+restore and the complete Agent/host Recovery Set remain unproved. Its snapshot
+is deploy/manual-triggered, not periodic; the former 15-minute stop/start timer
+was removed because it broke chat streams. A disk mirror remains deferred and
+is defense in depth, not a backup.
+
+## finite-lat-3 storage canary
+
+`nixosConfigurations.finite-lat-3` is the pinned NixOS 26.05 storage-qualified
+Runner candidate at `207.188.7.157`. Its host-specific definition is
+`hosts/finite-lat-3/`: two exact-size RAID1 arrays, two independently mounted
+removable-path ESPs, ext4 project quotas on `/data`, a 64-GiB swapfile with
+bounded zswap, stable disk/partition/filesystem identities, and fail-closed
+storage health checks. The bootloader wrapper refuses an update unless both
+expected FAT ESPs are mounted read-write with their exact PARTUUIDs.
+
+It was installed and storage-qualified on 2026-07-20. The current generation
+adds Kata/containerd and a timer-disabled Runner configured for a drained
+private-path proof. It is not customer capacity or a Recovery Authority until
+the synthetic handoff passes. The authoritative sequence and dated evidence are in
+`docs/runs/finite-lat-capacity-and-redundancy.md`. Builds happen on the existing
+finite-lat-2 x86_64 Nix builder; lat2's services and storage are unchanged.
 
 ## Deploy story
 
-### Rebuild from bare metal (wipes the box)
+### Bare-metal rebuild (paused; historical transcript follows)
 
-Full procedure — install, rescue-mode recovery, secrets, data restore, DNS
-ordering — is in `infra/runbooks/lat1-nixos-reinstall.md`. In short:
+Do not run the commands below as a current procedure. They summarize the
+2026-07-09 cutover and remain useful only for artifact handoff and incident
+evidence. A new recovery-proved procedure is governed by
+`docs/runs/finite-lat-capacity-and-redundancy.md`; until it is exercised, start
+an incident with `infra/runbooks/break-glass.md` and preserve state.
 
 ```sh
 set -euo pipefail
@@ -288,6 +311,8 @@ that final operation read-only unless the tester explicitly intends a write.
 | 38918 | 127.0.0.1 | Finite Chat Hosted Web Device (dashboard-internal) | new |
 | 9100 | 127.0.0.1 | node-exporter | new |
 | 2019 | 127.0.0.1 | caddy admin API | lat1/lat2 |
+| 14200 | 10.254.3.1 (WireGuard) | private proxy to Core :4200 | lat3 Runner only |
+| dynamic 32768-60999 | 10.254.3.2 (WireGuard) | lat3 Kata Runtime contact/health | lat1 peer only |
 
 Caddy vhost → backend: `finite.computer` → 4200 for
 `/internal/finite-private/*` and the exact API-key usage/reset paths under
@@ -301,14 +326,20 @@ to loopback :3015, then Brain applies its Nostr authorization.
 Resolved during the 2026-07-09 cutover: disko device layout (single-disk,
 by-id), gateways/resolvers, root ssh key, dashboard image digest. Still open:
 
-- **Offsite Borg activation + restore proof** (`modules/backups.nix`) — the
-  15-minute service-consistent Hosted Web Chat snapshot, rsync.net repository,
-  Borg 1.2 selection, established finitecomputer credential paths, and
-  stale-health units are defined. Copying the existing credential bundle and
-  verifying the destination-side append-only restriction remain operator work;
-  no deployment/archive or empty-target drill is claimed by repository config.
-- **Disk mirror** — root + /data are single NVMe; two spare NVMes are free
-  for a ZFS/mdadm mirror (the mdadm RAID1 bug is why we went single-disk).
+- **Non-disruptive recovery cadence + restore proof** (`modules/backups.nix`) —
+  the service-consistent Hosted Web Chat snapshot service, rsync.net
+  repository, Borg 1.2 selection, established credential paths, and
+  stale-health units are defined. Snapshot creation is deploy/manual-triggered;
+  no 15-minute timer exists. The 2026-07-18 live inventory observed the
+  offsite jobs healthy and a verified first archive. Add a stream-safe cadence
+  and complete an empty-target drill before claiming the accepted RPO. A
+  destination-enforced append-only upload credential remains recommended
+  hardening.
+- **Disk mirror** — root + `/data` are single NVMe. The matching Micron and
+  Samsung disks contain stale MD metadata from the failed 2026-07-09 install;
+  they are not free/untouched spares. The accepted `finite-lat-3` rehearsal
+  must prove exact member sizing, release-matched assembly, dual-ESP boot, and
+  degraded rebuild before a separately authorized lat1 reprovision.
 - **Runner fast-follow** — Kata is the production adapter; Phala must pass the
   same provider-neutral contract before it is enabled.
 - **KATA ISOLATION** (`modules/finitesitesd.nix`): sites run

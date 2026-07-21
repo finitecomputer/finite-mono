@@ -1,9 +1,16 @@
 use super::*;
+use crate::retirement::{
+    RecoveryArtifactContext, VerifiedRecoveryZip, create_recovery_zip, source_manifest,
+    verify_recovery_zip,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::Output;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 const KATA_PROVIDER_DIR: &str = "kata";
 const KATA_METADATA_DIR: &str = "kata-metadata";
@@ -21,6 +28,54 @@ const MAX_KATA_RECOVERY_FENCE_OPERATIONS: usize = 32;
 
 struct KataRuntimeOperationLock {
     file: std::fs::File,
+}
+
+#[derive(Debug, Clone)]
+pub struct KataRetirementConfig {
+    pub borg_bin: PathBuf,
+    pub ctr_bin: PathBuf,
+    pub repository: String,
+    pub remote_path: PathBuf,
+    pub ssh_key_file: PathBuf,
+    pub known_hosts_file: PathBuf,
+    pub passphrase_file: PathBuf,
+    pub staging_root: PathBuf,
+    pub recovery_authority_id: String,
+    pub poll_interval: Duration,
+    pub convergence_timeout: Duration,
+}
+
+impl KataRetirementConfig {
+    fn validate(&self) -> Result<(), RunnerError> {
+        if self.borg_bin.as_os_str().is_empty()
+            || self.ctr_bin.as_os_str().is_empty()
+            || self.remote_path.as_os_str().is_empty()
+            || self.staging_root.as_os_str().is_empty()
+            || self.repository.trim().is_empty()
+            || self.recovery_authority_id.trim().is_empty()
+            || self.recovery_authority_id.len() > 256
+            || self.recovery_authority_id.chars().any(char::is_control)
+            || self.poll_interval.is_zero()
+            || self.convergence_timeout.is_zero()
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata retirement configuration is incomplete or invalid".to_string(),
+            ));
+        }
+        for path in [
+            &self.ssh_key_file,
+            &self.known_hosts_file,
+            &self.passphrase_file,
+        ] {
+            if !path.is_absolute() || !path.is_file() {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "Kata retirement credential file {} is unavailable",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for KataRuntimeOperationLock {
@@ -44,6 +99,10 @@ pub struct KataConfig {
     pub finitechat_server_url: String,
     pub agent_picture_url: String,
     pub name_prefix: String,
+    /// Host address used both for the containerd port binding and the
+    /// Core-persisted Runtime URL. Loopback remains the single-host default;
+    /// a remote Runner supplies its private overlay address.
+    pub host_address: IpAddr,
     pub container_port: u16,
     pub cpus: Option<u32>,
     pub memory: Option<String>,
@@ -56,6 +115,7 @@ pub struct KataConfig {
     pub readiness_timeout: Duration,
     pub readiness_interval: Duration,
     pub stop_timeout_secs: u64,
+    pub retirement: Option<KataRetirementConfig>,
 }
 
 impl Default for KataConfig {
@@ -74,6 +134,7 @@ impl Default for KataConfig {
             finitechat_server_url: DEFAULT_FINITECHAT_SERVER_URL.to_string(),
             agent_picture_url: DEFAULT_FINITE_AGENT_PICTURE_URL.to_string(),
             name_prefix: "finite-kata".to_string(),
+            host_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
             container_port: DEFAULT_DOCKER_CONTAINER_PORT,
             cpus: Some(4),
             memory: Some("8G".to_string()),
@@ -86,6 +147,7 @@ impl Default for KataConfig {
             readiness_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
             readiness_interval: DEFAULT_RUNTIME_READY_INTERVAL,
             stop_timeout_secs: 30,
+            retirement: None,
         }
     }
 }
@@ -94,6 +156,9 @@ impl KataConfig {
     pub fn validate(&self) -> Result<(), RunnerError> {
         if self.nerdctl_bin.as_os_str().is_empty() {
             return Err(RunnerError::MissingNerdctlBinary);
+        }
+        if let Some(retirement) = self.retirement.as_ref() {
+            retirement.validate()?;
         }
         if self.kata_runtime_bin.as_os_str().is_empty() {
             return Err(RunnerError::MissingKataRuntimeBinary);
@@ -112,6 +177,11 @@ impl KataConfig {
         }
         if self.container_port == 0 {
             return Err(RunnerError::InvalidDockerHostPort);
+        }
+        if self.host_address.is_unspecified() || self.host_address.is_multicast() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata host address must be a specific unicast address".to_string(),
+            ));
         }
         validate_identifier("Kata namespace", &self.namespace)?;
         validate_identifier("Kata runtime", &self.runtime)?;
@@ -167,12 +237,13 @@ pub struct KataLaunchPlan {
     pub state_root: PathBuf,
     pub metadata_root: PathBuf,
     pub env_file: PathBuf,
+    pub host_address: IpAddr,
     pub container_port: u16,
 }
 
 impl KataLaunchPlan {
     fn public_base_url(&self, host_port: u16) -> String {
-        format!("http://127.0.0.1:{host_port}")
+        format!("http://{}", SocketAddr::new(self.host_address, host_port))
     }
 
     fn health_url(&self, host_port: u16) -> String {
@@ -1103,6 +1174,442 @@ impl KataLauncher {
         Ok((plan, inspected))
     }
 
+    fn retirement_config(&self) -> Result<&KataRetirementConfig, RunnerError> {
+        self.config.retirement.as_ref().ok_or_else(|| {
+            RunnerError::RuntimeLaunch(
+                "Kata Runtime Retirement is not configured on this Runner".to_string(),
+            )
+        })
+    }
+
+    fn retirement_context(
+        &self,
+        lease: &RuntimeControlLease,
+        principal: Option<String>,
+    ) -> Result<RecoveryArtifactContext, RunnerError> {
+        let spec = control_runtime_spec(lease, RunnerClass::Kata)?.ok_or_else(|| {
+            RunnerError::RuntimeLaunch(
+                "Runtime Retirement requires a persisted RuntimeSpec".to_string(),
+            )
+        })?;
+        Ok(RecoveryArtifactContext {
+            request_id: lease.request.id.clone(),
+            project_id: lease.request.project_id.clone(),
+            agent_runtime_id: lease.request.agent_runtime_id.clone(),
+            durable_state_id: spec.durable_state_id.clone(),
+            runtime_artifact_id: spec.runtime_artifact_id.clone(),
+            runtime_image_digest: spec.runtime_image_digest.clone(),
+            agent_principal: principal,
+        })
+    }
+
+    fn retirement_progress_path(&self, plan: &KataLaunchPlan, request_id: &str) -> PathBuf {
+        plan.metadata_root.join(format!(
+            "retirement-{}.json",
+            sanitize_sandbox_name(request_id)
+        ))
+    }
+
+    fn load_retirement_progress(
+        &self,
+        plan: &KataLaunchPlan,
+        lease: &RuntimeControlLease,
+    ) -> Result<Option<KataRetirementProgress>, RunnerError> {
+        let path = self.retirement_progress_path(plan, &lease.request.id);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "failed to read Kata retirement progress: {error}"
+                )));
+            }
+        };
+        if bytes.len() > 32 * 1024 {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata retirement progress exceeded its bounded size".to_string(),
+            ));
+        }
+        let progress: KataRetirementProgress = serde_json::from_slice(&bytes).map_err(|_| {
+            RunnerError::RuntimeLaunch("Kata retirement progress was invalid".to_string())
+        })?;
+        let context = self.retirement_context(lease, progress.agent_principal.clone())?;
+        if progress.schema_version != 1
+            || progress.request_id != context.request_id
+            || progress.project_id != context.project_id
+            || progress.agent_runtime_id != context.agent_runtime_id
+            || progress.durable_state_id != context.durable_state_id
+            || progress.runtime_artifact_id != context.runtime_artifact_id
+            || progress.container_name != plan.container_name
+            || progress.container_id.trim().is_empty()
+            || progress.baseline_active_sandbox_count == 0
+            || (progress.phase >= KataRetirementPhase::RemoteVerified && progress.receipt.is_none())
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata retirement progress did not match the leased Runtime".to_string(),
+            ));
+        }
+        Ok(Some(progress))
+    }
+
+    fn write_retirement_progress(
+        &self,
+        plan: &KataLaunchPlan,
+        progress: &KataRetirementProgress,
+    ) -> Result<(), RunnerError> {
+        let path = self.retirement_progress_path(plan, &progress.request_id);
+        let temporary = path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec(progress)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        write_secret_file(&temporary, &bytes).map_err(|error| {
+            RunnerError::RuntimeLaunch(format!(
+                "failed to persist Kata retirement progress: {error}"
+            ))
+        })?;
+        std::fs::rename(&temporary, &path).map_err(|error| {
+            RunnerError::RuntimeLaunch(format!(
+                "failed to commit Kata retirement progress: {error}"
+            ))
+        })?;
+        #[cfg(unix)]
+        std::fs::File::open(&plan.metadata_root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                RunnerError::RuntimeLaunch(format!(
+                    "failed to make Kata retirement progress durable: {error}"
+                ))
+            })?;
+        Ok(())
+    }
+
+    fn task_absent(&self, container_id: &str) -> Result<bool, RunnerError> {
+        if container_id.trim().is_empty() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata retirement cannot fence an empty container ID".to_string(),
+            ));
+        }
+        let retirement = self.retirement_config()?;
+        let command = PlannedCommand {
+            program: retirement.ctr_bin.clone(),
+            cwd: None,
+            args: vec![
+                OsString::from("--namespace"),
+                OsString::from(self.config.namespace.trim()),
+                OsString::from("tasks"),
+                OsString::from("list"),
+                OsString::from("-q"),
+            ],
+            env: Vec::new(),
+        };
+        let output = self.execute(&command, self.config.command_timeout)?;
+        if !output.status.success() {
+            return Err(RunnerError::CommandExecution {
+                program: command.program.display().to_string(),
+                message: "containerd task-list fence failed".to_string(),
+            });
+        }
+        Ok(!String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.trim() == container_id))
+    }
+
+    fn wait_for_task_absence(
+        &self,
+        container_id: &str,
+        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        let retirement = self.retirement_config()?;
+        let started = Instant::now();
+        loop {
+            renew_lease()?;
+            if self.task_absent(container_id)? {
+                return Ok(());
+            }
+            if started.elapsed() >= retirement.convergence_timeout {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Kata containerd task did not become absent before retirement timeout"
+                        .to_string(),
+                ));
+            }
+            thread::sleep(retirement.poll_interval);
+        }
+    }
+
+    fn stable_source_manifest(
+        &self,
+        state_root: &Path,
+        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<Vec<crate::retirement::RecoveryManifestEntry>, RunnerError> {
+        let retirement = self.retirement_config()?;
+        renew_lease()?;
+        let first = source_manifest(state_root)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        thread::sleep(retirement.poll_interval);
+        renew_lease()?;
+        let second = source_manifest(state_root)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        if first != second {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata durable state changed after task absence; refusing retirement snapshot"
+                    .to_string(),
+            ));
+        }
+        Ok(second)
+    }
+
+    fn retirement_staging_paths(
+        &self,
+        request_id: &str,
+    ) -> Result<(PathBuf, PathBuf, PathBuf), RunnerError> {
+        let retirement = self.retirement_config()?;
+        let request = sanitize_sandbox_name(request_id);
+        let root = retirement.staging_root.join(&request);
+        let zip = root.join(format!("retirement-{request}.zip"));
+        let readback = root.join("readback");
+        Ok((root, zip, readback))
+    }
+
+    fn borg_command(&self, cwd: &Path, args: Vec<OsString>) -> Result<PlannedCommand, RunnerError> {
+        let retirement = self.retirement_config()?;
+        for path in [
+            &retirement.ssh_key_file,
+            &retirement.known_hosts_file,
+            &retirement.passphrase_file,
+        ] {
+            let value = path.to_string_lossy();
+            if value
+                .chars()
+                .any(|ch| !(ch.is_ascii_alphanumeric() || "_-/.:".contains(ch)))
+            {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Kata retirement credential paths contain unsafe shell characters".to_string(),
+                ));
+            }
+        }
+        Ok(PlannedCommand {
+            program: retirement.borg_bin.clone(),
+            cwd: Some(cwd.to_path_buf()),
+            args,
+            env: vec![
+                (
+                    OsString::from("BORG_RSH"),
+                    OsString::from(format!(
+                        "ssh -i {} -o UserKnownHostsFile={} -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes",
+                        retirement.ssh_key_file.display(),
+                        retirement.known_hosts_file.display()
+                    )),
+                ),
+                (
+                    OsString::from("BORG_PASSCOMMAND"),
+                    OsString::from(format!("cat {}", retirement.passphrase_file.display())),
+                ),
+            ],
+        })
+    }
+
+    fn run_borg_with_lease(
+        &self,
+        command: PlannedCommand,
+        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        let mut process = Command::new(&command.program);
+        process
+            .args(&command.args)
+            .envs(command.env.iter().map(|(key, value)| (key, value)))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(cwd) = command.cwd.as_ref() {
+            process.current_dir(cwd);
+        }
+        let mut child = process
+            .spawn()
+            .map_err(|error| RunnerError::CommandExecution {
+                program: command.program.display().to_string(),
+                message: error.to_string(),
+            })?;
+        let mut last_renewal = Instant::now() - Duration::from_secs(60);
+        loop {
+            if let Some(status) =
+                child
+                    .try_wait()
+                    .map_err(|error| RunnerError::CommandExecution {
+                        program: command.program.display().to_string(),
+                        message: error.to_string(),
+                    })?
+            {
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(RunnerError::CommandExecution {
+                    program: command.program.display().to_string(),
+                    message: format!("exit status {status}"),
+                });
+            }
+            if last_renewal.elapsed() >= Duration::from_secs(30) {
+                if let Err(error) = renew_lease() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+                last_renewal = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    fn borg_archive_exists(&self, root: &Path, locator: &str) -> Result<bool, RunnerError> {
+        let retirement = self.retirement_config()?;
+        let archive = format!("{}::{locator}", retirement.repository.trim());
+        let command = self.borg_command(
+            root,
+            vec![
+                OsString::from("info"),
+                OsString::from("--remote-path"),
+                retirement.remote_path.as_os_str().to_os_string(),
+                OsString::from(archive),
+            ],
+        )?;
+        let output = self.execute(&command, self.config.command_timeout)?;
+        Ok(output.status.success())
+    }
+
+    fn upload_and_readback_retirement(
+        &self,
+        root: &Path,
+        zip: &Path,
+        readback: &Path,
+        context: &RecoveryArtifactContext,
+        local: &VerifiedRecoveryZip,
+        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<VerifiedRecoveryZip, RunnerError> {
+        let retirement = self.retirement_config()?;
+        let locator = finite_saas_core::runtime_retirement_archive_locator(&context.request_id);
+        let archive = format!("{}::{locator}", retirement.repository.trim());
+        if !self.borg_archive_exists(root, &locator)? {
+            let file_name = zip.file_name().ok_or_else(|| {
+                RunnerError::RuntimeLaunch("retirement ZIP has no filename".to_string())
+            })?;
+            let command = self.borg_command(
+                root,
+                vec![
+                    OsString::from("create"),
+                    OsString::from("--remote-path"),
+                    retirement.remote_path.as_os_str().to_os_string(),
+                    OsString::from("--compression"),
+                    OsString::from("auto,zstd"),
+                    OsString::from(&archive),
+                    file_name.to_os_string(),
+                ],
+            )?;
+            self.run_borg_with_lease(command, renew_lease)?;
+        }
+        if !self.borg_archive_exists(root, &locator)? {
+            return Err(RunnerError::RuntimeLaunch(
+                "Borg retirement archive was not visible after upload".to_string(),
+            ));
+        }
+        let verified =
+            self.readback_retirement_archive(root, zip, readback, context, renew_lease)?;
+        if verified.zip_bytes != local.zip_bytes
+            || verified.zip_sha256 != local.zip_sha256
+            || verified.manifest_sha256 != local.manifest_sha256
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Borg readback did not match the exact retirement ZIP".to_string(),
+            ));
+        }
+        Ok(verified)
+    }
+
+    fn readback_retirement_archive(
+        &self,
+        root: &Path,
+        zip: &Path,
+        readback: &Path,
+        context: &RecoveryArtifactContext,
+        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<VerifiedRecoveryZip, RunnerError> {
+        let retirement = self.retirement_config()?;
+        std::fs::create_dir_all(root)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        let locator = finite_saas_core::runtime_retirement_archive_locator(&context.request_id);
+        if !self.borg_archive_exists(root, &locator)? {
+            return Err(RunnerError::RuntimeLaunch(
+                "Borg retirement archive was not visible for readback".to_string(),
+            ));
+        }
+        let archive = format!("{}::{locator}", retirement.repository.trim());
+        if readback.exists() {
+            std::fs::remove_dir_all(readback)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        }
+        std::fs::create_dir(readback)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(readback, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        let file_name = zip.file_name().ok_or_else(|| {
+            RunnerError::RuntimeLaunch("retirement ZIP has no filename".to_string())
+        })?;
+        let command = self.borg_command(
+            readback,
+            vec![
+                OsString::from("extract"),
+                OsString::from("--remote-path"),
+                retirement.remote_path.as_os_str().to_os_string(),
+                OsString::from(archive),
+                file_name.to_os_string(),
+            ],
+        )?;
+        self.run_borg_with_lease(command, renew_lease)?;
+        verify_recovery_zip(&readback.join(file_name), Some(context))
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))
+    }
+
+    fn wait_for_removal_convergence(
+        &self,
+        progress: &KataRetirementProgress,
+        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        let retirement = self.retirement_config()?;
+        let expected_count = progress
+            .baseline_active_sandbox_count
+            .checked_sub(1)
+            .ok_or_else(|| {
+                RunnerError::RuntimeLaunch("invalid pre-retirement sandbox count".to_string())
+            })?;
+        let started = Instant::now();
+        loop {
+            renew_lease()?;
+            let metadata_absent = self.inspect(&progress.container_name)?.is_none();
+            let task_absent = self.task_absent(&progress.container_id)?;
+            let count_matches = active_kata_container_count(&self.config) == Some(expected_count);
+            if metadata_absent && task_absent && count_matches {
+                return Ok(());
+            }
+            if started.elapsed() >= retirement.convergence_timeout {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Kata retirement removal did not converge exactly".to_string(),
+                ));
+            }
+            thread::sleep(retirement.poll_interval);
+        }
+    }
+
+    fn cleanup_retirement_staging(&self, request_id: &str) -> Result<(), RunnerError> {
+        let (root, _, _) = self.retirement_staging_paths(request_id)?;
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(RunnerError::RuntimeLaunch(format!(
+                "failed to remove verified retirement staging: {error}"
+            ))),
+        }
+    }
+
     fn prepare_plan(&self, plan: &KataLaunchPlan) -> Result<(), RunnerError> {
         std::fs::create_dir_all(&plan.state_root)
             .and_then(|_| std::fs::create_dir_all(&plan.metadata_root))
@@ -1166,7 +1673,7 @@ impl KataLauncher {
 
 impl RuntimeLauncher for KataLauncher {
     fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
-        kata_runtime_capabilities()
+        kata_runtime_capabilities_with_retirement(self.config.retirement.is_some())
     }
 
     fn runner_class(&self) -> RunnerClass {
@@ -1928,6 +2435,201 @@ impl RuntimeLauncher for KataLauncher {
         self.remove_compute(&plan.container_name)
     }
 
+    fn retire_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+        self.validate_ready()?;
+        self.retirement_config()?;
+        let plan = self.plan_for_control(lease)?;
+        let _operation_lock = self.acquire_runtime_operation_lock(&plan)?;
+        let (staging_root, zip_path, readback_root) =
+            self.retirement_staging_paths(&lease.request.id)?;
+
+        let mut progress = if let Some(progress) = self.load_retirement_progress(&plan, lease)? {
+            progress
+        } else {
+            let (validated_plan, inspected) = self.validate_control(lease)?;
+            self.reconcile_recovery_helpers(
+                &validated_plan,
+                &lease.runtime.project_id,
+                &inspected,
+                None,
+            )?;
+            if inspected.id.trim().is_empty() {
+                return Err(RunnerError::RuntimeLaunch(
+                    "nerdctl inspect did not expose the canonical container ID".to_string(),
+                ));
+            }
+            let baseline_active_sandbox_count = active_kata_container_count(&self.config)
+                .filter(|count| *count > 0)
+                .ok_or_else(|| {
+                    RunnerError::RuntimeLaunch(
+                        "could not establish the pre-retirement active-sandbox count".to_string(),
+                    )
+                })?;
+            let agent_principal = if inspected.state.status == "running" {
+                renew_lease()?;
+                let host_port = self.host_port(&validated_plan)?;
+                Some(self.wait_for_agent_npub(&validated_plan, host_port)?)
+            } else {
+                None
+            };
+            if inspected.state.status == "running" {
+                renew_lease()?;
+                self.stop_compute(&validated_plan.container_name)?;
+            }
+            let stopped = self
+                .inspect(&validated_plan.container_name)?
+                .ok_or_else(|| {
+                    RunnerError::RuntimeLaunch(
+                        "canonical Kata metadata disappeared before archival".to_string(),
+                    )
+                })?;
+            if stopped.id != inspected.id || stopped.state.status == "running" {
+                return Err(RunnerError::RuntimeLaunch(
+                    "canonical Kata container did not reach a stopped state".to_string(),
+                ));
+            }
+            self.wait_for_task_absence(&inspected.id, renew_lease)?;
+            let stable = self.stable_source_manifest(&validated_plan.state_root, renew_lease)?;
+
+            std::fs::create_dir_all(&staging_root)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            #[cfg(unix)]
+            std::fs::set_permissions(&staging_root, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            let source_bytes = stable
+                .iter()
+                .filter(|entry| entry.kind == crate::retirement::RecoveryEntryKind::File)
+                .try_fold(0_u64, |total, entry| total.checked_add(entry.size))
+                .ok_or_else(|| RunnerError::RuntimeLaunch("source size overflow".to_string()))?;
+            let required_space = source_bytes
+                .saturating_add(source_bytes / 100)
+                .saturating_add(64 * 1024 * 1024);
+            let available_space = fs4::available_space(&staging_root)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            if available_space < required_space {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "retirement staging requires {required_space} bytes but only {available_space} are available"
+                )));
+            }
+            let context = self.retirement_context(lease, agent_principal.clone())?;
+            let verified = if zip_path.exists() {
+                verify_recovery_zip(&zip_path, Some(&context))
+            } else {
+                create_recovery_zip(&validated_plan.state_root, &zip_path, &context)
+            }
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            if verified.manifest.entries != stable {
+                return Err(RunnerError::RuntimeLaunch(
+                    "retirement ZIP did not match the stable stopped source manifest".to_string(),
+                ));
+            }
+            let progress = KataRetirementProgress {
+                schema_version: 1,
+                request_id: context.request_id,
+                project_id: context.project_id,
+                agent_runtime_id: context.agent_runtime_id,
+                durable_state_id: context.durable_state_id,
+                runtime_artifact_id: context.runtime_artifact_id,
+                container_name: validated_plan.container_name.clone(),
+                container_id: inspected.id,
+                baseline_active_sandbox_count,
+                agent_principal,
+                stop_escalation_observed: None,
+                phase: KataRetirementPhase::LocalVerified,
+                receipt: None,
+            };
+            self.write_retirement_progress(&validated_plan, &progress)?;
+            progress
+        };
+
+        let context = self.retirement_context(lease, progress.agent_principal.clone())?;
+        self.wait_for_task_absence(&progress.container_id, renew_lease)?;
+        let remote = if progress.receipt.is_some() {
+            self.readback_retirement_archive(
+                &staging_root,
+                &zip_path,
+                &readback_root,
+                &context,
+                renew_lease,
+            )?
+        } else {
+            let local = verify_recovery_zip(&zip_path, Some(&context))
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            self.upload_and_readback_retirement(
+                &staging_root,
+                &zip_path,
+                &readback_root,
+                &context,
+                &local,
+                renew_lease,
+            )?
+        };
+        let verified_at = if let Some(stored) = progress.receipt.as_ref() {
+            stored.verified_at.clone()
+        } else {
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?
+        };
+        let candidate_receipt = RuntimeRetirementSnapshotReceipt {
+            schema: finite_saas_core::RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA.to_string(),
+            request_id: context.request_id.clone(),
+            project_id: context.project_id.clone(),
+            agent_runtime_id: context.agent_runtime_id.clone(),
+            durable_state_id: context.durable_state_id.clone(),
+            runtime_artifact_id: context.runtime_artifact_id.clone(),
+            backend: finite_saas_core::RUNTIME_RETIREMENT_BACKEND_BORG.to_string(),
+            locator: finite_saas_core::runtime_retirement_archive_locator(&context.request_id),
+            zip_bytes: remote.zip_bytes,
+            zip_sha256: remote.zip_sha256,
+            manifest_sha256: remote.manifest_sha256,
+            created_at: remote.manifest.created_at,
+            verified_at,
+            recovery_authority_id: self.retirement_config()?.recovery_authority_id.clone(),
+            retention_policy: finite_saas_core::RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
+        };
+        if let Some(stored) = progress.receipt.as_ref()
+            && stored != &candidate_receipt
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "remote retirement receipt changed across retry".to_string(),
+            ));
+        }
+        let receipt = progress.receipt.clone().unwrap_or(candidate_receipt);
+        if progress.phase < KataRetirementPhase::RemoteVerified {
+            progress.phase = KataRetirementPhase::RemoteVerified;
+            progress.receipt = Some(receipt.clone());
+            self.write_retirement_progress(&plan, &progress)?;
+        }
+
+        if progress.phase < KataRetirementPhase::ComputeRemoved {
+            if let Some(inspected) = self.inspect(&progress.container_name)? {
+                self.validate_owned(&plan, &lease.runtime.project_id, &inspected)?;
+                if inspected.id != progress.container_id {
+                    return Err(RunnerError::RuntimeLaunch(
+                        "canonical Kata container ID changed during retirement".to_string(),
+                    ));
+                }
+                self.remove_compute(&progress.container_name)?;
+            }
+            self.wait_for_removal_convergence(&progress, renew_lease)?;
+            progress.phase = KataRetirementPhase::ComputeRemoved;
+            self.write_retirement_progress(&plan, &progress)?;
+        } else {
+            self.wait_for_removal_convergence(&progress, renew_lease)?;
+        }
+        // Plaintext staging is part of the retryable retirement transaction,
+        // not best-effort work after Core commits. A cleanup failure returns
+        // the same request to the queue; the persisted remote receipt lets the
+        // retry read back the archive without needing the local ZIP.
+        self.cleanup_retirement_staging(&lease.request.id)?;
+        Ok(receipt)
+    }
+
     fn launch(
         &mut self,
         lease: &AgentCreationLease,
@@ -2012,8 +2714,16 @@ fn kata_launch_plan_for_source_machine(
             .join(durable_state_id),
         env_file: metadata_root.join("launch.env"),
         metadata_root,
+        host_address: config.host_address,
         container_port,
         container_name,
+    }
+}
+
+fn kata_publish_spec(host_address: IpAddr, container_port: u16) -> String {
+    match host_address {
+        IpAddr::V4(address) => format!("{address}::{container_port}"),
+        IpAddr::V6(address) => format!("[{address}]::{container_port}"),
     }
 }
 
@@ -2035,7 +2745,7 @@ pub(crate) fn kata_run_command(
         OsString::from("--restart"),
         OsString::from("unless-stopped"),
         OsString::from("--publish"),
-        OsString::from(format!("127.0.0.1::{}", plan.container_port)),
+        OsString::from(kata_publish_spec(config.host_address, plan.container_port)),
         OsString::from("--volume"),
         OsString::from(format!("{}:/data", plan.state_root.display())),
         OsString::from("--env-file"),
@@ -2326,6 +3036,7 @@ fn kata_upgrade_environment(
         })
         .collect();
     public_keys.extend(options.environment().keys().cloned());
+    secret_keys.extend(options.secret_environment().keys().cloned());
     let entries = merge_desired_runtime_environment(retained, options);
     Ok(KataUpgradeEnvironment {
         entries,
@@ -2398,6 +3109,7 @@ fn kata_recovery_plan(canonical: &KataLaunchPlan, request_id: &str) -> KataLaunc
             "recovery-{}.env",
             sanitize_sandbox_name(request_id)
         )),
+        host_address: canonical.host_address,
         container_port: canonical.container_port,
     }
 }
@@ -2653,6 +3365,7 @@ fn kata_upgrade_plan(
         env_file: canonical
             .metadata_root
             .join(format!("upgrade-{}.env", sanitize_sandbox_name(request_id))),
+        host_address: canonical.host_address,
         container_port: canonical.container_port,
     }
 }
@@ -2724,7 +3437,7 @@ fn kata_upgrade_run_command(
         OsString::from("--restart"),
         OsString::from("unless-stopped"),
         OsString::from("--publish"),
-        OsString::from(format!("127.0.0.1::{}", plan.container_port)),
+        OsString::from(kata_publish_spec(config.host_address, plan.container_port)),
         OsString::from("--volume"),
         OsString::from(format!("{}:/data", plan.state_root.display())),
         OsString::from("--env-file"),
@@ -2809,7 +3522,7 @@ fn kata_recovery_run_command(
         OsString::from("--restart"),
         OsString::from("unless-stopped"),
         OsString::from("--publish"),
-        OsString::from(format!("127.0.0.1::{}", plan.container_port)),
+        OsString::from(kata_publish_spec(config.host_address, plan.container_port)),
         OsString::from("--volume"),
         OsString::from(format!("{}:/data", plan.state_root.display())),
         OsString::from("--env-file"),
@@ -2901,6 +3614,8 @@ fn active_kata_container_count(config: &KataConfig) -> Option<u32> {
 
 #[derive(Deserialize)]
 struct KataInspect {
+    #[serde(rename = "Id", default)]
+    id: String,
     #[serde(rename = "Config")]
     config: KataInspectConfig,
     #[serde(rename = "State")]
@@ -2935,6 +3650,35 @@ struct KataInspectMount {
     read_write: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum KataRetirementPhase {
+    LocalVerified,
+    RemoteVerified,
+    ComputeRemoved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct KataRetirementProgress {
+    schema_version: u8,
+    request_id: String,
+    project_id: String,
+    agent_runtime_id: String,
+    durable_state_id: String,
+    runtime_artifact_id: String,
+    container_name: String,
+    container_id: String,
+    baseline_active_sandbox_count: u32,
+    agent_principal: Option<String>,
+    /// `nerdctl stop --time` may escalate internally; its output does not
+    /// expose that distinction reliably, so `None` records no unsupported
+    /// claim. Task absence plus stable manifests is the safety authority.
+    stop_escalation_observed: Option<bool>,
+    phase: KataRetirementPhase,
+    receipt: Option<RuntimeRetirementSnapshotReceipt>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct KataRecoveryFence {
@@ -2959,6 +3703,32 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn private_host_address_controls_binding_and_advertised_urls() {
+        let host_address = "10.254.3.2".parse::<IpAddr>().unwrap();
+        let plan = KataLaunchPlan {
+            container_name: "finite-kata-test".to_string(),
+            state_root: PathBuf::from("/data/finite-saas-runner/kata/test"),
+            metadata_root: PathBuf::from("/data/finite-saas-runner/kata-metadata/test"),
+            env_file: PathBuf::from("/data/finite-saas-runner/kata-metadata/test/launch.env"),
+            host_address,
+            container_port: 8080,
+        };
+
+        assert_eq!(kata_publish_spec(host_address, 8080), "10.254.3.2::8080");
+        assert_eq!(plan.public_base_url(41002), "http://10.254.3.2:41002");
+        assert_eq!(plan.contact_url(41002), "http://10.254.3.2:41002/contact");
+    }
+
+    #[test]
+    fn unspecified_kata_host_address_fails_closed() {
+        let config = KataConfig {
+            host_address: "0.0.0.0".parse().unwrap(),
+            ..KataConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
 
     #[derive(Clone)]
     struct TestRecoveryBehavior {
@@ -3120,7 +3890,7 @@ case "$cmd" in
     recovery="$(field_or_empty "$name" recovery)"
     public="$(field_or_empty "$name" public)"; secret="$(field_or_empty "$name" secret)"
     environment="$(python3 -c 'import json,sys; print(json.dumps([line.rstrip("\n") for line in open(sys.argv[1], encoding="utf-8")]))' "$root/$name.env-file")"
-    printf '[{"Config":{"Labels":{"computer.finite.v2.runtime":"true","computer.finite.v2.source_host_id":"finite-lat-1","computer.finite.v2.source_machine_id":"%s","computer.finite.v2.project_id":"%s","computer.finite.v2.runtime_artifact_id":"%s","computer.finite.v2.state_schema_version":"%s","computer.finite.v2.upgrade_request_id":"%s","computer.finite.v2.recovery_request_id":"%s","computer.finite.v2.runtime_environment_keys":"%s","computer.finite.v2.runtime_secret_environment_keys":"%s"},"Image":"%s","Env":%s},"State":{"Status":"%s"},"Mounts":[{"Source":"%s","Destination":"/data","RW":true}]}]\n' "$source" "$project" "$artifact" "$schema" "$request" "$recovery" "$public" "$secret" "$image" "$environment" "$status" "$mount"
+    printf '[{"Id":"%s-id","Config":{"Labels":{"computer.finite.v2.runtime":"true","computer.finite.v2.source_host_id":"finite-lat-1","computer.finite.v2.source_machine_id":"%s","computer.finite.v2.project_id":"%s","computer.finite.v2.runtime_artifact_id":"%s","computer.finite.v2.state_schema_version":"%s","computer.finite.v2.upgrade_request_id":"%s","computer.finite.v2.recovery_request_id":"%s","computer.finite.v2.runtime_environment_keys":"%s","computer.finite.v2.runtime_secret_environment_keys":"%s"},"Image":"%s","Env":%s},"State":{"Status":"%s"},"Mounts":[{"Source":"%s","Destination":"/data","RW":true}]}]\n' "$name" "$source" "$project" "$artifact" "$schema" "$request" "$recovery" "$public" "$secret" "$image" "$environment" "$status" "$mount"
     ;;
   port)
     name="$1"; printf '127.0.0.1:%s\n' "$(field "$name" port)" ;;
@@ -3188,6 +3958,44 @@ case "$cmd" in
     write_field "$name" port "$(cat "$root/candidate-port")"
     ;;
   *) echo "unsupported fake command: $cmd" >&2; exit 2 ;;
+esac
+"#,
+        );
+        bin
+    }
+
+    fn fake_ctr(root: &Path) -> PathBuf {
+        let bin = root.join("ctr-fake");
+        write_executable(&bin, "#!/bin/sh\nexit 0\n");
+        bin
+    }
+
+    fn fake_borg(root: &Path) -> PathBuf {
+        let bin = root.join("borg-fake");
+        write_executable(
+            &bin,
+            r#"#!/bin/sh
+set -eu
+remote="$(dirname "$0")/borg-remote"
+mkdir -p "$remote"
+cmd="$1"; shift
+case "$cmd" in
+  info)
+    test -f "$remote/archive.zip"
+    ;;
+  create)
+    zip="$(find . -maxdepth 1 -type f -name 'retirement-*.zip' | head -n 1)"
+    test -n "$zip"
+    test ! -f "$remote/archive.zip"
+    cp "$zip" "$remote/archive.zip"
+    basename "$zip" > "$remote/name"
+    ;;
+  extract)
+    if [ -f "$(dirname "$0")/borg-fail-extract" ]; then exit 42; fi
+    name="$(cat "$remote/name")"
+    cp "$remote/archive.zip" "./$name"
+    ;;
+  *) exit 2 ;;
 esac
 "#,
         );
@@ -3374,6 +4182,141 @@ esac
         std::fs::create_dir_all(&plan.metadata_root).unwrap();
         std::fs::write(plan.state_root.join("identity-marker"), "same-agent").unwrap();
         (launcher, plan, fake_state)
+    }
+
+    fn configure_test_retirement(launcher: &mut KataLauncher, root: &Path) {
+        let key = root.join("retirement-key");
+        let known_hosts = root.join("known-hosts");
+        let passphrase = root.join("borg-passphrase");
+        for path in [&key, &known_hosts, &passphrase] {
+            std::fs::write(path, "test-only").unwrap();
+        }
+        launcher.config.retirement = Some(KataRetirementConfig {
+            borg_bin: fake_borg(root),
+            ctr_bin: fake_ctr(root),
+            repository: "test-repository".to_string(),
+            remote_path: PathBuf::from("/usr/local/bin/borg1"),
+            ssh_key_file: key,
+            known_hosts_file: known_hosts,
+            passphrase_file: passphrase,
+            staging_root: root.join("retirement-staging"),
+            recovery_authority_id: "finite-assisted-test".to_string(),
+            poll_interval: Duration::from_millis(1),
+            convergence_timeout: Duration::from_secs(2),
+        });
+    }
+
+    #[test]
+    fn retirement_is_restartable_after_remote_verification_and_compute_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, 41234);
+        configure_test_retirement(&mut launcher, temp.path());
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            "runtime:v1",
+            "artifact-v1",
+            "",
+            41234,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.status", plan.container_name)),
+            "exited",
+        )
+        .unwrap();
+        std::fs::create_dir_all(plan.state_root.join("workspace")).unwrap();
+        std::fs::write(plan.state_root.join("workspace/note"), "preserved").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("workspace/note", plan.state_root.join("latest-note")).unwrap();
+        let image = "registry.example/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut lease = recovery_lease("runtime_ctl_retirement", image, 41234);
+        lease.request.kind = RuntimeControlKind::Destroy;
+        let RuntimeSpecEnvelope::V1(spec) = lease.runtime_spec.as_mut().unwrap();
+        spec.boot_intent = RuntimeBootIntent::Normal;
+        let mut renewals = 0;
+        let first = {
+            let mut renew = || {
+                renewals += 1;
+                Ok(())
+            };
+            launcher.retire_runtime(&lease, &mut renew).unwrap()
+        };
+        assert!(renewals > 0);
+        assert_eq!(first.request_id, lease.request.id);
+        assert_eq!(first.zip_sha256.len(), 64);
+        assert!(launcher.inspect(&plan.container_name).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_to_string(plan.state_root.join("workspace/note")).unwrap(),
+            "preserved"
+        );
+        assert!(temp.path().join("borg-remote/archive.zip").is_file());
+        assert!(
+            !launcher
+                .retirement_staging_paths(&lease.request.id)
+                .unwrap()
+                .0
+                .exists(),
+            "plaintext staging must be gone before Core completion"
+        );
+
+        // Models a Runner crash after removal but before Core completion. The
+        // exact persisted receipt is re-verified from the remote archive; no
+        // local ZIP or canonical container is required at this point.
+        let mut renew = || Ok(());
+        let second = launcher.retire_runtime(&lease, &mut renew).unwrap();
+        assert_eq!(second, first);
+        assert!(
+            !launcher
+                .retirement_staging_paths(&lease.request.id)
+                .unwrap()
+                .0
+                .exists()
+        );
+        assert!(plan.state_root.join("workspace/note").is_file());
+    }
+
+    #[test]
+    fn retirement_readback_failure_preserves_compute_and_retries_same_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, 41235);
+        configure_test_retirement(&mut launcher, temp.path());
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            "runtime:v1",
+            "artifact-v1",
+            "",
+            41235,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.status", plan.container_name)),
+            "exited",
+        )
+        .unwrap();
+        std::fs::create_dir_all(plan.state_root.join("workspace")).unwrap();
+        std::fs::write(plan.state_root.join("workspace/note"), "preserved").unwrap();
+        std::fs::write(temp.path().join("borg-fail-extract"), "fail").unwrap();
+        let image = "registry.example/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut lease = recovery_lease("runtime_ctl_retirement_readback", image, 41235);
+        lease.request.kind = RuntimeControlKind::Destroy;
+        let RuntimeSpecEnvelope::V1(spec) = lease.runtime_spec.as_mut().unwrap();
+        spec.boot_intent = RuntimeBootIntent::Normal;
+        let mut renew = || Ok(());
+
+        assert!(launcher.retire_runtime(&lease, &mut renew).is_err());
+        assert!(launcher.inspect(&plan.container_name).unwrap().is_some());
+        assert_eq!(
+            std::fs::read_to_string(plan.state_root.join("workspace/note")).unwrap(),
+            "preserved"
+        );
+        assert!(temp.path().join("borg-remote/archive.zip").is_file());
+
+        std::fs::remove_file(temp.path().join("borg-fail-extract")).unwrap();
+        let receipt = launcher.retire_runtime(&lease, &mut renew).unwrap();
+        assert_eq!(receipt.request_id, lease.request.id);
+        assert!(launcher.inspect(&plan.container_name).unwrap().is_none());
     }
 
     fn fake_environment(state: &Path, name: &str) -> BTreeMap<String, String> {
@@ -4668,8 +5611,13 @@ esac
                 "HOSTNAME=discard-me".to_string(),
             ],
         };
-        let environment =
-            kata_upgrade_environment(&inspected, &RuntimeRestartOptions::default()).unwrap();
+        let options = RuntimeRestartOptions::default()
+            .with_secret_environment(BTreeMap::from([(
+                "FAL_KEY".to_string(),
+                "fal-added-by-upgrade".to_string(),
+            )]))
+            .unwrap();
+        let environment = kata_upgrade_environment(&inspected, &options).unwrap();
         assert!(
             environment
                 .entries
@@ -4683,6 +5631,12 @@ esac
             "FINITE_PRIVATE_API_KEY".to_string(),
             "secret-kept".to_string()
         )));
+        assert!(
+            environment
+                .entries
+                .contains(&("FAL_KEY".to_string(), "fal-added-by-upgrade".to_string()))
+        );
+        assert!(environment.secret_keys.contains("FAL_KEY"));
         assert!(
             environment
                 .entries
@@ -4718,6 +5672,10 @@ esac
         assert!(args.windows(2).any(|pair| pair == ["--pull", "never"]));
         assert_eq!(args.last(), Some(&target_artifact().reference));
         assert!(args.iter().all(|value| !value.contains("secret-kept")));
+        assert!(
+            args.iter()
+                .all(|value| !value.contains("fal-added-by-upgrade"))
+        );
     }
 
     #[test]

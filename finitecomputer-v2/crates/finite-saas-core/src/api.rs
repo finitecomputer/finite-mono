@@ -21,11 +21,12 @@ use crate::{
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
     RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
-    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
-    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope,
-    RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
+    RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
+    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput,
     UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_runtime_contact_endpoint,
@@ -73,6 +74,9 @@ pub struct CoreApiState {
     /// First-use deployment gate. Persisting `kind = 'upgrade'` crosses the
     /// rollback boundary for Core generations that predate that value.
     runtime_upgrades_enabled: bool,
+    /// New owner retirement requests are default-off independently of Runner
+    /// capability so a rollout can be stopped without stranding in-flight work.
+    runtime_retirement_enabled: bool,
     relay_store: RelayStore,
     result_waiters: RelayWaiters,
     chat_watchers: ChatWatchers,
@@ -247,12 +251,32 @@ pub struct CompleteRuntimeControlRequest {
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
     pub runtime_host: Option<String>,
     pub published_app_urls: Option<Vec<String>>,
+    #[serde(default)]
+    pub retirement_snapshot: Option<crate::RuntimeRetirementSnapshotReceipt>,
     pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FailRuntimeControlRequest {
+    pub runner_id: String,
+    pub lease_token: String,
+    pub failure_message: String,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenewRuntimeControlRequest {
+    pub runner_id: String,
+    pub lease_token: String,
+    pub lease_seconds: Option<i64>,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryRuntimeControlRequest {
     pub runner_id: String,
     pub lease_token: String,
     pub failure_message: String,
@@ -603,13 +627,36 @@ impl From<AgentRuntime> for PublicAgentRuntime {
 pub struct PublicVisibleProject {
     pub project: PublicProject,
     pub runtime: Option<PublicAgentRuntime>,
+    pub active_runtime_control: Option<PublicRuntimeControl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicRuntimeControl {
+    pub id: String,
+    pub kind: crate::RuntimeControlKind,
+    pub status: crate::RuntimeControlRequestStatus,
+    pub retrying: bool,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 impl From<VisibleProject> for PublicVisibleProject {
     fn from(project: VisibleProject) -> Self {
+        let active_runtime_control =
+            project
+                .active_runtime_control
+                .map(|request| PublicRuntimeControl {
+                    id: request.id,
+                    kind: request.kind,
+                    status: request.status,
+                    retrying: request.failure_message.is_some(),
+                    created_at: request.created_at,
+                    updated_at: request.updated_at,
+                });
         Self {
             project: project.project.into(),
             runtime: project.runtime.map(PublicAgentRuntime::from),
+            active_runtime_control,
         }
     }
 }
@@ -689,11 +736,15 @@ pub fn router_with_agent_creation_placement(
     let runtime_upgrades_enabled = env::var("FC_CORE_ENABLE_RUNTIME_UPGRADES")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
+    let runtime_retirement_enabled = env::var("FC_CORE_ENABLE_RUNTIME_RETIREMENT")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
     router_with_runtime_upgrades_and_agent_creation_placement(
         store,
         auth,
         default_relay_state_dir(),
         runtime_upgrades_enabled,
+        runtime_retirement_enabled,
         agent_creation_placement,
     )
 }
@@ -715,11 +766,31 @@ pub fn router_with_runtime_upgrades(
     relay_state_dir: impl Into<PathBuf>,
     runtime_upgrades_enabled: bool,
 ) -> Router {
+    let runtime_retirement_enabled = env::var("FC_CORE_ENABLE_RUNTIME_RETIREMENT")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
+    router_with_runtime_features(
+        store,
+        auth,
+        relay_state_dir,
+        runtime_upgrades_enabled,
+        runtime_retirement_enabled,
+    )
+}
+
+pub fn router_with_runtime_features(
+    store: CoreStore,
+    auth: CoreAuth,
+    relay_state_dir: impl Into<PathBuf>,
+    runtime_upgrades_enabled: bool,
+    runtime_retirement_enabled: bool,
+) -> Router {
     router_with_runtime_upgrades_and_agent_creation_placement(
         store,
         auth,
         relay_state_dir,
         runtime_upgrades_enabled,
+        runtime_retirement_enabled,
         None,
     )
 }
@@ -729,6 +800,7 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     auth: CoreAuth,
     relay_state_dir: impl Into<PathBuf>,
     runtime_upgrades_enabled: bool,
+    runtime_retirement_enabled: bool,
     agent_creation_placement: Option<RuntimePlacement>,
 ) -> Router {
     let standard_stripe_price_id = optional_env_value("FC_CORE_STANDARD_STRIPE_PRICE_ID")
@@ -739,6 +811,7 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         standard_stripe_price_id,
         agent_creation_placement,
         runtime_upgrades_enabled,
+        runtime_retirement_enabled,
         relay_store: RelayStore::new(relay_state_dir.into()),
         result_waiters: RelayWaiters::default(),
         chat_watchers: ChatWatchers::default(),
@@ -913,6 +986,14 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         .route(
             "/api/core/v1/runtime-control-requests/{request_id}/fail",
             post(fail_runtime_control_request),
+        )
+        .route(
+            "/api/core/v1/runtime-control-requests/{request_id}/renew",
+            post(renew_runtime_control_request),
+        )
+        .route(
+            "/api/core/v1/runtime-control-requests/{request_id}/retry",
+            post(retry_runtime_control_request),
         )
         .route(
             "/api/core/v1/agent-creation-requests/{request_id}/complete",
@@ -1843,6 +1924,9 @@ async fn request_runtime_destroy(
     Json(input): Json<TimestampRequest>,
 ) -> Result<Json<RuntimeControlRequestView>, ApiError> {
     let identity = require_verified_identity(&state, &headers).await?;
+    if !state.runtime_retirement_enabled {
+        return Err(CoreError::RuntimeRetirementNotEnabled.into());
+    }
     let request = state
         .store
         .request_runtime_destroy(crate::RequestRuntimeDestroyInput {
@@ -1975,6 +2059,7 @@ async fn complete_runtime_control_request(
                 runtime_capabilities,
                 runtime_host: input.runtime_host,
                 published_app_urls: input.published_app_urls,
+                retirement_snapshot: input.retirement_snapshot,
                 now: input.now,
             })
             .await?,
@@ -1993,6 +2078,50 @@ async fn fail_runtime_control_request(
         state
             .store
             .fail_runtime_control_request(FailRuntimeControlRequestInput {
+                request_id,
+                runner_id: input.runner_id,
+                lease_token: input.lease_token,
+                failure_message: input.failure_message,
+                now: input.now,
+            })
+            .await?,
+    ))
+}
+
+async fn renew_runtime_control_request(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(input): Json<RenewRuntimeControlRequest>,
+) -> Result<Json<crate::RuntimeControlRequest>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    Ok(Json(
+        state
+            .store
+            .renew_runtime_control_request(RenewRuntimeControlRequestInput {
+                request_id,
+                runner_id: input.runner_id,
+                lease_token: input.lease_token,
+                lease_seconds: input.lease_seconds,
+                now: input.now,
+            })
+            .await?,
+    ))
+}
+
+async fn retry_runtime_control_request(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(input): Json<RetryRuntimeControlRequest>,
+) -> Result<Json<crate::RuntimeControlRequest>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    Ok(Json(
+        state
+            .store
+            .retry_runtime_control_request(RetryRuntimeControlRequestInput {
                 request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
@@ -3172,6 +3301,9 @@ impl From<CoreError> for ApiError {
             | CoreError::RuntimeUpgradeTargetConflict
             | CoreError::RuntimeControlOperationConflict
             | CoreError::RuntimeUpgradeCompletionMismatch
+            | CoreError::RuntimeRetirementSnapshotMismatch
+            | CoreError::RuntimeRetirementSnapshotConflict
+            | CoreError::RuntimeRetirementNotEnabled
             | CoreError::RuntimeControlRequestNotRunning
             | CoreError::RuntimeControlRequestLeaseConflict
             | CoreError::FinitePrivateGrantNotActive
@@ -3410,7 +3542,7 @@ mod tests {
             )
             .is_ok()
         );
-        let overclaim = RuntimeCapabilitiesV1 {
+        let retirement = RuntimeCapabilitiesV1 {
             runtime_retirement: true,
             ..RuntimeCapabilitiesV1::default()
         };
@@ -3419,11 +3551,11 @@ mod tests {
                 &current_kata,
                 Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
-                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(overclaim)),
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(retirement)),
                     ..RunnerLeaseCapacity::default()
                 })
             )
-            .is_err()
+            .is_ok()
         );
 
         let current_phala = VerifiedRunnerCredential {
@@ -3441,6 +3573,22 @@ mod tests {
                     runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                         RuntimeCapabilitiesV1 {
                             runtime_upgrade: true,
+                            ..RuntimeCapabilitiesV1::default()
+                        }
+                    )),
+                    ..RunnerLeaseCapacity::default()
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_runner_capacity(
+                &current_phala,
+                Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Phala],
+                    runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
+                        RuntimeCapabilitiesV1 {
+                            runtime_retirement: true,
                             ..RuntimeCapabilitiesV1::default()
                         }
                     )),
@@ -6171,6 +6319,50 @@ mod tests {
         )
         .await;
         assert_eq!(restart_status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn runtime_retirement_product_gate_is_independently_fail_closed() {
+        let user = identity_headers("owner@finite.vip", "true");
+        let disabled = router_with_runtime_features(
+            CoreStore::memory(),
+            test_auth(),
+            default_relay_state_dir(),
+            true,
+            false,
+        );
+        let (disabled_status, disabled_body) = send_json(
+            &disabled,
+            "POST",
+            "/api/core/v1/me/projects/missing/runtime/destroy",
+            &user,
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(disabled_status, StatusCode::CONFLICT);
+        assert!(
+            disabled_body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not enabled")
+        );
+
+        let enabled = router_with_runtime_features(
+            CoreStore::memory(),
+            test_auth(),
+            default_relay_state_dir(),
+            true,
+            true,
+        );
+        let (enabled_status, _) = send_json(
+            &enabled,
+            "POST",
+            "/api/core/v1/me/projects/missing/runtime/destroy",
+            &user,
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(enabled_status, StatusCode::NOT_FOUND);
     }
 
     /// Provision one hosted agent through the same HTTP flow the dashboard and

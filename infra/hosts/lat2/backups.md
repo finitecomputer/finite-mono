@@ -1,5 +1,11 @@
 # Backups on finite-lat-2
 
+> **HISTORICAL 2026-07-08 SITES CAPTURE — DO NOT RUN.** Sites moved to
+> `finite-lat-1` on 2026-07-09, and lat2 remains dedicated to CI/building.
+> Do not move old Sites files, install or enable these timers, or use `/data`
+> as a Finite recovery target. Current backup and restore procedures live under
+> [`infra/runbooks/`](../../runbooks/).
+
 ## Current reality (captured 2026-07-08) — GAP
 
 There is **no automated backup on this host**:
@@ -23,9 +29,8 @@ The data at stake: `/var/lib/finite-sites` — apps 110M, blobs 24M, git 26M,
 `registry.db` SQLite (~4.4M with WAL), plus the cookie secret. `/data`
 (1.8T `/dev/md1`) is empty (28K used) and unused.
 
-First action item regardless of automation: move the Jul 2 tarball out of
-`/tmp` (e.g. `sudo mv /tmp/finite-sites-20260702T145453Z.tar.gz
-/var/backups/finite-sites/`), then take a fresh one.
+The former first action was to move the July 2 tarball out of `/tmp`. It is no
+longer an authorized action on the CI/build host.
 
 ## Proposed fix (not yet deployed)
 
@@ -34,7 +39,7 @@ First action item regardless of automation: move the Jul 2 tarball out of
 03:15 UTC: tar `/var/lib/finite-sites` + `/etc/finite-saas` to
 `/data/backups/finite-sites-<stamp>.tar.gz` (root 0600), keep the newest 14.
 
-Install (explicit operator step; nothing auto-enables):
+Historical proposed install (never run):
 
 ```sh
 sudo install -m 0644 infra/hosts/lat2/systemd/finite-sites-backup.service /etc/systemd/system/

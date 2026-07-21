@@ -57,6 +57,16 @@ export type CoreAgentRuntime = {
 export type CoreVisibleProject = {
   project: CoreProject;
   runtime?: CoreAgentRuntime | null;
+  active_runtime_control?: CorePublicRuntimeControl | null;
+};
+
+export type CorePublicRuntimeControl = {
+  id: string;
+  kind: "restart" | "recover_known_good_chat_runtime" | "upgrade" | "stop" | "destroy";
+  status: "requested" | "running" | "succeeded" | "failed";
+  retrying: boolean;
+  created_at: string;
+  updated_at: string;
 };
 
 export type CoreAgentCreationRequest = {
@@ -1206,6 +1216,11 @@ export function coreProjectSupportsRetirement(
     project?.runtime?.runtime_capabilities,
     "runtime_retirement"
   );
+}
+
+export function runtimeRetirementProductEnabled() {
+  const value = process.env.FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
 export function coreAdminRuntimeSupportsRestart(

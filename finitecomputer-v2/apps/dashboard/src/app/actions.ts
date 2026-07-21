@@ -123,10 +123,10 @@ export async function destroyCoreRuntimeAction(formData: FormData) {
   const access = await loadDashboardMachineAccess(machineId);
 
   if (!access || access.mode !== "core" || !access.coreProject) {
-    throw new Error("This agent cannot be removed from the dashboard.");
+    throw new Error("This agent cannot be retired from the dashboard.");
   }
   if (!coreProjectSupportsRetirement(access.coreProject) || !access.canRetireRuntime) {
-    throw new Error("This agent cannot be removed from the dashboard.");
+    throw new Error("This agent cannot be retired from the dashboard.");
   }
 
   await requestCoreRuntimeDestroy(access.coreProject.project.id);

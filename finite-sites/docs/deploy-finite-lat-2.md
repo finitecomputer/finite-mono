@@ -1,5 +1,12 @@
 # Deploying Finite Sites To finite-lat-2
 
+> **SUPERSEDED 2026-07-09 — DO NOT RUN.** Finite Sites and its public edge
+> moved to `finite-lat-1`. Current deployment authority is
+> [`infra/runbooks/deploy-sites.md`](../../infra/runbooks/deploy-sites.md) and
+> [`infra/nixos/modules/finitesitesd.nix`](../../infra/nixos/modules/finitesitesd.nix).
+> This file remains only as dated migration history; none of its lat2 SSH,
+> systemd, Caddy, DNS, backup, or restore commands describe current topology.
+
 Finite Sites runs on its own box, **finite-lat-2 (64.34.80.19)**: Caddy in
 front of one `finite-saas-sites` systemd unit. Agent machines live on
 finite-lat-1; keeping tenant-facing serving off the Core box removes the

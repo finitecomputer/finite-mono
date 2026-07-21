@@ -4,8 +4,9 @@ Since the 2026-07-09 consolidation cutover, Core and the dashboard are NixOS
 services on finite-lat-1 (64.34.82.77). Config lives in `infra/nixos/`
 (host `finite-lat-1`, modules `modules/finite-saas-core.nix` +
 `modules/dashboard.nix`); topology and secrets checklist:
-`infra/nixos/README.md`. Rebuild/recovery of the box itself:
-[lat1-nixos-reinstall.md](lat1-nixos-reinstall.md).
+`infra/nixos/README.md`. The
+[2026-07-09 bare-metal transcript](lat1-nixos-reinstall.md) supplies historical
+facts only; no current destructive rebuild/recovery authority exists.
 
 - **Core** = systemd unit `finite-saas-core.service`, binds 127.0.0.1:4200,
   DynamicUser, `EnvironmentFile=/etc/finite/core.env`. Talks to native
@@ -55,7 +56,7 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
   counts separately from historical rows left in `reserved`; never rewrite
   either as part of deployment. Stop if a recent reservation is still plausibly
   in flight or the added per-turn status query lacks measured headroom; do not
-  discover either condition after activation. Migration 0013 adds the reviewed
+  discover either condition after activation. Migration 0014 adds the reviewed
   `(grant_id,status,burst_window_epoch,created_at)` index; include its brief DDL
   lock in the activation window and verify it exists afterward.
 - Finite Private epoch/reset history is a one-way Core binary boundary. Once

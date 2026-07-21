@@ -906,6 +906,16 @@ fn apple_container_replacement_required(
                     .rfind(|(current_key, _)| current_key == desired_key)
                     .is_none_or(|(_, current_value)| current_value != desired_value)
             })
+        || options
+            .secret_environment()
+            .iter()
+            .any(|(desired_key, desired_value)| {
+                inspected
+                    .environment
+                    .iter()
+                    .rfind(|(current_key, _)| current_key == desired_key)
+                    .is_none_or(|(_, current_value)| current_value != desired_value)
+            })
 }
 
 impl OwnedAppleContainer {
@@ -1267,6 +1277,11 @@ mod tests {
                 "http://another-service.test".to_string(),
             ),
         ]))
+        .unwrap()
+        .with_secret_environment(BTreeMap::from([(
+            "FAL_KEY".to_string(),
+            "fal-added-by-replacement".to_string(),
+        )]))
         .unwrap();
 
         let environment = merge_desired_runtime_environment(inspected.environment, &options);
@@ -1307,11 +1322,17 @@ mod tests {
             replacement_environment.get("ANOTHER_PRODUCT_URL"),
             Some(&"http://another-service.test".to_string())
         );
+        assert_eq!(
+            replacement_environment.get("FAL_KEY"),
+            Some(&"fal-added-by-replacement".to_string())
+        );
         assert!(!format!("{command:?}").contains("existing-inference-key"));
+        assert!(!format!("{command:?}").contains("fal-added-by-replacement"));
         assert!(
             apple_command_args(&command)
                 .iter()
-                .all(|argument| !argument.contains("existing-inference-key"))
+                .all(|argument| !argument.contains("existing-inference-key")
+                    && !argument.contains("fal-added-by-replacement"))
         );
     }
 
@@ -1348,6 +1369,18 @@ mod tests {
             &inspected,
             "sha256:same-image",
             &missing
+        ));
+
+        let missing_secret = RuntimeRestartOptions::default()
+            .with_secret_environment(BTreeMap::from([(
+                "FAL_KEY".to_string(),
+                "fal-added-by-replacement".to_string(),
+            )]))
+            .unwrap();
+        assert!(apple_container_replacement_required(
+            &inspected,
+            "sha256:same-image",
+            &missing_secret
         ));
 
         let matching = RuntimeRestartOptions::new(BTreeMap::from([(

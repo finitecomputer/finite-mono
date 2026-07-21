@@ -1209,18 +1209,25 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       );
 
       // Hold a selection-only OpenChat while a newer stream revision lands.
-      // The clicked selection is pinned client-side immediately, so the pane
-      // switches at once, the stale-selection stream snapshot applies its
-      // content without yanking the selection back, and the equal-revision
-      // mutation response still triggers a full state refetch to reconcile.
+      // Starting outside chat also proves route navigation does not wait for
+      // the high-latency mutation response. The clicked selection is pinned
+      // client-side immediately, so the pane switches at once, the stale
+      // stream snapshot applies its content without yanking the selection
+      // back, and the equal-revision response still triggers reconciliation.
       const stateFetchesBeforeSelectionRace = hostedDevice.state.authRequests.filter(
         (request) => request.path === "/v1/app/agent-bindings/open"
       ).length;
+      await page
+        .getByRole("navigation", { name: "Agent navigation" })
+        .getByRole("link", { name: "Connections", exact: true })
+        .click();
+      await page.waitForURL(/\/connections$/u);
       hostedDevice.holdNextNavigationAction();
       await page
         .locator(".finite-chat__folder-body")
         .getByRole("button", { name: "Browser QA", exact: true })
         .click();
+      await page.waitForURL(/\/chat$/u);
       await page
         .locator(".finite-chat__topbar")
         .getByText("Browser QA", { exact: true })
@@ -1390,7 +1397,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       );
       await page.waitForURL(/\/dashboard\/machines\/runtime_removable-kata-bot$/u);
       assert.equal(
-        await page.getByRole("button", { name: "Remove agent" }).count(),
+        await page.getByRole("button", { name: "Retire agent" }).count(),
         0,
         "ordinary destroy must stay hidden without an explicit Runtime Retirement capability"
       );
@@ -1822,9 +1829,9 @@ async function handleHostedDeviceRequest(
           (authorization) => authorization.project_id === projectId
         )
       ) {
-        writeJson(response, 409, {
+        writeJson(response, 503, {
           error:
-            "first-time binding bootstrap was not authorized by Project creation",
+            "canonical Agent conversation requires recovery: first-time binding bootstrap was not authorized by Project creation",
         });
         return;
       }

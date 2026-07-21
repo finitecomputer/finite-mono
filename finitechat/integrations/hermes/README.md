@@ -69,7 +69,7 @@ auxiliary:
   vision:
     base_url: https://inference.example/v1
     api_key: ${AEON_API_KEY}
-    model: aeon-gemma-4-12b-k4-nvfp4-unified-fast
+    model: nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast
     timeout: 120
 platform_toolsets:
   finitechat:

@@ -4,11 +4,15 @@ import test from "node:test";
 import {
   HostedWebChatError,
   hostedWebChatErrorMessage,
+  isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
   parseHostedChatAction,
 } from "@/lib/hosted-web-chat";
 import { CHAT_UNAVAILABLE_MESSAGE } from "@/lib/chat-product-copy";
-import type { HostedChatState } from "@/lib/hosted-web-device";
+import {
+  HostedDeviceRequestError,
+  type HostedChatState,
+} from "@/lib/hosted-web-device";
 
 function targetState(): HostedChatState {
   return {
@@ -76,6 +80,45 @@ test("unexpected chat infrastructure errors are replaced with plain product copy
   assert.equal(
     hostedWebChatErrorMessage(new HostedWebChatError("Sign in again to use chat.", 401)),
     "Sign in again to use chat."
+  );
+});
+
+test("hosted-device authorization recovery recognizes its service-unavailable contract", () => {
+  assert.equal(
+    isAgentBindingAuthorizationRequired(
+      new HostedDeviceRequestError(
+        "canonical Agent conversation requires recovery: first-time binding bootstrap was not authorized by Project creation",
+        503
+      )
+    ),
+    true
+  );
+  assert.equal(
+    isAgentBindingAuthorizationRequired(
+      new HostedDeviceRequestError(
+        "the observed Agent Principal changed",
+        503
+      )
+    ),
+    false
+  );
+  assert.equal(
+    isAgentBindingAuthorizationRequired(
+      new HostedDeviceRequestError(
+        "first-time binding bootstrap was not authorized by Project creation",
+        409
+      )
+    ),
+    true
+  );
+  assert.equal(
+    isAgentBindingAuthorizationRequired(
+      new HostedDeviceRequestError(
+        "first-time binding bootstrap was not authorized by Project creation",
+        503
+      )
+    ),
+    false
   );
 });
 

@@ -1,17 +1,20 @@
-# Single-disk layout (no mdadm). Decision 2026-07-09: disko's mdadm RAID1
-# superblocks were unassemblable on the pinned nixpkgs (25.11) kernel — the
-# recorded array size exceeded what fits after the 129 MiB data offset, so the
-# kernel rejected every member on boot with "md_import_device returned -22"
-# and stage-1 could not mount root. Rather than fight the mdadm-version bug
-# mid-cutover, root and /data each live on a single NVMe. The other two NVMes
-# (Micron ...E531, Samsung ...510141) are left untouched, free to add as
-# mirrors (ZFS or a fixed mdadm) in a calm follow-up. All data is backed up
-# and this config is in git, so a single root disk is an acceptable interim
-# redundancy posture.
+# Current single-disk layout (no mdadm). During the 2026-07-09 cutover, the
+# candidate RAID1 members were unassemblable: their recorded component size did
+# not fit after the observed data offset, and the kernel rejected them with
+# "md_import_device returned -22" before stage 1 could mount root. Root and
+# /data therefore remain on one NVMe each. The matching disks retain stale MD
+# metadata from that failed attempt; they are neither untouched nor authorized
+# for an in-place mirror conversion. Complete Agent/Sites/Brain recovery and an
+# empty-target full-host restore are also not yet proved, so do not infer that
+# every data class is backed up. The finite-lat capacity/redundancy plan governs
+# the replacement design and any future destructive work.
 #
 # Device paths are serial-stable /dev/disk/by-id (verified on the box
 # 2026-07-09): root on the Micron that already carried the ESP; /data on a
-# Samsung 1.7T. `nofail` on /data so a data-disk problem never blocks boot.
+# Samsung 1.92-TB (~1.75-TiB raw). The current `nofail` permits host boot
+# without /data but does not itself stop a dependent service from writing into
+# the root mountpoint;
+# every next design must prove that failure mode closed before user state.
 { ... }:
 {
   disko.devices = {

@@ -74,18 +74,27 @@ async function ImportedMachineOverview({
   access: DashboardMachineAccess;
   removalResult: string | null;
 }) {
-  const overview = coreRuntimeOverview(
-    access.coreProject.runtime?.runtime_status ?? "unknown"
-  );
+  const activeRetirement =
+    access.coreProject.active_runtime_control?.kind === "destroy"
+      ? access.coreProject.active_runtime_control
+      : null;
+  const overview = activeRetirement
+    ? {
+        state: "stale" as const,
+        description: activeRetirement.retrying
+          ? "Retirement is retrying safely. Your agent data remains retained."
+          : "Your agent is being retired safely.",
+      }
+    : coreRuntimeOverview(access.coreProject.runtime?.runtime_status ?? "unknown");
   const prismState = prismStateForRelay(overview);
   const canRestartRuntime = coreProjectSupportsHostedRestart(access.coreProject);
   const canStopRuntime = coreProjectSupportsHostedStop(access.coreProject);
-  // Chat recovery and agent removal are operator maintenance surfaces for
-  // now; a first-run customer should never meet them on their new agent.
+  // Chat recovery remains operator maintenance. Retirement is owner-facing
+  // only when both product and persisted Runtime capability gates are open.
   const isAdminViewer = Boolean(access.viewer.isAdmin);
   const canRecoverRuntime =
     isAdminViewer && coreProjectSupportsHostedRecovery(access.coreProject);
-  const canRemoveRuntime = isAdminViewer && access.canRetireRuntime;
+  const canRetireRuntime = access.canRetireRuntime && !activeRetirement;
 
   return (
     <div className="space-y-6">
@@ -94,7 +103,7 @@ async function ImportedMachineOverview({
           className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm"
           role="alert"
         >
-          We couldn&apos;t remove this agent. Please try again.
+          We couldn&apos;t start retirement. Your agent was not offboarded; please try again.
         </section>
       ) : null}
       {removalResult === "unavailable" ? (
@@ -102,7 +111,7 @@ async function ImportedMachineOverview({
           className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm"
           role="status"
         >
-          This agent cannot be removed from the dashboard.
+          This agent cannot be retired from the dashboard.
         </section>
       ) : null}
       <AgentHeroCard
@@ -161,12 +170,23 @@ async function ImportedMachineOverview({
           </form>
         </section>
       ) : null}
-      {canRemoveRuntime ? (
-        <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
-          <h2 className="font-semibold">Remove this agent</h2>
+      {activeRetirement ? (
+        <section className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-5">
+          <h2 className="font-semibold">Retiring agent</h2>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            This removes the agent&apos;s compute so you can create a new agent. Your saved
-            agent data is retained.
+            {activeRetirement.retrying
+              ? "The last attempt was interrupted and is retrying the same retirement request. Your agent data remains retained until recovery verification succeeds, and the agent stays visible until retirement commits."
+              : "The agent is stopping and creating a verified support-held recovery snapshot. It stays visible until that snapshot is proven and compute removal completes."}
+          </p>
+        </section>
+      ) : null}
+      {canRetireRuntime ? (
+        <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
+          <h2 className="font-semibold">Retire this agent</h2>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            Retirement stops this agent, removes it from your dashboard, and releases its
+            active slot after a verified support-held recovery snapshot is created. There is
+            no self-service restore or undo. Your original agent data is retained.
           </p>
           <form
             action={`/dashboard/machines/${encodeURIComponent(access.machineId)}/remove`}
@@ -175,11 +195,11 @@ async function ImportedMachineOverview({
           >
             <ConfirmSubmitButton
               variant="destructive"
-              pendingLabel="Removing..."
-              confirmMessage="Remove this agent's compute? Your saved agent data will be retained."
+              pendingLabel="Starting retirement..."
+              confirmMessage="Retire this agent? It will stop, leave your dashboard, and release its slot after a verified recovery snapshot is created. There is no self-service undo."
             >
               <Trash2Icon />
-              Remove agent
+              Retire agent
             </ConfirmSubmitButton>
           </form>
         </section>
