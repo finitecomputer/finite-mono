@@ -17,6 +17,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -97,6 +98,7 @@ const HERMES_ATTACHMENT_UNAVAILABLE_NOTICE: &str =
 /// Match the hosted-device batch ceiling so one Hermes send cannot make the
 /// resident bridge buffer the protocol's per-file maximum sixteen times over.
 const MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+static PRIVATE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const _: () = {
     assert!(MAX_HERMES_LOCAL_ATTACHMENT_TOTAL_BYTES >= MAX_ATTACHMENT_PLAINTEXT_BYTES as usize);
@@ -3290,13 +3292,47 @@ fn device_config(
 }
 
 fn write_private(path: PathBuf, contents: &str) -> Result<(), CliError> {
-    fs::write(&path, contents).map_err(|error| CliError::Hermes(error.to_string()))?;
+    let parent = path.parent().ok_or_else(|| {
+        CliError::Hermes(format!("private file {} has no parent", path.display()))
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        CliError::Hermes(format!("private file {} has no file name", path.display()))
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        PRIVATE_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| CliError::Hermes(error.to_string()))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    let staged = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = staged {
+        let _ = fs::remove_file(&temporary);
+        return Err(CliError::Hermes(error.to_string()));
+    }
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(CliError::Hermes(error.to_string()));
+    }
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
     Ok(())
 }
 
@@ -3364,6 +3400,31 @@ mod tests {
             r#"{"server_url":"http://127.0.0.1:1","device_id":"agent","account_id":"00"}"#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn private_journal_replacement_is_complete_and_leaves_no_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(HERMES_RUNNING_FILE);
+        write_private(path.clone(), r#"{"messages":[{"message_id":"before"}]}"#).unwrap();
+        write_private(path.clone(), r#"{"messages":[{"message_id":"after"}]}"#).unwrap();
+
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["messages"][0]["message_id"], "after");
+        let siblings = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(siblings, vec![HERMES_RUNNING_FILE]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     fn encrypted_test_attachment() -> (Vec<u8>, AttachmentBlobReferenceV1) {

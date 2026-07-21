@@ -5,11 +5,9 @@ name: Hermes runtime smoke
 # a second Hermes-only runtime; `.github/workflows/runtime-image.yml` is the
 # sole publication path.
 #
-# Dispatch-only for now: it needs the self-hosted lat2 runner, which must be
-# re-registered against finite-mono first (infra/hosts/lat2/runners.md).
-# Once the runner is live and this has a green history, re-add the
-# `push: branches: [main]` trigger for the durable smoke (that is what the
-# pre-mono workflow did).
+# Dispatch-only because it runs on the self-hosted lat2 Docker runner. Keep the
+# production-image proof explicit until it has enough green history to become
+# a normal main-branch gate.
 
 run-name: Hermes runtime smoke (${{ github.ref_name }})
 
@@ -18,6 +16,11 @@ on:
     inputs:
       durable_home_docker_smoke:
         description: "Run canonical Docker Add/Welcome chat plus durable /data restart smoke"
+        required: false
+        type: boolean
+        default: true
+      chat_interruption_smoke:
+        description: "Run graceful, SIGKILL, and empty-target chat recovery matrix"
         required: false
         type: boolean
         default: true
@@ -80,6 +83,15 @@ jobs:
             --image "$RUNTIME_IMAGE_REF" \
             --report target/hermes-durable-home-docker-smoke/report.json
 
+      - name: In-flight chat interruption and restore smoke
+        if: ${{ inputs.chat_interruption_smoke }}
+        run: |
+          cargo build --locked -p finitechat-server
+          python3 -m py_compile scripts/hermes-chat-interruption-docker-smoke.py
+          scripts/hermes-chat-interruption-docker-smoke.py \
+            --image "$RUNTIME_IMAGE_REF" \
+            --report target/hermes-chat-interruption-docker-smoke/report.json
+
       - name: Build hardening evidence audit
         if: always()
         run: scripts/hermes-hardening-audit.py --report target/hermes-hardening-audit.json
@@ -103,4 +115,5 @@ jobs:
             finitechat/target/hermes-docker-smoke/report.json
             finitechat/target/hermes-docker-smoke/restic-preflight.json
             finitechat/target/hermes-durable-home-docker-smoke/report.json
+            finitechat/target/hermes-chat-interruption-docker-smoke/report.json
           if-no-files-found: ignore
