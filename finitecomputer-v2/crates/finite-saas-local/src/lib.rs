@@ -94,13 +94,13 @@ pub fn chained_limiter_config(
     )?;
     let upstream_base_url = require_field("upstream base url", &inputs.upstream_base_url)?;
     let dashboard_url = require_field("dashboard url", &inputs.dashboard_url)?;
-    Ok(LimiterConfig {
-        finite_usage_api_url: core_url.trim_end_matches('/').to_string(),
-        finite_usage_api_service_key: finite_private_usage_api_token.to_string(),
-        upstream_base_url: upstream_root_for_chain(upstream_base_url),
-        vllm_internal_api_key: upstream_api_key.to_string(),
-        dashboard_url: dashboard_url.to_string(),
-    })
+    Ok(LimiterConfig::new(
+        core_url.trim_end_matches('/').to_string(),
+        finite_private_usage_api_token.to_string(),
+        upstream_root_for_chain(upstream_base_url),
+        upstream_api_key.to_string(),
+        dashboard_url.to_string(),
+    ))
 }
 
 fn require_field<'a>(
@@ -151,8 +151,8 @@ pub fn client_host(addr: &SocketAddr) -> String {
     }
 }
 
-/// Readiness URL for the chained limiter (the in-tree limiter serves
-/// `GET /health`; it has no separate `/live` route).
+/// Deep-readiness URL for the chained limiter. `/live` is process-only;
+/// local startup must also prove both upstream dependencies through `/health`.
 pub fn health_url(addr: &SocketAddr) -> String {
     format!("http://{}:{}/health", client_host(addr), addr.port())
 }

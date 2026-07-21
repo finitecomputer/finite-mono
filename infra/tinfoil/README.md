@@ -13,7 +13,7 @@ is to be measurable.
 
 | Repo | Enclave | Inputs pinned from mono |
 |---|---|---|
-| `finitecomputer/confidential-kimi-k2-6` | Finite Private inference (glm-5-2 vLLM, 8×GPU) + finite-private-limiter shim (:8002) | `ghcr.io/finitecomputer/finite-private-limiter@sha256:...` today (legacy-built, frozen package). At the NEXT inference-image roll, pin `ghcr.io/finitecomputer/private-limiter:<version>@<digest>` instead — built by `.github/workflows/service-images.yml` from `finitecomputer-v2/crates/finite-private-limiter` in THIS repo, closing the split-brain. No interim relaunch just for the image swap. |
+| `finitecomputer/confidential-kimi-k2-6` | Finite Private inference (glm-5-2 vLLM, 8×GPU) + finite-private-limiter shim (:8002) | Legacy image today. The staged v0.0.17 + mono-limiter candidate is under `infra/tinfoil/confidential-kimi-k2-6/`; its limiter digest remains an intentional release blocker until built from the exact merged mono SHA. |
 | `finitecomputer/finite-searxng-tinfoil` | Token-gated SearXNG | Config/proxy sources under `finite-search/tinfoil/searxng-public/` in this repo (that dir mirrors the satellite's content, including its release workflows). |
 | `finitecomputer/tinfoil-agent-runtime-canary` | Agent runtime canary | The same `ghcr.io/finitecomputer/agent-runtime@sha256:...` digest proved and published by the canonical mono workflows; no Hermes-only rebuild. |
 
@@ -23,16 +23,14 @@ is to be measurable.
 2. Run the `Service Images` workflow (image=`private-limiter`) → CI pushes
    `ghcr.io/finitecomputer/private-limiter:<version>@<digest>` (mono-owned
    package; the legacy finite-private-limiter package stays frozen).
-   First mono-built digest, ready for the next roll (2026-07-09, main):
-   `ghcr.io/finitecomputer/private-limiter:2026-07-09.1@sha256:3973eec572936cec61d5daec1b0032b52a705ccde750c2a3d849f5b2a8d96baf`
+   Do not reuse the earlier 2026-07-09 mono image: its source predates the
+   legacy-parity import. Build a fresh digest from the exact merged SHA.
 3. Update the digest pin in `confidential-kimi-k2-6`'s config; its measured
    release workflow produces the new enclave release.
-4. Relaunch via the Finite Private ops runbook. **Known debt:** the relaunch
-   script (`finite_private_ops.sh`) still lives in the LEGACY finitecomputer
-   repo; expect ~35 min relaunch downtime; the `tcbInfo has expired`
-   verification issue is tracked there. Moving that script into
-   `infra/runbooks/` is a follow-up — do it the next time a relaunch is
-   actually performed, so the moved script is validated by use.
+4. Follow `infra/runbooks/finite-private-limiter-mono-switch.md`. The ops
+   wrapper now lives at `infra/runbooks/finite-private-ops.sh` and requires an
+   exact approved tag in `FINITE_PRIVATE_RELAUNCH_APPROVED` before it will run
+   the mutating relaunch command. Expect about 35 minutes of downtime.
 
 ## Secrets
 

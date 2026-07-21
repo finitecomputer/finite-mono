@@ -28,6 +28,10 @@ import {
 import { CoreAgentCreationForm } from "@/components/core-agent-creation-form";
 import { AgentHeroCard } from "@/components/agent-hero-card";
 import { FormActionButton } from "@/components/form-action-button";
+import {
+  FinitePrivateUsagePanel,
+  FinitePrivateUsageUnavailablePanel,
+} from "@/components/finite-private-usage-panel";
 import { PendingRefresh } from "@/components/pending-refresh";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,6 +43,7 @@ import {
   coreProjectLaunchStatusLabel,
   coreProjectLabel,
   loadCoreFinitePrivateAdminState,
+  loadCoreFinitePrivateUsageStatus,
   loadCoreBillingOverview,
   loadCoreMe,
   type CoreAgentCreationRequestSummary,
@@ -130,9 +135,12 @@ export default async function DashboardPage({
   if (core.configured || !viewer.isAdmin) {
     // The checkout-return sync poll must observe Core directly, not a cached
     // read, so the webhook-arrival flip is seen as soon as it lands.
-    const billing = await loadCoreBillingOverview({
-      cacheMode: billingReturnParam === "success" ? "fresh" : "swr",
-    });
+    const [billing, finitePrivateUsage] = await Promise.all([
+      loadCoreBillingOverview({
+        cacheMode: billingReturnParam === "success" ? "fresh" : "swr",
+      }),
+      loadCoreFinitePrivateUsageStatus(),
+    ]);
     const draft = await unsealAgentOnboardingDraft(
       (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
       account.workosUserId
@@ -256,6 +264,12 @@ export default async function DashboardPage({
           <AccountBillingPanel
             billingClass={billing.billing.customer_org.billing_class}
           />
+        ) : null}
+        {!isNewAgentFlow && finitePrivateUsage.usage ? (
+          <FinitePrivateUsagePanel usage={finitePrivateUsage.usage} />
+        ) : null}
+        {!isNewAgentFlow && !finitePrivateUsage.usage && finitePrivateUsage.error ? (
+          <FinitePrivateUsageUnavailablePanel error={finitePrivateUsage.error} />
         ) : null}
         {pendingAgentCreationRequests.length && !creationAuthorizationRetry ? (
           <CoreAgentCreationStatusPanel requests={pendingAgentCreationRequests} />
@@ -499,7 +513,7 @@ function FinitePrivateAdminPanel({
                 <Input
                   id="fpLimitProfileId"
                   name="limitProfileId"
-                  defaultValue="finite-private-generous"
+                  defaultValue="finite-private-generous-v2"
                 />
               </div>
               <FormActionButton className="w-fit" pendingLabel="Approving...">

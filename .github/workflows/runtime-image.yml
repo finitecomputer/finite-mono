@@ -54,6 +54,9 @@ jobs:
           # pinned digests from it).
           IMAGE: ghcr.io/${{ github.repository_owner }}/agent-runtime
           VERSION: ${{ inputs.version }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
+          FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
         run: |
           VERSION_REF="$IMAGE:$VERSION"
           SHA_REF="$IMAGE:sha-$GITHUB_SHA"
@@ -64,8 +67,11 @@ jobs:
             --platform linux/amd64 \
             --report finitecomputer-v2/runtime-image-report.json
 
+          LOCAL_IMAGE_ID="$(docker image inspect "$VERSION_REF" --format '{{.Id}}')"
+          test -n "$LOCAL_IMAGE_ID"
           test "$(docker image inspect "$VERSION_REF" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
+          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["image_metadata"]["id"])')" = "$LOCAL_IMAGE_ID"
           docker run --rm --entrypoint /bin/sh "$VERSION_REF" -ec '
             test "$(/runtime/hermes-venv/bin/python -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "0.18.2"
             /runtime/bin/finitechat --help >/dev/null
@@ -89,6 +95,20 @@ jobs:
               tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_strict_stream_service_failure_never_falls_back_to_cli \
               tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_stream_loop_reconnects_and_catches_up_without_poll_fallback
           )
+
+          # Promotion proof must exercise the exact local image that is about
+          # to be pushed. A separate smoke workflow rebuilds from the same SHA
+          # and is useful preflight, but mutable package/base inputs mean it is
+          # not proof of these exact bytes.
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::the build-once durable Runtime smoke requires OPENROUTER_API_KEY"
+            exit 1
+          fi
+          finitechat/scripts/hermes-durable-home-docker-smoke.py \
+            --image "$LOCAL_IMAGE_ID" \
+            --report finitechat/target/runtime-image-durable-smoke/report.json
+          test "$(docker image inspect "$VERSION_REF" --format '{{.Id}}')" = "$LOCAL_IMAGE_ID"
+          test "$(python3 -c 'import json; print(json.load(open("finitechat/target/runtime-image-durable-smoke/report.json"))["facts"]["image_id"])')" = "$LOCAL_IMAGE_ID"
 
           docker tag "$VERSION_REF" "$SHA_REF"
           docker push "$SHA_REF"
@@ -148,7 +168,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: runtime-image-report
-          path: finitecomputer-v2/runtime-image-report.json
+          path: |
+            finitecomputer-v2/runtime-image-report.json
+            finitechat/target/runtime-image-durable-smoke/report.json
 
       - name: Summarize
         env:

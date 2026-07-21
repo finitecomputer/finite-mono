@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
+import { getAccountAuthContext, loadOptionalViewerContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 import {
   launchCodeBatchFormInput,
@@ -22,6 +22,7 @@ import {
   adminUpgradeCoreRuntime,
   approveCoreFinitePrivateGrant,
   cancelFailedCoreAgentCreationRequest,
+  claimCoreFinitePrivateDailyReset,
   coreAdminRuntimeSupportsRecovery,
   coreAdminRuntimeSupportsRestart,
   coreAdminRuntimeSupportsUpgrade,
@@ -313,6 +314,43 @@ export async function revokeFinitePrivateApiKeyAction(formData: FormData) {
   await revokeCoreFinitePrivateApiKey(String(formData.get("keyId") ?? ""));
 
   revalidatePath("/dashboard");
+}
+
+export type FinitePrivateDailyResetActionState = {
+  message: string;
+  tone: "success" | "error" | null;
+};
+
+export async function claimFinitePrivateDailyResetAction(
+  _previousState: FinitePrivateDailyResetActionState,
+  _formData: FormData
+): Promise<FinitePrivateDailyResetActionState> {
+  void _previousState;
+  void _formData;
+  const account = await getAccountAuthContext();
+  if (!account.accessToken || !account.email || !account.workosUserId) {
+    return { message: "Sign in again to reset Finite Private usage.", tone: "error" };
+  }
+  try {
+    const result = await claimCoreFinitePrivateDailyReset();
+    revalidatePath("/dashboard");
+    if (!result.performed) {
+      return {
+        message: `Today's free reset is already used. The next one is available at ${result.status.freeDailyResetAvailableAgainAt}.`,
+        tone: "success",
+      };
+    }
+    return {
+      message: `Usage reset. This burst window now resets at ${result.status.burstResetAt}.`,
+      tone: "success",
+    };
+  } catch (error) {
+    return {
+      message:
+        error instanceof Error ? error.message : "Finite Private usage could not be reset.",
+      tone: "error",
+    };
+  }
 }
 
 // --- Admin Ops (/dashboard/admin) ---

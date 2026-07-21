@@ -21,11 +21,15 @@ in
     enable = true;
     email = "paul@finite.vip"; # ACME account (matches the legacy fleet's)
 
-    # finite.computer: /internal/finite-private/* -> core (the limiter's
-    # usage API), everything else -> dashboard. Replaces the fragile
-    # hardcoded-ClusterIP Caddyfile on old lat1.
+    # finite.computer: limiter-internal usage traffic plus the two narrowly
+    # scoped API-key self-service routes -> Core; everything else -> dashboard.
+    # Replaces the fragile hardcoded-ClusterIP Caddyfile on old lat1.
     virtualHosts."finite.computer".extraConfig = ''
       handle /internal/finite-private/* {
+        reverse_proxy 127.0.0.1:4200
+      }
+      @finitePrivateUserApi path /api/core/v1/finite-private/usage /api/core/v1/finite-private/usage/reset
+      handle @finitePrivateUserApi {
         reverse_proxy 127.0.0.1:4200
       }
       handle {

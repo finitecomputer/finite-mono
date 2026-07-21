@@ -16,13 +16,15 @@ use crate::{
     CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
     CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
     FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateGrant,
-    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
-    FinitePrivateReservationStatus, FinitePrivateUsageDecision, HostOwnedRuntimeFacts, HostingTier,
-    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
-    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus,
+    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateGrantStatus,
+    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
+    FinitePrivateUsageDecision, FinitePrivateUsageNotice, FinitePrivateUsageStatus,
+    HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
+    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
+    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
+    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
     RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
@@ -751,6 +753,83 @@ impl CoreStore {
             Self::Postgres(store) => store.settle_finite_private_reservation(input).await,
         }
     }
+
+    pub async fn finite_private_usage_status_for_api_key(
+        &self,
+        presented_api_key: &str,
+        claim_notice: bool,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
+        match self {
+            Self::Memory(store) => {
+                store
+                    .finite_private_usage_status_for_api_key(presented_api_key, claim_notice, now)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .finite_private_usage_status_for_api_key(presented_api_key, claim_notice, now)
+                    .await
+            }
+        }
+    }
+
+    pub async fn finite_private_usage_status_for_workos_user(
+        &self,
+        workos_user_id: &str,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
+        match self {
+            Self::Memory(store) => {
+                store
+                    .finite_private_usage_status_for_workos_user(workos_user_id, now)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .finite_private_usage_status_for_workos_user(workos_user_id, now)
+                    .await
+            }
+        }
+    }
+
+    pub async fn claim_finite_private_daily_reset_for_api_key(
+        &self,
+        presented_api_key: &str,
+        now: Option<String>,
+    ) -> CoreResult<FinitePrivateDailyResetResult> {
+        match self {
+            Self::Memory(store) => {
+                store
+                    .claim_finite_private_daily_reset_for_api_key(presented_api_key, now)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .claim_finite_private_daily_reset_for_api_key(presented_api_key, now)
+                    .await
+            }
+        }
+    }
+
+    pub async fn claim_finite_private_daily_reset_for_workos_user(
+        &self,
+        workos_user_id: &str,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
+        match self {
+            Self::Memory(store) => {
+                store
+                    .claim_finite_private_daily_reset_for_workos_user(workos_user_id, now)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .claim_finite_private_daily_reset_for_workos_user(workos_user_id, now)
+                    .await
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1268,6 +1347,43 @@ impl MemoryCoreStore {
     ) -> CoreResult<SettleFinitePrivateReservationResult> {
         let mut state = self.state.lock().await;
         state.settle_finite_private_reservation(input)
+    }
+
+    pub async fn finite_private_usage_status_for_api_key(
+        &self,
+        presented_api_key: &str,
+        claim_notice: bool,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
+        let mut state = self.state.lock().await;
+        state.finite_private_usage_status_for_api_key(presented_api_key, claim_notice, now)
+    }
+
+    pub async fn finite_private_usage_status_for_workos_user(
+        &self,
+        workos_user_id: &str,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
+        let mut state = self.state.lock().await;
+        state.finite_private_usage_status_for_workos_user(workos_user_id, false, now)
+    }
+
+    pub async fn claim_finite_private_daily_reset_for_api_key(
+        &self,
+        presented_api_key: &str,
+        now: Option<String>,
+    ) -> CoreResult<FinitePrivateDailyResetResult> {
+        let mut state = self.state.lock().await;
+        state.claim_finite_private_daily_reset_for_api_key(presented_api_key, now)
+    }
+
+    pub async fn claim_finite_private_daily_reset_for_workos_user(
+        &self,
+        workos_user_id: &str,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
+        let mut state = self.state.lock().await;
+        state.claim_finite_private_daily_reset_for_workos_user(workos_user_id, now)
     }
 }
 
@@ -2046,6 +2162,66 @@ impl PostgresCoreStore {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_settle_finite_private_reservation(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn finite_private_usage_status_for_api_key(
+        &self,
+        presented_api_key: &str,
+        claim_notice: bool,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_finite_private_usage_status_for_api_key(
+            &tx,
+            presented_api_key,
+            claim_notice,
+            now,
+        )
+        .await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn finite_private_usage_status_for_workos_user(
+        &self,
+        workos_user_id: &str,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result =
+            postgres_finite_private_usage_status_for_workos_user(&tx, workos_user_id, now).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn claim_finite_private_daily_reset_for_api_key(
+        &self,
+        presented_api_key: &str,
+        now: Option<String>,
+    ) -> CoreResult<FinitePrivateDailyResetResult> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result =
+            postgres_claim_finite_private_daily_reset_for_api_key(&tx, presented_api_key, now)
+                .await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn claim_finite_private_daily_reset_for_workos_user(
+        &self,
+        workos_user_id: &str,
+        now: Option<String>,
+    ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result =
+            postgres_claim_finite_private_daily_reset_for_workos_user(&tx, workos_user_id, now)
+                .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -4198,6 +4374,7 @@ fn finite_private_grant_from_row(row: &Row) -> CoreResult<FinitePrivateGrant> {
         })?,
         current_window_started_at: row.get("current_window_started_at"),
         current_window_used_units: row.get("current_window_used_units"),
+        burst_window_epoch: row.get("burst_window_epoch"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -5073,17 +5250,18 @@ where
         .query_one(
             "INSERT INTO finite_private_grants (
                id, user_id, limit_profile_id, status, current_window_started_at,
-               current_window_used_units, created_at, updated_at
+               current_window_used_units, burst_window_epoch, created_at, updated_at
              )
-             VALUES ($1, $2, $3, 'active', NULL, 0, $4::text::timestamptz, $4::text::timestamptz)
+             VALUES ($1, $2, $3, 'active', NULL, 0, 0, $4::text::timestamptz, $4::text::timestamptz)
              ON CONFLICT (user_id) DO UPDATE SET
                limit_profile_id = EXCLUDED.limit_profile_id,
                status = 'active',
                current_window_started_at = NULL,
                current_window_used_units = 0,
+               burst_window_epoch = finite_private_grants.burst_window_epoch + 1,
                updated_at = EXCLUDED.updated_at
              RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, created_at::text, updated_at::text",
+                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
             &[&grant_id, &user.id, &limit_profile_id, &now],
         )
         .await
@@ -7860,6 +8038,7 @@ fn finite_private_reservation_from_row(row: &Row) -> CoreResult<FinitePrivateRes
                 "invalid finite private reservation status {status}"
             ))
         })?,
+        burst_window_epoch: row.get("burst_window_epoch"),
         usage_formula_version: row.get("usage_formula_version"),
         upstream_status: row.get("upstream_status"),
         upstream_error_class: row.get("upstream_error_class"),
@@ -7880,7 +8059,7 @@ where
         "SELECT id, user_id, limit_profile_id, status,
                 CASE WHEN current_window_started_at IS NULL THEN NULL
                      ELSE {started} END AS current_window_started_at,
-                current_window_used_units,
+                current_window_used_units, burst_window_epoch,
                 {created} AS created_at, {updated} AS updated_at
          FROM finite_private_grants WHERE id = $1{lock}",
         started = rfc3339_col("current_window_started_at"),
@@ -7930,7 +8109,8 @@ where
         "SELECT id, request_id, api_key_id, grant_id, endpoint, model,
                 estimated_usage_units, reserved_usage_units, settled_usage_units,
                 settlement_kind, status, usage_formula_version, upstream_status,
-                upstream_error_class, {created} AS created_at, {updated} AS updated_at
+                upstream_error_class, burst_window_epoch,
+                {created} AS created_at, {updated} AS updated_at
          FROM finite_private_reservations WHERE id = $1{lock}",
         created = rfc3339_col("created_at"),
         updated = rfc3339_col("updated_at"),
@@ -8085,7 +8265,7 @@ where
              SET status = 'revoked', updated_at = $2::text::timestamptz
              WHERE id = $1
              RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, created_at::text, updated_at::text",
+                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
             &[&grant_id, &now],
         )
         .await
@@ -8134,12 +8314,13 @@ where
     let row = client
         .query_opt(
             "UPDATE finite_private_grants
-             SET current_window_started_at = NULL,
+             SET current_window_started_at = $2::text::timestamptz,
                  current_window_used_units = 0,
+                 burst_window_epoch = burst_window_epoch + 1,
                  updated_at = $2::text::timestamptz
              WHERE id = $1
              RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, created_at::text, updated_at::text",
+                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
             &[&grant_id, &now],
         )
         .await
@@ -8443,13 +8624,17 @@ where
 
     let (window_started_at, current_used_units, reset_at) =
         crate::finite_private_active_window(&grant, &profile, now_time)?;
+    let begins_new_epoch = crate::finite_private_begins_new_epoch(&grant, &window_started_at)?;
+    let reservation_epoch = grant.burst_window_epoch + i64::from(begins_new_epoch);
     let remaining_before = profile.burst_limit_units - current_used_units;
     if input.estimated_usage_units > remaining_before {
         let retry_after = (parse_time(&reset_at)? - now_time).whole_seconds().max(0);
+        let message =
+            crate::finite_private_limit_reached_message("burst window", &reset_at, retry_after);
         return Ok(crate::finite_private_denial(
             request_id,
             dashboard_url,
-            "Finite Private burst window limit reached.",
+            &message,
             "burst_window_limit_exceeded",
             Some(retry_after),
             Some(reset_at),
@@ -8464,10 +8649,12 @@ where
                     .unwrap_or_else(|_| now.clone())
             });
             let retry_after = (parse_time(&reset_at)? - now_time).whole_seconds().max(0);
+            let message =
+                crate::finite_private_limit_reached_message("weekly", &reset_at, retry_after);
             return Ok(crate::finite_private_denial(
                 request_id,
                 dashboard_url,
-                "Finite Private weekly limit reached.",
+                &message,
                 "weekly_limit_exceeded",
                 Some(retry_after),
                 Some(reset_at),
@@ -8481,9 +8668,16 @@ where
             "UPDATE finite_private_grants
              SET current_window_started_at = $2::text::timestamptz,
                  current_window_used_units = $3,
-                 updated_at = $4::text::timestamptz
+                 burst_window_epoch = $4,
+                 updated_at = $5::text::timestamptz
              WHERE id = $1",
-            &[&grant.id, &window_started_at, &new_used_units, &now],
+            &[
+                &grant.id,
+                &window_started_at,
+                &new_used_units,
+                &reservation_epoch,
+                &now,
+            ],
         )
         .await
         .map_err(store_error)?;
@@ -8497,10 +8691,10 @@ where
                id, request_id, api_key_id, grant_id, endpoint, model,
                estimated_usage_units, reserved_usage_units, settled_usage_units,
                settlement_kind, status, usage_formula_version, upstream_status,
-               upstream_error_class, created_at, updated_at
+               upstream_error_class, burst_window_epoch, created_at, updated_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $7, NULL, NULL, 'reserved', $8, NULL, NULL,
-                     $9::text::timestamptz, $9::text::timestamptz)",
+                     $9, $10::text::timestamptz, $10::text::timestamptz)",
             &[
                 &reservation_id,
                 &request_id,
@@ -8510,6 +8704,7 @@ where
                 &model,
                 &input.estimated_usage_units,
                 &usage_formula_version,
+                &reservation_epoch,
                 &now,
             ],
         )
@@ -8551,13 +8746,29 @@ where
     if existing.request_id != request_id {
         return Err(CoreError::FinitePrivateReservationNotFound);
     }
-    if existing.status == FinitePrivateReservationStatus::Settled {
-        return Err(CoreError::FinitePrivateReservationAlreadySettled);
-    }
     let settled_units = input
         .usage_units
         .unwrap_or(existing.reserved_usage_units)
         .max(0);
+    if existing.status == FinitePrivateReservationStatus::Settled {
+        let formula = crate::trim_or_fallback(
+            &input.usage_formula_version,
+            &existing.usage_formula_version,
+        );
+        if existing.settled_usage_units == Some(settled_units)
+            && existing.settlement_kind == Some(input.settlement)
+            && existing.usage_formula_version == formula
+            && existing.upstream_status == input.upstream_status
+            && existing.upstream_error_class
+                == trim_to_option(input.upstream_error_class.as_deref())
+        {
+            return Ok(SettleFinitePrivateReservationResult {
+                settled: true,
+                reservation_id,
+            });
+        }
+        return Err(CoreError::FinitePrivateReservationAlreadySettled);
+    }
     let delta = settled_units - existing.reserved_usage_units;
     // Adjust the grant's burst usage by the settle delta (clamped at 0).
     client
@@ -8565,8 +8776,13 @@ where
             "UPDATE finite_private_grants
              SET current_window_used_units = GREATEST(current_window_used_units + $2, 0),
                  updated_at = $3::text::timestamptz
-             WHERE id = $1",
-            &[&existing.grant_id, &delta, &now],
+             WHERE id = $1 AND burst_window_epoch = $4",
+            &[
+                &existing.grant_id,
+                &delta,
+                &now,
+                &existing.burst_window_epoch,
+            ],
         )
         .await
         .map_err(store_error)?;
@@ -8602,6 +8818,280 @@ where
         settled: true,
         reservation_id,
     })
+}
+
+async fn postgres_finite_private_grant_id_for_workos_user<C>(
+    client: &C,
+    workos_user_id: &str,
+) -> CoreResult<Option<String>>
+where
+    C: GenericClient + Sync,
+{
+    Ok(client
+        .query_opt(
+            "SELECT grant.id
+             FROM finite_private_grants grant
+             JOIN users usr ON usr.id = grant.user_id
+             WHERE usr.workos_user_id = $1 AND grant.status = 'active'",
+            &[&workos_user_id],
+        )
+        .await
+        .map_err(store_error)?
+        .map(|row| row.get("id")))
+}
+
+async fn postgres_finite_private_usage_status_for_api_key<C>(
+    client: &C,
+    presented_api_key: &str,
+    claim_notice: bool,
+    now: Option<String>,
+) -> CoreResult<Option<FinitePrivateUsageStatus>>
+where
+    C: GenericClient + Sync,
+{
+    let Some((_, grant)) = postgres_finite_private_key_and_grant(client, presented_api_key).await?
+    else {
+        return Ok(None);
+    };
+    postgres_finite_private_usage_status_for_grant(client, &grant.id, claim_notice, now)
+        .await
+        .map(Some)
+}
+
+async fn postgres_finite_private_usage_status_for_workos_user<C>(
+    client: &C,
+    workos_user_id: &str,
+    now: Option<String>,
+) -> CoreResult<Option<FinitePrivateUsageStatus>>
+where
+    C: GenericClient + Sync,
+{
+    let Some(grant_id) =
+        postgres_finite_private_grant_id_for_workos_user(client, workos_user_id).await?
+    else {
+        return Ok(None);
+    };
+    postgres_finite_private_usage_status_for_grant(client, &grant_id, false, now)
+        .await
+        .map(Some)
+}
+
+async fn postgres_finite_private_usage_status_for_grant<C>(
+    client: &C,
+    grant_id: &str,
+    claim_notice: bool,
+    now: Option<String>,
+) -> CoreResult<FinitePrivateUsageStatus>
+where
+    C: GenericClient + Sync,
+{
+    let now = now.unwrap_or(current_time_iso()?);
+    let now_time = parse_time(&now)?;
+    let grant = select_finite_private_grant(client, grant_id, false)
+        .await?
+        .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+    if grant.status != FinitePrivateGrantStatus::Active {
+        return Err(CoreError::FinitePrivateGrantNotActive);
+    }
+    let profile = select_finite_private_limit_profile(client, &grant.limit_profile_id)
+        .await?
+        .ok_or(CoreError::FinitePrivateLimitProfileNotFound)?;
+    let (window_started_at, current_used_units, reset_at) =
+        crate::finite_private_active_window(&grant, &profile, now_time)?;
+    let begins_new_epoch = crate::finite_private_begins_new_epoch(&grant, &window_started_at)?;
+    let epoch = grant.burst_window_epoch + i64::from(begins_new_epoch);
+    let settled_used_units: i64 = client
+        .query_one(
+            "SELECT COALESCE(SUM(settled_usage_units), 0)::bigint AS used_units
+             FROM finite_private_reservations
+             WHERE grant_id = $1
+               AND burst_window_epoch = $2
+               AND status = 'settled'
+               AND created_at >= $3::text::timestamptz",
+            &[&grant.id, &epoch, &window_started_at],
+        )
+        .await
+        .map_err(store_error)?
+        .get("used_units");
+    let notice = if claim_notice {
+        postgres_claim_finite_private_usage_notice(
+            client,
+            &grant.id,
+            epoch,
+            settled_used_units,
+            &profile,
+            &reset_at,
+            &now,
+        )
+        .await?
+    } else {
+        None
+    };
+    let daily_reset_used = client
+        .query_opt(
+            "SELECT 1
+             FROM finite_private_daily_resets
+             WHERE grant_id = $1
+               AND reset_day = ($2::text::timestamptz AT TIME ZONE 'UTC')::date",
+            &[&grant.id, &now],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some();
+    Ok(FinitePrivateUsageStatus {
+        burst_limit_units: profile.burst_limit_units,
+        burst_used_units: current_used_units.max(0),
+        burst_remaining_units: (profile.burst_limit_units - current_used_units).max(0),
+        burst_reset_at: reset_at,
+        free_daily_reset_available: !daily_reset_used,
+        free_daily_reset_available_again_at: crate::finite_private_next_daily_reset_at(now_time)?,
+        notice,
+    })
+}
+
+async fn postgres_claim_finite_private_usage_notice<C>(
+    client: &C,
+    grant_id: &str,
+    epoch: i64,
+    settled_used_units: i64,
+    profile: &FinitePrivateLimitProfile,
+    reset_at: &str,
+    now: &str,
+) -> CoreResult<Option<FinitePrivateUsageNotice>>
+where
+    C: GenericClient + Sync,
+{
+    let remaining = (profile.burst_limit_units - settled_used_units).max(0);
+    let threshold: Option<i16> =
+        if i128::from(remaining) * 100 <= i128::from(profile.burst_limit_units) * 10 {
+            Some(10)
+        } else if i128::from(remaining) * 100 <= i128::from(profile.burst_limit_units) * 25 {
+            Some(25)
+        } else {
+            None
+        };
+    let Some(threshold) = threshold else {
+        return Ok(None);
+    };
+    if threshold == 10 {
+        client
+            .execute(
+                "INSERT INTO finite_private_notice_claims (
+                   grant_id, burst_window_epoch, threshold_remaining_percent, claimed_at
+                 ) VALUES ($1, $2, 25, $3::text::timestamptz)
+                 ON CONFLICT DO NOTHING",
+                &[&grant_id, &epoch, &now],
+            )
+            .await
+            .map_err(store_error)?;
+    }
+    let claimed = client
+        .query_opt(
+            "INSERT INTO finite_private_notice_claims (
+               grant_id, burst_window_epoch, threshold_remaining_percent, claimed_at
+             ) VALUES ($1, $2, $3, $4::text::timestamptz)
+             ON CONFLICT DO NOTHING
+             RETURNING threshold_remaining_percent",
+            &[&grant_id, &epoch, &threshold, &now],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some();
+    if !claimed {
+        return Ok(None);
+    }
+    let retry_after = (parse_time(reset_at)? - parse_time(now)?)
+        .whole_seconds()
+        .max(0);
+    Ok(Some(FinitePrivateUsageNotice {
+        threshold_remaining_percent: i64::from(threshold),
+        message: format!(
+            "You have {threshold}% of your Finite Private burst limit remaining. Your usage resets at {reset_at} ({}).",
+            crate::finite_private_retry_after_label(retry_after)
+        ),
+    }))
+}
+
+async fn postgres_claim_finite_private_daily_reset_for_api_key<C>(
+    client: &C,
+    presented_api_key: &str,
+    now: Option<String>,
+) -> CoreResult<FinitePrivateDailyResetResult>
+where
+    C: GenericClient + Sync,
+{
+    let Some((_, grant)) = postgres_finite_private_key_and_grant(client, presented_api_key).await?
+    else {
+        return Err(CoreError::InvalidFinitePrivateApiKey);
+    };
+    postgres_claim_finite_private_daily_reset_for_grant(client, &grant.id, now).await
+}
+
+async fn postgres_claim_finite_private_daily_reset_for_workos_user<C>(
+    client: &C,
+    workos_user_id: &str,
+    now: Option<String>,
+) -> CoreResult<Option<FinitePrivateDailyResetResult>>
+where
+    C: GenericClient + Sync,
+{
+    let Some(grant_id) =
+        postgres_finite_private_grant_id_for_workos_user(client, workos_user_id).await?
+    else {
+        return Ok(None);
+    };
+    postgres_claim_finite_private_daily_reset_for_grant(client, &grant_id, now)
+        .await
+        .map(Some)
+}
+
+async fn postgres_claim_finite_private_daily_reset_for_grant<C>(
+    client: &C,
+    grant_id: &str,
+    now: Option<String>,
+) -> CoreResult<FinitePrivateDailyResetResult>
+where
+    C: GenericClient + Sync,
+{
+    let now = now.unwrap_or(current_time_iso()?);
+    let grant = select_finite_private_grant(client, grant_id, true)
+        .await?
+        .ok_or(CoreError::FinitePrivateGrantNotFound)?;
+    if grant.status != FinitePrivateGrantStatus::Active {
+        return Err(CoreError::FinitePrivateGrantNotActive);
+    }
+    let performed = client
+        .query_opt(
+            "INSERT INTO finite_private_daily_resets (grant_id, reset_day, claimed_at)
+             VALUES (
+               $1,
+               ($2::text::timestamptz AT TIME ZONE 'UTC')::date,
+               $2::text::timestamptz
+             )
+             ON CONFLICT DO NOTHING
+             RETURNING grant_id",
+            &[&grant_id, &now],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some();
+    if performed {
+        client
+            .execute(
+                "UPDATE finite_private_grants
+                 SET current_window_started_at = $2::text::timestamptz,
+                     current_window_used_units = 0,
+                     burst_window_epoch = burst_window_epoch + 1,
+                     updated_at = $2::text::timestamptz
+                 WHERE id = $1",
+                &[&grant_id, &now],
+            )
+            .await
+            .map_err(store_error)?;
+    }
+    let status =
+        postgres_finite_private_usage_status_for_grant(client, grant_id, false, Some(now)).await?;
+    Ok(FinitePrivateDailyResetResult { performed, status })
 }
 
 async fn postgres_finite_private_admin_audit_events<C>(
@@ -8646,7 +9136,8 @@ where
         "SELECT id, user_id, limit_profile_id, status,
                 CASE WHEN current_window_started_at IS NULL THEN NULL
                      ELSE {started} END AS current_window_started_at,
-                current_window_used_units, {created} AS created_at, {updated} AS updated_at
+                current_window_used_units, burst_window_epoch,
+                {created} AS created_at, {updated} AS updated_at
          FROM finite_private_grants
          ORDER BY created_at, id",
         started = rfc3339_col("current_window_started_at"),
@@ -10100,6 +10591,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_finite_private_default_survives_reapply_and_n_minus_one_schema() {
+        with_isolated_postgres(|store| async move {
+            // Reapplying the current concat is how this service migrates on
+            // every startup. A rolled-back N-1 binary would then replay 0010,
+            // which still names the old 50M policy. The compatibility trigger
+            // must preserve the doubled limit in both cases.
+            store.migrate().await.unwrap();
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.batch_execute(include_str!(
+                "../migrations/0010_align_finite_private_generous.sql"
+            ))
+            .await
+            .unwrap();
+
+            let old_limit: i64 = raw
+                .query_one(
+                    "SELECT burst_limit_units FROM finite_private_limit_profiles WHERE id = 'finite-private-generous'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            let new_limit: i64 = raw
+                .query_one(
+                    "SELECT burst_limit_units FROM finite_private_limit_profiles WHERE id = 'finite-private-generous-v2'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(old_limit, 100_000_000);
+            assert_eq!(new_limit, 100_000_000);
+            let usage_index_exists: bool = raw
+                .query_one(
+                    "SELECT to_regclass('finite_private_reservations_grant_status_epoch_created_idx') IS NOT NULL",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert!(usage_index_exists);
+
+            let run = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let raw_key = format!("fpk_live_schema_replay_{run}");
+            let issued = store
+                .admin_issue_finite_private_friend_key(AdminIssueFinitePrivateFriendKeyInput {
+                    admin_verified_email: "schema-replay-admin@finite.vip".to_string(),
+                    friend_email: format!("schema-replay-{run}@finite.vip"),
+                    limit_profile_id: None,
+                    raw_key,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let profile_id: String = raw
+                .query_one(
+                    "SELECT limit_profile_id FROM finite_private_grants WHERE id = $1",
+                    &[&issued.grant.id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(profile_id, "finite-private-generous-v2");
+
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_finite_private_same_window_reservations_share_epoch_and_settle() {
+        with_isolated_postgres(|store| async move {
+            let issued = store
+                .admin_issue_finite_private_friend_key(AdminIssueFinitePrivateFriendKeyInput {
+                    admin_verified_email: "epoch-admin@finite.vip".to_string(),
+                    friend_email: "epoch-user@finite.vip".to_string(),
+                    limit_profile_id: None,
+                    raw_key: "fpk_live_postgres_epoch".to_string(),
+                    now: Some("2026-07-21T12:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+
+            let reserve =
+                |request_id: &str, units: i64, now: &str| ReserveFinitePrivateUsageInput {
+                    request_id: request_id.to_string(),
+                    presented_api_key: "fpk_live_postgres_epoch".to_string(),
+                    endpoint: "/v1/chat/completions".to_string(),
+                    model: "glm-5.2".to_string(),
+                    estimated_prompt_tokens: units,
+                    estimated_completion_tokens: 0,
+                    estimated_usage_units: units,
+                    usage_formula_version: "v1".to_string(),
+                    dashboard_url: "https://finite.computer/dashboard".to_string(),
+                    now: Some(now.to_string()),
+                };
+            let first = store
+                .reserve_finite_private_usage(reserve(
+                    "req-postgres-epoch-1",
+                    30_000_000,
+                    "2026-07-21T12:00:01Z",
+                ))
+                .await
+                .unwrap();
+            let second = store
+                .reserve_finite_private_usage(reserve(
+                    "req-postgres-epoch-2",
+                    30_000_000,
+                    "2026-07-21T12:01:00Z",
+                ))
+                .await
+                .unwrap();
+
+            let settle = |reservation_id: String, request_id: &str, units: i64, now: &str| {
+                SettleFinitePrivateReservationInput {
+                    reservation_id,
+                    request_id: request_id.to_string(),
+                    settlement: crate::FinitePrivateSettlementKind::Actual,
+                    prompt_tokens: Some(units),
+                    completion_tokens: Some(0),
+                    usage_units: Some(units),
+                    usage_formula_version: "v1".to_string(),
+                    upstream_status: Some(200),
+                    upstream_error_class: None,
+                    now: Some(now.to_string()),
+                }
+            };
+            store
+                .settle_finite_private_reservation(settle(
+                    first.reservation_id.unwrap(),
+                    "req-postgres-epoch-1",
+                    20_000_000,
+                    "2026-07-21T12:01:10Z",
+                ))
+                .await
+                .unwrap();
+            store
+                .settle_finite_private_reservation(settle(
+                    second.reservation_id.unwrap(),
+                    "req-postgres-epoch-2",
+                    55_000_000,
+                    "2026-07-21T12:01:20Z",
+                ))
+                .await
+                .unwrap();
+
+            let status = store
+                .finite_private_usage_status_for_api_key(
+                    "fpk_live_postgres_epoch",
+                    true,
+                    Some("2026-07-21T12:02:00Z".to_string()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.burst_used_units, 75_000_000);
+            assert_eq!(
+                status
+                    .notice
+                    .as_ref()
+                    .map(|notice| notice.threshold_remaining_percent),
+                Some(25)
+            );
+
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let epochs = raw
+                .query(
+                    "SELECT DISTINCT burst_window_epoch
+                     FROM finite_private_reservations
+                     WHERE grant_id = $1
+                     ORDER BY burst_window_epoch",
+                    &[&issued.grant.id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                epochs.len(),
+                1,
+                "same-window reservations must share one epoch"
+            );
+            let settled_count: i64 = raw
+                .query_one(
+                    "SELECT COUNT(*) FROM finite_private_reservations
+                     WHERE grant_id = $1 AND status = 'settled'",
+                    &[&issued.grant.id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(settled_count, 2);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn postgres_admin_ops_runtime_overview_and_finite_private_lifecycle() {
         with_isolated_postgres(|store| async move {
             let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
@@ -10265,6 +10963,34 @@ mod tests {
             assert_eq!(issued.api_key.status, FinitePrivateApiKeyStatus::Active);
             assert_ne!(issued.api_key.key_hash, raw_key);
 
+            let usage = store
+                .finite_private_usage_status_for_api_key(
+                    &raw_key,
+                    true,
+                    Some("2026-07-21T12:00:00Z".to_string()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(usage.burst_limit_units, 100_000_000);
+            assert!(usage.free_daily_reset_available);
+            let daily_reset = store
+                .claim_finite_private_daily_reset_for_api_key(
+                    &raw_key,
+                    Some("2026-07-21T12:01:00Z".to_string()),
+                )
+                .await
+                .unwrap();
+            assert!(daily_reset.performed);
+            let repeated_reset = store
+                .claim_finite_private_daily_reset_for_api_key(
+                    &raw_key,
+                    Some("2026-07-21T12:02:00Z".to_string()),
+                )
+                .await
+                .unwrap();
+            assert!(!repeated_reset.performed);
+
             let rotated = store
                 .admin_rotate_finite_private_api_key(AdminRotateFinitePrivateApiKeyInput {
                     admin_verified_email: admin_email.clone(),
@@ -10309,7 +11035,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(reset.current_window_used_units, 0);
-            assert!(reset.current_window_started_at.is_none());
+            assert!(reset.current_window_started_at.is_some());
 
             // Every admin action is durably audited with the admin actor.
             let events = store.finite_private_admin_audit_events().await.unwrap();

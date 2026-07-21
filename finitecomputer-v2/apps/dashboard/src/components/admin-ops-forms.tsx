@@ -139,7 +139,7 @@ export function AdminFriendKeyIssueForm() {
         <Input
           id="adminFriendKeyLimitProfile"
           name="limitProfileId"
-          placeholder="finite-private-generous"
+          placeholder="finite-private-generous-v2"
         />
       </div>
       <FormActionButton className="w-fit" pendingLabel="Issuing...">

@@ -6188,10 +6188,11 @@ mod tests {
             grant: finite_saas_core::FinitePrivateGrant {
                 id: "fp_grant_123".to_string(),
                 user_id: "user_123".to_string(),
-                limit_profile_id: "finite-private-generous".to_string(),
+                limit_profile_id: "finite-private-generous-v2".to_string(),
                 status: finite_saas_core::FinitePrivateGrantStatus::Active,
                 current_window_started_at: None,
                 current_window_used_units: 0,
+                burst_window_epoch: 0,
                 created_at: "2026-05-25T13:00:00Z".to_string(),
                 updated_at: "2026-05-25T13:00:00Z".to_string(),
             },
