@@ -40,7 +40,7 @@ admission-fence work and open lat3 directly with a 32-Agent hard limit.
 
 | Host | Current role and state | Next change |
 | --- | --- | --- |
-| `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Its Runner timer remains active for lifecycle work, but `FC_RUNNER_DRAIN=true` prevents new creation. A `/run`-only WireGuard peer, peer-scoped firewall rules, private proxy, and Core override connect lat3 to Core. The WireGuard key now also has a byte-identical root-only persistent copy. PR #134 declares the complete bridge, but the broad lat1 closure was not activated. Root and `/data` remain single-disk. | Keep the temporary overlay and Core override in place without rebooting. Activate the declarative bridge only with an accepted broader lat1 rollout or a separately reviewed next-boot plan. |
+| `finite-lat-1` (`64.34.82.77`) | NixOS control/app plane plus the Kata Runtimes for every existing Agent. Its Runner timer remains active for lifecycle work, but `FC_RUNNER_DRAIN=true` prevents new creation. The PR #134 WireGuard peer, peer-scoped firewall rules, private Core socket proxy, credential keyring Core, and root-only key are active declarative configuration; no `/run` bridge override remains. Both current system and system profile resolve to the exact merged closure. Root and `/data` remain single-disk. | Keep existing Agents in place. The next destructive storage step requires the accepted backup/empty-target restore gate and a separate maintenance window. |
 | `finite-lat-2` (`64.34.80.19`) | Ubuntu/Nix finite-mono CI Runner and sole approved x86_64 production Nix builder. | No role or storage change. Build the reviewed closures here. |
 | `finite-lat-3` (`207.188.7.157`) | NixOS `26.05.20260719.fd14620`, kernel 6.18.39. Healthy RAID1 root and `/data`, two ESPs, 64-GiB swapfile and zswap. The merged PR #134 closure is both active and the system profile. WireGuard has a current lat1 handshake and private Core health is 200. `FC_RUNNER_DRAIN=false`, `FC_RUNNER_MAX_SANDBOXES=32`, and the Runner timer is enabled declaratively. Repeated cycles return `idle`; containerd still has zero containers. | Accept up to 32 new Standard Agents. Keep existing Agents on lat1 and lat2 CI/build-only. |
 
@@ -114,14 +114,41 @@ The pinned lat3 nixpkgs revision is
   or restarted.
 - Lat1 candidate
   `/nix/store/i81dpv94lx2ppnmgc0n7kpz22zrvsv5p-nixos-system-finite-lat-1-25.11.20260630.b6018f8`
-  was built and copied but not activated. Dry activation would stop and start
+  initially failed the bounded live-switch gate. Dry activation would stop and start
   Brain, Core, Sites, Hosted Device, and Chat, restart systemd-networkd, and
   reload the firewall. The five application unit diffs each select a different
   binary store path, so this is a real broad rollout rather than harmless unit
-  relinking. The agreed boundary therefore makes the lat1 switch a no-go.
-- Result: lat3's own Runner schedule is reboot-persistent. The lat1 half of the
-  private bridge remains runtime-only; do not reboot lat1 until a broader
-  rollout or separately reviewed next-boot activation is accepted.
+  relinking. The rollout stopped until Paul explicitly authorized the broader
+  evening activation.
+- Immediately before activation, the service-consistent Hosted Web Chat
+  snapshot completed at
+  `/data/recovery-snapshots/hosted-web-chat/20260721T013053Z`; the old system
+  closure and all runtime bridge files were retained as the rollback boundary.
+  Both Runner timers were stopped with their services idle.
+- The first activation completed the application and network switch, but its
+  newly enabled lat1 Runner timer fired before Core finished binding. That one
+  drained Runner cycle received connection-refused and made the activation
+  wrapper report failure. Core and every application were already healthy;
+  the Runner was reset and then repeatedly returned authenticated
+  `runner is draining`. No rollback or durable-state repair was required.
+- Runtime network files, the Core `ExecStart` drop-in, transient proxy, and old
+  firewall rules were removed. The active networkd units, private proxy socket,
+  Core unit, and peer-scoped firewall rules now come only from the system
+  closure. A second dry activation was empty.
+- The PR-head closure embedded `49b94bb` in FiniteChat. Lat2 therefore built
+  exact merged revision `f5feb0401f0264ea00f10e23ac8877d37680bbbd` as
+  `/nix/store/yrpvrnp8a3h65hcmnk46jgxg563fmp28-nixos-system-finite-lat-1-25.11.20260630.b6018f8`.
+  Its only live delta was FiniteChat's source revision. After a fresh snapshot
+  at `/data/recovery-snapshots/hosted-web-chat/20260721T013700Z`, that closure
+  was activated; Chat reports `source_commit=f5feb0401f02`.
+- Final verification found zero failed units; all Core, private Core, Chat,
+  Hosted Device, Brain, and Sites health checks pass. All 34 Runtime rows
+  remain. Creation/control ordered hashes and the exact 27-container/task
+  inventories match pre-activation; Postgres, containerd, and Caddy did not
+  restart. Lat1 remains creation-drained, while lat3 is undrained at its hard
+  limit of 32.
+- Result: both halves of the private bridge and both Runner schedules are now
+  reboot-persistent and declarative.
 
 ### finite-lat-3 storage truth
 
@@ -330,3 +357,4 @@ Append only decisive checkpoints here:
 | 2026-07-20 | One synthetic Agent handoff and persistence check | Waived by owner |
 | 2026-07-20 | PR #134 merged; exact lat3 closure activated with declarative Runner timer | Pass |
 | 2026-07-20 | Exact lat1 persistence closure dry activation | No-go: broad application restart set |
+| 2026-07-21 | Owner-authorized evening lat1 rollout; exact merged closure and declarative bridge | Pass |
