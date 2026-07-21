@@ -1397,7 +1397,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       );
       await page.waitForURL(/\/dashboard\/machines\/runtime_removable-kata-bot$/u);
       assert.equal(
-        await page.getByRole("button", { name: "Remove agent" }).count(),
+        await page.getByRole("button", { name: "Retire agent" }).count(),
         0,
         "ordinary destroy must stay hidden without an explicit Runtime Retirement capability"
       );

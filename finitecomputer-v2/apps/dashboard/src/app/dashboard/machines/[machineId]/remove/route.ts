@@ -29,8 +29,6 @@ export async function POST(request: Request, context: RouteContext) {
 
   if (
     !access?.coreProject ||
-    // Operator-only maintenance for now; mirrors the admin-gated UI section.
-    !access.viewer.isAdmin ||
     !coreProjectSupportsRetirement(access.coreProject) ||
     !access.canRetireRuntime
   ) {

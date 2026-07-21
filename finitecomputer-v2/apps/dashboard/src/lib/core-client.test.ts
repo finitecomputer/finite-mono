@@ -32,7 +32,21 @@ import {
   type CoreRuntimeCapabilities,
   type CoreVisibleProject,
   loadCoreSourceHostRelayEndpoint,
+  runtimeRetirementProductEnabled,
 } from "./core-client";
+
+test("owner-facing retirement has an independent default-off product gate", () => {
+  const previous = process.env.FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT;
+  delete process.env.FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT;
+  assert.equal(runtimeRetirementProductEnabled(), false);
+  process.env.FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT = "true";
+  assert.equal(runtimeRetirementProductEnabled(), true);
+  if (previous === undefined) {
+    delete process.env.FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT;
+  } else {
+    process.env.FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT = previous;
+  }
+});
 
 test("Launch Code issuance requests default to Standard and carry explicit Confidential", () => {
   assert.deepEqual(

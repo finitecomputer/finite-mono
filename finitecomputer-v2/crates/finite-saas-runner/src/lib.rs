@@ -3,10 +3,11 @@ use finite_saas_core::{
     CompleteRuntimeControlRequestInput, FailAgentCreationRequestInput,
     FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RegisterAgentCreationRuntimeInput, RelayHeartbeat, RunnerClass, RunnerLeaseCapacity,
-    RuntimeArtifact, RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope,
-    RuntimeCapabilitiesV1, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
-    RuntimeResourceClass, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
+    RegisterAgentCreationRuntimeInput, RelayHeartbeat, RenewRuntimeControlRequestInput,
+    RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
+    RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeResourceClass,
+    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
     runtime_relay_token_hash as hash_runtime_relay_token,
 };
 #[cfg(test)]
@@ -29,15 +30,17 @@ mod apple_container;
 mod kata;
 pub mod phala;
 mod phala_inventory;
+pub mod retirement;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
-pub use kata::{KataConfig, KataLaunchPlan, KataLauncher};
+pub use kata::{KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig};
 pub use phala::{PhalaConfig, PhalaLauncher};
 
 const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_RUNTIME_READY_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
+const RUNTIME_RETIREMENT_LEASE_SECONDS: i64 = 60 * 60;
 // The deployed limiter domain keeps the historical kimi-k2-6 name but now
 // serves glm-5-2 (see docs/service-dependencies.md, Finite Private Routing
 // Debt). Do not rename the URL as a cosmetic change.
@@ -72,13 +75,20 @@ pub(crate) fn state_preserving_runtime_capabilities(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
+    kata_runtime_capabilities_with_retirement(false)
+}
+
+pub(crate) fn kata_runtime_capabilities_with_retirement(
+    runtime_retirement: bool,
+) -> RuntimeCapabilitiesEnvelope {
     RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
         restart: true,
         recover_known_good_chat: true,
         runtime_upgrade: true,
         stop: true,
-        runtime_retirement: false,
+        runtime_retirement,
     })
 }
 
@@ -747,30 +757,70 @@ where
         };
         let restart_options = RuntimeRestartOptions::new(desired_environment)?
             .with_secret_environment(desired_secret_environment)?;
-        let operation_result: Result<Option<RuntimeUpgradeFacts>, RunnerError> = match kind {
+        let operation_result: Result<RuntimeControlCompletionFacts, RunnerError> = match kind {
             RuntimeControlKind::Restart => self
                 .launcher
                 .restart_runtime(&lease, &restart_options)
-                .map(|()| None),
+                .map(|()| RuntimeControlCompletionFacts::None),
             RuntimeControlKind::RecoverKnownGoodChatRuntime => self
                 .launcher
                 .recover_known_good_chat_runtime(&lease, &restart_options)
-                .map(|()| None),
+                .map(|()| RuntimeControlCompletionFacts::None),
             RuntimeControlKind::Upgrade => self
                 .launcher
                 .upgrade_runtime(&lease, &restart_options)
-                .map(Some),
-            RuntimeControlKind::Stop => self.launcher.stop_runtime(&lease).map(|()| None),
-            RuntimeControlKind::Destroy => self.launcher.destroy_runtime(&lease).map(|()| None),
+                .map(RuntimeControlCompletionFacts::Upgrade),
+            RuntimeControlKind::Stop => self
+                .launcher
+                .stop_runtime(&lease)
+                .map(|()| RuntimeControlCompletionFacts::None),
+            RuntimeControlKind::Destroy => {
+                let runner_id = self.runner_id.clone();
+                let lease_token_for_renewal = lease_token.clone();
+                // Establish Core's maximum bounded lease before synchronous
+                // local manifest/ZIP work. Borg operations below renew this
+                // same lease every 30 seconds.
+                let lease_seconds = RUNTIME_RETIREMENT_LEASE_SECONDS;
+                let queue = &mut self.queue;
+                let mut renew_lease = || {
+                    queue
+                        .renew_runtime_control(
+                            &request_id,
+                            RenewRuntimeControlRequestInput {
+                                request_id: request_id.clone(),
+                                runner_id: runner_id.clone(),
+                                lease_token: lease_token_for_renewal.clone(),
+                                lease_seconds: Some(lease_seconds),
+                                now: None,
+                            },
+                        )
+                        .map(|_| ())
+                };
+                self.launcher
+                    .retire_runtime(&lease, &mut renew_lease)
+                    .map(|receipt| RuntimeControlCompletionFacts::Retirement(Box::new(receipt)))
+            }
         };
 
         match operation_result {
-            Ok(upgrade_facts) => match self.wait_for_runtime_control_readiness(
+            Ok(completion_facts) => match self.wait_for_runtime_control_readiness(
                 kind,
                 &source_machine_id,
                 previous_heartbeat.as_deref(),
             ) {
                 Ok(()) => {
+                    let upgrade_facts = match &completion_facts {
+                        RuntimeControlCompletionFacts::Upgrade(facts) => Some(facts),
+                        RuntimeControlCompletionFacts::None
+                        | RuntimeControlCompletionFacts::Retirement(_) => None,
+                    };
+                    let retirement_snapshot = match &completion_facts {
+                        RuntimeControlCompletionFacts::Retirement(receipt) => {
+                            Some((**receipt).clone())
+                        }
+                        RuntimeControlCompletionFacts::None
+                        | RuntimeControlCompletionFacts::Upgrade(_) => None,
+                    };
                     let runtime_capabilities = (kind == RuntimeControlKind::Upgrade).then(|| {
                         artifact_bounded_upgrade_runtime_capabilities(
                             self.launcher.runtime_capabilities(),
@@ -796,6 +846,7 @@ where
                             published_app_urls: upgrade_facts
                                 .as_ref()
                                 .map(|facts| facts.published_app_urls.clone()),
+                            retirement_snapshot,
                             now: None,
                         },
                     )?;
@@ -807,15 +858,11 @@ where
                 }
                 Err(error) => {
                     let failure_message = error.to_string();
-                    self.queue.fail_runtime_control(
+                    self.record_runtime_control_failure(
+                        kind,
                         &request_id,
-                        FailRuntimeControlRequestInput {
-                            request_id: request_id.clone(),
-                            runner_id: self.runner_id.clone(),
-                            lease_token,
-                            failure_message: failure_message.clone(),
-                            now: None,
-                        },
+                        &lease_token,
+                        &failure_message,
                     )?;
                     Ok(runtime_control_failed_outcome(
                         kind,
@@ -826,15 +873,11 @@ where
             },
             Err(error) => {
                 let failure_message = error.to_string();
-                self.queue.fail_runtime_control(
+                self.record_runtime_control_failure(
+                    kind,
                     &request_id,
-                    FailRuntimeControlRequestInput {
-                        request_id: request_id.clone(),
-                        runner_id: self.runner_id.clone(),
-                        lease_token,
-                        failure_message: failure_message.clone(),
-                        now: None,
-                    },
+                    &lease_token,
+                    &failure_message,
                 )?;
                 Ok(runtime_control_failed_outcome(
                     kind,
@@ -843,6 +886,39 @@ where
                 ))
             }
         }
+    }
+
+    fn record_runtime_control_failure(
+        &mut self,
+        kind: RuntimeControlKind,
+        request_id: &str,
+        lease_token: &str,
+        failure_message: &str,
+    ) -> Result<(), RunnerError> {
+        if kind == RuntimeControlKind::Destroy {
+            self.queue.retry_runtime_control(
+                request_id,
+                RetryRuntimeControlRequestInput {
+                    request_id: request_id.to_string(),
+                    runner_id: self.runner_id.clone(),
+                    lease_token: lease_token.to_string(),
+                    failure_message: failure_message.to_string(),
+                    now: None,
+                },
+            )?;
+        } else {
+            self.queue.fail_runtime_control(
+                request_id,
+                FailRuntimeControlRequestInput {
+                    request_id: request_id.to_string(),
+                    runner_id: self.runner_id.clone(),
+                    lease_token: lease_token.to_string(),
+                    failure_message: failure_message.to_string(),
+                    now: None,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     fn wait_for_runtime_control_readiness(
@@ -1020,6 +1096,18 @@ pub trait AgentCreationQueue {
         input: FailRuntimeControlRequestInput,
     ) -> Result<RuntimeControlRequest, RunnerError>;
 
+    fn renew_runtime_control(
+        &mut self,
+        request_id: &str,
+        input: RenewRuntimeControlRequestInput,
+    ) -> Result<RuntimeControlRequest, RunnerError>;
+
+    fn retry_runtime_control(
+        &mut self,
+        request_id: &str,
+        input: RetryRuntimeControlRequestInput,
+    ) -> Result<RuntimeControlRequest, RunnerError>;
+
     fn lease_agent_creation(
         &mut self,
         runner_id: &str,
@@ -1113,6 +1201,15 @@ pub trait RuntimeLauncher {
             "runtime destroy is not supported by this launcher".to_string(),
         ))
     }
+    fn retire_runtime(
+        &mut self,
+        _lease: &RuntimeControlLease,
+        _renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "runtime retirement is not supported by this launcher".to_string(),
+        ))
+    }
     fn launch(
         &mut self,
         lease: &AgentCreationLease,
@@ -1185,6 +1282,14 @@ where
 
     fn destroy_runtime(&mut self, lease: &RuntimeControlLease) -> Result<(), RunnerError> {
         (**self).destroy_runtime(lease)
+    }
+
+    fn retire_runtime(
+        &mut self,
+        lease: &RuntimeControlLease,
+        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+        (**self).retire_runtime(lease, renew_lease)
     }
 
     fn launch(
@@ -1303,6 +1408,12 @@ pub struct RuntimeUpgradeFacts {
     pub state_schema_version: String,
     pub runtime_host: String,
     pub published_app_urls: Vec<String>,
+}
+
+enum RuntimeControlCompletionFacts {
+    None,
+    Upgrade(RuntimeUpgradeFacts),
+    Retirement(Box<RuntimeRetirementSnapshotReceipt>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1919,6 +2030,28 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
                 runner_capacity: runner_capacity.cloned(),
                 now: None,
             },
+        )
+    }
+
+    fn renew_runtime_control(
+        &mut self,
+        request_id: &str,
+        input: RenewRuntimeControlRequestInput,
+    ) -> Result<RuntimeControlRequest, RunnerError> {
+        self.post_json(
+            &format!("/api/core/v1/runtime-control-requests/{}/renew", request_id),
+            &input,
+        )
+    }
+
+    fn retry_runtime_control(
+        &mut self,
+        request_id: &str,
+        input: RetryRuntimeControlRequestInput,
+    ) -> Result<RuntimeControlRequest, RunnerError> {
+        self.post_json(
+            &format!("/api/core/v1/runtime-control-requests/{}/retry", request_id),
+            &input,
         )
     }
 
@@ -4171,6 +4304,95 @@ mod tests {
     }
 
     #[test]
+    fn run_once_renews_and_completes_retirement_with_typed_receipt() {
+        let runtime_control =
+            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Destroy);
+        let receipt = RuntimeRetirementSnapshotReceipt {
+            schema: finite_saas_core::RUNTIME_RETIREMENT_SNAPSHOT_SCHEMA.to_string(),
+            request_id: runtime_control.request.id.clone(),
+            project_id: runtime_control.request.project_id.clone(),
+            agent_runtime_id: runtime_control.request.agent_runtime_id.clone(),
+            durable_state_id: "state-123".to_string(),
+            runtime_artifact_id: "artifact-v1".to_string(),
+            backend: finite_saas_core::RUNTIME_RETIREMENT_BACKEND_BORG.to_string(),
+            locator: finite_saas_core::runtime_retirement_archive_locator(
+                &runtime_control.request.id,
+            ),
+            zip_bytes: 10,
+            zip_sha256: "a".repeat(64),
+            manifest_sha256: "b".repeat(64),
+            created_at: "2026-05-25T13:00:00Z".to_string(),
+            verified_at: "2026-05-25T13:01:00Z".to_string(),
+            recovery_authority_id: "finite-assisted-v1".to_string(),
+            retention_policy: finite_saas_core::RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
+        };
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample())
+                .for_kata()
+                .with_retirement_result(Ok(receipt.clone())),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::RuntimeDestroyed {
+                request_id: runtime_control.request.id,
+                runtime_id: runtime_control.runtime.id,
+            }
+        );
+        assert_eq!(runner.queue.renewed_runtime_control.len(), 1);
+        assert_eq!(
+            runner.queue.renewed_runtime_control[0].lease_seconds,
+            Some(RUNTIME_RETIREMENT_LEASE_SECONDS)
+        );
+        assert_eq!(
+            runner.queue.completed_runtime_control[0].retirement_snapshot,
+            Some(receipt)
+        );
+        assert!(runner.queue.retried_runtime_control.is_empty());
+        assert!(runner.queue.failed_runtime_control.is_empty());
+    }
+
+    #[test]
+    fn retirement_failure_requeues_same_request_instead_of_terminal_failure() {
+        let runtime_control =
+            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Destroy);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample())
+                .for_kata()
+                .with_retirement_result(Err("synthetic archive failure".to_string())),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::RuntimeDestroyFailed {
+                request_id: runtime_control.request.id.clone(),
+                failure_message: "runtime launch failed: synthetic archive failure".to_string(),
+            }
+        );
+        assert_eq!(runner.queue.retried_runtime_control.len(), 1);
+        assert_eq!(
+            runner.queue.retried_runtime_control[0].request_id,
+            runtime_control.request.id
+        );
+        assert!(runner.queue.failed_runtime_control.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
+    }
+
+    #[test]
     fn run_once_fails_restart_when_runtime_does_not_publish_new_heartbeat() {
         let runtime_control = sample_runtime_control_lease("runtime_ctl_123");
         let mut runner = AgentCreationRunner::new(
@@ -5496,6 +5718,8 @@ mod tests {
         runtime_control_capacities: Vec<Option<RunnerLeaseCapacity>>,
         completed_runtime_control: Vec<CompleteRuntimeControlRequestInput>,
         failed_runtime_control: Vec<FailRuntimeControlRequestInput>,
+        renewed_runtime_control: Vec<RenewRuntimeControlRequestInput>,
+        retried_runtime_control: Vec<RetryRuntimeControlRequestInput>,
         provisioned: Vec<ProvisionFinitePrivateRuntimeKeyInput>,
         registered: Vec<RegisterAgentCreationRuntimeInput>,
         heartbeat_checks: Vec<String>,
@@ -5517,6 +5741,8 @@ mod tests {
                 runtime_control_capacities: Vec::new(),
                 completed_runtime_control: Vec::new(),
                 failed_runtime_control: Vec::new(),
+                renewed_runtime_control: Vec::new(),
+                retried_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
                 registered: Vec::new(),
                 heartbeat_checks: Vec::new(),
@@ -5538,6 +5764,8 @@ mod tests {
                 runtime_control_capacities: Vec::new(),
                 completed_runtime_control: Vec::new(),
                 failed_runtime_control: Vec::new(),
+                renewed_runtime_control: Vec::new(),
+                retried_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
                 registered: Vec::new(),
                 heartbeat_checks: Vec::new(),
@@ -5559,6 +5787,8 @@ mod tests {
                 runtime_control_capacities: Vec::new(),
                 completed_runtime_control: Vec::new(),
                 failed_runtime_control: Vec::new(),
+                renewed_runtime_control: Vec::new(),
+                retried_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
                 registered: Vec::new(),
                 heartbeat_checks: Vec::new(),
@@ -5618,6 +5848,24 @@ mod tests {
             input: FailRuntimeControlRequestInput,
         ) -> Result<RuntimeControlRequest, RunnerError> {
             self.failed_runtime_control.push(input);
+            Ok(sample_runtime_control_lease("runtime_ctl_123").request)
+        }
+
+        fn renew_runtime_control(
+            &mut self,
+            _request_id: &str,
+            input: RenewRuntimeControlRequestInput,
+        ) -> Result<RuntimeControlRequest, RunnerError> {
+            self.renewed_runtime_control.push(input);
+            Ok(sample_runtime_control_lease("runtime_ctl_123").request)
+        }
+
+        fn retry_runtime_control(
+            &mut self,
+            _request_id: &str,
+            input: RetryRuntimeControlRequestInput,
+        ) -> Result<RuntimeControlRequest, RunnerError> {
+            self.retried_runtime_control.push(input);
             Ok(sample_runtime_control_lease("runtime_ctl_123").request)
         }
 
@@ -5705,6 +5953,8 @@ mod tests {
         upgraded: Vec<String>,
         stopped: Vec<String>,
         destroyed: Vec<String>,
+        retired: Vec<String>,
+        retirement_result: Option<Result<RuntimeRetirementSnapshotReceipt, String>>,
         runner_capacity: RunnerLeaseCapacity,
         runner_class: RunnerClass,
         uses_core_heartbeat: bool,
@@ -5724,6 +5974,8 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
+                retired: Vec::new(),
+                retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
@@ -5746,6 +5998,8 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
+                retired: Vec::new(),
+                retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
@@ -5768,6 +6022,8 @@ mod tests {
                 upgraded: Vec::new(),
                 stopped: Vec::new(),
                 destroyed: Vec::new(),
+                retired: Vec::new(),
+                retirement_result: None,
                 runner_capacity: RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
@@ -5792,6 +6048,14 @@ mod tests {
             self.runner_capacity.runner_classes = vec![RunnerClass::Kata];
             self
         }
+
+        fn with_retirement_result(
+            mut self,
+            result: Result<RuntimeRetirementSnapshotReceipt, String>,
+        ) -> Self {
+            self.retirement_result = Some(result);
+            self
+        }
     }
 
     impl RuntimeLauncher for FakeLauncher {
@@ -5804,7 +6068,7 @@ mod tests {
 
         fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
             if self.runner_class == RunnerClass::Kata {
-                kata_runtime_capabilities()
+                kata_runtime_capabilities_with_retirement(self.retirement_result.is_some())
             } else {
                 state_preserving_runtime_capabilities(false)
             }
@@ -5890,6 +6154,19 @@ mod tests {
             self.destroyed.push(lease.runtime.source_machine_id.clone());
             self.restart_result
                 .clone()
+                .map_err(RunnerError::RuntimeLaunch)
+        }
+
+        fn retire_runtime(
+            &mut self,
+            lease: &RuntimeControlLease,
+            renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
+        ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+            self.retired.push(lease.runtime.source_machine_id.clone());
+            renew_lease()?;
+            self.retirement_result
+                .clone()
+                .unwrap_or_else(|| Err("retirement not configured".to_string()))
                 .map_err(RunnerError::RuntimeLaunch)
         }
 
