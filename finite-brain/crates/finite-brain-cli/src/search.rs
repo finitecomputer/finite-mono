@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -8,22 +8,26 @@ use finite_brain_core::portability::{
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use rustix::fs::{FlockOperation, flock};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AgentState, CliEnvironment, CliError, ConflictState, SyncChangeReport, SyncOnceReport,
+    AgentState, CliEnvironment, CliError, ConflictState, EmbeddingProviderAdapter,
+    EmbeddingProviderConfig, EmbeddingProviderInput, SyncChangeReport, SyncOnceReport,
     create_private_directory_if_missing, current_tree_root, read_agent_state,
-    read_working_tree_state, set_private_file_permissions, write_json,
+    read_working_tree_state, semantic_index, set_private_file_permissions, write_json,
 };
 
-const SEARCH_INDEX_VERSION: &str = "finitebrain-folder-search-v3";
+pub(crate) const SEARCH_INDEX_VERSION: &str = "finitebrain-folder-search-v3";
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const MAX_SEARCH_LIMIT: usize = 50;
 const MAX_INDEXED_MARKDOWN_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_INDEXED_FILES_PER_FOLDER: usize = 100_000;
 const MAX_SECTION_CHARS: usize = 12_000;
 const SECTION_OVERLAP_CHARS: usize = 500;
+const SEMANTIC_BUILD_LOCK: &str = "semantic-build.lock";
+const SEMANTIC_ADMISSION_LOCK: &str = "semantic-admission.lock";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,11 +51,15 @@ struct SearchEvidence {
     heading: Option<String>,
     excerpt: String,
     disposition: SearchDisposition,
-    signals: [&'static str; 1],
+    signals: Vec<&'static str>,
+    #[serde(skip)]
+    section_key: String,
     #[serde(skip)]
     normalized_bm25: f64,
     #[serde(skip)]
     raw_bm25: f64,
+    #[serde(skip)]
+    fusion_score: f64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
@@ -67,6 +75,7 @@ struct SearchOptions {
     query: String,
     folders: Vec<String>,
     limit: usize,
+    lexical_only: bool,
 }
 
 #[derive(Debug)]
@@ -86,6 +95,30 @@ struct MarkdownSection {
     body: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchIndexStatusReport {
+    folders: Vec<FolderSearchIndexStatus>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderSearchIndexStatus {
+    folder_id: String,
+    source_brain_id: Option<String>,
+    folder_path: String,
+    #[serde(flatten)]
+    semantic: semantic_index::SemanticStatus,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SemanticRefreshReport {
+    pub(crate) selected_folders: usize,
+    pub(crate) rebuilt_folders: usize,
+    pub(crate) failed_folders: usize,
+}
+
 pub(crate) fn search<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -97,19 +130,19 @@ pub(crate) fn search<W: Write>(
     let tree = read_working_tree_state(&root)?;
     let folders = select_readable_folders(&tree, &options.folders)?;
     reconcile_search_indexes(&root)?;
-    let mut evidence = Vec::new();
+    let mut lexical_evidence = Vec::new();
     for folder in &folders {
         let path = folder_index_path(&root, folder);
         let mut connection = open_folder_index(&path)?;
         let _ = initialize_index_schema(&connection, folder)?;
-        evidence.extend(search_folder_index(
+        lexical_evidence.extend(search_folder_index(
             &mut connection,
             folder,
             &options.query,
             MAX_SEARCH_LIMIT,
         )?);
     }
-    evidence.sort_by(|left, right| {
+    lexical_evidence.sort_by(|left, right| {
         right
             .normalized_bm25
             .total_cmp(&left.normalized_bm25)
@@ -119,13 +152,24 @@ pub(crate) fn search<W: Write>(
             .then(left.page_path.cmp(&right.page_path))
             .then(left.heading_ancestry.cmp(&right.heading_ancestry))
     });
+    let (mut evidence, mode) = if options.lexical_only {
+        (lexical_evidence, "lexical")
+    } else {
+        hybrid_evidence(
+            &root,
+            &folders,
+            &options.query,
+            lexical_evidence,
+            env.embedding_provider.as_ref(),
+        )
+    };
     evidence.truncate(options.limit);
     for (index, result) in evidence.iter_mut().enumerate() {
         result.rank = index + 1;
     }
     let report = SearchReport {
         query: options.query,
-        mode: "lexical",
+        mode,
         searched_folders: folders
             .iter()
             .map(|folder| {
@@ -144,14 +188,126 @@ pub(crate) fn search<W: Write>(
     }
 }
 
+pub(crate) fn search_index<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let (action, selectors) = parse_search_index_options(args)?;
+    let root = current_tree_root(env)?;
+    reconcile_search_indexes(&root)?;
+    let tree = read_working_tree_state(&root)?;
+    let folders = select_readable_folders(&tree, &selectors)?;
+    if action != "status" && folders.len() != 1 {
+        return Err(CliError::InvalidInput(format!(
+            "search-index {action} requires exactly one --folder selector"
+        )));
+    }
+    for folder in &folders {
+        let path = folder_index_path(&root, folder);
+        let connection = open_folder_index(&path)?;
+        initialize_index_schema(&connection, folder)?;
+        match action {
+            "enable" => semantic_index::enable(&connection)?,
+            "disable" => {
+                let admission = open_semantic_lock(&path, SEMANTIC_ADMISSION_LOCK)?;
+                flock(&admission, FlockOperation::LockExclusive).map_err(lock_error)?;
+                semantic_index::disable(&connection)?;
+            }
+            "status" => {}
+            _ => unreachable!("search-index action was validated"),
+        }
+    }
+    let report = SearchIndexStatusReport {
+        folders: folders
+            .into_iter()
+            .map(|folder| {
+                let path = folder_index_path(&root, folder);
+                let connection = open_folder_index(&path)?;
+                Ok(FolderSearchIndexStatus {
+                    folder_id: folder.folder_id.clone(),
+                    source_brain_id: folder.source_brain_id.clone(),
+                    folder_path: folder.path.clone(),
+                    semantic: semantic_index::status(&connection)?,
+                })
+            })
+            .collect::<Result<_, CliError>>()?,
+    };
+    if json {
+        write_json(output, &report)
+    } else {
+        for folder in &report.folders {
+            writeln!(
+                output,
+                "{} enabled={} lifecycle={:?} vectors={}/{}{}",
+                folder.folder_path,
+                folder.semantic.enabled,
+                folder.semantic.lifecycle,
+                folder.semantic.current_vectors,
+                folder.semantic.current_sections,
+                folder
+                    .semantic
+                    .model
+                    .as_ref()
+                    .map_or_else(String::new, |model| { format!(" model={model}") })
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn parse_search_index_options(args: &[String]) -> Result<(&str, Vec<String>), CliError> {
+    let action = args
+        .first()
+        .map(String::as_str)
+        .ok_or(CliError::MissingArgument("search-index command"))?;
+    if !matches!(action, "status" | "enable" | "disable") {
+        return Err(CliError::InvalidCommand(format!("search-index {action}")));
+    }
+    let mut selectors = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--folder" => {
+                selectors.push(required_search_option(args, index, "--folder")?.to_owned());
+                index += 2;
+            }
+            value if value.starts_with("--folder=") => {
+                let value = value.trim_start_matches("--folder=");
+                if value.is_empty() {
+                    return Err(CliError::MissingArgument("--folder"));
+                }
+                selectors.push(value.to_owned());
+                index += 1;
+            }
+            value => {
+                return Err(CliError::InvalidInput(format!(
+                    "unknown search-index option {value}"
+                )));
+            }
+        }
+    }
+    if action != "status" && selectors.len() != 1 {
+        return Err(CliError::InvalidInput(format!(
+            "search-index {action} requires exactly one --folder selector"
+        )));
+    }
+    Ok((action, selectors))
+}
+
 fn parse_search_options(args: &[String]) -> Result<SearchOptions, CliError> {
     let mut query = None;
     let mut folders = Vec::new();
     let mut limit = DEFAULT_SEARCH_LIMIT;
+    let mut lexical_only = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--lexical-only" => index += 1,
+            "--lexical-only" => {
+                lexical_only = true;
+                index += 1;
+            }
             "--folder" => {
                 let value = required_search_option(args, index, "--folder")?;
                 folders.push(value.to_owned());
@@ -198,6 +354,7 @@ fn parse_search_options(args: &[String]) -> Result<SearchOptions, CliError> {
         query,
         folders,
         limit,
+        lexical_only,
     })
 }
 
@@ -293,6 +450,145 @@ pub(crate) fn reconcile_search_indexes(root: &Path) -> Result<usize, CliError> {
     }
     remove_unreadable_folder_indexes(root, &tree)?;
     Ok(changed)
+}
+
+/// Revoke semantic admission before an access-loss manifest is published.
+/// The returned guards keep the transition linearized until the caller has
+/// atomically replaced `working-tree-state.json`.
+pub(crate) fn revoke_semantic_admission_before_state_publish(
+    root: &Path,
+    next: &BrainWorkingTreeStateManifest,
+) -> Result<Vec<File>, CliError> {
+    let state_path = root.join(".finitebrain/working-tree-state.json");
+    if !state_path.exists() {
+        return Ok(Vec::new());
+    }
+    let prior = read_working_tree_state(root)?;
+    let readable_next = next
+        .folder_roots
+        .iter()
+        .filter(|folder| folder.can_read && !folder.metadata_only)
+        .map(|folder| (folder.source_brain_id.as_deref(), folder.folder_id.as_str()))
+        .collect::<BTreeSet<_>>();
+    let mut guards = Vec::new();
+    for folder in prior
+        .folder_roots
+        .iter()
+        .filter(|folder| folder.can_read && !folder.metadata_only)
+        .filter(|folder| {
+            !readable_next.contains(&(folder.source_brain_id.as_deref(), folder.folder_id.as_str()))
+        })
+    {
+        let index_path = folder_index_path(root, folder);
+        let Some(directory) = index_path.parent() else {
+            continue;
+        };
+        if !directory.exists() {
+            continue;
+        }
+        let admission = open_semantic_lock(&index_path, SEMANTIC_ADMISSION_LOCK)?;
+        flock(&admission, FlockOperation::LockExclusive).map_err(lock_error)?;
+        if index_path.is_file() {
+            match open_folder_index(&index_path) {
+                Ok(connection) => semantic_index::disable(&connection)?,
+                Err(CliError::SearchIndexCorrupt(_)) => {
+                    // A corrupt derived index cannot admit a valid semantic
+                    // build; reconciliation removes it after publication.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        guards.push(admission);
+    }
+    Ok(guards)
+}
+
+/// Refresh disposable semantic generations outside the sync path. Failures are
+/// isolated to the selected Folder and recorded only as a non-content class so
+/// BM25 and sync remain available.
+pub(crate) fn refresh_semantic_indexes(
+    root: &Path,
+    provider_config: &EmbeddingProviderConfig,
+) -> Result<SemanticRefreshReport, CliError> {
+    reconcile_search_indexes(root)?;
+    let tree = read_working_tree_state(root)?;
+    let provider = EmbeddingProviderAdapter::new(provider_config.clone()).ok();
+    let mut report = SemanticRefreshReport {
+        selected_folders: 0,
+        rebuilt_folders: 0,
+        failed_folders: 0,
+    };
+    for folder in tree
+        .folder_roots
+        .iter()
+        .filter(|folder| folder.can_read && !folder.metadata_only)
+    {
+        let path = folder_index_path(root, folder);
+        let build_lock = match open_semantic_lock(&path, SEMANTIC_BUILD_LOCK) {
+            Ok(lock) => lock,
+            Err(_) => {
+                report.failed_folders += 1;
+                continue;
+            }
+        };
+        if flock(&build_lock, FlockOperation::LockExclusive).is_err() {
+            report.failed_folders += 1;
+            continue;
+        }
+        let admission_lock = match open_semantic_lock(&path, SEMANTIC_ADMISSION_LOCK) {
+            Ok(lock) => lock,
+            Err(_) => {
+                report.failed_folders += 1;
+                continue;
+            }
+        };
+        let admission_path = semantic_lock_path(&path, SEMANTIC_ADMISSION_LOCK)?;
+        let connection = match open_folder_index(&path).and_then(|connection| {
+            initialize_index_schema(&connection, folder)?;
+            Ok(connection)
+        }) {
+            Ok(connection) => connection,
+            Err(_) => {
+                report.failed_folders += 1;
+                continue;
+            }
+        };
+        let status = match semantic_index::status(&connection) {
+            Ok(status) => status,
+            Err(_) => {
+                report.failed_folders += 1;
+                continue;
+            }
+        };
+        if !status.enabled {
+            continue;
+        }
+        report.selected_folders += 1;
+        let result = provider.as_ref().map_or_else(
+            || {
+                Err(CliError::EmbeddingProvider(
+                    "provider configuration was invalid".to_owned(),
+                ))
+            },
+            |provider| {
+                semantic_index::build_generation(
+                    &connection,
+                    provider,
+                    &admission_lock,
+                    &admission_path,
+                )
+            },
+        );
+        match result {
+            Ok(true) => report.rebuilt_folders += 1,
+            Ok(false) => {}
+            Err(_) => {
+                report.failed_folders += 1;
+                let _ = semantic_index::record_failure(&connection, "provider_or_index");
+            }
+        }
+    }
+    Ok(report)
 }
 
 /// Apply one successful sync report to existing indexes without walking every Folder.
@@ -559,6 +855,9 @@ fn reconcile_folder_index_with_count(
         .filter(|path| !current_paths.contains(path.as_str()))
     {
         transaction
+            .execute("DELETE FROM semantic_vectors WHERE page_path = ?1", [stale])
+            .map_err(search_index_error)?;
+        transaction
             .execute("DELETE FROM sections WHERE page_path = ?1", [stale])
             .map_err(search_index_error)?;
         transaction
@@ -591,6 +890,12 @@ fn reconcile_folder_index_with_count(
         {
             transaction
                 .execute(
+                    "DELETE FROM semantic_vectors WHERE page_path = ?1 AND section_key = ?2",
+                    params![&page.path, stale_key],
+                )
+                .map_err(search_index_error)?;
+            transaction
+                .execute(
                     "DELETE FROM sections WHERE page_path = ?1 AND section_key = ?2",
                     params![&page.path, stale_key],
                 )
@@ -599,13 +904,26 @@ fn reconcile_folder_index_with_count(
         }
         for section in &sections {
             let heading_ancestry = serde_json::to_string(&section.heading_ancestry)?;
-            let section_hash = section_fingerprint(section, disposition);
+            let section_hash = section_fingerprint(section);
             if known_sections
                 .get(&section.key)
                 .is_some_and(|known_hash| known_hash == &section_hash)
             {
+                transaction
+                    .execute(
+                        "UPDATE sections SET disposition = ?1
+                          WHERE page_path = ?2 AND section_key = ?3",
+                        params![disposition, &page.path, &section.key],
+                    )
+                    .map_err(search_index_error)?;
                 continue;
             }
+            transaction
+                .execute(
+                    "DELETE FROM semantic_vectors WHERE page_path = ?1 AND section_key = ?2",
+                    params![&page.path, &section.key],
+                )
+                .map_err(search_index_error)?;
             transaction
                 .execute(
                     "DELETE FROM sections WHERE page_path = ?1 AND section_key = ?2",
@@ -772,6 +1090,10 @@ fn initialize_index_schema(
             )
             .map_err(search_index_error)?;
     }
+    semantic_index::ensure_schema(connection)?;
+    if !schema_is_current {
+        semantic_index::invalidate_for_section_format(connection)?;
+    }
     Ok(!schema_is_current)
 }
 
@@ -801,6 +1123,12 @@ fn delete_indexed_page(
     transaction: &rusqlite::Transaction<'_>,
     page_path: &str,
 ) -> Result<usize, CliError> {
+    transaction
+        .execute(
+            "DELETE FROM semantic_vectors WHERE page_path = ?1",
+            [page_path],
+        )
+        .map_err(search_index_error)?;
     let sections = transaction
         .execute("DELETE FROM sections WHERE page_path = ?1", [page_path])
         .map_err(search_index_error)?;
@@ -839,6 +1167,12 @@ fn reconcile_page_sections(
     {
         transaction
             .execute(
+                "DELETE FROM semantic_vectors WHERE page_path = ?1 AND section_key = ?2",
+                params![page_path, stale],
+            )
+            .map_err(search_index_error)?;
+        transaction
+            .execute(
                 "DELETE FROM sections WHERE page_path = ?1 AND section_key = ?2",
                 params![page_path, stale],
             )
@@ -847,13 +1181,26 @@ fn reconcile_page_sections(
     }
     for section in sections {
         let heading_ancestry = serde_json::to_string(&section.heading_ancestry)?;
-        let section_hash = section_fingerprint(section, disposition);
+        let section_hash = section_fingerprint(section);
         if known_sections
             .get(&section.key)
             .is_some_and(|known_hash| known_hash == &section_hash)
         {
+            transaction
+                .execute(
+                    "UPDATE sections SET disposition = ?1
+                      WHERE page_path = ?2 AND section_key = ?3",
+                    params![disposition, page_path, &section.key],
+                )
+                .map_err(search_index_error)?;
             continue;
         }
+        transaction
+            .execute(
+                "DELETE FROM semantic_vectors WHERE page_path = ?1 AND section_key = ?2",
+                params![page_path, &section.key],
+            )
+            .map_err(search_index_error)?;
         transaction
             .execute(
                 "DELETE FROM sections WHERE page_path = ?1 AND section_key = ?2",
@@ -1236,13 +1583,12 @@ fn assign_section_keys(sections: &mut [MarkdownSection]) {
     }
 }
 
-fn section_fingerprint(section: &MarkdownSection, disposition: &str) -> String {
+fn section_fingerprint(section: &MarkdownSection) -> String {
     let mut hasher = Sha256::new();
     for value in [
         section.page_title.as_str(),
         section.heading.as_deref().unwrap_or(""),
         section.body.as_str(),
-        disposition,
     ] {
         hasher.update(value.len().to_le_bytes());
         hasher.update(value.as_bytes());
@@ -1263,7 +1609,7 @@ fn search_folder_index(
     let fts_query = fts_query(query).expect("validated search query");
     let mut statement = connection
         .prepare(
-            "SELECT page_path, page_title, heading_ancestry, heading,
+            "SELECT section_key, page_path, page_title, heading_ancestry, heading,
                     snippet(sections, 6, '', '', ' … ', 24), disposition,
                     bm25(sections, 0.0, 0.0, 3.0, 4.0, 2.0, 2.0, 1.0, 0.0, 0.0)
              FROM sections WHERE sections MATCH ?1
@@ -1273,22 +1619,24 @@ fn search_folder_index(
         .map_err(search_index_error)?;
     let rows = statement
         .query_map(params![fts_query, limit as i64], |row| {
-            let ancestry_json: String = row.get(2)?;
-            let disposition: String = row.get(5)?;
+            let ancestry_json: String = row.get(3)?;
+            let disposition: String = row.get(6)?;
             Ok(SearchEvidence {
                 rank: 0,
                 folder_id: folder.folder_id.clone(),
                 source_brain_id: folder.source_brain_id.clone(),
                 folder_path: folder.path.clone(),
-                page_path: row.get(0)?,
-                page_title: row.get(1)?,
+                page_path: row.get(1)?,
+                page_title: row.get(2)?,
                 heading_ancestry: serde_json::from_str(&ancestry_json).unwrap_or_default(),
-                heading: row.get(3)?,
-                excerpt: row.get(4)?,
+                heading: row.get(4)?,
+                excerpt: row.get(5)?,
                 disposition: parse_disposition(&disposition),
-                signals: ["lexical"],
+                signals: vec!["lexical"],
+                section_key: row.get(0)?,
                 normalized_bm25: 0.0,
-                raw_bm25: row.get(6)?,
+                raw_bm25: row.get(7)?,
+                fusion_score: 0.0,
             })
         })
         .map_err(search_index_error)?;
@@ -1305,6 +1653,126 @@ fn search_folder_index(
         }
     }
     Ok(evidence)
+}
+
+fn hybrid_evidence(
+    root: &Path,
+    folders: &[&WorkingTreeFolderRoot],
+    query: &str,
+    lexical: Vec<SearchEvidence>,
+    provider_config: Option<&EmbeddingProviderConfig>,
+) -> (Vec<SearchEvidence>, &'static str) {
+    let Some(provider_config) = provider_config else {
+        return (lexical, "lexical");
+    };
+    let has_active_generation = folders.iter().any(|folder| {
+        let path = folder_index_path(root, folder);
+        open_folder_index(&path)
+            .and_then(|connection| semantic_index::active_contract(&connection))
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if !has_active_generation {
+        return (lexical, "lexical");
+    }
+    let Ok(provider) = EmbeddingProviderAdapter::new(provider_config.clone()) else {
+        return (lexical, "lexical");
+    };
+    let Ok(query_embedding) = provider.embed(&[EmbeddingProviderInput::query("query-0", query)])
+    else {
+        return (lexical, "lexical");
+    };
+
+    let mut semantic = Vec::<SearchEvidence>::new();
+    for folder in folders {
+        let path = folder_index_path(root, folder);
+        let Ok(connection) = open_folder_index(&path) else {
+            continue;
+        };
+        let candidates = match semantic_index::semantic_candidates(
+            &connection,
+            &query_embedding,
+            MAX_SEARCH_LIMIT,
+        ) {
+            Ok(candidates) => candidates,
+            Err(_) => {
+                let _ = semantic_index::record_failure(&connection, "corrupt_or_incompatible");
+                continue;
+            }
+        };
+        semantic.extend(candidates.into_iter().map(|candidate| SearchEvidence {
+            rank: 0,
+            folder_id: folder.folder_id.clone(),
+            source_brain_id: folder.source_brain_id.clone(),
+            folder_path: folder.path.clone(),
+            page_path: candidate.page_path,
+            page_title: candidate.page_title,
+            heading_ancestry: candidate.heading_ancestry,
+            heading: candidate.heading,
+            excerpt: candidate.excerpt,
+            disposition: parse_disposition(&candidate.disposition),
+            signals: vec!["semantic"],
+            section_key: candidate.section_key,
+            normalized_bm25: 0.0,
+            raw_bm25: 0.0,
+            fusion_score: candidate.similarity as f64,
+        }));
+    }
+    if semantic.is_empty() {
+        return (lexical, "lexical");
+    }
+    semantic.sort_by(|left, right| {
+        right
+            .fusion_score
+            .total_cmp(&left.fusion_score)
+            .then(left.folder_id.cmp(&right.folder_id))
+            .then(left.source_brain_id.cmp(&right.source_brain_id))
+            .then(left.page_path.cmp(&right.page_path))
+            .then(left.section_key.cmp(&right.section_key))
+    });
+
+    type EvidenceIdentity = (Option<String>, String, String, String);
+    let identity = |evidence: &SearchEvidence| -> EvidenceIdentity {
+        (
+            evidence.source_brain_id.clone(),
+            evidence.folder_id.clone(),
+            evidence.page_path.clone(),
+            evidence.section_key.clone(),
+        )
+    };
+    let mut fused = BTreeMap::<EvidenceIdentity, SearchEvidence>::new();
+    for (position, mut evidence) in lexical.into_iter().enumerate() {
+        evidence.fusion_score = reciprocal_rank(position + 1);
+        fused.insert(identity(&evidence), evidence);
+    }
+    for (position, mut evidence) in semantic.into_iter().enumerate() {
+        let semantic_score = reciprocal_rank(position + 1);
+        let key = identity(&evidence);
+        if let Some(existing) = fused.get_mut(&key) {
+            existing.fusion_score += semantic_score;
+            existing.signals = vec!["lexical", "semantic"];
+        } else {
+            evidence.fusion_score = semantic_score;
+            fused.insert(key, evidence);
+        }
+    }
+    let mut evidence = fused.into_values().collect::<Vec<_>>();
+    evidence.sort_by(|left, right| {
+        right
+            .fusion_score
+            .total_cmp(&left.fusion_score)
+            .then(right.normalized_bm25.total_cmp(&left.normalized_bm25))
+            .then(left.folder_id.cmp(&right.folder_id))
+            .then(left.source_brain_id.cmp(&right.source_brain_id))
+            .then(left.page_path.cmp(&right.page_path))
+            .then(left.section_key.cmp(&right.section_key))
+    });
+    (evidence, "hybrid")
+}
+
+fn reciprocal_rank(rank: usize) -> f64 {
+    1.0 / (60.0 + rank as f64)
 }
 
 fn fts_query(query: &str) -> Option<String> {
@@ -1331,12 +1799,13 @@ fn write_search_report<W: Write>(output: &mut W, report: &SearchReport) -> Resul
             .unwrap_or_default();
         writeln!(
             output,
-            "{}. {}/{}{} [{}; lexical]",
+            "{}. {}/{}{} [{}; {}]",
             result.rank,
             result.folder_path,
             result.page_path,
             heading,
-            disposition_name(result.disposition)
+            disposition_name(result.disposition),
+            result.signals.join("+")
         )?;
         writeln!(output, "   {}", result.excerpt.replace('\n', " "))?;
     }
@@ -1352,6 +1821,41 @@ fn folder_index_path(root: &Path, folder: &WorkingTreeFolderRoot) -> PathBuf {
     root.join(".finitebrain/search-indexes")
         .join(sha256_hex(identity.as_bytes()))
         .join("index.sqlite3")
+}
+
+fn open_semantic_lock(index_path: &Path, name: &str) -> Result<File, CliError> {
+    let path = semantic_lock_path(index_path, name)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| CliError::SearchIndex("Folder index has no directory".to_owned()))?;
+    create_private_directory_if_missing(directory)?;
+    if let Ok(metadata) = fs::symlink_metadata(&path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        return Err(CliError::SearchIndex(format!(
+            "refusing unsafe semantic lock {}",
+            path.display()
+        )));
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)?;
+    set_private_file_permissions(&path)?;
+    Ok(file)
+}
+
+fn semantic_lock_path(index_path: &Path, name: &str) -> Result<PathBuf, CliError> {
+    Ok(index_path
+        .parent()
+        .ok_or_else(|| CliError::SearchIndex("Folder index has no directory".to_owned()))?
+        .join(name))
+}
+
+fn lock_error(error: rustix::io::Errno) -> CliError {
+    CliError::SearchIndex(format!("semantic admission lock: {error}"))
 }
 
 fn remove_unreadable_folder_indexes(
@@ -1417,6 +1921,19 @@ fn remove_folder_index_directory(directory: &Path) -> Result<(), CliError> {
             directory.display()
         )));
     }
+    let index_path = directory.join("index.sqlite3");
+    let admission = open_semantic_lock(&index_path, SEMANTIC_ADMISSION_LOCK)?;
+    flock(&admission, FlockOperation::LockExclusive).map_err(lock_error)?;
+    if index_path.is_file() {
+        match open_folder_index(&index_path) {
+            Ok(connection) => semantic_index::disable(&connection)?,
+            Err(CliError::SearchIndexCorrupt(_)) => {
+                // Corrupt derived state cannot be disabled through SQLite. The
+                // exclusive admission barrier plus unlink below revokes it.
+            }
+            Err(error) => return Err(error),
+        }
+    }
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
         let name = path.file_name().and_then(|name| name.to_str());
@@ -1430,6 +1947,8 @@ fn remove_folder_index_directory(directory: &Path) -> Result<(), CliError> {
                         | "index.sqlite3-journal"
                         | "index.sqlite3-wal"
                         | "index.sqlite3-shm"
+                        | "semantic-build.lock"
+                        | "semantic-admission.lock"
                 )
             )
         {

@@ -29,6 +29,7 @@ use crate::{
     load_signer, read_agent_state, read_working_tree_state, server_url_for_command, sign_event,
     signed_json_request, signed_json_request_to_server, tag_vec, timestamp, timestamp_from_unix,
     unix_timestamp, write_agent_state, write_json_file, write_private_file_atomic,
+    write_working_tree_state,
 };
 
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
@@ -2064,7 +2065,10 @@ fn write_projection_files(
 ) -> Result<(), CliError> {
     for (relative_path, body) in files {
         let path = root.join(relative_path);
-        if relative_path.starts_with(".finitebrain/") {
+        if relative_path == ".finitebrain/working-tree-state.json" {
+            let state: BrainWorkingTreeStateManifest = serde_json::from_str(body)?;
+            write_working_tree_state(root, &state)?;
+        } else if relative_path.starts_with(".finitebrain/") {
             write_private_file_atomic(&path, body.as_bytes())?;
         } else {
             if let Some(parent) = path.parent() {
@@ -2851,6 +2855,7 @@ mod tests {
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(temp.path().join("finite-home")),
+            embedding_provider: None,
         };
         let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
             .unwrap();
@@ -3078,6 +3083,7 @@ mod tests {
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
         };
         let object_id = ObjectId::new("obj_remote000001").unwrap();
         let page_path = SafeRelativePath::new("page_path", "docs/from-envelope.md").unwrap();
@@ -3168,6 +3174,7 @@ mod tests {
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
         };
         let object_id = ObjectId::new("obj_mounted00001").unwrap();
         let page_path = SafeRelativePath::new("page_path", "compiled/share-brief.md").unwrap();
@@ -3338,6 +3345,7 @@ mod tests {
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
         };
         let export = CliEncryptedBrainExport {
             brain: CliExportBrain {

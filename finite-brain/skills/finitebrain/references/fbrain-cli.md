@@ -39,6 +39,7 @@ fbrain status [--json]
 fbrain conflicts
 fbrain resolve <id>
 fbrain search <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]
+fbrain search-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list|grant|revoke
@@ -99,6 +100,7 @@ fbrain sync now --json
 fbrain conflicts --json
 fbrain resolve <conflict-id>
 fbrain search "credential rotation" --json
+fbrain search-index status --json
 fbrain activity
 fbrain wiki check --json
 ```
@@ -128,8 +130,22 @@ Folder in one result list. Repeat `--folder` to deliberately narrow the scope;
 an unknown or unreadable Folder fails closed. When mounted Folders reuse an ID,
 use `<source-brain-id>:<folder-id>` to select one unambiguously. Results identify
 the Folder and source Brain, Page path and title, heading ancestry, excerpt,
-sync disposition, and lexical signal. The default is ten results and the
-maximum explicit limit is fifty.
+sync disposition, and the contributing `lexical`, `semantic`, or combined
+signals. The default is ten results and the maximum explicit limit is fifty.
+
+BM25 is always available. When the runtime supplies
+`FBRAIN_EMBEDDING_ENDPOINT` and `FBRAIN_EMBEDDING_BEARER_TOKEN` and a Folder has
+a current semantic generation, `search` embeds the query once and combines the
+lexical and semantic rankings. Missing, disabled, building, stale, corrupt,
+timed-out, or unavailable semantic state falls back to BM25 without failing the
+search or sync. `--lexical-only` bypasses the provider for diagnostics.
+
+Semantic indexing is selected by default for readable Folders. Inspect it with
+`search-index status`; `disable --folder` deletes that Folder's vectors but
+keeps BM25, while `enable --folder` durably schedules it for the foreground
+`daemon watch` worker to rebuild in the background. Status reports only
+lifecycle, model contract, and counts—not credentials or wiki text. Folder
+selectors use the same readable-Folder and mounted-source rules as `search`.
 
 The lexical index is private disposable state under `.finitebrain/`. It is
 maintained from live daemon saves, startup reconciliation, and sync, but it is
@@ -176,6 +192,8 @@ supervisor for long-running work. The default strategy is file-aware:
 initial sync, sync when readable Brain Working Tree markdown changes are
 detected, and bounded periodic remote polling. Use `--remote-poll-ticks 0` to
 disable periodic remote polling and `--poll-only` for legacy every-tick syncing.
+When an embedding provider is configured, semantic generations refresh on a
+separate background worker; provider work never runs inside the sync path.
 
 `daemon status --json` exposes `lastTickAt`, `lastError`, `tickCount`,
 `failureCount`, `retryBackoffMillis`, `watchStrategy`, and

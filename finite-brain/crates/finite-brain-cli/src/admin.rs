@@ -14,7 +14,7 @@ use crate::{
     APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
     SessionFolderKeyring, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
     normalize_folder_access, read_working_tree_state, sign_event, signed_json_request, tag_vec,
-    timestamp, unix_timestamp, write_json_file,
+    timestamp, unix_timestamp, write_working_tree_state,
 };
 
 pub(crate) fn fetch_brain_metadata(
@@ -315,7 +315,7 @@ pub(crate) fn update_local_folder_after_create(
         });
         tree.folder_roots
             .sort_by(|left, right| left.path.cmp(&right.path));
-        write_json_file(&root.join(".finitebrain/working-tree-state.json"), &tree)?;
+        write_working_tree_state(&root, &tree)?;
     }
     for subdir in [
         "",
