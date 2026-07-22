@@ -74,11 +74,13 @@ chat-electron-check:
     cd finitechat/apps/electron-chat && npm ci && npm run check
     cd finitecomputer-v2/apps/dashboard && npm ci && npm test && npm run lint && npm run build
 
-# Build an ad-hoc-signed internal macOS alpha. npm never invokes Cargo; this
-# root recipe supplies the exact release daemon copied into app resources.
+# Build the macOS Electron app. It is ad-hoc signed by default; release callers
+# supply FINITECHAT_CODESIGN_IDENTITY (and optionally a temporary keychain) for
+# Developer ID signing. npm never invokes Cargo; this recipe supplies the exact
+# release daemon copied into app resources.
 chat-electron-package:
     cargo build --locked --release -p finitechat-daemon
-    cd finitechat/apps/electron-chat && npm ci && FINITECHAT_DAEMON_BINARY="{{justfile_directory()}}/target/release/finitechatd" npm run package:mac-alpha
+    cd finitechat/apps/electron-chat && npm ci && FINITECHAT_DAEMON_BINARY="{{justfile_directory()}}/target/release/finitechatd" npm run package:mac
 
 # Opt-in Stripe test-mode clock E2E. Credentials come from the caller's
 # environment and the harness never prints their values.

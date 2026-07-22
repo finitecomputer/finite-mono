@@ -1,17 +1,14 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { sign } from "@electron/osx-sign";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(appRoot, "../../..");
-const electronApp = path.join(
-  appRoot,
-  "node_modules",
-  "electron",
-  "dist",
-  "Electron.app"
-);
+const electronExecutable = createRequire(import.meta.url)("electron");
+const electronApp = path.resolve(path.dirname(electronExecutable), "../..");
 const daemonBinary = path.resolve(
   process.env.FINITECHAT_DAEMON_BINARY || path.join(repoRoot, "target", "release", "finitechatd")
 );
@@ -82,12 +79,22 @@ info = replacePlistString(info, "CFBundleShortVersionString", packageJson.versio
 info = replacePlistString(info, "CFBundleVersion", packageJson.version);
 info = replacePlistString(
   info,
+  "NSMicrophoneUsageDescription",
+  "Finite Chat uses the microphone when you choose to use voice features."
+);
+info = replacePlistString(
+  info,
   "LSApplicationCategoryType",
   "public.app-category.social-networking"
 );
 fs.writeFileSync(infoPath, info);
 
-signAlphaBundle(outputApp, packagedDaemon);
+const signingIdentity = process.env.FINITECHAT_CODESIGN_IDENTITY?.trim();
+if (signingIdentity) {
+  await signReleaseBundle(outputApp, packagedDaemon, signingIdentity);
+} else {
+  signAlphaBundle(outputApp, packagedDaemon);
+}
 
 console.log(outputApp);
 
@@ -177,6 +184,32 @@ function signAlphaBundle(appPath, daemonPath) {
     "--verbose=2",
     appPath,
   ]);
+}
+
+async function signReleaseBundle(appPath, daemonPath, identity) {
+  const appEntitlements = path.join(appRoot, "build", "entitlements.mac.plist");
+  const daemonEntitlements = path.join(
+    appRoot,
+    "build",
+    "entitlements.daemon.plist"
+  );
+  await sign({
+    app: appPath,
+    identity,
+    keychain: process.env.FINITECHAT_CODESIGN_KEYCHAIN?.trim() || undefined,
+    optionsForFile(filePath) {
+      if (filePath === appPath) {
+        return { entitlements: appEntitlements };
+      }
+      if (filePath === daemonPath) {
+        return { entitlements: daemonEntitlements };
+      }
+      return null;
+    },
+    platform: "darwin",
+    preEmbedProvisioningProfile: false,
+    strictVerify: true,
+  });
 }
 
 function buildIcon(outputDirectory, resourceDirectory) {

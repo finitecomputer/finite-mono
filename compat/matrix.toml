@@ -12,9 +12,14 @@
 [field.finitechat-cli]
 # Released CLI versions believed installed in the field (hosted agents use
 # releases/latest at install time).
-released = ["v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3"]
+released = ["v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4"]
 install_url = "https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/"
-notes = "Hard-cut 2026-07-08: installers point at the finite-mono rolling alias. The pre-cut releases listed above were installed from the legacy repo URL; no live users depend on it. Server must keep accepting these clients until a deprecation is announced."
+notes = "Hard-cut 2026-07-08: installers point at the finite-mono rolling alias. The pre-cut releases listed above were installed from the legacy repo URL; no live users depend on it. v0.1.4 adds the signed and notarized Apple Silicon Electron client while preserving the CLI/server protocol. Server must keep accepting these clients until a deprecation is announced."
+
+[field.finitechat-electron]
+released = ["v0.1.4"]
+install_url = "https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest/finitechat-electron-macos-aarch64.zip"
+notes = "Developer ID-signed and Apple-notarized direct-download app for Apple Silicon. Electron is a distinct revocable Device on the user's existing Finite Chat account; v0.1.4 includes revoked-device recovery and microphone permission for upcoming voice features."
 
 [field.fsite-cli]
 released = ["v0.3.1", "v0.4.0"]
