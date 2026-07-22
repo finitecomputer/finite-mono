@@ -2,8 +2,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
 const { spawn } = require("node:child_process");
-const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, clipboard, ipcMain, net, protocol, safeStorage, session, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, protocol, safeStorage, session, shell } = require("electron");
 const {
   attachmentActionUsesBinaryTransport,
   forwardAttachmentUpload,
@@ -12,6 +11,21 @@ const {
   attachmentMediaScheme,
   parseAttachmentMediaUrl,
 } = require("./attachment-media.cjs");
+const {
+  MAX_DESKTOP_ACTION_BYTES,
+  assertDesktopChatAction,
+  dashboardDestination,
+  isAllowedUnprivilegedNavigation,
+  isDashboardDocumentUrl,
+  isDashboardOriginUrl,
+  isGoogleWorkspaceStartUrl,
+  normalizeDashboardBaseUrl,
+  parseAccountBinding,
+  parseDeviceLinkPublicRequest,
+  parseDeviceLinkPublicResponse,
+  parseLocalDaemonIdentity,
+  trustedDashboardIpcFrame,
+} = require("./dashboard-security.cjs");
 const {
   AccountSecretStore,
   DaemonUpdateRelay,
@@ -26,7 +40,8 @@ const {
 } = require("./daemon-process.cjs");
 
 let mainWindow = null;
-let pendingTargetUrl = null;
+let authWindow = null;
+let dashboardSession = null;
 let daemonSupervisor = null;
 let activeDeviceLink = null;
 let daemonFailure = null;
@@ -37,28 +52,32 @@ let quitAfterDaemonStops = false;
 let daemonShutdownPromise = null;
 let daemonUpdateRelay = null;
 let accountSecretStore = null;
+let localDeviceLifecycle = null;
+let verifiedLocalDevice = null;
+let localDeviceGeneration = 0;
+let deviceLinkCancellation = Promise.resolve();
+let lastDeviceLinkStatus = null;
 
-const rendererUrl = process.env.FINITECHAT_RENDERER_URL;
 const defaultServerUrl = process.env.FINITECHAT_SERVER_URL || "https://chat.finite.computer";
-const defaultDashboardUrl = process.env.FINITECHAT_DASHBOARD_URL || "https://finite.computer";
-const appProtocol = "finitechat-app";
-const desktopIpcConnection = "finitechat-desktop-ipc";
-const maxIpcActionBytes = 16 * 1024 * 1024;
+const defaultDashboardUrl = normalizeDashboardBaseUrl(
+  process.env.FINITECHAT_DASHBOARD_URL || "https://finite.computer"
+);
+const dashboardStartUrl = dashboardDestination(
+  defaultDashboardUrl,
+  process.env.FINITECHAT_DASHBOARD_PATH || "/dashboard"
+);
+if (!isDashboardDocumentUrl(dashboardStartUrl, defaultDashboardUrl)) {
+  throw new Error("FINITECHAT_DASHBOARD_PATH must stay inside /dashboard");
+}
+const dashboardPartition = "persist:finite-dashboard-v1";
+const deviceLinkPollIntervalMs = 750;
+const maxDashboardResponseBytes = 64 * 1024;
 
 if (process.env.FINITECHAT_USER_DATA_DIR) {
   app.setPath("userData", process.env.FINITECHAT_USER_DATA_DIR);
 }
 
 protocol.registerSchemesAsPrivileged([
-  {
-    scheme: appProtocol,
-    privileges: {
-      standard: true,
-      secure: true,
-      supportFetchAPI: true,
-      corsEnabled: true,
-    },
-  },
   {
     scheme: attachmentMediaScheme,
     privileges: {
@@ -70,75 +89,217 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-function createWindow() {
-  mainWindow = new BrowserWindow({
+function commonWindowOptions() {
+  return {
     width: 1280,
     height: 860,
     minWidth: 900,
     minHeight: 640,
     backgroundColor: "#f6f7f9",
     show: false,
-    title: "Finite Chat",
+    title: "Finite",
+  };
+}
+
+function showWindowWhenReady(window) {
+  window.once("ready-to-show", () => {
+    if (!window.isDestroyed()) {
+      window.show();
+      window.focus();
+    }
+  });
+}
+
+function hasTrustedDashboardWindow() {
+  return Boolean(
+    mainWindow
+    && !mainWindow.isDestroyed()
+    && !mainWindow.webContents.isDestroyed()
+    && isDashboardDocumentUrl(mainWindow.webContents.getURL(), defaultDashboardUrl)
+  );
+}
+
+function downloadDashboardAttachment(url) {
+  try {
+    parseAttachmentMediaUrl(url);
+  } catch {
+    return false;
+  }
+  if (!hasTrustedDashboardWindow()) {
+    return false;
+  }
+  mainWindow.webContents.downloadURL(url);
+  return true;
+}
+
+function createDashboardWindow(targetUrl = dashboardStartUrl) {
+  if (!isDashboardDocumentUrl(targetUrl, defaultDashboardUrl)) {
+    throw new Error("Finite dashboard tried to open an untrusted privileged document");
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    void mainWindow.loadURL(targetUrl);
+    mainWindow.show();
+    mainWindow.focus();
+    return mainWindow;
+  }
+
+  mainWindow = new BrowserWindow({
+    ...commonWindowOptions(),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
+      partition: dashboardPartition,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      webSecurity: true,
     },
   });
 
-  mainWindow.once("ready-to-show", () => {
-    mainWindow.show();
-    mainWindow.focus();
-  });
+  showWindowWhenReady(mainWindow);
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+  const transitionToAuth = (url) => {
+    const window = mainWindow;
+    if (!window || window.isDestroyed()) return;
+    mainWindow = null;
+    window.destroy();
+    createAuthWindow(url);
+  };
+  mainWindow.webContents.on("will-navigate", (event) => {
+    const url = event.url;
+    if (isDashboardDocumentUrl(url, defaultDashboardUrl)) return;
+    event.preventDefault();
+    if (downloadDashboardAttachment(url)) {
+      return;
+    } else if (isGoogleWorkspaceStartUrl(url, defaultDashboardUrl)) {
+      void shell.openExternal(url);
+    } else if (isDashboardOriginUrl(url, defaultDashboardUrl)) {
+      transitionToAuth(url);
+    } else if (url.startsWith("https://")) {
+      void shell.openExternal(url);
+    }
+  });
+  mainWindow.webContents.on("will-redirect", (event) => {
+    if (!event.isMainFrame) return;
+    const url = event.url;
+    if (isDashboardDocumentUrl(url, defaultDashboardUrl)) return;
+    event.preventDefault();
+    if (isAllowedUnprivilegedNavigation(url, defaultDashboardUrl)) {
+      transitionToAuth(url);
+    }
+  });
+  mainWindow.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+    if (!isMainFrame || isDashboardDocumentUrl(url, defaultDashboardUrl)) return;
+    if (isAllowedUnprivilegedNavigation(url, defaultDashboardUrl)) {
+      transitionToAuth(url);
+    }
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("https://")) {
-      shell.openExternal(url);
+    if (downloadDashboardAttachment(url)) {
+      // Custom-scheme content stays out of a new privileged renderer.
+    } else if (isDashboardDocumentUrl(url, defaultDashboardUrl)) {
+      void mainWindow?.loadURL(url);
+    } else if (isGoogleWorkspaceStartUrl(url, defaultDashboardUrl)) {
+      void shell.openExternal(url);
+    } else if (isDashboardOriginUrl(url, defaultDashboardUrl)) {
+      transitionToAuth(url);
+    } else if (url.startsWith("https://")) {
+      void shell.openExternal(url);
     }
     return { action: "deny" };
   });
-  if (rendererUrl) {
-    mainWindow.loadURL(rendererUrl);
-  } else {
-    mainWindow.loadURL(`${appProtocol}://app/index.html`);
-  }
+  void mainWindow.loadURL(targetUrl);
 
   mainWindow.webContents.once("did-finish-load", () => {
-    if (pendingTargetUrl) {
-      mainWindow.webContents.send("finitechat:target-url", pendingTargetUrl);
-    }
     maybeCaptureWindow();
   });
+  return mainWindow;
+}
+
+function createAuthWindow(targetUrl = dashboardStartUrl) {
+  if (!isAllowedUnprivilegedNavigation(targetUrl, defaultDashboardUrl)) {
+    throw new Error("Finite sign-in tried to open an invalid address");
+  }
+  invalidateLocalDeviceVerification({ cancelLink: true });
+  if (authWindow && !authWindow.isDestroyed()) {
+    void authWindow.loadURL(targetUrl);
+    authWindow.show();
+    authWindow.focus();
+    return authWindow;
+  }
+
+  authWindow = new BrowserWindow({
+    ...commonWindowOptions(),
+    webPreferences: {
+      partition: dashboardPartition,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  showWindowWhenReady(authWindow);
+  authWindow.on("closed", () => {
+    authWindow = null;
+  });
+  const enterDashboardIfReady = (url) => {
+    if (!isDashboardDocumentUrl(url, defaultDashboardUrl)) return;
+    const window = authWindow;
+    if (!window || window.isDestroyed()) return;
+    authWindow = null;
+    window.destroy();
+    createDashboardWindow(url);
+  };
+  authWindow.webContents.on("did-navigate", (_event, url) => enterDashboardIfReady(url));
+  authWindow.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
+    if (isMainFrame) enterDashboardIfReady(url);
+  });
+  authWindow.webContents.on(
+    "did-redirect-navigation",
+    (event) => {
+      if (event.isMainFrame) enterDashboardIfReady(event.url);
+    }
+  );
+  authWindow.webContents.on("will-navigate", (event) => {
+    if (!isAllowedUnprivilegedNavigation(event.url, defaultDashboardUrl)) {
+      event.preventDefault();
+    }
+  });
+  authWindow.webContents.on("will-redirect", (event) => {
+    if (!isAllowedUnprivilegedNavigation(event.url, defaultDashboardUrl)) {
+      event.preventDefault();
+    }
+  });
+  authWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedUnprivilegedNavigation(url, defaultDashboardUrl)) {
+      void authWindow?.loadURL(url);
+    }
+    return { action: "deny" };
+  });
+  void authWindow.loadURL(targetUrl);
+  return authWindow;
 }
 
 function repoRoot() {
-  return path.resolve(__dirname, "../../..");
-}
-
-function rendererRoot() {
-  return path.resolve(__dirname, "../dist");
-}
-
-function registerAppProtocol() {
-  protocol.handle(appProtocol, (request) => {
-    const url = new URL(request.url);
-    const pathname = decodeURIComponent(url.pathname === "/" ? "/index.html" : url.pathname);
-    const root = rendererRoot();
-    const filePath = path.normalize(path.join(root, pathname));
-    if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) {
-      return new Response("Not found", { status: 404 });
-    }
-    return net.fetch(pathToFileURL(filePath).toString());
-  });
+  return path.resolve(__dirname, "../../../..");
 }
 
 function registerAttachmentMediaProtocol() {
-  protocol.handle(attachmentMediaScheme, async (request) => {
+  dashboardSession.protocol.handle(attachmentMediaScheme, async (request) => {
     if (request.method !== "GET") {
       return new Response("Method not allowed", { status: 405 });
+    }
+    if (
+      !mainWindow
+      || mainWindow.isDestroyed()
+      || !isDashboardDocumentUrl(mainWindow.webContents.getURL(), defaultDashboardUrl)
+    ) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    const referrer = request.headers.get("referer");
+    if (referrer && !isDashboardOriginUrl(referrer, defaultDashboardUrl)) {
+      return new Response("Forbidden", { status: 403 });
     }
     let coordinates;
     try {
@@ -183,35 +344,20 @@ function registerAttachmentMediaProtocol() {
   });
 }
 
-function isAllowedNavigation(navigationUrl) {
-  const parsed = new URL(navigationUrl);
-  if (parsed.protocol === `${appProtocol}:`) {
-    return true;
-  }
-  if (parsed.protocol === `${attachmentMediaScheme}:`) {
-    try {
-      parseAttachmentMediaUrl(navigationUrl);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  if (rendererUrl && parsed.origin === new URL(rendererUrl).origin) {
-    return true;
-  }
-  return false;
-}
-
 function configureSessionSecurity() {
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
+  dashboardSession = session.fromPartition(dashboardPartition);
+  dashboardSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
     callback(false);
   });
-  app.on("web-contents-created", (_event, contents) => {
-    contents.on("will-navigate", (event, navigationUrl) => {
-      if (!isAllowedNavigation(navigationUrl)) {
-        event.preventDefault();
-      }
-    });
+  dashboardSession.setPermissionCheckHandler(() => false);
+  dashboardSession.setDevicePermissionHandler(() => false);
+  dashboardSession.webRequest.onBeforeRequest((details, callback) => {
+    if (details.resourceType === "mainFrame") {
+      const allowed = isAllowedUnprivilegedNavigation(details.url, defaultDashboardUrl);
+      callback({ cancel: !allowed });
+      return;
+    }
+    callback({});
   });
 }
 
@@ -269,27 +415,40 @@ function readDesktopSettings() {
 
 function writeDesktopSettings(settings) {
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
-  fs.writeFileSync(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  const temporaryPath = `${settingsPath()}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporaryPath, settingsPath());
 }
 
-function desktopOnboardingStatus() {
-  return {
-    completed: readDesktopSettings().onboardingCompleted === true,
-  };
+function pendingDeviceLink() {
+  const candidate = readDesktopSettings().pendingDeviceLink;
+  if (!candidate) return null;
+  try {
+    return parseDeviceLinkPublicRequest(candidate);
+  } catch {
+    throw new Error("Finite Chat desktop settings contain an invalid pending Device link");
+  }
 }
 
-function completeDesktopOnboarding() {
+function storePendingDeviceLink(value) {
   const settings = readDesktopSettings();
-  settings.onboardingCompleted = true;
+  settings.pendingDeviceLink = parseDeviceLinkPublicRequest(value);
   writeDesktopSettings(settings);
-  return desktopOnboardingStatus();
 }
 
-function resetDesktopOnboarding() {
+function clearPendingDeviceLink(expected) {
   const settings = readDesktopSettings();
-  settings.onboardingCompleted = false;
+  if (!settings.pendingDeviceLink) return;
+  const current = parseDeviceLinkPublicRequest(settings.pendingDeviceLink);
+  const requested = parseDeviceLinkPublicRequest(expected);
+  if (
+    current.link_session_id !== requested.link_session_id
+    || current.target_device_id !== requested.target_device_id
+  ) {
+    return;
+  }
+  delete settings.pendingDeviceLink;
   writeDesktopSettings(settings);
-  return desktopOnboardingStatus();
 }
 
 function secureStorageAvailable() {
@@ -324,22 +483,6 @@ function discardProvisionalAccountSecret() {
   }
 }
 
-function clearStoredAccountSecret() {
-  try {
-    identityStore().clear();
-  } catch (error) {
-    console.error(`failed to clear stored Finite identity: ${error.message}`);
-  }
-}
-
-function desktopIdentityStatus() {
-  return {
-    secureStorageAvailable: secureStorageAvailable(),
-    hasStoredAccountSecret: Boolean(readStoredAccountSecret()),
-    linking: Boolean(activeDeviceLink),
-  };
-}
-
 function daemonDeviceId() {
   if (process.env.FINITECHAT_DEVICE_ID) {
     if (!validDeviceId(process.env.FINITECHAT_DEVICE_ID)) {
@@ -355,7 +498,7 @@ function daemonDeviceId() {
 }
 
 function broadcastToRenderer(channel, value) {
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+  if (hasTrustedDashboardWindow()) {
     mainWindow.webContents.send(channel, value);
   }
 }
@@ -422,8 +565,22 @@ function createDaemonSupervisor(accountSecret) {
     cwd: app.isPackaged ? path.dirname(binaryPath) : repoRoot(),
     accountSecret,
     onUnexpectedExit: (error) => {
+      const reconnect = Boolean(verifiedLocalDevice);
+      invalidateLocalDeviceVerification();
+      const reconnectGeneration = localDeviceGeneration;
       stopUpdatePump();
       recordDaemonFailure(error);
+      if (reconnect && !quitAfterDaemonStops) {
+        setTimeout(() => {
+          if (
+            reconnectGeneration === localDeviceGeneration
+            && hasTrustedDashboardWindow()
+            && !quitAfterDaemonStops
+          ) {
+            void ensureLocalDevice().catch(() => {});
+          }
+        }, 250);
+      }
     },
   });
 }
@@ -555,7 +712,7 @@ function startDaemonProcessRuntime(startDaemonProcess) {
       }
       return started;
     },
-    dispatchDaemonAction,
+    dispatchDaemonAction: dispatchInternalDaemonAction,
   });
 }
 
@@ -570,33 +727,6 @@ function stopDaemon() {
     }
     if (daemonSupervisor) {
       await daemonSupervisor.stop();
-    }
-  });
-}
-
-function restartDaemon() {
-  return enqueueDaemonLifecycle(async () => {
-    stopUpdatePump();
-    const accountSecret = readStoredAccountSecret();
-    if (!accountSecret) {
-      if (daemonSupervisor) {
-        await daemonSupervisor.stop();
-        daemonSupervisor = null;
-      }
-      daemonFailure = null;
-      return;
-    }
-    try {
-      if (!daemonSupervisor) {
-        daemonSupervisor = createDaemonSupervisor(accountSecret);
-        await startDaemonProcessRuntime(() => daemonSupervisor.start());
-      } else {
-        await startDaemonProcessRuntime(() => daemonSupervisor.restart({ accountSecret }));
-      }
-    } catch (error) {
-      stopUpdatePump();
-      recordDaemonFailure(error);
-      throw error;
     }
   });
 }
@@ -620,24 +750,14 @@ async function requestDaemonState() {
   }
 }
 
-async function dispatchDaemonAction(action) {
-  if (!action || typeof action !== "object" || Array.isArray(action)) {
-    throw new Error("Finite Chat action is invalid");
-  }
-  if (attachmentActionUsesBinaryTransport(action)) {
-    throw new Error("Finite Chat attachments must use the binary upload transport");
-  }
-  const body = JSON.stringify(action);
-  if (Buffer.byteLength(body) > maxIpcActionBytes) {
-    throw new Error("Finite Chat action is too large");
-  }
+async function requestDaemonMutation(pathname, body) {
   if (!daemonSupervisor) {
     throw new Error(rendererDaemonError());
   }
   try {
     const requestGeneration = updateGeneration;
     const requestConnection = daemonSupervisor.connectionForUpdateStream();
-    const state = await daemonSupervisor.requestJson("/v1/app/actions", {
+    const state = await daemonSupervisor.requestJson(pathname, {
       method: "POST",
       body,
     });
@@ -650,6 +770,24 @@ async function dispatchDaemonAction(action) {
     }
     throw error;
   }
+}
+
+function dispatchInternalDaemonAction(action) {
+  const body = JSON.stringify(action);
+  if (typeof body !== "string" || Buffer.byteLength(body) > MAX_DESKTOP_ACTION_BYTES) {
+    throw new Error("Finite Chat internal action is invalid");
+  }
+  return requestDaemonMutation("/v1/app/actions", body);
+}
+
+function dispatchDaemonAction(action) {
+  const validated = assertDesktopChatAction(action);
+  if (attachmentActionUsesBinaryTransport(action)) {
+    throw new Error("Finite Chat attachments must use the binary upload transport");
+  }
+  return validated.operation === "StartTopicChatIntent"
+    ? requestDaemonMutation("/v1/app/new-chat", JSON.stringify(action.StartTopicChatIntent))
+    : requestDaemonMutation("/v1/app/actions", validated.encoded);
 }
 
 async function uploadDaemonAttachments(upload) {
@@ -699,48 +837,119 @@ async function uploadDaemonAttachments(upload) {
 }
 
 function deviceLinkStatus(status) {
+  lastDeviceLinkStatus = status;
   broadcastToRenderer("finitechat:device-link-status", status);
 }
 
-async function finishSuccessfulDeviceLink(link) {
-  if (activeDeviceLink !== link) {
-    return;
+async function dashboardJson(pathname, init = {}) {
+  if (!dashboardSession) {
+    throw new Error("Finite dashboard session is unavailable");
   }
-  activeDeviceLink = null;
+  const url = new URL(pathname, `${defaultDashboardUrl}/`);
+  if (url.origin !== defaultDashboardUrl || !url.pathname.startsWith("/api/")) {
+    throw new Error("Finite dashboard request address is invalid");
+  }
+  const headers = new Headers(init.headers);
+  headers.set("accept", "application/json");
+  if (typeof init.body === "string") {
+    headers.set("content-type", "application/json");
+  }
+  let response;
   try {
-    await restartDaemon();
-    deviceLinkStatus({ status: "linked" });
-  } catch {
-    deviceLinkStatus({
-      status: "failed",
-      message: "This desktop is linked, but its local runtime could not start. Restart Finite Chat to continue.",
+    response = await dashboardSession.fetch(url.toString(), {
+      ...init,
+      cache: "no-store",
+      credentials: "include",
+      headers,
+      signal: AbortSignal.timeout(15_000),
     });
+  } catch {
+    throw new Error("Finite dashboard is unavailable right now");
+  }
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new Error("Sign in again to prepare local chat on this desktop");
+    }
+    throw new Error("Finite dashboard could not prepare local chat right now");
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    throw new Error("Finite dashboard returned an invalid local-chat response");
+  }
+  if (!response.body) {
+    throw new Error("Finite dashboard returned an invalid local-chat response");
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxDashboardResponseBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error("Finite dashboard returned an invalid local-chat response");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error("Finite dashboard returned an invalid local-chat response");
   }
 }
 
-function finishFailedDeviceLink(link, error) {
-  if (activeDeviceLink !== link) {
-    return;
-  }
-  activeDeviceLink = null;
-  discardProvisionalAccountSecret();
-  deviceLinkStatus({
-    status: "failed",
-    message: deviceLinkFailureMessage(error),
+async function currentDashboardAccountBinding() {
+  return parseAccountBinding(await dashboardJson("/api/device-links/account-binding"));
+}
+
+async function dashboardDeviceLinkRequest(pathname, request) {
+  const expected = parseDeviceLinkPublicRequest(request);
+  const value = await dashboardJson(pathname, {
+    method: "POST",
+    body: JSON.stringify(expected),
   });
+  return parseDeviceLinkPublicResponse(value, expected);
 }
 
-async function beginDeviceLink() {
-  if (!secureStorageAvailable()) {
-    throw new Error("Secure storage is required to link this desktop");
+async function waitForDeviceLinkReady(request, initial = null, generation = null) {
+  const expected = parseDeviceLinkPublicRequest(request);
+  let current = initial ? parseDeviceLinkPublicResponse(initial, expected) : null;
+  while (true) {
+    if (generation !== null) assertLocalDeviceGeneration(generation);
+    if (!current) {
+      current = await dashboardDeviceLinkRequest("/api/device-links/status", expected);
+      if (generation !== null) assertLocalDeviceGeneration(generation);
+    }
+    if (current.status === "ready") {
+      return current;
+    }
+    if (
+      current.status === "expired"
+      || Date.now() >= current.expires_at_unix_seconds * 1_000
+    ) {
+      throw new Error("This desktop's automatic Device setup expired. Restart Finite and try again.");
+    }
+    deviceLinkStatus({
+      status: current.status === "joining_rooms" ? "joining_rooms" : "linking",
+    });
+    await delay(deviceLinkPollIntervalMs);
+    if (generation !== null) assertLocalDeviceGeneration(generation);
+    current = null;
   }
-  if (readStoredAccountSecret()) {
-    throw new Error("This desktop is already linked");
-  }
-  if (activeDeviceLink) {
-    return activeDeviceLink.begin();
-  }
+}
 
+async function createAndApproveDeviceLink(generation) {
+  assertLocalDeviceGeneration(generation);
+  if (!secureStorageAvailable()) {
+    throw new Error("Secure storage is required to prepare local chat on this desktop");
+  }
   const binaryPath = daemonBinaryPath();
   const link = new DeviceLinkSupervisor({
     spawnProcess: spawn,
@@ -753,37 +962,104 @@ async function beginDeviceLink() {
     promoteAccountSecret: async () => promoteProvisionalAccountSecret(),
   });
   activeDeviceLink = link;
-  let readyPromise;
   try {
-    readyPromise = link.begin();
-  } catch {
-    activeDeviceLink = null;
-    throw new Error("This desktop could not start device linking");
-  }
-  void link.completion.then(
-    () => finishSuccessfulDeviceLink(link),
-    (error) => finishFailedDeviceLink(link, error)
-  );
-  try {
-    const ready = await readyPromise;
+    assertLocalDeviceGeneration(generation);
+    deviceLinkStatus({ status: "linking" });
+    const ready = await link.begin();
+    assertLocalDeviceGeneration(generation);
     if (activeDeviceLink !== link) {
-      throw new Error("Finite Chat device link was cancelled");
+      throw new Error("Finite Chat Device setup was cancelled");
     }
-    deviceLinkStatus({ status: "waiting", ready });
-    return ready;
+    const request = parseDeviceLinkPublicRequest(ready);
+    storePendingDeviceLink(request);
+    const approved = await dashboardDeviceLinkRequest("/api/device-links/approve", request);
+    assertLocalDeviceGeneration(generation);
+    await link.completion;
+    assertLocalDeviceGeneration(generation);
+    return { request, approved };
   } catch (error) {
-    finishFailedDeviceLink(link, error);
-    throw new Error(deviceLinkFailureMessage(error, "This desktop could not start device linking"));
+    if (activeDeviceLink === link) {
+      await link.cancel().catch(() => {});
+    }
+    discardProvisionalAccountSecret();
+    throw new Error(deviceLinkFailureMessage(error, error?.message || "This desktop could not be linked"));
+  } finally {
+    if (activeDeviceLink === link) {
+      activeDeviceLink = null;
+    }
   }
 }
 
-async function openDeviceLinkApproval(approvalUrl) {
-  const expected = activeDeviceLink?.ready?.approval_url;
-  if (!expected || approvalUrl !== expected) {
-    throw new Error("Finite Chat device-link approval address is invalid");
+function assertLocalDeviceGeneration(generation) {
+  if (generation !== localDeviceGeneration) {
+    throw new Error("Finite dashboard session changed while local chat was being prepared");
   }
-  await shell.openExternal(expected);
-  return true;
+}
+
+function invalidateLocalDeviceVerification({ cancelLink = false } = {}) {
+  localDeviceGeneration += 1;
+  verifiedLocalDevice = null;
+  if (cancelLink) {
+    lastDeviceLinkStatus = null;
+    deviceLinkCancellation = deviceLinkCancellation
+      .then(() => cancelDeviceLink())
+      .catch(() => {});
+  }
+}
+
+async function ensureLocalDeviceNow(generation) {
+  await deviceLinkCancellation;
+  assertLocalDeviceGeneration(generation);
+  deviceLinkStatus({ status: "preparing" });
+  const binding = await currentDashboardAccountBinding();
+  assertLocalDeviceGeneration(generation);
+  let pending = pendingDeviceLink();
+  let initial = null;
+  if (!readStoredAccountSecret()) {
+    const linked = await createAndApproveDeviceLink(generation);
+    pending = linked.request;
+    initial = linked.approved;
+  }
+  assertLocalDeviceGeneration(generation);
+  await startDaemon();
+  assertLocalDeviceGeneration(generation);
+  if (pending) {
+    await waitForDeviceLinkReady(pending, initial, generation);
+    clearPendingDeviceLink(pending);
+  }
+  const state = await requestDaemonState();
+  assertLocalDeviceGeneration(generation);
+  const identity = parseLocalDaemonIdentity(state, binding.account_id);
+  deviceLinkStatus({ status: "ready" });
+  return { status: "ready", ...identity };
+}
+
+function ensureLocalDevice() {
+  if (verifiedLocalDevice) {
+    return Promise.resolve(verifiedLocalDevice);
+  }
+  const generation = localDeviceGeneration;
+  if (!localDeviceLifecycle || localDeviceLifecycle.generation !== generation) {
+    const promise = ensureLocalDeviceNow(generation)
+      .then((device) => {
+        assertLocalDeviceGeneration(generation);
+        verifiedLocalDevice = device;
+        return device;
+      })
+      .catch((error) => {
+        if (generation === localDeviceGeneration) {
+          deviceLinkStatus({ status: "failed", message: error.message });
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (localDeviceLifecycle?.promise === promise) {
+          localDeviceLifecycle = null;
+        }
+      });
+    localDeviceLifecycle = { generation, promise };
+  }
+  return localDeviceLifecycle.promise;
 }
 
 async function cancelDeviceLink() {
@@ -794,23 +1070,15 @@ async function cancelDeviceLink() {
   activeDeviceLink = null;
   await link.cancel();
   discardProvisionalAccountSecret();
-  deviceLinkStatus({ status: "cancelled" });
 }
 
-function findTargetUrl(argv) {
-  return argv.find((arg) => typeof arg === "string" && arg.startsWith("finite://")) || null;
-}
-
-function handleTargetUrl(url) {
-  if (!url || !url.startsWith("finite://")) {
-    return;
-  }
-  pendingTargetUrl = url;
-  if (mainWindow) {
-    mainWindow.webContents.send("finitechat:target-url", url);
+function focusAppWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.focus();
-  } else {
-    pendingTargetUrl = url;
+  } else if (authWindow && !authWindow.isDestroyed()) {
+    authWindow.focus();
+  } else if (app.isReady()) {
+    createAuthWindow();
   }
 }
 
@@ -819,45 +1087,29 @@ const gotLock = useSingleInstanceLock ? app.requestSingleInstanceLock() : true;
 if (!gotLock) {
   app.quit();
 } else {
-  const initialTargetUrl = findTargetUrl(process.argv);
-  if (initialTargetUrl) {
-    pendingTargetUrl = initialTargetUrl;
-  }
-
   if (useSingleInstanceLock) {
-    app.on("second-instance", (_event, argv) => {
-      const targetUrl = findTargetUrl(argv);
-      if (targetUrl) {
-        handleTargetUrl(targetUrl);
-      }
-    });
+    app.on("second-instance", () => focusAppWindow());
   }
 
-  app.on("open-url", (event, url) => {
+  // Older alpha bundles registered finite://. Do not interpret those invite
+  // payloads in the remote-dashboard shell; only bring the app forward.
+  app.on("open-url", (event) => {
     event.preventDefault();
-    handleTargetUrl(url);
+    focusAppWindow();
   });
 
   app.whenReady().then(async () => {
     discardProvisionalAccountSecret();
-    registerAppProtocol();
-    registerAttachmentMediaProtocol();
     configureSessionSecurity();
-    if (process.env.FINITECHAT_SKIP_PROTOCOL_REGISTRATION !== "1") {
-      if (process.defaultApp && process.argv.length >= 2) {
-        app.setAsDefaultProtocolClient("finite", process.execPath, [path.resolve(process.argv[1])]);
-      } else {
-        app.setAsDefaultProtocolClient("finite");
-      }
-    }
+    registerAttachmentMediaProtocol();
     await startDaemon().catch(() => {});
-    createWindow();
+    createAuthWindow();
   });
 
   app.on("activate", async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       await startDaemon().catch(() => {});
-      createWindow();
+      createAuthWindow();
     }
   });
 
@@ -882,89 +1134,58 @@ if (!gotLock) {
 }
 
 function assertTrustedIpcSender(event) {
-  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+  const frame = event.senderFrame;
+  if (
+    !mainWindow
+    || mainWindow.isDestroyed()
+    || event.sender !== mainWindow.webContents
+    || !frame
+    || !trustedDashboardIpcFrame(
+      {
+        frameUrl: frame.url,
+        isMainFrame: frame === mainWindow.webContents.mainFrame,
+      },
+      defaultDashboardUrl
+    )
+  ) {
     throw new Error("Finite Chat desktop request came from an untrusted renderer");
   }
 }
 
-ipcMain.handle("finitechat:daemon-connection", (event) => {
+ipcMain.handle("finitechat:ensure-local-device", async (event) => {
   assertTrustedIpcSender(event);
-  return desktopIpcConnection;
+  return ensureLocalDevice();
 });
 
-ipcMain.handle("finitechat:daemon-state", (event) => {
+ipcMain.handle("finitechat:daemon-state", async (event) => {
   assertTrustedIpcSender(event);
+  await ensureLocalDevice();
   return requestDaemonState();
 });
 
-ipcMain.handle("finitechat:daemon-action", (event, action) => {
+ipcMain.handle("finitechat:daemon-action", async (event, action) => {
   assertTrustedIpcSender(event);
+  await ensureLocalDevice();
   return dispatchDaemonAction(action);
 });
 
-ipcMain.handle("finitechat:daemon-attachments", (event, upload) => {
+ipcMain.handle("finitechat:daemon-attachments", async (event, upload) => {
   assertTrustedIpcSender(event);
+  await ensureLocalDevice();
   return uploadDaemonAttachments(upload);
 });
 
-ipcMain.handle("finitechat:daemon-subscribe", (event) => {
+ipcMain.handle("finitechat:daemon-subscribe", async (event) => {
   assertTrustedIpcSender(event);
+  await ensureLocalDevice();
   updateRelay().replay((channel, value) => event.sender.send(channel, value));
   return true;
 });
 
-ipcMain.handle("finitechat:begin-device-link", (event) => {
+ipcMain.handle("finitechat:device-link-subscribe", (event) => {
   assertTrustedIpcSender(event);
-  return beginDeviceLink();
-});
-
-ipcMain.handle("finitechat:open-device-link-approval", (event, approvalUrl) => {
-  assertTrustedIpcSender(event);
-  return openDeviceLinkApproval(approvalUrl);
-});
-
-ipcMain.handle("finitechat:cancel-device-link", (event) => {
-  assertTrustedIpcSender(event);
-  return cancelDeviceLink();
-});
-
-ipcMain.handle("finitechat:consume-pending-target-url", (event) => {
-  assertTrustedIpcSender(event);
-  const url = pendingTargetUrl;
-  pendingTargetUrl = null;
-  return url;
-});
-
-ipcMain.handle("finitechat:identity-status", (event) => {
-  assertTrustedIpcSender(event);
-  return desktopIdentityStatus();
-});
-
-ipcMain.handle("finitechat:onboarding-status", (event) => {
-  assertTrustedIpcSender(event);
-  return desktopOnboardingStatus();
-});
-
-ipcMain.handle("finitechat:complete-onboarding", (event) => {
-  assertTrustedIpcSender(event);
-  return completeDesktopOnboarding();
-});
-
-ipcMain.handle("finitechat:clear-account-secret", async (event) => {
-  assertTrustedIpcSender(event);
-  await cancelDeviceLink();
-  clearStoredAccountSecret();
-  resetDesktopOnboarding();
-  await restartDaemon();
-  return desktopIdentityStatus();
-});
-
-ipcMain.handle("finitechat:copy-text", (event, text) => {
-  assertTrustedIpcSender(event);
-  const value = String(text ?? "");
-  if (!value) {
-    throw new Error("Nothing to copy");
+  if (lastDeviceLinkStatus) {
+    event.sender.send("finitechat:device-link-status", lastDeviceLinkStatus);
   }
-  clipboard.writeText(value);
   return true;
 });

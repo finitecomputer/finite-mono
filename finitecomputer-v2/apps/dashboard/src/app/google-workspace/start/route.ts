@@ -18,7 +18,9 @@ export async function GET(request: Request) {
   const redirectPath = `/dashboard/machines/${encodeURIComponent(machineId)}/connections`;
   const account = await getAccountAuthContext();
   if (!account.workosUserId || !account.emailVerified) {
-    return NextResponse.redirect(googleWorkspaceDashboardUrl("/login", request.url));
+    const login = googleWorkspaceDashboardUrl("/login", request.url);
+    login.searchParams.set("returnTo", `${requestUrl.pathname}${requestUrl.search}`);
+    return NextResponse.redirect(login);
   }
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   const config = googleWorkspaceOAuthConfig(request.url);

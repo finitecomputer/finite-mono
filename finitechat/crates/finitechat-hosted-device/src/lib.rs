@@ -44,8 +44,9 @@ use finitechat_http::{
 };
 use finitechat_proto::{
     ClaimKeyPackageResult, CreateRoomRequest, DecryptedApplicationEventV1, DurableAppEventKind,
-    RuntimeCommandJsonPayloadV1, RuntimeCommandPayloadKindV1, RuntimeCommandRequestV1,
-    RuntimeCommandResultV1, RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
+    MAX_DEVICE_ID_BYTES, RuntimeCommandJsonPayloadV1, RuntimeCommandPayloadKindV1,
+    RuntimeCommandRequestV1, RuntimeCommandResultV1, RuntimeCommandTargetV1,
+    RuntimeCommandTerminalStatusV1,
 };
 use futures_util::{Stream, StreamExt};
 use nostr::{Keys, SecretKey};
@@ -88,6 +89,7 @@ const DEVICE_LINK_HTTP_TIMEOUT_SECS: u64 = 10;
 const MAX_DEVICE_LINK_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_DEVICE_LINK_HTTP_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_DEVICE_LINK_REQUEST_BYTES: usize = 4 * 1024;
+const DEVICE_LINK_RECONCILE_FANOUT_DOMAIN: &[u8] = b"finitechat.hosted-device-link-reconcile.v1";
 const AGENT_BINDING_VERSION: u16 = 1;
 const AGENT_BINDING_NONCE_BYTES: usize = 12;
 const MAX_AGENT_BINDING_REQUEST_BYTES: usize = 8 * 1024;
@@ -441,6 +443,11 @@ fn app_with_test_options(
             post(device_link_status).layer(DefaultBodyLimit::max(MAX_DEVICE_LINK_REQUEST_BYTES)),
         )
         .route(
+            "/v1/device-links/reconcile",
+            post(reconcile_linked_device)
+                .layer(DefaultBodyLimit::max(MAX_DEVICE_LINK_REQUEST_BYTES)),
+        )
+        .route(
             "/v1/app/attachments",
             post(upload_attachments).layer(DefaultBodyLimit::max(MAX_HOSTED_MULTIPART_BODY_BYTES)),
         )
@@ -455,6 +462,30 @@ fn app_with_test_options(
 struct DeviceLinkRequest {
     link_session_id: String,
     target_device_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconcileLinkedDeviceRequest {
+    project_id: String,
+    target_device_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct ReconcileLinkedDeviceResponse {
+    project_id: String,
+    target_device_id: String,
+    status: ReconcileLinkedDeviceStatus,
+    room_count: u32,
+    active_room_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReconcileLinkedDeviceStatus {
+    AwaitingKeyPackage,
+    JoiningRooms,
+    Ready,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -545,6 +576,91 @@ async fn authenticated_device_link_request(
             }
         })?;
     Ok((user_id, input))
+}
+
+async fn reconcile_linked_device(
+    State(state): State<HostedDeviceState>,
+    request: Request,
+) -> Result<Json<ReconcileLinkedDeviceResponse>, HostedDeviceError> {
+    // Authenticate before Axum parses or buffers any caller-controlled body.
+    let user_id = authorized_user(&state, request.headers())?;
+    let Json(input) = Json::<ReconcileLinkedDeviceRequest>::from_request(request, &state)
+        .await
+        .map_err(|error| {
+            if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                HostedDeviceError::PayloadTooLarge(
+                    "device reconciliation request exceeds its 4 KiB limit".to_owned(),
+                )
+            } else {
+                HostedDeviceError::InvalidDeviceLink(
+                    "device reconciliation request body must be strict JSON".to_owned(),
+                )
+            }
+        })?;
+    let response = tokio::task::spawn_blocking(move || {
+        reconcile_linked_device_for_user(&state, &user_id, input)
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(response))
+}
+
+fn reconcile_linked_device_for_user(
+    state: &HostedDeviceState,
+    user_id: &str,
+    input: ReconcileLinkedDeviceRequest,
+) -> Result<ReconcileLinkedDeviceResponse, HostedDeviceError> {
+    validate_binding_field("Project id", &input.project_id)?;
+    validate_reconciliation_target_device_id(&input.target_device_id)?;
+
+    let runtime = state.runtime_for(user_id)?;
+    let binding = load_agent_binding(state, user_id, &input.project_id, &runtime)?
+        .ok_or(HostedDeviceError::AgentBindingNotFound)?;
+    // Opening is the binding validator: it proves that the sealed record is
+    // owned by this authenticated user and still names a canonical Agent Room.
+    open_validated_agent_binding(&runtime, &binding)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(DEVICE_LINK_RECONCILE_FANOUT_DOMAIN);
+    for component in [
+        user_id,
+        input.project_id.as_str(),
+        input.target_device_id.as_str(),
+    ] {
+        hasher.update([0]);
+        hasher.update(component.as_bytes());
+    }
+    let fanout_id = format!("device-reconcile-{}", hex::encode(hasher.finalize()));
+    let report = runtime.link_device_and_wait(fanout_id, input.target_device_id.clone())?;
+    let status = if report.fanout_complete && report.room_count == report.active_room_count {
+        ReconcileLinkedDeviceStatus::Ready
+    } else if report.room_count == 0 && !report.fanout_complete {
+        ReconcileLinkedDeviceStatus::AwaitingKeyPackage
+    } else {
+        ReconcileLinkedDeviceStatus::JoiningRooms
+    };
+
+    Ok(ReconcileLinkedDeviceResponse {
+        project_id: input.project_id,
+        target_device_id: input.target_device_id,
+        status,
+        room_count: report.room_count,
+        active_room_count: report.active_room_count,
+    })
+}
+
+fn validate_reconciliation_target_device_id(value: &str) -> Result<(), HostedDeviceError> {
+    if value.is_empty()
+        || value.len() > MAX_DEVICE_ID_BYTES as usize
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+        || value == "hosted-web"
+    {
+        return Err(HostedDeviceError::InvalidDeviceLink(
+            "target Device id is invalid".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn approve_device_link_for_user(
