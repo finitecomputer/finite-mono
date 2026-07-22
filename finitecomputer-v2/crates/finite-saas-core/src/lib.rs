@@ -3376,6 +3376,7 @@ impl BridgeCoreState {
                 .published_app_urls
                 .clone()
                 .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
             if reported_id != target.id || reported_schema != target.state_schema_version {
                 return Err(CoreError::RuntimeUpgradeCompletionMismatch);
             }
@@ -3417,6 +3418,7 @@ impl BridgeCoreState {
                 reported_schema,
                 runtime_host,
                 published_app_urls,
+                contact_endpoint,
                 upgraded_spec,
                 input.runtime_capabilities.clone(),
             ))
@@ -3462,11 +3464,19 @@ impl BridgeCoreState {
         };
         if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
             runtime.host_facts.runtime_status = completed_status;
-            if let Some((artifact_id, schema, runtime_host, published_app_urls, _, capabilities)) =
-                upgrade_facts.as_ref()
+            if let Some((
+                artifact_id,
+                schema,
+                runtime_host,
+                published_app_urls,
+                contact_endpoint,
+                _,
+                capabilities,
+            )) = upgrade_facts.as_ref()
             {
                 runtime.runtime_artifact_id = Some(artifact_id.clone());
                 runtime.state_schema_version = Some(schema.clone());
+                runtime.contact_endpoint = Some(contact_endpoint.clone());
                 runtime.host_facts.runtime_host = runtime_host.clone();
                 runtime.host_facts.published_app_urls = published_app_urls.clone();
                 runtime.host_facts.hermes_available = Some(true);
@@ -3485,7 +3495,7 @@ impl BridgeCoreState {
             .get_mut(&request.agent_runtime_id)
         {
             snapshot.status = completed_status;
-            if let Some((_, _, runtime_host, _, _, _)) = upgrade_facts.as_ref() {
+            if let Some((_, _, runtime_host, _, _, _, _)) = upgrade_facts.as_ref() {
                 snapshot.runtime_host = runtime_host.clone();
                 snapshot.hermes_available = Some(true);
             }
@@ -3494,7 +3504,7 @@ impl BridgeCoreState {
             }
             snapshot.updated_at = now.clone();
         }
-        if let Some((artifact_id, _, _, _, Some(runtime_spec), _)) = upgrade_facts.as_ref()
+        if let Some((artifact_id, _, _, _, _, Some(runtime_spec), _)) = upgrade_facts.as_ref()
             && let Some(creation) = self.agent_creation_requests.values_mut().find(|creation| {
                 creation.agent_runtime_id.as_deref() == Some(request.agent_runtime_id.as_str())
             })
@@ -6874,6 +6884,23 @@ pub(crate) fn normalize_runtime_contact_endpoint(
         return Err(CoreError::InvalidRuntimeContactEndpoint);
     }
     Ok(Some(value.trim_end_matches('/').to_string()))
+}
+
+pub(crate) fn runtime_upgrade_contact_endpoint(
+    published_app_urls: &[String],
+) -> CoreResult<String> {
+    let mut contact_endpoint = None;
+    for published_url in published_app_urls {
+        let normalized = normalize_runtime_contact_endpoint(Some(published_url))?
+            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+        if !normalized.ends_with("/contact") {
+            continue;
+        }
+        if contact_endpoint.replace(normalized).is_some() {
+            return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+        }
+    }
+    contact_endpoint.ok_or(CoreError::RuntimeUpgradeCompletionMismatch)
 }
 
 pub(crate) fn merge_provider_runtime_handle(
@@ -12392,7 +12419,7 @@ mod tests {
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
                 provider_runtime_handle: None,
-                contact_endpoint: None,
+                contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
                 runtime_capabilities: Some(kata_runtime_capabilities()),
                 display_name: None,
                 hostname: None,
@@ -12696,6 +12723,10 @@ mod tests {
         let runtime = &state.agent_runtimes[&runtime_id];
         assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v2"));
         assert_eq!(runtime.source_machine_id, "finite-kata-upgrade");
+        assert_eq!(
+            runtime.contact_endpoint.as_deref(),
+            Some("http://127.0.0.1:41002/contact")
+        );
         assert_eq!(runtime.host_facts.runtime_host, "http://127.0.0.1:41002");
         assert!(
             runtime
