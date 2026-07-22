@@ -219,7 +219,7 @@ function checkStaticShell() {
     "revokeShareLinkButton",
     "accessResultPanel",
     "accessBusyStatus",
-    "brainManagementTitle",
+    "manageBrainsModalTitle",
     "brainPeopleList",
     "brainInvitationList",
     "brainInvitationCount",
@@ -461,8 +461,8 @@ function checkStaticShell() {
   );
   assert.match(
     html,
-    /id="copyBrainInviteUrlButton"[^>]*aria-label="Copy client-only invite link"/,
-    "Product Client HTML must name the client-only invite copy action"
+    /id="copyBrainInviteUrlButton"[^>]*aria-label="Copy private invite link"/,
+    "Product Client HTML must name the private invite copy action"
   );
   assert.match(
     html,
@@ -471,7 +471,7 @@ function checkStaticShell() {
   );
   assert.match(
     js,
-    /async function copyToClipboard\(text\)/,
+    /async function copyToClipboard\(text, kind = "page-id"\)/,
     "Product Client JS must route copy actions through one safe helper"
   );
   assert.doesNotMatch(
@@ -499,8 +499,6 @@ function checkStaticShell() {
     "right-sidebar",
     "sidebar-footer",
     "status-bar",
-    "outgoingLinkList",
-    "backlinkList",
     "pageStatusDetail",
     "brainStatusDetail",
     "activityLog",
@@ -513,6 +511,17 @@ function checkStaticShell() {
     "accessAcceptSection",
   ]) {
     assertNotIncludes(html, marker, "Product Client HTML");
+  }
+
+  for (const marker of [
+    "pageLinkContextPanel",
+    "outgoingLinkList",
+    "backlinkList",
+    "unlinkedMentionList",
+    "Linked mentions",
+    "Unlinked mentions",
+  ]) {
+    assertIncludes(html, marker, "Product Client HTML");
   }
 
   for (const marker of [

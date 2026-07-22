@@ -127,6 +127,7 @@ const FiniteBrainProductClient = (() => {
     "brain-invite-authorization": "finite-email-invite-bootstrap-authorization:",
   });
   const MAX_OBJECT_ID_ATTEMPTS = 1000;
+  const MAX_TITLE_OCCURRENCES_PER_PAGE = 1000;
   const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS = 100;
   // Keep these public-client preflight bounds aligned with finite-brain-core.
   const MAX_PERSONAL_AGENT_ROTATION_FOLDERS = 100;
@@ -3696,6 +3697,7 @@ const FiniteBrainProductClient = (() => {
   function markdownContext(text) {
     const source = String(text || "");
     const excluded = markdownCodeRanges(source);
+    const referenceDefinitions = [];
     const references = new Map();
     const definitionPattern = /^ {0,3}\[([^\]\n]+)\]:[ \t]*(.+)$/gm;
     for (const match of source.matchAll(definitionPattern)) {
@@ -3704,10 +3706,12 @@ const FiniteBrainProductClient = (() => {
       if (!destination) continue;
       const label = markdownReferenceLabel(match[1]);
       if (!references.has(label)) references.set(label, destination);
-      excluded.push([match.index, match.index + match[0].length]);
+      const range = [match.index, match.index + match[0].length];
+      excluded.push(range);
+      referenceDefinitions.push(range);
     }
     excluded.sort((left, right) => left[0] - right[0]);
-    return { excluded, references };
+    return { excluded, referenceDefinitions, references };
   }
 
   function closingMarkdownBracket(source, start) {
@@ -3829,19 +3833,225 @@ const FiniteBrainProductClient = (() => {
     return tokens.sort((left, right) => left.start - right.start);
   }
 
-  function extractPageLinks(text) {
-    const links = new Set();
+  function pageReferenceTokens(text) {
+    const source = String(text || "");
     const context = markdownContext(text);
-    for (const token of wikiLinkTokens(text, context)) {
-      links.add(token.target);
+    return [
+      ...wikiLinkTokens(source, context).map((token) => ({
+        end: token.end,
+        label: token.label,
+        reference: token.target,
+        start: token.start,
+      })),
+      ...markdownLinkTokens(source, context)
+        .filter(
+          (token) =>
+            !isExternalPageReference(token.destination) &&
+            isMarkdownPageDestination(token.destination)
+        )
+        .map((token) => ({
+          end: token.end,
+          label: token.label.trim(),
+          reference: normalizePageReference(token.destination.split("#")[0]),
+          start: token.start,
+        })),
+    ].filter((token) => token.reference);
+  }
+
+  function extractPageLinks(text) {
+    const links = new Set(pageReferenceTokens(text).map((token) => token.reference));
+    return [...links].filter(Boolean);
+  }
+
+  function regexEscape(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function codePointEnd(value, start) {
+    return start + (value.codePointAt(start) > 0xffff ? 2 : 1);
+  }
+
+  function isHangulLeadingJamo(point) {
+    return (point >= 0x1100 && point <= 0x1112) || (point >= 0xa960 && point <= 0xa97c);
+  }
+
+  function isHangulVowelJamo(point) {
+    return (point >= 0x1161 && point <= 0x1175) || (point >= 0xd7b0 && point <= 0xd7c6);
+  }
+
+  function isHangulTrailingJamo(point) {
+    return (point >= 0x11a8 && point <= 0x11c2) || (point >= 0xd7cb && point <= 0xd7fb);
+  }
+
+  function fallbackNormalizationSegmentEnd(source, start) {
+    const first = source.codePointAt(start);
+    let end = codePointEnd(source, start);
+    if (isHangulLeadingJamo(first) && end < source.length) {
+      const vowel = source.codePointAt(end);
+      if (isHangulVowelJamo(vowel)) {
+        end = codePointEnd(source, end);
+        if (end < source.length && isHangulTrailingJamo(source.codePointAt(end))) {
+          end = codePointEnd(source, end);
+        }
+      }
+    } else if (
+      first >= 0xac00 &&
+      first <= 0xd7a3 &&
+      (first - 0xac00) % 28 === 0 &&
+      end < source.length &&
+      isHangulTrailingJamo(source.codePointAt(end))
+    ) {
+      end = codePointEnd(source, end);
     }
-    for (const token of markdownLinkTokens(text, context)) {
-      const target = token.destination;
-      if (!isExternalPageReference(target) && isMarkdownPageDestination(target)) {
-        links.add(normalizePageReference(target.split("#")[0]));
+    while (end < source.length) {
+      const next = String.fromCodePoint(source.codePointAt(end));
+      if (!/\p{M}/u.test(next)) break;
+      end += next.length;
+    }
+    return end;
+  }
+
+  function originalMentionRanges(source, normalizedMatches) {
+    const ranges = normalizedMatches.map((match) => ({
+      normalizedEnd: match.index + match[0].length,
+      normalizedStart: match.index,
+      originalEnd: null,
+      originalStart: null,
+    }));
+    const segmentIterator =
+      typeof Intl.Segmenter === "function"
+        ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+            .segment(source)
+            [Symbol.iterator]()
+        : null;
+    let normalizedOffset = 0;
+    let startIndex = 0;
+    let endIndex = 0;
+    for (let start = 0; start < source.length; ) {
+      const segment = segmentIterator?.next().value;
+      let end = segment ? segment.index + segment.segment.length : null;
+      if (!end) {
+        end = fallbackNormalizationSegmentEnd(source, start);
+      }
+      const chunk = source.slice(start, end).normalize("NFC");
+      const normalizedEnd = normalizedOffset + chunk.length;
+      while (
+        startIndex < ranges.length &&
+        ranges[startIndex].normalizedStart < normalizedEnd
+      ) {
+        if (ranges[startIndex].normalizedStart >= normalizedOffset) {
+          ranges[startIndex].originalStart = start;
+        }
+        startIndex += 1;
+      }
+      while (endIndex < ranges.length && ranges[endIndex].normalizedEnd <= normalizedEnd) {
+        if (ranges[endIndex].normalizedEnd > normalizedOffset) {
+          ranges[endIndex].originalEnd = end;
+        }
+        endIndex += 1;
+      }
+      normalizedOffset = normalizedEnd;
+      start = end;
+      if (endIndex >= ranges.length) break;
+    }
+    return ranges;
+  }
+
+  function codePointBefore(value, index) {
+    if (index <= 0) return "";
+    let start = index - 1;
+    const unit = value.charCodeAt(start);
+    if (unit >= 0xdc00 && unit <= 0xdfff && start > 0) start -= 1;
+    return value.slice(start, index);
+  }
+
+  function codePointFrom(value, index) {
+    if (index >= value.length) return "";
+    const point = value.codePointAt(index);
+    return String.fromCodePoint(point);
+  }
+
+  function isMentionWordCharacter(value) {
+    return Boolean(value && /[\p{L}\p{N}_]/u.test(value));
+  }
+
+  function mentionSnippet(text, start, end, limit = 220) {
+    const source = String(text || "");
+    const lineStart = source.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    const nextBreak = source.indexOf("\n", end);
+    const lineEnd = nextBreak < 0 ? source.length : nextBreak;
+    const line = source.slice(lineStart, lineEnd).trim().replace(/\s+/g, " ");
+    if (line.length <= limit) return line;
+    const mentionOffset = Math.max(0, start - lineStart);
+    const windowStart = Math.max(0, Math.min(mentionOffset - 70, line.length - limit));
+    const windowEnd = Math.min(line.length, windowStart + limit);
+    return `${windowStart ? "..." : ""}${line.slice(windowStart, windowEnd).trim()}${
+      windowEnd < line.length ? "..." : ""
+    }`;
+  }
+
+  function unlinkedPageMentions(text, term) {
+    const source = String(text || "");
+    const normalizedTerm = String(term || "").trim().normalize("NFC");
+    if (!normalizedTerm) return { limited: false, mentions: [] };
+    const context = markdownContext(source);
+    const excluded = [
+      ...context.excluded,
+      ...wikiLinkTokens(source, context).map((token) => [token.start, token.end]),
+      ...markdownLinkTokens(source, context).map((token) => [token.start, token.end]),
+    ]
+      .sort((left, right) => left[0] - right[0])
+      .reduce((merged, range) => {
+        const previous = merged[merged.length - 1];
+        if (!previous || range[0] > previous[1]) merged.push([...range]);
+        else previous[1] = Math.max(previous[1], range[1]);
+        return merged;
+      }, []);
+    const pattern = new RegExp(regexEscape(normalizedTerm), "giu");
+    const mentions = [];
+    let limited = false;
+
+    function scanAllowedRegion(regionStart, regionEnd) {
+      if (limited || regionStart >= regionEnd) return;
+      const region = source.slice(regionStart, regionEnd);
+      const normalizedRegion = region.normalize("NFC");
+      const normalizedMatches = [];
+      for (const match of normalizedRegion.matchAll(pattern)) {
+        const normalizedStart = match.index;
+        const normalizedEnd = normalizedStart + match[0].length;
+        if (
+          isMentionWordCharacter(codePointBefore(normalizedRegion, normalizedStart)) ||
+          isMentionWordCharacter(codePointFrom(normalizedRegion, normalizedEnd))
+        ) {
+          continue;
+        }
+        if (mentions.length + normalizedMatches.length >= MAX_TITLE_OCCURRENCES_PER_PAGE) {
+          limited = true;
+          break;
+        }
+        normalizedMatches.push(match);
+      }
+      for (const range of originalMentionRanges(region, normalizedMatches)) {
+        if (range.originalStart === null || range.originalEnd === null) continue;
+        const start = regionStart + range.originalStart;
+        const end = regionStart + range.originalEnd;
+        mentions.push({
+          end,
+          snippet: mentionSnippet(source, start, end),
+          start,
+          text: source.slice(start, end),
+        });
       }
     }
-    return [...links].filter(Boolean);
+
+    let allowedStart = 0;
+    for (const [excludedStart, excludedEnd] of excluded) {
+      scanAllowedRegion(allowedStart, excludedStart);
+      if (limited) break;
+      allowedStart = Math.max(allowedStart, excludedEnd);
+    }
+    if (!limited) scanAllowedRegion(allowedStart, source.length);
+    return { limited, mentions };
   }
 
   function pageReferencesForPage(page) {
@@ -3866,6 +4076,38 @@ const FiniteBrainProductClient = (() => {
       ? readableMatches.filter((page) => page.folderId === sourcePage.folderId)
       : [];
     const candidates = localMatches.length ? localMatches : readableMatches;
+    if (candidates.length === 1) {
+      return { matches: candidates, status: "resolved", target: candidates[0] };
+    }
+    return {
+      matches: candidates,
+      status: candidates.length ? "ambiguous" : "missing",
+      target: null,
+    };
+  }
+
+  function buildPageReferenceIndex(pages) {
+    const byReference = new Map();
+    for (const page of pages.filter(isReadablePage)) {
+      for (const reference of new Set(pageReferencesForPage(page))) {
+        let entry = byReference.get(reference);
+        if (!entry) {
+          entry = { all: [], byFolder: new Map() };
+          byReference.set(reference, entry);
+        }
+        entry.all.push(page);
+        const local = entry.byFolder.get(page.folderId) || [];
+        local.push(page);
+        entry.byFolder.set(page.folderId, local);
+      }
+    }
+    return byReference;
+  }
+
+  function resolveIndexedPageReference(index, reference, sourcePage = null) {
+    const entry = index.get(normalizePageReference(reference));
+    const localMatches = sourcePage ? entry?.byFolder.get(sourcePage.folderId) || [] : [];
+    const candidates = localMatches.length ? localMatches : entry?.all || [];
     if (candidates.length === 1) {
       return { matches: candidates, status: "resolved", target: candidates[0] };
     }
@@ -4012,7 +4254,18 @@ const FiniteBrainProductClient = (() => {
   }
 
   function markdownPreviewBlocks(markdown, options = {}) {
-    const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+    const source = String(markdown || "").replace(/\r\n/g, "\n");
+    const context = markdownContext(source);
+    const referenceDefinitionStarts = new Set(
+      context.referenceDefinitions.map(([start]) => start)
+    );
+    const lines = source.split("\n");
+    const lineStarts = [];
+    let lineOffset = 0;
+    for (const line of lines) {
+      lineStarts.push(lineOffset);
+      lineOffset += line.length + 1;
+    }
     const blocks = [];
     let paragraph = [];
 
@@ -4027,6 +4280,11 @@ const FiniteBrainProductClient = (() => {
       const trimmed = line.trim();
       if (!trimmed) {
         flushParagraph();
+        continue;
+      }
+      if (referenceDefinitionStarts.has(lineStarts[index])) {
+        flushParagraph();
+        blocks.push({ text: line, type: "reference-definition" });
         continue;
       }
       const fence = trimmed.match(/^(```|~~~)\s*([A-Za-z0-9_+.#-]+)?\s*$/);
@@ -4997,11 +5255,12 @@ const FiniteBrainProductClient = (() => {
   }
 
   function pageLinkContext(page, pages = readablePages()) {
-    if (!isReadablePage(page)) return { backlinks: [], outgoing: [] };
+    if (!isReadablePage(page)) return { backlinks: [], outgoing: [], unlinkedMentions: [] };
     const readable = [...pages].filter(isReadablePage);
+    const referenceIndex = buildPageReferenceIndex(readable);
     const currentKey = pageKeyForPage(page);
     const outgoing = extractPageLinks(page.text).map((targetRef) => {
-      const resolution = resolvePageReference(targetRef, readable, page);
+      const resolution = resolveIndexedPageReference(referenceIndex, targetRef, page);
       if (!resolution.target) {
         return {
           detail:
@@ -5022,20 +5281,49 @@ const FiniteBrainProductClient = (() => {
     });
     const backlinks = readable
       .filter((candidate) => pageKeyForPage(candidate) !== currentKey)
-      .filter((candidate) =>
-        extractPageLinks(candidate.text).some((targetRef) => {
-          const target = resolvePageReference(targetRef, readable, candidate).target;
+      .map((candidate) => {
+        const mentions = pageReferenceTokens(candidate.text).filter((token) => {
+          const target = resolveIndexedPageReference(
+            referenceIndex,
+            token.reference,
+            candidate
+          ).target;
           return target ? pageKeyForPage(target) === currentKey : false;
-        })
-      )
-      .map((candidate) => ({
-        detail: candidate.folderId,
-        key: pageKeyForPage(candidate),
-        label: pageTitleForPage(candidate),
-        status: "resolved",
-      }))
+        });
+        if (!mentions.length) return null;
+        return {
+          detail: candidate.folderId,
+          key: pageKeyForPage(candidate),
+          label: pageTitleForPage(candidate),
+          mentionCount: mentions.length,
+          snippet: mentionSnippet(candidate.text, mentions[0].start, mentions[0].end),
+          status: "resolved",
+        };
+      })
+      .filter(Boolean)
       .sort((left, right) => left.label.localeCompare(right.label));
-    return { backlinks, outgoing };
+    const term = pageTitleForPage(page).trim();
+    const unlinkedMentions = readable
+      .filter((candidate) => pageKeyForPage(candidate) !== currentKey)
+      .map((candidate) => {
+        const mentionResult = unlinkedPageMentions(candidate.text, term);
+        const mentions = mentionResult.mentions;
+        if (!mentions.length) return null;
+        return {
+          detail: candidate.folderId,
+          key: pageKeyForPage(candidate),
+          label: pageTitleForPage(candidate),
+          mentionCount: mentions.length,
+          mentionCountLimited: mentionResult.limited,
+          searchTerm: mentions[0].text,
+          snippet: mentions[0].snippet,
+          status: "unlinked",
+          term,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.label.localeCompare(right.label));
+    return { backlinks, outgoing, unlinkedMentions };
   }
 
   function pageCountLabel(count) {
@@ -5587,7 +5875,13 @@ const FiniteBrainProductClient = (() => {
 
   function selectReaderPage(pageKeyValue, options = {}) {
     const searchQuery = String(options.searchQuery || "").trim();
-    state.searchHighlight = searchQuery ? { pageKey: pageKeyValue, query: searchQuery } : null;
+    state.searchHighlight = searchQuery
+      ? {
+          pageKey: pageKeyValue,
+          query: searchQuery,
+          unlinkedOnly: Boolean(options.unlinkedOnly),
+        }
+      : null;
     state.searchHighlightShouldScroll = Boolean(searchQuery);
     state.selectedPageKey = pageKeyValue;
     state.activeWorkspaceView = "page";
@@ -6020,6 +6314,9 @@ const FiniteBrainProductClient = (() => {
         continue;
       }
       const paragraph = document.createElement("p");
+      if (block.type === "reference-definition") {
+        paragraph.className = "markdown-reference-definition";
+      }
       appendInlineSegments(paragraph, block.text);
       container.appendChild(paragraph);
     }
@@ -6565,7 +6862,14 @@ const FiniteBrainProductClient = (() => {
     content.removeAttribute("aria-multiline");
   }
 
-  function highlightReaderSearchMatches(container, query) {
+  function readerSearchTextNodeAllowed(node, options = {}) {
+    if (!options.unlinkedOnly) return true;
+    return !node?.parentElement?.closest?.(
+      ".internal-link, .external-link, .markdown-reference-definition, code, pre"
+    );
+  }
+
+  function highlightReaderSearchMatches(container, query, options = {}) {
     if (!container || !query) return [];
 
     const textNodes = [];
@@ -6573,6 +6877,7 @@ const FiniteBrainProductClient = (() => {
     while (walker.nextNode()) {
       const node = walker.currentNode;
       if (node.parentElement?.closest?.(".reader-search-match")) continue;
+      if (!readerSearchTextNodeAllowed(node, options)) continue;
       const segments = searchHighlightSegments(node.nodeValue, query);
       if (segments.some((segment) => segment.match)) textNodes.push({ node, segments });
     }
@@ -6626,7 +6931,9 @@ const FiniteBrainProductClient = (() => {
     renderMarkdownEditor(content, page.text || "", { editable: state.editorMode === "visual" });
     const searchQuery = readerSearchHighlightForPage(page.key, state.searchHighlight);
     if (!searchQuery) return;
-    const matches = highlightReaderSearchMatches(content, searchQuery);
+    const matches = highlightReaderSearchMatches(content, searchQuery, {
+      unlinkedOnly: Boolean(state.searchHighlight?.unlinkedOnly),
+    });
     if (state.searchHighlightShouldScroll) {
       state.searchHighlightShouldScroll = false;
       scrollReaderSearchMatchIntoView(matches[0]);
@@ -6637,8 +6944,73 @@ const FiniteBrainProductClient = (() => {
     return page;
   }
 
+  function renderPageLinkRow(item, row, options = {}) {
+    const button = document.createElement("button");
+    button.className = "page-link-row";
+    button.type = "button";
+    button.disabled = !row.key;
+    if (row.key) {
+      button.addEventListener("click", () =>
+        selectReaderPage(
+          row.key,
+          options.searchTerm
+            ? { searchQuery: options.searchTerm, unlinkedOnly: options.unlinkedOnly }
+            : {}
+        )
+      );
+    }
+
+    const title = document.createElement("span");
+    title.className = "page-link-row-title";
+    title.textContent = row.label;
+    button.appendChild(title);
+
+    const meta = document.createElement("span");
+    meta.className = "page-link-row-meta";
+    if (row.mentionCount) {
+      const mentionCount = `${row.mentionCount}${row.mentionCountLimited ? "+" : ""}`;
+      meta.textContent = `${mentionCount} ${row.mentionCount === 1 ? "mention" : "mentions"} · ${row.detail}`;
+    } else {
+      meta.textContent = row.detail || row.status;
+    }
+    button.appendChild(meta);
+
+    if (row.snippet) {
+      const snippet = document.createElement("span");
+      snippet.className = "page-link-row-snippet";
+      snippet.textContent = row.snippet;
+      button.appendChild(snippet);
+    }
+    item.appendChild(button);
+  }
+
   function renderLinkContext(page) {
-    return page;
+    const context = pageLinkContext(page);
+    const backlinkCount = context.backlinks.length;
+    const unlinkedCount = context.unlinkedMentions.length;
+    const outgoingCount = context.outgoing.length;
+    setText("backlinkCount", String(backlinkCount));
+    setText("unlinkedMentionCount", String(unlinkedCount));
+    setText("outgoingLinkCount", String(outgoingCount));
+    setPill(
+      "pageLinkContextCount",
+      String(backlinkCount + unlinkedCount),
+      backlinkCount || unlinkedCount ? "ready" : "muted"
+    );
+    setList("backlinkList", context.backlinks, "No linked mentions", (item, row) => {
+      renderPageLinkRow(item, row);
+    });
+    setList(
+      "unlinkedMentionList",
+      context.unlinkedMentions,
+      "No unlinked mentions",
+      (item, row) => {
+        renderPageLinkRow(item, row, { searchTerm: row.searchTerm, unlinkedOnly: true });
+      }
+    );
+    setList("outgoingLinkList", context.outgoing, "No outgoing links", (item, row) => {
+      renderPageLinkRow(item, row);
+    });
   }
 
   function setGraphStats(graph) {
@@ -12065,6 +12437,7 @@ const FiniteBrainProductClient = (() => {
     readerFolderRows,
     readerEmptyStateCopy,
     readerSearchHighlightForPage,
+    readerSearchTextNodeAllowed,
     readerPageDetail,
     readerPageRows,
     resumeSession,
