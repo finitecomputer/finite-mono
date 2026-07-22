@@ -1,6 +1,7 @@
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import {
   HostedDeviceRequestError,
+  hostedDeviceAction,
   hostedDeviceApproveLink,
   hostedDeviceConfig,
   hostedDeviceLinkStatus,
@@ -16,6 +17,10 @@ export const MAX_DEVICE_LINK_REQUEST_BYTES = 4 * 1024;
 
 export type HostedWebAccountBinding = {
   account_id: string;
+  local_device?: {
+    device_id: string;
+    status: "available" | "revoked" | "unknown";
+  };
 };
 
 export class DeviceLinkError extends Error {
@@ -130,13 +135,38 @@ export async function currentAccountDeviceLinkStatus(
   );
 }
 
-export async function currentHostedWebAccountBinding(): Promise<HostedWebAccountBinding> {
-  return withCurrentAccount(async (config, account) =>
-    projectHostedWebAccountBinding(await hostedDeviceState(config, account))
-  );
+export async function currentHostedWebAccountBinding(
+  targetDeviceId?: string
+): Promise<HostedWebAccountBinding> {
+  return withCurrentAccount(async (config, account) => {
+    // A recovery decision must not rely on a cached Device projection. The
+    // Hosted Web Device is already the account's link authority, so reuse its
+    // existing bounded refresh action before reporting the requested status.
+    const state = targetDeviceId === undefined
+      ? await hostedDeviceState(config, account)
+      : await hostedDeviceAction(config, account, { RefreshDevices: null });
+    return projectHostedWebAccountBinding(state, targetDeviceId);
+  });
 }
 
-export function projectHostedWebAccountBinding(value: unknown): HostedWebAccountBinding {
+export function parseOptionalDeviceStatusTarget(request: Request): string | undefined {
+  const url = new URL(request.url);
+  const allowedKey = "target_device_id";
+  if ([...url.searchParams.keys()].some((key) => key !== allowedKey)) {
+    throw new DeviceLinkError("This Device status request is invalid.", 400);
+  }
+  const values = url.searchParams.getAll(allowedKey);
+  if (values.length === 0) return undefined;
+  if (values.length !== 1) {
+    throw new DeviceLinkError("This Device status request is invalid.", 400);
+  }
+  return deviceLinkToken("Device", values[0]);
+}
+
+export function projectHostedWebAccountBinding(
+  value: unknown,
+  targetDeviceId?: string
+): HostedWebAccountBinding {
   if (!value || typeof value !== "object") {
     throw new Error("Hosted Web Device returned an invalid identity.");
   }
@@ -149,9 +179,35 @@ export function projectHostedWebAccountBinding(value: unknown): HostedWebAccount
     throw new Error("Hosted Web Device returned an invalid identity.");
   }
 
-  // Project an exact allowlist. Device keys, signer material, and the Hosted
-  // Web Device identifier must never cross this browser-facing boundary.
-  return { account_id: accountId };
+  const binding: HostedWebAccountBinding = { account_id: accountId };
+  if (targetDeviceId === undefined) {
+    // Preserve the v1 response exactly for already-installed Electron builds.
+    return binding;
+  }
+
+  const devices = (value as Record<string, unknown>).devices;
+  if (!Array.isArray(devices)) {
+    throw new Error("Hosted Web Device returned an invalid Device list.");
+  }
+  const candidate = devices.find((device) =>
+    device
+    && typeof device === "object"
+    && !Array.isArray(device)
+    && (device as Record<string, unknown>).account_id === accountId
+    && (device as Record<string, unknown>).device_id === targetDeviceId
+  );
+  let status: "available" | "revoked" | "unknown" = "unknown";
+  if (candidate) {
+    const record = candidate as Record<string, unknown>;
+    if (typeof record.revoked !== "boolean" || typeof record.active !== "boolean") {
+      throw new Error("Hosted Web Device returned an invalid Device list.");
+    }
+    status = record.revoked ? "revoked" : "available";
+  }
+  // Project only the status of the exact Device Electron requested. Device
+  // keys, signer material, and the rest of the account-wide list stay native.
+  binding.local_device = { device_id: targetDeviceId, status };
+  return binding;
 }
 
 export function deviceLinkBoundaryError(error: unknown): DeviceLinkError {

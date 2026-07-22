@@ -107,12 +107,14 @@ export function HostedWebChat({
     transportError,
     claimError,
     bindingRecoveryRequired,
+    localDeviceRecoveryRequired,
     selectionPending,
     streamConnected,
     ownerClaimed,
     load,
     claimOwner,
     recoverBinding,
+    recoverLocalDevice,
     dispatch,
     dispatchQuiet,
     uploadAttachments,
@@ -652,7 +654,11 @@ export function HostedWebChat({
                     size="sm"
                     onClick={() => {
                       if (transportError) {
-                        void (bindingRecoveryRequired ? recoverBinding() : load(true));
+                        void (localDeviceRecoveryRequired
+                          ? recoverLocalDevice()
+                          : bindingRecoveryRequired
+                            ? recoverBinding()
+                            : load(true));
                       } else if (claimError) {
                         void claimOwner();
                       } else {
@@ -662,9 +668,11 @@ export function HostedWebChat({
                   >
                     {transportError || claimError ? <RotateCcwIcon /> : null}
                     {transportError
-                      ? bindingRecoveryRequired
-                        ? "Finish chat setup"
-                        : "Retry load"
+                      ? localDeviceRecoveryRequired
+                        ? "Relink this Mac"
+                        : bindingRecoveryRequired
+                          ? "Finish chat setup"
+                          : "Retry load"
                       : claimError
                         ? "Retry claim"
                         : "Dismiss"}

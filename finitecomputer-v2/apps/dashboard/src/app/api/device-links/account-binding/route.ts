@@ -3,15 +3,17 @@ import { NextResponse } from "next/server";
 import {
   currentHostedWebAccountBinding,
   deviceLinkRouteError,
+  parseOptionalDeviceStatusTarget,
 } from "@/lib/device-link";
 
 export const dynamic = "force-dynamic";
 
 const PRIVATE_NO_STORE_HEADERS = { "cache-control": "private, no-store" };
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    return NextResponse.json(await currentHostedWebAccountBinding(), {
+    const targetDeviceId = parseOptionalDeviceStatusTarget(request);
+    return NextResponse.json(await currentHostedWebAccountBinding(targetDeviceId), {
       headers: PRIVATE_NO_STORE_HEADERS,
     });
   } catch (error) {

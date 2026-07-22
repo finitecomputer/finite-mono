@@ -182,7 +182,38 @@ test("device-link responses must match the exact public rendezvous", () => {
 test("account and daemon identity projections are exact and fail closed on mismatch", () => {
   const accountId = "a".repeat(64);
   assert.deepEqual(parseAccountBinding({ account_id: accountId }), { account_id: accountId });
+  assert.deepEqual(
+    parseAccountBinding(
+      {
+        account_id: accountId,
+        local_device: { device_id: "electron-alpha", status: "revoked" },
+      },
+      "electron-alpha"
+    ),
+    {
+      account_id: accountId,
+      local_device: { device_id: "electron-alpha", status: "revoked" },
+    }
+  );
   assert.throws(() => parseAccountBinding({ account_id: accountId, secret: "no" }));
+  assert.throws(() =>
+    parseAccountBinding(
+      {
+        account_id: accountId,
+        local_device: { device_id: "electron-other", status: "available" },
+      },
+      "electron-alpha"
+    )
+  );
+  assert.throws(() =>
+    parseAccountBinding(
+      {
+        account_id: accountId,
+        local_device: { device_id: "electron-alpha", status: "surprising" },
+      },
+      "electron-alpha"
+    )
+  );
   assert.throws(() => parseAccountBinding({ account_id: "A".repeat(64) }));
 
   assert.deepEqual(
@@ -205,6 +236,7 @@ test("remote dashboard preload contains only the versioned local-chat bridge", (
   const preload = fs.readFileSync(path.join(__dirname, "preload.cjs"), "utf8");
   for (const capability of [
     "ensureLocalDevice",
+    "recoverLocalDevice",
     "daemonState",
     "dispatchDaemonAction",
     "uploadDaemonAttachments",

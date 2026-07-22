@@ -22,6 +22,7 @@ const {
   DaemonUpdateRelay,
   DaemonSupervisor,
   DeviceLinkSupervisor,
+  archiveRevokedDeviceProfile,
   daemonRequestVersionMatches,
   deviceLinkFailureMessage,
   legacyHostnameDeviceId,
@@ -220,6 +221,109 @@ test("a pre-alpha data directory pins the legacy hostname Device id once", (cont
     }),
     migrated
   );
+});
+
+test("revoked Device recovery archives local cryptographic state and creates a fresh identity boundary", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const userDataDirectory = path.join(root, "user-data");
+  const daemonDataDirectory = path.join(userDataDirectory, "finitechatd");
+  const settingsFile = path.join(userDataDirectory, "desktop-settings.json");
+  const secretFile = path.join(userDataDirectory, "account-secret.safe");
+  const deviceId = "electron-revoked-alpha";
+  fs.mkdirSync(daemonDataDirectory, { recursive: true });
+  fs.writeFileSync(path.join(daemonDataDirectory, "client.sqlite3"), "encrypted-state");
+  fs.writeFileSync(secretFile, "encrypted-account-secret");
+  fs.writeFileSync(settingsFile, `${JSON.stringify({
+    deviceId,
+    pendingDeviceLink: {
+      link_session_id: "old-link",
+      target_device_id: deviceId,
+    },
+    dashboardPreference: "keep-me",
+  })}\n`);
+
+  const archived = archiveRevokedDeviceProfile({
+    userDataDirectory,
+    daemonDataDirectory,
+    settingsFile,
+    secretFile,
+    deviceId,
+    now: new Date("2026-07-22T19:00:00.000Z"),
+    randomUUID: () => "11111111-2222-4333-8444-555555555555",
+  });
+
+  assert.equal(fs.existsSync(daemonDataDirectory), false);
+  assert.equal(fs.existsSync(secretFile), false);
+  assert.equal(
+    fs.readFileSync(path.join(archived.backupDirectory, "finitechatd", "client.sqlite3"), "utf8"),
+    "encrypted-state"
+  );
+  assert.equal(
+    fs.readFileSync(path.join(archived.backupDirectory, "account-secret.safe"), "utf8"),
+    "encrypted-account-secret"
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, "utf8")), {
+    dashboardPreference: "keep-me",
+  });
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(archived.backupDirectory, "recovery.json"), "utf8")),
+    {
+      version: 1,
+      reason: "device_revoked",
+      device_id: deviceId,
+      archived_at: "2026-07-22T19:00:00.000Z",
+    }
+  );
+  assert.equal(
+    loadOrCreateDeviceId({
+      settingsFile,
+      daemonDataDirectory,
+      hostname: "same-hostname",
+      randomUUID: () => "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    }),
+    "electron-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+  );
+});
+
+test("revoked Device archive rolls the original profile back after a partial failure", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const userDataDirectory = path.join(root, "user-data");
+  const daemonDataDirectory = path.join(userDataDirectory, "finitechatd");
+  const settingsFile = path.join(userDataDirectory, "desktop-settings.json");
+  const secretFile = path.join(userDataDirectory, "account-secret.safe");
+  const deviceId = "electron-revoked-alpha";
+  fs.mkdirSync(daemonDataDirectory, { recursive: true });
+  fs.writeFileSync(path.join(daemonDataDirectory, "client.sqlite3"), "encrypted-state");
+  fs.writeFileSync(secretFile, "encrypted-account-secret");
+  fs.writeFileSync(settingsFile, `${JSON.stringify({ deviceId })}\n`);
+  const failingFileSystem = {
+    ...fs,
+    writeFileSync(filePath, ...args) {
+      if (/recovery\.json\.[0-9]+\.tmp$/u.test(String(filePath))) {
+        throw new Error("synthetic metadata failure");
+      }
+      return fs.writeFileSync(filePath, ...args);
+    },
+  };
+
+  assert.throws(
+    () => archiveRevokedDeviceProfile({
+      userDataDirectory,
+      daemonDataDirectory,
+      settingsFile,
+      secretFile,
+      deviceId,
+      now: new Date("2026-07-22T19:00:00.000Z"),
+      randomUUID: () => "11111111-2222-4333-8444-555555555555",
+      fileSystem: failingFileSystem,
+    }),
+    /synthetic metadata failure/
+  );
+  assert.equal(fs.readFileSync(path.join(daemonDataDirectory, "client.sqlite3"), "utf8"), "encrypted-state");
+  assert.equal(fs.readFileSync(secretFile, "utf8"), "encrypted-account-secret");
+  assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, "utf8")), { deviceId });
 });
 
 test("invalid persisted Device settings fail closed instead of forking local state", (context) => {
