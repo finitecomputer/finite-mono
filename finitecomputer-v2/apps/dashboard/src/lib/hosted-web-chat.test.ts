@@ -3,10 +3,13 @@ import test from "node:test";
 
 import {
   HostedWebChatError,
+  MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES,
   hostedWebChatErrorMessage,
   isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
   parseHostedChatAction,
+  parseHostedDeviceReconcileJsonRequest,
+  parseHostedDeviceReconcileRequest,
 } from "@/lib/hosted-web-chat";
 import { CHAT_UNAVAILABLE_MESSAGE } from "@/lib/chat-product-copy";
 import {
@@ -259,5 +262,75 @@ test("parseHostedChatAction rejects ambiguous and oversized input", () => {
   assert.throws(
     () => parseHostedChatAction({ SetTyping: { room_id: "room-1", is_typing: "yes" } }),
     /Invalid is_typing/
+  );
+});
+
+test("Device reconciliation accepts exactly one bounded target Device id", () => {
+  assert.deepEqual(
+    parseHostedDeviceReconcileRequest({ target_device_id: "electron-paul-alpha" }),
+    { target_device_id: "electron-paul-alpha" }
+  );
+
+  for (const payload of [
+    null,
+    [],
+    {},
+    { target_device_id: "electron-alpha", project_id: "project-injected" },
+    { target_device_id: "electron-alpha", room_id: "room-injected" },
+    { target_device_id: "electron-alpha", account_id: "account-injected" },
+    { target_device_id: "hosted-web" },
+    { target_device_id: " electron-alpha" },
+    { target_device_id: "electron-alpha\n" },
+    { target_device_id: `electron\u200b-alpha` },
+    { target_device_id: "é".repeat(65) },
+  ]) {
+    assert.throws(
+      () => parseHostedDeviceReconcileRequest(payload),
+      (error: unknown) => error instanceof HostedWebChatError && error.status === 400
+    );
+  }
+});
+
+test("Device reconciliation JSON parsing enforces media type and body limits", async () => {
+  const valid = new Request("https://finite.computer/api/reconcile-device", {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ target_device_id: "electron-alpha" }),
+  });
+  assert.deepEqual(await parseHostedDeviceReconcileJsonRequest(valid), {
+    target_device_id: "electron-alpha",
+  });
+
+  const wrongMediaType = new Request("https://finite.computer/api/reconcile-device", {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: "{}",
+  });
+  await assert.rejects(
+    parseHostedDeviceReconcileJsonRequest(wrongMediaType),
+    (error: unknown) => error instanceof HostedWebChatError && error.status === 415
+  );
+
+  const oversizedDeclared = new Request("https://finite.computer/api/reconcile-device", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "content-length": String(MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES + 1),
+    },
+    body: "{}",
+  });
+  await assert.rejects(
+    parseHostedDeviceReconcileJsonRequest(oversizedDeclared),
+    (error: unknown) => error instanceof HostedWebChatError && error.status === 413
+  );
+
+  const oversizedActual = new Request("https://finite.computer/api/reconcile-device", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "x".repeat(MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES + 1),
+  });
+  await assert.rejects(
+    parseHostedDeviceReconcileJsonRequest(oversizedActual),
+    (error: unknown) => error instanceof HostedWebChatError && error.status === 413
   );
 });

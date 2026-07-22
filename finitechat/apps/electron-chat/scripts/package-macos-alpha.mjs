@@ -85,26 +85,6 @@ info = replacePlistString(
   "LSApplicationCategoryType",
   "public.app-category.social-networking"
 );
-if (!info.includes("<string>finite</string>")) {
-  info = info.replace(
-    /\n<\/dict>\n<\/plist>\s*$/u,
-    `
-\t<key>CFBundleURLTypes</key>
-\t<array>
-\t\t<dict>
-\t\t\t<key>CFBundleURLName</key>
-\t\t\t<string>Finite Chat invite</string>
-\t\t\t<key>CFBundleURLSchemes</key>
-\t\t\t<array>
-\t\t\t\t<string>finite</string>
-\t\t\t</array>
-\t\t</dict>
-\t</array>
-</dict>
-</plist>
-`
-  );
-}
 fs.writeFileSync(infoPath, info);
 
 signAlphaBundle(outputApp, packagedDaemon);

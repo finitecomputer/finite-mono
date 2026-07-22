@@ -5215,6 +5215,7 @@ impl AppRuntimeState {
         fanout_id: String,
         target_device_id: String,
     ) -> Result<DeviceLinkFanoutReport, FiniteChatCoreError> {
+        self.core.refresh_device_clock()?;
         validate_string_bytes("device_link.fanout_id", &fanout_id, MAX_OBJECT_ID_BYTES)
             .map_err(client_error)?;
         validate_string_bytes(

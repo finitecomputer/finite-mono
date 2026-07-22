@@ -1,12 +1,14 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use devfinity::workos_fixture::{
     FixturePaths, prepare_if_missing as prepare_workos_fixture_if_missing,
     serve as serve_workos_fixture,
 };
-use devfinity::{ProcessComposeMode, Stack, StackProfile};
+use devfinity::{ProcessComposeMode, Stack, StackProfile, store_inference_key};
 
 #[derive(Debug, Parser)]
 #[command(name = "devfinity")]
@@ -32,6 +34,9 @@ enum Command {
     Status,
     /// Best-effort cleanup for orphaned devfinity processes.
     Cleanup,
+    /// Cache an existing Finite Private key read from stdin for local chat.
+    #[command(name = "inference-key")]
+    InferenceKey,
     /// Run the local read-only WorkOS fixture used by the dev stack.
     #[command(name = "workos-fixture")]
     WorkosFixture {
@@ -62,6 +67,11 @@ struct UpArgs {
     #[arg(long, requires = "services_only")]
     fresh: bool,
 
+    /// Use the real WorkOS staging tenant configured in the repository-root
+    /// .env instead of the deterministic local WorkOS fixture.
+    #[arg(long)]
+    workos_staging: bool,
+
     /// Command to run after the headless stack is ready. Pass after `--`.
     #[arg(last = true)]
     command: Vec<String>,
@@ -90,6 +100,9 @@ fn run() -> anyhow::Result<ExitCode> {
             let mut stack = Stack::new(cli.state_dir)?
                 .with_profile(profile)
                 .with_fresh_services_state(args.fresh);
+            if args.workos_staging {
+                stack = stack.with_workos_staging()?;
+            }
             stack.prepare_host_environment(args.dry_run)?;
             stack.write_files()?;
             stack.print_summary();
@@ -112,6 +125,15 @@ fn run() -> anyhow::Result<ExitCode> {
             stack.status()
         }
         Command::Cleanup => Stack::new(cli.state_dir)?.cleanup(),
+        Command::InferenceKey => {
+            let mut input = String::new();
+            std::io::stdin()
+                .read_to_string(&mut input)
+                .context("failed to read Finite Private key from stdin")?;
+            let path = store_inference_key(cli.state_dir, &input)?;
+            println!("saved Finite Private key to {}", path.display());
+            Ok(ExitCode::SUCCESS)
+        }
         Command::WorkosFixture { listen, state_dir } => {
             let paths = FixturePaths::new(state_dir);
             prepare_workos_fixture_if_missing(&paths, &format!("http://{listen}"))?;

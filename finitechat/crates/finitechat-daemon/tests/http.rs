@@ -5,7 +5,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use finitechat_core::{AppAction, AppState, FiniteChatRuntime, OpenOptions};
 use finitechat_daemon::app_with_data_dir;
-use finitechat_daemon::{MAX_DAEMON_ATTACHMENTS_PER_MESSAGE, MAX_DAEMON_MULTIPART_BODY_BYTES, app};
+use finitechat_daemon::{
+    MAX_DAEMON_ATTACHMENTS_PER_MESSAGE, MAX_DAEMON_MULTIPART_BODY_BYTES,
+    MAX_DAEMON_NEW_CHAT_REQUEST_BYTES, app,
+};
 use finitechat_server::{HttpServerState, http_router};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -25,6 +28,10 @@ async fn every_route_rejects_missing_and_wrong_authorization() {
         Request::get("/v1/app/state").body(Body::empty()).unwrap(),
         Request::get("/v1/app/updates").body(Body::empty()).unwrap(),
         Request::post("/v1/app/actions")
+            .header("content-type", "application/json")
+            .body(Body::from("not-json"))
+            .unwrap(),
+        Request::post("/v1/app/new-chat")
             .header("content-type", "application/json")
             .body(Body::from("not-json"))
             .unwrap(),
@@ -61,6 +68,19 @@ async fn every_route_rejects_missing_and_wrong_authorization() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    let new_chat = daemon
+        .clone()
+        .oneshot(
+            Request::post("/v1/app/new-chat")
+                .header("authorization", format!("Bearer {WRONG_TOKEN}"))
+                .header("content-type", "application/json")
+                .body(Body::from("not-json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(new_chat.status(), StatusCode::UNAUTHORIZED);
+
     let attachment = daemon
         .oneshot(
             Request::post("/v1/app/attachments")
@@ -72,6 +92,93 @@ async fn every_route_rejects_missing_and_wrong_authorization() {
         .await
         .unwrap();
     assert_eq!(attachment.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_new_chat_is_idempotent_and_returns_redacted_state() {
+    let root = TempDir::new().unwrap();
+    let (server_url, server_task) = spawn_chat_server(&root.path().join("server.sqlite3")).await;
+    let daemon = test_app(&root, &server_url);
+    action(daemon.clone(), AppAction::StartRuntime).await;
+    let created = action(
+        daemon.clone(),
+        AppAction::CreateRoom {
+            display_name: "New chat intent".to_owned(),
+        },
+    )
+    .await;
+    let room_id = created.selected_room_id.clone().unwrap();
+    let topic_id = created.selected_topic_id.clone().unwrap();
+    let chat_count_before = topic_chat_count(&created, &room_id, &topic_id);
+    let body = serde_json::json!({
+        "room_id": room_id,
+        "topic_id": topic_id,
+        "reason": "Focused follow-up",
+        "intent_key": "electron-new-chat-1",
+    });
+
+    let first = new_chat(daemon.clone(), body.clone()).await;
+    assert!(first.identity.account_secret_hex.is_empty());
+    assert_eq!(first.selected_room_id.as_deref(), Some(room_id.as_str()));
+    assert_eq!(first.selected_topic_id.as_deref(), Some(topic_id.as_str()));
+    assert_eq!(
+        topic_chat_count(&first, &room_id, &topic_id),
+        chat_count_before + 1
+    );
+    let selected_chat_id = first.selected_chat_id.expect("new Chat selected");
+
+    let retried = new_chat(daemon, body).await;
+    assert_eq!(
+        retried.selected_chat_id.as_deref(),
+        Some(selected_chat_id.as_str())
+    );
+    assert_eq!(
+        topic_chat_count(&retried, &room_id, &topic_id),
+        chat_count_before + 1
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn new_chat_rejects_invalid_and_oversized_json() {
+    let root = TempDir::new().unwrap();
+    let daemon = test_app(&root, "http://127.0.0.1:9");
+
+    let malformed = new_chat_response(daemon.clone(), Body::from("not-json")).await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    let unknown_field = new_chat_response(
+        daemon.clone(),
+        Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "room_id": "room-test",
+                "topic_id": "home",
+                "reason": null,
+                "intent_key": "intent-1",
+                "unexpected": true,
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(unknown_field.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let oversized = new_chat_response(
+        daemon,
+        Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "room_id": "room-test",
+                "topic_id": "home",
+                "reason": "x".repeat(MAX_DAEMON_NEW_CHAT_REQUEST_BYTES),
+                "intent_key": "intent-1",
+            }))
+            .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -330,6 +437,42 @@ async fn action(daemon: axum::Router, action: AppAction) -> AppState {
         String::from_utf8_lossy(&bytes)
     );
     serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn new_chat(daemon: axum::Router, body: serde_json::Value) -> AppState {
+    let response = new_chat_response(daemon, Body::from(serde_json::to_vec(&body).unwrap())).await;
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn new_chat_response(daemon: axum::Router, body: Body) -> axum::response::Response {
+    daemon
+        .oneshot(
+            Request::post("/v1/app/new-chat")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+fn topic_chat_count(state: &AppState, room_id: &str, topic_id: &str) -> usize {
+    state
+        .topics
+        .iter()
+        .find(|topic| topic.room_id == room_id && topic.topic_id == topic_id)
+        .expect("topic must exist")
+        .chats
+        .len()
 }
 
 async fn read_json<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
