@@ -47,9 +47,10 @@ checkpoint and future regression gates are recorded in
 [`docs/runs/production-baseline-2026-07-15.md`](../docs/runs/production-baseline-2026-07-15.md).
 
 `scripts/deploy-lat1 REV` switches infrastructure only. An Agent Runtime image
-rollout is a separate opt-in argument set: it must name an exact promoted
-artifact and either explicit Project ids or `--roll-all` plus a canary. Never
-infer a bot rollout from the word “deploy.”
+rollout is a separate two-command prepare/execute operation: it names an exact
+promoted artifact and either explicit Project ids or `--roll-all` plus an
+already-target canary, then requires the prepared plan hash before mutation.
+Never infer a bot rollout from the word “deploy.”
 
 ## Layout
 

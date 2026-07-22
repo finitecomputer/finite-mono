@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Opt-in, serial rollout of one promoted Runtime Artifact to existing lat1
-# agents. This reuses Core's explicit per-Runtime Upgrade operation; it does
-# not create a second fleet lifecycle contract.
+# Prepare and execute a reviewed, exact rollout of one promoted Runtime Artifact
+# to existing lat1 agents. Core remains the lifecycle authority; this wrapper
+# only freezes its exact plan and provider facts between two operator commands.
 set -euo pipefail
 
 LAT1="${LAT1:-root@64.34.82.77}"
 SOURCE_HOST_ID=finite-lat-1
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROLLOUT_STATE_ROOT="${ROLLOUT_STATE_ROOT:-$REPO_ROOT/.local-state/runtime-rollouts}"
 
 usage() {
   cat >&2 <<'EOF'
 usage: scripts/rollout-lat1-runtime-artifact [--validate-only] \
+  (--prepare | --execute-plan-hash 64_LOWERCASE_HEX) \
   --roll-runtime-artifact ID \
   --roll-admin-email EMAIL \
   --roll-admin-workos-user-id ID \
@@ -40,10 +43,13 @@ validate_local_inputs() {
   if [[ -n $ROLLOUT_CANARY_PROJECT_ID ]]; then
     validate_id "canary project id" "$ROLLOUT_CANARY_PROJECT_ID" || return
   fi
+  [[ $ROLLOUT_STATE_ROOT == /* ]] || invalid_value "ROLLOUT_STATE_ROOT: expected an absolute path"
 }
 
 parse_args() {
   VALIDATE_ONLY=false
+  ROLLOUT_MODE=""
+  EXECUTE_PLAN_HASH=""
   ROLLOUT_ARTIFACT_ID=""
   ROLLOUT_ADMIN_EMAIL=""
   ROLLOUT_ADMIN_WORKOS_USER_ID=""
@@ -57,6 +63,17 @@ parse_args() {
       --validate-only)
         VALIDATE_ONLY=true
         shift
+        ;;
+      --prepare)
+        [[ -z $ROLLOUT_MODE ]] || { echo "choose exactly one of --prepare or --execute-plan-hash" >&2; return 64; }
+        ROLLOUT_MODE=prepare
+        shift
+        ;;
+      --execute-plan-hash)
+        [[ -z $ROLLOUT_MODE && $# -ge 2 && -n $2 ]] || { usage; return 64; }
+        ROLLOUT_MODE=execute
+        EXECUTE_PLAN_HASH="$2"
+        shift 2
         ;;
       --roll-runtime-artifact)
         [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
@@ -100,6 +117,14 @@ parse_args() {
     esac
   done
 
+  if [[ -z $ROLLOUT_MODE ]]; then
+    echo "choose exactly one of --prepare or --execute-plan-hash" >&2
+    return 64
+  fi
+  if [[ $ROLLOUT_MODE == execute && ! $EXECUTE_PLAN_HASH =~ ^[0-9a-f]{64}$ ]]; then
+    echo "--execute-plan-hash requires exactly 64 lowercase hexadecimal characters" >&2
+    return 64
+  fi
   if [[ -z $ROLLOUT_ARTIFACT_ID || -z $ROLLOUT_ADMIN_EMAIL || -z $ROLLOUT_ADMIN_WORKOS_USER_ID ]]; then
     echo "runtime rollout requires the artifact id and real admin identity" >&2
     return 64
@@ -163,15 +188,6 @@ set +a
 exec /run/current-system/sw/bin/finite-saas-core "$@"' "$@"
 }
 
-print_json_if_present() {
-  local payload="$1"
-  [[ -n $payload ]] || return 0
-  if ! jq . <<<"$payload"; then
-    printf '%s\n' "$payload"
-    return 65
-  fi
-}
-
 capture_remote_cli() {
   local output_name="$1" status_name="$2"
   shift 2
@@ -184,20 +200,42 @@ capture_remote_cli() {
   printf -v "$status_name" '%s' "$captured_status"
 }
 
+print_json_if_present() {
+  local payload="$1"
+  [[ -n $payload ]] || return 0
+  if ! jq . <<<"$payload"; then
+    printf '%s\n' "$payload"
+    return 65
+  fi
+}
+
 validate_plan() {
   local plan="$1"
   jq -e --arg artifact "$ROLLOUT_ARTIFACT_ID" --arg host "$SOURCE_HOST_ID" '
-    .target_artifact_id == $artifact
+    type == "object"
+    and .target_artifact_id == $artifact
     and .source_host_id == $host
+    and .plan_only == true
+    and .halted == false
+    and .halted_reason == null
     and (.planned | type == "array")
     and (.skipped | type == "array")
+    and (.outcomes | type == "array" and length == 0)
     and all(.planned[];
-      .source_host_id == $host
+      (keys | sort) == (["agent_runtime_id", "project_display_name", "project_id", "source_host_id", "source_machine_id", "target_artifact_id"] | sort)
+      and .source_host_id == $host
       and .target_artifact_id == $artifact
-      and (.project_id | type == "string")
-      and (.agent_runtime_id | type == "string")
-      and (.source_machine_id | type == "string"))
-  ' <<<"$plan" >/dev/null
+      and all(.project_id, .agent_runtime_id, .project_display_name, .source_machine_id; type == "string" and length > 0))
+    and all(.skipped[];
+      (keys | sort) == (["agent_runtime_id", "project_display_name", "project_id", "reason", "source_host_id", "source_machine_id"] | sort)
+      and (.project_id | type == "string" and length > 0)
+      and (.reason | type == "string" and length > 0)
+      and all(.agent_runtime_id, .project_display_name, .source_host_id, .source_machine_id; . == null or (type == "string" and length > 0)))
+    and ((.planned | map(.project_id + "\u0000" + .agent_runtime_id + "\u0000" + .source_machine_id) | unique | length) == (.planned | length))
+  ' <<<"$plan" >/dev/null || {
+    echo "runtime rollout plan failed complete-shape validation" >&2
+    return 65
+  }
 
   local project_id runtime_id source_host_id machine_id target_artifact_id
   while IFS=$'\t' read -r project_id runtime_id source_host_id machine_id target_artifact_id; do
@@ -207,32 +245,405 @@ validate_plan() {
     validate_id "planned source machine id" "$machine_id" || return
     [[ $target_artifact_id == "$ROLLOUT_ARTIFACT_ID" ]] || { invalid_value "planned target artifact id"; return; }
   done < <(jq -r '.planned[] | [.project_id, .agent_runtime_id, .source_host_id, .source_machine_id, .target_artifact_id] | @tsv' <<<"$plan")
+
+  while IFS=$'\t' read -r project_id runtime_id source_host_id machine_id; do
+    validate_id "skipped project id" "$project_id" || return
+    [[ -z $runtime_id ]] || validate_id "skipped Runtime id" "$runtime_id" || return
+    [[ -z $source_host_id || $source_host_id == "$SOURCE_HOST_ID" ]] || { invalid_value "skipped source host id"; return; }
+    [[ -z $machine_id ]] || validate_id "skipped source machine id" "$machine_id" || return
+  done < <(jq -r '.skipped[] | [.project_id, (.agent_runtime_id // ""), (.source_host_id // ""), (.source_machine_id // "")] | @tsv' <<<"$plan")
+
+  if [[ $ROLLOUT_ALL == false && $(jq '.skipped | length' <<<"$plan") -ne 0 ]]; then
+    echo "runtime rollout refused: an explicitly requested project was skipped" >&2
+    return 65
+  fi
+  if [[ $ROLLOUT_ALL == true ]]; then
+    jq -e --arg canary "$ROLLOUT_CANARY_PROJECT_ID" --arg host "$SOURCE_HOST_ID" '
+      ([.skipped[] | select(.project_id == $canary and .reason == "already_on_target_artifact" and .source_host_id == $host and .agent_runtime_id != null and .source_machine_id != null)] | length) == 1
+      and ([.planned[] | select(.project_id == $canary)] | length) == 0
+    ' <<<"$plan" >/dev/null || {
+      echo "runtime rollout refused: --all canary must be the one Core entry skipped as already_on_target_artifact" >&2
+      return 65
+    }
+  fi
 }
 
-preflight_planned_compute() {
-  local plan="$1"
-  local -a machines=()
-  mapfile -t machines < <(jq -r '.planned[].source_machine_id' <<<"$plan")
-  if [[ ${#machines[@]} -eq 0 ]]; then
-    return 0
+provider_request_entries() {
+  local core_plan="$1"
+  if [[ $ROLLOUT_ALL == true ]]; then
+    jq -c --arg canary "$ROLLOUT_CANARY_PROJECT_ID" '
+      [.planned[] | {project_id, agent_runtime_id, source_machine_id}]
+      + [.skipped[] | select(.project_id == $canary and .reason == "already_on_target_artifact") | {project_id, agent_runtime_id, source_machine_id}]
+      | sort_by(.project_id, .agent_runtime_id, .source_machine_id)
+    ' <<<"$core_plan"
+  else
+    jq -c '[.planned[] | {project_id, agent_runtime_id, source_machine_id}] | sort_by(.project_id, .agent_runtime_id, .source_machine_id)' <<<"$core_plan"
   fi
-  local machine
-  for machine in "${machines[@]}"; do
-    validate_id "planned source machine id" "$machine" || return
-  done
-  run_remote_bash 'set -euo pipefail
-for machine in "$@"; do
-  nerdctl --namespace finite inspect "$machine" >/dev/null || {
-    echo "runtime rollout preflight failed: canonical container $machine is absent" >&2
+}
+
+collect_provider_facts() {
+  local request_entries="$1"
+  local -a provider_args=(provider-snapshot-v1)
+  local project_id runtime_id machine_id
+  while IFS=$'\t' read -r project_id runtime_id machine_id; do
+    validate_id "provider project id" "$project_id" || return
+    validate_id "provider Runtime id" "$runtime_id" || return
+    validate_id "provider source machine id" "$machine_id" || return
+    provider_args+=("$runtime_id" "$machine_id" "$project_id")
+  done < <(jq -r '.[] | [.project_id, .agent_runtime_id, .source_machine_id] | @tsv' <<<"$request_entries")
+
+  local snapshot status provider_script
+  read -r -d '' provider_script <<'REMOTE' || true
+set -euo pipefail
+[[ ${1:-} == provider-snapshot-v1 ]] || exit 64
+shift
+(( $# % 3 == 0 )) || exit 64
+printf 'SYSTEM\t%s\n' "$(readlink -f /run/current-system)"
+while (($#)); do
+  runtime_id="$1"
+  machine="$2"
+  project_id="$3"
+  shift 3
+  printf 'CANONICAL\t%s\t%s\t%s\t' "$runtime_id" "$machine" "$project_id"
+  nerdctl --namespace finite inspect --format '{{.State.Status}}{{"\t"}}{{.Config.Image}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.runtime_artifact_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.state_schema_version"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.runtime"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.source_host_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.source_machine_id"}}{{"\t"}}{{index .Config.Labels "computer.finite.v2.project_id"}}{{"\t"}}{{json .Mounts}}{{"\t"}}{{json .NetworkSettings.Ports}}' "$machine" || {
+    echo "runtime rollout provider preflight failed: canonical container $machine is absent" >&2
     exit 1
   }
-done' "${machines[@]}"
+done
+while IFS= read -r name; do
+  [[ -n $name ]] || continue
+  printf 'TOPOLOGY\t%s\t' "$name"
+  nerdctl --namespace finite inspect --format '{{with .Config.Labels}}{{index . "computer.finite.v2.source_machine_id"}}{{end}}{{"\t"}}{{json .Mounts}}' "$name" || {
+    echo "runtime rollout provider preflight failed: could not inspect topology member $name" >&2
+    exit 1
+  }
+done < <(nerdctl --namespace finite ps --all --format '{{.Names}}')
+REMOTE
+  set +e
+  snapshot="$(run_remote_bash "$provider_script" "${provider_args[@]}")"
+  status=$?
+  set -e
+  ((status == 0)) || return "$status"
+
+  local parsed_snapshot
+  parsed_snapshot="$(jq -Rsc --argjson expected "$request_entries" '
+    split("\n") | map(select(length > 0) | split("\t")) as $rows
+    | [$rows[] | select(.[0] == "SYSTEM")] as $systems
+    | [$rows[] | select(.[0] == "TOPOLOGY") | {
+        name: .[1], source_machine_id: .[2], mounts: (.[3] | fromjson)
+      }] as $topology
+    | [$rows[] | select(.[0] == "CANONICAL") | {
+        agent_runtime_id: .[1], source_machine_id: .[2], project_id: .[3],
+        state: .[4], image: .[5], current_artifact_id: .[6], state_schema_version: .[7],
+        runtime_label: .[8], source_host_label: .[9], source_machine_label: .[10],
+        project_label: .[11], mounts: (.[12] | fromjson), ports: (.[13] | fromjson)
+      }] | sort_by(.project_id, .agent_runtime_id, .source_machine_id) as $canonical
+    | if ($systems | length) != 1 or ($systems[0] | length) != 2
+        or ($systems[0][1] | test("^/nix/store/[A-Za-z0-9+._?=-]+$") | not)
+      then error("invalid remote system closure") else . end
+    | if ($canonical | length) != ($expected | length)
+        or ($canonical | map({project_id, agent_runtime_id, source_machine_id})) != $expected
+      then error("provider fact identity mismatch") else . end
+    | [$canonical[]
+      | . as $entry
+      | [.mounts[]? | select(.Destination == "/data")] as $data_mounts
+      | ($data_mounts[0].Source // "") as $root
+      | ([(.ports // {}) | to_entries[]?.value[]? | select(.HostPort != null) | .HostPort] | unique) as $ports
+      | ([$topology[] | select(.source_machine_id == $entry.source_machine_id)] | length) as $source_owners
+      | ([$topology[] | select(any(.mounts[]?; .Source == $root))] | length) as $durable_owners
+      | if (.state | type) != "string" or (.state | length) == 0 then error("canonical state is missing")
+        elif (.image | test("@sha256:[0-9a-f]{64}$") | not) then error("image is not digest pinned")
+        elif .current_artifact_id == "" or .state_schema_version == "" then error("artifact labels are incomplete")
+        elif .runtime_label != "true" or .source_host_label != "finite-lat-1"
+          or .source_machine_label != .source_machine_id or .project_label != .project_id
+          then error("ownership labels do not match")
+        elif ($data_mounts | length) != 1 or $data_mounts[0].RW != true
+          or ($root | test("^/var/lib/finite-saas-runner/kata/[A-Za-z0-9_.-]+$") | not)
+          then error("durable /data bind is not exact")
+        elif $source_owners != 1 or $durable_owners != 1 then error("ambiguous container topology")
+        elif .state == "running" and (($ports | length) != 1 or ($ports[0] | test("^[0-9]{1,5}$") | not))
+          then error("expected exactly one published host port")
+        else {
+          project_id, agent_runtime_id, source_machine_id, current_artifact_id, image,
+          state_schema_version, state, data_source: $root,
+          ownership: {runtime:"true", source_host_id:"finite-lat-1", source_machine_id:.source_machine_id, project_id:.project_id},
+          source_machine_owner_count: $source_owners,
+          durable_root_owner_count: $durable_owners,
+          host_port: (if .state == "running" then $ports[0] else null end)
+        } end]
+      | {remote_system_closure:$systems[0][1], provider_facts:.}
+  ' <<<"$snapshot")" || {
+    echo "runtime rollout provider facts failed local validation" >&2
+    return 65
+  }
+
+  local contact_request_entries
+  contact_request_entries="$(jq -c '[.provider_facts[] | select(.state == "running") | {project_id, agent_runtime_id, source_machine_id}]' <<<"$parsed_snapshot")"
+  local -a contact_args=(provider-contact-v1)
+  while IFS=$'\t' read -r project_id runtime_id machine_id; do
+    local host_port
+    host_port="$(jq -r --arg runtime "$runtime_id" '.provider_facts[] | select(.agent_runtime_id == $runtime) | .host_port' <<<"$parsed_snapshot")"
+    contact_args+=("$runtime_id" "$machine_id" "$project_id" "$host_port")
+  done < <(jq -r '.[] | [.project_id, .agent_runtime_id, .source_machine_id] | @tsv' <<<"$contact_request_entries")
+
+  local contact_script contacts
+  read -r -d '' contact_script <<'REMOTE' || true
+set -euo pipefail
+[[ ${1:-} == provider-contact-v1 ]] || exit 64
+shift
+(( $# % 4 == 0 )) || exit 64
+while (($#)); do
+  runtime_id="$1"
+  machine="$2"
+  project_id="$3"
+  host_port="$4"
+  shift 4
+  printf '\036CONTACT\t%s\t%s\t%s\n' "$runtime_id" "$machine" "$project_id"
+  curl -fsS --max-time 10 "http://127.0.0.1:$host_port/contact" || {
+    echo "runtime rollout provider preflight failed: /contact was unavailable for $machine" >&2
+    exit 1
+  }
+  printf '\n'
+done
+REMOTE
+  set +e
+  contacts="$(run_remote_bash "$contact_script" "${contact_args[@]}")"
+  status=$?
+  set -e
+  ((status == 0)) || return "$status"
+
+  local contact_rows facts_with_principals principal principal_hash
+  contact_rows="$(jq -Rsc --argjson expected "$contact_request_entries" '
+    split("\u001e") | map(select(length > 0) | capture("^CONTACT\\t(?<runtime>[^\\t]+)\\t(?<machine>[^\\t]+)\\t(?<project>[^\\n]+)\\n(?<payload>.*)\\n?$"; "s")
+      | {agent_runtime_id:.runtime, source_machine_id:.machine, project_id:.project,
+         agent_principal: ((.payload | fromjson).agent_npub)})
+    | sort_by(.project_id, .agent_runtime_id, .source_machine_id)
+    | if map({project_id, agent_runtime_id, source_machine_id}) != $expected
+      then error("contact identity mismatch")
+      elif all(.[]; (.agent_principal | type == "string" and startswith("npub1") and length <= 256))
+      then .
+      else error("invalid Agent Principal contact") end
+  ' <<<"$contacts")" || {
+    echo "runtime rollout provider contact failed local validation" >&2
+    return 65
+  }
+  facts_with_principals="$(jq -c '[.provider_facts[] | if .state == "running" then . else . + {agent_principal_sha256:null} | del(.host_port) end]' <<<"$parsed_snapshot")"
+  while IFS=$'\t' read -r project_id runtime_id machine_id principal; do
+    principal_hash="$(sha256_text "$principal")"
+    facts_with_principals="$(jq -c --arg project "$project_id" --arg runtime "$runtime_id" --arg machine "$machine_id" --arg hash "$principal_hash" '
+      map(if .project_id == $project and .agent_runtime_id == $runtime and .source_machine_id == $machine
+        then . + {agent_principal_sha256:$hash} | del(.host_port) else . end)
+    ' <<<"$facts_with_principals")"
+  done < <(jq -r '.[] | [.project_id, .agent_runtime_id, .source_machine_id, .agent_principal] | @tsv' <<<"$contact_rows")
+
+  jq -cS --argjson facts "$facts_with_principals" '
+    .provider_facts as $original
+    | if ($facts | length) != ($original | length)
+        or any($facts[];
+          has("host_port")
+          or (if .state == "running"
+            then (.agent_principal_sha256 | test("^[0-9a-f]{64}$") | not)
+            else .agent_principal_sha256 != null end))
+      then error("provider contact identity mismatch")
+      else {remote_system_closure, provider_facts:$facts} end
+  ' <<<"$parsed_snapshot"
+}
+
+build_reviewed_plan() {
+  local core_plan="$1" provider_snapshot="$2"
+  local scope target_reference provider_facts remote_system_closure repo_revision
+  provider_facts="$(jq -c '.provider_facts' <<<"$provider_snapshot")"
+  remote_system_closure="$(jq -r '.remote_system_closure' <<<"$provider_snapshot")"
+  repo_revision="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  [[ $repo_revision =~ ^[0-9a-f]{40}$ ]] || {
+    echo "runtime rollout refused: local repository revision was not a full SHA-1" >&2
+    return 65
+  }
+  if [[ $ROLLOUT_ALL == true ]]; then
+    scope="$(jq -cn --arg canary "$ROLLOUT_CANARY_PROJECT_ID" '{kind:"all", canary_project_id:$canary}')"
+    target_reference="$(jq -c --arg canary "$ROLLOUT_CANARY_PROJECT_ID" --arg artifact "$ROLLOUT_ARTIFACT_ID" '
+      .[] | select(.project_id == $canary and .current_artifact_id == $artifact and .state == "running")
+      | {image, state_schema_version}
+    ' <<<"$provider_facts")"
+    [[ -n $target_reference ]] || {
+      echo "runtime rollout refused: provider canary does not match the target artifact" >&2
+      return 65
+    }
+  else
+    scope="$(printf '%s\n' "${ROLLOUT_PROJECT_IDS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | {kind:"projects", project_ids:.}')"
+    target_reference=null
+  fi
+
+  jq -cnS \
+    --argjson core "$core_plan" \
+    --argjson facts "$provider_facts" \
+    --argjson scope "$scope" \
+    --argjson target_reference "$target_reference" \
+    --arg artifact "$ROLLOUT_ARTIFACT_ID" \
+    --arg host "$SOURCE_HOST_ID" \
+    --arg repo_revision "$repo_revision" \
+    --arg remote_system_closure "$remote_system_closure" '
+      {
+        schema_version: 3,
+        repo_revision: $repo_revision,
+        remote_system_closure: $remote_system_closure,
+        source_host_id: $host,
+        target_artifact_id: $artifact,
+        target_reference: $target_reference,
+        scope: $scope,
+        planned: [
+          $core.planned[] as $entry
+          | $facts[] as $fact
+          | select($fact.project_id == $entry.project_id and $fact.agent_runtime_id == $entry.agent_runtime_id and $fact.source_machine_id == $entry.source_machine_id)
+          | select($fact.state == "running")
+          | ($entry | del(.project_display_name)) + {provider_facts:$fact}
+        ] | sort_by(.project_id, .agent_runtime_id, .source_machine_id),
+        excluded: [
+          $core.planned[] as $entry
+          | $facts[] as $fact
+          | select($fact.project_id == $entry.project_id and $fact.agent_runtime_id == $entry.agent_runtime_id and $fact.source_machine_id == $entry.source_machine_id)
+          | select($fact.state != "running")
+          | ($entry | del(.project_display_name)) + {reason:"provider_not_running", provider_facts:$fact}
+        ] | sort_by(.project_id, .agent_runtime_id, .source_machine_id),
+        skipped: ($core.skipped | map(del(.project_display_name)) | sort_by(.project_id, .agent_runtime_id, .reason)),
+        canary: (if $scope.kind == "all" then
+          $core.skipped[] as $entry
+          | select($entry.project_id == $scope.canary_project_id and $entry.reason == "already_on_target_artifact")
+          | $facts[] as $fact
+          | select($fact.project_id == $entry.project_id and $fact.agent_runtime_id == $entry.agent_runtime_id and $fact.source_machine_id == $entry.source_machine_id)
+          | ($entry | del(.project_display_name)) + {provider_facts:$fact}
+        else null end)
+      }
+      | if ((.planned | length) + (.excluded | length)) != ($core.planned | length)
+        then error("planned provider fact partition was incomplete")
+        elif $scope.kind == "projects" and (.excluded | length) != 0
+        then error("explicitly requested Runtime was excluded by provider preflight")
+        else . end
+    '
+}
+
+sha256_text() {
+  local value="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf %s "$value" | sha256sum | awk '{print $1}'
+  else
+    printf %s "$value" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+write_atomic() {
+  local destination="$1" contents="$2" temporary
+  temporary="$destination.tmp.$$"
+  umask 077
+  printf '%s\n' "$contents" >"$temporary"
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$destination"
+}
+
+EVENTS_FILE=""
+EVENT_FINAL_WRITTEN=false
+EVENT_PHASE=""
+PLAN_HASH=""
+
+append_event() {
+  local event="$1" enriched
+  [[ -n $EVENTS_FILE ]] || return 0
+  enriched="$(jq -c --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg plan_hash "$PLAN_HASH" --arg phase "$EVENT_PHASE" '. + {timestamp:$timestamp, plan_hash:$plan_hash, phase:$phase}' <<<"$event")"
+  printf '%s\n' "$enriched" >>"$EVENTS_FILE"
+}
+
+record_final() {
+  local status="$1" exit_code="$2"
+  if [[ -n $EVENTS_FILE && $EVENT_FINAL_WRITTEN == false ]]; then
+    append_event "$(jq -cn --arg phase "$EVENT_PHASE" --arg status "$status" --argjson exit_code "$exit_code" '{event:"final", phase:$phase, status:$status, exit_code:$exit_code}')"
+    EVENT_FINAL_WRITTEN=true
+  fi
+}
+
+record_final_on_exit() {
+  local exit_code="$1"
+  if ((exit_code == 0)); then
+    record_final success 0
+  else
+    record_final failure "$exit_code"
+  fi
+}
+
+initialize_evidence() {
+  local mode="$1" require_existing="$2" evidence_dir
+  evidence_dir="$ROLLOUT_STATE_ROOT/$PLAN_HASH"
+  if [[ $require_existing == true && ! -f $evidence_dir/plan.json ]]; then
+    echo "runtime rollout refused: prepared plan is absent at $evidence_dir/plan.json" >&2
+    return 66
+  fi
+  mkdir -p "$evidence_dir"
+  chmod 0700 "$ROLLOUT_STATE_ROOT" "$evidence_dir"
+  EVENTS_FILE="$evidence_dir/events.jsonl"
+  touch "$EVENTS_FILE"
+  chmod 0600 "$EVENTS_FILE"
+  EVENT_PHASE="$mode"
+  append_event "$(jq -cn --arg phase "$mode" '{event:"start", phase:$phase}')"
+  trap 'record_final_on_exit "$?"' EXIT
+}
+
+copy_paste_execute_command() {
+  local -a command=("$REPO_ROOT/scripts/rollout-lat1-runtime-artifact" --execute-plan-hash "$PLAN_HASH")
+  command+=(--roll-runtime-artifact "$ROLLOUT_ARTIFACT_ID")
+  command+=(--roll-admin-email "$ROLLOUT_ADMIN_EMAIL")
+  command+=(--roll-admin-workos-user-id "$ROLLOUT_ADMIN_WORKOS_USER_ID")
+  command+=(--roll-wait-timeout-seconds "$ROLLOUT_WAIT_TIMEOUT_SECONDS")
+  local project_id
+  if [[ $ROLLOUT_ALL == true ]]; then
+    command+=(--roll-all --roll-canary-project-id "$ROLLOUT_CANARY_PROJECT_ID")
+  else
+    for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
+      command+=(--roll-project-id "$project_id")
+    done
+  fi
+  printf '  '
+  printf '%q ' "${command[@]}"
+  printf '\n'
+}
+
+capture_current_reviewed_plan() {
+  build_plan_cli_args
+  local core_plan core_status request_entries provider_facts
+  capture_remote_cli core_plan core_status "${PLAN_CLI_ARGS[@]}" --plan-only
+  if ((core_status != 0)); then
+    print_json_if_present "$core_plan" || true
+    return "$core_status"
+  fi
+  validate_plan "$core_plan"
+  request_entries="$(provider_request_entries "$core_plan")"
+  provider_facts="$(collect_provider_facts "$request_entries")"
+  build_reviewed_plan "$core_plan" "$provider_facts"
+}
+
+inspect_one_entry() {
+  local entry="$1" request observed
+  request="$(jq -c '[{project_id, agent_runtime_id, source_machine_id}]' <<<"$entry")"
+  observed="$(collect_provider_facts "$request")"
+  jq -c '.provider_facts[0] + {remote_system_closure:.remote_system_closure}' <<<"$observed"
 }
 
 execute_exact_plan() {
-  local plan="$1"
-  local project_id runtime_id source_host_id machine_id target_artifact_id result result_status
-  while IFS=$'\t' read -r project_id runtime_id source_host_id machine_id target_artifact_id; do
+  local reviewed_plan="$1"
+  local entry project_id runtime_id source_host_id machine_id target_artifact_id approved observed result result_status post
+  while IFS= read -r entry; do
+    project_id="$(jq -r '.project_id' <<<"$entry")"
+    runtime_id="$(jq -r '.agent_runtime_id' <<<"$entry")"
+    source_host_id="$(jq -r '.source_host_id' <<<"$entry")"
+    machine_id="$(jq -r '.source_machine_id' <<<"$entry")"
+    target_artifact_id="$(jq -r '.target_artifact_id' <<<"$entry")"
+    approved="$(jq -cS --arg closure "$(jq -r '.remote_system_closure' <<<"$reviewed_plan")" '.provider_facts + {remote_system_closure:$closure}' <<<"$entry")"
+
+    observed="$(inspect_one_entry "$entry")"
+    if [[ $(jq -cS . <<<"$observed") != "$approved" ]]; then
+      echo "runtime rollout refused: provider facts drifted before enqueue for $project_id" >&2
+      return 65
+    fi
+    append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson provider_facts "$observed" '{event:"entry_preflight", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", provider_facts:$provider_facts}')"
+
     local -a exact_args=(
       runtime-artifact-rollout
       --artifact-id "$target_artifact_id"
@@ -245,8 +656,9 @@ execute_exact_plan() {
       --expected-source-machine-id "$machine_id"
     )
     capture_remote_cli result result_status "${exact_args[@]}"
-    print_json_if_present "$result" || return $?
     if ((result_status != 0)); then
+      print_json_if_present "$result" || true
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson exit_code "$result_status" '{event:"core", project_id:$project, agent_runtime_id:$runtime, status:"failed", exit_code:$exit_code}')"
       return "$result_status"
     fi
     jq -e \
@@ -264,12 +676,34 @@ execute_exact_plan() {
         and .planned[0].source_host_id == $host
         and .planned[0].source_machine_id == $machine
         and .planned[0].target_artifact_id == $artifact
+        and (.skipped | length == 0)
         and (.outcomes | length == 1)
         and .outcomes[0].project_id == $project
         and .outcomes[0].agent_runtime_id == $runtime
         and .outcomes[0].status == "succeeded"
-      ' <<<"$result" >/dev/null || return 1
-  done < <(jq -r '.planned[] | [.project_id, .agent_runtime_id, .source_host_id, .source_machine_id, .target_artifact_id] | @tsv' <<<"$plan")
+        and (.outcomes[0].request_id | type == "string" and length > 0)
+      ' <<<"$result" >/dev/null || {
+        echo "runtime rollout refused: Core result failed exact-shape validation for $project_id" >&2
+        return 65
+      }
+    append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --arg request "$(jq -r '.outcomes[0].request_id' <<<"$result")" '{event:"core", project_id:$project, agent_runtime_id:$runtime, request_id:$request, status:"succeeded"}')"
+
+    post="$(inspect_one_entry "$entry")"
+    jq -e \
+      --arg artifact "$target_artifact_id" \
+      --arg principal "$(jq -r '.agent_principal_sha256' <<<"$approved")" \
+      --argjson target "$(jq -c '.target_reference' <<<"$reviewed_plan")" '
+        .current_artifact_id == $artifact
+        and .agent_principal_sha256 == $principal
+        and .state == "running"
+        and ($target == null or (.image == $target.image and .state_schema_version == $target.state_schema_version))
+      ' <<<"$post" >/dev/null || {
+        echo "runtime rollout postflight failed for $project_id" >&2
+        return 65
+      }
+    append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson provider_facts "$post" '{event:"entry_postflight", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", provider_facts:$provider_facts}')"
+    echo "==> upgraded and verified $project_id ($runtime_id)"
+  done < <(jq -c '.planned[]' <<<"$reviewed_plan")
 }
 
 main() {
@@ -277,27 +711,64 @@ main() {
   if [[ $VALIDATE_ONLY == true ]]; then
     exit 0
   fi
-  build_plan_cli_args
 
-  echo "==> planning existing-runtime rollout on source host $SOURCE_HOST_ID"
-  local plan plan_status
-  capture_remote_cli plan plan_status "${PLAN_CLI_ARGS[@]}" --plan-only
-  print_json_if_present "$plan" || exit $?
-  if ((plan_status != 0)); then
-    exit "$plan_status"
-  fi
-  validate_plan "$plan"
+  echo "==> recomputing Core scope and allowlisted provider facts on $SOURCE_HOST_ID"
+  local reviewed_plan canonical_plan plan_path saved_plan planned_count excluded_count excluded_summary skipped_count skip_summary current_plan_hash
+  reviewed_plan="$(capture_current_reviewed_plan)"
+  canonical_plan="$(jq -cS . <<<"$reviewed_plan")"
+  PLAN_HASH="$(sha256_text "$canonical_plan")"
+  plan_path="$ROLLOUT_STATE_ROOT/$PLAN_HASH/plan.json"
+  planned_count="$(jq '.planned | length' <<<"$canonical_plan")"
+  excluded_count="$(jq '.excluded | length' <<<"$canonical_plan")"
+  excluded_summary="$(jq -r '
+    [.excluded | group_by(.reason)[] | "\(.[0].reason)=\(length)"] | join(", ")
+  ' <<<"$canonical_plan")"
+  skipped_count="$(jq '.skipped | length' <<<"$canonical_plan")"
+  skip_summary="$(jq -r '
+    [.skipped | group_by(.reason)[] | "\(.[0].reason)=\(length)"] | join(", ")
+  ' <<<"$canonical_plan")"
 
-  if [[ $(jq '.planned | length' <<<"$plan") -eq 0 ]]; then
-    echo "==> no eligible existing runtimes need this artifact"
+  if [[ $ROLLOUT_MODE == prepare ]]; then
+    initialize_evidence prepare false
+    write_atomic "$plan_path" "$(jq -S . <<<"$canonical_plan")"
+    echo "==> prepared $planned_count runtime(s); excluded $excluded_count provider-ineligible runtime(s); retained $skipped_count Core skip(s)"
+    if [[ -n $excluded_summary ]]; then
+      echo "==> exclusions: $excluded_summary"
+    fi
+    if [[ -n $skip_summary ]]; then
+      echo "==> skips: $skip_summary"
+    fi
+    echo "==> plan hash: $PLAN_HASH"
+    echo "==> plan: $plan_path"
+    echo "==> review the plan, then execute exactly it with:"
+    copy_paste_execute_command
+    record_final success 0
     exit 0
   fi
 
-  echo "==> preflighting every exact planned canonical Kata container"
-  preflight_planned_compute "$plan"
-
-  echo "==> rolling the exact preflighted runtimes serially; first failure stops the cohort"
-  execute_exact_plan "$plan"
+  if [[ $PLAN_HASH != "$EXECUTE_PLAN_HASH" ]]; then
+    current_plan_hash="$PLAN_HASH"
+    PLAN_HASH="$EXECUTE_PLAN_HASH"
+    plan_path="$ROLLOUT_STATE_ROOT/$PLAN_HASH/plan.json"
+    if [[ -f $plan_path ]]; then
+      initialize_evidence execute true
+      append_event "$(jq -cn --arg current "$current_plan_hash" '{event:"plan_drift", status:"failed", current_plan_hash:$current}')"
+    fi
+    echo "runtime rollout refused: current plan hash $current_plan_hash does not match approved hash $EXECUTE_PLAN_HASH" >&2
+    exit 65
+  fi
+  initialize_evidence execute true
+  saved_plan="$(jq -cS . <"$plan_path")" || {
+    echo "runtime rollout refused: prepared plan is not valid JSON" >&2
+    exit 65
+  }
+  if [[ $saved_plan != "$canonical_plan" ]]; then
+    echo "runtime rollout refused: retained prepared plan does not equal the recomputed plan" >&2
+    exit 65
+  fi
+  echo "==> approved plan unchanged; upgrading $planned_count runtime(s) serially"
+  execute_exact_plan "$canonical_plan"
+  record_final success 0
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

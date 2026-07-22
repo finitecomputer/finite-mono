@@ -75,24 +75,22 @@ it deploys as a digest-pinned GHCR container, so bumping it is an edit to
 > reference for what it does and for break-glass situations.
 
 To roll a reviewed, healthy existing Runtime cohort after the deployment has
-passed its normal verification, append an exact artifact id, a real admin
-identity, and one or more explicit project ids:
+passed its normal verification, use the separate prepare/execute workflow with
+an exact artifact id and a real admin identity:
 
-```sh
-just deploy-lat1 "$REV" \
-  --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
-  --roll-admin-email operator@example.com \
-  --roll-admin-workos-user-id user_operator \
-  --roll-project-id project_example
-```
+Deploy the reviewed control-plane revision first. Runtime rollout is deliberately
+separate: run `scripts/rollout-lat1-runtime-artifact --prepare ...`, review its
+concise summary/hash, then run the emitted `--execute-plan-hash ...` command.
+The exact commands and evidence path are documented in
+[`runtime-image.md`](runtime-image.md).
 
-The helper plans the cohort first, verifies every selected canonical container
-on lat1 before enqueueing anything, and then delegates to Core's existing
-Runtime Upgrade operation one Runtime at a time. It stops on the first failure,
-timeout, or failed postcondition. Missing compute is a recovery case and fails
-closed here. Fleet scope is available only with both `--roll-all` and an
-explicit `--roll-canary-project-id`; the canary must finish healthy before the
-remaining planned projects are attempted.
+Preparation verifies every selected canonical container but never enqueues an
+upgrade. Execution recomputes the exact reviewed plan, then delegates to Core's
+existing Runtime Upgrade operation one Runtime at a time with a just-in-time
+provider check and postflight. It stops on the first drift, failure, timeout, or
+failed postcondition. Missing compute is a recovery case and fails closed here.
+Fleet scope requires both `--roll-all` and an explicit
+`--roll-canary-project-id`; that canary must already be healthy on the target.
 
 1. **Core (and any config/module change):** From the reviewed checkout, select
    the full commit, prove it is on `origin/main`, and prebuild it on lat2. The
