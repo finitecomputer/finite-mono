@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ElectronChatStateError,
   electronAttachmentUpload,
+  electronChatRuntime,
   reconcileElectronChatState,
   mergeElectronChatState,
   type ElectronLocalDevice,
@@ -17,6 +18,61 @@ const DEVICE: ElectronLocalDevice = {
   account_id: ACCOUNT_ID,
   device_id: "electron-device",
 };
+
+test("dashboard accepts both released and recovery-capable Electron bridges", (context) => {
+  const previousWindow = globalThis.window;
+  context.after(() => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: previousWindow,
+      writable: true,
+    });
+  });
+  const common = {
+    ensureLocalDevice: async () => DEVICE,
+    daemonState: async () => chatState(ACCOUNT_ID, [ROOM_ID]),
+    dispatchDaemonAction: async () => chatState(ACCOUNT_ID, [ROOM_ID]),
+    uploadDaemonAttachments: async () => chatState(ACCOUNT_ID, [ROOM_ID]),
+    attachmentUrl: () => "finitechat-media://attachment/room/message/attachment",
+    onDaemonUpdate: () => () => undefined,
+    onDaemonGeneration: () => () => undefined,
+    onDaemonError: () => () => undefined,
+    onDeviceLinkStatus: () => () => undefined,
+  };
+  const setBridge = (finiteChatDesktop: unknown) => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { finiteChatDesktop },
+      writable: true,
+    });
+  };
+
+  setBridge({
+    ...common,
+    version: 1,
+    capabilities: ["local-chat-v1", "automatic-device-link-v1"],
+  });
+  assert.equal(electronChatRuntime()?.version, 1);
+
+  setBridge({
+    ...common,
+    version: 2,
+    capabilities: [
+      "local-chat-v1",
+      "automatic-device-link-v1",
+      "revoked-device-recovery-v1",
+    ],
+    recoverLocalDevice: async () => DEVICE,
+  });
+  assert.equal(electronChatRuntime()?.version, 2);
+
+  setBridge({
+    ...common,
+    version: 2,
+    capabilities: ["local-chat-v1", "automatic-device-link-v1"],
+  });
+  assert.equal(electronChatRuntime(), null);
+});
 
 test("local state accepts only the authoritative account and canonical room", () => {
   const hosted = chatState(ACCOUNT_ID, [], binding(ACCOUNT_ID));

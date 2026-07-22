@@ -4,9 +4,13 @@ import type {
   HostedChatState,
 } from "@/lib/hosted-web-device";
 
-const ELECTRON_CHAT_CAPABILITIES = [
+const ELECTRON_CHAT_CAPABILITIES_V1 = [
   "local-chat-v1",
   "automatic-device-link-v1",
+] as const;
+const ELECTRON_CHAT_CAPABILITIES_V2 = [
+  ...ELECTRON_CHAT_CAPABILITIES_V1,
+  "revoked-device-recovery-v1",
 ] as const;
 
 const ELECTRON_ROOM_RECONCILIATION_ATTEMPTS = 8;
@@ -28,7 +32,13 @@ export class ElectronChatStateError extends Error {
 }
 
 export type ElectronDeviceLinkStatus = {
-  status: "preparing" | "linking" | "joining_rooms" | "ready" | "failed";
+  status:
+    | "preparing"
+    | "linking"
+    | "joining_rooms"
+    | "ready"
+    | "recovery_required"
+    | "failed";
   message?: string;
 };
 
@@ -37,6 +47,17 @@ export type ElectronLocalDevice = {
   account_id: string;
   device_id: string;
 };
+
+export type ElectronLocalDeviceRecoveryRequired = {
+  status: "recovery_required";
+  reason: "device_revoked";
+  device_id: string;
+  message: string;
+};
+
+export type ElectronLocalDeviceResult =
+  | ElectronLocalDevice
+  | ElectronLocalDeviceRecoveryRequired;
 
 export type ElectronAttachmentUpload = {
   room_id: string;
@@ -57,10 +78,7 @@ export type ElectronAttachmentAddress = {
   attachment_id: string;
 };
 
-export type ElectronChatRuntime = {
-  version: 1;
-  capabilities: readonly ["local-chat-v1", "automatic-device-link-v1"];
-  ensureLocalDevice(): Promise<ElectronLocalDevice>;
+type ElectronChatRuntimeCommon = {
   daemonState(): Promise<HostedChatState>;
   dispatchDaemonAction(action: HostedChatAction): Promise<HostedChatState>;
   uploadDaemonAttachments(upload: ElectronAttachmentUpload): Promise<HostedChatState>;
@@ -70,6 +88,25 @@ export type ElectronChatRuntime = {
   onDaemonError(callback: (message: string) => void): () => void;
   onDeviceLinkStatus(callback: (status: ElectronDeviceLinkStatus) => void): () => void;
 };
+
+export type ElectronChatRuntimeV1 = ElectronChatRuntimeCommon & {
+  version: 1;
+  capabilities: readonly ["local-chat-v1", "automatic-device-link-v1"];
+  ensureLocalDevice(): Promise<ElectronLocalDevice>;
+};
+
+export type ElectronChatRuntimeV2 = ElectronChatRuntimeCommon & {
+  version: 2;
+  capabilities: readonly [
+    "local-chat-v1",
+    "automatic-device-link-v1",
+    "revoked-device-recovery-v1",
+  ];
+  ensureLocalDevice(): Promise<ElectronLocalDeviceResult>;
+  recoverLocalDevice(): Promise<ElectronLocalDeviceResult>;
+};
+
+export type ElectronChatRuntime = ElectronChatRuntimeV1 | ElectronChatRuntimeV2;
 
 export type ElectronRoomReconciliation = {
   project_id: string;
@@ -90,8 +127,7 @@ export function electronChatRuntime(): ElectronChatRuntime | null {
   const candidate = window.finiteChatDesktop;
   if (!candidate || typeof candidate !== "object") return null;
 
-  const bridge = candidate as Partial<Record<keyof ElectronChatRuntime, unknown>>;
-  if (bridge.version !== 1 || !hasExactCapabilities(bridge.capabilities)) return null;
+  const bridge = candidate as Record<string, unknown>;
   for (const method of [
     "ensureLocalDevice",
     "daemonState",
@@ -102,10 +138,32 @@ export function electronChatRuntime(): ElectronChatRuntime | null {
     "onDaemonGeneration",
     "onDaemonError",
     "onDeviceLinkStatus",
-  ] satisfies ReadonlyArray<keyof ElectronChatRuntime>) {
+  ] as const) {
     if (typeof bridge[method] !== "function") return null;
   }
-  return candidate as ElectronChatRuntime;
+  if (
+    bridge.version === 1
+    && hasExactCapabilities(bridge.capabilities, ELECTRON_CHAT_CAPABILITIES_V1)
+  ) {
+    return candidate as ElectronChatRuntimeV1;
+  }
+  if (
+    bridge.version === 2
+    && hasExactCapabilities(bridge.capabilities, ELECTRON_CHAT_CAPABILITIES_V2)
+    && typeof bridge.recoverLocalDevice === "function"
+  ) {
+    return candidate as ElectronChatRuntimeV2;
+  }
+  return null;
+}
+
+export function isElectronLocalDeviceRecoveryRequired(
+  value: ElectronLocalDeviceResult
+): value is ElectronLocalDeviceRecoveryRequired {
+  return value.status === "recovery_required"
+    && value.reason === "device_revoked"
+    && typeof value.device_id === "string"
+    && value.device_id.length > 0;
 }
 
 export function mergeElectronChatState(
@@ -292,10 +350,13 @@ function throwIfElectronReconciliationAborted(signal?: AbortSignal) {
     : new Error("Electron room reconciliation was cancelled.");
 }
 
-function hasExactCapabilities(value: unknown): value is ElectronChatRuntime["capabilities"] {
+function hasExactCapabilities(
+  value: unknown,
+  expected: readonly string[]
+): value is ElectronChatRuntime["capabilities"] {
   return Array.isArray(value)
-    && value.length === ELECTRON_CHAT_CAPABILITIES.length
-    && ELECTRON_CHAT_CAPABILITIES.every((capability, index) => value[index] === capability);
+    && value.length === expected.length
+    && expected.every((capability, index) => value[index] === capability);
 }
 
 function requiredFormString(formData: FormData, name: string) {

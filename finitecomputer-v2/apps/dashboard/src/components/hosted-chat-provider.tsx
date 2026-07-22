@@ -18,6 +18,7 @@ import {
   ElectronChatStateError,
   electronAttachmentUpload,
   electronChatRuntime,
+  isElectronLocalDeviceRecoveryRequired,
   mergeElectronChatState,
   reconcileElectronChatState,
   type ElectronAttachmentAddress,
@@ -49,6 +50,8 @@ import {
 } from "@/lib/hosted-web-chat-selection";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
+const REVOKED_DESKTOP_MESSAGE =
+  "This desktop Device was revoked. Relink this Mac to create a fresh Device. Your existing encrypted local store will be kept as a backup.";
 
 type MutationSnapshotRequest = {
   allowEqualRevision: boolean;
@@ -65,10 +68,12 @@ type HostedChatContextValue = {
   streamConnected: boolean;
   ownerClaimed: boolean;
   bindingRecoveryRequired: boolean;
+  localDeviceRecoveryRequired: boolean;
   selectionPending: boolean;
   load: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
   claimOwner: () => Promise<HostedChatRetryAttempt>;
   recoverBinding: () => Promise<HostedChatRetryAttempt>;
+  recoverLocalDevice: () => Promise<HostedChatRetryAttempt>;
   dispatch: (action: HostedChatAction) => Promise<HostedChatState>;
   dispatchQuiet: (action: HostedChatAction) => Promise<HostedChatState | null>;
   uploadAttachments: (formData: FormData) => Promise<HostedChatState>;
@@ -92,6 +97,7 @@ export function HostedChatProvider({
   const [streamConnected, setStreamConnected] = useState(false);
   const [ownerClaimed, setOwnerClaimed] = useState(false);
   const [bindingRecoveryRequired, setBindingRecoveryRequired] = useState(false);
+  const [localDeviceRecoveryRequired, setLocalDeviceRecoveryRequired] = useState(false);
   const [selectionPending, setSelectionPending] = useState(false);
   const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
   const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
@@ -185,7 +191,14 @@ export function HostedChatProvider({
       try {
         let next: HostedChatState;
         if (runtime) {
-          const device = await runtime.ensureLocalDevice();
+          const deviceResult = await runtime.ensureLocalDevice();
+          if (isElectronLocalDeviceRecoveryRequired(deviceResult)) {
+            setLocalDeviceRecoveryRequired(true);
+            lastLoadErrorRef.current = REVOKED_DESKTOP_MESSAGE;
+            if (showError) setTransportError(REVOKED_DESKTOP_MESSAGE);
+            return "stop";
+          }
+          const device = deviceResult;
           const hosted = await hostedChatRequest<HostedChatState>(
             `${apiBase}/state`,
             signal ? { signal } : undefined
@@ -216,6 +229,7 @@ export function HostedChatProvider({
         applyHttpSnapshot(next, requestGeneration);
         setTransportError(null);
         setBindingRecoveryRequired(false);
+        setLocalDeviceRecoveryRequired(false);
         return "succeeded";
       } catch (caught) {
         if (runtime && signal?.aborted) return "stop";
@@ -318,10 +332,15 @@ export function HostedChatProvider({
     try {
       let next: HostedChatState;
       if (runtime) {
+        const device = await runtime.ensureLocalDevice();
+        if (isElectronLocalDeviceRecoveryRequired(device)) {
+          setLocalDeviceRecoveryRequired(true);
+          setTransportError(REVOKED_DESKTOP_MESSAGE);
+          return "stop";
+        }
         const hosted = await hostedChatRequest<HostedChatState>(`${apiBase}/recover-binding`, {
           method: "POST",
         });
-        const device = await runtime.ensureLocalDevice();
         hostedAuthorityRef.current = hosted;
         localDeviceRef.current = device;
         next = await requestElectronMutationSnapshot(
@@ -351,6 +370,28 @@ export function HostedChatProvider({
       return "stop";
     }
   }, [apiBase, requestElectronMutationSnapshot, requestMutationSnapshot, runtime]);
+
+  const recoverLocalDevice = useCallback(async (): Promise<HostedChatRetryAttempt> => {
+    if (!runtime || runtime.version !== 2) {
+      setTransportError(CHAT_UNAVAILABLE_MESSAGE);
+      return "stop";
+    }
+    setLocalDeviceRecoveryRequired(false);
+    setTransportError(null);
+    try {
+      const device = await runtime.recoverLocalDevice();
+      if (isElectronLocalDeviceRecoveryRequired(device)) {
+        setLocalDeviceRecoveryRequired(true);
+        setTransportError(REVOKED_DESKTOP_MESSAGE);
+        return "stop";
+      }
+      localDeviceRef.current = device;
+      return load(true);
+    } catch (caught) {
+      setTransportError(hostedChatErrorMessage(caught));
+      return "stop";
+    }
+  }, [load, runtime]);
 
   const requestActionSnapshot = useCallback((
     action: HostedChatAction,
@@ -573,10 +614,12 @@ export function HostedChatProvider({
       streamConnected,
       ownerClaimed,
       bindingRecoveryRequired,
+      localDeviceRecoveryRequired,
       selectionPending,
       load,
       claimOwner,
       recoverBinding,
+      recoverLocalDevice,
       dispatch,
       dispatchQuiet,
       uploadAttachments,

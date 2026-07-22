@@ -31,6 +31,7 @@ const {
   DaemonUpdateRelay,
   DaemonSupervisor,
   DeviceLinkSupervisor,
+  archiveRevokedDeviceProfile,
   daemonRequestVersionMatches,
   deviceLinkFailureMessage,
   loadOrCreateDeviceId,
@@ -905,8 +906,14 @@ async function dashboardJson(pathname, init = {}) {
   }
 }
 
-async function currentDashboardAccountBinding() {
-  return parseAccountBinding(await dashboardJson("/api/device-links/account-binding"));
+async function currentDashboardAccountBinding(deviceId = null) {
+  const suffix = deviceId === null
+    ? ""
+    : `?target_device_id=${encodeURIComponent(deviceId)}`;
+  return parseAccountBinding(
+    await dashboardJson(`/api/device-links/account-binding${suffix}`),
+    deviceId
+  );
 }
 
 async function dashboardDeviceLinkRequest(pathname, request) {
@@ -1011,8 +1018,20 @@ async function ensureLocalDeviceNow(generation) {
   await deviceLinkCancellation;
   assertLocalDeviceGeneration(generation);
   deviceLinkStatus({ status: "preparing" });
-  const binding = await currentDashboardAccountBinding();
+  const deviceId = daemonDeviceId();
+  const binding = await currentDashboardAccountBinding(deviceId);
   assertLocalDeviceGeneration(generation);
+  if (binding.local_device.status === "revoked") {
+    const recovery = {
+      status: "recovery_required",
+      reason: "device_revoked",
+      device_id: deviceId,
+      message:
+        "This desktop Device was revoked. Relink this Mac to create a fresh Device. Your existing encrypted local store will be kept as a backup.",
+    };
+    deviceLinkStatus(recovery);
+    return recovery;
+  }
   let pending = pendingDeviceLink();
   let initial = null;
   if (!readStoredAccountSecret()) {
@@ -1072,6 +1091,30 @@ async function cancelDeviceLink() {
   discardProvisionalAccountSecret();
 }
 
+async function recoverRevokedLocalDevice() {
+  if (process.env.FINITECHAT_DEVICE_ID || process.env.FINITECHAT_HOME) {
+    throw new Error("Revoked Device recovery is unavailable for an explicitly configured development profile");
+  }
+  const deviceId = daemonDeviceId();
+  const binding = await currentDashboardAccountBinding(deviceId);
+  if (binding.local_device.status !== "revoked") {
+    throw new Error("This desktop Device is no longer marked as revoked");
+  }
+
+  await stopDaemon();
+  daemonSupervisor = null;
+  archiveRevokedDeviceProfile({
+    userDataDirectory: app.getPath("userData"),
+    daemonDataDirectory: daemonDataDir(),
+    settingsFile: settingsPath(),
+    secretFile: identitySecretPath(),
+    deviceId,
+  });
+  daemonFailure = null;
+  invalidateLocalDeviceVerification({ cancelLink: true });
+  return ensureLocalDevice();
+}
+
 function focusAppWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.focus();
@@ -1098,17 +1141,15 @@ if (!gotLock) {
     focusAppWindow();
   });
 
-  app.whenReady().then(async () => {
+  app.whenReady().then(() => {
     discardProvisionalAccountSecret();
     configureSessionSecurity();
     registerAttachmentMediaProtocol();
-    await startDaemon().catch(() => {});
     createAuthWindow();
   });
 
-  app.on("activate", async () => {
+  app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      await startDaemon().catch(() => {});
       createAuthWindow();
     }
   });
@@ -1155,6 +1196,11 @@ function assertTrustedIpcSender(event) {
 ipcMain.handle("finitechat:ensure-local-device", async (event) => {
   assertTrustedIpcSender(event);
   return ensureLocalDevice();
+});
+
+ipcMain.handle("finitechat:recover-local-device", async (event) => {
+  assertTrustedIpcSender(event);
+  return recoverRevokedLocalDevice();
 });
 
 ipcMain.handle("finitechat:daemon-state", async (event) => {

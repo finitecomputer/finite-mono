@@ -8,6 +8,7 @@ import {
   deviceLinkRouteError,
   parseDeviceLinkJsonRequest,
   parseDeviceLinkRequest,
+  parseOptionalDeviceStatusTarget,
   projectHostedWebAccountBinding,
 } from "@/lib/device-link";
 import { HostedDeviceRequestError } from "@/lib/hosted-web-device";
@@ -127,18 +128,50 @@ test("device-link boundary maps upstream failures to fixed public errors", () =>
 });
 
 test("Hosted Web account binding projects only a valid public Nostr account id", () => {
-  assert.deepEqual(
-    projectHostedWebAccountBinding({
-      identity: {
+  const state = {
+    identity: {
+      account_id: ACCOUNT_ID,
+      device_id: "hosted-web",
+      account_secret_hex: "must-not-escape",
+    },
+    api_token: "must-not-escape",
+    rooms: [],
+    devices: [
+      {
         account_id: ACCOUNT_ID,
-        device_id: "hosted-web",
-        account_secret_hex: "must-not-escape",
+        device_id: "electron-active",
+        active: true,
+        current_device: false,
+        revoked: false,
+        room_count: 2,
+        credential: "must-not-escape",
       },
-      api_token: "must-not-escape",
-      rooms: [],
-    }),
+      {
+        account_id: ACCOUNT_ID,
+        device_id: "electron-revoked",
+        active: true,
+        current_device: false,
+        revoked: true,
+        room_count: 2,
+      },
+    ],
+  };
+  assert.deepEqual(
+    projectHostedWebAccountBinding(state),
     { account_id: ACCOUNT_ID }
   );
+  assert.deepEqual(projectHostedWebAccountBinding(state, "electron-active"), {
+    account_id: ACCOUNT_ID,
+    local_device: { device_id: "electron-active", status: "available" },
+  });
+  assert.deepEqual(projectHostedWebAccountBinding(state, "electron-revoked"), {
+    account_id: ACCOUNT_ID,
+    local_device: { device_id: "electron-revoked", status: "revoked" },
+  });
+  assert.deepEqual(projectHostedWebAccountBinding(state, "electron-new"), {
+    account_id: ACCOUNT_ID,
+    local_device: { device_id: "electron-new", status: "unknown" },
+  });
 
   for (const value of [
     null,
@@ -148,5 +181,32 @@ test("Hosted Web account binding projects only a valid public Nostr account id",
     { identity: { account_id: "A".repeat(64) } },
   ]) {
     assert.throws(() => projectHostedWebAccountBinding(value), /invalid identity/u);
+  }
+});
+
+test("Device status lookup accepts one exact optional target and no other query", () => {
+  assert.equal(
+    parseOptionalDeviceStatusTarget(
+      new Request("https://finite.computer/api/device-links/account-binding")
+    ),
+    undefined
+  );
+  assert.equal(
+    parseOptionalDeviceStatusTarget(
+      new Request(
+        "https://finite.computer/api/device-links/account-binding?target_device_id=electron-alpha"
+      )
+    ),
+    "electron-alpha"
+  );
+  for (const url of [
+    "https://finite.computer/api/device-links/account-binding?target_device_id=a&target_device_id=b",
+    "https://finite.computer/api/device-links/account-binding?unexpected=1",
+    "https://finite.computer/api/device-links/account-binding?target_device_id=%20bad",
+  ]) {
+    assert.throws(
+      () => parseOptionalDeviceStatusTarget(new Request(url)),
+      (error: unknown) => error instanceof DeviceLinkError && error.status === 400
+    );
   }
 });

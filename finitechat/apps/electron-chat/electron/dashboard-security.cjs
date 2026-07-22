@@ -1,6 +1,6 @@
 const { URL } = require("node:url");
 
-const DESKTOP_BRIDGE_CONTRACT_VERSION = 1;
+const DESKTOP_BRIDGE_CONTRACT_VERSION = 2;
 const MAX_DESKTOP_ACTION_BYTES = 256 * 1024;
 const MAX_DEVICE_LINK_TOKEN_BYTES = 256;
 const NOSTR_ACCOUNT_ID = /^[0-9a-f]{64}$/;
@@ -170,17 +170,43 @@ function parseDeviceLinkPublicResponse(value, expected) {
   };
 }
 
-function parseAccountBinding(value) {
+function parseAccountBinding(value, expectedDeviceId = null) {
+  if (expectedDeviceId !== null) {
+    deviceLinkToken(expectedDeviceId);
+  }
+  const expectedKeys = expectedDeviceId === null
+    ? ["account_id"]
+    : ["account_id", "local_device"];
   if (
     !value
     || typeof value !== "object"
     || Array.isArray(value)
-    || Object.keys(value).length !== 1
+    || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)
     || !NOSTR_ACCOUNT_ID.test(value.account_id)
   ) {
     throw new Error("Finite dashboard returned an invalid account binding");
   }
-  return { account_id: value.account_id };
+  if (expectedDeviceId === null) {
+    return { account_id: value.account_id };
+  }
+  const localDevice = value.local_device;
+  if (
+    !localDevice
+    || typeof localDevice !== "object"
+    || Array.isArray(localDevice)
+    || JSON.stringify(Object.keys(localDevice).sort()) !== JSON.stringify(["device_id", "status"])
+    || localDevice.device_id !== expectedDeviceId
+    || !new Set(["available", "revoked", "unknown"]).has(localDevice.status)
+  ) {
+    throw new Error("Finite dashboard returned an invalid account binding");
+  }
+  return {
+    account_id: value.account_id,
+    local_device: {
+      device_id: expectedDeviceId,
+      status: localDevice.status,
+    },
+  };
 }
 
 function parseLocalDaemonIdentity(value, expectedAccountId) {
