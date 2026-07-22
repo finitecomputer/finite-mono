@@ -59,11 +59,11 @@ use crate::{
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
     runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_secret_references,
-    runtime_spec_v1, runtime_upgrade_prelease_rejection_is_terminal,
-    should_replace_stripe_subscription, source_import_key, trim_to_option,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
-    validate_runtime_spec_environment,
+    runtime_spec_v1, runtime_upgrade_contact_endpoint,
+    runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
+    source_import_key, trim_to_option, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_retirement_snapshot_receipt,
+    validate_runtime_spec_binding, validate_runtime_spec_environment,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -6700,6 +6700,7 @@ struct RuntimeUpgradeCompletion {
     state_schema_version: String,
     runtime_host: String,
     published_app_urls: Vec<String>,
+    contact_endpoint: String,
     runtime_spec: Option<RuntimeSpecEnvelope>,
     runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
 }
@@ -6769,6 +6770,7 @@ where
         if let Some(upgrade) = upgrade {
             runtime.runtime_artifact_id = Some(upgrade.runtime_artifact_id.clone());
             runtime.state_schema_version = Some(upgrade.state_schema_version.clone());
+            runtime.contact_endpoint = Some(upgrade.contact_endpoint.clone());
             runtime.host_facts.runtime_host = upgrade.runtime_host.clone();
             runtime.host_facts.published_app_urls = upgrade.published_app_urls.clone();
             runtime.host_facts.hermes_available = Some(true);
@@ -6923,6 +6925,7 @@ where
             .published_app_urls
             .clone()
             .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+        let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
         if reported_id != target.id || state_schema_version != target.state_schema_version {
             return Err(CoreError::RuntimeUpgradeCompletionMismatch);
         }
@@ -6970,6 +6973,7 @@ where
             state_schema_version,
             runtime_host,
             published_app_urls,
+            contact_endpoint,
             runtime_spec,
             runtime_capabilities: input.runtime_capabilities.clone(),
         })
@@ -11249,7 +11253,7 @@ mod tests {
                     runtime_artifact_id: Some("artifact-rc-v1".to_string()),
                     state_schema_version: Some("state-v1".to_string()),
                     provider_runtime_handle: None,
-                    contact_endpoint: None,
+                    contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
                     runtime_capabilities: Some(kata_runtime_capabilities()),
                     display_name: Some("RC Agent".to_string()),
                     hostname: None,
@@ -11257,7 +11261,7 @@ mod tests {
                     runtime_status: Some(RuntimeSummaryStatus::Online),
                     active_inference_profile: None,
                     hermes_available: Some(true),
-                    published_app_urls: Vec::new(),
+                    published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
                     now: None,
                 })
                 .await
@@ -11699,6 +11703,18 @@ mod tests {
             assert_eq!(
                 refreshed_capabilities["capabilities"]["recover_known_good_chat"],
                 true
+            );
+            let refreshed_contact_endpoint: Option<String> = raw
+                .query_one(
+                    "SELECT contact_endpoint FROM agent_runtimes WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(
+                refreshed_contact_endpoint.as_deref(),
+                Some("http://127.0.0.1:41002/contact")
             );
             let upgraded_spec: Value = raw
                 .query_one(
