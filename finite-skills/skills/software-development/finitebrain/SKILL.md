@@ -246,10 +246,14 @@ Core wiki rules:
   permanent deletion, briefly double-check once in ordinary language, then
   delete on a clear yes; do not silently substitute an archive.
 - When querying, use `fbrain search "<query>" --json` for ranked evidence
-  across every readable Folder, then open the original Pages with ordinary file
-  tools. Use repeatable `--folder` only when the user deliberately narrows the
-  scope. If the wiki lacks enough evidence, say what is missing and suggest
-  what source to ingest.
+  across every readable Folder. Treat the strongest results as entry points:
+  open their full Pages and follow internal links that bear on the question.
+  When the answer depends on surrounding relationships, use exact file search
+  for each central Page's title, filename, and Folder-root-relative path to find
+  incoming links. Use repeatable `--folder` only when the user deliberately
+  narrows the scope. Completion: the answer is grounded in opened Pages and
+  includes the directly relevant linked context, or names the missing evidence
+  and suggests what source to ingest.
 - Chunk large article or output writes into small edits so agent tool streams do
   not stall.
 
