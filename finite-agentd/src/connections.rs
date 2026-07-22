@@ -18,6 +18,7 @@ use crate::config::{
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4.6";
+const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 
 #[derive(Debug, Clone)]
@@ -69,6 +70,15 @@ pub(crate) struct InferenceApplyRequest {
     pub api_key: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+}
+
+pub(crate) struct InferenceApplyPlan {
+    pub offer: HermesConfigOfferV1,
+    openrouter_api_key_to_persist: Option<String>,
+}
+
+pub(crate) struct InferenceCredentialSnapshot {
+    before: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,22 +139,25 @@ impl ConnectionManager {
         })
     }
 
-    pub(crate) fn inference_offer(
+    pub(crate) fn inference_plan(
         &self,
         request_id: &str,
         request: InferenceApplyRequest,
-    ) -> Result<HermesConfigOfferV1, AgentdError> {
-        let value = match request.profile.as_str() {
-            "finite_private" => json!({
-                "default": required_env("FINITE_PRIVATE_MODEL")?,
-                "provider": "custom",
-                "base_url": required_env("FINITE_PRIVATE_BASE_URL")?,
-                "api_key": "${FINITE_PRIVATE_API_KEY}",
-                "api_mode": "chat_completions",
-            }),
+    ) -> Result<InferenceApplyPlan, AgentdError> {
+        let (value, openrouter_api_key_to_persist) = match request.profile.as_str() {
+            "finite_private" => (
+                json!({
+                    "default": required_env("FINITE_PRIVATE_MODEL")?,
+                    "provider": "custom",
+                    "base_url": required_env("FINITE_PRIVATE_BASE_URL")?,
+                    "api_key": "${FINITE_PRIVATE_API_KEY}",
+                    "api_mode": "chat_completions",
+                }),
+                None,
+            ),
             "openrouter" => {
                 let current = self.config.current_value(MODEL_CONFIG_PATH)?;
-                let current_key = current
+                let legacy_config_key = current
                     .as_object()
                     .filter(|value| {
                         value.get("provider").and_then(Value::as_str) == Some("openrouter")
@@ -152,20 +165,29 @@ impl ConnectionManager {
                     .and_then(|value| value.get("api_key"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                let provisioned_key = std::env::var("OPENROUTER_API_KEY").ok();
-                let api_key = select_openrouter_key(request.api_key, current_key, provisioned_key)?;
+                let durable_key =
+                    read_dotenv_value(&self.openrouter_env_path(), OPENROUTER_API_KEY_ENV)?;
+                let provisioned_key = std::env::var(OPENROUTER_API_KEY_ENV).ok();
+                let (api_key, persist) = select_openrouter_key(
+                    request.api_key,
+                    durable_key,
+                    legacy_config_key,
+                    provisioned_key,
+                )?;
                 validate_secret("OpenRouter key", &api_key)?;
                 let model = request
                     .model
                     .unwrap_or_else(|| OPENROUTER_DEFAULT_MODEL.to_owned());
                 validate_model_name(&model)?;
-                json!({
-                    "default": model,
-                    "provider": "openrouter",
-                    "base_url": OPENROUTER_BASE_URL,
-                    "api_key": api_key,
-                    "api_mode": "chat_completions",
-                })
+                (
+                    json!({
+                        "default": model,
+                        "provider": "openrouter",
+                        "base_url": OPENROUTER_BASE_URL,
+                        "api_mode": "chat_completions",
+                    }),
+                    persist.then_some(api_key),
+                )
             }
             _ => {
                 return Err(AgentdError::InvalidPayload(
@@ -173,7 +195,38 @@ impl ConnectionManager {
                 ));
             }
         };
-        Ok(approved_offer(request_id, MODEL_CONFIG_PATH, value))
+        Ok(InferenceApplyPlan {
+            offer: approved_offer(request_id, MODEL_CONFIG_PATH, value),
+            openrouter_api_key_to_persist,
+        })
+    }
+
+    pub(crate) fn stage_inference_credential(
+        &self,
+        plan: &InferenceApplyPlan,
+    ) -> Result<Option<InferenceCredentialSnapshot>, AgentdError> {
+        let Some(api_key) = plan.openrouter_api_key_to_persist.as_deref() else {
+            return Ok(None);
+        };
+        let path = self.openrouter_env_path();
+        let before = snapshot(&path)?;
+        let rendered = upsert_dotenv_value(
+            before.as_deref().unwrap_or_default(),
+            OPENROUTER_API_KEY_ENV,
+            api_key,
+        )?;
+        atomic_private_bytes(&path, &rendered)?;
+        Ok(Some(InferenceCredentialSnapshot { before }))
+    }
+
+    pub(crate) fn restore_inference_credential(
+        &self,
+        snapshot: Option<InferenceCredentialSnapshot>,
+    ) -> Result<(), AgentdError> {
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        restore_private_bytes(&self.openrouter_env_path(), &snapshot.before)
     }
 
     pub(crate) fn telegram_connect_offer(
@@ -496,6 +549,10 @@ impl ConnectionManager {
         self.agent_home.join("agentd/google-workspace.json")
     }
 
+    fn openrouter_env_path(&self) -> PathBuf {
+        self.hermes_home.join(".env")
+    }
+
     fn google_scopes(&self) -> Result<BTreeSet<String>, AgentdError> {
         let path = self
             .google_skill_root()
@@ -571,14 +628,81 @@ fn required_env(name: &str) -> Result<String, AgentdError> {
 
 fn select_openrouter_key(
     requested: Option<String>,
-    current: Option<String>,
+    durable: Option<String>,
+    legacy_config: Option<String>,
     provisioned: Option<String>,
-) -> Result<String, AgentdError> {
-    [requested, current, provisioned]
-        .into_iter()
-        .flatten()
-        .find(|value| !value.trim().is_empty())
-        .ok_or_else(|| AgentdError::InvalidPayload("OpenRouter key is required".to_owned()))
+) -> Result<(String, bool), AgentdError> {
+    for (candidate, persist) in [
+        (requested, true),
+        (durable, false),
+        (legacy_config, true),
+        (provisioned, false),
+    ] {
+        if let Some(value) = candidate.filter(|value| !value.trim().is_empty()) {
+            return Ok((value, persist));
+        }
+    }
+    Err(AgentdError::InvalidPayload(
+        "OpenRouter key is required".to_owned(),
+    ))
+}
+
+fn read_dotenv_value(path: &Path, name: &str) -> Result<Option<String>, AgentdError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let text = String::from_utf8(bytes)
+        .map_err(|_| AgentdError::Config("Hermes .env is not valid UTF-8".to_owned()))?;
+    Ok(text.lines().find_map(|line| dotenv_assignment(line, name)))
+}
+
+fn dotenv_assignment(line: &str, name: &str) -> Option<String> {
+    let line = line.trim_start();
+    let line = line
+        .strip_prefix("export ")
+        .map(str::trim_start)
+        .unwrap_or(line);
+    let (key, value) = line.split_once('=')?;
+    if key.trim() != name {
+        return None;
+    }
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
+        return Some(
+            value[1..value.len() - 1]
+                .replace("\\'", "'")
+                .replace("\\\\", "\\"),
+        );
+    }
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        return Some(value[1..value.len() - 1].to_owned());
+    }
+    Some(value.to_owned())
+}
+
+fn upsert_dotenv_value(existing: &[u8], name: &str, value: &str) -> Result<Vec<u8>, AgentdError> {
+    let text = std::str::from_utf8(existing)
+        .map_err(|_| AgentdError::Config("Hermes .env is not valid UTF-8".to_owned()))?;
+    let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+    let replacement = format!("{name}='{escaped}'");
+    let mut rendered = Vec::new();
+    let mut replaced = false;
+    for line in text.lines() {
+        if dotenv_assignment(line, name).is_some() {
+            if !replaced {
+                rendered.push(replacement.clone());
+                replaced = true;
+            }
+        } else {
+            rendered.push(line.to_owned());
+        }
+    }
+    if !replaced {
+        rendered.push(replacement);
+    }
+    Ok(format!("{}\n", rendered.join("\n")).into_bytes())
 }
 
 fn validate_secret(label: &str, value: &str) -> Result<(), AgentdError> {
@@ -650,14 +774,19 @@ fn validate_google_request(request: &GoogleApplyRequest) -> Result<(), AgentdErr
 }
 
 fn atomic_private_json(path: &Path, value: &Value) -> Result<(), AgentdError> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    atomic_private_bytes(path, &bytes)
+}
+
+fn atomic_private_bytes(path: &Path, bytes: &[u8]) -> Result<(), AgentdError> {
     let parent = path
         .parent()
         .ok_or_else(|| AgentdError::Config("credential path has no parent".to_owned()))?;
     fs::create_dir_all(parent)?;
     fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     let mut temporary = NamedTempFile::new_in(parent)?;
-    temporary.write_all(&serde_json::to_vec_pretty(value)?)?;
-    temporary.write_all(b"\n")?;
+    temporary.write_all(bytes)?;
     temporary.as_file_mut().sync_all()?;
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o600))?;
     temporary.persist(path).map_err(|error| error.error)?;
@@ -686,6 +815,18 @@ fn restore(path: &Path, bytes: &Option<Vec<u8>>) -> Result<(), AgentdError> {
     }
 }
 
+fn restore_private_bytes(path: &Path, bytes: &Option<Vec<u8>>) -> Result<(), AgentdError> {
+    if let Some(bytes) = bytes {
+        atomic_private_bytes(path, bytes)
+    } else {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -699,6 +840,21 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::Ledger;
+
+    fn manager() -> (tempfile::TempDir, ConnectionManager) {
+        let temp = tempfile::tempdir().unwrap();
+        let agent_home = temp.path().join("agent");
+        let hermes_home = agent_home.join("hermes-home");
+        fs::create_dir_all(&hermes_home).unwrap();
+        fs::write(hermes_home.join("config.yaml"), "{}\n").unwrap();
+        let ledger = Ledger::open(agent_home.join("agentd/ledger.sqlite3")).unwrap();
+        let manager = ConnectionManager::new(
+            &agent_home,
+            &hermes_home,
+            ConfigManager::new(hermes_home.join("config.yaml"), ledger),
+        );
+        (temp, manager)
+    }
 
     #[test]
     fn status_never_returns_connection_secrets() {
@@ -750,38 +906,166 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_prefers_an_explicit_rotation_then_current_then_provisioned_key() {
+    fn openrouter_prefers_an_explicit_rotation_then_durable_then_legacy_then_provisioned_key() {
         assert_eq!(
             select_openrouter_key(
                 Some("rotated-key".to_owned()),
+                Some("durable-key".to_owned()),
                 Some("current-key".to_owned()),
                 Some("provisioned-key".to_owned()),
             )
             .unwrap(),
-            "rotated-key"
+            ("rotated-key".to_owned(), true)
         );
         assert_eq!(
             select_openrouter_key(
+                None,
+                Some("durable-key".to_owned()),
+                Some("current-key".to_owned()),
+                Some("provisioned-key".to_owned()),
+            )
+            .unwrap(),
+            ("durable-key".to_owned(), false)
+        );
+        assert_eq!(
+            select_openrouter_key(
+                None,
                 None,
                 Some("current-key".to_owned()),
                 Some("provisioned-key".to_owned()),
             )
             .unwrap(),
-            "current-key"
-        );
-        assert_eq!(
-            select_openrouter_key(None, None, Some("provisioned-key".to_owned())).unwrap(),
-            "provisioned-key"
+            ("current-key".to_owned(), true)
         );
         assert_eq!(
             select_openrouter_key(
                 Some("  ".to_owned()),
+                None,
                 Some("current-key".to_owned()),
                 Some("provisioned-key".to_owned()),
             )
             .unwrap(),
-            "current-key"
+            ("current-key".to_owned(), true)
         );
-        assert!(select_openrouter_key(None, None, Some("  ".to_owned())).is_err());
+        assert_eq!(
+            select_openrouter_key(None, None, None, Some("provisioned-key".to_owned())).unwrap(),
+            ("provisioned-key".to_owned(), false)
+        );
+        assert!(select_openrouter_key(None, None, None, Some("  ".to_owned())).is_err());
+    }
+
+    #[test]
+    fn openrouter_plan_stages_key_in_durable_env_without_putting_it_in_config() {
+        let (_temp, manager) = manager();
+        let secret = "sk-or-v1-test-explicit";
+        let original = b"OPENAI_API_KEY='finite-private-key'\n";
+        fs::write(manager.openrouter_env_path(), original).unwrap();
+        let plan = manager
+            .inference_plan(
+                "openrouter-explicit",
+                InferenceApplyRequest {
+                    profile: "openrouter".to_owned(),
+                    api_key: Some(secret.to_owned()),
+                    model: Some("poolside/laguna-s-2.1".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let serialized_offer = serde_json::to_string(&plan.offer).unwrap();
+        assert!(!serialized_offer.contains(secret));
+        assert!(plan.offer.value.get("api_key").is_none());
+
+        let snapshot = manager.stage_inference_credential(&plan).unwrap();
+        assert_eq!(
+            read_dotenv_value(&manager.openrouter_env_path(), OPENROUTER_API_KEY_ENV)
+                .unwrap()
+                .as_deref(),
+            Some(secret)
+        );
+        assert_eq!(
+            fs::metadata(manager.openrouter_env_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            fs::read_to_string(manager.openrouter_env_path())
+                .unwrap()
+                .contains("OPENAI_API_KEY='finite-private-key'")
+        );
+
+        manager.restore_inference_credential(snapshot).unwrap();
+        assert_eq!(fs::read(manager.openrouter_env_path()).unwrap(), original);
+    }
+
+    #[test]
+    fn openrouter_plan_reuses_durable_key_and_preserves_openai_key() {
+        let (_temp, manager) = manager();
+        let env_path = manager.openrouter_env_path();
+        fs::write(
+            &env_path,
+            "OPENAI_API_KEY='finite-private-key'\nOPENROUTER_API_KEY='sk-or-v1-durable'\n",
+        )
+        .unwrap();
+
+        let plan = manager
+            .inference_plan(
+                "openrouter-durable",
+                InferenceApplyRequest {
+                    profile: "openrouter".to_owned(),
+                    api_key: None,
+                    model: None,
+                },
+            )
+            .unwrap();
+
+        assert!(plan.openrouter_api_key_to_persist.is_none());
+        assert!(manager.stage_inference_credential(&plan).unwrap().is_none());
+        assert_eq!(
+            fs::read_to_string(env_path).unwrap(),
+            "OPENAI_API_KEY='finite-private-key'\nOPENROUTER_API_KEY='sk-or-v1-durable'\n"
+        );
+    }
+
+    #[test]
+    fn openrouter_plan_migrates_legacy_config_key_and_can_restore_exact_env_bytes() {
+        let (_temp, manager) = manager();
+        fs::write(
+            manager.config.path(),
+            "model:\n  default: old/model\n  provider: openrouter\n  api_key: sk-or-v1-legacy\n",
+        )
+        .unwrap();
+        let env_path = manager.openrouter_env_path();
+        let original = b"UNRELATED=kept\n";
+        fs::write(&env_path, original).unwrap();
+
+        let plan = manager
+            .inference_plan(
+                "openrouter-legacy",
+                InferenceApplyRequest {
+                    profile: "openrouter".to_owned(),
+                    api_key: None,
+                    model: None,
+                },
+            )
+            .unwrap();
+        let snapshot = manager.stage_inference_credential(&plan).unwrap();
+
+        assert_eq!(
+            read_dotenv_value(&env_path, OPENROUTER_API_KEY_ENV)
+                .unwrap()
+                .as_deref(),
+            Some("sk-or-v1-legacy")
+        );
+        assert!(
+            fs::read_to_string(&env_path)
+                .unwrap()
+                .contains("UNRELATED=kept")
+        );
+
+        manager.restore_inference_credential(snapshot).unwrap();
+        assert_eq!(fs::read(env_path).unwrap(), original);
     }
 }
