@@ -1453,6 +1453,21 @@ pub struct AdminRuntimeUpgradeExactInput {
     pub now: Option<String>,
 }
 
+/// Operator-only retirement input bound to the exact active Runtime observed
+/// before enqueueing. Retirement still runs through the normal verified
+/// Recovery Snapshot and offboarding lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRuntimeRetireExactInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub now: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeControlExpectedBinding {
     pub agent_runtime_id: String,
@@ -2496,6 +2511,28 @@ impl BridgeCoreState {
             },
             RuntimeControlKind::Upgrade,
             Some(input.target_runtime_artifact_id),
+            Some(&expected),
+        )
+    }
+
+    pub fn admin_request_runtime_retire_exact(
+        &mut self,
+        input: AdminRuntimeRetireExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let expected = RuntimeControlExpectedBinding {
+            agent_runtime_id: input.expected_agent_runtime_id,
+            source_host_id: input.expected_source_host_id,
+            source_machine_id: input.expected_source_machine_id,
+        };
+        self.admin_request_runtime_control_bound(
+            AdminRuntimeControlInput {
+                admin_verified_email: input.admin_verified_email,
+                admin_workos_user_id: input.admin_workos_user_id,
+                project_id: input.project_id,
+                now: input.now,
+            },
+            RuntimeControlKind::Destroy,
+            None,
             Some(&expected),
         )
     }
@@ -11919,6 +11956,69 @@ mod tests {
             !actions
                 .iter()
                 .any(|(action, _)| action == "runtime.admin_recover_known_good_chat")
+        );
+    }
+
+    #[test]
+    fn admin_runtime_retirement_requires_the_exact_active_binding() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "owner@finite.vip",
+            "user_workos_owner_retire",
+            "retire-submit",
+            "oslo-agent-retire",
+            "artifact-v1",
+            "2026-07-22T15:00:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            runtime_retirement: true,
+            ..*kata_runtime_capabilities().v1()
+        }));
+
+        let changed_binding = state
+            .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "user_workos_admin_retire".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: "runtime-replaced-after-review".to_string(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "oslo-agent-retire".to_string(),
+                now: Some("2026-07-22T15:01:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
+        assert!(state.runtime_control_requests.is_empty());
+
+        let retirement = state
+            .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                admin_verified_email: "Admin@Finite.VIP".to_string(),
+                admin_workos_user_id: "user_workos_admin_retire".to_string(),
+                project_id,
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "oslo-agent-retire".to_string(),
+                now: Some("2026-07-22T15:02:00Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(retirement.kind, RuntimeControlKind::Destroy);
+        assert_eq!(retirement.agent_runtime_id, runtime_id);
+        assert_eq!(retirement.status, RuntimeControlRequestStatus::Requested);
+        assert!(
+            state
+                .finite_private_admin_audit_events
+                .values()
+                .any(|event| {
+                    event.action == "runtime.admin_destroy"
+                        && event.actor == "admin@finite.vip"
+                        && event.target_id == retirement.agent_runtime_id
+                })
         );
     }
 

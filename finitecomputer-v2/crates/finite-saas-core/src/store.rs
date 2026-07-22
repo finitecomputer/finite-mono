@@ -7,20 +7,20 @@ use crate::{
     AdminArchiveUnrecoverableRuntimeInput, AdminIssueFinitePrivateFriendKeyInput,
     AdminIssuedFinitePrivateKey, AdminResetFinitePrivateUsageWindowInput,
     AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
-    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeUpgradeExactInput,
-    AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationEntitlement,
-    AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime,
-    ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass, BillingOverview,
-    BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
-    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
-    CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
-    FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus,
-    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateGrantStatus,
-    FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, FinitePrivateUsageNotice, FinitePrivateUsageStatus,
-    HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
+    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRetireExactInput,
+    AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput, AgentCreationConfiguration,
+    AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus,
+    AgentRuntime, ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass,
+    BillingOverview, BillingSubscriptionStatus, BridgeCoreState, CORE_SCHEMA_SQL,
+    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
+    CoreUser, CustomerBillingAccount, CustomerOrganization, ExistingHostProjectImport,
+    FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
+    FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult, FinitePrivateGrant,
+    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
+    FinitePrivateReservationStatus, FinitePrivateUsageDecision, FinitePrivateUsageNotice,
+    FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
     LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
     ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
@@ -668,6 +668,16 @@ impl CoreStore {
         }
     }
 
+    pub async fn admin_request_runtime_retire_exact(
+        &self,
+        input: AdminRuntimeRetireExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        match self {
+            Self::Memory(store) => store.admin_request_runtime_retire_exact(input).await,
+            Self::Postgres(store) => store.admin_request_runtime_retire_exact(input).await,
+        }
+    }
+
     pub async fn runtime_control_request(
         &self,
         request_id: &str,
@@ -1281,6 +1291,14 @@ impl MemoryCoreStore {
         state.admin_request_runtime_upgrade_exact(input)
     }
 
+    pub async fn admin_request_runtime_retire_exact(
+        &self,
+        input: AdminRuntimeRetireExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut state = self.state.lock().await;
+        state.admin_request_runtime_retire_exact(input)
+    }
+
     pub async fn runtime_control_request(
         &self,
         request_id: &str,
@@ -1559,6 +1577,17 @@ impl PostgresCoreStore {
         let mut client = self.client.lock().await;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_upgrade_exact(&tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn admin_request_runtime_retire_exact(
+        &self,
+        input: AdminRuntimeRetireExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.client.lock().await;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_admin_request_runtime_retire_exact(&tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -6315,6 +6344,33 @@ where
         },
         RuntimeControlKind::Upgrade,
         Some(input.target_runtime_artifact_id),
+        Some(&expected),
+    )
+    .await
+}
+
+async fn postgres_admin_request_runtime_retire_exact<C>(
+    client: &C,
+    input: AdminRuntimeRetireExactInput,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
+    let expected = RuntimeControlExpectedBinding {
+        agent_runtime_id: input.expected_agent_runtime_id,
+        source_host_id: input.expected_source_host_id,
+        source_machine_id: input.expected_source_machine_id,
+    };
+    postgres_admin_request_runtime_control_bound(
+        client,
+        AdminRuntimeControlInput {
+            admin_verified_email: input.admin_verified_email,
+            admin_workos_user_id: input.admin_workos_user_id,
+            project_id: input.project_id,
+            now: input.now,
+        },
+        RuntimeControlKind::Destroy,
+        None,
         Some(&expected),
     )
     .await
@@ -11689,11 +11745,30 @@ mod tests {
             // Retirement requires a receipt bound to this exact request and
             // RuntimeSpec. Postgres stores that receipt and performs the
             // target-scoped offboarding in the same transaction.
-            let destroy = store
-                .request_runtime_destroy(RequestRuntimeDestroyInput {
-                    verified_email: email.clone(),
-                    workos_user_id: workos.clone(),
+            let changed_retirement_binding = store
+                .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                    admin_verified_email: format!("admin-{run}@finite.vip"),
+                    admin_workos_user_id: format!("admin-workos-{run}"),
                     project_id: project_id.clone(),
+                    expected_agent_runtime_id: "runtime-replaced-after-review".to_string(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    now: Some("2026-07-10T12:03:50Z".to_string()),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                changed_retirement_binding,
+                CoreError::RuntimeSpecMismatch
+            ));
+            let destroy = store
+                .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                    admin_verified_email: format!("admin-{run}@finite.vip"),
+                    admin_workos_user_id: format!("admin-workos-{run}"),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
                     now: Some("2026-07-10T12:04:00Z".to_string()),
                 })
                 .await
