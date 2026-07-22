@@ -12,6 +12,22 @@ and durable message state.
 The production server is `https://chat.finite.computer`. Use it unless you are
 intentionally targeting a local development server.
 
+## Install Finite Chat for macOS
+
+The desktop app currently supports Apple Silicon Macs:
+
+```sh
+base="https://github.com/finitecomputer/finite-mono/releases/download/finitechat-latest"
+curl -fsSLO "$base/finitechat-electron-macos-aarch64.zip"
+curl -fsSLO "$base/finitechat-electron-macos-aarch64.zip.sha256"
+shasum -a 256 -c finitechat-electron-macos-aarch64.zip.sha256
+ditto -x -k finitechat-electron-macos-aarch64.zip .
+open "Finite Chat.app"
+```
+
+The app is Developer ID-signed and Apple-notarized. It links a distinct,
+revocable Device to the signed-in user's existing Finite Chat account.
+
 ## Install `finitechat`
 
 Install the latest release binary:

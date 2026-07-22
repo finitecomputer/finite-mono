@@ -10,7 +10,7 @@ workflow refreshes on every versioned release.
 
 | Component | Tag | Workflow | Builds | Rolling alias |
 |---|---|---|---|---|
-| finitechat | `finitechat/vX.Y.Z` | `release-finitechat.yml` | `finitechat-cli` → bin `finitechat` | `finitechat-latest` |
+| finitechat | `finitechat/vX.Y.Z` | `release-finitechat.yml` | `finitechat-cli` → bin `finitechat`; signed + notarized Electron app (macOS arm64) | `finitechat-latest` |
 | fsite | `fsite/vX.Y.Z` | `release-fsite.yml` | `fsite-cli` → bin `fsite`; + `finitesitesd` (linux) | `fsite-latest` |
 | fbrain | `fbrain/vX.Y.Z` | `release-fbrain.yml` | `finite-brain-cli` → bin `fbrain`; + `finite-brain` server (linux) | `fbrain-latest` |
 
@@ -21,6 +21,10 @@ Assets per release: `<name>-linux-x86_64.tar.gz`, `<name>-macos-aarch64.tar.gz`,
 `<name>-macos-x86_64.tar.gz` (+ the linux server binaries for fsite/fbrain),
 each with a `.sha256` sibling. Built on GitHub-hosted runners (Rust 1.88.0,
 `--locked`) — no self-hosted runner dependency for CLI releases.
+Finitechat releases additionally publish
+`finitechat-electron-macos-aarch64.zip` and its `.sha256` sibling after the app
+passes Device parity, Developer ID signing, Apple notarization, stapling, and
+Gatekeeper assessment.
 
 ## PRECONDITIONS
 
@@ -63,7 +67,10 @@ each with a `.sha256` sibling. Built on GitHub-hosted runners (Rust 1.88.0,
 2. Field-style install — run the exact install block from the component's
    README on a machine that is not your dev checkout; confirm
    `--version` reports the new version.
-3. The versioned release page exists (`finitechat/vX.Y.Z`) and the alias
+3. For finitechat, download the Electron ZIP from the alias, verify its
+   checksum, and confirm `codesign`, `stapler`, and Gatekeeper accept the
+   extracted app.
+4. The versioned release page exists (`finitechat/vX.Y.Z`) and the alias
    release notes name that version (the refresh step writes them).
 
 ## First-release-from-mono acceptance test

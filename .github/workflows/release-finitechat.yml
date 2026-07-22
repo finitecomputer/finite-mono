@@ -64,8 +64,134 @@ jobs:
             ${{ matrix.asset_name }}.tar.gz
             ${{ matrix.asset_name }}.tar.gz.sha256
 
+  electron:
+    name: Signed + notarized Electron (macOS arm64)
+    runs-on: macos-14
+    env:
+      FINITECHAT_CODESIGN_IDENTITY: "Developer ID Application: Paul Miller (JBLHZ83X6T)"
+      ELECTRON_APP_PATH: finitechat/apps/electron-chat/release/Finite Chat.app
+      ELECTRON_ASSET_PATH: finitechat-electron-macos-aarch64.zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify release version
+        run: |
+          version="$(node -p "require('./finitechat/apps/electron-chat/package.json').version")"
+          test "$GITHUB_REF_NAME" = "finitechat/v${version}"
+
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          test -n "$CERTIFICATE_BASE64"
+          test -n "$CERTIFICATE_PASSWORD"
+          signing_keychain_path="$RUNNER_TEMP/finitechat-signing.keychain-db"
+          signing_certificate_path="$RUNNER_TEMP/finitechat-developer-id.p12"
+          echo "FINITECHAT_CODESIGN_KEYCHAIN=$signing_keychain_path" >> "$GITHUB_ENV"
+          echo "SIGNING_CERTIFICATE_PATH=$signing_certificate_path" >> "$GITHUB_ENV"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$signing_certificate_path"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$signing_keychain_path"
+          security set-keychain-settings -lut 21600 "$signing_keychain_path"
+          security unlock-keychain -p "$keychain_password" "$signing_keychain_path"
+          security import "$signing_certificate_path" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$signing_keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$signing_keychain_path"
+          security list-keychains -d user -s "$signing_keychain_path"
+          security find-identity -v -p codesigning "$signing_keychain_path" \
+            | grep -F "$FINITECHAT_CODESIGN_IDENTITY"
+
+      - name: Device parity and Electron boundary gates
+        run: nix develop --command just chat-device-parity
+
+      - name: Build Developer ID-signed Electron app
+        run: nix develop --command just chat-electron-package
+
+      - name: Verify Developer ID signature
+        run: |
+          test -x "$ELECTRON_APP_PATH/Contents/Resources/finitechatd"
+          codesign --verify --deep --strict --verbose=2 "$ELECTRON_APP_PATH"
+          signature="$(codesign -dvv "$ELECTRON_APP_PATH" 2>&1)"
+          grep -F 'Authority=Developer ID Application: Paul Miller (JBLHZ83X6T)' <<<"$signature"
+          grep -F 'TeamIdentifier=JBLHZ83X6T' <<<"$signature"
+          grep -F 'flags=0x10000(runtime)' <<<"$signature"
+          entitlements="$(codesign -d --entitlements - "$ELECTRON_APP_PATH" 2>/dev/null)"
+          grep -F 'com.apple.security.cs.allow-jit' <<<"$entitlements"
+          grep -F 'com.apple.security.device.audio-input' <<<"$entitlements"
+          if grep -E 'com\.apple\.security\.device\.(bluetooth|camera|print|usb)' <<<"$entitlements"; then
+            exit 1
+          fi
+          if grep -F 'com.apple.security.personal-information' <<<"$entitlements"; then
+            exit 1
+          fi
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$ELECTRON_APP_PATH/Contents/Info.plist")" = \
+            'Finite Chat uses the microphone when you choose to use voice features.'
+          daemon_signature="$(codesign -dvv "$ELECTRON_APP_PATH/Contents/Resources/finitechatd" 2>&1)"
+          grep -F 'Authority=Developer ID Application: Paul Miller (JBLHZ83X6T)' <<<"$daemon_signature"
+          grep -F 'TeamIdentifier=JBLHZ83X6T' <<<"$daemon_signature"
+          grep -F 'flags=0x10000(runtime)' <<<"$daemon_signature"
+
+      - name: Submit to Apple and staple ticket
+        env:
+          APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_PASSWORD"
+          test "$APPLE_TEAM_ID" = 'JBLHZ83X6T'
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$ELECTRON_APP_PATH" \
+            notarization-upload.zip
+          xcrun notarytool submit notarization-upload.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --output-format json > notarization-result.json
+          jq -e '.status == "Accepted"' notarization-result.json
+          xcrun stapler staple "$ELECTRON_APP_PATH"
+          xcrun stapler validate "$ELECTRON_APP_PATH"
+          spctl --assess --type execute --verbose=2 "$ELECTRON_APP_PATH"
+
+      - name: Package Electron release asset
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$ELECTRON_APP_PATH" \
+            "$ELECTRON_ASSET_PATH"
+          shasum -a 256 "$ELECTRON_ASSET_PATH" > "$ELECTRON_ASSET_PATH.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finitechat-electron-macos-aarch64
+          path: |
+            finitechat-electron-macos-aarch64.zip
+            finitechat-electron-macos-aarch64.zip.sha256
+          if-no-files-found: error
+
+      - name: Remove signing material
+        if: always()
+        run: |
+          security delete-keychain "$FINITECHAT_CODESIGN_KEYCHAIN" 2>/dev/null || true
+          rm -f "$SIGNING_CERTIFICATE_PATH"
+
   publish:
-    needs: build
+    needs:
+      - build
+      - electron
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
