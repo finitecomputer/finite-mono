@@ -1077,13 +1077,16 @@ impl KataLauncher {
     /// canonical name. A process can die after either rename syscall, so the
     /// absence of the canonical handle is a recoverable state when the stopped
     /// old container and candidate both prove ownership of this exact request.
+    /// Returns whether exact operation-scoped helper state proves this is an
+    /// interrupted operation. The caller must also require the same request's
+    /// persisted expected Principal before restoring a stopped old canonical.
     fn reconcile_interrupted_upgrade(
         &self,
         canonical_plan: &KataLaunchPlan,
         project_id: &str,
         request_id: &str,
         target: &RuntimeArtifact,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<bool, RunnerError> {
         let canonical_name = canonical_plan.container_name.as_str();
         let candidate_name = kata_upgrade_helper_name(canonical_name, "candidate", request_id);
         let rollback_name = kata_upgrade_helper_name(canonical_name, "rollback", request_id);
@@ -1100,6 +1103,8 @@ impl KataLauncher {
             // rename; it deliberately does not gain an upgrade-request label.
             self.validate_owned(canonical_plan, project_id, rollback)?;
         }
+
+        let operation_has_helper_state = candidate.is_some() || rollback.is_some();
 
         match canonical {
             None => {
@@ -1144,7 +1149,7 @@ impl KataLauncher {
                 }
             }
         }
-        Ok(())
+        Ok(operation_has_helper_state)
     }
 
     fn validate_control(
@@ -2123,7 +2128,7 @@ impl RuntimeLauncher for KataLauncher {
 
         let canonical_plan = self.plan_for_control(lease)?;
         let _operation_lock = self.acquire_runtime_operation_lock(&canonical_plan)?;
-        self.reconcile_interrupted_upgrade(
+        let interrupted_upgrade_has_helper_state = self.reconcile_interrupted_upgrade(
             &canonical_plan,
             &lease.runtime.project_id,
             &lease.request.id,
@@ -2209,6 +2214,28 @@ impl RuntimeLauncher for KataLauncher {
             });
         }
 
+        let interrupted_upgrade_expected_npub = if inspected.state.status != "running" {
+            let marker_exists = kata_upgrade_expected_npub_path(&canonical_plan, &lease.request.id)
+                .try_exists()
+                .map_err(|error| {
+                    RunnerError::RuntimeLaunch(format!(
+                        "cannot inspect interrupted Kata upgrade identity marker: {error}"
+                    ))
+                })?;
+            if !interrupted_upgrade_has_helper_state && !marker_exists {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "refusing to upgrade Kata Runtime {canonical_name} because its canonical container is {}; start it explicitly before upgrading",
+                    inspected.state.status
+                )));
+            }
+            Some(read_kata_upgrade_expected_npub(
+                &canonical_plan,
+                &lease.request.id,
+            )?)
+        } else {
+            None
+        };
+
         // A candidate from an interrupted pre-swap attempt is never adopted
         // blindly. The canonical old Runtime remains authoritative, so remove
         // only a helper whose operation-scoped labels and /data bind match.
@@ -2234,8 +2261,8 @@ impl RuntimeLauncher for KataLauncher {
             self.remove_compute(&candidate_name)?;
         }
 
-        if inspected.state.status != "running" {
-            self.start_compute(&canonical_name)?;
+        if let Some(expected_npub) = interrupted_upgrade_expected_npub.as_deref() {
+            self.restore_previous_compute(&canonical_plan, expected_npub)?;
             inspected = self.inspect(&canonical_name)?.ok_or_else(|| {
                 RunnerError::RuntimeLaunch(
                     "owned Kata Runtime disappeared before upgrade".to_string(),
@@ -5405,6 +5432,164 @@ esac
     }
 
     #[test]
+    fn kata_upgrade_rejects_stopped_old_canonical_without_provider_mutation() {
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
+        let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            old_image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.status", plan.container_name)),
+            "exited",
+        )
+        .unwrap();
+
+        let error = launcher
+            .upgrade_runtime(
+                &upgrade_lease("runtime_ctl_upgrade_stopped"),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("start it explicitly before upgrading"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
+                .unwrap(),
+            "exited"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
+                .unwrap(),
+            old_image
+        );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        for mutation in [
+            "start ", "pull ", "run ", "stop ", "rm ", "rename ", "restart ",
+        ] {
+            assert!(
+                !commands
+                    .lines()
+                    .any(|command| command.starts_with(mutation)),
+                "stopped fresh upgrade must not execute provider mutation {mutation:?}: {commands}"
+            );
+        }
+    }
+
+    #[test]
+    fn kata_upgrade_rejects_stopped_old_canonical_with_helper_but_no_identity_marker() {
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        let lease = upgrade_lease("runtime_ctl_upgrade_stopped_helper_without_marker");
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.status", plan.container_name)),
+            "exited",
+        )
+        .unwrap();
+        let candidate_name =
+            kata_upgrade_helper_name(&plan.container_name, "candidate", &lease.request.id);
+        write_fake_container(
+            &fake_state,
+            &candidate_name,
+            &target_artifact().reference,
+            "artifact-v2",
+            &lease.request.id,
+            candidate_server.port,
+            &plan.state_root,
+        );
+
+        let error = launcher
+            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot verify interrupted Kata upgrade identity"),
+            "{error}"
+        );
+        assert!(fake_state.join(format!("{candidate_name}.image")).exists());
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        for mutation in [
+            "start ", "pull ", "run ", "stop ", "rm ", "rename ", "restart ",
+        ] {
+            assert!(
+                !commands
+                    .lines()
+                    .any(|command| command.starts_with(mutation)),
+                "helper without the expected-Principal marker must not execute provider mutation {mutation:?}: {commands}"
+            );
+        }
+    }
+
+    #[test]
+    fn kata_upgrade_retry_recovers_crash_after_old_stop_before_candidate_creation() {
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        let lease = upgrade_lease("runtime_ctl_crash_after_old_stop");
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.status", plan.container_name)),
+            "exited",
+        )
+        .unwrap();
+        write_kata_upgrade_expected_npub(&plan, &lease.request.id, "npub1sameagent").unwrap();
+
+        launcher
+            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
+                .unwrap(),
+            target_artifact().reference
+        );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        let restore = commands
+            .find(&format!("start {}", plan.container_name))
+            .unwrap();
+        let pull = commands.find("pull --quiet").unwrap();
+        let candidate = commands.find("run --detach").unwrap();
+        assert!(
+            restore < pull && pull < candidate,
+            "retry must restore and verify the old canonical before resuming the upgrade"
+        );
+    }
+
+    #[test]
     fn kata_stop_outer_timeout_includes_grace_and_full_command_budget() {
         let launcher = KataLauncher::new(KataConfig {
             command_timeout: Duration::from_secs(35),
@@ -5481,7 +5666,10 @@ esac
         let old_server = TestHttpServer::start("npub1sameagent");
         let temp = tempfile::tempdir().unwrap();
         let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
-        launcher.config.command_timeout = Duration::from_secs(1);
+        // Leave enough budget for unrelated fake-provider commands under the
+        // default parallel test runner while still timing out the injected
+        // ten-second stop below.
+        launcher.config.command_timeout = Duration::from_secs(5);
         launcher.config.stop_timeout_secs = 0;
         let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         write_fake_container(
@@ -5708,6 +5896,7 @@ esac
             candidate_server.port,
             &plan.state_root,
         );
+        write_kata_upgrade_expected_npub(&plan, &lease.request.id, "npub1sameagent").unwrap();
 
         launcher
             .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
@@ -5727,6 +5916,13 @@ esac
         assert!(
             remove < restore,
             "candidate must be removed before old /data writer is restored"
+        );
+        let start = commands
+            .find(&format!("start {}", plan.container_name))
+            .unwrap();
+        assert!(
+            restore < start,
+            "operation-scoped rollback recovery must still restart the restored old canonical"
         );
     }
 
