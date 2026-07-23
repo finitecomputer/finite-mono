@@ -17,6 +17,11 @@ type Scenario = "healthy" | "unavailable" | "recovering";
 type FixtureState = {
   rev: number;
   chatTitle: string;
+  extraTopics: Array<{
+    topicId: string;
+    title: string;
+    createdSeq: number;
+  }>;
   messages: Array<Record<string, unknown>>;
 };
 
@@ -287,6 +292,20 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
     return;
   }
 
+  if (
+    request.method === "POST" &&
+    (requestPath === "/v1/app/agent-bindings/open" ||
+      requestPath === "/v1/app/agent-bindings/ensure")
+  ) {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    if (body.project_id !== "project_web_design") {
+      writeJson(response, 404, { error: "agent binding not found" });
+      return;
+    }
+    writeJson(response, 200, appState());
+    return;
+  }
+
   if (request.method === "GET" && requestPath === "/v1/app/state") {
     writeJson(response, 200, appState());
     return;
@@ -332,6 +351,15 @@ function applyAction(action: Record<string, unknown>) {
     // The current real UI gets the renamed title through the same state payload.
     state.chatTitle = rename.title.trim().slice(0, 120);
   }
+  const createTopic = action.CreateTopic as { title?: unknown } | undefined;
+  if (createTopic && typeof createTopic.title === "string" && createTopic.title.trim()) {
+    const createdSeq = state.rev + 1;
+    state.extraTopics.push({
+      topicId: `topic_fixture_${createdSeq}`,
+      title: createTopic.title.trim().slice(0, 120),
+      createdSeq,
+    });
+  }
   state.rev += 1;
   saveState();
 }
@@ -348,9 +376,28 @@ function appState() {
         room_id: "room_design",
         topic_id: "topic_design",
         title: "General",
+        last_message_preview: last,
+        unread_count: 0,
+        message_count: state.messages.length,
+        created_seq: 1,
+        updated_seq: state.rev,
+        archived: false,
         active_chat_id: "chat_design",
         chats: [{ chat_id: "chat_design", title: state.chatTitle, active: true }],
       },
+      ...state.extraTopics.map((topic) => ({
+        room_id: "room_design",
+        topic_id: topic.topicId,
+        title: topic.title,
+        last_message_preview: "",
+        unread_count: 0,
+        message_count: 0,
+        created_seq: topic.createdSeq,
+        updated_seq: topic.createdSeq,
+        archived: false,
+        active_chat_id: null,
+        chats: [],
+      })),
     ],
     selected_topic_id: "topic_design",
     selected_chat_id: "chat_design",
@@ -361,6 +408,15 @@ function appState() {
     profiles: [{ account_id: "agent_design", npub: "npub1webdesignfixture", display_name: "Moss", about: "A deterministic local design collaborator", picture: null, stale: false, is_agent: true }],
     devices: [{ account_id: "web-design-user", device_id: "hosted-web", active: true, current_device: true, revoked: false, room_count: 1 }],
     typing_members: [],
+    hosted_agent_binding: {
+      version: 1,
+      project_id: "project_web_design",
+      human_account_id: "web-design-user",
+      agent_account_id: "agent_design",
+      agent_npub: "npub1webdesignfixture",
+      canonical_room_id: "room_design",
+      associated_room_ids: [],
+    },
     flow: { notice_text: null, notice_busy: false, scan_in_flight: false, scan_result: "" },
   };
 }
@@ -388,6 +444,13 @@ function loadState(): FixtureState {
           typeof parsed.chatTitle === "string" && parsed.chatTitle.trim()
             ? parsed.chatTitle
             : "Design review",
+        extraTopics: Array.isArray(parsed.extraTopics)
+          ? parsed.extraTopics.filter((topic) =>
+              typeof topic?.topicId === "string"
+              && typeof topic?.title === "string"
+              && Number.isInteger(topic?.createdSeq)
+            )
+          : [],
         messages: parsed.messages,
       };
     }
@@ -399,6 +462,7 @@ function initialState(): FixtureState {
   return {
     rev: 1,
     chatTitle: "Design review",
+    extraTopics: [],
     messages: [
       message("I kept this conversation after the local dashboard restarted.", false, 1),
       message("Great. Let’s refine the web chat without needing a provider account.", true, 2),
