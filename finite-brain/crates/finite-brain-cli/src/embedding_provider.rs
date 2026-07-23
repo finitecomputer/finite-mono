@@ -16,6 +16,8 @@ const MAX_EMBEDDING_HEADINGS: usize = 12;
 const MAX_EMBEDDING_HEADING_CHARS: usize = 512;
 const MAX_EMBEDDING_TOTAL_CHARS: usize = 8 * 1024 * 1024;
 const MAX_EMBEDDING_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const EMBEDDING_PROVIDER_ATTEMPTS: usize = 3;
+const EMBEDDING_PROVIDER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 
 /// Runtime-injected connection settings for one replaceable Embedding Provider.
 #[derive(Clone)]
@@ -191,25 +193,39 @@ impl EmbeddingProviderAdapter {
         inputs: &[EmbeddingProviderInput],
     ) -> Result<EmbeddingProviderResponse, CliError> {
         let url = format!("{}/v1/embeddings", self.endpoint);
-        let request = self
-            .agent
-            .post(&url)
-            .set("Accept", "application/json")
-            .set("Content-Type", "application/json")
-            .set("Authorization", &format!("Bearer {}", self.bearer_token));
-        let response = request.send_json(serde_json::json!({ "inputs": inputs }));
-        let response = match response {
-            Ok(response) => response,
-            Err(ureq::Error::Status(status, _)) => {
-                return Err(CliError::EmbeddingProvider(format!(
-                    "provider returned status {status}"
-                )));
-            }
-            Err(ureq::Error::Transport(error)) => {
-                return Err(CliError::EmbeddingProvider(format!(
-                    "provider request failed: {}",
-                    safe_transport_error(&error.to_string())
-                )));
+        let payload = serde_json::json!({ "inputs": inputs });
+        let mut attempt = 0;
+        let response = loop {
+            attempt += 1;
+            let response = self
+                .agent
+                .post(&url)
+                .set("Accept", "application/json")
+                .set("Content-Type", "application/json")
+                .set("Authorization", &format!("Bearer {}", self.bearer_token))
+                .send_json(&payload);
+            match response {
+                Ok(response) => break response,
+                Err(ureq::Error::Status(status, _))
+                    if retryable_provider_status(status)
+                        && attempt < EMBEDDING_PROVIDER_ATTEMPTS =>
+                {
+                    std::thread::sleep(provider_retry_delay(attempt));
+                }
+                Err(ureq::Error::Transport(_)) if attempt < EMBEDDING_PROVIDER_ATTEMPTS => {
+                    std::thread::sleep(provider_retry_delay(attempt));
+                }
+                Err(ureq::Error::Status(status, _)) => {
+                    return Err(CliError::EmbeddingProvider(format!(
+                        "provider returned status {status}"
+                    )));
+                }
+                Err(ureq::Error::Transport(error)) => {
+                    return Err(CliError::EmbeddingProvider(format!(
+                        "provider request failed after {attempt} attempts: {}",
+                        safe_transport_error(&error.to_string())
+                    )));
+                }
             }
         };
         let mut body = Vec::new();
@@ -230,6 +246,15 @@ impl EmbeddingProviderAdapter {
         })?;
         validate_provider_response(inputs, wire)
     }
+}
+
+fn retryable_provider_status(status: u16) -> bool {
+    status == 408 || status == 429 || status >= 500
+}
+
+fn provider_retry_delay(failed_attempt: usize) -> Duration {
+    EMBEDDING_PROVIDER_RETRY_BASE_DELAY
+        .saturating_mul(1_u32 << failed_attempt.saturating_sub(1).min(4))
 }
 
 fn validate_input_identifiers(inputs: &[EmbeddingProviderInput]) -> Result<(), CliError> {

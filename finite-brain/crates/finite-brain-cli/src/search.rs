@@ -24,10 +24,11 @@ use crate::{
 pub(crate) const SEARCH_INDEX_VERSION: &str = "finitebrain-folder-search-v4";
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const MAX_SEARCH_LIMIT: usize = 50;
-const MAX_INDEXED_MARKDOWN_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_INDEXED_MARKDOWN_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_INDEXED_FILES_PER_FOLDER: usize = 100_000;
 const MAX_SECTION_CHARS: usize = 12_000;
 const SECTION_OVERLAP_CHARS: usize = 500;
+const MAX_SEMANTIC_QUERY_SECTIONS: usize = 50_000;
 const SEMANTIC_BUILD_LOCK: &str = "semantic-build.lock";
 const SEMANTIC_ADMISSION_LOCK: &str = "semantic-admission.lock";
 const ACCESS_REVOCATION_MARKER: &str = "access-revoked";
@@ -143,10 +144,10 @@ pub(crate) fn search<W: Write>(
     let folders = select_readable_folders(&tree, &options.folders)?;
     let agent = read_agent_state(&root)?;
     remove_legacy_search_index_files(&root)?;
-    // Standalone search verifies selected Folder metadata so offline saves are
-    // visible without a running daemon. Persisted size/mtime fingerprints avoid
-    // rereading or hashing unchanged Markdown; sync/daemon paths remain fully
-    // change-report driven.
+    // Standalone search verifies selected Folder contents so offline saves,
+    // restored snapshots, and same-size rewrites with preserved mtimes are
+    // visible without a running daemon. Content hashes prevent unchanged Pages
+    // from being reindexed; sync/daemon hot paths remain change-report driven.
     for folder in &folders {
         reconcile_folder_index_with_count(&root, &tree, &agent, folder)?;
     }
@@ -1519,27 +1520,6 @@ fn collect_folder_pages(
                     path.display()
                 ))
             })?;
-            if let Some((known_hash, _known_disposition, known_modified, known_size)) =
-                known.get(&relative)
-                && *known_modified == modified_nanos
-                && *known_size == file_size
-            {
-                let disposition = page_disposition(
-                    agent,
-                    folder,
-                    &relative,
-                    manifests.get(relative.as_str()).copied(),
-                    known_hash,
-                );
-                return Ok(IndexedPage {
-                    path: relative,
-                    content_hash: known_hash.clone(),
-                    disposition,
-                    modified_nanos,
-                    file_size,
-                    sections: None,
-                });
-            }
             let markdown = fs::read_to_string(&path)?;
             let content_hash = sha256_hex(markdown.as_bytes());
             let disposition = page_disposition(
@@ -2060,6 +2040,7 @@ fn hybrid_evidence(
         return (lexical, "lexical");
     };
     let mut admitted = Vec::new();
+    let mut semantic_sections = 0_usize;
     for folder in folders {
         let path = folder_index_path(root, folder);
         let Ok(connection) = open_folder_index(&path) else {
@@ -2098,6 +2079,19 @@ fn hybrid_evidence(
             let _ = flock(&lock, FlockOperation::Unlock);
             continue;
         }
+        let Ok(folder_sections) = semantic_index::active_vector_count(&connection) else {
+            let _ = flock(&lock, FlockOperation::Unlock);
+            unlock_semantic_query_admissions(&admitted);
+            return (lexical, "lexical");
+        };
+        let Some(next_semantic_sections) =
+            semantic_query_section_total(semantic_sections, folder_sections)
+        else {
+            let _ = flock(&lock, FlockOperation::Unlock);
+            unlock_semantic_query_admissions(&admitted);
+            return (lexical, "lexical");
+        };
+        semantic_sections = next_semantic_sections;
         admitted.push(lock);
     }
     if admitted.is_empty() {
@@ -2196,6 +2190,12 @@ fn hybrid_evidence(
             .then(left.section_key.cmp(&right.section_key))
     });
     (evidence, "hybrid")
+}
+
+fn semantic_query_section_total(current: usize, additional: usize) -> Option<usize> {
+    current
+        .checked_add(additional)
+        .filter(|total| *total <= MAX_SEMANTIC_QUERY_SECTIONS)
 }
 
 fn unlock_semantic_query_admissions(admitted: &[File]) {
@@ -2549,5 +2549,18 @@ mod tests {
         assert_eq!(parse_limit("50").unwrap(), 50);
         assert!(parse_limit("0").is_err());
         assert!(parse_limit("51").is_err());
+    }
+
+    #[test]
+    fn semantic_query_work_is_globally_bounded() {
+        assert_eq!(
+            semantic_query_section_total(MAX_SEMANTIC_QUERY_SECTIONS - 1, 1),
+            Some(MAX_SEMANTIC_QUERY_SECTIONS)
+        );
+        assert_eq!(
+            semantic_query_section_total(MAX_SEMANTIC_QUERY_SECTIONS, 1),
+            None
+        );
+        assert_eq!(semantic_query_section_total(usize::MAX, 1), None);
     }
 }

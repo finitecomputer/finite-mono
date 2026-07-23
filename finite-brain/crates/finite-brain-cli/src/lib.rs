@@ -7918,6 +7918,25 @@ mod tests {
         run_with_env(["search", "amber", "--json"], env.clone(), &mut output).unwrap();
         let first: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(first["results"][0]["pagePath"], "runbook.md");
+        let large_page = tree.join("General/large.md");
+        fs::write(
+            &large_page,
+            format!(
+                "# Large Page\n\n{}\n\nultravioletbigpage\n",
+                "x".repeat(5 * 1024 * 1024)
+            ),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        run_with_env(
+            ["search", "ultravioletbigpage", "--json"],
+            env.clone(),
+            &mut output,
+        )
+        .unwrap();
+        let large_result: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(large_result["results"][0]["pagePath"], "large.md");
+        fs::remove_file(large_page).unwrap();
         let index_directories = fs::read_dir(tree.join(".finitebrain/search-indexes"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -7966,14 +7985,34 @@ mod tests {
             stable_rowid_after_edit, stable_rowid,
             "an unrelated Section should not be rewritten"
         );
+        let runbook_path = tree.join("General/runbook.md");
+        let preserved_modified = fs::metadata(&runbook_path).unwrap().modified().unwrap();
+        fs::write(
+            &runbook_path,
+            "# Runbook\n\n## Stable procedure\n\nKeep the violet recovery note.\n\n## Active procedure\n\nRestart the orange service.\n",
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&runbook_path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(preserved_modified))
+            .unwrap();
         let mut output = Vec::new();
-        run_with_env(["search", "amber", "--json"], env.clone(), &mut output).unwrap();
+        run_with_env(["search", "orange", "--json"], env.clone(), &mut output).unwrap();
+        let preserved_timestamp_edit: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            preserved_timestamp_edit["results"][0]["pagePath"],
+            "runbook.md"
+        );
+        let mut output = Vec::new();
+        run_with_env(["search", "cobalt", "--json"], env.clone(), &mut output).unwrap();
         let stale: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(stale["results"], serde_json::json!([]));
 
         fs::write(&index_path, b"not a sqlite database").unwrap();
         let mut output = Vec::new();
-        run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
+        run_with_env(["search", "orange", "--json"], env, &mut output).unwrap();
         let rebuilt: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(rebuilt["results"][0]["pagePath"], "runbook.md");
 
@@ -7985,7 +8024,7 @@ mod tests {
         let mut output = Vec::new();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
-        run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
+        run_with_env(["search", "orange", "--json"], env, &mut output).unwrap();
         let rebuilt_without_version: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(
             rebuilt_without_version["results"][0]["pagePath"],
@@ -8000,7 +8039,7 @@ mod tests {
         let mut output = Vec::new();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
-        run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
+        run_with_env(["search", "orange", "--json"], env, &mut output).unwrap();
         let rebuilt_partial_schema: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(
             rebuilt_partial_schema["results"][0]["pagePath"],
@@ -8018,7 +8057,7 @@ mod tests {
         let mut output = Vec::new();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
-        run_with_env(["search", "cobalt", "--json"], env, &mut output).unwrap();
+        run_with_env(["search", "orange", "--json"], env, &mut output).unwrap();
         let after_revocation: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(after_revocation["results"], serde_json::json!([]));
         assert_eq!(
@@ -8111,17 +8150,9 @@ mod tests {
 
         // A full Folder scan would reject this unrelated Page, making this a
         // high-seam assertion that the hot path follows the sync report only.
-        fs::write(
-            tree.join("General/stable.md"),
-            "x".repeat((4 * 1024 * 1024) + 1),
-        )
-        .unwrap();
+        fs::write(tree.join("General/stable.md"), [0xff]).unwrap();
         fs::remove_dir_all(&research_index_directory).unwrap();
-        fs::write(
-            tree.join("Research/unrelated.md"),
-            "x".repeat((4 * 1024 * 1024) + 1),
-        )
-        .unwrap();
+        fs::write(tree.join("Research/unrelated.md"), [0xff]).unwrap();
         fs::write(
             tree.join("General/changed.md"),
             "# Changed\n\n## Stable procedure\n\nKeep violet text.\n\n## Active procedure\n\nCobalt text.\n",
@@ -8177,11 +8208,7 @@ mod tests {
             "# Changed\n\n## Stable procedure\n\nKeep violet text.\n\n## Active procedure\n\nEmerald text.\n",
         )
         .unwrap();
-        fs::write(
-            tree.join("General/z-broken.md"),
-            "x".repeat((4 * 1024 * 1024) + 1),
-        )
-        .unwrap();
+        fs::write(tree.join("General/z-broken.md"), [0xff]).unwrap();
         let mut failing_report = report.clone();
         let mut broken_change = failing_report.local_changes[0].clone();
         broken_change.path = Some("General/z-broken.md".to_owned());
@@ -8510,6 +8537,50 @@ mod tests {
 
         server.join().unwrap();
         assert!(error.to_string().contains("wrong-dimension"));
+    }
+
+    #[test]
+    fn embedding_provider_adapter_retries_transient_failures_only() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            for (attempt, status) in [(1, "503 Service Unavailable"), (2, "429 Too Many Requests")]
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_request_with_headers(&mut stream);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\nX-Attempt: {attempt}\r\n\r\n"
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request_with_headers(&mut stream);
+            let response_body = serde_json::json!({
+                "model": "embed-test",
+                "modelVersion": "embed-test-v1",
+                "dimensions": 2,
+                "vectors": [{ "id": "query-1", "embedding": [0.1, 0.2] }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let adapter = EmbeddingProviderAdapter::new(EmbeddingProviderConfig {
+            endpoint,
+            bearer_token: "adapter-secret".to_owned(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let response = adapter
+            .embed(&[EmbeddingProviderInput::query("query-1", "test query")])
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(response.vectors[0].embedding, vec![0.1, 0.2]);
     }
 
     #[test]

@@ -79,6 +79,17 @@ pub(crate) struct SemanticCandidate {
 }
 
 #[derive(Debug)]
+struct RankedSemanticCandidate {
+    section_key: String,
+    page_path: String,
+    page_title: String,
+    heading_ancestry: String,
+    heading: Option<String>,
+    disposition: String,
+    similarity: f32,
+}
+
+#[derive(Debug)]
 struct SectionForEmbedding {
     key: String,
     page_path: String,
@@ -672,7 +683,7 @@ pub(crate) fn semantic_candidates(
     let mut statement = connection
         .prepare(
             "SELECT s.section_key, s.page_path, s.page_title, s.heading_ancestry,
-                    s.heading, s.body, s.disposition, v.vector
+                    s.heading, s.disposition, v.vector
                FROM semantic_vectors v
                JOIN sections s
                  ON s.section_key = v.section_key
@@ -690,15 +701,21 @@ pub(crate) fn semantic_candidates(
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, Vec<u8>>(7)?,
+                row.get::<_, Vec<u8>>(6)?,
             ))
         })
         .map_err(index_error)?;
-    let mut candidates = Vec::new();
+    let mut ranked = Vec::<RankedSemanticCandidate>::with_capacity(limit);
+    let mut scanned = 0_usize;
     for row in rows {
-        let (section_key, page_path, page_title, ancestry, heading, body, disposition, vector) =
+        let (section_key, page_path, page_title, ancestry, heading, disposition, vector) =
             row.map_err(index_error)?;
+        scanned = scanned.saturating_add(1);
+        if scanned > MAX_SEMANTIC_SECTIONS_PER_FOLDER {
+            return Err(CliError::SearchIndex(format!(
+                "semantic candidate scan exceeds {MAX_SEMANTIC_SECTIONS_PER_FOLDER} Sections"
+            )));
+        }
         let vector = decode_vector(&vector, dimensions)?;
         let Some(similarity) = cosine_similarity(query_vector, &vector) else {
             continue;
@@ -706,31 +723,74 @@ pub(crate) fn semantic_candidates(
         if similarity <= 0.0 {
             continue;
         }
-        candidates.push(SemanticCandidate {
+        let candidate = RankedSemanticCandidate {
             section_key,
             page_path,
             page_title,
-            heading_ancestry: serde_json::from_str(&ancestry).unwrap_or_default(),
+            heading_ancestry: ancestry,
             heading,
-            excerpt: excerpt(&body),
             disposition,
             similarity,
-        });
-        if candidates.len() > MAX_SEMANTIC_SECTIONS_PER_FOLDER {
-            return Err(CliError::SearchIndex(format!(
-                "semantic candidate scan exceeds {MAX_SEMANTIC_SECTIONS_PER_FOLDER} Sections"
-            )));
+        };
+        if ranked.len() < limit {
+            ranked.push(candidate);
+        } else if let Some((worst_index, worst)) = ranked
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| semantic_rank_cmp(left, right))
+            && semantic_rank_cmp(&candidate, worst).is_gt()
+        {
+            ranked[worst_index] = candidate;
         }
     }
-    candidates.sort_by(|left, right| {
-        right
-            .similarity
-            .total_cmp(&left.similarity)
-            .then(left.page_path.cmp(&right.page_path))
-            .then(left.section_key.cmp(&right.section_key))
-    });
-    candidates.truncate(limit);
+    ranked.sort_by(|left, right| semantic_rank_cmp(right, left));
+    let mut candidates = Vec::with_capacity(ranked.len());
+    for candidate in ranked {
+        let body = connection
+            .query_row(
+                "SELECT body FROM sections WHERE section_key = ?1 AND page_path = ?2",
+                params![&candidate.section_key, &candidate.page_path],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(index_error)?;
+        candidates.push(SemanticCandidate {
+            section_key: candidate.section_key,
+            page_path: candidate.page_path,
+            page_title: candidate.page_title,
+            heading_ancestry: serde_json::from_str(&candidate.heading_ancestry).unwrap_or_default(),
+            heading: candidate.heading,
+            excerpt: excerpt(&body),
+            disposition: candidate.disposition,
+            similarity: candidate.similarity,
+        });
+    }
     Ok(candidates)
+}
+
+fn semantic_rank_cmp(
+    left: &RankedSemanticCandidate,
+    right: &RankedSemanticCandidate,
+) -> std::cmp::Ordering {
+    left.similarity
+        .total_cmp(&right.similarity)
+        .then_with(|| right.page_path.cmp(&left.page_path))
+        .then_with(|| right.section_key.cmp(&left.section_key))
+}
+
+pub(crate) fn active_vector_count(connection: &Connection) -> Result<usize, CliError> {
+    ensure_schema(connection)?;
+    connection
+        .query_row(
+            "SELECT count(*)
+               FROM semantic_vectors v
+               JOIN semantic_settings s ON s.active_generation = v.generation_id
+               JOIN semantic_generations g ON g.generation_id = v.generation_id
+              WHERE s.singleton = 1 AND s.enabled = 1 AND g.complete = 1
+                AND g.section_format = ?1",
+            [SEARCH_INDEX_VERSION],
+            |row| row.get(0),
+        )
+        .map_err(index_error)
 }
 
 struct SharedAdmission<'a>(&'a File);
