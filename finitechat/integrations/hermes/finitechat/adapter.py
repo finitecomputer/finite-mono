@@ -1080,8 +1080,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 admission = self._deferred_admissions.get(session_key)
                 if admission is None:
                     return
-                if self._is_immediate_text_control(admission[0], session_key):
-                    break
                 owner = self._session_tasks.get(session_key)
                 if owner is not None and not owner.done():
                     await asyncio.wait({owner}, timeout=ADMISSION_RECHECK_SECS)

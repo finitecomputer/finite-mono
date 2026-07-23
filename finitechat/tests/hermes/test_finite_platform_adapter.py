@@ -1240,6 +1240,77 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         acked = [call[1]["message_id"] for call in calls if call[0] == "ack"]
         self.assertEqual(acked, ["msg-41", "msg-42", "msg-43", "msg-44"])
 
+    def _assert_deferred_text_keeps_arrival_classification(
+        self,
+        *,
+        text: str,
+        later_control: str,
+    ) -> None:
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        session_key = "agent:main:finitechat:dm:room-agent-1:chat-build-1"
+        tools_module = types.ModuleType("tools")
+        tools_module.__path__ = []
+        clarify_module = types.ModuleType("tools.clarify_gateway")
+        approval_module = types.ModuleType("tools.approval")
+        pending = {"clarification": False, "approval": False}
+        cast(Any, clarify_module).get_pending_for_session = lambda _key, include_choice_prompts: (
+            object() if pending["clarification"] and include_choice_prompts else None
+        )
+        cast(Any, approval_module).has_blocking_approval = lambda _key: pending["approval"]
+        cast(Any, tools_module).clarify_gateway = clarify_module
+
+        async def exercise():
+            release = asyncio.Event()
+
+            async def active_owner():
+                await release.wait()
+                adapter._active_sessions.pop(session_key, None)
+                adapter._session_tasks.pop(session_key, None)
+
+            owner = asyncio.create_task(active_owner())
+            adapter._active_sessions[session_key] = asyncio.Event()
+            adapter._session_tasks[session_key] = owner
+
+            await adapter._handle_finitechat_event(self._text_event(45, "msg-45", text))
+            pending[later_control] = True
+            await asyncio.sleep(self.module.ADMISSION_RECHECK_SECS * 2)
+
+            self.assertEqual(adapter.handled_messages, [])
+            self.assertNotIn("msg-45", [call[1].get("message_id") for call in calls])
+
+            admission_task = adapter._admission_tasks[session_key]
+            release.set()
+            await owner
+            await admission_task
+
+        with patch.dict(
+            sys.modules,
+            {
+                "tools": tools_module,
+                "tools.clarify_gateway": clarify_module,
+                "tools.approval": approval_module,
+            },
+        ):
+            asyncio.run(exercise())
+
+        self.assertEqual([event.text for event in adapter.handled_messages], [text])
+        acked = [call[1]["message_id"] for call in calls if call[0] == "ack"]
+        self.assertEqual(acked, ["msg-45"])
+
+    def test_deferred_text_does_not_become_later_clarification_reply(self):
+        self._assert_deferred_text_keeps_arrival_classification(
+            text="ordinary follow-up",
+            later_control="clarification",
+        )
+
+    def test_deferred_text_does_not_become_later_approval_reply(self):
+        self._assert_deferred_text_keeps_arrival_classification(
+            text="yes",
+            later_control="approval",
+        )
+
     def test_active_session_does_not_block_another_session(self):
         adapter = self.adapter()
         calls = []
