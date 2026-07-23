@@ -1,36 +1,42 @@
 //! Narrow Phala Cloud HTTPS API adapter.
 //!
 //! This module intentionally contains no CLI fallback and no provider delete
-//! primitive. Provision and update commits accept only opaque material from the
-//! not-yet-integrated, officially reviewed environment-encryption helper. That
-//! keeps this client usable for inventory and ordinary lifecycle work without
-//! inventing a cryptographic envelope or staging plaintext environment files.
+//! primitive. Provision and update commits accept only material produced after
+//! the Phala KMS signature and provision binding have been verified. That keeps
+//! plaintext environment values out of compose files and provider API bodies.
 
 use super::{
     DEFAULT_DOCKER_CONTAINER_PORT, DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITECHAT_SERVER_URL,
     DEFAULT_RUNTIME_READY_INTERVAL, DEFAULT_RUNTIME_READY_TIMEOUT, DockerEquivalentRuntimeEnv,
-    FINITE_SPECIALIZATION_WORKER_API_KEY_ENV, RunnerError, RuntimeLaunchFacts,
-    RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions, RuntimeUpgradeFacts,
-    control_runtime_spec, creation_runtime_spec, docker_equivalent_runtime_env,
-    state_preserving_runtime_capabilities, wait_for_http_json_ready,
+    RunnerError, RuntimeLaunchFacts, RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions,
+    RuntimeUpgradeFacts, control_runtime_spec, creation_runtime_spec,
+    docker_equivalent_runtime_env, state_preserving_runtime_capabilities, wait_for_http_json_ready,
 };
 use crate::phala_inventory::{
     AppRevision, AppsPage, CurrentUserResponse, FiniteProviderInventory, InventoryContractError,
     PhalaApp, RevisionsPage, WorkspaceQuotas,
 };
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use finite_saas_core::{
-    AgentCreationLease, ProviderRuntimeHandleEnvelope, ProviderRuntimeHandleV1, RunnerClass,
-    RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeControlLease,
+    AgentCreationLease, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderRuntimeHandleEnvelope, ProviderRuntimeHandleV1, RunnerClass, RunnerLeaseCapacity,
+    RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeControlLease,
 };
+use rand::RngCore;
+use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
+use secp256k1::{Message, Secp256k1};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeSet;
+use sha3::{Digest, Keccak256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Read;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Instant;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 pub const API_BASE_URL: &str = "https://cloud-api.phala.com/api/v1";
 pub const API_VERSION: &str = "2026-06-23";
@@ -48,6 +54,9 @@ const MAX_PROVIDER_ID_BYTES: usize = 256;
 const MAX_INVENTORY_PAGES: u32 = 1000;
 const INVENTORY_PAGE_SIZE: u32 = 100;
 const PREFLIGHT_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const ENV_KEY_SIGNATURE_PREFIX: &[u8] = b"dstack-env-encrypt-pubkey:";
+const ENV_KEY_SIGNATURE_MAX_AGE: Duration = Duration::from_secs(300);
+const ENV_KEY_SIGNATURE_FUTURE_SKEW: Duration = Duration::from_secs(60);
 const USER_AGENT: &str = concat!("finite-saas-runner/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone)]
@@ -124,9 +133,10 @@ impl PhalaConfig {
                 kind.as_str()
             )));
         }
-        if self.max_cvm_count == Some(0) {
+        if self.max_cvm_count != Some(1) {
             return Err(RunnerError::RuntimeLaunch(
-                "Phala maximum CVM count must be at least one".to_string(),
+                "Phala maximum CVM count must remain exactly one for the internal canary"
+                    .to_string(),
             ));
         }
         if self.readiness_timeout.is_zero() || self.readiness_interval.is_zero() {
@@ -152,7 +162,7 @@ impl Default for PhalaConfig {
             finitechat_server_url: DEFAULT_FINITECHAT_SERVER_URL.to_string(),
             agent_picture_url: DEFAULT_FINITE_AGENT_PICTURE_URL.to_string(),
             max_cvm_count: Some(1),
-            drain_new_leases: false,
+            drain_new_leases: true,
             available_memory_bytes: None,
             readiness_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
             readiness_interval: DEFAULT_RUNTIME_READY_INTERVAL,
@@ -217,6 +227,7 @@ impl PhalaRuntimeHandleV1 {
 #[derive(Debug, Clone, Copy, Default)]
 struct PreflightSnapshot {
     billable_resource_count: u32,
+    verified: bool,
     last_attempt: Option<Instant>,
 }
 
@@ -324,11 +335,13 @@ impl PhalaLauncher {
         match result {
             Ok(summary) => {
                 snapshot.billable_resource_count = summary.billable_finite_resource_count;
+                snapshot.verified = true;
             }
             Err(error) => {
                 // Preserve the last known conservative count while draining.
                 // A transient read failure must not make existing resources
                 // disappear from capacity accounting.
+                snapshot.verified = false;
                 eprintln!("Phala preflight blocked new creation: {error}");
             }
         }
@@ -436,8 +449,8 @@ impl PhalaLauncher {
 
 impl RuntimeLauncher for PhalaLauncher {
     fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
-        // Provider-safe upgrade remains blocked on opaque environment
-        // encryption material; ordinary lifecycle controls stay available.
+        // Upgrade remains blocked until the canary proves the provider's
+        // complete-environment replacement and rollback behavior.
         state_preserving_runtime_capabilities(false)
     }
 
@@ -463,10 +476,7 @@ impl RuntimeLauncher for PhalaLauncher {
             .unwrap_or_default();
         RunnerLeaseCapacity {
             runner_classes: vec![RunnerClass::Phala],
-            // Creation stays hard-disabled until both reviewed environment
-            // encryption and a typed Core in-flight reservation count exist.
-            // Provider inventory alone is not a sufficient admission ledger.
-            draining: true,
+            draining: self.config.drain_new_leases || !snapshot.verified,
             max_sandbox_count: self.config.max_cvm_count,
             active_sandbox_count: Some(snapshot.billable_resource_count),
             available_memory_bytes: self.config.available_memory_bytes,
@@ -515,7 +525,7 @@ impl RuntimeLauncher for PhalaLauncher {
     ) -> Result<RuntimeUpgradeFacts, RunnerError> {
         control_runtime_spec(lease, RunnerClass::Phala)?;
         Err(RunnerError::RuntimeLaunch(
-            "Phala upgrade is disabled until reviewed encrypted-environment handling and durable Core acknowledgment are wired"
+            "Phala upgrade is disabled until the canary proves complete-environment update and rollback"
                 .to_string(),
         ))
     }
@@ -554,11 +564,11 @@ impl RuntimeLauncher for PhalaLauncher {
         }
         config.validate()?;
         // Render and validate the reviewed compose contract in memory only.
-        // No provider provision call or plaintext environment staging is
-        // allowed on this side of the encryption-and-acknowledgment boundary.
+        // Provider mutation stays behind the separately approved canary
+        // activation even though the two prerequisite boundaries now exist.
         let _compose = phala_compose(&config, lease, options)?;
         Err(RunnerError::RuntimeLaunch(
-            "Phala creation is disabled until reviewed encrypted-environment handling, typed Core reservation accounting, and durable Core acknowledgment are wired"
+            "Phala creation is disabled until the separately approved canary activation wires the reviewed boundaries into the provider mutation state machine"
                 .to_string(),
         ))
     }
@@ -604,7 +614,34 @@ fn phala_compose(
 ) -> Result<String, RunnerError> {
     config.validate()?;
     let cvm_name = phala_cvm_name_for_request_id(&lease.request.id);
-    let mut environment = docker_equivalent_runtime_env(
+    let environment = phala_runtime_environment(config, lease, options);
+
+    let mut rendered = String::new();
+    rendered.push_str("services:\n  agent:\n    image: ");
+    rendered.push_str(&yaml_quote(config.image.trim()));
+    rendered.push_str("\n    platform: linux/amd64\n    container_name: ");
+    rendered.push_str(&yaml_quote(&cvm_name));
+    rendered.push_str(
+        "\n    restart: unless-stopped\n    ports:\n      - \"8080:8080\"\n    volumes:\n      - agent_state:/data\n      - /var/run/dstack.sock:/var/run/dstack.sock\n    environment:\n",
+    );
+    for key in environment.keys() {
+        rendered.push_str("      ");
+        rendered.push_str(key);
+        rendered.push_str(": ");
+        rendered.push_str(&yaml_quote(&format!("${{{key}:?{key} is required}}")));
+        rendered.push('\n');
+    }
+    rendered.push_str("\nvolumes:\n  agent_state:\n");
+    Ok(rendered)
+}
+
+fn phala_runtime_environment(
+    config: &PhalaConfig,
+    lease: &AgentCreationLease,
+    options: &RuntimeLaunchOptions,
+) -> BTreeMap<String, String> {
+    let cvm_name = phala_cvm_name_for_request_id(&lease.request.id);
+    docker_equivalent_runtime_env(
         DockerEquivalentRuntimeEnv {
             finitechat_server_url: &config.finitechat_server_url,
             agent_picture_url: &config.agent_picture_url,
@@ -616,34 +653,9 @@ fn phala_compose(
         },
         lease,
         options,
-    );
-    for (key, value) in &mut environment {
-        if matches!(key.as_str(), "FINITE_PRIVATE_API_KEY" | "OPENAI_API_KEY") {
-            *value = "${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}".to_string();
-        } else if key == FINITE_SPECIALIZATION_WORKER_API_KEY_ENV
-            || options.secret_environment.contains_key(key)
-        {
-            *value = format!("${{{key}:?{key} is required}}");
-        }
-    }
-
-    let mut rendered = String::new();
-    rendered.push_str("services:\n  agent:\n    image: ");
-    rendered.push_str(&yaml_quote(config.image.trim()));
-    rendered.push_str("\n    platform: linux/amd64\n    container_name: ");
-    rendered.push_str(&yaml_quote(&cvm_name));
-    rendered.push_str(
-        "\n    restart: unless-stopped\n    ports:\n      - \"8080:8080\"\n    volumes:\n      - agent_state:/data\n      - /var/run/dstack.sock:/var/run/dstack.sock\n    environment:\n",
-    );
-    for (key, value) in environment {
-        rendered.push_str("      ");
-        rendered.push_str(&key);
-        rendered.push_str(": ");
-        rendered.push_str(&yaml_quote(&value));
-        rendered.push('\n');
-    }
-    rendered.push_str("\nvolumes:\n  agent_state:\n");
-    Ok(rendered)
+    )
+    .into_iter()
+    .collect()
 }
 
 fn yaml_quote(value: &str) -> String {
@@ -859,6 +871,19 @@ impl PhalaApiClient {
         self.get_json("current_user", "/auth/me")
     }
 
+    fn signed_environment_public_key(
+        &self,
+        kms_reference: &str,
+        app_id: &str,
+    ) -> Result<SignedEnvironmentPublicKeyResponse, PhalaApiError> {
+        validate_provider_id(kms_reference)?;
+        let app_id = normalized_app_id(app_id)?;
+        self.get_json(
+            "signed_environment_public_key",
+            &format!("/kms/{kms_reference}/pubkey/{app_id}"),
+        )
+    }
+
     pub fn workspace_quotas(&self, workspace_slug: &str) -> Result<WorkspaceQuotas, PhalaApiError> {
         validate_provider_id(workspace_slug)?;
         self.get_json(
@@ -1067,16 +1092,33 @@ impl PhalaApiClient {
         self.post_json("provision_cvm", "/cvms/provision", Some(request))
     }
 
+    /// Fetch and verify the KMS-signed X25519 key for Core-acknowledged
+    /// provision facts, then encrypt the complete runtime environment in
+    /// memory using Phala's documented envelope.
+    pub fn encrypt_environment_for_provision(
+        &self,
+        provision: &PersistedProvision,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<VerifiedEncryptedEnvironment, PhalaApiError> {
+        let signed_key = self.signed_environment_public_key(
+            &provision.facts.kms_reference,
+            &provision.facts.app_id,
+        )?;
+        let verified_key =
+            verify_environment_public_key(&provision.facts, &signed_key, SystemTime::now())?;
+        VerifiedEncryptedEnvironment::encrypt(environment, &verified_key)
+    }
+
     /// Commit is deliberately gated on both Core-persisted identifiers and an
-    /// envelope produced by a future reviewed official-helper integration.
+    /// envelope produced by the verified encryption boundary above.
     pub fn commit_provision(
         &self,
         provision: &PersistedProvision,
         environment: &VerifiedEncryptedEnvironment,
     ) -> Result<CvmAction, PhalaApiError> {
         let request = CommitProvisionRequest {
-            app_id: &provision.app_id,
-            compose_hash: &provision.compose_hash,
+            app_id: &provision.facts.app_id,
+            compose_hash: &provision.facts.compose_hash,
             encrypted_env: environment.ciphertext(),
             env_keys: environment.keys(),
         };
@@ -1882,32 +1924,157 @@ pub struct UnverifiedProvision {
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
 pub struct KmsInfo {
+    pub chain_id: Option<i64>,
     pub encrypted_env_pubkey: Option<String>,
     pub k256_pubkey: Option<String>,
     pub dstack_kms_address: Option<String>,
     pub dstack_app_address: Option<String>,
 }
 
-/// Core-acknowledged provision identifiers. Construction remains crate-private
-/// until the durable handle write is wired into the generic Runner contract.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct PersistedProvision {
+impl KmsInfo {
+    fn cloud_kms_reference(&self) -> Result<&'static str, PhalaApiError> {
+        if !matches!(self.chain_id, None | Some(0)) {
+            return Err(PhalaApiError::Contract(
+                "Phala provision selected an unexpected non-Cloud KMS",
+            ));
+        }
+        // The provision request pins `kms: "PHALA"` and the official SDK's
+        // signed-key endpoint uses the stable lowercase Cloud KMS selector.
+        Ok("phala")
+    }
+
+    fn expected_signer(&self) -> Result<&str, PhalaApiError> {
+        self.k256_pubkey
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(PhalaApiError::Contract(
+                "Phala provision omitted the KMS signing anchor",
+            ))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+struct SignedEnvironmentPublicKeyResponse {
+    public_key: String,
+    signature: String,
+    #[serde(default)]
+    timestamp: Option<u64>,
+    #[serde(default)]
+    signature_v1: Option<String>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct VerifiedEnvironmentPublicKey([u8; 32]);
+
+impl fmt::Debug for VerifiedEnvironmentPublicKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("VerifiedEnvironmentPublicKey")
+            .field(&"<verified>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PhalaProvisionFactsV1 {
     app_id: String,
     compose_hash: String,
+    env_encrypt_public_key: String,
+    kms_reference: String,
+    kms_signer_public_key: String,
+    instance_type: String,
+    node_id: Option<u64>,
+}
+
+impl PhalaProvisionFactsV1 {
+    pub fn from_provision(provision: &UnverifiedProvision) -> Result<Self, PhalaApiError> {
+        let app_id = normalized_app_id(&provision.app_id)?;
+        validate_provider_id(&provision.compose_hash)?;
+        let kms = provision.kms_info.as_ref().ok_or(PhalaApiError::Contract(
+            "Phala provision omitted its KMS facts",
+        ))?;
+        let kms_reference = kms.cloud_kms_reference()?.to_string();
+        let kms_signer_public_key = kms.expected_signer()?.to_string();
+        if provision.instance_type.as_deref() != Some(FINITE_INSTANCE_TYPE) {
+            return Err(PhalaApiError::Contract(
+                "Phala provision returned an unexpected instance type",
+            ));
+        }
+        let env_encrypt_public_key = normalize_hex(
+            &provision.app_env_encrypt_pubkey,
+            32,
+            "environment public key",
+        )?;
+        if let Some(kms_key) = kms.encrypted_env_pubkey.as_deref()
+            && normalize_hex(kms_key, 32, "KMS environment public key")? != env_encrypt_public_key
+        {
+            return Err(PhalaApiError::Contract(
+                "Phala provision returned conflicting environment public keys",
+            ));
+        }
+        normalize_secp256k1_public_key(&kms_signer_public_key)?;
+        Ok(Self {
+            app_id,
+            compose_hash: provision.compose_hash.clone(),
+            env_encrypt_public_key,
+            kms_reference,
+            kms_signer_public_key,
+            instance_type: FINITE_INSTANCE_TYPE.to_string(),
+            node_id: provision.node_id,
+        })
+    }
+}
+
+/// Provision identifiers reconstructed only from the exact facts Core
+/// acknowledged. This prevents a local response from crossing the commit
+/// boundary before its replay material is durable.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PersistedProvision {
+    facts: PhalaProvisionFactsV1,
 }
 
 impl PersistedProvision {
+    pub fn from_core_operation(
+        operation: &ProviderOperationEnvelope,
+    ) -> Result<Self, PhalaApiError> {
+        let facts = operation
+            .v1()
+            .transitions
+            .iter()
+            .find_map(|record| match &record.transition {
+                ProviderOperationTransition::Provisioned { provider_facts } => {
+                    Some(provider_facts.clone())
+                }
+                _ => None,
+            })
+            .ok_or(PhalaApiError::Contract(
+                "Core did not acknowledge the Phala provision facts",
+            ))?;
+        let facts = serde_json::from_value::<PhalaProvisionFactsV1>(facts).map_err(|_| {
+            PhalaApiError::Contract("Core returned invalid acknowledged Phala provision facts")
+        })?;
+        Ok(Self { facts })
+    }
+
     #[cfg(test)]
     fn fixture(app_id: &str, compose_hash: &str) -> Self {
         Self {
-            app_id: app_id.to_string(),
-            compose_hash: compose_hash.to_string(),
+            facts: PhalaProvisionFactsV1 {
+                app_id: app_id.to_string(),
+                compose_hash: compose_hash.to_string(),
+                env_encrypt_public_key: "11".repeat(32),
+                kms_reference: "phala".to_string(),
+                kms_signer_public_key: format!("02{}", "22".repeat(32)),
+                instance_type: FINITE_INSTANCE_TYPE.to_string(),
+                node_id: Some(101),
+            },
         }
     }
 }
 
-/// Ciphertext created only by the future reviewed official helper. It has no
-/// public constructor and deliberately contains no plaintext environment API.
+/// Ciphertext created only after the KMS signature, app binding, timestamp (if
+/// supplied), signer anchor, and provisioned public-key equality all verify.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedEncryptedEnvironment {
     ciphertext: String,
@@ -1933,6 +2100,66 @@ impl VerifiedEncryptedEnvironment {
         &self.keys
     }
 
+    fn encrypt(
+        environment: &BTreeMap<String, String>,
+        public_key: &VerifiedEnvironmentPublicKey,
+    ) -> Result<Self, PhalaApiError> {
+        let mut ephemeral_private = [0_u8; 32];
+        let mut nonce = [0_u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut ephemeral_private);
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        Self::encrypt_with_material(environment, public_key, ephemeral_private, nonce)
+    }
+
+    fn encrypt_with_material(
+        environment: &BTreeMap<String, String>,
+        public_key: &VerifiedEnvironmentPublicKey,
+        ephemeral_private: [u8; 32],
+        nonce: [u8; 12],
+    ) -> Result<Self, PhalaApiError> {
+        #[derive(Serialize)]
+        struct EnvironmentEntry<'a> {
+            key: &'a str,
+            value: &'a str,
+        }
+        #[derive(Serialize)]
+        struct EnvironmentPayload<'a> {
+            env: Vec<EnvironmentEntry<'a>>,
+        }
+
+        let entries = environment
+            .iter()
+            .map(|(key, value)| EnvironmentEntry { key, value })
+            .collect::<Vec<_>>();
+        let plaintext = Zeroizing::new(
+            serde_json::to_vec(&EnvironmentPayload { env: entries }).map_err(|_| {
+                PhalaApiError::Contract("Phala environment could not be serialized")
+            })?,
+        );
+        let ephemeral_secret = StaticSecret::from(ephemeral_private);
+        let ephemeral_public = X25519PublicKey::from(&ephemeral_secret);
+        let remote_public = X25519PublicKey::from(public_key.0);
+        let shared_secret = ephemeral_secret.diffie_hellman(&remote_public);
+        if !shared_secret.was_contributory() {
+            return Err(PhalaApiError::Contract(
+                "Phala environment public key produced an invalid X25519 secret",
+            ));
+        }
+        let cipher = Aes256Gcm::new_from_slice(shared_secret.as_bytes())
+            .map_err(|_| PhalaApiError::Contract("Phala environment encryption key was invalid"))?;
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), plaintext.as_slice())
+            .map_err(|_| PhalaApiError::Contract("Phala environment encryption failed"))?;
+        let mut envelope = Vec::with_capacity(32 + 12 + ciphertext.len());
+        envelope.extend_from_slice(ephemeral_public.as_bytes());
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&ciphertext);
+        Ok(Self {
+            ciphertext: hex::encode(envelope),
+            keys: environment.keys().cloned().collect(),
+        })
+    }
+
     #[cfg(test)]
     fn fixture(ciphertext: &str, keys: &[&str]) -> Self {
         Self {
@@ -1940,6 +2167,120 @@ impl VerifiedEncryptedEnvironment {
             keys: keys.iter().map(|key| (*key).to_string()).collect(),
         }
     }
+}
+
+fn normalized_app_id(value: &str) -> Result<String, PhalaApiError> {
+    normalize_hex(value, 20, "app id")
+}
+
+fn normalize_hex(
+    value: &str,
+    expected_bytes: usize,
+    _field: &'static str,
+) -> Result<String, PhalaApiError> {
+    let value = value.trim().strip_prefix("0x").unwrap_or(value.trim());
+    if value.len() != expected_bytes * 2 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(PhalaApiError::Contract(
+            "Phala cryptographic response contained invalid hex",
+        ));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn decode_hex(
+    value: &str,
+    expected_bytes: usize,
+    field: &'static str,
+) -> Result<Vec<u8>, PhalaApiError> {
+    hex::decode(normalize_hex(value, expected_bytes, field)?)
+        .map_err(|_| PhalaApiError::Contract("Phala cryptographic response contained invalid hex"))
+}
+
+fn normalize_secp256k1_public_key(value: &str) -> Result<[u8; 33], PhalaApiError> {
+    let bytes = decode_hex(value, 33, "KMS signer public key")?;
+    let key = secp256k1::PublicKey::from_slice(&bytes).map_err(|_| {
+        PhalaApiError::Contract("Phala KMS signing anchor was not a secp256k1 public key")
+    })?;
+    Ok(key.serialize())
+}
+
+fn verify_environment_public_key(
+    facts: &PhalaProvisionFactsV1,
+    response: &SignedEnvironmentPublicKeyResponse,
+    now: SystemTime,
+) -> Result<VerifiedEnvironmentPublicKey, PhalaApiError> {
+    let response_public_key =
+        normalize_hex(&response.public_key, 32, "signed environment public key")?;
+    if response_public_key != facts.env_encrypt_public_key {
+        return Err(PhalaApiError::Contract(
+            "signed environment public key did not match the provision",
+        ));
+    }
+    let public_key = decode_hex(&response_public_key, 32, "signed environment public key")?;
+    let app_id = decode_hex(&facts.app_id, 20, "app id")?;
+    let mut message =
+        Vec::with_capacity(ENV_KEY_SIGNATURE_PREFIX.len() + app_id.len() + 8 + public_key.len());
+    message.extend_from_slice(ENV_KEY_SIGNATURE_PREFIX);
+    message.extend_from_slice(&app_id);
+
+    let signature = match (&response.signature_v1, response.timestamp) {
+        (Some(signature), Some(timestamp)) => {
+            let now = now
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| PhalaApiError::Contract("system clock preceded the Unix epoch"))?
+                .as_secs();
+            if timestamp > now.saturating_add(ENV_KEY_SIGNATURE_FUTURE_SKEW.as_secs())
+                || now.saturating_sub(timestamp) > ENV_KEY_SIGNATURE_MAX_AGE.as_secs()
+            {
+                return Err(PhalaApiError::Contract(
+                    "Phala KMS environment-key signature timestamp was stale or in the future",
+                ));
+            }
+            message.extend_from_slice(&timestamp.to_be_bytes());
+            decode_hex(signature, 65, "timestamped environment key signature")?
+        }
+        (None, None) => decode_hex(&response.signature, 65, "environment key signature")?,
+        _ => {
+            return Err(PhalaApiError::Contract(
+                "Phala KMS returned an incomplete timestamped signature",
+            ));
+        }
+    };
+    message.extend_from_slice(&public_key);
+
+    let digest = Keccak256::digest(&message);
+    let recovery = match signature[64] {
+        value @ 0..=3 => value,
+        value @ 27..=30 => value - 27,
+        _ => {
+            return Err(PhalaApiError::Contract(
+                "Phala KMS signature recovery id was invalid",
+            ));
+        }
+    };
+    let recovery_id = RecoveryId::from_i32(i32::from(recovery))
+        .map_err(|_| PhalaApiError::Contract("Phala KMS signature recovery id was invalid"))?;
+    let signature = RecoverableSignature::from_compact(&signature[..64], recovery_id)
+        .map_err(|_| PhalaApiError::Contract("Phala KMS environment-key signature was invalid"))?;
+    let message = Message::from_digest_slice(&digest).map_err(|_| {
+        PhalaApiError::Contract("Phala KMS environment-key signature digest was invalid")
+    })?;
+    let recovered = Secp256k1::verification_only()
+        .recover_ecdsa(&message, &signature)
+        .map_err(|_| {
+            PhalaApiError::Contract("Phala KMS environment-key signature recovery failed")
+        })?
+        .serialize();
+    let expected = normalize_secp256k1_public_key(&facts.kms_signer_public_key)?;
+    if recovered != expected {
+        return Err(PhalaApiError::Contract(
+            "Phala KMS environment-key signature did not match its signer anchor",
+        ));
+    }
+    let public_key: [u8; 32] = public_key.try_into().map_err(|_| {
+        PhalaApiError::Contract("Phala environment public key had the wrong length")
+    })?;
+    Ok(VerifiedEnvironmentPublicKey(public_key))
 }
 
 #[derive(Debug, Serialize)]
@@ -2263,6 +2604,7 @@ mod tests {
             ),
             runtime_artifact_id: Some("artifact-phala-1".to_string()),
             runtime_state_schema_version: Some("runtime-state-v1".to_string()),
+            drain_new_leases: false,
             readiness_timeout: Duration::from_millis(100),
             readiness_interval: Duration::from_millis(1),
             ..PhalaConfig::default()
@@ -2307,6 +2649,7 @@ mod tests {
                 updated_at: "2026-07-01T00:00:00Z".to_string(),
             },
             provider_operation: None,
+            in_flight_capacity_reservation: None,
         }
     }
 
@@ -2391,7 +2734,9 @@ mod tests {
         assert!(compose.contains("platform: linux/amd64"));
         assert!(compose.contains("- agent_state:/data"));
         assert!(compose.contains("- /var/run/dstack.sock:/var/run/dstack.sock"));
-        assert!(compose.contains("FINITECHAT_HOME: '/data/agent'"));
+        assert!(
+            compose.contains("FINITECHAT_HOME: '${FINITECHAT_HOME:?FINITECHAT_HOME is required}'")
+        );
         assert!(compose.contains(
             "FINITE_PRIVATE_API_KEY: '${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}'"
         ));
@@ -2411,15 +2756,176 @@ mod tests {
     }
 
     #[test]
+    fn environment_encryption_matches_independent_x25519_aes_gcm_vector() {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/phala/environment_crypto_vector.json"
+        ))
+        .unwrap();
+        let encryption = &vector["encryption"];
+        let decode_array = |field: &str, length: usize| {
+            let value = encryption[field].as_str().unwrap();
+            let bytes = hex::decode(value).unwrap();
+            assert_eq!(bytes.len(), length);
+            bytes
+        };
+        let remote_public: [u8; 32] = decode_array("remote_public_key", 32).try_into().unwrap();
+        let ephemeral_private: [u8; 32] = decode_array("ephemeral_private_key", 32)
+            .try_into()
+            .unwrap();
+        let nonce: [u8; 12] = decode_array("nonce", 12).try_into().unwrap();
+        let environment: BTreeMap<String, String> =
+            serde_json::from_value(encryption["environment"].clone()).unwrap();
+
+        let encrypted = VerifiedEncryptedEnvironment::encrypt_with_material(
+            &environment,
+            &VerifiedEnvironmentPublicKey(remote_public),
+            ephemeral_private,
+            nonce,
+        )
+        .unwrap();
+
+        assert_eq!(
+            encrypted.ciphertext(),
+            encryption["envelope"].as_str().unwrap()
+        );
+        assert_eq!(
+            encrypted.keys(),
+            &["ALPHA".to_string(), "FINITE_PRIVATE_API_KEY".to_string()]
+        );
+        assert!(!encrypted.ciphertext().contains("fixture-secret"));
+    }
+
+    #[test]
+    fn kms_legacy_signature_vector_binds_app_key_and_provision_anchor() {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/phala/environment_crypto_vector.json"
+        ))
+        .unwrap();
+        let signature = &vector["legacy_signature"];
+        let facts = PhalaProvisionFactsV1 {
+            app_id: signature["app_id"].as_str().unwrap().to_string(),
+            compose_hash: "compose-fixture".to_string(),
+            env_encrypt_public_key: signature["public_key"].as_str().unwrap().to_string(),
+            kms_reference: "phala".to_string(),
+            kms_signer_public_key: signature["signer_public_key"].as_str().unwrap().to_string(),
+            instance_type: FINITE_INSTANCE_TYPE.to_string(),
+            node_id: Some(101),
+        };
+        let response = SignedEnvironmentPublicKeyResponse {
+            public_key: signature["public_key"].as_str().unwrap().to_string(),
+            signature: signature["signature"].as_str().unwrap().to_string(),
+            timestamp: None,
+            signature_v1: None,
+        };
+
+        let verified =
+            verify_environment_public_key(&facts, &response, UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap();
+        assert_eq!(
+            hex::encode(verified.0),
+            signature["public_key"].as_str().unwrap()
+        );
+
+        let mut wrong_app = facts.clone();
+        wrong_app.app_id = format!("01{}", "00".repeat(19));
+        assert!(
+            verify_environment_public_key(
+                &wrong_app,
+                &response,
+                UNIX_EPOCH + Duration::from_secs(1)
+            )
+            .is_err()
+        );
+
+        let mut wrong_key = response.clone();
+        wrong_key.public_key = "11".repeat(32);
+        assert!(
+            verify_environment_public_key(&facts, &wrong_key, UNIX_EPOCH + Duration::from_secs(1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn provision_crypto_facts_cross_commit_boundary_only_after_core_acknowledges_them() {
+        let provision: UnverifiedProvision = serde_json::from_str(include_str!(
+            "../tests/fixtures/phala/provision_crypto.json"
+        ))
+        .unwrap();
+        let facts = PhalaProvisionFactsV1::from_provision(&provision).unwrap();
+        let provider_facts = serde_json::to_value(&facts).unwrap();
+        let operation = ProviderOperationEnvelope::V1(finite_saas_core::ProviderOperationV1 {
+            agent_creation_request_id: "agent_request_fixture".to_string(),
+            correlation_id: "finite-agent-fixture".to_string(),
+            placement: finite_saas_core::RuntimePlacement::for_hosting_tier(
+                finite_saas_core::HostingTier::Confidential,
+            ),
+            transitions: vec![finite_saas_core::ProviderOperationTransitionRecord {
+                sequence: 0,
+                transition: ProviderOperationTransition::Provisioned { provider_facts },
+                recorded_at: "2026-07-23T12:00:00Z".to_string(),
+            }],
+        });
+
+        let persisted = PersistedProvision::from_core_operation(&operation).unwrap();
+
+        assert_eq!(persisted.facts, facts);
+        assert_eq!(persisted.facts.app_id, "00".repeat(20));
+        assert_eq!(persisted.facts.kms_reference, "phala");
+    }
+
+    #[test]
+    fn signed_key_fetch_and_encryption_use_typed_authenticated_endpoint() {
+        const SIGNED_KEY: &str = r#"{
+          "public_key":"e33a1832c6562067ff8f844a61e51ad051f1180b66ec2551fb0251735f3ee90a",
+          "signature":"8542c49081fbf4e03f62034f13fbf70630bdf256a53032e38465a27c36fd6bed7a5e7111652004aef37f7fd92fbfc1285212c4ae6a6154203a48f5e16cad2cef00"
+        }"#;
+        let server = FakePhalaServer::start(vec![json_response(SIGNED_KEY)]);
+        let provision = PersistedProvision {
+            facts: PhalaProvisionFactsV1 {
+                app_id: "00".repeat(20),
+                compose_hash: "compose-fixture".to_string(),
+                env_encrypt_public_key:
+                    "e33a1832c6562067ff8f844a61e51ad051f1180b66ec2551fb0251735f3ee90a".to_string(),
+                kms_reference: "phala".to_string(),
+                kms_signer_public_key:
+                    "0217610d74cbd39b6143842c6d8bc310d79da1d82cc9d17f8876376221eda0c38f".to_string(),
+                instance_type: FINITE_INSTANCE_TYPE.to_string(),
+                node_id: Some(101),
+            },
+        };
+        let environment =
+            BTreeMap::from([("FINITE_PRIVATE_API_KEY".to_string(), "secret".to_string())]);
+
+        let encrypted = server
+            .client()
+            .encrypt_environment_for_provision(&provision, &environment)
+            .unwrap();
+
+        assert_eq!(encrypted.keys(), &["FINITE_PRIVATE_API_KEY".to_string()]);
+        assert!(!encrypted.ciphertext().contains("secret"));
+        let requests = server.requests();
+        assert_eq!(
+            requests[0].path,
+            format!("/api/v1/kms/phala/pubkey/{}", "00".repeat(20))
+        );
+        assert_eq!(
+            requests[0].headers.get("x-api-key").map(String::as_str),
+            Some(FIXTURE_API_KEY)
+        );
+    }
+
+    #[test]
     fn launcher_preflight_pins_shape_price_capacity_and_inventory_count() {
         let server = FakePhalaServer::start(preflight_responses());
         let launcher = PhalaLauncher::with_client(launcher_config(), server.client());
         launcher.validate_ready().unwrap();
         let capacity = launcher.runner_capacity();
-        assert!(capacity.draining);
+        assert!(!capacity.draining);
         assert_eq!(capacity.active_sandbox_count, Some(1));
         assert_eq!(capacity.max_sandbox_count, Some(1));
-        assert!(!capacity.accepts_agent_creation());
+        // Core owns the atomic Phala capacity decision, including re-leasing
+        // an already-reserved request while provider inventory is full.
+        assert!(capacity.accepts_agent_creation());
         assert_eq!(
             server
                 .requests()
@@ -2439,14 +2945,14 @@ mod tests {
     }
 
     #[test]
-    fn green_empty_preflight_remains_hard_drained_without_core_reservation_count() {
+    fn green_empty_preflight_advertises_capacity_for_core_to_reserve() {
         let server = FakePhalaServer::start(empty_preflight_responses());
         let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
         launcher.validate_ready().unwrap();
         let capacity = launcher.runner_capacity();
-        assert!(capacity.draining);
+        assert!(!capacity.draining);
         assert_eq!(capacity.active_sandbox_count, Some(0));
-        assert!(!capacity.accepts_agent_creation());
+        assert!(capacity.accepts_agent_creation());
         assert!(
             server
                 .requests()
