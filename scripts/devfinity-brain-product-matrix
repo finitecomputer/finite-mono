@@ -372,7 +372,19 @@ def main() -> int:
                     stderr=subprocess.DEVNULL,
                 )
         if outcome == "passed":
-            shutil.rmtree(state_dir)
+            try:
+                shutil.rmtree(state_dir)
+            except PermissionError:
+                # Dockerized services can leave root-owned diagnostic paths
+                # behind even after their containers are removed. The matrix
+                # report is already durable outside this tree, and CI gives
+                # every attempt an isolated checkout, so cleanup residue must
+                # not turn a fully-proven product pass into a false failure.
+                print(
+                    "Brain matrix passed; container-owned state could not be "
+                    f"removed and remains at {state_dir}",
+                    flush=True,
+                )
         else:
             logs = state_dir / "runs/default/logs"
             if logs.is_dir():
