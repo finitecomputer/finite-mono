@@ -8727,10 +8727,17 @@ where
         .ok_or(CoreError::FinitePrivateLimitProfileNotFound)?;
 
     let reservation_id = crate::finite_private_reservation_id_for(&api_key.id, &request_id);
-    let window_start = (now_time - Duration::seconds(crate::FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS))
+    let (weekly_used_units, weekly_reset_at) = if profile.weekly_limit_units.is_some() {
+        let window_start = (now_time
+            - Duration::seconds(crate::FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS))
         .format(&Rfc3339)?;
-    let (weekly_used_units, weekly_reset_at) =
-        postgres_finite_private_weekly_usage(client, &grant.id, &window_start, &now).await?;
+        postgres_finite_private_weekly_usage(client, &grant.id, &window_start, &now).await?
+    } else {
+        // The shipped profiles have no rolling weekly limit. Avoid scanning
+        // the reservation ledger when its result cannot affect admission or
+        // the public response.
+        (0, None)
+    };
 
     if let Some(existing) =
         select_finite_private_reservation(client, &reservation_id, false).await?
