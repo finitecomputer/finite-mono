@@ -80,6 +80,7 @@
   --radius: 0.5rem;
   --radius-badge: 0.375rem;
   --radius-button: 9999px;
+  --radius-dialog: 1.5rem;
   --sidebar: var(--background);
   --sidebar-foreground: oklch(0.22 0.01 75);
   --sidebar-primary: oklch(0.52 0.14 255);

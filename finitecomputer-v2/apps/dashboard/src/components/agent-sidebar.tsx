@@ -1,11 +1,16 @@
 "use client";
 
 import type { CSSProperties, FormEvent, ReactNode } from "react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  ChevronRightIcon,
   HashIcon,
+  MessageSquarePlusIcon,
   PanelLeftIcon,
+  PencilIcon,
   PlusIcon,
   RotateCcwIcon,
 } from "lucide-react";
@@ -64,6 +69,34 @@ export function AgentSidebar({
   const [actionError, setActionError] = useState<string | null>(null);
   const [createTopicOpen, setCreateTopicOpen] = useState(false);
   const [createTopicTitle, setCreateTopicTitle] = useState("");
+  const [collapsedTopicKeys, setCollapsedTopicKeys] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [expandedArchiveKeys, setExpandedArchiveKeys] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [archivedChatKeys, setArchivedChatKeys] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [renameTarget, setRenameTarget] = useState<{
+    topic: HostedChatTopic;
+    chat: HostedChatSummary;
+  } | null>(null);
+  const [renameTitle, setRenameTitle] = useState("");
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(archivedChatsStorageKey(machineId));
+      const parsed: unknown = stored ? JSON.parse(stored) : [];
+      setArchivedChatKeys(new Set(
+        Array.isArray(parsed)
+          ? parsed.filter((value): value is string => typeof value === "string")
+          : []
+      ));
+    } catch {
+      setArchivedChatKeys(new Set());
+    }
+  }, [machineId]);
 
   const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id ?? null;
   const topics = useMemo(
@@ -84,6 +117,7 @@ export function AgentSidebar({
     setBusy(true);
     try {
       const canNavigateImmediately = "OpenTopic" in action || "OpenChat" in action;
+      const preservesMobileSidebar = "CreateTopic" in action;
       const pending = dispatch(action);
       if (canNavigateImmediately && !pathname.endsWith("/chat")) {
         router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
@@ -95,7 +129,7 @@ export function AgentSidebar({
         if (!pathname.endsWith("/chat")) {
           router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
         }
-        onMobileOpenChange(false);
+        if (!preservesMobileSidebar) onMobileOpenChange(false);
       }
       return next;
     } catch (caught) {
@@ -108,10 +142,6 @@ export function AgentSidebar({
     }
   }, [dispatch, machineId, onMobileOpenChange, pathname, router]);
 
-  function openTopic(topic: HostedChatTopic) {
-    void act({ OpenTopic: { room_id: topic.room_id, topic_id: topic.topic_id } });
-  }
-
   function openChat(topic: HostedChatTopic, chat: HostedChatSummary) {
     void act({
       OpenChat: {
@@ -120,6 +150,71 @@ export function AgentSidebar({
         chat_id: chat.chat_id,
       },
     });
+  }
+
+  function toggleTopicCollapsed(topicKey: string) {
+    setCollapsedTopicKeys((current) => {
+      const next = new Set(current);
+      if (next.has(topicKey)) {
+        next.delete(topicKey);
+      } else {
+        next.add(topicKey);
+      }
+      return next;
+    });
+  }
+
+  function toggleArchiveExpanded(topicKey: string) {
+    setExpandedArchiveKeys((current) => {
+      const next = new Set(current);
+      if (next.has(topicKey)) {
+        next.delete(topicKey);
+      } else {
+        next.add(topicKey);
+      }
+      return next;
+    });
+  }
+
+  function setChatArchived(topic: HostedChatTopic, chat: HostedChatSummary, archived: boolean) {
+    setArchivedChatKeys((current) => {
+      const next = new Set(current);
+      const key = chatArchiveKey(topic, chat);
+      if (archived) {
+        next.add(key);
+      } else {
+        next.delete(key);
+      }
+      try {
+        window.localStorage.setItem(
+          archivedChatsStorageKey(machineId),
+          JSON.stringify([...next])
+        );
+      } catch {
+        // Archiving still works for this session when local storage is unavailable.
+      }
+      return next;
+    });
+  }
+
+  function openRename(topic: HostedChatTopic, chat: HostedChatSummary) {
+    setRenameTarget({ topic, chat });
+    setRenameTitle(chat.title || "New chat");
+  }
+
+  async function renameChat(event: FormEvent) {
+    event.preventDefault();
+    const title = renameTitle.trim();
+    if (!renameTarget || !title || busy) return;
+    const next = await act({
+      RenameChat: {
+        room_id: renameTarget.topic.room_id,
+        topic_id: renameTarget.topic.topic_id,
+        chat_id: renameTarget.chat.chat_id,
+        title,
+      },
+    });
+    if (next) setRenameTarget(null);
   }
 
   function createChat(topic: HostedChatTopic | null) {
@@ -166,7 +261,7 @@ export function AgentSidebar({
             aria-pressed={collapsed}
             onClick={() => onCollapsedChange(!collapsed)}
           >
-            <PanelLeftIcon className="size-4" />
+            <PanelLeftIcon className="size-3.5" />
           </button>
           <button
             type="button"
@@ -174,7 +269,7 @@ export function AgentSidebar({
             aria-label="Close agent navigation"
             onClick={() => onMobileOpenChange(false)}
           >
-            <PanelLeftIcon className="size-4" />
+            <PanelLeftIcon className="size-3.5" />
           </button>
         </div>
 
@@ -191,6 +286,7 @@ export function AgentSidebar({
               type="button"
               className="ocean-icon-button"
               aria-label="New topic"
+              title="New topic"
               disabled={busy || !canonicalRoomId}
               onClick={() => setCreateTopicOpen(true)}
             >
@@ -220,49 +316,98 @@ export function AgentSidebar({
               </Button>
             </div>
           ) : null}
-          {topics.map((topic) => (
-            <div className="finite-chat__folder" key={`${topic.room_id}:${topic.topic_id}`}>
-              <div className="finite-chat__folder-header">
-                <button type="button" className="finite-chat__folder-summary" onClick={() => openTopic(topic)}>
-                  <span className="finite-chat__folder-main">
-                    <span className="finite-chat__folder-icon" style={topicColorStyle(topic.title)} aria-hidden>
-                      <HashIcon className="size-3.5" />
-                    </span>
-                    <span className="finite-chat__folder-label">{topic.title}</span>
-                  </span>
-                  {topic.unread_count > 0 ? <span className="finite-chat__unread-count">{topic.unread_count}</span> : null}
-                </button>
-                <button
-                  type="button"
-                  className="finite-chat__topic-new-chat"
-                  aria-label={`New chat in ${topic.title}`}
-                  disabled={busy}
-                  onClick={() => createChat(topic)}
-                >
-                  <PlusIcon className="size-3.5" />
-                </button>
-              </div>
-              <div className="finite-chat__folder-body">
-                {topic.chats.map((chat) => {
-                  const active = topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId;
-                  return (
-                    <button
-                      key={chat.chat_id}
-                      type="button"
-                      className={active ? "is-active" : ""}
-                      aria-current={active ? "page" : undefined}
-                      onClick={() => openChat(topic, chat)}
-                    >
-                      <span className="finite-chat__thread-indicator" aria-hidden />
-                      <span className="finite-chat__thread-main">
-                        <span className="finite-chat__thread-title">{chat.title || "New chat"}</span>
+          {topics.map((topic) => {
+            const topicKey = `${topic.room_id}:${topic.topic_id}`;
+            const topicBodyId = `finite-chat-topic-${safeDomId(topicKey)}`;
+            const archiveBodyId = `${topicBodyId}-archive`;
+            const topicCollapsed = collapsedTopicKeys.has(topicKey);
+            const archiveExpanded = expandedArchiveKeys.has(topicKey);
+            const visibleChats = topic.chats.filter(
+              (chat) => !archivedChatKeys.has(chatArchiveKey(topic, chat))
+            );
+            const archivedChats = topic.chats.filter(
+              (chat) => archivedChatKeys.has(chatArchiveKey(topic, chat))
+            );
+            return (
+              <div className="finite-chat__folder" key={topicKey}>
+                <div className="finite-chat__folder-header">
+                  <button
+                    type="button"
+                    className="finite-chat__folder-summary"
+                    aria-controls={topicBodyId}
+                    aria-expanded={!topicCollapsed}
+                    aria-label={`${topicCollapsed ? "Expand" : "Collapse"} ${topic.title}`}
+                    title={`${topicCollapsed ? "Expand" : "Collapse"} ${topic.title}`}
+                    onClick={() => toggleTopicCollapsed(topicKey)}
+                  >
+                    <span className="finite-chat__folder-main">
+                      <span className="finite-chat__folder-icon" style={topicColorStyle(topic.title)} aria-hidden>
+                        <HashIcon className="size-3.5" />
                       </span>
-                    </button>
-                  );
-                })}
+                      <span className="finite-chat__folder-label">{topic.title}</span>
+                    </span>
+                    {topic.unread_count > 0 ? <span className="finite-chat__unread-count">{topic.unread_count}</span> : null}
+                    <ChevronRightIcon className="finite-chat__topic-collapse-icon size-3.5" aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className="finite-chat__topic-new-chat"
+                    aria-label={`New chat in ${topic.title}`}
+                    title={`New chat in ${topic.title}`}
+                    disabled={busy}
+                    onClick={() => createChat(topic)}
+                  >
+                    <MessageSquarePlusIcon className="size-3.5" aria-hidden />
+                  </button>
+                </div>
+                <div
+                  id={topicBodyId}
+                  className="finite-chat__folder-body"
+                  hidden={topicCollapsed}
+                >
+                  {visibleChats.map((chat) => (
+                    <ChatRow
+                      key={chat.chat_id}
+                      active={topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId}
+                      archived={false}
+                      chat={chat}
+                      disabled={busy}
+                      onArchiveChange={(archived) => setChatArchived(topic, chat, archived)}
+                      onOpen={() => openChat(topic, chat)}
+                      onRename={() => openRename(topic, chat)}
+                    />
+                  ))}
+                  {archivedChats.length > 0 ? (
+                    <div className="finite-chat__archive-group">
+                      <button
+                        type="button"
+                        className="finite-chat__archive-toggle"
+                        aria-controls={archiveBodyId}
+                        aria-expanded={archiveExpanded}
+                        onClick={() => toggleArchiveExpanded(topicKey)}
+                      >
+                        <span>Archive</span>
+                      </button>
+                      <div id={archiveBodyId} hidden={!archiveExpanded}>
+                        {archivedChats.map((chat) => (
+                          <ChatRow
+                            key={chat.chat_id}
+                            active={topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId}
+                            archived
+                            chat={chat}
+                            disabled={busy}
+                            onArchiveChange={(archived) => setChatArchived(topic, chat, archived)}
+                            onOpen={() => openChat(topic, chat)}
+                            onRename={() => openRename(topic, chat)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </nav>
 
         <button
@@ -308,7 +453,99 @@ export function AgentSidebar({
           </form>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => {
+        if (!open) setRenameTarget(null);
+      }}>
+        <DialogContent>
+          <form className="finite-chat__rename-form" onSubmit={renameChat}>
+            <DialogHeader>
+              <DialogTitle>Rename chat</DialogTitle>
+              <DialogDescription>Choose a name that makes this chat easy to find later.</DialogDescription>
+            </DialogHeader>
+            <div className="finite-chat__rename-field">
+              <label htmlFor="finite-chat-sidebar-rename-title">Name</label>
+              <Input
+                id="finite-chat-sidebar-rename-title"
+                autoFocus
+                maxLength={120}
+                value={renameTitle}
+                onChange={(event) => setRenameTitle(event.target.value)}
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy || !renameTitle.trim()}>
+                {busy ? "Saving…" : "Save"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </>
+  );
+}
+
+function ChatRow({
+  active,
+  archived,
+  chat,
+  disabled,
+  onArchiveChange,
+  onOpen,
+  onRename,
+}: {
+  active: boolean;
+  archived: boolean;
+  chat: HostedChatSummary;
+  disabled: boolean;
+  onArchiveChange: (archived: boolean) => void;
+  onOpen: () => void;
+  onRename: () => void;
+}) {
+  const title = chat.title || "New chat";
+  return (
+    <div className={`finite-chat__thread-row ${active ? "is-active" : ""}`}>
+      <button
+        type="button"
+        className="finite-chat__thread-open"
+        aria-current={active ? "page" : undefined}
+        onClick={onOpen}
+      >
+        <span className="finite-chat__thread-indicator" aria-hidden />
+        <span className="finite-chat__thread-main">
+          <span className="finite-chat__thread-title">{title}</span>
+        </span>
+      </button>
+      <div className="finite-chat__thread-actions">
+        {!archived ? (
+          <button
+            type="button"
+            className="finite-chat__thread-action"
+            aria-label={`Rename ${title}`}
+            title="Rename chat"
+            disabled={disabled}
+            onClick={onRename}
+          >
+            <PencilIcon className="size-3.5" aria-hidden />
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="finite-chat__thread-action"
+          aria-label={archived ? `Unarchive ${title}` : `Archive ${title}`}
+          title={archived ? "Unarchive chat" : "Archive chat"}
+          disabled={disabled}
+          onClick={() => onArchiveChange(!archived)}
+        >
+          {archived
+            ? <ArchiveRestoreIcon className="size-3.5" aria-hidden />
+            : <ArchiveIcon className="size-3.5" aria-hidden />}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -326,4 +563,16 @@ function topicColorStyle(title: string): CSSProperties {
   for (const character of title) hash = (hash * 31 + character.codePointAt(0)!) >>> 0;
   const [color, background] = TOPIC_COLORS[hash % TOPIC_COLORS.length]!;
   return { color, background };
+}
+
+function safeDomId(value: string) {
+  return value.replace(/[^a-zA-Z0-9_-]/gu, "-");
+}
+
+function chatArchiveKey(topic: HostedChatTopic, chat: HostedChatSummary) {
+  return `${topic.room_id}:${topic.topic_id}:${chat.chat_id}`;
+}
+
+function archivedChatsStorageKey(machineId: string) {
+  return `finite.chat.archived-chats.${machineId}`;
 }
