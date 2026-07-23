@@ -246,11 +246,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }} -> target
-      - name: Install Brain matrix browser
-        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}/finitecomputer-v2/apps/dashboard
-        run: |
-          nix develop --command npm ci
-          nix develop --command npx playwright install chromium
       - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
         working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
         run: nix develop --command just brain-product-matrix

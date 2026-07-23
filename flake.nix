@@ -90,24 +90,26 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            cargo
-            clippy
-            curl
-            git
-            just
-            nodejs_24
-            openssl
-            postgresql_16
-            pkg-config
-            process-compose
-            python3
-            rsync
-            rust-analyzer
-            rustPlatform.rustLibSrc
-            rustc
-            rustfmt
-          ];
+          packages =
+            (with pkgs; [
+              cargo
+              clippy
+              curl
+              git
+              just
+              nodejs_24
+              openssl
+              postgresql_16
+              pkg-config
+              process-compose
+              python3
+              rsync
+              rust-analyzer
+              rustPlatform.rustLibSrc
+              rustc
+              rustfmt
+            ])
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };

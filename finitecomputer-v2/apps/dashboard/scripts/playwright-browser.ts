@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { chromium } from "playwright";
 
@@ -14,6 +14,12 @@ export function chromiumLaunchOptions() {
     "/usr/bin/chromium-browser",
   ]) {
     if (existsSync(executablePath)) return { executablePath };
+  }
+  for (const directory of (process.env.PATH || "").split(delimiter)) {
+    for (const executable of ["google-chrome", "chromium", "chromium-browser"]) {
+      const executablePath = join(directory, executable);
+      if (existsSync(executablePath)) return { executablePath };
+    }
   }
   const playwrightChromium = chromium.executablePath();
   if (existsSync(playwrightChromium)) return { executablePath: playwrightChromium };
