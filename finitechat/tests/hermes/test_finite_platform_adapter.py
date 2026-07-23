@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = REPO_ROOT / "integrations" / "hermes" / "finitechat" / "adapter.py"
@@ -96,6 +98,7 @@ def install_gateway_stubs() -> None:
     config = types.ModuleType("gateway.config")
     platforms = types.ModuleType("gateway.platforms")
     base = types.ModuleType("gateway.platforms.base")
+    session_context = types.ModuleType("gateway.session_context")
 
     config_module = cast(Any, config)
     base_module = cast(Any, base)
@@ -105,11 +108,17 @@ def install_gateway_stubs() -> None:
     base_module.MessageEvent = MessageEvent
     base_module.MessageType = MessageType
     base_module.SendResult = SendResult
+    session_context_module = cast(Any, session_context)
+    session_context_module.values = {}
+    session_context_module.get_session_env = lambda name, default="": (
+        session_context_module.values.get(name, default)
+    )
 
     sys.modules["gateway"] = gateway
     sys.modules["gateway.config"] = config
     sys.modules["gateway.platforms"] = platforms
     sys.modules["gateway.platforms.base"] = base
+    sys.modules["gateway.session_context"] = session_context
 
 
 def load_adapter_module():
@@ -128,11 +137,15 @@ def load_adapter_module():
 class MockPluginContext:
     def __init__(self):
         self.registered: list[dict[str, Any]] = []
+        self.registered_hooks: dict[str, Any] = {}
         self.registered_tools: list[dict[str, Any]] = []
         self.registered_commands: list[dict[str, Any]] = []
 
     def register_platform(self, **kwargs):
         self.registered.append(kwargs)
+
+    def register_hook(self, name, callback):
+        self.registered_hooks[name] = callback
 
     def register_tool(self, **kwargs):
         self.registered_tools.append(kwargs)
@@ -153,9 +166,14 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
     def test_register_exposes_finitechat_platform_contract(self):
         ctx = MockPluginContext()
-        self.module.register(ctx)
+        with (
+            tempfile.TemporaryDirectory() as finite_home,
+            patch.dict(os.environ, {"FINITE_HOME": finite_home}),
+        ):
+            self.module.register(ctx)
 
         self.assertEqual(len(ctx.registered), 1)
+        self.assertEqual(set(ctx.registered_hooks), {"pre_tool_call", "post_tool_call"})
         entry = ctx.registered[0]
         self.assertEqual(entry["name"], "finitechat")
         self.assertEqual(entry["label"], "Finite Chat")
@@ -170,13 +188,106 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
     def test_register_advertises_generic_file_attachments_to_hermes(self):
         ctx = MockPluginContext()
-        self.module.register(ctx)
+        with (
+            tempfile.TemporaryDirectory() as finite_home,
+            patch.dict(os.environ, {"FINITE_HOME": finite_home}),
+        ):
+            self.module.register(ctx)
 
         hint = ctx.registered[0]["platform_hint"]
         self.assertIn("You can send files natively", hint)
         self.assertIn("MEDIA:/absolute/path/to/file", hint)
         self.assertIn("downloadable attachments", hint)
         self.assertIn("Do not tell the user", hint)
+
+    def test_terminal_hook_leases_only_the_active_finite_sender_and_cleans_up(self):
+        with tempfile.TemporaryDirectory() as finite_home:
+            broker = self.module._RequesterContextBroker(Path(finite_home) / "contexts")
+            session_context = cast(Any, sys.modules["gateway.session_context"])
+            session_context.values = {
+                "HERMES_SESSION_PLATFORM": "finitechat",
+                "HERMES_SESSION_ID": "session-a",
+                "HERMES_SESSION_USER_ID": "a1" * 32,
+            }
+            hook = {"tool_name": "terminal", "tool_call_id": "call-a"}
+            broker.before_tool_call(**hook)
+            context_path = broker.root / self.module._requester_context_filename("session-a")
+            payload = json.loads(context_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["requesting_user_id"], "a1" * 32)
+            self.assertEqual(payload["platform"], "finitechat")
+
+            broker.after_tool_call(**hook)
+            self.assertFalse(context_path.exists())
+
+            session_context.values["HERMES_SESSION_USER_ID"] = "b2" * 32
+            broker.before_tool_call(**hook)
+            payload = json.loads(context_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["requesting_user_id"], "b2" * 32)
+
+    def test_non_finite_invalid_and_non_terminal_hooks_never_lease(self):
+        with tempfile.TemporaryDirectory() as finite_home:
+            broker = self.module._RequesterContextBroker(Path(finite_home) / "contexts")
+            session_context = cast(Any, sys.modules["gateway.session_context"])
+            valid = {
+                "HERMES_SESSION_PLATFORM": "finitechat",
+                "HERMES_SESSION_ID": "session-a",
+                "HERMES_SESSION_USER_ID": "a1" * 32,
+            }
+            session_context.values = {**valid, "HERMES_SESSION_PLATFORM": "telegram"}
+            broker.before_tool_call(tool_name="terminal", tool_call_id="call-a")
+            session_context.values = {**valid, "HERMES_SESSION_USER_ID": "not-a-pubkey"}
+            broker.before_tool_call(tool_name="terminal", tool_call_id="call-a")
+            session_context.values = valid
+            broker.before_tool_call(tool_name="read_file", tool_call_id="call-a")
+            self.assertEqual(list(broker.root.glob("*.json")), [])
+
+    def test_parallel_terminal_leases_are_reference_counted_and_restart_clears_them(self):
+        with tempfile.TemporaryDirectory() as finite_home:
+            root = Path(finite_home) / "contexts"
+            broker = self.module._RequesterContextBroker(root)
+            session_context = cast(Any, sys.modules["gateway.session_context"])
+            session_context.values = {
+                "HERMES_SESSION_PLATFORM": "finitechat",
+                "HERMES_SESSION_ID": "session-a",
+                "HERMES_SESSION_USER_ID": "a1" * 32,
+            }
+            first = {"tool_name": "terminal", "tool_call_id": "call-a"}
+            second = {"tool_name": "terminal", "tool_call_id": "call-b"}
+            broker.before_tool_call(**first)
+            broker.before_tool_call(**second)
+            context_path = root / self.module._requester_context_filename("session-a")
+            broker.after_tool_call(**first)
+            self.assertTrue(context_path.exists())
+            broker.after_tool_call(**second)
+            self.assertFalse(context_path.exists())
+
+            broker.before_tool_call(**first)
+            self.assertTrue(context_path.exists())
+            self.module._RequesterContextBroker(root)
+            self.assertFalse(context_path.exists())
+
+    def test_expired_orphan_lease_cannot_keep_a_later_terminal_context_alive(self):
+        with tempfile.TemporaryDirectory() as finite_home:
+            root = Path(finite_home) / "contexts"
+            broker = self.module._RequesterContextBroker(root)
+            session_context = cast(Any, sys.modules["gateway.session_context"])
+            session_context.values = {
+                "HERMES_SESSION_PLATFORM": "finitechat",
+                "HERMES_SESSION_ID": "session-a",
+                "HERMES_SESSION_USER_ID": "a1" * 32,
+            }
+            original_time = self.module.time.time
+            try:
+                self.module.time.time = lambda: 100
+                broker.before_tool_call(tool_name="terminal", tool_call_id="orphan")
+                self.module.time.time = lambda: 101 + self.module.REQUESTER_CONTEXT_TTL_SECS
+                current = {"tool_name": "terminal", "tool_call_id": "current"}
+                broker.before_tool_call(**current)
+                broker.after_tool_call(**current)
+            finally:
+                self.module.time.time = original_time
+            context_path = root / self.module._requester_context_filename("session-a")
+            self.assertFalse(context_path.exists())
 
     def test_adapter_disables_edit_streaming_for_ios_rendering_compatibility(self):
         self.assertFalse(self.module.FiniteChatAdapter.SUPPORTS_MESSAGE_EDITING)

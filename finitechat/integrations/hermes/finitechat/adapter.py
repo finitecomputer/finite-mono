@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -48,6 +49,9 @@ PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
+REQUESTER_CONTEXT_DIR = "requester-context-v1"
+REQUESTER_CONTEXT_TTL_SECS = 15 * 60
+REQUESTER_CONTEXT_VERSION = 1
 
 # Hermes 0.18.2 does not pass a semantic progress flag to platform adapters.
 # Pin its real registry prefix -> tool-name pairs and friendly prefix -> verb
@@ -170,6 +174,157 @@ def _load_local_env_defaults(path: Path | None = None) -> None:
 
 
 _load_local_env_defaults()
+
+
+class _RequesterContextBroker:
+    """Lease authenticated Finite sender context to turn-local subprocesses.
+
+    Hermes already isolates the session variables with ContextVars and copies
+    the active values into terminal subprocesses. The small file lease lets
+    `fsite` distinguish that live binding from arbitrary or stale environment
+    text without teaching Sites about Chat or Hermes.
+    """
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = root or _requester_context_root()
+        self._lock = threading.Lock()
+        self._leases: dict[str, dict[str, tuple[int, int]]] = {}
+        self._clear_on_start()
+
+    def before_tool_call(self, **kwargs: Any) -> None:
+        if str(kwargs.get("tool_name") or "") != "terminal":
+            return
+        session_id, user_id = _active_finite_session()
+        if session_id is None or user_id is None:
+            return
+        lease_id = _requester_context_lease_id(kwargs)
+        now = int(time.time())
+        with self._lock:
+            self._prune(now)
+            session_leases = self._leases.setdefault(session_id, {})
+            count, _ = session_leases.get(lease_id, (0, 0))
+            session_leases[lease_id] = (
+                count + 1,
+                now + REQUESTER_CONTEXT_TTL_SECS,
+            )
+            self._write(
+                session_id=session_id,
+                user_id=user_id,
+                expires_at_unix=now + REQUESTER_CONTEXT_TTL_SECS,
+            )
+
+    def after_tool_call(self, **kwargs: Any) -> None:
+        if str(kwargs.get("tool_name") or "") != "terminal":
+            return
+        session_id, _ = _active_finite_session()
+        if session_id is None:
+            return
+        lease_id = _requester_context_lease_id(kwargs)
+        with self._lock:
+            session_leases = self._leases.get(session_id)
+            if session_leases is None:
+                self._remove(session_id)
+                return
+            count, expires_at = session_leases.get(lease_id, (0, 0))
+            if count <= 1:
+                session_leases.pop(lease_id, None)
+            else:
+                session_leases[lease_id] = (count - 1, expires_at)
+            if not session_leases:
+                self._leases.pop(session_id, None)
+                self._remove(session_id)
+
+    def _clear_on_start(self) -> None:
+        try:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.root.chmod(0o700)
+            for path in self.root.iterdir():
+                if path.is_file() or path.is_symlink():
+                    path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("[finitechat] could not reset requester context leases: %s", exc)
+
+    def _prune(self, now: int) -> None:
+        for leases in self._leases.values():
+            for lease_id, (_, expires_at) in list(leases.items()):
+                if expires_at <= now:
+                    leases.pop(lease_id, None)
+        expired_sessions = [session_id for session_id, leases in self._leases.items() if not leases]
+        for session_id in expired_sessions:
+            self._leases.pop(session_id, None)
+            self._remove(session_id)
+        try:
+            for path in self.root.glob("*.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    expires_at = int(payload.get("expires_at_unix") or 0)
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    expires_at = 0
+                if expires_at <= now:
+                    path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _write(self, *, session_id: str, user_id: str, expires_at_unix: int) -> None:
+        try:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            final_path = self.root / _requester_context_filename(session_id)
+            temp_path = self.root / f".{final_path.name}.{os.getpid()}.tmp"
+            payload = {
+                "version": REQUESTER_CONTEXT_VERSION,
+                "session_id": session_id,
+                "platform": FINITE_PLATFORM_NAME,
+                "requesting_user_id": user_id,
+                "expires_at_unix": expires_at_unix,
+            }
+            with temp_path.open("w", encoding="utf-8") as handle:
+                os.chmod(temp_path, 0o600)
+                json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_path.replace(final_path)
+        except OSError as exc:
+            logger.warning("[finitechat] could not write requester context lease: %s", exc)
+
+    def _remove(self, session_id: str) -> None:
+        with contextlib.suppress(OSError):
+            (self.root / _requester_context_filename(session_id)).unlink(missing_ok=True)
+
+
+def _requester_context_root() -> Path:
+    finite_home = str(os.getenv("FINITE_HOME") or "").strip()
+    root = Path(finite_home).expanduser() if finite_home else Path.home() / ".finite"
+    return root / REQUESTER_CONTEXT_DIR
+
+
+def _requester_context_filename(session_id: str) -> str:
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return f"{digest}.json"
+
+
+def _requester_context_lease_id(kwargs: dict[str, Any]) -> str:
+    return ":".join(
+        str(kwargs.get(name) or "")
+        for name in ("tool_call_id", "task_id", "turn_id", "api_request_id")
+    )
+
+
+def _active_finite_session() -> tuple[str | None, str | None]:
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return None, None
+    platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+    session_id = str(get_session_env("HERMES_SESSION_ID", "") or "").strip()
+    user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
+    if (
+        platform != FINITE_PLATFORM_NAME
+        or not session_id
+        or FINITE_ACCOUNT_ID_PATTERN.fullmatch(user_id) is None
+    ):
+        return None, None
+    return session_id, user_id
 
 
 def check_requirements() -> bool:
@@ -1603,6 +1758,11 @@ def _finite_platform() -> Platform:
 
 
 def register(ctx) -> None:
+    register_hook = getattr(ctx, "register_hook", None)
+    if callable(register_hook):
+        requester_context = _RequesterContextBroker()
+        register_hook("pre_tool_call", requester_context.before_tool_call)
+        register_hook("post_tool_call", requester_context.after_tool_call)
     ctx.register_platform(
         name=FINITE_PLATFORM_NAME,
         label="Finite Chat",

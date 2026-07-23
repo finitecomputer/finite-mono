@@ -3643,6 +3643,9 @@ mod tests {
 
         let plugin_yaml = fs::read_to_string(plugin_dir.join("plugin.yaml")).unwrap();
         assert!(plugin_yaml.lines().any(|line| line == "name: finitechat"));
+        assert!(plugin_yaml.contains("  - pre_tool_call\n  - post_tool_call"));
+        let adapter = fs::read_to_string(plugin_dir.join("adapter.py")).unwrap();
+        assert!(adapter.contains("_RequesterContextBroker"));
         assert!(
             summary["recommended_config"]
                 .as_str()

@@ -8,6 +8,9 @@ description: >
   agent does not create an invite session or choose a room at startup. All
   message senders are MLS-authenticated.
 author: finitecomputer
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
 requires_env:
   - name: FINITECHAT_HOME
     description: >
