@@ -9062,7 +9062,7 @@ mod tests {
                 AuthorityTestResponse::StreamedOversized => {
                     write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.0 200 OK\r\nConnection: close\r\n\r\n{}",
                         "x".repeat(AUTHORITY_RESPONSE_MAX_BYTES as usize + 1)
                     )
                     .unwrap();
