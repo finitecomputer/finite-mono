@@ -70,6 +70,34 @@ fn kp_relay_csv_from_env() -> String {
     )
 }
 
+fn ios_simulator_launch_args() -> Vec<String> {
+    ios_simulator_launch_args_with(|key| std::env::var(key).ok())
+}
+
+fn ios_simulator_launch_args_with<F>(get: F) -> Vec<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut args = Vec::new();
+    for (environment_key, argument) in [
+        ("FINITECHAT_SERVER_URL", "--finitechat-server"),
+        ("FINITECHAT_DASHBOARD_URL", "--finitechat-dashboard"),
+        ("FINITECHAT_DEVICE_ID", "--finitechat-device"),
+    ] {
+        if let Some(value) = get(environment_key)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            args.push(argument.to_owned());
+            args.push(value);
+        }
+    }
+    if !args.is_empty() {
+        args.push("--finitechat-transient-config".to_owned());
+    }
+    args
+}
+
 fn run_ios(
     root: &Path,
     json: bool,
@@ -106,11 +134,12 @@ fn run_ios(
         )?;
     }
 
+    let launch_args = ios_simulator_launch_args();
     launch_ios_simulator_app(
         &installed.dev_dir,
         &installed.udid,
         &installed.bundle_id,
-        &[],
+        &launch_args,
         verbose,
     )?;
 
@@ -303,7 +332,6 @@ pub(crate) fn build_install_ios_simulator(
         .arg("build")
         .arg(format!("ARCHS={xcode_arch}"))
         .arg("ONLY_ACTIVE_ARCH=YES")
-        .arg("CODE_SIGNING_ALLOWED=NO")
         .arg(format!("PRODUCT_BUNDLE_IDENTIFIER={bundle_id}"));
 
     let status = cmd
@@ -2011,6 +2039,33 @@ mod tests {
     fn app_default_csv_helpers_are_empty_without_env() {
         assert_eq!(default_app_relay_csv(), "");
         assert_eq!(default_app_kp_relay_csv(), "");
+    }
+
+    #[test]
+    fn ios_simulator_launch_args_forward_local_device_link_environment() {
+        let args = ios_simulator_launch_args_with(|key| match key {
+            "FINITECHAT_SERVER_URL" => Some(" http://127.0.0.1:18788 ".to_owned()),
+            "FINITECHAT_DASHBOARD_URL" => Some("http://127.0.0.1:13002".to_owned()),
+            "FINITECHAT_DEVICE_ID" => Some("ios-local".to_owned()),
+            _ => None,
+        });
+        assert_eq!(
+            args,
+            vec![
+                "--finitechat-server",
+                "http://127.0.0.1:18788",
+                "--finitechat-dashboard",
+                "http://127.0.0.1:13002",
+                "--finitechat-device",
+                "ios-local",
+                "--finitechat-transient-config",
+            ]
+        );
+    }
+
+    #[test]
+    fn ios_simulator_launch_args_are_empty_without_overrides() {
+        assert!(ios_simulator_launch_args_with(|_| None).is_empty());
     }
 
     #[test]

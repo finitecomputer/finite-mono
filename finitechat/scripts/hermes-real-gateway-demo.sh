@@ -10,32 +10,25 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 state_root="${FINITECHAT_HERMES_STATE_ROOT:-${repo_root}/.state/hermes-real}"
-profile="${FINITECHAT_HERMES_PROFILE:-finitechat-real-demo}"
 agent_device_id="${FINITECHAT_HERMES_AGENT_DEVICE_ID:-hermes-real-agent}"
 port="${FINITECHAT_HERMES_PORT:-18788}"
 server_url="${FINITECHAT_HERMES_SERVER_URL:-http://127.0.0.1:${port}}"
 listen_addr="${FINITECHAT_HERMES_LISTEN_ADDR:-127.0.0.1:${port}}"
-hermes_repo="${FINITECHAT_HERMES_REPO:-}"
+service_port="${FINITECHAT_HERMES_SERVICE_PORT:-$((port + 1))}"
+service_addr="127.0.0.1:${service_port}"
+service_url="http://127.0.0.1:${service_port}"
+hermes_package="${FINITECHAT_HERMES_PACKAGE:-hermes-agent==0.18.2}"
 hermes_home="${FINITECHAT_HERMES_HOME:-${state_root}/hermes-home}"
 agent_home="${FINITECHAT_HERMES_AGENT_HOME:-${state_root}/agent-home}"
+finite_home="${FINITECHAT_HERMES_FINITE_HOME:-${state_root}/finite-home}"
+agent_info="${state_root}/agent-info.json"
 finitechat_bin="${repo_root}/target/debug/finitechat"
 server_bin="${repo_root}/target/debug/finitechat-server"
 model="${FINITECHAT_HERMES_MODEL:-anthropic/claude-sonnet-4.6}"
 
-if [[ -z "${hermes_repo}" ]]; then
-  if [[ -d "${repo_root}/../finitecomputer-v2/.state/hermes-runtime/deps/hermes-agent" ]]; then
-    hermes_repo="${repo_root}/../finitecomputer-v2/.state/hermes-runtime/deps/hermes-agent"
-  elif [[ -d "${repo_root}/../hermes-agent" ]]; then
-    hermes_repo="${repo_root}/../hermes-agent"
-  else
-    echo "Hermes checkout not found. Set FINITECHAT_HERMES_REPO to a Hermes checkout with a .venv." >&2
-    exit 1
-  fi
-fi
-
-if [[ ! -x "${hermes_repo}/.venv/bin/python" ]]; then
-  echo "Hermes venv not found at ${hermes_repo}/.venv/bin/python." >&2
-  echo "Use the finitecomputer-v2 Hermes runtime matrix or point FINITECHAT_HERMES_REPO at a prepared Hermes checkout." >&2
+uvx_bin="$(command -v uvx || true)"
+if [[ -z "${uvx_bin}" ]]; then
+  echo "uvx is required to run the pinned Hermes package." >&2
   exit 1
 fi
 
@@ -65,6 +58,9 @@ gateway:
       extra:
         home: ${agent_home}
         finitechat_bin: ${finitechat_bin}
+        inbound_stream: true
+        service_url: ${service_url}
+        service_addr: ${service_addr}
         poll_timeout_secs: 1
         poll_limit: 10
 terminal:
@@ -75,24 +71,14 @@ approvals:
   mode: off
 display:
   streaming: false
+security:
+  redact_secrets: true
+_config_version: 10
 EOF
 }
 
 mkdir -p "${state_root}"
 write_hermes_profile "${hermes_home}"
-
-if [[ "${profile}" != "default" ]]; then
-  profile_home="${hermes_home}/profiles/${profile}"
-  if [[ ! -d "${profile_home}" ]]; then
-    (
-      cd "${hermes_repo}"
-      HERMES_HOME="${hermes_home}" .venv/bin/python hermes profile create --no-alias --no-skills "${profile}" >/dev/null
-    )
-  fi
-  write_hermes_profile "${profile_home}"
-else
-  profile_home="${hermes_home}"
-fi
 
 if [[ -n "${FINITECHAT_HERMES_ENV_FILE:-}" ]]; then
   env_files=("${FINITECHAT_HERMES_ENV_FILE}")
@@ -113,19 +99,10 @@ for env_file in "${env_files[@]}"; do
   fi
 done
 
-if [[ ! -f "${agent_home}/config.json" ]]; then
-  "${finitechat_bin}" hermes --home "${agent_home}" init \
-    --server "${server_url}" \
-    --device-id "${agent_device_id}" \
-    --agent-name "${FINITECHAT_HERMES_ROOM_NAME:-Finite Agent}" \
-    >/dev/null
-elif command -v jq >/dev/null 2>&1; then
-  configured_server="$(jq -r '.server_url // empty' "${agent_home}/config.json")"
-  if [[ "${configured_server}" != "${server_url}" ]]; then
-    echo "Agent home is initialized for ${configured_server}, not ${server_url}." >&2
-    echo "Use a different FINITECHAT_HERMES_STATE_ROOT or intentionally delete ${agent_home}." >&2
-    exit 1
-  fi
+if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+  echo "OPENROUTER_API_KEY is required by the local Hermes model profile." >&2
+  echo "Put it in finitechat/.env or set FINITECHAT_HERMES_ENV_FILE to a mode-0600 env file." >&2
+  exit 1
 fi
 
 server_pid_file="${state_root}/server.pid"
@@ -144,29 +121,73 @@ for _ in {1..80}; do
 done
 curl -fsS "${server_url}/health" >/dev/null
 
+if [[ ! -f "${agent_home}/config.json" ]]; then
+  umask 077
+  FINITE_HOME="${finite_home}" "${finitechat_bin}" hermes --home "${agent_home}" init \
+    --server "${server_url}" \
+    --device-id "${agent_device_id}" \
+    --agent-name "${FINITECHAT_HERMES_ROOM_NAME:-Finite Agent}" \
+    >"${agent_info}"
+elif command -v jq >/dev/null 2>&1; then
+  configured_server="$(jq -r '.server_url // empty' "${agent_home}/config.json")"
+  if [[ "${configured_server}" != "${server_url}" ]]; then
+    echo "Agent home is initialized for ${configured_server}, not ${server_url}." >&2
+    echo "Use a different FINITECHAT_HERMES_STATE_ROOT or intentionally delete ${agent_home}." >&2
+    exit 1
+  fi
+fi
+
+if [[ ! -s "${agent_info}" ]]; then
+  echo "Agent identity metadata is missing at ${agent_info}." >&2
+  echo "Use a fresh FINITECHAT_HERMES_STATE_ROOT; local identity migration is intentionally unsupported." >&2
+  exit 1
+fi
+
+service_pid_file="${state_root}/service.pid"
+service_ready_file="${state_root}/service-ready.json"
+if [[ -f "${service_pid_file}" ]] && kill -0 "$(cat "${service_pid_file}")" 2>/dev/null; then
+  :
+else
+  FINITE_HOME="${finite_home}" "${finitechat_bin}" hermes --home "${agent_home}" serve \
+    --addr "127.0.0.1:${service_port}" \
+    --ready-file "${service_ready_file}" \
+    --json >"${state_root}/service.log" 2>&1 &
+  echo "$!" >"${service_pid_file}"
+fi
+
+for _ in {1..80}; do
+  if curl -fsS "${service_url}/readyz" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+curl -fsS "${service_url}/readyz" >/dev/null
+
 cat >"${state_root}/ready.json" <<EOF
 {
   "server_url": "${server_url}",
+  "service_url": "${service_url}",
   "agent_home": "${agent_home}",
   "hermes_home": "${hermes_home}",
-  "profile_home": "${profile_home}",
-  "hermes_repo": "${hermes_repo}",
-  "profile": "${profile}"
+  "hermes_package": "${hermes_package}"
 }
 EOF
 
 echo "Finite Chat server: ${server_url}"
-echo "Hermes profile: ${profile}"
+echo "Hermes package: ${hermes_package}"
 echo "Agent home: ${agent_home}"
 echo "Running real Hermes gateway. No echo handler is installed by this script."
 
-cd "${hermes_repo}"
-HERMES_HOME="${hermes_home}" \
+exec env HERMES_HOME="${hermes_home}" \
+FINITE_HOME="${finite_home}" \
 FINITECHAT_HOME="${agent_home}" \
 FINITECHAT_BIN="${finitechat_bin}" \
+FINITECHAT_HERMES_INBOUND_STREAM=1 \
+FINITECHAT_HERMES_SERVICE_ADDR="${service_addr}" \
+FINITECHAT_HERMES_SERVICE_URL="${service_url}" \
 FINITE_GATEWAY_ENABLED=true \
 GATEWAY_ALLOW_ALL_USERS=true \
 FINITE_ALLOW_ALL_USERS=true \
 FINITE_AGENT_ID="agent_${agent_device_id}" \
 FINITE_AGENT_NAME="${agent_device_id}" \
-  .venv/bin/python hermes -p "${profile}" gateway run
+  "${uvx_bin}" --no-config --from "${hermes_package}" hermes gateway run --replace

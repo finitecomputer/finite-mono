@@ -21,8 +21,9 @@ use finitechat_client::{
     RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore, SqliteClientStoreOptions,
     StoredAppEvent, StoredAppMessage, StoredAppProfile, StoredAppRoom, StoredAppRoomState,
     StoredAppState, StoredChatArchiveState, StoredOutboundLocalState, StoredOutboundMessage,
-    StoredOutboundServerDeliveryState, generate_account_secret, run_link_fanout_tick,
-    run_room_server_sync_setup_tick, run_room_sync_tick, run_runtime_sync_setup_tick,
+    StoredOutboundServerDeliveryState, StoredPairedAgent, generate_account_secret,
+    run_link_fanout_tick, run_room_server_sync_setup_tick, run_room_sync_tick,
+    run_runtime_sync_setup_tick,
 };
 use finitechat_hermes::{
     HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1,
@@ -62,6 +63,7 @@ use thiserror::Error;
 use time::{OffsetDateTime, UtcOffset};
 
 pub mod device_link;
+pub mod native_device_link;
 
 const CLIENT_STORE_FILE: &str = "client.sqlite3";
 const ATTACHMENT_CACHE_DIR: &str = "attachments";
@@ -455,6 +457,12 @@ pub struct AppTopicSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AppPairedAgent {
+    pub agent_account_id: String,
+    pub canonical_room_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct AppRoomDetailsState {
     pub room_id: String,
     pub display_name: String,
@@ -586,6 +594,7 @@ pub struct AppState {
     pub rev: u64,
     pub identity: Identity,
     pub rooms: Vec<AppRoomSummary>,
+    pub paired_agent: Option<AppPairedAgent>,
     pub selected_room_id: Option<String>,
     pub topics: Vec<AppTopicSummary>,
     pub selected_topic_id: Option<String>,
@@ -640,6 +649,13 @@ pub enum AppAction {
         room_id: String,
         topic_id: String,
         chat_id: String,
+    },
+    PairAgent {
+        room_id: String,
+    },
+    StartHomeChat {
+        text: String,
+        intent_key: String,
     },
     RenameChat {
         room_id: String,
@@ -2182,6 +2198,10 @@ impl AppRuntimeState {
             app: AppState {
                 rev: 0,
                 identity,
+                paired_agent: stored_app_state.paired_agent.map(|paired| AppPairedAgent {
+                    agent_account_id: paired.agent_account_id,
+                    canonical_room_id: paired.canonical_room_id,
+                }),
                 selected_room_id,
                 topics: Vec::new(),
                 selected_topic_id: None,
@@ -2292,6 +2312,10 @@ impl AppRuntimeState {
                 topic_id,
                 chat_id,
             } => self.open_chat(room_id, topic_id, chat_id)?,
+            AppAction::PairAgent { room_id } => self.pair_agent(room_id)?,
+            AppAction::StartHomeChat { text, intent_key } => {
+                self.start_home_chat(text, intent_key)?
+            }
             AppAction::RenameChat {
                 room_id,
                 topic_id,
@@ -3146,6 +3170,121 @@ impl AppRuntimeState {
         self.persist_app_state()?;
         self.sync_selected_room_messages();
         self.app.status = "chat created".to_owned();
+        Ok(())
+    }
+
+    fn pair_agent(&mut self, room_id: String) -> Result<(), FiniteChatCoreError> {
+        let room = self
+            .room(&room_id)
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: format!("agent room not found: {room_id}"),
+            })?;
+        if room.state != AppRoomState::Connected {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not an available agent"),
+            });
+        }
+        let owner_account_id = self.app.identity.account_id.clone();
+        let member_account_ids = self
+            .core
+            .device
+            .room_members(&room_id)
+            .map_err(client_error)?
+            .into_iter()
+            .map(|member| member.account_id)
+            .collect::<BTreeSet<_>>();
+        let agent_account_id = member_account_ids
+            .iter()
+            .find(|account_id| account_id.as_str() != owner_account_id)
+            .filter(|_| member_account_ids.len() == 2)
+            .filter(|account_id| {
+                self.profile_cache
+                    .get(*account_id)
+                    .is_some_and(|profile| profile.is_agent)
+            })
+            .cloned()
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not an available direct agent"),
+            })?;
+        if !self
+            .profile_chat_room_ids(&agent_account_id)
+            .iter()
+            .any(|candidate| candidate == &room_id)
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not the selected agent's direct room"),
+            });
+        }
+
+        self.ensure_home_topic(&room_id)?;
+        self.app.paired_agent = Some(AppPairedAgent {
+            agent_account_id,
+            canonical_room_id: room_id,
+        });
+        self.persist_app_state()?;
+        self.app.status = "agent paired".to_owned();
+        Ok(())
+    }
+
+    fn start_home_chat(
+        &mut self,
+        text: String,
+        intent_key: String,
+    ) -> Result<(), FiniteChatCoreError> {
+        let paired = self
+            .app
+            .paired_agent
+            .clone()
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: "choose an agent before starting a chat".to_owned(),
+            })?;
+        let room_id = paired.canonical_room_id;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(FiniteChatCoreError::Client {
+                reason: "message must not be empty".to_owned(),
+            });
+        }
+        let room = self
+            .room(&room_id)
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: format!("agent room not found: {room_id}"),
+            })?;
+        if room.state != AppRoomState::Connected
+            || !self
+                .profile_chat_room_ids(&paired.agent_account_id)
+                .iter()
+                .any(|candidate| candidate == &room_id)
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not an available agent"),
+            });
+        }
+
+        self.ensure_home_topic(&room_id)?;
+        self.start_topic_chat_intent(room_id.clone(), HOME_TOPIC_ID.to_owned(), None, intent_key)?;
+        let chat_id =
+            self.app
+                .selected_chat_id
+                .clone()
+                .ok_or_else(|| FiniteChatCoreError::Client {
+                    reason: "new home chat did not select a chat".to_owned(),
+                })?;
+        if self.app.messages.iter().any(|message| {
+            message.room_id == room_id
+                && message.conversation_id.as_deref() == Some(HOME_TOPIC_ID)
+                && message.chat_id.as_deref() == Some(chat_id.as_str())
+        }) {
+            self.app.status = "chat started".to_owned();
+            return Ok(());
+        }
+        self.send_chat_message(
+            room_id,
+            HOME_TOPIC_ID.to_owned(),
+            chat_id,
+            trimmed.to_owned(),
+        )?;
+        self.app.status = "chat started".to_owned();
         Ok(())
     }
 
@@ -6373,6 +6512,14 @@ impl AppRuntimeState {
             selected_room_id: self.app.selected_room_id.clone(),
             selected_topic_id: self.app.selected_topic_id.clone(),
             selected_chat_id: self.app.selected_chat_id.clone(),
+            paired_agent: self
+                .app
+                .paired_agent
+                .as_ref()
+                .map(|paired| StoredPairedAgent {
+                    agent_account_id: paired.agent_account_id.clone(),
+                    canonical_room_id: paired.canonical_room_id.clone(),
+                }),
             revoked_devices: self.revoked_device_refs(),
             chat_archives: self.chat_projection.stored_chat_archives(),
         };
@@ -6443,6 +6590,7 @@ impl AppRuntimeState {
                     selected_room_id,
                     selected_topic_id: None,
                     selected_chat_id: None,
+                    paired_agent: None,
                     revoked_devices: BTreeSet::new(),
                     chat_archives: Vec::new(),
                 },
@@ -15551,6 +15699,164 @@ mod tests {
             .chats
             .len();
         assert_eq!(chats, before + 1);
+    }
+
+    #[test]
+    fn app_pairs_one_agent_and_starts_a_new_home_chat_with_the_first_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let user_options = with_test_secret(OpenOptions {
+            data_dir: dir.path().join("user").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "user-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        });
+        let user = FiniteChatRuntime::open(user_options.clone()).unwrap();
+        let agent = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let agent_state = agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("agent publishes key packages");
+        let mut agent_profile = test_profile(&agent_state.identity.account_id, "Agent");
+        agent_profile.is_agent = true;
+
+        let connected = user
+            .dispatch_and_wait(AppAction::StartProfileChat {
+                profile: agent_profile,
+                display_name: "Agent".to_owned(),
+            })
+            .expect("user creates an encrypted agent room");
+        let room_id = connected
+            .selected_room_id
+            .clone()
+            .expect("agent room is selected");
+        assert!(app_room(&connected, &room_id).is_agent_chat);
+        let before = connected
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .expect("agent room has a home topic")
+            .chats
+            .len();
+
+        let paired = user
+            .dispatch_and_wait(AppAction::PairAgent {
+                room_id: room_id.clone(),
+            })
+            .expect("connected agent can be paired");
+        assert_eq!(
+            paired
+                .paired_agent
+                .as_ref()
+                .map(|paired| paired.canonical_room_id.as_str()),
+            Some(room_id.as_str()),
+        );
+        let paired_again = user
+            .dispatch_and_wait(AppAction::PairAgent {
+                room_id: room_id.clone(),
+            })
+            .expect("pairing the same direct agent is idempotent");
+        assert_eq!(paired_again.paired_agent, paired.paired_agent);
+
+        let started = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: "  Help me ship this.  ".to_owned(),
+                intent_key: "ios-home-submit-1".to_owned(),
+            })
+            .expect("home starts a new chat and sends its first message");
+        let selected_chat_id = started
+            .selected_chat_id
+            .as_deref()
+            .expect("new chat selected");
+        let home = started
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .expect("home topic remains available");
+        assert_eq!(home.chats.len(), before + 1);
+        assert!(
+            home.chats
+                .iter()
+                .any(|chat| chat.chat_id == selected_chat_id)
+        );
+        assert!(started.messages.iter().any(|message| {
+            message.room_id == room_id
+                && message.chat_id.as_deref() == Some(selected_chat_id)
+                && message.text == "Help me ship this."
+        }));
+        let retried = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: "Help me ship this.".to_owned(),
+                intent_key: "ios-home-submit-1".to_owned(),
+            })
+            .expect("retry reuses the chat and first message");
+        let retried_home = retried
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .unwrap();
+        assert_eq!(retried_home.chats.len(), before + 1);
+        assert_eq!(
+            retried
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.chat_id.as_deref() == Some(selected_chat_id)
+                        && message.text == "Help me ship this."
+                })
+                .count(),
+            1
+        );
+
+        drop(user);
+        let reopened = FiniteChatRuntime::open(user_options)
+            .expect("paired app state reopens from encrypted local storage")
+            .state()
+            .unwrap();
+        assert_eq!(
+            reopened
+                .paired_agent
+                .as_ref()
+                .map(|paired| paired.canonical_room_id.as_str()),
+            Some(room_id.as_str()),
+        );
+    }
+
+    #[test]
+    fn app_refuses_to_pair_a_non_agent_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let app = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("app").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let room_id = app
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Not an agent".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+
+        let error = app
+            .dispatch_and_wait(AppAction::PairAgent { room_id })
+            .expect_err("ordinary rooms are outside the focused iOS product");
+        assert!(matches!(
+            error,
+            FiniteChatCoreError::Client { reason }
+                if reason.contains("is not an available")
+        ));
     }
 
     #[test]

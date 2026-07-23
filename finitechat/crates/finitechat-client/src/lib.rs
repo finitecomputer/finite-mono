@@ -519,6 +519,7 @@ pub struct StoredAppState {
     pub selected_room_id: Option<RoomId>,
     pub selected_topic_id: Option<String>,
     pub selected_chat_id: Option<String>,
+    pub paired_agent: Option<StoredPairedAgent>,
     pub revoked_devices: BTreeSet<DeviceRef>,
     pub chat_archives: Vec<StoredChatArchiveState>,
 }
@@ -551,6 +552,12 @@ impl StoredChatArchiveState {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPairedAgent {
+    pub agent_account_id: String,
+    pub canonical_room_id: RoomId,
+}
+
 impl StoredAppState {
     fn validate_limits(&self) -> Result<(), ClientError> {
         if let Some(room_id) = &self.selected_room_id {
@@ -563,6 +570,18 @@ impl StoredAppState {
         if let Some(chat_id) = &self.selected_chat_id {
             validate_bytes_non_empty("app_state.selected_chat_id", chat_id.len())?;
             validate_string_bytes("app_state.selected_chat_id", chat_id, MAX_OBJECT_ID_BYTES)?;
+        }
+        if let Some(paired_agent) = &self.paired_agent {
+            validate_bytes_non_empty(
+                "app_state.paired_agent.agent_account_id",
+                paired_agent.agent_account_id.len(),
+            )?;
+            validate_string_bytes(
+                "app_state.paired_agent.agent_account_id",
+                &paired_agent.agent_account_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+            validate_room_id(&paired_agent.canonical_room_id)?;
         }
         validate_item_count(
             "app_state.revoked_devices",
@@ -592,6 +611,8 @@ struct StoredAppStateMetadataV1 {
     selected_topic_id: Option<String>,
     #[serde(default)]
     selected_chat_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    paired_agent: Option<StoredPairedAgent>,
     revoked_devices: BTreeSet<DeviceRef>,
     #[serde(default)]
     chat_archives: Vec<StoredChatArchiveState>,
@@ -3465,6 +3486,7 @@ impl SqliteClientStore {
             selected_room_id: metadata.selected_room_id,
             selected_topic_id: metadata.selected_topic_id,
             selected_chat_id: metadata.selected_chat_id,
+            paired_agent: metadata.paired_agent,
             revoked_devices: metadata.revoked_devices,
             chat_archives: metadata.chat_archives,
         };
@@ -7199,6 +7221,7 @@ fn encrypt_app_state_metadata(
         selected_room_id: state.selected_room_id.clone(),
         selected_topic_id: state.selected_topic_id.clone(),
         selected_chat_id: state.selected_chat_id.clone(),
+        paired_agent: state.paired_agent.clone(),
         revoked_devices: state.revoked_devices.clone(),
         chat_archives: state.chat_archives.clone(),
     };
@@ -9999,6 +10022,10 @@ mod tests {
             selected_room_id: Some("room-main".to_owned()),
             selected_topic_id: Some("home".to_owned()),
             selected_chat_id: Some("segment-main".to_owned()),
+            paired_agent: Some(StoredPairedAgent {
+                agent_account_id: "agent-account".to_owned(),
+                canonical_room_id: "room-agent".to_owned(),
+            }),
             revoked_devices: [DeviceRef {
                 account_id: owner.account_id.clone(),
                 device_id: "tablet".to_owned(),
@@ -10024,6 +10051,7 @@ mod tests {
             selected_room_id: None,
             selected_topic_id: None,
             selected_chat_id: None,
+            paired_agent: None,
             revoked_devices: BTreeSet::new(),
             chat_archives: Vec::new(),
         };
@@ -10033,7 +10061,11 @@ mod tests {
 
     #[test]
     fn sqlite_client_store_rejects_legacy_app_state_metadata_shapes() {
-        for case in ["missing selected room", "missing revoked devices"] {
+        for case in [
+            "missing selected room",
+            "missing paired agent",
+            "missing revoked devices",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let secret = NostrSecretKey::from_bytes([16; NOSTR_SECRET_KEY_BYTES]).unwrap();
             let device_id = "phone";
@@ -10055,6 +10087,10 @@ mod tests {
                 selected_room_id: Some("room-main".to_owned()),
                 selected_topic_id: Some("home".to_owned()),
                 selected_chat_id: Some("segment-main".to_owned()),
+                paired_agent: Some(StoredPairedAgent {
+                    agent_account_id: "agent-account".to_owned(),
+                    canonical_room_id: "room-agent".to_owned(),
+                }),
                 revoked_devices: [DeviceRef {
                     account_id: owner.account_id.clone(),
                     device_id: "tablet".to_owned(),
@@ -10068,6 +10104,9 @@ mod tests {
             match case {
                 "missing selected room" => {
                     metadata_object.remove("selected_room_id");
+                }
+                "missing paired agent" => {
+                    metadata_object.remove("paired_agent");
                 }
                 "missing revoked devices" => {
                     metadata_object.remove("revoked_devices");

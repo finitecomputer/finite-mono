@@ -1385,6 +1385,7 @@ dependencies = [
  "finitechat-mls",
  "finitechat-proto 0.1.0",
  "finitechat-server",
+ "getrandom 0.3.4",
  "hex",
  "hypernote-mdx",
  "nostr",

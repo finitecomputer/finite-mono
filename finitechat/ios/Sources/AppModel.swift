@@ -5,11 +5,13 @@ import UniformTypeIdentifiers
 
 struct RuntimeConfig: Codable, Equatable {
     let serverURL: String
+    let dashboardURL: String
     let deviceID: String
     let usesTransientStore: Bool
     let persistsRuntimeIdentityUpdates: Bool
 
     static let defaultServerURL = "https://chat.finite.computer"
+    static let defaultDashboardURL = "https://finite.computer"
     private static let generatedDeviceIDPrefix = "ios-"
     private static let transientConfigArgument = "--finitechat-transient-config"
     private static let transientConfigEnvironmentKey = "FINITECHAT_TRANSIENT_CONFIG"
@@ -18,16 +20,19 @@ struct RuntimeConfig: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case serverURL = "server_url"
+        case dashboardURL = "dashboard_url"
         case deviceID = "device_id"
     }
 
     init(
         serverURL: String,
+        dashboardURL: String = defaultDashboardURL,
         deviceID: String,
         usesTransientStore: Bool = false,
         persistsRuntimeIdentityUpdates: Bool = true
     ) {
         self.serverURL = serverURL
+        self.dashboardURL = dashboardURL
         self.deviceID = deviceID
         self.usesTransientStore = usesTransientStore
         self.persistsRuntimeIdentityUpdates = persistsRuntimeIdentityUpdates
@@ -36,6 +41,8 @@ struct RuntimeConfig: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         serverURL = try container.decode(String.self, forKey: .serverURL)
+        dashboardURL = try container.decodeIfPresent(String.self, forKey: .dashboardURL)
+            ?? Self.defaultDashboardURL
         deviceID = try container.decode(String.self, forKey: .deviceID)
         usesTransientStore = false
         persistsRuntimeIdentityUpdates = true
@@ -44,27 +51,35 @@ struct RuntimeConfig: Codable, Equatable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(serverURL, forKey: .serverURL)
+        try container.encode(dashboardURL, forKey: .dashboardURL)
         try container.encode(deviceID, forKey: .deviceID)
     }
 
     static func load(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         args: [String] = CommandLine.arguments,
-        storageURL: URL? = nil
+        storageURL: URL? = nil,
+        allowsDevelopmentOverrides: Bool = developmentOverridesEnabled
     ) -> RuntimeConfig {
         let serverURL = argumentValue("--finitechat-server", in: args)
             ?? environmentValue("FINITECHAT_SERVER_URL", in: environment)
+        let requestedDashboardURL = argumentValue("--finitechat-dashboard", in: args)
+            ?? environmentValue("FINITECHAT_DASHBOARD_URL", in: environment)
+        let dashboardURL = allowsDevelopmentOverrides ? requestedDashboardURL : nil
         let deviceID = argumentValue("--finitechat-device", in: args)
             ?? environmentValue("FINITECHAT_DEVICE_ID", in: environment)
         let persisted = loadPersisted(storageURL: storageURL)
         let fallback = RuntimeConfig(
             serverURL: persisted.serverURL ?? defaultServerURL,
+            dashboardURL: allowsDevelopmentOverrides
+                ? (persisted.dashboardURL ?? defaultDashboardURL)
+                : defaultDashboardURL,
             deviceID: persisted.deviceID ?? generatedDefaultDeviceID()
         )
         let hostedUnitTest = storageURL == nil && environment["XCTestConfigurationFilePath"] != nil
         let persistLaunchOverride = argumentFlag(persistLaunchConfigArgument, in: args)
             || truthyEnvironmentValue(persistLaunchConfigEnvironmentKey, in: environment)
-        let hasLaunchOverride = serverURL != nil || deviceID != nil
+        let hasLaunchOverride = serverURL != nil || dashboardURL != nil || deviceID != nil
         let transientOverride = argumentFlag(transientConfigArgument, in: args)
             || truthyEnvironmentValue(transientConfigEnvironmentKey, in: environment)
             || hostedUnitTest
@@ -72,6 +87,7 @@ struct RuntimeConfig: Codable, Equatable {
             && (!hasLaunchOverride || persistLaunchOverride)
         let config = RuntimeConfig(
             serverURL: serverURL ?? fallback.serverURL,
+            dashboardURL: dashboardURL ?? fallback.dashboardURL,
             deviceID: deviceID ?? fallback.deviceID,
             usesTransientStore: transientOverride,
             persistsRuntimeIdentityUpdates: shouldPersistResolvedIdentity
@@ -79,6 +95,7 @@ struct RuntimeConfig: Codable, Equatable {
         let shouldPersistFallbackRepair = !hasLaunchOverride
             && (
                 persisted.serverURL != config.serverURL
+                    || persisted.dashboardURL != config.dashboardURL
                     || persisted.deviceID != config.deviceID
             )
         // Runtime identity is product state. Launch values are test/developer
@@ -97,9 +114,13 @@ struct RuntimeConfig: Codable, Equatable {
     func save(storageURL: URL? = nil) throws {
         let config = RuntimeConfig(
             serverURL: serverURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            dashboardURL: dashboardURL.trimmingCharacters(in: .whitespacesAndNewlines),
             deviceID: deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
         )
-        guard !config.serverURL.isEmpty, !config.deviceID.isEmpty else {
+        guard !config.serverURL.isEmpty,
+              !config.dashboardURL.isEmpty,
+              !config.deviceID.isEmpty
+        else {
             throw ConfigError.emptyValue
         }
         let data = try JSONEncoder().encode(config)
@@ -143,6 +164,54 @@ struct RuntimeConfig: Codable, Equatable {
         case emptyValue
     }
 
+    static var developmentOverridesEnabled: Bool {
+#if DEBUG && targetEnvironment(simulator)
+        true
+#else
+        false
+#endif
+    }
+
+    var usesLocalDeviceLinkEnvironment: Bool {
+        Self.isLoopbackHTTPURL(serverURL) && Self.isLoopbackHTTPURL(dashboardURL)
+    }
+
+    var hasCompatibleDeviceLinkOrigins: Bool {
+        usesLocalDeviceLinkEnvironment
+            || (
+                serverURL == Self.defaultServerURL
+                    && dashboardURL == Self.defaultDashboardURL
+            )
+    }
+
+    var accountIdentityKeychainService: String {
+        usesLocalDeviceLinkEnvironment
+            ? KeychainNostrIdentityStore.localDevelopmentService
+            : KeychainNostrIdentityStore.productionService
+    }
+
+    var accountIdentityKeychainAccount: String {
+        usesLocalDeviceLinkEnvironment
+            ? deviceID
+            : KeychainNostrIdentityStore.primaryAccount
+    }
+
+    private static func isLoopbackHTTPURL(_ value: String) -> Bool {
+        guard let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "http",
+              let host = components.host?.lowercased()
+        else {
+            return false
+        }
+        if host == "localhost" || host == "::1" {
+            return true
+        }
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        let octets = parts.compactMap { UInt8($0) }
+        return octets.count == 4 && octets[0] == 127
+    }
+
     private static func environmentValue(
         _ key: String,
         in environment: [String: String]
@@ -184,21 +253,29 @@ struct RuntimeConfig: Codable, Equatable {
 
 private struct PersistedRuntimeConfig: Codable, Equatable {
     var serverURL: String?
+    var dashboardURL: String?
     var deviceID: String?
 
     enum CodingKeys: String, CodingKey {
         case serverURL = "server_url"
+        case dashboardURL = "dashboard_url"
         case deviceID = "device_id"
     }
 
-    init(serverURL: String? = nil, deviceID: String? = nil) {
+    init(
+        serverURL: String? = nil,
+        dashboardURL: String? = nil,
+        deviceID: String? = nil
+    ) {
         self.serverURL = serverURL
+        self.dashboardURL = dashboardURL
         self.deviceID = deviceID
     }
 
     func normalized() -> PersistedRuntimeConfig {
         PersistedRuntimeConfig(
             serverURL: normalizedPersistedServerURL(serverURL),
+            dashboardURL: normalizedPersistedServerURL(dashboardURL),
             deviceID: normalizedNonEmpty(deviceID)
         )
     }
@@ -416,6 +493,7 @@ final class AppModel: ObservableObject, AppReconciler {
     }()
 
     @Published var serverURL: String
+    @Published private(set) var dashboardURL: String
     @Published var deviceID: String
     @Published private(set) var state: AppState? {
         didSet {
@@ -436,6 +514,7 @@ final class AppModel: ObservableObject, AppReconciler {
     @Published private(set) var relayedMyProfile: AppProfileSummary?
     @Published private(set) var requiresNostrLogin: Bool
     @Published private(set) var canRecoverRuntimeIdentity: Bool
+    @Published private(set) var accountLinkPhase: AccountLinkPhase = .ready
 
     private var runtime: (any FiniteChatRuntimeProtocol)?
     private var openKey = ""
@@ -466,6 +545,7 @@ final class AppModel: ObservableObject, AppReconciler {
     private var pushTokenRegistrationInFlight: String?
     private var didRunLaunchAutomation = false
     private let launchConfigurationError: String?
+    private var accountLinkTask: Task<Void, Never>?
 
     deinit {
         updateTask?.cancel()
@@ -473,6 +553,7 @@ final class AppModel: ObservableObject, AppReconciler {
         postSendCatchUpTask?.cancel()
         runtimeDispatchTail?.cancel()
         myProfileHydrationTask?.cancel()
+        accountLinkTask?.cancel()
     }
 
     init(
@@ -481,7 +562,7 @@ final class AppModel: ObservableObject, AppReconciler {
         configStorageURL: URL? = nil,
         args: [String] = CommandLine.arguments,
         requiresNostrLogin: Bool = false,
-        nostrIdentityStore: AppNostrIdentityStoring = KeychainNostrIdentityStore(),
+        nostrIdentityStore: AppNostrIdentityStoring? = nil,
         nostrProfileService: NostrRelayProfileService = NostrRelayProfileService(),
         nostrPeopleCache: NostrPeopleCache? = .shared,
         startsUpdateLoop: Bool = true,
@@ -498,6 +579,7 @@ final class AppModel: ObservableObject, AppReconciler {
             storageURL: resolvedConfigStorageURL
         )
         serverURL = resolvedConfig.serverURL
+        dashboardURL = resolvedConfig.dashboardURL
         deviceID = resolvedConfig.deviceID
         usesTransientStore = resolvedConfig.usesTransientStore
         persistsRuntimeIdentityUpdates = resolvedConfig.persistsRuntimeIdentityUpdates
@@ -507,10 +589,15 @@ final class AppModel: ObservableObject, AppReconciler {
         self.args = args
         self.runtimeFactory = runtimeFactory
         self.startsUpdateLoop = startsUpdateLoop
-        self.nostrIdentityStore = nostrIdentityStore
+        let resolvedNostrIdentityStore = nostrIdentityStore
+            ?? KeychainNostrIdentityStore(
+                service: resolvedConfig.accountIdentityKeychainService,
+                account: resolvedConfig.accountIdentityKeychainAccount
+            )
+        self.nostrIdentityStore = resolvedNostrIdentityStore
         self.nostrProfileService = nostrProfileService
         self.nostrPeopleCache = nostrPeopleCache
-        let storedNostrIdentity = nostrIdentityStore.load()
+        let storedNostrIdentity = resolvedNostrIdentityStore.load()
         let hasRecoverableRuntimeIdentity = !usesTransientStore
             && storedNostrIdentity == nil
             && RuntimeDataStore.hasRecoverableStableStore(
@@ -563,6 +650,19 @@ final class AppModel: ObservableObject, AppReconciler {
 
     var rooms: [AppRoomSummary] {
         state?.rooms ?? []
+    }
+
+    var availableAgents: [AppRoomSummary] {
+        rooms
+            .filter { $0.state == .connected && $0.isAgentChat }
+            .sorted {
+                $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+    }
+
+    var pairedAgent: AppRoomSummary? {
+        guard let roomID = state?.pairedAgent?.canonicalRoomId else { return nil }
+        return availableAgents.first { $0.roomId == roomID }
     }
 
     var selectedRoom: AppRoomSummary? {
@@ -788,6 +888,85 @@ final class AppModel: ObservableObject, AppReconciler {
         }
     }
 
+    func beginAccountLink() {
+        guard requiresNostrLogin, accountLinkPhase == .ready else { return }
+        errorText = nil
+        accountLinkPhase = .authenticating
+        let serverURL = serverURL
+        let dashboardURL = dashboardURL
+        let deviceID = deviceID
+        let runtimeConfig = RuntimeConfig(
+            serverURL: serverURL,
+            dashboardURL: dashboardURL,
+            deviceID: deviceID
+        )
+        guard runtimeConfig.hasCompatibleDeviceLinkOrigins else {
+            accountLinkPhase = .ready
+            errorText = "Local account linking requires both the chat server and dashboard to use loopback URLs."
+            return
+        }
+        accountLinkTask?.cancel()
+        accountLinkTask = Task { [weak self] in
+            do {
+                let link = try await Task.detached(priority: .userInitiated) {
+                    try NativeDeviceLinkSession.create(
+                        serverUrl: serverURL,
+                        dashboardUrl: dashboardURL,
+                        targetDeviceId: deviceID
+                    )
+                }.value
+                guard !Task.isCancelled else {
+                    link.release()
+                    return
+                }
+                try await Task.detached(priority: .userInitiated) {
+                    try link.approveAuthenticatedAccount(accessToken: nil)
+                }.value
+                guard !Task.isCancelled else {
+                    link.release()
+                    return
+                }
+                self?.accountLinkPhase = .waiting
+                let accountSecret = try await Task.detached(priority: .userInitiated) {
+                    try link.claimAccountSecret()
+                }.value
+                let material = try nostrIdentityFromAccountSecretHex(
+                    accountSecretHex: accountSecret
+                )
+                guard let self else {
+                    link.release()
+                    return
+                }
+                try self.applyNostrIdentity(
+                    AppNostrIdentity(material: material),
+                    resetStore: true
+                )
+                try await Task.detached(priority: .utility) {
+                    try link.acknowledgeStored()
+                    try link.waitUntilReady(accessToken: nil)
+                }.value
+                self.startFromForeground()
+                self.accountLinkPhase = .ready
+            } catch is CancellationError {
+                self?.accountLinkPhase = .ready
+            } catch {
+                self?.accountLinkPhase = .ready
+                self?.errorText = Self.accountLinkErrorText(error)
+            }
+        }
+    }
+
+    private static func accountLinkErrorText(_ error: Error) -> String {
+        let description = String(describing: error)
+        if description.localizedCaseInsensitiveContains("canceled") {
+            return "Sign in was canceled."
+        }
+        if description.contains("expired") {
+            return "That secure link expired. Start a new one."
+        }
+        return "This iPhone could not finish linking. Please try again."
+    }
+
     @discardableResult
     func recoverExistingDeviceAccount() -> Bool {
         guard canRecoverRuntimeIdentity else { return false }
@@ -828,6 +1007,7 @@ final class AppModel: ObservableObject, AppReconciler {
         }
         let resetConfig = RuntimeConfig.load(args: args, storageURL: configStorageURL)
         serverURL = resetConfig.serverURL
+        dashboardURL = resetConfig.dashboardURL
         deviceID = resetConfig.deviceID
         nostrIdentity = nil
         requiresNostrLogin = true
@@ -853,7 +1033,11 @@ final class AppModel: ObservableObject, AppReconciler {
         closeRuntime()
         serverURL = defaultServerURL
         do {
-            try RuntimeConfig(serverURL: serverURL, deviceID: deviceID).save(
+            try RuntimeConfig(
+                serverURL: serverURL,
+                dashboardURL: dashboardURL,
+                deviceID: deviceID
+            ).save(
                 storageURL: configStorageURL
             )
             appendDiagnostic(category: "persistence", event: "server.reset_default.succeeded")
@@ -1075,6 +1259,46 @@ final class AppModel: ObservableObject, AppReconciler {
             topicId: topic.topicId,
             chatId: chat.chatId
         ))
+    }
+
+    @discardableResult
+    func openChat(
+        roomID: String,
+        topicID: String,
+        chatID: String,
+        onOpened: (@MainActor () -> Void)? = nil
+    ) -> Bool {
+        dispatchInBackground(
+            .openChat(roomId: roomID, topicId: topicID, chatId: chatID),
+            onSuccess: onOpened
+        )
+    }
+
+    @discardableResult
+    func pairAgent(_ room: AppRoomSummary, onPaired: (@MainActor () -> Void)? = nil) -> Bool {
+        dispatchInBackground(
+            .pairAgent(roomId: room.roomId),
+            onSuccess: onPaired
+        )
+    }
+
+    @discardableResult
+    func startHomeChat(
+        text rawText: String,
+        intentKey: String,
+        onStarted: (@MainActor () -> Void)? = nil,
+        onFailure: (@MainActor () -> Void)? = nil
+    ) -> Bool {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, pairedAgent != nil else { return false }
+        return dispatchInBackground(
+            .startHomeChat(
+                text: text,
+                intentKey: intentKey
+            ),
+            onSuccess: onStarted,
+            onFailure: { _ in onFailure?() }
+        )
     }
 
     func projection(for roomID: String) -> ChatRoomProjection {
@@ -1818,7 +2042,7 @@ final class AppModel: ObservableObject, AppReconciler {
                 transient: usesTransientStore
             )
         }
-        nostrIdentityStore.save(identity)
+        try nostrIdentityStore.save(identity)
         nostrIdentity = identity
         resetMyProfileHydration()
         requiresNostrLogin = false
@@ -2092,7 +2316,11 @@ final class AppModel: ObservableObject, AppReconciler {
             deviceID = resolvedDeviceID
         }
         if !usesTransientStore && persistsRuntimeIdentityUpdates {
-            try? RuntimeConfig(serverURL: serverURL, deviceID: resolvedDeviceID).save(
+            try? RuntimeConfig(
+                serverURL: serverURL,
+                dashboardURL: dashboardURL,
+                deviceID: resolvedDeviceID
+            ).save(
                 storageURL: configStorageURL
             )
         }
@@ -2112,7 +2340,7 @@ final class AppModel: ObservableObject, AppReconciler {
             return
         }
         let appIdentity = AppNostrIdentity(material: material)
-        nostrIdentityStore.save(appIdentity)
+        try? nostrIdentityStore.save(appIdentity)
         nostrIdentity = appIdentity
         canRecoverRuntimeIdentity = false
     }
@@ -2181,6 +2409,10 @@ final class AppModel: ObservableObject, AppReconciler {
             text: text,
             displayContent: text,
             richTextJson: "",
+            kind: .message,
+            status: .complete,
+            finalDelivery: true,
+            editOfMessageId: nil,
             payload: Data(text.utf8),
             replyToMessageId: replyToMessageID,
             isMine: true,
@@ -2368,6 +2600,24 @@ final class AppModel: ObservableObject, AppReconciler {
             return DiagnosticActionSummary(
                 category: "runtime",
                 name: "open_chat",
+                details: ["room": roomId, "topic": topicId, "chat": chatId]
+            )
+        case .pairAgent(let roomId):
+            return DiagnosticActionSummary(
+                category: "runtime",
+                name: "pair_agent",
+                details: ["room": roomId]
+            )
+        case .startHomeChat:
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "start_home_chat",
+                details: [:]
+            )
+        case .renameChat(let roomId, let topicId, let chatId, _):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "rename_chat",
                 details: ["room": roomId, "topic": topicId, "chat": chatId]
             )
         case .createRoom:

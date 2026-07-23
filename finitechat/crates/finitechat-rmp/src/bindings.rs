@@ -297,7 +297,15 @@ fn generate_ios_sources_with_output(
     let out_dir = root.join("ios/Bindings");
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| CliError::operational(format!("failed to create ios/Bindings: {e}")))?;
-    if use_cache && bindgen_cache_hit(root, swift_bindings_present(root)?, "swift", verbose)? {
+    if use_cache
+        && bindgen_cache_hit(
+            root,
+            core_pkg,
+            swift_bindings_present(root)?,
+            "swift",
+            verbose,
+        )?
+    {
         return Ok(());
     }
     cargo_build_host(root, core_pkg, profile, verbose, stdout_to_stderr)?;
@@ -325,7 +333,7 @@ fn generate_ios_sources_with_output(
         return Err(CliError::operational("uniffi swift generation failed"));
     }
     if use_cache {
-        write_bindgen_hash(root, "swift")?;
+        write_bindgen_hash(root, core_pkg, "swift")?;
     }
     Ok(())
 }
@@ -342,7 +350,15 @@ fn generate_android_sources(
     let out_dir = root.join("android/app/src/main/java");
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| CliError::operational(format!("failed to create android java dir: {e}")))?;
-    if use_cache && bindgen_cache_hit(root, kotlin_bindings_present(root)?, "kotlin", verbose)? {
+    if use_cache
+        && bindgen_cache_hit(
+            root,
+            core_pkg,
+            kotlin_bindings_present(root)?,
+            "kotlin",
+            verbose,
+        )?
+    {
         return Ok(());
     }
     cargo_build_host(root, core_pkg, profile, verbose, false)?;
@@ -374,7 +390,7 @@ fn generate_android_sources(
         return Err(CliError::operational("uniffi kotlin generation failed"));
     }
     if use_cache {
-        write_bindgen_hash(root, "kotlin")?;
+        write_bindgen_hash(root, core_pkg, "kotlin")?;
     }
     Ok(())
 }
@@ -905,6 +921,7 @@ fn kotlin_bindings_present(root: &Path) -> Result<bool, CliError> {
 
 fn bindgen_cache_hit(
     root: &Path,
+    core_pkg: &str,
     outputs_present: bool,
     key: &str,
     verbose: bool,
@@ -912,7 +929,7 @@ fn bindgen_cache_hit(
     if !outputs_present {
         return Ok(false);
     }
-    let hash = compute_bindgen_inputs_hash(root)?;
+    let hash = compute_bindgen_inputs_hash(root, core_pkg)?;
     let cache_path = bindgen_hash_path(root, key);
     let cached = std::fs::read_to_string(cache_path).ok();
     let cached = cached.as_deref().map(str::trim);
@@ -926,8 +943,8 @@ fn bindgen_cache_hit(
     Ok(false)
 }
 
-fn write_bindgen_hash(root: &Path, key: &str) -> Result<(), CliError> {
-    let hash = compute_bindgen_inputs_hash(root)?;
+fn write_bindgen_hash(root: &Path, core_pkg: &str, key: &str) -> Result<(), CliError> {
+    let hash = compute_bindgen_inputs_hash(root, core_pkg)?;
     let path = bindgen_hash_path(root, key);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -943,10 +960,56 @@ fn bindgen_hash_path(root: &Path, key: &str) -> PathBuf {
     root.join(format!("{BINDGEN_HASH_FILE_PREFIX}-{key}"))
 }
 
-fn compute_bindgen_inputs_hash(root: &Path) -> Result<String, CliError> {
+fn compute_bindgen_inputs_hash(root: &Path, core_pkg: &str) -> Result<String, CliError> {
     let mut files: Vec<PathBuf> = vec![];
     let src_dir = root.join("rust/src");
     for ent in WalkDir::new(&src_dir).into_iter().flatten() {
+        if ent.file_type().is_file() {
+            files.push(ent.path().to_path_buf());
+        }
+    }
+    let metadata = Command::new("cargo")
+        .current_dir(root)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .map_err(|error| {
+            CliError::operational(format!(
+                "failed to locate core crate for bindgen cache: {error}"
+            ))
+        })?;
+    if !metadata.status.success() {
+        return Err(CliError::operational(
+            "cargo metadata failed while locating core crate for bindgen cache",
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+        .map_err(|error| CliError::operational(format!("invalid cargo metadata: {error}")))?;
+    let core_manifest = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|packages| {
+            packages.iter().find_map(|package| {
+                (package.get("name").and_then(serde_json::Value::as_str) == Some(core_pkg))
+                    .then(|| {
+                        package
+                            .get("manifest_path")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .flatten()
+            })
+        })
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            CliError::operational(format!(
+                "core crate {core_pkg} was not present in cargo metadata"
+            ))
+        })?;
+    files.push(core_manifest.clone());
+    let core_src = core_manifest
+        .parent()
+        .ok_or_else(|| CliError::operational("core crate manifest has no parent directory"))?
+        .join("src");
+    for ent in WalkDir::new(core_src).into_iter().flatten() {
         if ent.file_type().is_file() {
             files.push(ent.path().to_path_buf());
         }
