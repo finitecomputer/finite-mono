@@ -6269,6 +6269,7 @@ mod tests {
                 updated_at: "2026-05-25T13:00:00Z".to_string(),
             },
             provider_operation: None,
+            in_flight_capacity_reservation: None,
         }
     }
 
