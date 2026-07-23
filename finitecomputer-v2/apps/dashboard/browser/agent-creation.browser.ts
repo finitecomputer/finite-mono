@@ -1045,7 +1045,10 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
 
       await page.getByLabel("Message your agent").fill("Working lease browser proof.");
       await page.getByRole("button", { name: "Send message" }).click();
-      await expectVisibleText(page, "Working lease browser proof.");
+      await page
+        .getByRole("article")
+        .getByText("Working lease browser proof.", { exact: true })
+        .waitFor({ state: "visible", timeout: 15_000 });
       hostedDevice.state.app.typing_members = [
         {
           room_id: "room_browser_agent",
