@@ -177,7 +177,11 @@ git push finite main
 ```
 
 Pushing the configured Deploy Branch creates a new immutable Version. Finite
-Sites validates and serves the committed bytes under `path`.
+Sites validates and serves the committed bytes under `path`. A successful push
+returns only after every matching output is active. If Git reports
+`git ref accepted but deploy failed`, the ref has already moved: fix the config
+or deploy bytes, create a correcting commit, and push that commit instead of
+retrying the same commit.
 
 Confirm the URL returned by the configured server and preview that exact
 origin:

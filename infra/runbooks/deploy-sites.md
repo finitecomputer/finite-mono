@@ -155,7 +155,30 @@ by copying a release tarball onto the box.
 3. Load a published site (`https://<something>.finite.chat`) and a
    `*.docs.finite.chat` vhost. (sitesd serves by Host header; there is no
    root `/healthz` on the wildcard vhosts — a 404 at `/` is normal.)
-4. TODO: once finitesitesd exposes a `source_commit` health payload
+4. Probe one real HTML URL and one real asset URL through Cloudflare. Both
+   must return `Cache-Control: no-store`; reject any positive `max-age`:
+
+   ```sh
+   for url in \
+     'https://<published-site>.finite.chat/' \
+     'https://<published-site>.finite.chat/<real-asset>.js'
+   do
+     headers="$(curl -fsSI "$url")"
+     grep -Eiq '^cache-control:[[:space:]]*no-store([[:space:]]|$)' <<<"$headers"
+     ! grep -Eiq '^cache-control:.*max-age=[1-9]' <<<"$headers"
+   done
+   ```
+
+   On 2026-07-23 the zone's default four-hour Browser Cache TTL rewrote the
+   origin's `public, max-age=0, must-revalidate` asset responses to
+   `public, max-age=14400, must-revalidate`. That let an ordinary reload mix
+   current HTML with stale JavaScript or CSS. `no-store` is the application
+   correctness boundary while URLs remain mutable. Separately set Cloudflare
+   **Caching → Configuration → Browser Cache TTL** to **Respect Existing
+   Headers** and ensure no Cache Rule overrides browser TTL. Only restore
+   validator-based public caching after an edge probe proves those headers are
+   preserved; correctness must not depend on that external setting.
+5. TODO: once finitesitesd exposes a `source_commit` health payload
    (finitechat-style contract gate), gate on it here.
 
 ### ROLLBACK
