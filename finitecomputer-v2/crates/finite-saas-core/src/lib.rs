@@ -469,6 +469,8 @@ pub enum CoreError {
     RuntimeArtifactUnavailable,
     #[error("hosting tier is required before creating an agent")]
     MissingHostingTier,
+    #[error("selected hosting tier is not authorized by this account or Launch Code")]
+    HostingTierNotAuthorized,
     #[error("launch code is required")]
     MissingLaunchCode,
     #[error("launch code is invalid")]
@@ -1415,6 +1417,10 @@ pub struct AgentCreationConfiguration {
     /// Internal-only placement override for local/provider conformance tests.
     /// User-scoped HTTP requests never populate this field.
     pub placement: Option<RuntimePlacement>,
+    /// Customer-visible product choice. Core compares it with the tier granted
+    /// by billing or the submitted Launch Code before creating any durable
+    /// agent state; provider placement remains Core-owned.
+    pub requested_hosting_tier: Option<HostingTier>,
     pub profile_picture_url: Option<String>,
 }
 
@@ -2218,6 +2224,12 @@ impl BridgeCoreState {
                 .and_then(|account| account.hosting_tier)
                 .ok_or(CoreError::MissingHostingTier)?
         };
+        if configuration
+            .requested_hosting_tier
+            .is_some_and(|requested| requested != hosting_tier)
+        {
+            return Err(CoreError::HostingTierNotAuthorized);
+        }
         let placement = configuration
             .placement
             .unwrap_or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier));
@@ -8268,6 +8280,45 @@ mod tests {
     }
 
     #[test]
+    fn selected_hosting_tier_must_match_launch_code_before_code_redemption() {
+        let mut state = BridgeCoreState::default();
+        let launch_code = issue_test_launch_code(&mut state);
+        let input = RequestAgentCreationInput {
+            verified_email: "tier-check@finite.vip".to_string(),
+            workos_user_id: "user_workos_tier_check".to_string(),
+            display_name: "Tier Check".to_string(),
+            launch_code: launch_code.clone(),
+            idempotency_key: "tier-check-submit".to_string(),
+            now: Some(NOW.to_string()),
+        };
+
+        let denied = state
+            .request_agent_creation_configured(
+                input.clone(),
+                AgentCreationConfiguration {
+                    requested_hosting_tier: Some(HostingTier::Confidential),
+                    ..AgentCreationConfiguration::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(denied, CoreError::HostingTierNotAuthorized));
+        assert!(state.users.is_empty());
+        assert!(state.projects.is_empty());
+        assert!(state.agent_creation_requests.is_empty());
+
+        let created = state
+            .request_agent_creation_configured(
+                input,
+                AgentCreationConfiguration {
+                    requested_hosting_tier: Some(HostingTier::Standard),
+                    ..AgentCreationConfiguration::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(created.request.runner_class, RunnerClass::Kata);
+    }
+
+    #[test]
     fn phala_capacity_reservation_is_atomic_and_releases_only_the_existing_in_flight_request() {
         let mut state = BridgeCoreState::default();
         promote_runtime_artifact(&mut state);
@@ -8370,6 +8421,7 @@ mod tests {
                 },
                 AgentCreationConfiguration {
                     placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                    requested_hosting_tier: None,
                     profile_picture_url: Some(
                         "https://chat.finite.computer/v1/blobs/profile".to_string(),
                     ),
@@ -12638,6 +12690,7 @@ mod tests {
                 },
                 AgentCreationConfiguration {
                     placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                    requested_hosting_tier: None,
                     profile_picture_url: None,
                 },
             )

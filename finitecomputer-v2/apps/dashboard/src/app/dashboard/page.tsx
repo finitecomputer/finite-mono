@@ -912,6 +912,7 @@ function CoreAgentCreationPanel({
         idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
         initialName={draft?.displayName}
         initialPictureUrl={draft?.profilePictureUrl}
+        initialHostingTier={draft?.hostingTier}
         returnMachineId={returnMachineId}
         requiresAccess={requiresAccess}
         stripeConfigured={stripeCheckoutAvailable()}

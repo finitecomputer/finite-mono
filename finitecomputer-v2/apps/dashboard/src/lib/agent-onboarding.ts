@@ -3,11 +3,16 @@ import { sealData, unsealData } from "iron-session";
 export const AGENT_DRAFT_COOKIE = "finite-agent-draft";
 export const AGENT_DRAFT_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_AGENT_PROFILE_IMAGE_BYTES = 5 * 1024 * 1024;
+export type AgentHostingTier = "standard" | "confidential";
 
 const AGENT_CREATION_ENTITLEMENT_EXHAUSTED = "agent creation entitlement is exhausted";
 const AGENT_CREATION_BILLING_REQUIRED = "billing is required before creating an agent";
+const AGENT_CREATION_HOSTING_TIER_NOT_AUTHORIZED =
+  "selected hosting tier is not authorized by this account or launch code";
 const AGENT_CREATION_BILLING_REQUIRED_MESSAGE =
   "Choose payment or enter a Launch Code to continue.";
+const AGENT_CREATION_HOSTING_TIER_MESSAGE =
+  "This account or Launch Code does not match the selected hosting option. Choose the matching option or use a different Launch Code.";
 
 export type AgentCreationRecovery = "access" | null;
 
@@ -16,6 +21,7 @@ export type AgentOnboardingDraft = {
   workosUserId: string;
   displayName: string;
   profilePictureUrl: string | null;
+  hostingTier: AgentHostingTier;
   idempotencyKey: string;
   issuedAtMs: number;
   /** Validated Runtime id used only to return to the originating agent. */
@@ -74,7 +80,8 @@ export function agentCreationErrorRecovery(error: unknown): AgentCreationRecover
   const message = error instanceof Error ? error.message : String(error ?? "");
   const normalized = message.toLowerCase();
   return normalized.includes(AGENT_CREATION_BILLING_REQUIRED) ||
-    normalized === AGENT_CREATION_BILLING_REQUIRED_MESSAGE.toLowerCase()
+    normalized === AGENT_CREATION_BILLING_REQUIRED_MESSAGE.toLowerCase() ||
+    normalized.includes(AGENT_CREATION_HOSTING_TIER_NOT_AUTHORIZED)
     ? "access"
     : null;
 }
@@ -87,6 +94,9 @@ export function agentCreationErrorMessage(error: unknown): string {
   if (message.toLowerCase().includes(AGENT_CREATION_BILLING_REQUIRED)) {
     return AGENT_CREATION_BILLING_REQUIRED_MESSAGE;
   }
+  if (message.toLowerCase().includes(AGENT_CREATION_HOSTING_TIER_NOT_AUTHORIZED)) {
+    return AGENT_CREATION_HOSTING_TIER_MESSAGE;
+  }
   return message;
 }
 
@@ -96,6 +106,13 @@ export function normalizeAgentDisplayName(value: FormDataEntryValue | null) {
     throw new Error("Choose an agent name between 1 and 80 characters.");
   }
   return name;
+}
+
+export function normalizeAgentHostingTier(
+  value: FormDataEntryValue | null
+): AgentHostingTier {
+  if (value === "standard" || value === "confidential") return value;
+  throw new Error("Choose Standard or Confidential hosting.");
 }
 
 export function normalizeAgentReturnMachineId(value: FormDataEntryValue | null) {
@@ -128,6 +145,9 @@ export async function unsealAgentOnboardingDraft(
       draft.version !== 1 ||
       draft.workosUserId !== workosUserId ||
       !draft.displayName?.trim() ||
+      (draft.hostingTier != null &&
+        draft.hostingTier !== "standard" &&
+        draft.hostingTier !== "confidential") ||
       !draft.idempotencyKey?.trim() ||
       !Number.isFinite(draft.issuedAtMs) ||
       (draft.stripeCheckoutStartedAtMs != null &&
@@ -144,6 +164,7 @@ export async function unsealAgentOnboardingDraft(
       workosUserId: draft.workosUserId,
       displayName: draft.displayName,
       profilePictureUrl: draft.profilePictureUrl ?? null,
+      hostingTier: draft.hostingTier ?? "standard",
       idempotencyKey: draft.idempotencyKey,
       issuedAtMs: draft.issuedAtMs,
       returnMachineId: normalizeAgentReturnMachineId(draft.returnMachineId ?? null),

@@ -2596,6 +2596,12 @@ where
             .and_then(|account| account.hosting_tier)
             .ok_or(CoreError::MissingHostingTier)?
     };
+    if configuration
+        .requested_hosting_tier
+        .is_some_and(|requested| requested != hosting_tier)
+    {
+        return Err(CoreError::HostingTierNotAuthorized);
+    }
     let placement = configuration
         .placement
         .unwrap_or_else(|| RuntimePlacement::for_hosting_tier(hosting_tier));
@@ -9949,6 +9955,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_rejects_selected_tier_mismatch_without_consuming_launch_code() {
+        with_isolated_postgres(|store| async move {
+            let issued = store
+                .issue_launch_code_batch(IssueLaunchCodeBatchInput {
+                    name: "Tier mismatch".to_string(),
+                    code_count: 1,
+                    expires_in_hours: Some(1),
+                    hosting_tier: Some(HostingTier::Standard),
+                    created_by_workos_user_id: "workos_operator".to_string(),
+                    now: Some("2026-07-23T12:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let input = RequestAgentCreationInput {
+                verified_email: "tier-check@finite.vip".to_string(),
+                workos_user_id: "workos_tier_check".to_string(),
+                display_name: "Tier Check".to_string(),
+                launch_code: issued.codes[0].code.clone(),
+                idempotency_key: "tier-check-submit".to_string(),
+                now: Some("2026-07-23T12:01:00Z".to_string()),
+            };
+
+            let denied = store
+                .request_agent_creation_configured(
+                    input.clone(),
+                    AgentCreationConfiguration {
+                        requested_hosting_tier: Some(HostingTier::Confidential),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(denied, CoreError::HostingTierNotAuthorized));
+
+            let created = store
+                .request_agent_creation_configured(
+                    input,
+                    AgentCreationConfiguration {
+                        requested_hosting_tier: Some(HostingTier::Standard),
+                        ..AgentCreationConfiguration::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(created.request.runner_class, RunnerClass::Kata);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn postgres_launch_code_redemption_serializes_with_revocation() {
         with_isolated_postgres(|store| async move {
             let issued = store
@@ -11542,6 +11598,7 @@ mod tests {
                     },
                     AgentCreationConfiguration {
                         placement: Some(RuntimePlacement::for_hosting_tier(HostingTier::Standard)),
+                        requested_hosting_tier: None,
                         profile_picture_url: None,
                     },
                 )

@@ -51,6 +51,7 @@ export async function GET(request: Request) {
       displayName: draft.displayName,
       launchCode: "",
       idempotencyKey: draft.idempotencyKey,
+      hostingTier: draft.hostingTier,
       profilePictureUrl: draft.profilePictureUrl,
     });
     if (creation.project.id !== creation.request.project_id) {

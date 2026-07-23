@@ -9,6 +9,7 @@ import {
   agentCreationErrorRecovery,
   agentCreationErrorMessage,
   normalizeAgentDisplayName,
+  normalizeAgentHostingTier,
   normalizeAgentReturnMachineId,
   resolveAgentCreationAccessPath,
   sealAgentOnboardingDraft,
@@ -67,6 +68,7 @@ export async function POST(request: Request) {
       throw new Error("Sign in again to create your agent.");
     }
     const displayName = normalizeAgentDisplayName(formData.get("displayName"));
+    const hostingTier = normalizeAgentHostingTier(formData.get("hostingTier"));
     const existingDraft = await currentDraft(request, account.workosUserId);
     const profilePictureUrl = await profilePicture(
       formData.get("profilePicture"),
@@ -78,7 +80,8 @@ export async function POST(request: Request) {
     // exact retry instead of creating a second project.
     const idempotencyKey =
       existingDraft?.displayName === displayName &&
-      existingDraft.profilePictureUrl === profilePictureUrl
+      existingDraft.profilePictureUrl === profilePictureUrl &&
+      existingDraft.hostingTier === hostingTier
         ? existingDraft.idempotencyKey
         : validIdempotencyKey(formData.get("idempotencyKey"));
     draft = {
@@ -86,6 +89,7 @@ export async function POST(request: Request) {
       workosUserId: account.workosUserId,
       displayName,
       profilePictureUrl,
+      hostingTier,
       idempotencyKey,
       issuedAtMs: Date.now(),
       returnMachineId,
@@ -119,6 +123,9 @@ export async function POST(request: Request) {
     }
 
     if (accessPath === "stripe") {
+      if (draft.hostingTier !== "standard") {
+        throw new Error("Confidential hosting currently requires a Confidential Launch Code.");
+      }
       if (!stripeCheckoutAvailable()) {
         throw new Error("Payment is unavailable right now.");
       }
@@ -171,6 +178,7 @@ async function launchDraft(
     displayName: draft.displayName,
     launchCode,
     idempotencyKey: draft.idempotencyKey,
+    hostingTier: draft.hostingTier,
     profilePictureUrl: draft.profilePictureUrl,
   });
   if (creation.project.id !== creation.request.project_id) {
