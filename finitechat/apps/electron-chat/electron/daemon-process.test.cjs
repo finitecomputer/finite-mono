@@ -1028,3 +1028,23 @@ test("daemon generation always precedes its buffered or live state", () => {
     ["finitechat:daemon-update", { rev: 1 }],
   ]);
 });
+
+test("daemon relay suppresses duplicate revisions only within one generation", () => {
+  const live = [];
+  const relay = new DaemonUpdateRelay((channel, payload) => live.push([channel, payload]));
+
+  relay.beginGeneration();
+  assert.equal(relay.update({ rev: 7, status: "first" }), true);
+  assert.equal(relay.update({ rev: 7, status: "duplicate heartbeat" }), false);
+  assert.equal(relay.update({ rev: 8, status: "changed" }), true);
+  relay.beginGeneration();
+  assert.equal(relay.update({ rev: 7, status: "new daemon baseline" }), true);
+
+  assert.deepEqual(live, [
+    ["finitechat:daemon-generation", { generation: 1 }],
+    ["finitechat:daemon-update", { rev: 7, status: "first" }],
+    ["finitechat:daemon-update", { rev: 8, status: "changed" }],
+    ["finitechat:daemon-generation", { generation: 2 }],
+    ["finitechat:daemon-update", { rev: 7, status: "new daemon baseline" }],
+  ]);
+});

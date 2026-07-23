@@ -952,6 +952,7 @@ struct AppRuntimeState {
     revoked_devices: BTreeSet<String>,
     downloading_attachments: BTreeSet<(String, String, String)>,
     bridge_seen_joined_account_ids: BTreeSet<String>,
+    room_sync_failures: BTreeSet<String>,
     inbox_hint_after_seq: u64,
     requested_link_bootstrap_rooms: BTreeSet<String>,
     profile_chat_bootstrap_preparations: BTreeMap<String, AppProfileChatBootstrapPreparedCommit>,
@@ -1838,8 +1839,7 @@ fn spawn_app_runtime_worker(
                         if matches!(event, SyncHintEvent::Heartbeat) {
                             return Ok(state.app.clone());
                         }
-                        state.runtime_tick()?;
-                        state.apply_sync_hint(&event);
+                        state.apply_app_sync_hint(&event)?;
                         state.bump_rev();
                         let snapshot = state.app.clone();
                         publish_app_update(&snapshot, &shared_state, &reconciler);
@@ -2174,6 +2174,7 @@ impl AppRuntimeState {
             revoked_devices,
             downloading_attachments: BTreeSet::new(),
             bridge_seen_joined_account_ids: BTreeSet::new(),
+            room_sync_failures: BTreeSet::new(),
             inbox_hint_after_seq: 0,
             requested_link_bootstrap_rooms: BTreeSet::new(),
             profile_chat_bootstrap_preparations: BTreeMap::new(),
@@ -2533,16 +2534,64 @@ impl AppRuntimeState {
         }
     }
 
+    fn apply_app_sync_hint(&mut self, event: &SyncHintEvent) -> Result<(), FiniteChatCoreError> {
+        // Room/activity hints name an exact, already-watched scope. Unknown
+        // scopes and inbox work retain the full reconciliation path.
+        match event {
+            SyncHintEvent::RoomAdvanced { room_id, .. } if self.core.has_room(room_id) => {
+                self.expire_ephemeral_activity()?;
+                let synced = self.core.sync_room_with_projection(room_id)?;
+                self.apply_targeted_sync_projection(room_id, synced)?;
+            }
+            SyncHintEvent::ActivityChanged { room_id, .. }
+                if self.room_is_connected(room_id) && self.core.has_room(room_id) =>
+            {
+                self.refresh_ephemeral_activity_for_room(room_id)?;
+                self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
+                self.app.status = ready_status(self.room_sync_failures.len());
+            }
+            SyncHintEvent::Heartbeat => {}
+            SyncHintEvent::RoomAdvanced { .. }
+            | SyncHintEvent::ActivityChanged { .. }
+            | SyncHintEvent::InboxAdvanced { .. } => self.runtime_tick()?,
+        }
+        self.apply_sync_hint(event);
+        Ok(())
+    }
+
     fn runtime_tick(&mut self) -> Result<(), FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         let synced = self.core.sync_with_projection()?;
-        let room_sync_failure_count = synced.room_sync_failures.len();
+        self.room_sync_failures = synced.room_sync_failures.iter().cloned().collect();
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages);
         self.materialize_known_connected_rooms()?;
         self.request_missing_link_device_bootstraps()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
-        self.app.status = ready_status(room_sync_failure_count);
+        self.app.status = ready_status(self.room_sync_failures.len());
+        Ok(())
+    }
+
+    fn apply_targeted_sync_projection(
+        &mut self,
+        room_id: &str,
+        synced: CoreSyncProjection,
+    ) -> Result<(), FiniteChatCoreError> {
+        if synced
+            .room_sync_failures
+            .iter()
+            .any(|failed_room_id| failed_room_id == room_id)
+        {
+            self.room_sync_failures.insert(room_id.to_owned());
+        } else {
+            self.room_sync_failures.remove(room_id);
+        }
+        self.apply_projection_events(synced.events)?;
+        self.append_messages(synced.result.messages);
+        self.materialize_known_connected_rooms()?;
+        self.request_missing_link_device_bootstraps()?;
+        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
+        self.app.status = ready_status(self.room_sync_failures.len());
         Ok(())
     }
 
@@ -2571,7 +2620,26 @@ impl AppRuntimeState {
         &mut self,
         event: SyncHintEvent,
     ) -> Result<AppBridgeSync, FiniteChatCoreError> {
-        let bridge = self.agent_bridge_sync_after_change()?;
+        // The resident bridge deliberately keeps heartbeat reconciliation
+        // full so a missed or dropped hint cannot strand durable Chat data.
+        let bridge = match &event {
+            SyncHintEvent::RoomAdvanced { room_id, .. } if self.core.has_room(room_id) => {
+                self.agent_bridge_sync_room_after_change(room_id)?
+            }
+            SyncHintEvent::ActivityChanged { room_id, .. }
+                if self.room_is_connected(room_id) && self.core.has_room(room_id) =>
+            {
+                self.refresh_ephemeral_activity_for_room(room_id)?;
+                self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
+                self.sync_selected_room_messages();
+                self.app.status = ready_status(self.room_sync_failures.len());
+                AppBridgeSync::default()
+            }
+            SyncHintEvent::RoomAdvanced { .. }
+            | SyncHintEvent::ActivityChanged { .. }
+            | SyncHintEvent::InboxAdvanced { .. }
+            | SyncHintEvent::Heartbeat => self.agent_bridge_sync_after_change()?,
+        };
         self.apply_sync_hint(&event);
         Ok(bridge)
     }
@@ -2579,7 +2647,7 @@ impl AppRuntimeState {
     fn agent_bridge_sync_after_change(&mut self) -> Result<AppBridgeSync, FiniteChatCoreError> {
         self.refresh_ephemeral_activity_for_connected_rooms()?;
         let synced = self.core.sync_with_projection()?;
-        let room_sync_failure_count = synced.room_sync_failures.len();
+        self.room_sync_failures = synced.room_sync_failures.iter().cloned().collect();
         let events = synced
             .events
             .iter()
@@ -2591,7 +2659,41 @@ impl AppRuntimeState {
         self.materialize_known_connected_rooms()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
         self.sync_selected_room_messages();
-        self.app.status = ready_status(room_sync_failure_count);
+        self.app.status = ready_status(self.room_sync_failures.len());
+        let joined_account_ids = self.bridge_unseen_joined_account_ids();
+        Ok(AppBridgeSync {
+            joined_account_ids,
+            events,
+        })
+    }
+
+    fn agent_bridge_sync_room_after_change(
+        &mut self,
+        room_id: &str,
+    ) -> Result<AppBridgeSync, FiniteChatCoreError> {
+        self.expire_ephemeral_activity()?;
+        let synced = self.core.sync_room_with_projection(room_id)?;
+        if synced
+            .room_sync_failures
+            .iter()
+            .any(|failed_room_id| failed_room_id == room_id)
+        {
+            self.room_sync_failures.insert(room_id.to_owned());
+        } else {
+            self.room_sync_failures.remove(room_id);
+        }
+        let events = synced
+            .events
+            .iter()
+            .filter(|event| !is_device_link_control_event(&event.plaintext))
+            .map(app_bridge_event_from_stored_event)
+            .collect::<Vec<_>>();
+        self.apply_projection_events(synced.events)?;
+        self.append_messages(synced.result.messages);
+        self.materialize_known_connected_rooms()?;
+        self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
+        self.sync_selected_room_messages();
+        self.app.status = ready_status(self.room_sync_failures.len());
         let joined_account_ids = self.bridge_unseen_joined_account_ids();
         Ok(AppBridgeSync {
             joined_account_ids,
@@ -5941,12 +6043,7 @@ impl AppRuntimeState {
     fn refresh_ephemeral_activity_for_connected_rooms(
         &mut self,
     ) -> Result<(), FiniteChatCoreError> {
-        let now_ms = self.core.now_millis()?;
-        self.activity_projection
-            .expire_at(now_ms)
-            .map_err(client_error)?;
-        self.local_typing_leases
-            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        let now_ms = self.expire_ephemeral_activity()?;
         let room_ids = self
             .app
             .rooms
@@ -5956,50 +6053,78 @@ impl AppRuntimeState {
             .map(|room| room.room_id.clone())
             .collect::<Vec<_>>();
         for room_id in room_ids {
-            let selected_topic_id = (self.app.selected_room_id.as_deref()
-                == Some(room_id.as_str()))
-            .then(|| self.app.selected_topic_id.clone())
-            .flatten();
-            let scopes = std::iter::once(None)
-                .chain(selected_topic_id.as_deref().map(Some))
-                .collect::<Vec<_>>();
-            for conversation_id in scopes {
-                let records =
-                    match self
-                        .core
-                        .get_ephemeral_activities(&room_id, conversation_id, now_ms)
-                    {
-                        Ok(records) => records,
-                        Err(FiniteChatCoreError::Delivery { .. }) => {
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
-                for record in records {
-                    let Ok(plaintext) = self
-                        .core
-                        .device
-                        .decrypt_activity_payload(&record.room_id, &record.payload)
-                    else {
-                        continue;
-                    };
-                    let Ok(activity) =
-                        serde_json::from_slice::<DecryptedEphemeralActivityV1>(&plaintext)
-                    else {
-                        continue;
-                    };
-                    let context = EphemeralActivityIngressContext {
-                        room_id: &record.room_id,
-                        conversation_id: record.conversation_id.as_deref(),
-                        sender: &record.sender,
-                        received_at_ms: record.received_at_ms,
-                        expires_at_ms: record.expires_at_ms,
-                    };
-                    let _ = self.activity_projection.apply(context, &activity);
-                }
-            }
+            self.refresh_ephemeral_activity_for_room_at(&room_id, now_ms)?;
         }
         self.sync_typing_members();
+        Ok(())
+    }
+
+    fn refresh_ephemeral_activity_for_room(
+        &mut self,
+        room_id: &str,
+    ) -> Result<(), FiniteChatCoreError> {
+        let now_ms = self.expire_ephemeral_activity()?;
+        self.refresh_ephemeral_activity_for_room_at(room_id, now_ms)?;
+        self.sync_typing_members();
+        Ok(())
+    }
+
+    fn expire_ephemeral_activity(&mut self) -> Result<u64, FiniteChatCoreError> {
+        let now_ms = self.core.now_millis()?;
+        self.activity_projection
+            .expire_at(now_ms)
+            .map_err(client_error)?;
+        self.local_typing_leases
+            .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
+        self.sync_typing_members();
+        Ok(now_ms)
+    }
+
+    fn refresh_ephemeral_activity_for_room_at(
+        &mut self,
+        room_id: &str,
+        now_ms: u64,
+    ) -> Result<(), FiniteChatCoreError> {
+        let selected_topic_id = (self.app.selected_room_id.as_deref() == Some(room_id))
+            .then(|| self.app.selected_topic_id.clone())
+            .flatten();
+        let scopes = std::iter::once(None)
+            .chain(selected_topic_id.as_deref().map(Some))
+            .collect::<Vec<_>>();
+        for conversation_id in scopes {
+            let records = match self
+                .core
+                .get_ephemeral_activities(room_id, conversation_id, now_ms)
+            {
+                Ok(records) => records,
+                Err(FiniteChatCoreError::Delivery { .. }) => {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            for record in records {
+                let Ok(plaintext) = self
+                    .core
+                    .device
+                    .decrypt_activity_payload(&record.room_id, &record.payload)
+                else {
+                    continue;
+                };
+                let Ok(activity) =
+                    serde_json::from_slice::<DecryptedEphemeralActivityV1>(&plaintext)
+                else {
+                    continue;
+                };
+                let context = EphemeralActivityIngressContext {
+                    room_id: &record.room_id,
+                    conversation_id: record.conversation_id.as_deref(),
+                    sender: &record.sender,
+                    received_at_ms: record.received_at_ms,
+                    expires_at_ms: record.expires_at_ms,
+                };
+                let _ = self.activity_projection.apply(context, &activity);
+            }
+        }
         Ok(())
     }
 
@@ -7933,6 +8058,51 @@ impl CoreState {
 
     fn sync(&mut self) -> Result<SyncResult, FiniteChatCoreError> {
         Ok(self.sync_with_projection()?.result)
+    }
+
+    fn sync_room_with_projection(
+        &mut self,
+        room_id: &str,
+    ) -> Result<CoreSyncProjection, FiniteChatCoreError> {
+        let Some(cursor) = self
+            .device
+            .room_sync_cursors()
+            .into_iter()
+            .find(|cursor| cursor.room_id == room_id)
+        else {
+            return self.sync_with_projection();
+        };
+        let options = RuntimeSyncOptions {
+            key_package_target_available: DEFAULT_KEY_PACKAGE_TARGET_AVAILABLE,
+            max_sync_pages_per_room: DEFAULT_MAX_SYNC_PAGES_PER_ROOM,
+        };
+        let owner = self.device.device_ref().clone();
+        let server_url = cursor.server_url.unwrap_or_else(|| self.server_url.clone());
+        let mut delivery = self.delivery_for(&server_url);
+        let mut projection = CoreSyncProjection::default();
+        match run_room_sync_tick(
+            &mut self.store,
+            &mut self.device,
+            &mut delivery,
+            &options,
+            room_id,
+        ) {
+            Ok(report) => projection.merge_report(report, &owner),
+            Err(error) => {
+                self.reload_persisted_device()?;
+                let quarantined_room_failure = matches!(
+                    &error,
+                    RuntimeWorkerError::Client(_)
+                        | RuntimeWorkerError::ClientStore(ClientStoreError::Client(_))
+                );
+                if quarantined_room_failure {
+                    projection.room_sync_failures.push(room_id.to_owned());
+                } else {
+                    return Err(runtime_error(error));
+                }
+            }
+        }
+        Ok(projection)
     }
 
     fn sync_with_projection(&mut self) -> Result<CoreSyncProjection, FiniteChatCoreError> {
@@ -10880,6 +11050,51 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing harness; run explicitly in release mode"]
+    fn app_runtime_activity_hint_with_many_rooms() {
+        const ROOMS: usize = 20;
+        const SAMPLES: usize = 10;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let core = CoreState::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("app").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "perf-targeted-hint".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let mut state = AppRuntimeState::new(core).unwrap();
+        for index in 0..ROOMS {
+            state
+                .create_room(format!("Performance room {index}"))
+                .unwrap();
+        }
+        let room_id = state.app.rooms[ROOMS / 2].room_id.clone();
+        let hint = SyncHintEvent::ActivityChanged {
+            room_id,
+            received_at_ms: NOW * 1_000,
+        };
+
+        state.apply_app_sync_hint(&hint).unwrap();
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            state.apply_app_sync_hint(&hint).unwrap();
+            samples.push(started.elapsed());
+        }
+        samples.sort();
+        let p50 = samples[samples.len() / 2];
+        let total = samples.iter().copied().sum::<Duration>();
+        println!(
+            "activity hint with {ROOMS} rooms: n={SAMPLES} p50={p50:?} average={:?} max={:?}",
+            total / SAMPLES as u32,
+            samples.last().unwrap()
+        );
+    }
+
+    #[test]
     fn server_contract_check_rejects_old_health_without_contract_version() {
         let health = HealthResponse {
             status: "ok".to_owned(),
@@ -13802,6 +14017,122 @@ mod tests {
                 .after_seq
                 > heartbeat_before_seq,
             "heartbeat reconciliation advances the durable room cursor"
+        );
+    }
+
+    #[test]
+    fn app_runtime_room_hint_syncs_only_target_and_heartbeat_recovers_other_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let agent_options = with_test_secret(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        });
+        let user_options = with_test_secret(OpenOptions {
+            data_dir: dir.path().join("user").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "user".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        });
+        let agent_runtime = FiniteChatRuntime::open(agent_options.clone()).unwrap();
+        let user_runtime = FiniteChatRuntime::open(user_options).unwrap();
+        let user_account_id = user_runtime.state().unwrap().identity.account_id;
+
+        let target_room_id = agent_runtime
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Targeted room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        add_runtime_member(
+            &agent_runtime,
+            &user_runtime,
+            &target_room_id,
+            test_profile(&user_account_id, "User"),
+        );
+        let recovery_room_id = agent_runtime
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Heartbeat recovery room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        add_runtime_member(
+            &agent_runtime,
+            &user_runtime,
+            &recovery_room_id,
+            test_profile(&user_account_id, "User"),
+        );
+        drop(agent_runtime);
+
+        let agent_core = CoreState::open(agent_options.clone()).unwrap();
+        let mut agent = AppRuntimeState::new(agent_core).unwrap();
+        let recovery_before = agent
+            .core
+            .device
+            .last_applied_seq(&recovery_room_id)
+            .unwrap();
+
+        user_runtime
+            .send_encoded_chat_message_and_wait(
+                target_room_id.clone(),
+                encode_text_message_payload("targeted delivery", None).unwrap(),
+                "targeted delivery".to_owned(),
+            )
+            .unwrap();
+        user_runtime
+            .send_encoded_chat_message_and_wait(
+                recovery_room_id.clone(),
+                encode_text_message_payload("heartbeat recovery", None).unwrap(),
+                "heartbeat recovery".to_owned(),
+            )
+            .unwrap();
+
+        let targeted = agent
+            .agent_bridge_apply_sync_hint(SyncHintEvent::RoomAdvanced {
+                room_id: target_room_id.clone(),
+                seq: u64::MAX,
+            })
+            .expect("a precise room hint syncs its target");
+        assert!(
+            targeted
+                .events
+                .iter()
+                .any(|event| event.room_id == target_room_id)
+        );
+        assert!(
+            targeted
+                .events
+                .iter()
+                .all(|event| event.room_id != recovery_room_id),
+            "the precise room hint must not consume another room"
+        );
+        assert_eq!(
+            agent
+                .core
+                .device
+                .last_applied_seq(&recovery_room_id)
+                .unwrap(),
+            recovery_before,
+            "the unhinted room keeps its durable cursor"
+        );
+        drop(agent);
+
+        let reopened_core = CoreState::open(agent_options).unwrap();
+        let mut reopened = AppRuntimeState::new(reopened_core).unwrap();
+        let recovered = reopened
+            .agent_bridge_apply_sync_hint(SyncHintEvent::Heartbeat)
+            .expect("heartbeat performs full reconciliation after restart");
+        assert!(
+            recovered
+                .events
+                .iter()
+                .any(|event| event.room_id == recovery_room_id)
         );
     }
 

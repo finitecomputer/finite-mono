@@ -136,19 +136,74 @@ runtime stays degraded-ready instead of bricking Chat.
 Deterministic regressions prove that an empty bridge sync is not wake-worthy and
 an initialized inbox does not create/open its Agent store.
 
+### P4 — precise sync hints triggered all-room network work
+
+- **Path:** `AppRuntimeCommand::ApplySyncHint` /
+  `AgentBridgeApplySyncHint` → `AppRuntimeState::runtime_tick` in
+  `finitechat/crates/finitechat-core/src/lib.rs`.
+- **Trigger before:** every non-heartbeat Electron hint and every resident
+  bridge hint, even though `RoomAdvanced` and `ActivityChanged` carry an exact
+  `room_id`.
+- **Cost before:** an activity change or durable entry in one room fetched
+  ephemeral activity for every connected room and ran the bounded MLS sync for
+  every joined room. Cost was **O(rooms)** network requests and crypto work for
+  an **O(1)** change.
+- **Measured evidence:** the ignored release harness creates 20 real encrypted
+  rooms and applies one room's `ActivityChanged` hint ten times.
+  - before: p50 **3.843 ms**, average **3.795 ms**, max **4.053 ms**;
+  - after: p50 **82.417 µs**, average **84.733 µs**, max **116.333 µs**;
+  - p50 improvement: approximately **46.6×** on this development machine.
+- **Smallest corrective boundary:** `RoomAdvanced` syncs only the named,
+  already-known room; `ActivityChanged` fetches only the named room's
+  ephemeral routes and performs no MLS sync. Unknown rooms and inbox hints
+  retain the full path.
+- **Recovery boundary:** resident startup, explicit poll, inbox processing,
+  and heartbeat reconciliation still sweep every room. A regression queues
+  messages in two rooms, proves a precise hint consumes only its target and
+  leaves the other durable cursor unchanged, restarts Core, then proves the
+  heartbeat recovers the unhinted room.
+
+Reproduce:
+
+```sh
+scripts/with-dev-env cargo test --release -p finitechat-core \
+  app_runtime_activity_hint_with_many_rooms -- --ignored --nocapture
+```
+
+### P5 — Electron relayed unchanged revisions into React
+
+- **Path:** `DaemonUpdateRelay.update` in
+  `finitechat/apps/electron-chat/electron/daemon-process.cjs`.
+- **Trigger before:** duplicate full-state deliveries, including Core
+  heartbeat responses and the SSE copy of a state already returned by a daemon
+  mutation.
+- **Cost before:** every duplicate crossed Electron IPC and replaced the React
+  root state, rerunning whole-state selectors and render reconciliation even
+  though `AppState.rev` had not changed.
+- **Evidence classification:** statically proven delivery count, not a
+  production timing measurement.
+- **Smallest corrective boundary:** suppress the same safe-integer revision
+  only within one daemon generation. A new generation clears the cached
+  revision and always delivers its first authoritative full state, even when
+  the numeric revision moves backward after restart.
+
 ## Correctness and regression boundary
 
 The optimization deliberately keeps these semantics:
 
 - sync hints remain advisory; Core still pulls and validates durable entries;
-- heartbeat reconciliation remains in place for missed-hint recovery;
+- precise room/activity hints narrow only unambiguous work;
+- startup, inbox, explicit-poll, and heartbeat reconciliation remain full
+  recovery boundaries;
 - startup still reconstructs the full projection from encrypted durable state;
 - a failed room still restores the last durable Device before any later room
   runs;
 - outbox retries retain the same idempotency material and restart behavior;
 - Hermes inbox durability, per-room cursors, event ordering, and ACK behavior
   are unchanged; and
-- the bridge stream's independent wire heartbeat remains active.
+- the bridge stream's independent wire heartbeat remains active; and
+- each Electron daemon generation still delivers its first authoritative full
+  state before revision deduplication begins.
 
 Focused tests must cover Core unit/integration behavior, Electron daemon HTTP
 behavior, CLI bridge unit/integration behavior, rustfmt, and clippy with

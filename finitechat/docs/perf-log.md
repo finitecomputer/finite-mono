@@ -342,5 +342,14 @@ June device-save/server-clone work. The full report is
   decrypt the 5,000-event recovery window; cold Hermes collection scanned it
   twice. Empty reconciliations no longer wake consumers, initialized inboxes
   return before store access, and cold initialization/recovery share one scan.
+- Exact room/activity sync hints previously ran activity fetches and MLS sync
+  across every connected room. The 20-room activity-hint harness measures p50
+  **3.843 ms → 82 µs** (approximately **46.6×**). Exact known-room hints now
+  do exact work; startup, inbox, explicit poll, and heartbeat remain full
+  reconciliation boundaries, including across restart.
+- Electron's main-process relay now suppresses duplicate safe-integer
+  `AppState.rev` values within one daemon generation, avoiding unchanged React
+  state replacement while still delivering the first authoritative state
+  after every daemon restart.
 - Finite Private limiter reserve/settle was intentionally deferred until an
   approved load result and rollout path select it.
