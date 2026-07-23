@@ -38,7 +38,7 @@ pub(crate) async fn replace_personal_agent_handler(
     let replacement_identity = request
         .agent_email
         .as_deref()
-        .map(|email| resolve_managed_agent_email(&state, email))
+        .map(|email| resolve_managed_agent_email(&state, email, &actor_id))
         .transpose()?;
     let replacement = match replacement_identity.as_ref() {
         Some(identity) => Some(UserId::new(identity.npub.clone())?),
