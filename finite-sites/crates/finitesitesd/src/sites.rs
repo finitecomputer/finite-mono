@@ -326,11 +326,11 @@ fn blob_response(
     status: StatusCode,
 ) -> Response {
     let etag = format!("\"{sha256}\"");
-    // Public output URLs are mutable across publishes. Keep their exact ETag
-    // validators, but require browsers and intermediaries to revalidate on
-    // every use so a prior release cannot remain fresh after a new publish.
+    // Output URLs are mutable across publishes. Cloudflare's default Browser
+    // Cache TTL can replace a shorter origin max-age for cacheable assets, so
+    // validators alone cannot keep an ordinary browser reload fresh.
     let cache_control = if site.visibility == finitesites_store::Visibility::Public {
-        "public, max-age=0, must-revalidate"
+        "no-store"
     } else {
         "private, no-store"
     };
