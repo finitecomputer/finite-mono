@@ -94,10 +94,11 @@ impl ServingEnginePool {
             .pop()
             .expect("permit guarantees an available serving engine");
         let available = Arc::clone(&self.available);
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let lease = ServingEngineLease {
                 engine: Some(engine),
                 available,
+                _permit: permit,
             };
             work(
                 lease
@@ -107,15 +108,14 @@ impl ServingEnginePool {
             )
         })
         .await
-        .map_err(|error| format!("serving engine task failed: {error}"));
-        drop(permit);
-        result
+        .map_err(|error| format!("serving engine task failed: {error}"))
     }
 }
 
 struct ServingEngineLease {
     engine: Option<Engine>,
     available: Arc<Mutex<Vec<Engine>>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl Drop for ServingEngineLease {
@@ -473,6 +473,60 @@ mod tests {
 
         release_tx.send(()).unwrap();
         slow.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serving_pool_keeps_permit_until_cancelled_blocking_work_returns() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = finitesites_store::Store::open(&directory.path().join("registry.db")).unwrap();
+        let blobs = finitesites_blob::BlobStore::open(&directory.path().join("blobs")).unwrap();
+        let engine = finitesites_engine::Engine::new(
+            store,
+            blobs,
+            [7; 32],
+            finitesites_engine::EngineConfig {
+                base_domain: "sites.test".to_string(),
+                document_base_domain: "docs.sites.test".to_string(),
+                site_url_scheme: "https".to_string(),
+                site_url_port: None,
+            },
+        );
+        let pool = Arc::new(ServingEnginePool::new(&engine, 1).unwrap());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slow_pool = Arc::clone(&pool);
+        let slow = tokio::spawn(async move {
+            slow_pool
+                .run(move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .await
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+
+        slow.abort();
+        assert!(slow.await.unwrap_err().is_cancelled());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                pool.run(|_| "must wait"),
+            )
+            .await
+            .is_err(),
+            "cancelling the async caller must not release the blocking worker's permit"
+        );
+
+        release_tx.send(()).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            pool.run(|_| "available again"),
+        )
+        .await
+        .expect("serving engine returns after cancelled blocking work finishes")
+        .unwrap();
+        assert_eq!(result, "available again");
     }
 
     #[test]
