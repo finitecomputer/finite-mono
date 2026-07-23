@@ -14,6 +14,10 @@ pub enum CliError {
     InvalidSigner(String),
     InvalidInput(String),
     Http(String),
+    /// A successful HTTP response could not be decoded as the expected JSON.
+    /// The request may have committed a mutation, so collaboration callers
+    /// render this as an indeterminate receipt rather than a clean failure.
+    HttpResponseDecode(String),
     /// An authoritative HTTP response from the Brain server. Unlike a
     /// transport error, this response is proof that the server rejected the
     /// request and must not be reported as indeterminate mutation state.
@@ -63,6 +67,9 @@ impl fmt::Display for CliError {
             Self::InvalidSigner(reason) => write!(f, "invalid local signer: {reason}"),
             Self::InvalidInput(reason) => write!(f, "invalid input: {reason}"),
             Self::Http(reason) => write!(f, "http request failed: {reason}"),
+            Self::HttpResponseDecode(reason) => {
+                write!(f, "invalid successful HTTP response: {reason}")
+            }
             Self::HttpStatus { status, body } => {
                 write!(f, "http request rejected with {status}: {}", body.trim())
             }

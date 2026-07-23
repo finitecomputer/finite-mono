@@ -136,7 +136,11 @@ pub(crate) fn signed_json_request_to_server(
     if response.body.trim().is_empty() {
         return Ok(serde_json::json!({ "status": "ok" }));
     }
-    serde_json::from_str(&response.body).map_err(CliError::from)
+    parse_success_json(&response.body)
+}
+
+fn parse_success_json(body: &str) -> Result<serde_json::Value, CliError> {
+    serde_json::from_str(body).map_err(|error| CliError::HttpResponseDecode(error.to_string()))
 }
 
 pub(crate) fn http_request(
@@ -171,10 +175,28 @@ pub(crate) fn http_request(
         Err(ureq::Error::Status(status, response)) => (status, response),
         Err(error) => return Err(CliError::Http(error.to_string())),
     };
-    let body = response
-        .into_string()
-        .map_err(|error| CliError::Http(error.to_string()))?;
+    let body = match response.into_string() {
+        Ok(body) => body,
+        Err(error) if !(200..300).contains(&status) => {
+            return Err(body_read_error(status, error.to_string()));
+        }
+        Err(error) => return Err(CliError::Http(error.to_string())),
+    };
     Ok(HttpResponse { status, body })
+}
+
+fn body_read_error(status: u16, error: String) -> CliError {
+    // Headers are authoritative even when the body stream is broken.
+    // Preserve the status so callers cannot misclassify a server rejection as
+    // transport uncertainty.
+    if !(200..300).contains(&status) {
+        CliError::HttpStatus {
+            status,
+            body: format!("response body could not be read: {error}"),
+        }
+    } else {
+        CliError::Http(error)
+    }
 }
 
 pub(crate) fn server_url_for_command(
@@ -402,5 +424,17 @@ mod tests {
             authorization_url_for_request("http://192.168.67.1:18790", "/_admin/brains", None,),
             "http://192.168.67.1:18790/_admin/brains"
         );
+    }
+
+    #[test]
+    fn malformed_success_body_is_typed_as_response_decode_uncertainty() {
+        let error = parse_success_json("{not-json").unwrap_err();
+        assert!(matches!(error, CliError::HttpResponseDecode(_)));
+    }
+
+    #[test]
+    fn body_read_failure_preserves_authoritative_non_success_status() {
+        let error = body_read_error(409, "connection reset".to_owned());
+        assert!(matches!(error, CliError::HttpStatus { status: 409, .. }));
     }
 }

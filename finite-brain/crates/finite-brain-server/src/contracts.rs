@@ -467,6 +467,17 @@ pub enum CollaborationFolderOutcome {
     Failed,
 }
 
+/// Public identity of a current Folder-key holder. The npub is safe to expose;
+/// a verified NIP-05 is included when the server has one recorded, never any
+/// key or grant plaintext.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationKeyHolder {
+    pub npub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
 /// One safe Folder result in a collaboration receipt.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -477,6 +488,8 @@ pub struct CollaborationFolderReceipt {
     pub outcome: CollaborationFolderOutcome,
     pub reason: Option<String>,
     pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_holders: Vec<CollaborationKeyHolder>,
 }
 
 /// Typed Organization Brain collaboration receipt shared by CLI and clients.

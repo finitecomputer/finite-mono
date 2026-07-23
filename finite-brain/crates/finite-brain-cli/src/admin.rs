@@ -13,7 +13,7 @@ use nostr::{Kind, Tag};
 use crate::{
     APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
     SessionFolderKeyring, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
-    normalize_folder_access, open_brain_session_folder_keys, read_agent_state,
+    normalize_folder_access, open_brain_session_folder_keys_for_collaboration, read_agent_state,
     read_working_tree_state, sign_event, signed_json_request, tag_vec, timestamp, unix_timestamp,
     write_working_tree_state,
 };
@@ -44,7 +44,10 @@ pub(crate) fn ensure_organization_admin(
             "collaborators ensure-admin requires an Organization Brain".to_owned(),
         ));
     }
-    let keyring = open_brain_session_folder_keys(env, args, brain_id)?;
+    // Collaboration is intentionally tolerant of one malformed grant: a
+    // usable grant for another Folder still produces a useful partial batch.
+    // Other commands retain the strict opener and fail closed.
+    let keyring = open_brain_session_folder_keys_for_collaboration(env, args, brain_id)?;
     let auth = load_signer(env)?;
     let mut folders = Vec::with_capacity(metadata.folders.len());
     let mut grants = Vec::new();
@@ -105,7 +108,7 @@ pub(crate) fn ensure_organization_admin(
     );
     match request {
         Ok(response) => Ok(response),
-        Err(CliError::Http(_)) => Ok(serde_json::json!({
+        Err(CliError::Http(_) | CliError::HttpResponseDecode(_)) => Ok(serde_json::json!({
             "brainId": brain_id,
             "targetNpub": target,
             "state": "indeterminate",

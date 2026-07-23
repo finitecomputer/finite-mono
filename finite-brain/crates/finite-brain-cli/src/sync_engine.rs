@@ -206,6 +206,30 @@ pub(crate) fn open_brain_session_folder_keys(
     Ok(keyring)
 }
 
+/// Open keys for the high-level collaboration operation. A damaged or
+/// undecryptable grant addressed to this signer is treated as an unavailable
+/// source key while other grants continue opening; the server receipt then
+/// reports the affected Folder as partial and names its current holders.
+pub(crate) fn open_brain_session_folder_keys_for_collaboration(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+) -> Result<SessionFolderKeyring, CliError> {
+    let path = format!("/_admin/brains/{brain_id}/export");
+    let response = signed_json_request(env, args, "GET", &path, None)?;
+    let export: CliEncryptedBrainExport = serde_json::from_value(response)?;
+    if export.brain.id != brain_id {
+        return Err(CliError::InvalidInput(format!(
+            "encrypted export returned brain {} while opening {brain_id}",
+            export.brain.id
+        )));
+    }
+    let auth = load_signer(env)?;
+    let mut keyring = SessionFolderKeyring::default();
+    open_export_folder_key_grants_into_session_tolerant(&auth, &export, &mut keyring)?;
+    Ok(keyring)
+}
+
 fn newly_readable_session_key_count(
     prior_tree_state: &finite_brain_core::portability::BrainWorkingTreeStateManifest,
     export: &CliEncryptedBrainExport,
@@ -828,6 +852,33 @@ fn open_export_folder_key_grants_into_session(
     Ok(opened_count)
 }
 
+fn open_export_folder_key_grants_into_session_tolerant(
+    auth: &crate::LocalSigner,
+    export: &CliEncryptedBrainExport,
+    session_keys: &mut SessionFolderKeyring,
+) -> Result<usize, CliError> {
+    let opened = opened_export_folder_key_grants_tolerant(auth, export);
+    let mut opened_count = 0;
+    for grant in opened {
+        let folder_key =
+            FolderKey::from_base64(&grant.folder_key).map_err(|_| CliError::GrantOpening {
+                brain_id: grant.brain_id.clone(),
+                folder_id: grant.folder_id.clone(),
+                key_version: grant.key_version,
+                reason: "opened grant did not contain a valid Folder Key".to_owned(),
+            })?;
+        if session_keys.insert(
+            grant.brain_id,
+            grant.folder_id,
+            grant.key_version,
+            folder_key,
+        ) {
+            opened_count += 1;
+        }
+    }
+    Ok(opened_count)
+}
+
 fn opened_export_folder_key_grants(
     auth: &crate::LocalSigner,
     export: &CliEncryptedBrainExport,
@@ -871,6 +922,41 @@ fn opened_export_folder_key_grants(
     }
 
     Ok(opened)
+}
+
+pub(crate) fn opened_export_folder_key_grants_tolerant(
+    auth: &crate::LocalSigner,
+    export: &CliEncryptedBrainExport,
+) -> Vec<CliFolderKeyGrantPlaintext> {
+    let keys = auth.keys.clone();
+    let recipient = match NostrPublicKey::parse(&auth.npub) {
+        Ok(recipient) => recipient,
+        Err(_) => return Vec::new(),
+    };
+    let validation = GiftWrapValidation::new(recipient);
+    export
+        .key_grants
+        .iter()
+        .filter(|grant| grant.recipient_npub == auth.npub)
+        .filter_map(|grant| {
+            let event = Event::from_json(grant.wrapped_event_json.clone()).ok()?;
+            let opened_wrap = open_gift_wrap(&keys, &event, &validation).ok()?;
+            let plaintext =
+                serde_json::from_str::<CliFolderKeyGrantPlaintext>(&opened_wrap.rumor.content)
+                    .ok()?;
+            if plaintext.version != "finite-folder-key-grant-v1"
+                || plaintext.brain_id != export.brain.id
+                || plaintext.folder_id != grant.folder_id
+                || plaintext.key_version != grant.key_version
+                || plaintext.issuer_npub != grant.issuer_npub
+                || plaintext.recipient_npub != auth.npub
+            {
+                return None;
+            }
+            FolderKey::from_base64(&plaintext.folder_key).ok()?;
+            Some(plaintext)
+        })
+        .collect()
 }
 
 fn push_local_working_tree_changes(
@@ -2542,25 +2628,25 @@ struct CliFolderObjectAssetPlaintext {
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliEncryptedBrainExport {
-    brain: CliExportBrain,
-    folders: Vec<CliExportFolder>,
-    key_grants: Vec<CliFolderKeyGrant>,
-    access_state: CliExportAccessState,
+pub(crate) struct CliEncryptedBrainExport {
+    pub(crate) brain: CliExportBrain,
+    pub(crate) folders: Vec<CliExportFolder>,
+    pub(crate) key_grants: Vec<CliFolderKeyGrant>,
+    pub(crate) access_state: CliExportAccessState,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliExportBrain {
-    id: String,
-    kind: String,
-    name: String,
-    owner_user_id: Option<String>,
+pub(crate) struct CliExportBrain {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) owner_user_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliExportFolder {
+pub(crate) struct CliExportFolder {
     id: String,
     path: String,
     access: String,
@@ -2571,7 +2657,7 @@ struct CliExportFolder {
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliFolderKeyGrant {
+pub(crate) struct CliFolderKeyGrant {
     folder_id: String,
     key_version: u32,
     issuer_npub: String,
@@ -2581,9 +2667,9 @@ struct CliFolderKeyGrant {
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliExportAccessState {
-    members: Vec<String>,
-    admins: Vec<String>,
+pub(crate) struct CliExportAccessState {
+    pub(crate) members: Vec<String>,
+    pub(crate) admins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -2653,14 +2739,14 @@ struct CliMountedFolder {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CliFolderKeyGrantPlaintext {
-    version: String,
-    brain_id: String,
-    folder_id: String,
-    key_version: u32,
-    folder_key: String,
-    issuer_npub: String,
-    recipient_npub: String,
+pub(crate) struct CliFolderKeyGrantPlaintext {
+    pub(crate) version: String,
+    pub(crate) brain_id: String,
+    pub(crate) folder_id: String,
+    pub(crate) key_version: u32,
+    pub(crate) folder_key: String,
+    pub(crate) issuer_npub: String,
+    pub(crate) recipient_npub: String,
 }
 
 #[cfg(test)]

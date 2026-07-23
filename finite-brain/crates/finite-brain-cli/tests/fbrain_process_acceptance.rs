@@ -10,18 +10,37 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use finite_nostr::NostrPublicKey;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-fn spawn_real_brain_server() -> (
+fn spawn_real_brain_server(
+    target_npub: &str,
+) -> (
     String,
     tokio::sync::oneshot::Sender<()>,
     thread::JoinHandle<()>,
 ) {
     let (url_tx, url_rx) = mpsc::channel();
+    let nip05_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let nip05_url = format!("http://{}", nip05_listener.local_addr().unwrap());
+    let target_hex = NostrPublicKey::parse(target_npub).unwrap().to_hex();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = nip05_listener.accept() {
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let body = format!(r#"{{"names":{{"collaborator":"{target_hex}"}}}}"#);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let thread = thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -32,6 +51,7 @@ fn spawn_real_brain_server() -> (
                 finite_brain_store::BrainStore::open_in_memory().unwrap(),
                 url.clone(),
             )
+            .with_identity_authority_url(nip05_url)
             .with_auth_clock(OffsetDateTime::now_utc().unix_timestamp() as u64, 300);
             let router = finite_brain_server::router_with_state(state);
             url_tx.send(url).unwrap();
@@ -269,7 +289,15 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         .success()
     );
 
-    let (server_url, shutdown, server_thread) = spawn_real_brain_server();
+    let signer_b = run(&home_b, &home_b, &["signer", "public-key", "--json"]);
+    assert!(
+        signer_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signer_b.stderr)
+    );
+    let signer_b: Value = serde_json::from_slice(&signer_b.stdout).unwrap();
+    let target_npub = signer_b["npub"].as_str().unwrap().to_owned();
+    let (server_url, shutdown, server_thread) = spawn_real_brain_server(&target_npub);
     let run = |home: &Path, cwd: &Path, args: &[&str]| run_at_current_time(home, cwd, args);
     let create = run(
         &home_a,
@@ -351,14 +379,7 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         String::from_utf8_lossy(&synced_a.stderr)
     );
 
-    let signer_b = run(&home_b, &home_b, &["signer", "public-key", "--json"]);
-    assert!(
-        signer_b.status.success(),
-        "{}",
-        String::from_utf8_lossy(&signer_b.stderr)
-    );
-    let signer_b: Value = serde_json::from_slice(&signer_b.stdout).unwrap();
-    let target = signer_b["npub"].as_str().unwrap();
+    let target = "collaborator@finite.vip";
     let ensure = run(
         &home_a,
         &tree_a,

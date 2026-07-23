@@ -2194,7 +2194,33 @@ fn collaborators<W: Write>(
                                 .get("reason")
                                 .and_then(serde_json::Value::as_str)
                                 .unwrap_or("unknown");
-                            writeln!(output, "- {path}: {outcome} ({reason})")?;
+                            let holders = folder
+                                .get("keyHolders")
+                                .and_then(serde_json::Value::as_array)
+                                .map(|holders| {
+                                    holders
+                                        .iter()
+                                        .filter_map(|holder| {
+                                            holder
+                                                .get("email")
+                                                .and_then(serde_json::Value::as_str)
+                                                .or_else(|| {
+                                                    holder
+                                                        .get("npub")
+                                                        .and_then(serde_json::Value::as_str)
+                                                })
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                })
+                                .filter(|holders| !holders.is_empty())
+                                .unwrap_or_else(|| {
+                                    "no readable current holder identity".to_owned()
+                                });
+                            writeln!(
+                                output,
+                                "- {path}: {outcome} ({reason}); current key holder(s): {holders}; one of these holders can retry"
+                            )?;
                         }
                     }
                 }
@@ -5420,6 +5446,46 @@ mod tests {
         assert!(!migrated_body.contains("localFolderKeys"));
         assert!(!migrated_body.contains("unlockedFolders"));
         assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn collaboration_grant_opening_skips_one_malformed_grant_and_keeps_usable_keys() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let env = env_for(&tmp);
+        let auth = load_signer(&env).unwrap();
+        let key = FolderKey::from_bytes([17; 32]);
+        let valid = export_grant_for_test(&env, "brain", "usable", 1, &key, &auth.npub);
+        let malformed = serde_json::json!({
+            "folderId": "broken",
+            "keyVersion": 1,
+            "issuerNpub": auth.npub,
+            "recipientNpub": auth.npub,
+            "wrappedEventJson": "not-a-nostr-event"
+        });
+        let export = CliEncryptedBrainExport {
+            brain: CliExportBrain {
+                id: "brain".to_owned(),
+                kind: "organization".to_owned(),
+                name: "Brain".to_owned(),
+                owner_user_id: None,
+            },
+            folders: vec![],
+            key_grants: vec![
+                serde_json::from_value(valid).unwrap(),
+                serde_json::from_value(malformed).unwrap(),
+            ],
+            access_state: CliExportAccessState {
+                members: vec![],
+                admins: vec![],
+            },
+        };
+        let opened = opened_export_folder_key_grants_tolerant(&auth, &export);
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].folder_id, "usable");
     }
 
     #[test]

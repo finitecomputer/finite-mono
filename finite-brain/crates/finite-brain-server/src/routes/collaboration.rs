@@ -5,6 +5,36 @@ use crate::*;
 pub(crate) const MAX_COLLABORATION_FOLDERS: usize = 1_000;
 pub(crate) const MAX_COLLABORATION_GRANTS: usize = 1_000;
 
+fn current_key_holders(
+    state: &ServerState,
+    stored: &StoredBrain,
+    folder_id: &FolderId,
+    key_version: u32,
+) -> Result<Vec<CollaborationKeyHolder>, ApiError> {
+    let mut npubs = stored
+        .grants
+        .iter()
+        .filter(|grant| grant.folder_id == *folder_id && grant.key_version == key_version)
+        .map(|grant| grant.issuer_npub.clone())
+        .collect::<Vec<_>>();
+    npubs.sort();
+    npubs.dedup();
+    let aliases = {
+        let store = state.store.lock().map_err(lock_error)?;
+        store.load_identity_aliases(&npubs)?
+    };
+    Ok(npubs
+        .into_iter()
+        .map(|npub| CollaborationKeyHolder {
+            email: aliases
+                .iter()
+                .find(|alias| alias.npub == npub)
+                .and_then(|alias| alias.preferred_nip05.clone()),
+            npub: npub.to_string(),
+        })
+        .collect())
+}
+
 /// Converge one Organization Brain collaborator to administrator plus the
 /// current encrypted Folder Key Grants supplied by the trusted client.
 pub(crate) async fn ensure_organization_admin_handler(
@@ -117,6 +147,7 @@ pub(crate) async fn ensure_organization_admin_handler(
                     outcome: CollaborationFolderOutcome::Failed,
                     reason: Some("folderMissingFromSnapshot".to_owned()),
                     retryable: true,
+                    key_holders: Vec::new(),
                 });
                 continue;
             };
@@ -128,6 +159,7 @@ pub(crate) async fn ensure_organization_admin_handler(
                     outcome: CollaborationFolderOutcome::StaleVersion,
                     reason: Some("currentKeyVersionChanged".to_owned()),
                     retryable: true,
+                    key_holders: Vec::new(),
                 });
                 continue;
             }
@@ -144,6 +176,7 @@ pub(crate) async fn ensure_organization_admin_handler(
                     outcome: CollaborationFolderOutcome::AlreadyReady,
                     reason: None,
                     retryable: false,
+                    key_holders: Vec::new(),
                 });
                 continue;
             }
@@ -155,6 +188,7 @@ pub(crate) async fn ensure_organization_admin_handler(
                     outcome: CollaborationFolderOutcome::MissingSourceKey,
                     reason: Some("sourceKeyUnavailable".to_owned()),
                     retryable: true,
+                    key_holders: Vec::new(),
                 });
                 continue;
             };
@@ -166,6 +200,7 @@ pub(crate) async fn ensure_organization_admin_handler(
                     outcome: CollaborationFolderOutcome::StaleVersion,
                     reason: Some("submittedGrantVersionChanged".to_owned()),
                     retryable: true,
+                    key_holders: Vec::new(),
                 });
                 continue;
             }
@@ -192,6 +227,7 @@ pub(crate) async fn ensure_organization_admin_handler(
                 outcome: CollaborationFolderOutcome::Granted,
                 reason: None,
                 retryable: false,
+                key_holders: Vec::new(),
             });
             accepted.push((
                 grant.clone(),
@@ -237,6 +273,7 @@ pub(crate) async fn ensure_organization_admin_handler(
                     outcome: CollaborationFolderOutcome::Failed,
                     reason: Some("folderRemovedSinceSnapshot".to_owned()),
                     retryable: true,
+                    key_holders: Vec::new(),
                 },
             );
             continue;
@@ -251,6 +288,12 @@ pub(crate) async fn ensure_organization_admin_handler(
                     outcome: CollaborationFolderOutcome::StaleVersion,
                     reason: Some("currentKeyVersionChanged".to_owned()),
                     retryable: true,
+                    key_holders: current_key_holders(
+                        &state,
+                        &final_stored,
+                        &folder.id,
+                        folder.current_key_version,
+                    )?,
                 },
             );
             continue;
@@ -286,9 +329,23 @@ pub(crate) async fn ensure_organization_admin_handler(
                 reason: if ready {
                     None
                 } else {
-                    Some("postconditionMissingCurrentGrant".to_owned())
+                    provisional
+                        .iter()
+                        .find(|outcome| outcome.folder_id == folder.id.to_string())
+                        .and_then(|outcome| outcome.reason.clone())
+                        .or_else(|| Some("postconditionMissingCurrentGrant".to_owned()))
                 },
                 retryable: !ready,
+                key_holders: if ready {
+                    Vec::new()
+                } else {
+                    current_key_holders(
+                        &state,
+                        &final_stored,
+                        &folder.id,
+                        folder.current_key_version,
+                    )?
+                },
             },
         );
     }
@@ -303,6 +360,12 @@ pub(crate) async fn ensure_organization_admin_handler(
                     outcome: CollaborationFolderOutcome::Failed,
                     reason: Some("folderAddedSinceSnapshot".to_owned()),
                     retryable: true,
+                    key_holders: current_key_holders(
+                        &state,
+                        &final_stored,
+                        &folder.id,
+                        folder.current_key_version,
+                    )?,
                 },
             );
         }

@@ -7078,6 +7078,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signed_organization_collaboration_is_complete_idempotent_and_partial_safe() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let target = npub(&target_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let folders = serde_json::json!([
+            {"folderId":"getting-started","keyVersion":1,"path":"getting-started"},
+            {"folderId":"restricted","keyVersion":1,"path":"restricted"}
+        ]);
+        let body = serde_json::json!({
+            "targetNpub": target,
+            "folders": folders,
+            "grants": [
+                {"folderId":"getting-started", "id":"collab-getting-started", "keyVersion":1,
+                 "recipientNpub":target, "wrappedEventJson":gift_wrap_event_json(&target),
+                 "createdAt":"2026-06-23T00:00:00.000Z", "accessChangeEvent":admin_event(&admin_keys,"acme","collab-getting-started",AdminAccessAction::GrantFolderAccess,Some("getting-started"),Some(&target),Some(1))},
+                {"folderId":"restricted", "id":"collab-restricted", "keyVersion":1,
+                 "recipientNpub":target, "wrappedEventJson":gift_wrap_event_json(&target),
+                 "createdAt":"2026-06-23T00:00:00.000Z", "accessChangeEvent":admin_event(&admin_keys,"acme","collab-restricted",AdminAccessAction::GrantFolderAccess,Some("restricted"),Some(&target),Some(1))}
+            ],
+            "accessChangeEvent":admin_event(&admin_keys,"acme","collab-admin",AdminAccessAction::AddAdmin,None,Some(&target),None)
+        }).to_string();
+        let first = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(body.clone()),
+            TEST_NOW,
+        )
+        .await;
+        let first_status = first.status();
+        let first_text = read_text(first).await;
+        assert_eq!(first_status, StatusCode::OK, "{first_text}");
+        let first: EnsureOrganizationAdminResponse = serde_json::from_str(&first_text).unwrap();
+        assert_eq!(first.state, CollaborationReceiptState::Complete);
+        assert_eq!(first.ready_count, 2);
+        let sequence = latest_sync_sequence(&router, &admin_keys, "acme").await;
+        let retry = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retry: EnsureOrganizationAdminResponse = read_json(retry).await;
+        assert_eq!(retry.state, CollaborationReceiptState::Complete);
+        assert!(
+            retry
+                .folders
+                .iter()
+                .all(|folder| folder.outcome == CollaborationFolderOutcome::AlreadyReady)
+        );
+        assert_eq!(
+            latest_sync_sequence_at(&router, &admin_keys, "acme", TEST_NOW + 2).await,
+            sequence
+        );
+
+        let partial_target = npub(&Keys::generate());
+        let partial_body = serde_json::json!({
+            "targetNpub": partial_target,
+            "folders": folders,
+            "grants": [],
+            "accessChangeEvent": admin_event(&admin_keys,"acme","collab-partial",AdminAccessAction::AddAdmin,None,Some(&partial_target),None)
+        }).to_string();
+        let partial = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(partial_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(partial.status(), StatusCode::OK);
+        let partial: EnsureOrganizationAdminResponse = read_json(partial).await;
+        assert_eq!(partial.state, CollaborationReceiptState::Partial);
+        assert!(
+            partial
+                .folders
+                .iter()
+                .any(|folder| folder.reason.as_deref() == Some("sourceKeyUnavailable"))
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_organization_collaboration_rejects_non_admin_and_malformed_evidence() {
+        let admin_keys = Keys::generate();
+        let actor_keys = Keys::generate();
+        let target = npub(&Keys::generate());
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let valid_body = serde_json::json!({
+            "targetNpub": target,
+            "folders": [],
+            "grants": [],
+            "accessChangeEvent": admin_event(&actor_keys,"acme","collab-denied",AdminAccessAction::AddAdmin,None,Some(&target),None)
+        })
+        .to_string();
+        let denied = authed_request(
+            router.clone(),
+            &actor_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(valid_body),
+            TEST_NOW,
+        )
+        .await;
+        let denied_status = denied.status();
+        let denied_text = read_text(denied).await;
+        assert_eq!(denied_status, StatusCode::FORBIDDEN, "{denied_text}");
+        let malformed_body = serde_json::json!({
+            "targetNpub": target,
+            "folders": [],
+            "grants": [],
+            "accessChangeEvent": {}
+        })
+        .to_string();
+        let malformed = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(malformed_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn finish_setup_route_repairs_empty_setup_incomplete_folder() {
         let admin_keys = Keys::generate();
         let state = test_state();
