@@ -9,7 +9,7 @@ use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use finitesites_engine::{Engine, FoundFile};
-use finitesites_store::{SiteRecord, Visibility};
+use finitesites_store::SiteRecord;
 use pulldown_cmark::{Event, Options, Parser, html};
 use sha2::Digest as _;
 
@@ -235,7 +235,20 @@ fn rendered_page_response(
     headers: &HeaderMap,
     method: &Method,
 ) -> Response {
-    let etag = format!("\"doc-{}\"", page.sha256);
+    let bytes = match engine.read_blob(&page.sha256) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("finitesitesd document blob error: {error}");
+            return platform_html(StatusCode::INTERNAL_SERVER_ERROR, pages::not_found());
+        }
+    };
+    let markdown = String::from_utf8_lossy(&bytes);
+    let html_body = render_markdown(&markdown);
+    let page_html = document_shell(site, pages, page, &html_body);
+    // The representation includes navigation derived from every Markdown
+    // page, so the page blob alone is not a valid cache validator.
+    let digest = sha2::Sha256::digest(page_html.as_bytes());
+    let etag = format!("\"doc-{}\"", finitesites_proto::hex::encode(&digest));
     let client_etag = headers
         .get(IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok());
@@ -247,17 +260,6 @@ fn rendered_page_response(
             .body(Body::empty())
             .expect("document response builds");
     }
-
-    let bytes = match engine.read_blob(&page.sha256) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("finitesitesd document blob error: {error}");
-            return platform_html(StatusCode::INTERNAL_SERVER_ERROR, pages::not_found());
-        }
-    };
-    let markdown = String::from_utf8_lossy(&bytes);
-    let html_body = render_markdown(&markdown);
-    let page_html = document_shell(site, pages, page, &html_body);
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
@@ -513,8 +515,10 @@ fn document_shell(
 }
 
 fn cache_control(site: &SiteRecord) -> &'static str {
-    if site.visibility == Visibility::Public {
-        "public, max-age=0, must-revalidate"
+    // Document routes and assets are mutable across publishes. Keep them
+    // uncacheable until the edge is proven to preserve origin validators.
+    if site.visibility == finitesites_store::Visibility::Public {
+        "no-store"
     } else {
         "private, no-store"
     }
@@ -815,7 +819,7 @@ mod tests {
             name: "design-docs".to_string(),
             owner_pubkey: "owner".to_string(),
             status: SiteStatus::Published,
-            visibility: Visibility::Public,
+            visibility: finitesites_store::Visibility::Public,
             active_version_id: Some("version_test".to_string()),
             active_version_number: Some(1),
             active_version_spa: false,
