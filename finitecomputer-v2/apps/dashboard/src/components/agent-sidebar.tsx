@@ -1,11 +1,9 @@
 "use client";
 
 import type { CSSProperties, FormEvent, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  ArchiveIcon,
-  ArchiveRestoreIcon,
   ChevronRightIcon,
   HashIcon,
   MessageSquarePlusIcon,
@@ -72,31 +70,11 @@ export function AgentSidebar({
   const [collapsedTopicKeys, setCollapsedTopicKeys] = useState<Set<string>>(
     () => new Set()
   );
-  const [expandedArchiveKeys, setExpandedArchiveKeys] = useState<Set<string>>(
-    () => new Set()
-  );
-  const [archivedChatKeys, setArchivedChatKeys] = useState<Set<string>>(
-    () => new Set()
-  );
   const [renameTarget, setRenameTarget] = useState<{
     topic: HostedChatTopic;
     chat: HostedChatSummary;
   } | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
-
-  useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(archivedChatsStorageKey(machineId));
-      const parsed: unknown = stored ? JSON.parse(stored) : [];
-      setArchivedChatKeys(new Set(
-        Array.isArray(parsed)
-          ? parsed.filter((value): value is string => typeof value === "string")
-          : []
-      ));
-    } catch {
-      setArchivedChatKeys(new Set());
-    }
-  }, [machineId]);
 
   const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id ?? null;
   const topics = useMemo(
@@ -117,6 +95,8 @@ export function AgentSidebar({
     setBusy(true);
     try {
       const canNavigateImmediately = "OpenTopic" in action || "OpenChat" in action;
+      const navigatesAfterSuccess =
+        "CreateTopic" in action || "StartTopicChatIntent" in action;
       const preservesMobileSidebar = "CreateTopic" in action;
       const pending = dispatch(action);
       if (canNavigateImmediately && !pathname.endsWith("/chat")) {
@@ -125,7 +105,7 @@ export function AgentSidebar({
       if (canNavigateImmediately) onMobileOpenChange(false);
       const next = await pending;
       setActionError(null);
-      if (!canNavigateImmediately) {
+      if (navigatesAfterSuccess) {
         if (!pathname.endsWith("/chat")) {
           router.push(`/dashboard/machines/${encodeURIComponent(machineId)}/chat`);
         }
@@ -159,39 +139,6 @@ export function AgentSidebar({
         next.delete(topicKey);
       } else {
         next.add(topicKey);
-      }
-      return next;
-    });
-  }
-
-  function toggleArchiveExpanded(topicKey: string) {
-    setExpandedArchiveKeys((current) => {
-      const next = new Set(current);
-      if (next.has(topicKey)) {
-        next.delete(topicKey);
-      } else {
-        next.add(topicKey);
-      }
-      return next;
-    });
-  }
-
-  function setChatArchived(topic: HostedChatTopic, chat: HostedChatSummary, archived: boolean) {
-    setArchivedChatKeys((current) => {
-      const next = new Set(current);
-      const key = chatArchiveKey(topic, chat);
-      if (archived) {
-        next.add(key);
-      } else {
-        next.delete(key);
-      }
-      try {
-        window.localStorage.setItem(
-          archivedChatsStorageKey(machineId),
-          JSON.stringify([...next])
-        );
-      } catch {
-        // Archiving still works for this session when local storage is unavailable.
       }
       return next;
     });
@@ -319,15 +266,7 @@ export function AgentSidebar({
           {topics.map((topic) => {
             const topicKey = `${topic.room_id}:${topic.topic_id}`;
             const topicBodyId = `finite-chat-topic-${safeDomId(topicKey)}`;
-            const archiveBodyId = `${topicBodyId}-archive`;
             const topicCollapsed = collapsedTopicKeys.has(topicKey);
-            const archiveExpanded = expandedArchiveKeys.has(topicKey);
-            const visibleChats = topic.chats.filter(
-              (chat) => !archivedChatKeys.has(chatArchiveKey(topic, chat))
-            );
-            const archivedChats = topic.chats.filter(
-              (chat) => archivedChatKeys.has(chatArchiveKey(topic, chat))
-            );
             return (
               <div className="finite-chat__folder" key={topicKey}>
                 <div className="finite-chat__folder-header">
@@ -365,45 +304,16 @@ export function AgentSidebar({
                   className="finite-chat__folder-body"
                   hidden={topicCollapsed}
                 >
-                  {visibleChats.map((chat) => (
+                  {topic.chats.map((chat) => (
                     <ChatRow
                       key={chat.chat_id}
                       active={topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId}
-                      archived={false}
                       chat={chat}
                       disabled={busy}
-                      onArchiveChange={(archived) => setChatArchived(topic, chat, archived)}
                       onOpen={() => openChat(topic, chat)}
                       onRename={() => openRename(topic, chat)}
                     />
                   ))}
-                  {archivedChats.length > 0 ? (
-                    <div className="finite-chat__archive-group">
-                      <button
-                        type="button"
-                        className="finite-chat__archive-toggle"
-                        aria-controls={archiveBodyId}
-                        aria-expanded={archiveExpanded}
-                        onClick={() => toggleArchiveExpanded(topicKey)}
-                      >
-                        <span>Archive</span>
-                      </button>
-                      <div id={archiveBodyId} hidden={!archiveExpanded}>
-                        {archivedChats.map((chat) => (
-                          <ChatRow
-                            key={chat.chat_id}
-                            active={topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId}
-                            archived
-                            chat={chat}
-                            disabled={busy}
-                            onArchiveChange={(archived) => setChatArchived(topic, chat, archived)}
-                            onOpen={() => openChat(topic, chat)}
-                            onRename={() => openRename(topic, chat)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
               </div>
             );
@@ -490,18 +400,14 @@ export function AgentSidebar({
 
 function ChatRow({
   active,
-  archived,
   chat,
   disabled,
-  onArchiveChange,
   onOpen,
   onRename,
 }: {
   active: boolean;
-  archived: boolean;
   chat: HostedChatSummary;
   disabled: boolean;
-  onArchiveChange: (archived: boolean) => void;
   onOpen: () => void;
   onRename: () => void;
 }) {
@@ -520,29 +426,15 @@ function ChatRow({
         </span>
       </button>
       <div className="finite-chat__thread-actions">
-        {!archived ? (
-          <button
-            type="button"
-            className="finite-chat__thread-action"
-            aria-label={`Rename ${title}`}
-            title="Rename chat"
-            disabled={disabled}
-            onClick={onRename}
-          >
-            <PencilIcon className="size-3.5" aria-hidden />
-          </button>
-        ) : null}
         <button
           type="button"
           className="finite-chat__thread-action"
-          aria-label={archived ? `Unarchive ${title}` : `Archive ${title}`}
-          title={archived ? "Unarchive chat" : "Archive chat"}
+          aria-label={`Rename ${title}`}
+          title="Rename chat"
           disabled={disabled}
-          onClick={() => onArchiveChange(!archived)}
+          onClick={onRename}
         >
-          {archived
-            ? <ArchiveRestoreIcon className="size-3.5" aria-hidden />
-            : <ArchiveIcon className="size-3.5" aria-hidden />}
+          <PencilIcon className="size-3.5" aria-hidden />
         </button>
       </div>
     </div>
@@ -567,12 +459,4 @@ function topicColorStyle(title: string): CSSProperties {
 
 function safeDomId(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]/gu, "-");
-}
-
-function chatArchiveKey(topic: HostedChatTopic, chat: HostedChatSummary) {
-  return `${topic.room_id}:${topic.topic_id}:${chat.chat_id}`;
-}
-
-function archivedChatsStorageKey(machineId: string) {
-  return `finite.chat.archived-chats.${machineId}`;
 }

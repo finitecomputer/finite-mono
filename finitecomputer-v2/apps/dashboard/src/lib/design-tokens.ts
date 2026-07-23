@@ -42,7 +42,6 @@ export const OCEAN_TOKENS: DesignTokenEntry[] = [
   { name: "radius-segmented", cssVar: "--radius-segmented", group: "radius", description: "Segmented controls" },
   { name: "radius-badge", cssVar: "--radius-badge", group: "radius", description: "Badges" },
   { name: "radius-button", cssVar: "--radius-button", group: "radius", description: "Buttons" },
-  { name: "radius-dialog", cssVar: "--radius-dialog", group: "radius", description: "Dialogs and modal surfaces" },
   { name: "size-control", cssVar: "--size-control", group: "size", description: "Icon controls" },
   { name: "size-control-composer", cssVar: "--size-control-composer", group: "size", description: "Composer controls" },
 ];
