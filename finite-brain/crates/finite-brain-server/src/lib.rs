@@ -2870,8 +2870,11 @@ mod tests {
         assert!(client_body.contains("sidebar-primary-nav"));
         assert!(!client_body.contains("app-ribbon"));
         assert!(client_body.contains("file-sidebar"));
-        assert!(client_body.contains("Connect signer"));
-        assert!(client_body.contains("Session locked"));
+        assert!(client_body.contains("Connect securely"));
+        assert!(client_body.contains("Brain locked"));
+        assert!(!client_body.contains("Connect signer"));
+        assert!(!client_body.contains("Connect account"));
+        assert!(!client_body.contains("Session locked"));
         assert!(client_body.contains("resumeSessionButton"));
         assert!(client_body.contains("lockSessionButton"));
         assert!(!client_body.contains("Open accessible brain"));

@@ -2126,6 +2126,138 @@ button.settings-nav-item.active {
   min-height: 40px;
 }
 
+.settings-access-section .access-field,
+.settings-invitations-section .access-field {
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.settings-access-section .access-field input,
+.settings-access-section .access-inline-field input,
+.settings-invitations-section .access-field input,
+.settings-invitations-section .access-inline-field input {
+  min-height: 40px;
+}
+
+.settings-access-section .access-add-button,
+.settings-invitations-section .access-add-button {
+  min-height: 40px;
+}
+
+.settings-folder-choices {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.settings-folder-choices legend {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.settings-folder-choice-list {
+  display: grid;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--access-surface-soft);
+  box-shadow: var(--shadow-access-ring);
+}
+
+.settings-folder-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 9px 11px;
+  color: var(--access-text);
+  cursor: pointer;
+}
+
+.settings-folder-choice + .settings-folder-choice {
+  border-top: 1px solid var(--access-border);
+}
+
+.settings-folder-choice input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--access-accent);
+}
+
+.settings-folder-choice span {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-access-section .brain-access-action-grid,
+.settings-invitations-section .brain-access-action-grid {
+  gap: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--access-surface-soft);
+  box-shadow: var(--shadow-access-ring);
+}
+
+.settings-access-section .brain-access-option,
+.settings-invitations-section .brain-access-option {
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 14px;
+}
+
+.settings-access-section .brain-access-option.primary,
+.settings-invitations-section .brain-access-option.primary {
+  background: transparent;
+  box-shadow: none;
+}
+
+.settings-access-section .brain-access-option + .brain-access-option,
+.settings-invitations-section .brain-access-option + .brain-access-option {
+  border-top: 1px solid var(--access-border);
+}
+
+.settings-access-section .brain-access-option-heading h4,
+.settings-invitations-section .brain-access-option-heading h4 {
+  color: var(--access-text);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.settings-access-section #brainPeopleActionPanel .access-inline-field {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.settings-access-section #brainPeopleActionPanel .access-inline-label {
+  grid-column: 1 / -1;
+}
+
+.settings-access-section #brainPeopleActionPanel .access-add-button {
+  width: auto;
+  min-width: 112px;
+  white-space: nowrap;
+}
+
+.settings-invitations-section #brainInvitationPanel .access-button-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .settings-invitation-copy {
   margin: 0 0 12px;
   line-height: 1.45;
@@ -2211,46 +2343,99 @@ button.settings-nav-item.active {
   padding: 16px;
 }
 
-.settings-section .session-security-status {
+.settings-health-section {
+  gap: 16px;
+}
+
+.settings-health-overview {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--surface-soft);
+  box-shadow: var(--shadow-control);
+}
+
+.settings-health-row {
   display: grid;
-  gap: 14px;
-  border-bottom: 0;
-  padding: 16px;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+}
+
+.settings-health-row + .settings-health-row {
+  border-top: 1px solid var(--line);
+}
+
+.settings-health-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--surface-strong);
+  color: var(--muted);
+}
+
+.settings-health-icon .icon {
+  width: 17px;
+  height: 17px;
+}
+
+.settings-health-icon-privacy {
+  color: var(--status-ready);
 }
 
 .settings-section .session-security-copy {
   display: grid;
-  gap: 5px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .settings-section .session-security-copy strong {
+  color: var(--text);
   font-size: 14px;
 }
 
-.settings-section .session-security-copy span {
+.settings-section .session-security-copy > span:last-child {
   position: static;
   width: auto;
   height: auto;
   overflow: visible;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.4;
   clip: auto;
   white-space: normal;
 }
 
 .settings-section .session-security-copy strong::before {
-  width: 6px;
-  height: 6px;
-  margin-right: 7px;
+  display: none;
 }
 
-.settings-section .session-security-status button {
-  justify-self: start;
+.settings-row-label {
+  color: var(--soft);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.settings-section .settings-health-row button {
+  justify-self: end;
+  min-width: 116px;
   min-height: 40px;
-  min-width: 142px;
 }
 
-.settings-section .session-security-status button:disabled {
+.settings-health-row #resumeSessionButton {
+  border-color: transparent;
+  background: var(--action-primary-bg);
+  color: var(--action-primary-text);
+}
+
+.settings-section #resumeSessionButton:disabled {
   opacity: 1;
   border-color: transparent;
   background: var(--surface-strong);
@@ -2263,11 +2448,11 @@ button.settings-nav-item.active {
   align-items: flex-start;
   gap: 10px;
   min-width: 0;
-  border: 1px solid var(--status-warning-border);
-  border-radius: 10px;
-  background: var(--status-warning-bg);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--muted);
-  padding: 12px;
+  padding: 0 2px;
 }
 
 .settings-info-card p {
@@ -2277,7 +2462,7 @@ button.settings-nav-item.active {
 .settings-info-icon {
   display: inline-flex;
   flex: 0 0 auto;
-  color: var(--status-warning);
+  color: var(--soft);
 }
 
 .settings-info-icon .icon {
@@ -2286,25 +2471,18 @@ button.settings-nav-item.active {
 }
 
 .settings-recovery-note {
-  border-color: var(--line-strong);
-  background: var(--surface-soft);
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
 }
 
 .settings-recovery-note .settings-info-icon {
   color: var(--muted);
 }
 
-.settings-signer-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
 .settings-card-copy {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: 3px;
 }
 
 .settings-card-copy strong {
@@ -2425,14 +2603,14 @@ button.settings-nav-item.active {
   font-size: 11px;
 }
 
-.session-security-status button:not(:disabled):hover {
+#resumeSessionButton:not(:disabled):hover {
   border-color: transparent;
   background: var(--action-primary-bg-hover);
   box-shadow: var(--shadow-control-hover);
   color: var(--action-primary-text);
 }
 
-.session-security-status button:not(:disabled):active {
+#resumeSessionButton:not(:disabled):active {
   transform: scale(0.96);
 }
 
@@ -5183,14 +5361,30 @@ button.command-palette-row.active {
     padding: 18px 16px 20px;
   }
 
-  .settings-signer-card {
-    align-items: stretch;
-    flex-direction: column;
+  .settings-health-row {
+    grid-template-columns: 36px minmax(0, 1fr);
+    align-items: start;
+    padding: 14px;
   }
 
-  .settings-signer-card .settings-primary-action,
+  .settings-health-row button {
+    grid-column: 2;
+    justify-self: stretch;
+    width: 100%;
+  }
+
+  .settings-health-row .settings-primary-action,
   .settings-secondary-action {
     justify-content: center;
+    width: 100%;
+  }
+
+  .settings-access-section #brainPeopleActionPanel .access-inline-field,
+  .settings-invitations-section #brainInvitationPanel .access-button-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-access-section #brainPeopleActionPanel .access-add-button {
     width: 100%;
   }
 

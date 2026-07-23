@@ -68,6 +68,7 @@ function interactiveElement(ownerDocument = null) {
     listeners.set(type, listener);
   };
   target.click = () => listeners.get("click")?.({ currentTarget: target, target });
+  target.dispatch = (type) => listeners.get(type)?.({ currentTarget: target, target });
   return target;
 }
 
@@ -338,8 +339,11 @@ function invitationPanelTestSeams() {
     ...context,
     document: {
       ...context.document,
+      createElement() {
+        return interactiveElement(this);
+      },
       getElementById(id) {
-        if (!testElements.has(id)) testElements.set(id, element());
+        if (!testElements.has(id)) testElements.set(id, interactiveElement(this));
         return testElements.get(id);
       },
     },
@@ -359,7 +363,7 @@ function invitationPanelTestSeams() {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, handleBrainInvitationInput, renderBrainInvitationPanel, revokeBrainInvitationById });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, buildBrainInvitationRequest, handleBrainInvitationInput, initialBrainInvitationFolders, rememberIdentity, renderBrainAccessManagement, renderBrainInvitationFolderOptions, renderBrainInvitationList, renderBrainInvitationPanel, renderFolderShareLinkList, replacePersonalAgentFromPanel, resetBrainSessionState, revokeBrainInvitationById });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(seamSource, source, "The invitation test must capture the Product Client's real panel seams");
   vm.runInNewContext(seamSource, testContext, { filename: "product-client-invitation-panel.test.js" });
@@ -534,13 +538,10 @@ for (const [inputId, buttonId] of [
   ["accessShareTargetInput", "createShareLinkButton"],
   ["accessShareExpiresAtInput", "createShareLinkButton"],
   ["accessShareLinkInput", "acceptShareLinkButton"],
-  ["brainInviteTargetNpubInput", "createBrainInvitationButton"],
-  ["brainInviteFoldersInput", "createBrainInvitationButton"],
+  ["brainInviteRecipientEmailInput", "createBrainInvitationButton"],
   ["brainInviteExpiresAtInput", "createBrainInvitationButton"],
   ["brainInviteCodeInput", "getBrainInvitationButton"],
   ["brainInviteEmailInput", "getEmailInviteInstructionsButton"],
-  ["brainInviteEmailProofCreatedAtInput", "getEmailInviteInstructionsButton"],
-  ["brainInviteSecretInput", "getEmailInviteInstructionsButton"],
 ]) {
   assert.equal(
     keyboardNavigation.primaryFormActionForInput(inputId),
@@ -905,8 +906,8 @@ assert.match(
 );
 assert.match(
   htmlSource,
-  /id="brainInviteSecretInput"[\s\S]{0,180}type="password"/,
-  "Manually entered Invite Secrets must remain masked"
+  /id="brainInviteSecretInput"[^>]*type="hidden"/,
+  "Client-only Invite Secrets must travel in private link state instead of a visible form field"
 );
 assert.match(
   source,
@@ -1089,7 +1090,7 @@ assert.match(htmlSource, /class="access-action-stack"/);
 assert.match(htmlSource, /class="access-state-stack"/);
 assert.match(htmlSource, /id="accessAddPersonPanel"/);
 assert.match(htmlSource, />\s*Grant folder access\s*</);
-assert.match(htmlSource, />\s*Choose folder and Member Identity\s*</);
+assert.match(htmlSource, />\s*Choose a Folder and enter an email\s*</);
 assert.match(htmlSource, /id="accessAdvancedSection"/);
 assert.match(htmlSource, />\s*Restricted folder link\s*</);
 assert.match(htmlSource, /id="accessSidebarCount"/);
@@ -1104,8 +1105,27 @@ assert.doesNotMatch(htmlSource, />\s*Create personal mount\s*</);
 assert.doesNotMatch(htmlSource, />\s*Folder \+ person\s*</);
 assert.doesNotMatch(htmlSource, />\s*Single-use Folder access\s*</);
 assert.doesNotMatch(htmlSource, />\s*Share with link\s*</);
-assert.match(htmlSource, /placeholder="npub… or name@domain"/);
-assert.doesNotMatch(htmlSource, /id="accessShareTargetInput"[\s\S]{0,160}placeholder="name@example\.com"/);
+assert.doesNotMatch(
+  htmlSource,
+  /npub/i,
+  "Product Client markup must never expose a public-key identity in a form or visible fallback"
+);
+for (const inputId of [
+  "accessAddPersonInput",
+  "accessShareTargetInput",
+  "brainInviteRecipientEmailInput",
+  "brainMemberEmailInput",
+  "brainAdminEmailInput",
+  "brainInviteEmailInput",
+  "personalAgentEmailInput",
+  "managePersonalAgentEmailInput",
+]) {
+  assert.match(
+    htmlSource,
+    new RegExp(`<input(?=[^>]*id="${inputId}")(?=[^>]*type="email")(?=[^>]*autocomplete="email")(?=[^>]*inputmode="email")[^>]*>`, "s"),
+    `${inputId} must use the browser's email input contract`
+  );
+}
 assert.match(htmlSource, /id="accessFolderPanel"/);
 assert.match(htmlSource, /id="brainPeopleList"/);
 assert.match(htmlSource, /id="brainPeopleSection"/);
@@ -1113,11 +1133,12 @@ assert.doesNotMatch(htmlSource, /agentWorkspacePairing/);
 assert.match(htmlSource, /id="brainPeopleActionPanel"/);
 assert.match(htmlSource, /class="brain-access-action-grid"/);
 assert.match(htmlSource, />\s*Manage members\s*</);
-assert.match(htmlSource, />\s*Add or promote existing identities\s*</);
+assert.match(htmlSource, />\s*Invite, add, or promote by email\s*</);
 assert.match(htmlSource, />\s*Invite someone\s*</);
-assert.match(htmlSource, />\s*Email or Member Identity\s*</);
-assert.match(htmlSource, />\s*Folder access plan\s*</);
-assert.match(htmlSource, />\s*Add member now\s*</);
+assert.match(htmlSource, />\s*Email address\s*</);
+assert.match(htmlSource, />\s*Folder access\s*</);
+assert.doesNotMatch(htmlSource, />\s*Folder access plan\s*</);
+assert.match(htmlSource, />\s*Add existing member\s*</);
 assert.match(htmlSource, />\s*Make admin\s*</);
 assert.match(htmlSource, />\s*Join a Brain\s*</);
 assert.match(htmlSource, />\s*Verify email and load access\s*</);
@@ -1126,10 +1147,10 @@ assert.doesNotMatch(htmlSource, />\s*Invite, add, or promote\s*</);
 assert.doesNotMatch(htmlSource, />\s*Accept received invite\s*</);
 assert.doesNotMatch(htmlSource, />\s*Choose folder and person\s*</);
 assert.doesNotMatch(htmlSource, />\s*Brain people\s*</);
-assert.doesNotMatch(source, /Invite, add, or promote/);
+assert.match(source, /Invite, add, or promote by email/);
 assert.doesNotMatch(source, /Accept received invite/);
 assert.doesNotMatch(source, /Admin-only controls/);
-assert.match(source, /Member Identities or Links/);
+assert.match(source, /People or Links/);
 assert.match(htmlSource, /id="folderShareLinkListSection"/);
 assert.match(htmlSource, /id="brainInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
@@ -1194,7 +1215,8 @@ const unresolvedOrgPeopleRows = client.brainPeopleRows({
   admins: ["npub-admin"],
 });
 assert.equal(
-  JSON.stringify(unresolvedOrgPeopleRows.map(({ id, name, role, status, type, removable }) => ({
+  JSON.stringify(unresolvedOrgPeopleRows.map(({ canMutate, id, name, role, status, type, removable }) => ({
+    canMutate,
     id,
     name,
     role,
@@ -1204,36 +1226,53 @@ assert.equal(
   }))),
   JSON.stringify([
     {
+      canMutate: false,
       id: "npub-admin",
-      name: "npub-admin",
+      name: "Private member",
       role: "admin",
-      status: "No email or NIP-05 metadata loaded",
+      status: "Email unavailable",
       type: "admin",
       removable: true,
     },
     {
+      canMutate: false,
       id: "npub-member",
-      name: "npub-member",
+      name: "Private member",
       role: "member",
-      status: "No email or NIP-05 metadata loaded",
+      status: "Email unavailable",
       type: "member",
       removable: true,
     },
   ])
 );
 assert.equal(
-  JSON.stringify(unresolvedOrgPeopleRows[0].details.slice(0, 2)),
+  JSON.stringify(unresolvedOrgPeopleRows[0].details),
   JSON.stringify([
-    { label: "Email / NIP-05", value: "Not resolved in this client" },
-    { label: "Public key", value: "npub-admin" },
+    { label: "Email", value: "Not available" },
   ])
+);
+assert.match(
+  source,
+  /if \(person\.removable && person\.canMutate && canManage\)/,
+  "Unresolved identity rows must fail closed before rendering a destructive action"
+);
+assert.match(
+  source,
+  /if \(oldAgent && !oldAgentEmail\) \{[\s\S]{0,180}Current Personal Agent email is unavailable/,
+  "Personal Agent replacement and removal must fail closed until the existing email is resolved"
+);
+assert.equal(
+  (source.match(/if \(person\.removable && person\.canMutate && canManage\)/g) || []).length,
+  2,
+  "Both Brain-member and Folder-access removal controls must require a resolved email"
 );
 const unresolvedOwnerRows = client.brainPeopleRows({
   kind: "personal",
   ownerUserId: "npub-owner",
 });
 assert.equal(
-  JSON.stringify(unresolvedOwnerRows.map(({ id, name, role, status, type, removable }) => ({
+  JSON.stringify(unresolvedOwnerRows.map(({ canMutate, id, name, role, status, type, removable }) => ({
+    canMutate,
     id,
     name,
     role,
@@ -1243,10 +1282,11 @@ assert.equal(
   }))),
   JSON.stringify([
     {
+      canMutate: false,
       id: "npub-owner",
-      name: "npub-owner",
+      name: "Private member",
       role: "owner",
-      status: "No email or NIP-05 metadata loaded",
+      status: "Email unavailable",
       type: "owner",
       removable: false,
     },
@@ -1262,7 +1302,7 @@ assert.equal(
     },
     "connected"
   ).map((badge) => badge.label)),
-  JSON.stringify(["signer connected", "organization", "1 folders", "2 grants", "1 mounts"])
+  JSON.stringify(["connection ready", "organization", "1 folders", "2 grants", "1 mounts"])
 );
 assert.equal(client.personalBrainIdForPubkey("ab".repeat(32)), "personal-abababababababab");
 const firstSameNameBrainId = client.brainIdFromName("org", "Same Name", {
@@ -1392,7 +1432,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.equal(clipboardFeedbackState.clientActionFeedback, null);
   assert.equal(
     clipboardFeedbackElement.textContent,
-    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+    "Action could not be completed. Try again. If it continues, check your connection and Brain status."
   );
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /later-action-failure-detail-sentinel/);
   assert.equal(await clipboardFeedback.seams.copyToClipboard(copiedPageId), true);
@@ -1589,7 +1629,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.equal(await copyBeforeNewerAction, true);
   assert.equal(
     newerActionElement.textContent,
-    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+    "Action could not be completed. Try again. If it continues, check your connection and Brain status."
   );
   assert.doesNotMatch(newerActionElement.textContent, /(?:copy-before-newer-action|newer-action-detail)-sentinel/);
 }
@@ -1814,28 +1854,28 @@ function assertModalFocusAndContextRouteContracts() {
 assert.equal(
   JSON.stringify(client.sessionStatusView("locked")),
   JSON.stringify({
-    action: "Unlock session",
-    detail: "Folder Keys and temporary plaintext are cleared. Unlock to reopen encrypted grants.",
+    action: "Open Brain",
+    detail: "Your private content is closed on this device.",
     locked: true,
-    title: "Session locked",
+    title: "Brain locked",
   })
 );
 assert.equal(
   JSON.stringify(client.sessionStatusView("unlocked")),
   JSON.stringify({
-    action: "Lock session",
-    detail: "Readable content and Session Folder Keys are held in memory for this session.",
+    action: "Lock Brain",
+    detail: "Your Brain is open and ready on this device.",
     locked: false,
-    title: "Session unlocked",
+    title: "Brain ready",
   })
 );
 assert.equal(
   JSON.stringify(client.sessionStatusView("resuming")),
   JSON.stringify({
-    action: "Lock session",
-    detail: "Opening encrypted Folder Key Grants and rebuilding the temporary client view.",
+    action: "Lock Brain",
+    detail: "Opening your private content on this device.",
     locked: false,
-    title: "Unlocking session",
+    title: "Opening Brain",
   })
 );
 const activeBrainAccessLoss = client.protectedRequestError(
@@ -1875,9 +1915,9 @@ for (const [status, reason, path] of [
   );
 }
 assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
-assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
-assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Unlock session</);
-assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock session</);
+assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Brain locked</);
+assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Open Brain</);
+assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock Brain</);
 assert.match(htmlSource, /<meta name="color-scheme" content="dark light"\s*\/>/);
 assert.match(
   htmlSource,
@@ -1931,7 +1971,7 @@ assert.doesNotMatch(source, /sessionAccountBrainButton[\s\S]{0,180}openSettingsM
 assert.match(htmlSource, /id="manageBrainsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
 assert.match(htmlSource, /id="manageBrainsList"/);
 assert.match(htmlSource, /id="manageBrainsLoadButton"/);
-assert.match(htmlSource, /id="manageBrainsLoadButton"[^>]*>Unlock Brain</);
+assert.match(htmlSource, /id="manageBrainsLoadButton"[^>]*>Open Brain</);
 assert.doesNotMatch(htmlSource, /id="accessLoadBrainButton"/);
 assert.match(htmlSource, /id="manageBrainsConnectSignerButton"/);
 assert.match(htmlSource, /id="manageCreateOrganizationBrainButton"/);
@@ -1950,7 +1990,9 @@ assert.match(htmlSource, /id="settingsNavBrain"[^>]*role="tab"/);
 assert.match(htmlSource, /id="settingsNavAccess"[^>]*role="tab"[^>]*aria-controls="settingsAccessPanel"/);
 assert.match(htmlSource, /id="settingsNavInvitations"[^>]*role="tab"[^>]*aria-controls="settingsInvitationsPanel"/);
 assert.match(htmlSource, /id="settingsSessionPanel"[^>]*role="tabpanel"[^>]*aria-labelledby="settingsSessionTitle"/);
-assert.match(htmlSource, /id="settingsSessionTitle"[^>]*>Session and signer</);
+assert.match(htmlSource, /id="settingsSessionTitle"[^>]*>Brain health</);
+assert.match(htmlSource, />\s*Health\s*</);
+assert.match(htmlSource, />\s*Connection and privacy\s*</);
 assert.match(htmlSource, /id="settingsBrainPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsAccessPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsAccessPanelMount"/);
@@ -1974,20 +2016,18 @@ assert.doesNotMatch(
   /id="accessResultPanel"/,
   "Invitation feedback must not be stranded inside the hidden Access section"
 );
-assert.match(htmlSource, /id="settingsConnectSignerButton"/);
 assert.match(htmlSource, /id="settingsSignerTitle"/);
 assert.match(htmlSource, /id="settingsSignerDetail"/);
 assert.match(
   htmlSource,
-  /The server cannot reconstruct a lost Folder Key or sole signer\. Treat a Brain as durable only after a separate recovery path has reopened it on a replacement client\./,
-  "Settings must disclose the current recovery limitation without inventing a recovery control"
+  /Recovery is proven only when the same Recovery Set restores this Brain onto an empty replacement device\./,
+  "Settings must state the tested empty-target recovery boundary without inventing a recovery control"
 );
+assert.match(htmlSource, /id="brainInviteSecretInput"[^>]*type="hidden"/);
+assert.doesNotMatch(htmlSource, /id="brainInviteEmailProofCreatedAtInput"/);
+assert.doesNotMatch(htmlSource, /Private Invite Secret|Email proof time/);
 assert.match(htmlSource, /id="settingsManageBrainsButton"/);
-assert.doesNotMatch(
-  htmlSource.slice(htmlSource.indexOf('id="settingsBrainPanel"'), htmlSource.indexOf('id="settingsAccessPanel"')),
-  /id="settingsConnectSignerButton"/,
-  "Signer connection must live in Session rather than a duplicate Brain action"
-);
+assert.doesNotMatch(htmlSource, /id="settingsConnectSignerButton"/);
 assert.match(source, /openSettingsModal\("session"\)/);
 assert.match(source, /settingsNavAccess[\s\S]{0,120}setSettingsSection\("access"\)/);
 assert.match(source, /settingsNavInvitations[\s\S]{0,120}setSettingsSection\("invitations"\)/);
@@ -2002,17 +2042,17 @@ assert.match(source, /settingsNav\.hidden = sessionOnly;/);
 assert.match(source, /panel\.hidden = false;[\s\S]{0,120}panel\.open = true;/);
 assert.match(
   createBrainInvitationFromPanelSource,
-  /They can claim the encrypted Folder Key Grants in the invitation scope after proving the invited email\.[\s\S]{0,260}They can join with this one-time invite; grant any required Folder Keys after they join\./s,
-  "Invitation creation must distinguish email grant claim from direct Member Identity membership"
+  /They can claim the selected Folder access after verifying the invited email\.[\s\S]{0,260}They can join with this one-time invite; an admin may still need to finish their Folder access\./s,
+  "Invitation creation must distinguish email access claim from existing-account membership"
 );
 assert.match(
   acceptBrainInvitationFromPanelSource,
-  /An admin must grant any required Folder Keys before encrypted content can open\./,
-  "Direct invitation acceptance must not promise Folder Keys"
+  /An admin must finish granting access before private content can open\./,
+  "Direct invitation acceptance must not promise private content access"
 );
 assert.match(
   loadEmailInviteInstructionsFromPanelSource,
-  /Email verified[\s\S]{0,220}can claim encrypted Folder Key Grants/,
+  /Email verified[\s\S]{0,220}Selected Folder access is ready to claim/,
   "Email invitation flow must keep the grant claim explicit"
 );
 assert.match(source, /ribbonAccessButton[\s\S]{0,120}openSettingsModal\("access"\)/);
@@ -2104,8 +2144,8 @@ assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
 assert.match(cssSource, /@media \(max-width: 640px\)/);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*display:\s*flex;/s);
-assert.match(htmlSource, /<span class="pill ready">email or npub<\/span>/);
-assert.doesNotMatch(htmlSource, /<span class="pill ready">new Member Identity<\/span>/);
+assert.doesNotMatch(htmlSource, /Member Identity/i);
+assert.doesNotMatch(htmlSource, /Connect signer/i);
 assert.match(source, /clearSessionSecretsAndPlaintext\(state\)/);
 assert.equal(client.sessionGrantOpeningAllowed("locked"), false);
 assert.equal(client.sessionGrantOpeningAllowed("resuming"), true);
@@ -2209,7 +2249,7 @@ assert.deepEqual(
 );
 assert.equal(
   client.clientFailureMessage(Object.assign(new Error("raw target detail"), { code: "brain_target_unavailable" })),
-  "That Brain is not yet available to this account. Refresh or check your access."
+  "You do not have access to that Brain yet. Refresh or check your invitation."
 );
 assert.equal(
   client.clientFailureMessage(Object.assign(new Error("raw setup detail"), { code: "brain_setup_cancelled" })),
@@ -2221,7 +2261,7 @@ assert.equal(
 );
 assert.equal(
   client.clientFailureMessage(new Error("Session is locked. Unlock the session before refreshing")),
-  "Your Brain session is locked. Unlock it and try again."
+  "Your Brain is locked. Open it and try again."
 );
 assert.equal(client.signerIdentityChanged(null, "aa".repeat(32)), false);
 assert.equal(client.signerIdentityChanged("aa".repeat(32), "aa".repeat(32)), false);
@@ -2950,7 +2990,7 @@ assert.equal(
   assert.equal(missingBrainIdentityProvider.label, "setup required");
   assert.equal(
     missingBrainIdentityProvider.detail,
-    "Set up your Finite Chat Hosted Device before opening Brain."
+    "Finish setting up your Finite account in Chat before opening Brain."
   );
   assert.equal(missingBrainIdentityProvider.canConnect, false);
   assert.equal(
@@ -3194,7 +3234,15 @@ assert.equal(
     verifiedAt: "2026-07-06T00:00:00Z",
   });
   assert.equal(client.identityDisplay(authorNpub), "alice@example.com");
-  assert.equal(client.identityDisplay(otherNpub), client.shortKey(otherNpub));
+  assert.equal(client.identityDisplay(otherNpub), "Private member");
+  assert.equal(
+    client.brainPeopleRows({
+      kind: "organization",
+      members: [authorNpub, otherNpub],
+      admins: [authorNpub],
+    })[0].canMutate,
+    true
+  );
   assert.equal(
     client.brainPeopleRows({
       kind: "organization",
@@ -3209,7 +3257,7 @@ assert.equal(
       members: [authorNpub, otherNpub],
       admins: [authorNpub],
     })[1].name,
-    client.shortKey(otherNpub)
+    "Private member"
   );
 
   const devGrant = {
@@ -3362,6 +3410,10 @@ assert.equal(
     JSON.stringify(["getting-started", "restricted"])
   );
   assert.equal(
+    JSON.stringify(client.initialBrainInvitationFolders(["restricted", "restricted", "notes"])),
+    JSON.stringify(["restricted", "notes"])
+  );
+  assert.equal(
     JSON.stringify(
       client.buildBrainInvitationRequest({
       targetNpub: otherNpub,
@@ -3393,12 +3445,12 @@ assert.equal(
   assert.equal(client.brainInvitationIdentifierHint("invite-0fe6eda60e1bf6e662acb8e2b5c425d9"), null);
   assert.match(
     client.brainInvitationIdentifierHint("invitation-4f82a37c1b82bcdd54973c466cdde914"),
-    /invitation id/
+    /internal invitation reference/
   );
   assert.match(client.brainInvitationIdentifierHint("4f82a37c1b82bcdd54973c466cdde914"), /start with invite-/);
   assert.match(
     client.brainInvitationUnavailableDetail(new Error("brain invitation unavailable")),
-    /Check the Invite Code, active signer/
+    /Check the Invite Code, secure connection/
   );
   assert.equal(
     client.brainInvitationRevokePath("smoke org", "invitation/one"),
@@ -3406,7 +3458,7 @@ assert.equal(
   );
   assert.match(htmlSource, /id="brainInviteUrlInput"/);
   assert.match(htmlSource, /id="brainInviteEmailInput"/);
-  assert.match(htmlSource, /id="brainInviteEmailProofCreatedAtInput"/);
+  assert.doesNotMatch(htmlSource, /id="brainInviteEmailProofCreatedAtInput"/);
   assert.match(htmlSource, /id="brainInviteSecretInput"/);
   assert.match(htmlSource, /id="brainInviteConnectSignerButton"/);
   assert.match(htmlSource, /id="getEmailInviteInstructionsButton"/);
@@ -3420,7 +3472,7 @@ assert.equal(
     signerCanConnect: true,
     signerStatus: "unavailable",
   });
-  assert.match(lockedInvitationControls.hint, /Unlock the session/);
+  assert.match(lockedInvitationControls.hint, /Open the Brain/);
   assert.equal(lockedInvitationControls.connectDisabled, false);
   assert.equal(lockedInvitationControls.createDisabled, true);
   assert.equal(lockedInvitationControls.inspectDisabled, true);
@@ -3442,6 +3494,18 @@ assert.equal(
   assert.equal(unlockedInvitationControls.emailScopeDisabled, false);
   assert.equal(unlockedInvitationControls.acceptDisabled, false);
   assert.equal(unlockedInvitationControls.revokeDisabled, false);
+  const incompleteEmailInvitationControls = client.brainInvitationPanelState({
+    code: "invite-pending",
+    email: "member@example.com",
+    inviteSecret: "",
+    organizationBrain: true,
+    sessionStatus: "unlocked",
+    signerCanConnect: true,
+    signerStatus: "connected",
+  });
+  assert.equal(incompleteEmailInvitationControls.acceptDisabled, true);
+  assert.equal(incompleteEmailInvitationControls.emailScopeDisabled, true);
+  assert.match(incompleteEmailInvitationControls.hint, /Open the private invite link/);
 
   assert.equal(
     JSON.stringify(
@@ -3501,13 +3565,130 @@ assert.equal(
   );
   assert.match(
     source,
-    /for \(const inputId of \[\s*"brainInviteCodeInput",\s*"brainInviteEmailInput",\s*"brainInviteEmailProofCreatedAtInput",\s*"brainInviteSecretInput",\s*\]\) \{[\s\S]{0,180}handleBrainInvitationInput\(inputId\)/,
-    "Invitation inputs must update the panel as the Member changes code, email proof, or Invite Secret"
+    /for \(const inputId of \[\s*"brainInviteCodeInput",\s*"brainInviteEmailInput",\s*\]\) \{[\s\S]{0,180}handleBrainInvitationInput\(inputId\)/,
+    "Visible invitation inputs must update the panel as the member changes the code or email"
   );
 
   const invitationPanel = invitationPanelTestSeams();
   const invitationState = invitationPanel.seams.state;
   const invitationElement = (id) => invitationPanel.context.document.getElementById(id);
+  const renderedText = (node) =>
+    [node?.textContent || "", ...(node?.children || []).map(renderedText)].join(" ").trim();
+
+  invitationState.accessBusy = false;
+  invitationState.brainInvitations = [
+    {
+      createdAt: "2026-07-01T00:00:00.000Z",
+      expiresAt: "2026-08-01T00:00:00.000Z",
+      id: "invitation-private-target",
+      inviteCode: "invite-visible-full-code",
+      status: "pending",
+      userId: otherNpub,
+    },
+  ];
+  invitationPanel.seams.renderBrainInvitationList();
+  const renderedInvitationRow = invitationElement("brainInvitationList").children[0];
+  assert.match(renderedText(renderedInvitationRow), /invite-visible-full-code/);
+  assert.match(renderedText(renderedInvitationRow), /Revoke/);
+
+  invitationState.folderShareLinksFolderId = "restricted-finance";
+  invitationState.folderShareLinks = [
+    {
+      createdAt: "2026-07-01T00:00:00.000Z",
+      expiresAt: "2026-08-01T00:00:00.000Z",
+      id: "share-visible-full-code",
+      recipientNpub: otherNpub,
+      status: "pending",
+    },
+  ];
+  invitationPanel.seams.renderFolderShareLinkList({ id: "restricted-finance" });
+  const renderedShareRow = invitationElement("folderShareLinkList").children[0];
+  assert.match(renderedText(renderedShareRow), /share-visible-full-code/);
+  assert.match(renderedText(renderedShareRow), /Revoke/);
+
+  invitationState.metadata = {
+    kind: "organization",
+    folders: [
+      { id: "standard", path: "Standard", access: "all_members", currentKeyVersion: 1 },
+      {
+        id: "restricted-finance",
+        path: "Finance",
+        access: "restricted",
+        currentKeyVersion: 1,
+      },
+      {
+        id: "restricted-research",
+        path: "Research",
+        access: "restricted",
+        currentKeyVersion: 1,
+      },
+    ],
+  };
+  invitationPanel.seams.renderBrainInvitationFolderOptions();
+  const folderChoices = invitationElement("brainInviteFoldersOptions").children;
+  assert.equal(folderChoices.length, 2);
+  assert.deepEqual(
+    folderChoices.map((choice) => choice.children[1].textContent),
+    ["Finance", "Research"]
+  );
+  const financeCheckbox = folderChoices[0].children[0];
+  financeCheckbox.checked = true;
+  financeCheckbox.dispatch("change");
+  assert.equal(
+    JSON.stringify(invitationPanel.seams.initialBrainInvitationFolders()),
+    JSON.stringify(["restricted-finance"])
+  );
+  assert.equal(
+    JSON.stringify(
+      invitationPanel.seams.buildBrainInvitationRequest({
+        targetNpub: otherNpub,
+        initialFolderAccess: invitationPanel.seams.initialBrainInvitationFolders(),
+        expiresAt: "2026-08-01T00:00:00.000Z",
+      }).initialFolderAccess
+    ),
+    JSON.stringify(["restricted-finance"])
+  );
+  invitationPanel.seams.resetBrainSessionState({ preserveManageBrainsReturnToSettings: false });
+  assert.equal(
+    JSON.stringify(invitationPanel.seams.initialBrainInvitationFolders()),
+    JSON.stringify([])
+  );
+
+  invitationState.accessBusy = false;
+  invitationState.activeBrainId = "personal-owner";
+  invitationState.pubkeyHex = "00".repeat(32);
+  invitationState.sessionStatus = "unlocked";
+  invitationState.signerStatus = "connected";
+  invitationState.metadata = {
+    brainId: "personal-owner",
+    kind: "personal",
+    ownerUserId: authorNpub,
+    personalAgent: { agentNpub: otherNpub },
+  };
+  invitationPanel.seams.renderBrainAccessManagement(invitationState.metadata);
+  assert.match(
+    invitationElement("personalAgentCurrent").textContent,
+    /email unavailable/
+  );
+  assert.equal(invitationElement("replacePersonalAgentButton").disabled, true);
+  assert.equal(invitationElement("removePersonalAgentButton").disabled, true);
+  await assert.rejects(
+    () => invitationPanel.seams.replacePersonalAgentFromPanel(true),
+    /Current Personal Agent email is unavailable/
+  );
+  invitationPanel.seams.rememberIdentity({
+    npub: otherNpub,
+    nip05: "agent@finite.vip",
+    verifiedAt: "2026-07-01T00:00:00.000Z",
+  });
+  invitationPanel.seams.renderBrainAccessManagement(invitationState.metadata);
+  assert.equal(
+    invitationElement("personalAgentCurrent").textContent,
+    "Current: agent@finite.vip"
+  );
+  assert.equal(invitationElement("replacePersonalAgentButton").disabled, false);
+  assert.equal(invitationElement("removePersonalAgentButton").disabled, false);
+
   invitationState.accessBusy = false;
   invitationState.metadata = { kind: "organization" };
   invitationState.sessionStatus = "locked";
@@ -3519,7 +3700,7 @@ assert.equal(
   assert.equal(invitationElement("brainInviteConnectSignerButton").disabled, false);
   assert.equal(invitationElement("getBrainInvitationButton").disabled, true);
   assert.equal(invitationElement("acceptBrainInvitationButton").disabled, true);
-  assert.match(invitationElement("brainInvitationHint").textContent, /Unlock the session/);
+  assert.match(invitationElement("brainInvitationHint").textContent, /Open the Brain/);
 
   invitationState.sessionStatus = "unlocked";
   invitationState.signerStatus = "connected";
@@ -3555,7 +3736,7 @@ assert.equal(
   invitationState.sessionStatus = "locked";
   await assert.rejects(
     () => invitationPanel.seams.revokeBrainInvitationById("invitation-pending-row"),
-    /Session is locked\. Unlock the session before revoking an invitation/
+    /Brain is locked\. Open the Brain before revoking an invitation/
   );
 
   const nip44VectorSender = client.inviteUnwrapKeypairFromSecret("2".padStart(64, "0"));
@@ -3591,6 +3772,11 @@ assert.equal(
     ],
   };
   assert.equal(client.canonicalInviteEmail(" Friend@Example.COM "), "friend@example.com");
+  assert.throws(
+    () => client.canonicalInviteEmail(client.npubFromHex("44".repeat(32))),
+    /must be an email address/,
+    "Public-key identities must never pass the Product Client's email form boundary"
+  );
   assert.equal(
     JSON.stringify(
       client.emailInviteScope(emailMetadata, "restricted").map((folder) => [
@@ -3991,7 +4177,11 @@ assert.equal(
   assert.equal(boundWrapperGrant.id, "grant-bound-wrapper");
   assert.equal(boundProviderEncryptCalls, 2);
 
-  assert.match(htmlSource, /id="brainInviteFoldersInput"(?![^>]*\svalue=)/);
+  assert.doesNotMatch(htmlSource, /id="brainInviteFoldersInput"/);
+  assert.match(htmlSource, /id="brainInviteFoldersOptions"/);
+  assert.doesNotMatch(source, /\$\("brainInviteFoldersInput"\)/);
+  assert.match(source, /Invite code \$\{row\.inviteCode\}/);
+  assert.match(source, /Share link \$\{linkRow\.id\}/);
   assert.match(htmlSource, />Invite code<\/span>/);
   assert.doesNotMatch(htmlSource, /Invite code or id/);
   assert.match(htmlSource, /id="pageFolderIdInput"(?![^>]*\svalue=)/);
@@ -6215,16 +6405,16 @@ assert.equal(
   assert.equal(elements.get("clientActionFeedback").hidden, false);
   assert.equal(
     elements.get("clientActionFeedback").textContent,
-    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+    "Action could not be completed. Try again. If it continues, check your connection and Brain status."
   );
   assert.doesNotMatch(elements.get("clientActionFeedback").textContent, /invite-secret-sentinel/);
   client.lockSession();
   assert.equal(elements.get("pageDraftInput").value, "");
   assert.equal(elements.get("brainInviteSecretInput").value, "");
-  assert.equal(elements.get("sessionSecurityTitle").textContent, "Session locked");
+  assert.equal(elements.get("sessionSecurityTitle").textContent, "Brain locked");
   assert.equal(
     elements.get("readerPageContent").textContent,
-    "Session locked. Unlock to reopen encrypted Folder Key Grants."
+    "Brain locked. Open it to view your private content."
   );
   assert.equal(elements.get("graphCanvas").children.length, 0);
   assert.equal(elements.get("graphStats").textContent, "0 nodes / 0 links");

@@ -233,8 +233,8 @@ function checkStaticShell() {
     "addBrainMemberButton",
     "addBrainAdminButton",
     "brainInvitationPanel",
-    "brainInviteTargetNpubInput",
-    "brainInviteFoldersInput",
+    "brainInviteRecipientEmailInput",
+    "brainInviteFoldersOptions",
     "brainInviteExpiresAtInput",
     "createBrainInvitationButton",
     "revokeBrainInvitationButton",
@@ -243,7 +243,6 @@ function checkStaticShell() {
     "copyBrainInviteUrlButton",
     "brainInviteCodeInput",
     "brainInviteEmailInput",
-    "brainInviteEmailProofCreatedAtInput",
     "brainInviteSecretInput",
     "brainInviteConnectSignerButton",
     "getBrainInvitationButton",
@@ -461,17 +460,22 @@ function checkStaticShell() {
   );
   assert.match(
     html,
-    /id="copyBrainInviteUrlButton"[^>]*aria-label="Copy client-only invite link"/,
+    /id="copyBrainInviteUrlButton"[^>]*aria-label="Copy private invite link"/,
     "Product Client HTML must name the client-only invite copy action"
   );
   assert.match(
     html,
-    /id="brainInviteSecretInput"[\s\S]{0,180}type="password"/,
-    "Product Client HTML must keep manually entered Invite Secrets masked"
+    /id="brainInviteSecretInput"[^>]*type="hidden"/,
+    "Product Client HTML must keep Invite Secrets in private link state instead of a visible form field"
+  );
+  assertNotIncludes(
+    html,
+    "brainInviteEmailProofCreatedAtInput",
+    "Product Client HTML"
   );
   assert.match(
     js,
-    /async function copyToClipboard\(text\)/,
+    /async function copyToClipboard\(text, kind = "page-id"\)/,
     "Product Client JS must route copy actions through one safe helper"
   );
   assert.doesNotMatch(

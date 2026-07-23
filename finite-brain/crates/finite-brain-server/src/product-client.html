@@ -7,7 +7,7 @@
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#212121" />
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f6f3" />
     <title>FiniteBrain</title>
-    <link rel="stylesheet" href="/client/app.css?v=20260713-sidebar-navigation" />
+    <link rel="stylesheet" href="/client/app.css?v=20260723-brain-health" />
   </head>
   <body>
     <div class="obsidian-shell" data-workspace-view="page">
@@ -125,7 +125,7 @@
                     <path d="M15 11v6" />
                   </svg>
                   <span>Grant folder access</span>
-                  <small>Choose folder and Member Identity</small>
+                  <small>Choose a Folder and enter an email</small>
                 </summary>
                 <div class="access-advanced-content">
                   <div class="access-folder-selector">
@@ -146,16 +146,18 @@
 
                   <div id="accessAddPersonForm" class="access-inline-form" hidden>
                     <label class="access-inline-field">
-                      <span class="sr-only">Member Identity</span>
+                      <span class="access-inline-label">Email address</span>
                       <input
                         id="accessAddPersonInput"
-                        placeholder="npub… or name@domain"
-                        autocomplete="off"
+                        type="email"
+                        placeholder="name@example.com"
+                        autocomplete="email"
+                        inputmode="email"
                         spellcheck="false"
                       />
                       <button id="accessAddPersonButton" type="button" class="access-add-button">Add</button>
                     </label>
-                    <p id="accessAddPersonHint" class="access-field-hint">Enter a Member Identity to grant Folder access</p>
+                    <p id="accessAddPersonHint" class="access-field-hint">They must already have a Finite account.</p>
                   </div>
                 </div>
               </details>
@@ -172,13 +174,15 @@
                 <div class="access-advanced-content">
                   <div id="accessShareSection" class="access-subsection">
                     <div id="accessShareForm" class="access-share-form">
-                      <p id="accessShareHint" class="access-field-hint access-share-hint">Open this Folder key to create share links.</p>
+                      <p id="accessShareHint" class="access-field-hint access-share-hint">Open this Folder to create share links.</p>
                       <label class="access-field">
-                        <span>Member Identity</span>
+                        <span>Recipient email</span>
                         <input
                           id="accessShareTargetInput"
-                          placeholder="npub… or name@domain"
-                          autocomplete="off"
+                          type="email"
+                          placeholder="name@example.com"
+                          autocomplete="email"
+                          inputmode="email"
                           spellcheck="false"
                           aria-describedby="accessShareHint"
                         />
@@ -229,35 +233,33 @@
                     <path d="M15 11h6" />
                   </svg>
                   <span>Manage members</span>
-                  <small id="brainPeopleActionHint">Add or promote existing identities</small>
+                  <small id="brainPeopleActionHint">Invite, add, or promote by email</small>
                 </summary>
                 <div class="access-admin-content">
                   <div class="brain-access-action-grid">
                     <section id="brainInvitationActionSection" class="access-admin-section brain-access-option primary settings-invitation-create">
                       <div class="brain-access-option-heading">
                         <h4>Invite someone</h4>
-                        <span class="pill ready">email or npub</span>
                       </div>
-                      <p class="access-field-hint settings-invitation-copy">Use an email address or Member Identity. Email invitations provision encrypted Folder Key Grants after a successful claim; direct Member Identity invitations record the access plan and need normal Folder Key grants after joining.</p>
+                      <p class="access-field-hint settings-invitation-copy">Send a private, one-time invitation to an email address.</p>
                       <label class="access-field">
-                        <span>Email or Member Identity</span>
+                        <span>Email address</span>
                         <input
-                          id="brainInviteTargetNpubInput"
-                          placeholder="name@example.com or npub…"
-                          autocomplete="off"
+                          id="brainInviteRecipientEmailInput"
+                          type="email"
+                          placeholder="name@example.com"
+                          autocomplete="email"
+                          inputmode="email"
                           spellcheck="false"
                         />
                       </label>
-                      <label class="access-field">
-                        <span>Folder access plan</span>
-                        <input
-                          id="brainInviteFoldersInput"
-                          autocomplete="off"
-                          spellcheck="false"
-                          aria-describedby="brainInviteFolderPlanHint"
-                        />
-                      </label>
-                      <p id="brainInviteFolderPlanHint" class="access-field-hint">For an email invite, these Folders are included in the encrypted claim scope. For an existing Member Identity, grant any required Folder Keys after they join.</p>
+                      <fieldset id="brainInviteFoldersFieldset" class="settings-folder-choices">
+                        <legend>Folder access</legend>
+                        <div id="brainInviteFoldersOptions" class="settings-folder-choice-list">
+                          <p class="access-field-hint">Load a Brain to choose restricted Folders.</p>
+                        </div>
+                        <p id="brainInviteFolderPlanHint" class="access-field-hint">Standard Brain Folders are included automatically. Choose any restricted Folders to include.</p>
+                      </fieldset>
                       <label class="access-field">
                         <span>Expires</span>
                         <input
@@ -296,15 +298,16 @@
 
                     <section class="access-admin-section brain-access-option">
                       <div class="brain-access-option-heading">
-                        <h4>Add member now</h4>
-                        <span class="pill muted">existing identity</span>
+                        <h4>Add existing member</h4>
                       </div>
                       <label class="access-inline-field">
-                        <span class="sr-only">Member Identity</span>
+                        <span class="access-inline-label">Email address</span>
                         <input
-                          id="brainMemberNpubInput"
-                          placeholder="npub… or name@domain"
-                          autocomplete="off"
+                          id="brainMemberEmailInput"
+                          type="email"
+                          placeholder="name@example.com"
+                          autocomplete="email"
+                          inputmode="email"
                           spellcheck="false"
                         />
                         <button id="addBrainMemberButton" type="button" class="access-add-button">Add member</button>
@@ -314,14 +317,15 @@
                     <section class="access-admin-section brain-access-option">
                       <div class="brain-access-option-heading">
                         <h4>Make admin</h4>
-                        <span class="pill muted">existing member</span>
                       </div>
                       <label class="access-inline-field">
-                        <span class="sr-only">Member Identity</span>
+                        <span class="access-inline-label">Member email</span>
                         <input
-                          id="brainAdminNpubInput"
-                          placeholder="npub… or name@domain"
-                          autocomplete="off"
+                          id="brainAdminEmailInput"
+                          type="email"
+                          placeholder="name@example.com"
+                          autocomplete="email"
+                          inputmode="email"
                           spellcheck="false"
                         />
                         <button id="addBrainAdminButton" type="button" class="access-add-button">Add admin</button>
@@ -343,7 +347,7 @@
                 </summary>
                 <div class="access-admin-content">
                   <div class="access-admin-section">
-                    <p class="access-field-hint settings-invitation-copy">An Invite Code is bound to an identity or email claim. It does not open encrypted content until the required Folder Key Grants are available.</p>
+                    <p class="access-field-hint settings-invitation-copy">An Invite Code works only for the invited account or verified email and grants only the selected Folder access.</p>
                     <label class="access-field">
                       <span>Invite code</span>
                       <input
@@ -357,35 +361,16 @@
                       <span>Email for an email invite</span>
                       <input
                         id="brainInviteEmailInput"
+                        type="email"
                         placeholder="name@example.com"
-                        autocomplete="off"
+                        autocomplete="email"
+                        inputmode="email"
                         spellcheck="false"
                       />
                     </label>
-                    <label class="access-field">
-                      <span>Private Invite Secret</span>
-                      <input
-                        id="brainInviteSecretInput"
-                        type="password"
-                        autocomplete="off"
-                        spellcheck="false"
-                      />
-                    </label>
-                    <p class="access-field-hint settings-invite-secret-warning">Never paste the Invite Secret into a server-visible channel. It proves possession without being sent to the FiniteBrain server.</p>
-                    <details class="settings-advanced-details">
-                      <summary>Email invite details</summary>
-                      <p>Use this only when an email invitation requires a supplied proof time.</p>
-                      <label class="access-field">
-                        <span>Email proof time</span>
-                        <input
-                          id="brainInviteEmailProofCreatedAtInput"
-                          type="datetime-local"
-                          autocomplete="off"
-                        />
-                      </label>
-                    </details>
+                    <input id="brainInviteSecretInput" type="hidden" />
                     <div class="access-button-row">
-                      <button id="brainInviteConnectSignerButton" type="button">Connect signer</button>
+                      <button id="brainInviteConnectSignerButton" type="button">Connect securely</button>
                       <button id="getBrainInvitationButton" type="button">Inspect invite</button>
                       <button id="getEmailInviteInstructionsButton" type="button">Verify email and load access</button>
                       <button id="acceptBrainInvitationButton" type="button">Join Brain</button>
@@ -403,12 +388,12 @@
                 <p id="personalAgentCurrent" class="access-field-hint"></p>
                 <label class="access-field">
                   <span>Replacement agent email</span>
-                  <input id="personalAgentEmailInput" type="email" autocomplete="off" placeholder="agent@finite.computer" />
+                  <input id="personalAgentEmailInput" type="email" autocomplete="email" inputmode="email" placeholder="agent@finite.computer" />
                 </label>
-                <p class="access-field-hint">Replacing or removing rotates every Folder Key. Your Brain and content stay intact.</p>
+                <p class="access-field-hint">Replacing or removing the agent securely updates access. Your Brain and content stay intact.</p>
                 <div class="access-button-row">
-                  <button id="replacePersonalAgentButton" type="button">Replace agent</button>
-                  <button id="removePersonalAgentButton" type="button" class="danger">Remove agent</button>
+                  <button id="replacePersonalAgentButton" type="button" disabled>Replace agent</button>
+                  <button id="removePersonalAgentButton" type="button" class="danger" disabled>Remove agent</button>
                 </div>
               </section>
 
@@ -433,11 +418,11 @@
 
               <section id="brainPeopleSection" class="brain-management-section">
                 <div class="access-section-header">
-                  <span class="section-title">Brain Member Identities</span>
+                  <span class="section-title">People</span>
                   <span id="brainPeopleCount" class="pill muted">0</span>
                 </div>
                 <ol id="brainPeopleList" class="access-who-has-list">
-                  <li class="access-empty-state">Load an Organization Brain to manage Member Identities.</li>
+                  <li class="access-empty-state">Load an Organization Brain to manage people.</li>
                 </ol>
               </section>
 
@@ -459,7 +444,7 @@
                 <ol id="sharedFolderList" class="access-who-has-list">
                   <li class="access-empty-state">Brain admins see cross-Brain shared Folders here.</li>
                 </ol>
-                <p class="access-field-hint">Connections mount a source Folder into this Brain. Disconnecting rotates the source Folder Key and is not yet available in this client.</p>
+                <p class="access-field-hint">A connection makes a shared Folder available in this Brain. Disconnecting will revoke access, but is not yet available in this client.</p>
               </section>
             </div>
           </div>
@@ -487,9 +472,9 @@
               <span class="session-account-summary">
                 <strong id="sessionAccountBrain">No Brain selected</strong>
                 <span>
-                  <span id="sessionAccountIdentity">Signer unavailable</span>
+                  <span id="sessionAccountIdentity">Connection unavailable</span>
                   <span aria-hidden="true"> · </span>
-                  <span id="sessionAccountStatus">Session locked</span>
+                  <span id="sessionAccountStatus">Brain locked</span>
                 </span>
               </span>
               <svg class="session-account-chevron icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -717,8 +702,8 @@ Start writing here.</textarea>
                   <svg class="icon" viewBox="0 0 24 24"><path d="M7 11V8a5 5 0 0 1 10 0v3" /><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M12 15v3" /></svg>
                 </span>
                 <span>
-                  <strong>Session</strong>
-                  <small>Signer and lock</small>
+                  <strong>Health</strong>
+                  <small>Connection and privacy</small>
                 </span>
               </button>
               <button id="settingsNavBrain" class="settings-nav-item" type="button" role="tab" aria-selected="false" aria-controls="settingsBrainPanel" tabindex="-1">
@@ -762,41 +747,47 @@ Start writing here.</textarea>
                 <p id="accessBusyStatus" class="access-busy-status" hidden aria-live="polite">Working…</p>
               </div>
 
-              <section id="settingsSessionPanel" class="settings-section" role="tabpanel" aria-labelledby="settingsSessionTitle">
+              <section id="settingsSessionPanel" class="settings-section settings-health-section" role="tabpanel" aria-labelledby="settingsSessionTitle">
                 <header class="settings-section-header">
-                  <p class="eyebrow">Session</p>
-                  <h3 id="settingsSessionTitle">Session and signer</h3>
-                  <p>Session Folder Keys and readable content stay in memory only while this session is unlocked.</p>
+                  <p class="eyebrow">Workspace health</p>
+                  <h3 id="settingsSessionTitle">Brain health</h3>
+                  <p>See whether this Brain and its secure connection are ready, and what remains private on this device.</p>
                 </header>
-                <section id="sessionSecurityStatus" class="session-security-status settings-card" aria-live="polite">
-                  <div class="session-security-copy">
-                    <strong id="sessionSecurityTitle">Session locked</strong>
-                    <span id="sessionSecurityDetail">Folder Keys and temporary plaintext are cleared. Unlock to reopen encrypted grants.</span>
-                  </div>
-                  <button id="resumeSessionButton" type="button">Unlock session</button>
-                  <button id="lockSessionButton" type="button" hidden>Lock session</button>
-                </section>
-                <section class="settings-card settings-signer-card" aria-live="polite">
-                  <div class="settings-card-copy">
-                    <span class="settings-card-label">Signer</span>
-                    <strong id="settingsSignerTitle">Checking signer</strong>
-                    <p id="settingsSignerDetail">Looking for a NIP-07 signer in this browser.</p>
-                  </div>
-                  <button id="settingsConnectSignerButton" class="settings-primary-action" type="button">
-                    Connect signer
-                  </button>
-                </section>
-                <div class="settings-info-card">
+                <div class="settings-health-overview">
+                  <section id="sessionSecurityStatus" class="session-security-status settings-health-row" aria-live="polite">
+                    <span class="settings-health-icon settings-health-icon-privacy" aria-hidden="true">
+                      <svg class="icon" viewBox="0 0 24 24"><path d="M7 11V8a5 5 0 0 1 10 0v3" /><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M12 15v3" /></svg>
+                    </span>
+                    <div class="session-security-copy">
+                      <span class="settings-row-label">Privacy</span>
+                      <strong id="sessionSecurityTitle">Brain locked</strong>
+                      <span id="sessionSecurityDetail">Your private content is closed on this device.</span>
+                    </div>
+                    <button id="resumeSessionButton" type="button">Open Brain</button>
+                    <button id="lockSessionButton" class="settings-secondary-action" type="button" hidden>Lock Brain</button>
+                  </section>
+                  <section class="settings-health-row settings-account-row" aria-live="polite">
+                    <span class="settings-health-icon" aria-hidden="true">
+                      <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3" /><path d="M5 20c0-4 3-7 7-7s7 3 7 7" /></svg>
+                    </span>
+                    <div class="settings-card-copy">
+                      <span class="settings-row-label">Connection</span>
+                      <strong id="settingsSignerTitle">Checking connection</strong>
+                      <p id="settingsSignerDetail">Checking the secure Brain connection.</p>
+                    </div>
+                  </section>
+                </div>
+                <div class="settings-info-card settings-privacy-note">
                   <span class="settings-info-icon" aria-hidden="true">
                     <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 10v6M12 7h.01" /></svg>
                   </span>
-                  <p>Locking clears Session Folder Keys, decrypted pages, drafts, and other temporary plaintext from this client.</p>
+                  <p>Locking closes readable content and removes drafts and other temporary private data from this device.</p>
                 </div>
                 <div class="settings-info-card settings-recovery-note">
                   <span class="settings-info-icon" aria-hidden="true">
                     <svg class="icon" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.4-2.9 8-7 10-4.1-2-7-5.6-7-10V6z" /><path d="M9 12l2 2 4-4" /></svg>
                   </span>
-                  <p>The server cannot reconstruct a lost Folder Key or sole signer. Treat a Brain as durable only after a separate recovery path has reopened it on a replacement client.</p>
+                  <p>Recovery is proven only when the same Recovery Set restores this Brain onto an empty replacement device.</p>
                 </div>
               </section>
 
@@ -804,7 +795,7 @@ Start writing here.</textarea>
                 <header class="settings-section-header">
                   <p class="eyebrow">Brain</p>
                   <h3>Brain context</h3>
-                  <p>Review the selected Brain and active signer. Switching, loading, and organization creation stay explicit in Manage Brains.</p>
+                  <p>Review the selected Brain, secure connection, and current availability. Switching and organization creation stay explicit in Manage Brains.</p>
                 </header>
                 <div class="settings-card settings-brain-summary">
                   <div>
@@ -813,12 +804,12 @@ Start writing here.</textarea>
                   </div>
                   <dl>
                     <div>
-                      <dt>Connected signer</dt>
-                      <dd id="settingsBrainIdentity">Signer unavailable</dd>
+                      <dt>Connected as</dt>
+                      <dd id="settingsBrainIdentity">Connection unavailable</dd>
                     </div>
                     <div>
-                      <dt>Session</dt>
-                      <dd id="settingsBrainStatus">Session locked</dd>
+                      <dt>Status</dt>
+                      <dd id="settingsBrainStatus">Brain locked</dd>
                     </div>
                   </dl>
                 </div>
@@ -837,7 +828,7 @@ Start writing here.</textarea>
               <section id="settingsAccessPanel" class="settings-section settings-access-section" role="tabpanel" aria-labelledby="settingsNavAccess" hidden>
                 <header class="settings-section-header">
                   <p class="eyebrow">Access &amp; sharing</p>
-                  <h3>Folder access and sharing</h3>
+                  <h3 id="brainManagementTitle">Folder access and sharing</h3>
                   <p>Choose a Folder to review people, grant direct access, and manage restricted-Folder share links. Organization member management appears when available.</p>
                 </header>
                 <div id="settingsAccessPanelMount"></div>
@@ -847,7 +838,7 @@ Start writing here.</textarea>
                 <header class="settings-section-header">
                   <p class="eyebrow">Invitations</p>
                   <h3>Invite or join a Brain</h3>
-                  <p>Invite an email or Member Identity, join with a one-time Invite Code, and review pending invitations or shared-Folder relationships.</p>
+                  <p>Invite someone by email, join with a one-time Invite Code, and review pending invitations or shared-Folder relationships.</p>
                 </header>
                 <div id="settingsInvitationsPanelMount"></div>
               </section>
@@ -883,7 +874,7 @@ Start writing here.</textarea>
                 <span class="settings-card-label">Selected Brain</span>
                 <strong id="manageBrainsCurrentName">No Brain selected</strong>
               </div>
-              <p id="manageBrainsCurrentDetail">Session locked. Select a Brain, then unlock it to open encrypted content.</p>
+              <p id="manageBrainsCurrentDetail">Brain locked. Select a Brain, then open it to view private content.</p>
             </section>
 
             <section class="manage-brains-list-section">
@@ -895,8 +886,8 @@ Start writing here.</textarea>
             </section>
 
             <div class="manage-brain-actions">
-              <button id="manageBrainsConnectSignerButton" type="button" class="secondary-action">Connect signer</button>
-              <button id="manageBrainsLoadButton" type="button" class="access-add-button manage-brain-unlock-button">Unlock Brain</button>
+              <button id="manageBrainsConnectSignerButton" type="button" class="secondary-action">Connect securely</button>
+              <button id="manageBrainsLoadButton" type="button" class="access-add-button manage-brain-unlock-button">Open Brain</button>
             </div>
 
             <section id="managePersonalBrainCreate" class="manage-brain-create settings-card">
@@ -906,7 +897,7 @@ Start writing here.</textarea>
               </div>
               <label class="access-field" for="managePersonalAgentEmailInput">
                 <span>Personal Agent email</span>
-                <input id="managePersonalAgentEmailInput" type="email" autocomplete="off" placeholder="agent@finite.vip" />
+                <input id="managePersonalAgentEmailInput" type="email" autocomplete="email" inputmode="email" placeholder="agent@finite.vip" />
               </label>
               <p class="settings-field-hint">Creates your empty Personal Brain and pairs this agent atomically.</p>
               <button id="manageCreatePersonalBrainButton" type="button" class="access-add-button">Create Personal Brain</button>
@@ -934,6 +925,6 @@ Start writing here.</textarea>
       </div>
     </div>
 
-    <script src="/client/app.js?v=20260712-settings-consistency"></script>
+    <script src="/client/app.js?v=20260723-brain-health"></script>
   </body>
 </html>
