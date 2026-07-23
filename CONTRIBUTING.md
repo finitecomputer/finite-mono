@@ -32,7 +32,7 @@ just dev web-design
 ```
 
 Open
-<http://127.0.0.1:13002/dashboard/machines/skyler-fixture/chat>. The seeded
+<http://127.0.0.1:13002/dashboard/machines/runtime_web_design/chat>. The seeded
 conversation survives stopping and restarting the command. Exercise failure
 and recovery UI from another terminal:
 

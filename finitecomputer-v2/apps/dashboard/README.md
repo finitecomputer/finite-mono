@@ -105,7 +105,7 @@ just dev web-design
 ```
 
 Open
-`http://127.0.0.1:13002/dashboard/machines/skyler-fixture/chat`. Conversation
+`http://127.0.0.1:13002/dashboard/machines/runtime_web_design/chat`. Conversation
 state survives stopping and restarting the command. In another terminal:
 
 ```bash
@@ -120,6 +120,19 @@ These commands change only the local fixture under
 Runtime, or production service. The fixture backs the canonical dashboard
 components and routes; it is not a second UI and does not prove runtime
 acceptance.
+
+To exercise the same hosted fixture inside the Electron security boundary,
+leave `just dev web-design` running and start:
+
+```bash
+cd finitechat/apps/electron-chat
+npm run dev:electron:fixture
+```
+
+This development-only mode uses an isolated Electron profile and deliberately
+omits the local-device bridge because the deterministic hosted fixture does not
+run a local encrypted chat daemon. Packaged builds always expose and require
+that bridge.
 
 The fixture is intentionally scoped to chat, the machine overview, restart
 presentation, and bounded recovery states. Runtime-owned Stop and Connections
@@ -149,6 +162,6 @@ FC_REPO_ROOT=/absolute/path/to/finitecomputer-v2
 
 - `/` landing page
 - `/dashboard` self-serve dashboard
-- `/dashboard/machines/skyler-fixture/chat` durable design-fixture chat
+- `/dashboard/machines/runtime_web_design/chat` durable design-fixture chat
 - `/dev/sticker-sheet` development-only visual source of truth for dashboard
   tokens, typography, controls, and statuses

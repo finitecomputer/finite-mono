@@ -2,7 +2,16 @@ const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
 const { spawn } = require("node:child_process");
-const { app, BrowserWindow, ipcMain, protocol, safeStorage, session, shell } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  protocol,
+  safeStorage,
+  session,
+  shell,
+  systemPreferences,
+} = require("electron");
 const {
   attachmentActionUsesBinaryTransport,
   forwardAttachmentUpload,
@@ -24,7 +33,9 @@ const {
   parseDeviceLinkPublicRequest,
   parseDeviceLinkPublicResponse,
   parseLocalDaemonIdentity,
+  shouldExposeLocalChatBridge,
   trustedDashboardIpcFrame,
+  trustedDashboardMicrophonePermission,
 } = require("./dashboard-security.cjs");
 const {
   AccountSecretStore,
@@ -73,8 +84,13 @@ if (!isDashboardDocumentUrl(dashboardStartUrl, defaultDashboardUrl)) {
 const dashboardPartition = "persist:finite-dashboard-v1";
 const deviceLinkPollIntervalMs = 750;
 const maxDashboardResponseBytes = 64 * 1024;
+const exposeLocalChatBridge = shouldExposeLocalChatBridge({
+  isPackaged: app.isPackaged,
+  disabledInDevelopment: process.env.FINITECHAT_DISABLE_LOCAL_CHAT_BRIDGE === "1",
+});
 
 if (process.env.FINITECHAT_USER_DATA_DIR) {
+  fs.mkdirSync(process.env.FINITECHAT_USER_DATA_DIR, { recursive: true, mode: 0o700 });
   app.setPath("userData", process.env.FINITECHAT_USER_DATA_DIR);
 }
 
@@ -147,7 +163,7 @@ function createDashboardWindow(targetUrl = dashboardStartUrl) {
   mainWindow = new BrowserWindow({
     ...commonWindowOptions(),
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      ...(exposeLocalChatBridge ? { preload: path.join(__dirname, "preload.cjs") } : {}),
       partition: dashboardPartition,
       contextIsolation: true,
       nodeIntegration: false,
@@ -347,10 +363,45 @@ function registerAttachmentMediaProtocol() {
 
 function configureSessionSecurity() {
   dashboardSession = session.fromPartition(dashboardPartition);
-  dashboardSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
-    callback(false);
+  dashboardSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const trusted =
+      webContents === mainWindow?.webContents
+      && trustedDashboardMicrophonePermission(
+        {
+          permission,
+          requestingOrigin: details.securityOrigin,
+          requestingUrl: details.requestingUrl,
+          securityOrigin: details.securityOrigin,
+          isMainFrame: details.isMainFrame,
+          mediaTypes: details.mediaTypes,
+        },
+        defaultDashboardUrl
+      );
+    if (!trusted) {
+      callback(false);
+      return;
+    }
+    void requestSystemMicrophoneAccess().then(callback, () => callback(false));
   });
-  dashboardSession.setPermissionCheckHandler(() => false);
+  dashboardSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    const trusted =
+      webContents === mainWindow?.webContents
+      && trustedDashboardMicrophonePermission(
+        {
+          permission,
+          requestingOrigin,
+          requestingUrl: details.requestingUrl,
+          securityOrigin: details.securityOrigin,
+          isMainFrame: details.isMainFrame,
+          mediaType: details.mediaType,
+        },
+        defaultDashboardUrl
+      );
+    if (!trusted || process.platform !== "darwin") {
+      return trusted;
+    }
+    return systemPreferences.getMediaAccessStatus("microphone") === "granted";
+  });
   dashboardSession.setDevicePermissionHandler(() => false);
   dashboardSession.webRequest.onBeforeRequest((details, callback) => {
     if (details.resourceType === "mainFrame") {
@@ -360,6 +411,20 @@ function configureSessionSecurity() {
     }
     callback({});
   });
+}
+
+async function requestSystemMicrophoneAccess() {
+  if (process.platform !== "darwin") {
+    return true;
+  }
+  const status = systemPreferences.getMediaAccessStatus("microphone");
+  if (status === "granted") {
+    return true;
+  }
+  if (status === "denied" || status === "restricted") {
+    return false;
+  }
+  return systemPreferences.askForMediaAccess("microphone");
 }
 
 async function maybeCaptureWindow() {
