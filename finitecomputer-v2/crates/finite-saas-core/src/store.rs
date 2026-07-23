@@ -8986,10 +8986,10 @@ where
 {
     Ok(client
         .query_opt(
-            "SELECT grant.id
-             FROM finite_private_grants grant
-             JOIN users usr ON usr.id = grant.user_id
-             WHERE usr.workos_user_id = $1 AND grant.status = 'active'",
+            "SELECT fpg.id
+             FROM finite_private_grants fpg
+             JOIN users usr ON usr.id = fpg.user_id
+             WHERE usr.workos_user_id = $1 AND fpg.status = 'active'",
             &[&workos_user_id],
         )
         .await
@@ -9713,6 +9713,30 @@ mod tests {
             .expect("an unrelated read must use another pooled connection")
             .unwrap();
             slow_query.await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_finite_private_usage_accepts_linked_user_without_grant() {
+        with_isolated_postgres(|store| async move {
+            let workos_user_id = "workos_dashboard_summary_no_grant";
+            store
+                .link_verified_user(LinkVerifiedUserInput {
+                    verified_email: "dashboard-summary-no-grant@finite.vip".to_string(),
+                    workos_user_id: workos_user_id.to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                store
+                    .finite_private_usage_status_for_workos_user(workos_user_id, None)
+                    .await
+                    .unwrap(),
+                None
+            );
         })
         .await;
     }
