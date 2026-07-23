@@ -177,7 +177,10 @@ by copying a release tarball onto the box.
    **Caching → Configuration → Browser Cache TTL** to **Respect Existing
    Headers** and ensure no Cache Rule overrides browser TTL. Only restore
    validator-based public caching after an edge probe proves those headers are
-   preserved; correctness must not depend on that external setting.
+   preserved; correctness must not depend on that external setting. Browsers
+   that already received the old four-hour header can retain that old entry
+   until it expires (an edge purge cannot clear a browser cache), so allow that
+   one-time rollout window or hard-reload the validation browser once.
 5. TODO: once finitesitesd exposes a `source_commit` health payload
    (finitechat-style contract gate), gate on it here.
 
