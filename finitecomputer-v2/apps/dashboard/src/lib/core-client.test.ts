@@ -31,6 +31,7 @@ import {
   type CoreAdminRuntimeOverview,
   type CoreRuntimeCapabilities,
   type CoreVisibleProject,
+  loadCoreDashboardSummary,
   loadCoreFinitePrivateUsageStatus,
   loadCoreSourceHostRelayEndpoint,
   runtimeRetirementProductEnabled,
@@ -451,6 +452,165 @@ test("Finite Private usage is N-1 fail-soft on 404 but surfaces real Core failur
       requests.map((request) => request.authorization),
       Array(2).fill("Bearer dev-access-token")
     );
+  } finally {
+    for (const name of names) {
+      const value = previous[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("dashboard summary uses one Core request and falls back safely to independent routes", async () => {
+  const names = [
+    "FC_CORE_BASE_URL",
+    "FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH",
+    "FC_DASHBOARD_DEV_EMAIL",
+    "FC_DASHBOARD_DEV_WORKOS_USER_ID",
+    "FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN",
+    "FC_WORKOS_AUTH_ENABLED",
+  ] as const;
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const previousFetch = globalThis.fetch;
+  const requests: string[] = [];
+  const me = {
+    email: "summary-test@finite.vip",
+    workos_user_id: "user_summary_test",
+    claimable_candidates: [],
+    projects: [],
+    agent_creation_requests: [],
+  };
+  const billing = {
+    customer_org: {
+      id: "org_summary",
+      owner_user_id: "user_summary",
+      name: "summary-test@finite.vip",
+      billing_class: "standard",
+      created_at: "2026-07-23T12:00:00Z",
+      updated_at: "2026-07-23T12:00:00Z",
+    },
+    billing_account: null,
+    agent_creation_entitlement: null,
+    can_create_agent: false,
+    requires_billing: true,
+  };
+
+  process.env.FC_CORE_BASE_URL = "https://core.example.com";
+  process.env.FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH = "1";
+  process.env.FC_DASHBOARD_DEV_EMAIL = "summary-test@finite.vip";
+  process.env.FC_DASHBOARD_DEV_WORKOS_USER_ID = "user_summary_test";
+  process.env.FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN = "dev-access-token";
+  delete process.env.FC_WORKOS_AUTH_ENABLED;
+
+  try {
+    globalThis.fetch = (async (input, init) => {
+      requests.push(String(input));
+      assert.equal(
+        new Headers(init?.headers).get("authorization"),
+        "Bearer dev-access-token"
+      );
+      return new Response(
+        JSON.stringify({ me, billing, finite_private_usage: null }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }) as typeof fetch;
+
+    const aggregate = await loadCoreDashboardSummary();
+    assert.deepEqual(requests, [
+      "https://core.example.com/api/core/v1/me/dashboard-summary",
+    ]);
+    assert.deepEqual(aggregate.core.me, me);
+    assert.deepEqual(aggregate.billing.billing, billing);
+    assert.equal(aggregate.finitePrivateUsage.usage, null);
+    assert.equal(aggregate.core.error, null);
+
+    requests.length = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      requests.push(url);
+      assert.equal(
+        new Headers(init?.headers).get("authorization"),
+        "Bearer dev-access-token"
+      );
+      if (url.endsWith("/api/core/v1/me/dashboard-summary")) {
+        return new Response(JSON.stringify({ error: "route not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/core/v1/me")) {
+        return Response.json(me);
+      }
+      if (url.endsWith("/api/core/v1/me/billing")) {
+        return Response.json(billing);
+      }
+      if (url.endsWith("/api/core/v1/me/finite-private/usage")) {
+        return new Response(JSON.stringify({ error: "route not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ error: "unexpected route" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const fallback = await loadCoreDashboardSummary();
+    assert.equal(requests[0], "https://core.example.com/api/core/v1/me/dashboard-summary");
+    assert.deepEqual(
+      new Set(requests.slice(1)),
+      new Set([
+        "https://core.example.com/api/core/v1/me",
+        "https://core.example.com/api/core/v1/me/billing",
+        "https://core.example.com/api/core/v1/me/finite-private/usage",
+      ])
+    );
+    assert.deepEqual(fallback.core.me, me);
+    assert.deepEqual(fallback.billing.billing, billing);
+    assert.equal(fallback.finitePrivateUsage.usage, null);
+    assert.equal(fallback.finitePrivateUsage.error, null);
+
+    requests.length = 0;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      requests.push(url);
+      assert.equal(
+        new Headers(init?.headers).get("authorization"),
+        "Bearer dev-access-token"
+      );
+      if (url.endsWith("/api/core/v1/me/dashboard-summary")) {
+        return new Response(JSON.stringify({ error: "aggregate failed" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/core/v1/me")) {
+        return Response.json(me);
+      }
+      if (url.endsWith("/api/core/v1/me/billing")) {
+        return Response.json(billing);
+      }
+      if (url.endsWith("/api/core/v1/me/finite-private/usage")) {
+        return new Response(JSON.stringify({ error: "usage failed" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ error: "unexpected route" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const degraded = await loadCoreDashboardSummary();
+    assert.deepEqual(degraded.core.me, me);
+    assert.equal(degraded.core.error, null);
+    assert.deepEqual(degraded.billing.billing, billing);
+    assert.equal(degraded.billing.error, null);
+    assert.equal(degraded.finitePrivateUsage.usage, null);
+    assert.match(degraded.finitePrivateUsage.error ?? "", /usage failed/);
   } finally {
     for (const name of names) {
       const value = previous[name];
