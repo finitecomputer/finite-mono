@@ -296,9 +296,10 @@ async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
 async function waitForUnlockedBrain(brain: FrameLocator, page: Page) {
   const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 90_000);
   const status = brain.locator("#sessionAccountStatus");
+  const shell = brain.locator('.obsidian-shell[data-session-status="unlocked"]');
   await waitForBrainClient(brain, page);
   await assertEventually(
-    async () => (await status.textContent())?.trim() === "Session unlocked",
+    async () => shell.isVisible(),
     timeoutMs,
     async () =>
       `Brain did not unlock; current status: ${(await status.textContent())?.trim()}`,
