@@ -18,14 +18,16 @@ replacement.
 
 What the 2026-07-09 lat1 consolidation cutover changed:
 
-- **One app server, one config tree.** finite-saas-core, dashboard,
+- **One app server, one config tree.** finite-saas-core, Finite Identity, dashboard,
   finitechat-server (migrated off clawland), finitesitesd (migrated off lat2),
   finite-search, and Postgres all run on lat1, defined in `infra/nixos/`.
 - **Native Postgres.** Postgres 16 is a `services.postgresql` systemd service
   (db `finite_core`, 87 Finite Private keys) — **no more k3s StatefulSet**.
 - **One Caddy edge.** A single Caddy on lat1 fronts `finite.computer`,
   `brain.finite.computer`, `chat.finite.computer`, `*.finite.chat` (Cloudflare Origin CA), and
-  `*.docs.finite.chat`. **No Traefik, no k3s, no socat bridges.**
+  `*.docs.finite.chat`; the exact `identity.finite.vip` record joins it when
+  the Identity Authority deployment is accepted. **No Traefik, no k3s, no
+  socat bridges.**
 - **`nixos-rebuild` is THE deploy.** Deploying a release pins the flake to the
   rev that tagged the binaries. The old *six distinct deploy mechanisms* — k3s
   `kubectl apply` + on-host `podman build` (lat1), systemd + Kata (lat2), Nix
@@ -103,6 +105,9 @@ capacity. The one accepted next candidate and its hard gates live in
 - `brain.finite.computer` is the canonical production Brain signing/API
   origin. The WorkOS-protected embedded client remains under
   `finite.computer/client`; its capability names the canonical Brain origin.
+- `identity.finite.vip` is the canonical Finite Identity signing/API origin.
+  Only its exact record moves to lat1; the `finite.vip` apex and wildcard stay
+  on the legacy fleet.
 - `brain.smoke.finite.computer` / `*.smoke.finite.computer` → smoke, retained
   only as an explicit rollback target.
 

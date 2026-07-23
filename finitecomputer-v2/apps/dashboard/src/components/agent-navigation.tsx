@@ -56,9 +56,9 @@ export function AgentNavigation({
     },
     {
       label: "Brain",
-      href: `${root}/brain`,
       icon: BrainIcon,
-      active: pathname === `${root}/brain`,
+      active: false,
+      note: "Temporarily unavailable",
     },
     {
       label: "Skills",

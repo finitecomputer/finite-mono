@@ -61,7 +61,7 @@ in
 
       # Operator-created root:root 0600. It contains only this worker's
       # route-scoped Core token, Phala API key, and specialization credential.
-      EnvironmentFile = "/etc/finite/phala-runner.env";
+      EnvironmentFile = [ "/etc/finite/phala-runner.env" ];
       LoadCredential = "runtime-secrets.env:/etc/finite/runtime-secrets.env";
 
       DynamicUser = true;

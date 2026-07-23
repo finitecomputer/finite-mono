@@ -749,8 +749,8 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_identity_authority_url(None, Some(" https://identity.finite.chat ")).unwrap(),
-            Some("https://identity.finite.chat".to_string())
+            parse_identity_authority_url(None, Some(" https://identity.example ")).unwrap(),
+            Some("https://identity.example".to_string())
         );
         assert_eq!(
             parse_identity_authority_url(
