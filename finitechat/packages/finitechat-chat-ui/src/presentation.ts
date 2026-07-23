@@ -255,6 +255,52 @@ export function pendingTurnIsComplete(
   return hasFinalRemoteResponse(scoped, turn.after_seq, ownAccountId);
 }
 
+/**
+ * Consume final agent deliveries one-for-one against pending turns in send
+ * order. A queued follow-up can share the same visible `after_seq` as the
+ * running turn, so treating every matching final as completion would let turn
+ * A's reply falsely clear turn B's pending marker.
+ */
+export function reconcilePendingChatTurns(
+  turns: PendingChatTurn[],
+  messages: ChatMessage[],
+  ownAccountId: string
+) {
+  const pending = [...turns];
+  const finals = messages
+    .filter(
+      (message) =>
+        message.sender_account_id !== ownAccountId
+        && message.final_delivery === true
+    )
+    .sort((left, right) => left.seq - right.seq);
+
+  for (const message of finals) {
+    const turnIndex = pending.findIndex(
+      (turn) =>
+        message.seq > turn.after_seq
+        && message.room_id === turn.room_id
+        && (turn.topic_id === null || message.conversation_id === turn.topic_id)
+        && (turn.chat_id === null || message.chat_id === turn.chat_id)
+    );
+    if (turnIndex < 0) continue;
+    const [completed] = pending.splice(turnIndex, 1);
+    const nextIndex = pending.findIndex(
+      (turn) =>
+        turn.room_id === completed!.room_id
+        && turn.topic_id === completed!.topic_id
+        && turn.chat_id === completed!.chat_id
+    );
+    if (nextIndex >= 0) {
+      pending[nextIndex] = {
+        ...pending[nextIndex]!,
+        after_seq: Math.max(pending[nextIndex]!.after_seq, message.seq),
+      };
+    }
+  }
+  return pending;
+}
+
 export function liveActivityLabel(
   members: AppTypingMember[],
   fallbackName = "Someone",

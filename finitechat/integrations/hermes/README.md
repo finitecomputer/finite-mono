@@ -109,6 +109,17 @@ In that strict mode, stream failures reconnect with bounded backoff and resume
 from the Rust service's durable cursor. They never fall into Python timer
 polling or CLI-per-message subprocess calls. One-shot polling and CLI fallback
 remain available only when inbound streaming is disabled.
+
+Ordinary text follow-ups for a busy Hermes session stay unacknowledged in that
+same Rust inbox until the session owner task exits. The Python adapter retains
+only the first blocked event per session as an ephemeral admission head; later
+events remain exclusively in the durable inbox and preserve sequence order.
+Once Hermes begins the follow-up turn, the adapter ACKs it under the existing
+redelivery/deduplication contract. A gateway restart before that handoff loses
+only the ephemeral gate, so the inbox redelivers the message. Slash commands,
+pending approval responses, and pending clarification replies still reach the
+active turn immediately, and one busy session does not pause another.
+
 See [HARDENING.md](./HARDENING.md) for the adapter reliability plan and
 acceptance matrix.
 See
