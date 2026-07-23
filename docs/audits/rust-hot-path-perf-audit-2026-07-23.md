@@ -223,6 +223,84 @@ warnings denied.
   an approved load result and rollout path select it. No claim about limiter
   performance is made here.
 
+## Non-Chat follow-on shortlist
+
+Paul asked for the next scan to leave Chat and focus on server infrastructure.
+These are static findings only: none was changed or benchmarked in this patch.
+
+### N1 — Core serializes every Postgres operation through one client mutex
+
+- **Path:** `PostgresCoreStore.client: Arc<Mutex<Client>>` in
+  `finitecomputer-v2/crates/finite-saas-core/src/store.rs`.
+- **Evidence:** the production store opens one Postgres connection and has 64
+  mutex-acquisition sites before querying or transacting.
+- **Amplification:** one slow report, lease, or transaction prevents unrelated
+  heartbeat, runtime, billing, and dashboard queries from reaching Postgres.
+  The application therefore has an effective database concurrency of one even
+  when Postgres and Tokio have spare capacity.
+- **Candidate boundary:** introduce a bounded connection pool; preserve each
+  existing transaction on one checked-out connection and keep the current SQL
+  and row-locking semantics unchanged.
+- **Proof before change:** a mixed concurrent benchmark should include runtime
+  heartbeats, runner lease polls, and a deliberately slow independent read.
+  The slow read must cease head-of-line blocking the other two, while existing
+  lease exclusivity and rollback tests remain green.
+
+### N2 — Finite Sites performs synchronous serving work behind one global mutex
+
+- **Path:** `AppState.engine: Mutex<Engine>` and the static/document branches
+  of `serve_path` in `finite-sites/crates/finitesitesd/src/server.rs` and
+  `sites.rs`.
+- **Evidence:** every request resolves its output through the mutex. Static and
+  document requests reacquire it for synchronous SQLite lookups, filesystem
+  blob reads, Markdown rendering, and response construction. The repository's
+  technical-debt ledger already names the blocking-I/O risk.
+- **Amplification:** a cold or large asset for one site can occupy an async
+  worker and head-of-line block unrelated sites and control-plane operations.
+  Document responses also render and hash their HTML again on every
+  revalidation before deciding to return `304`.
+- **Candidate boundary:** first separate immutable serving metadata from
+  control-plane writes, then move blob reads/rendering off the reactor or
+  serve files asynchronously. Active-version publication must remain an atomic
+  visibility boundary.
+- **Proof before change:** a two-site concurrency test should hold one blob
+  read open and prove the other site's small asset and a control-plane read
+  complete independently; publish/reload tests must prove no mixed
+  manifest/blob version is observable.
+
+### N3 — each video request starts one `ffmpeg` process per sampled frame
+
+- **Path:** `sample_video_frames` in
+  `finitecomputer-v2/crates/finite-specialization-worker/src/lib.rs`.
+- **Evidence:** after a separate `ffprobe`, the worker loops over up to four
+  timestamps and starts a fresh `ffmpeg` process that reopens and seeks through
+  the same staged video for each timestamp.
+- **Amplification:** default video normalization pays five process launches and
+  up to four independent container decodes before making its model request.
+- **Candidate boundary:** extract the same bounded timestamp set in one
+  `ffmpeg` invocation, keeping the current semaphore, duration limit, output
+  dimensions, PNG validation, timestamp labels, and all-or-nothing failure
+  behavior.
+- **Proof before change:** compare process count and wall time on short,
+  long-GOP, variable-frame-rate, and near-duration-boundary fixtures; decoded
+  frame count and labels must match the current implementation.
+
+### N4 — Brain's replay cache scans all live authorization events per request
+
+- **Path:** `enforce_auth_replay_cache` in
+  `finite-brain/crates/finite-brain-server/src/protected_routes.rs`.
+- **Evidence:** every protected request takes one global mutex and calls
+  `BTreeMap::retain` over the complete replay window before its point lookup
+  and insert.
+- **Amplification:** CPU under a steady authenticated rate grows with both
+  request rate and the number of events in the auth-skew window, while the
+  mutex serializes concurrent callers.
+- **Candidate boundary:** pair the event-id map with expiry-ordered eviction,
+  retaining exact replay rejection and bounded expiry semantics.
+- **Proof before change:** benchmark a full live window under concurrency and
+  retain regressions for same-event rejection, expiry acceptance, clock
+  saturation, and bounded memory.
+
 ## Live acceptance remaining
 
 No production mutation was performed. After review and merge, the normal
