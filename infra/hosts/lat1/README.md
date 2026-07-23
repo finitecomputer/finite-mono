@@ -59,7 +59,7 @@ emails, base URLs, a public Stripe price id). Secrets: k8s Secret
 | Unit | What | Notes |
 |---|---|---|
 | `caddy.service` | Edge for `finite.computer` on :80/:443 | Stock Ubuntu package unit, no drop-ins. Config: `/etc/caddy/Caddyfile` (copy in `caddy/Caddyfile`). **There is no Traefik on this host** — k3s disables it; earlier inventories claiming Traefik are wrong. No Ingress/IngressRoute objects exist in the cluster. |
-| `finite-saas-runner.service` + `.timer` | Finite agent-creation runner | Oneshot `run-once`, User=ubuntu, After=k3s. Timer: `OnBootSec=30s`, **`OnUnitInactiveSec=20s`**, `AccuracySec=1s` — a 20-second polling loop dressed as a timer, not a cron-style schedule. Env: `/etc/finite-computer/runner.env`. Backend is **Phala Cloud** (launches CVMs from `ghcr.io/finitecomputer/finite-agent-runtime`). Binary: `/opt/finite/finitecomputer-v2/target/release/finite-saas-runner` — see appendix for the provenance problem. Units in `systemd/`. |
+| `finite-saas-runner.service` + `.timer` | Finite agent-creation runner | Oneshot `run-once`, User=ubuntu, After=k3s. Timer: `OnBootSec=30s`, **`OnUnitInactiveSec=5s`**, `AccuracySec=1s` — a 5-second serial polling loop dressed as a timer, not a cron-style schedule. Env: `/etc/finite-computer/runner.env`. Backend is **Phala Cloud** (launches CVMs from `ghcr.io/finitecomputer/finite-agent-runtime`). Binary: `/opt/finite/finitecomputer-v2/target/release/finite-saas-runner` — see appendix for the provenance problem. Units in `systemd/`. |
 | `k3s.service` | Single-node Kubernetes | Flags above. |
 
 ## Network / ports

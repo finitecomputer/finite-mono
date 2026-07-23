@@ -3,7 +3,7 @@ Description=Run Finite agent creation runner
 
 [Timer]
 OnBootSec=30s
-OnUnitInactiveSec=20s
+OnUnitInactiveSec=5s
 AccuracySec=1s
 Unit=finite-saas-runner.service
 

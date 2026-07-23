@@ -131,14 +131,14 @@
     };
   };
 
-  # One bounded lease attempt every 20 seconds. Adapter readiness and Core
+  # One bounded lease attempt every 5 seconds. Adapter readiness and Core
   # capacity matching happen before a Project can be claimed.
   systemd.timers.finite-saas-runner = {
     description = "Run Finite Kata runtime worker";
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "30s";
-      OnUnitInactiveSec = "20s";
+      OnUnitInactiveSec = "5s";
       AccuracySec = "1s";
       Unit = "finite-saas-runner.service";
     };
