@@ -30,7 +30,7 @@ for the same request.
 ```sh
 fbrain [--config-dir <path>] doctor
 fbrain repair
-fbrain auth status|import [--file <path>]
+fbrain auth status|import [--file <path>]|redeem <email> <token>
 fbrain signer status|public-key|sign|encrypt|decrypt
 fbrain daemon status|start|stop|logs|tick|watch
 fbrain sync status|now [--summary]
@@ -44,7 +44,7 @@ fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list|grant|revoke
 fbrain brain list|create|bootstrap-personal|metadata|export
-fbrain folder create|list
+fbrain folder create|list|delete
 fbrain mount list
 fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
 fbrain invites create|show|accept|revoke
@@ -71,6 +71,7 @@ status` only reports and never creates one.
 fbrain auth status --json
 fbrain auth import < secret.txt
 fbrain auth import --file <path>
+fbrain auth redeem <email> <token> --json
 fbrain signer public-key
 fbrain signer sign --kind text --content "hello"
 fbrain signer encrypt --to <npub> --text "..."
@@ -82,6 +83,11 @@ shared identity. The secret is read from stdin or `--file`, never from an argv
 flag, and import refuses to overwrite an existing identity. The legacy
 `auth login --nsec`/`auth logout` verbs and the plaintext `auth.json` config
 file are removed.
+
+`auth redeem` binds the current identity to an email through the trusted
+identity authority. Treat the one-time token as sensitive input: never repeat
+it in logs or reports. `auth login` is legacy guidance, not an available login
+flow.
 
 Use `auth status --json` to confirm the acting npub, identity file, and config
 directory. Do not print or request secrets during normal agent work.
@@ -225,8 +231,15 @@ fbrain brain export --brain <brain-id>
 fbrain folder list --brain <brain-id>
 fbrain folder create <folder-id> --brain <brain-id> --name Notes --path Notes
 fbrain folder create <folder-id> --brain <brain-id> --role folder --access restricted --member <npub>
+fbrain folder delete <folder-id> --brain <brain-id> --json
 fbrain mount list --brain <brain-id>
 ```
+
+`folder delete` permanently deletes the named Folder, all descendant Folders,
+and every durable object in that subtree. The CLI submits the current expected
+Folder IDs and object count so concurrent scope changes fail closed, then
+removes the returned `deletedFolderIds` from the local Working Tree projection.
+Read [destructive-operations.md](destructive-operations.md) before using it.
 
 `--requesting-user-npub` is Organization Brain-only. It atomically makes the
 distinct signing creator and authenticated requester initial members and
