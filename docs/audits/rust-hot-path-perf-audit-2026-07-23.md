@@ -227,8 +227,11 @@ warnings denied.
 
 Paul asked for the next scan to leave Chat and focus on server infrastructure.
 These are static findings only: none was changed or benchmarked in this patch.
+Core Postgres concurrency and the Finite Sites global engine mutex are the
+selected next priorities. Specialization and Brain remain useful observations,
+but implementation is deferred until Paul syncs with Austin.
 
-### N1 — Core serializes every Postgres operation through one client mutex
+### N1 / priority 1 — Core serializes every Postgres operation through one client mutex
 
 - **Path:** `PostgresCoreStore.client: Arc<Mutex<Client>>` in
   `finitecomputer-v2/crates/finite-saas-core/src/store.rs`.
@@ -246,7 +249,7 @@ These are static findings only: none was changed or benchmarked in this patch.
   The slow read must cease head-of-line blocking the other two, while existing
   lease exclusivity and rollback tests remain green.
 
-### N2 — Finite Sites performs synchronous serving work behind one global mutex
+### N2 / priority 2 — Finite Sites performs synchronous serving work behind one global mutex
 
 - **Path:** `AppState.engine: Mutex<Engine>` and the static/document branches
   of `serve_path` in `finite-sites/crates/finitesitesd/src/server.rs` and
@@ -268,7 +271,7 @@ These are static findings only: none was changed or benchmarked in this patch.
   complete independently; publish/reload tests must prove no mixed
   manifest/blob version is observable.
 
-### N3 — each video request starts one `ffmpeg` process per sampled frame
+### N3 / deferred — each video request starts one `ffmpeg` process per sampled frame
 
 - **Path:** `sample_video_frames` in
   `finitecomputer-v2/crates/finite-specialization-worker/src/lib.rs`.
@@ -284,8 +287,10 @@ These are static findings only: none was changed or benchmarked in this patch.
 - **Proof before change:** compare process count and wall time on short,
   long-GOP, variable-frame-rate, and near-duration-boundary fixtures; decoded
   frame count and labels must match the current implementation.
+- **Coordination boundary:** do not implement or land this change before Paul
+  syncs with Austin on the specialization worker.
 
-### N4 — Brain's replay cache scans all live authorization events per request
+### N4 / deferred — Brain's replay cache scans all live authorization events per request
 
 - **Path:** `enforce_auth_replay_cache` in
   `finite-brain/crates/finite-brain-server/src/protected_routes.rs`.
@@ -300,6 +305,8 @@ These are static findings only: none was changed or benchmarked in this patch.
 - **Proof before change:** benchmark a full live window under concurrency and
   retain regressions for same-event rejection, expiry acceptance, clock
   saturation, and bounded memory.
+- **Coordination boundary:** do not implement or land this change before Paul
+  syncs with Austin on Brain.
 
 ## Live acceptance remaining
 
