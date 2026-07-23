@@ -347,6 +347,18 @@ export type CoreMeResult = {
   error: string | null;
 };
 
+export type CoreDashboardSummaryPayload = {
+  me: CoreMe;
+  billing: CoreBillingOverview;
+  finite_private_usage: CoreFinitePrivateUsageStatus | null;
+};
+
+export type CoreDashboardSummaryResult = {
+  core: CoreMeResult;
+  billing: CoreBillingOverviewResult;
+  finitePrivateUsage: CoreFinitePrivateUsageResult;
+};
+
 export type CoreRuntimeRouteResolution = {
   project_id: string;
   runtime_id: string;
@@ -472,6 +484,80 @@ export async function loadCoreBillingOverview(
       account,
       billing: null,
       error: error instanceof Error ? error.message : "Finite Core is unavailable.",
+    };
+  }
+}
+
+export async function loadCoreDashboardSummary(): Promise<CoreDashboardSummaryResult> {
+  const status = coreBridgeStatus();
+  const account = await getAccountAuthContext();
+  if (!status.configured) {
+    return {
+      core: { ...status, account, me: null, error: null },
+      billing: { ...status, account, billing: null, error: null },
+      finitePrivateUsage: { ...status, usage: null, error: null },
+    };
+  }
+
+  if (!coreAccountReady(account)) {
+    return {
+      core: {
+        ...status,
+        account,
+        me: null,
+        error: "Sign in again to view your projects.",
+      },
+      billing: {
+        ...status,
+        account,
+        billing: null,
+        error: "Sign in again to view billing.",
+      },
+      finitePrivateUsage: {
+        ...status,
+        usage: null,
+        error: "Sign in again to view Finite Private usage.",
+      },
+    };
+  }
+
+  try {
+    const summary = await coreFetch<CoreDashboardSummaryPayload>(
+      "/api/core/v1/me/dashboard-summary",
+      account
+    );
+    return {
+      core: { ...status, account, me: summary.me, error: null },
+      billing: { ...status, account, billing: summary.billing, error: null },
+      finitePrivateUsage: {
+        ...status,
+        usage: summary.finite_private_usage,
+        error: null,
+      },
+    };
+  } catch (error) {
+    if (
+      !(error instanceof CoreFetchError) ||
+      (error.status !== 401 && error.status !== 403)
+    ) {
+      // Deployments update Core and the dashboard independently, and the
+      // aggregate route must not couple otherwise independent read failures.
+      // Preserve the legacy loaders' per-panel failure isolation for an N-1
+      // Core, transport failure, or aggregate server error.
+      const [core, billing, finitePrivateUsage] = await Promise.all([
+        loadCoreMe(),
+        loadCoreBillingOverview(),
+        loadCoreFinitePrivateUsageStatus(),
+      ]);
+      return { core, billing, finitePrivateUsage };
+    }
+
+    const message =
+      error instanceof Error ? error.message : "Finite Core is unavailable.";
+    return {
+      core: { ...status, account, me: null, error: message },
+      billing: { ...status, account, billing: null, error: message },
+      finitePrivateUsage: { ...status, usage: null, error: message },
     };
   }
 }

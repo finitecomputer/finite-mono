@@ -19,6 +19,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 
+use finitesites_blob::BlobStore;
 use finitesites_engine::{EngineError, ViewAccess};
 use finitesites_proto::dto::NativeViewerSessionRequest;
 use finitesites_proto::limits::{MAX_NATIVE_VIEWER_AUTH_BODY_BYTES, VIEWER_COOKIE_TTL_SECONDS};
@@ -49,10 +50,10 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// Resolve the site for this request's Host header. `Ok(None)` means the
 /// label is unclaimed or invalid (render the unknown-site page).
-fn resolve_request_site(
+async fn resolve_request_site(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<Option<SiteRecord>, EngineError> {
+) -> Result<Option<SiteRecord>, String> {
     let host = headers
         .get(HOST)
         .and_then(|value| value.to_str().ok())
@@ -65,8 +66,11 @@ fn resolve_request_site(
         // means the Host header changed between routing and handling.
         return Ok(None);
     };
-    let engine = state.engine.lock().expect("engine mutex never poisoned");
-    engine.resolve_output(output_kind, &label)
+    state
+        .serving_engines
+        .run(move |engine| engine.resolve_output(output_kind, &label))
+        .await?
+        .map_err(|error| error.to_string())
 }
 
 fn viewer_cookie_value(headers: &HeaderMap) -> Option<String> {
@@ -127,7 +131,7 @@ async fn serve_path(
     let headers = request.headers().clone();
     let method = request.method().clone();
     let uri = request.uri().clone();
-    let site = match resolve_request_site(&state, &headers) {
+    let site = match resolve_request_site(&state, &headers).await {
         Ok(Some(site)) => site,
         Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
         Err(error) => {
@@ -153,42 +157,43 @@ async fn serve_path(
         None
     };
     if llms_request_path.as_deref() == Some("/llms.txt") {
-        let generated = {
-            let engine = state.engine.lock().expect("engine mutex never poisoned");
-            match engine.should_generate_llms_txt(&site) {
-                Ok(true) => match engine.project_output_for_site(&site) {
-                    Ok(Some((project, output))) => {
-                        let git_remote_url = format!("{}/{}.git", state.git_base_url, project.slug);
-                        Some(crate::llms::generated_project_llms_txt(
-                            &site.name,
-                            &engine.output_url_for_site(&site),
-                            &state.api_url,
-                            &project.slug,
-                            &git_remote_url,
-                            &output.output_id,
-                            &output.kind,
-                            &output.branch,
-                            &output.path,
-                            output.start_command.as_deref(),
-                        ))
+        let llms_site = site.clone();
+        let git_base_url = state.git_base_url.clone();
+        let api_url = state.api_url.clone();
+        let generated =
+            state
+                .serving_engines
+                .run(move |engine| -> Result<Option<String>, EngineError> {
+                    if !engine.should_generate_llms_txt(&llms_site)? {
+                        return Ok(None);
                     }
-                    Ok(None) => {
-                        eprintln!(
-                            "finitesitesd project llms.txt invariant failed: no project output for {}",
-                            site.id
-                        );
-                        return internal_page();
-                    }
-                    Err(error) => {
-                        eprintln!("finitesitesd project llms.txt error: {error}");
-                        return internal_page();
-                    }
-                },
-                Ok(false) => None,
-                Err(error) => {
-                    eprintln!("finitesitesd llms.txt error: {error}");
-                    return internal_page();
-                }
+                    let (project, output) = engine.project_output_for_site(&llms_site)?.ok_or(
+                        EngineError::Conflict("published project output has no output record"),
+                    )?;
+                    let git_remote_url = format!("{git_base_url}/{}.git", project.slug);
+                    Ok(Some(crate::llms::generated_project_llms_txt(
+                        &llms_site.name,
+                        &engine.output_url_for_site(&llms_site),
+                        &api_url,
+                        &project.slug,
+                        &git_remote_url,
+                        &output.output_id,
+                        &output.kind,
+                        &output.branch,
+                        &output.path,
+                        output.start_command.as_deref(),
+                    )))
+                })
+                .await;
+        let generated = match generated {
+            Ok(Ok(generated)) => generated,
+            Ok(Err(error)) => {
+                eprintln!("finitesitesd project llms.txt error: {error}");
+                return internal_page();
+            }
+            Err(error) => {
+                eprintln!("finitesitesd project llms.txt task error: {error}");
+                return internal_page();
             }
         };
         if let Some(body) = generated {
@@ -196,17 +201,23 @@ async fn serve_path(
         }
     }
 
-    let access = {
-        let engine = state.engine.lock().expect("engine mutex never poisoned");
-        engine.view_access(&site, viewer_cookie_value(&headers).as_deref(), now_unix())
-    };
+    let access_site = site.clone();
+    let viewer_cookie = viewer_cookie_value(&headers);
+    let access = state
+        .serving_engines
+        .run(move |engine| engine.view_access(&access_site, viewer_cookie.as_deref(), now_unix()))
+        .await;
     match access {
-        Ok(ViewAccess::Allowed) => {}
-        Ok(ViewAccess::NeedsLogin) => {
+        Ok(Ok(ViewAccess::Allowed)) => {}
+        Ok(Ok(ViewAccess::NeedsLogin)) => {
             return html_response(StatusCode::UNAUTHORIZED, pages::login(&site.name));
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             eprintln!("finitesitesd access error: {error}");
+            return internal_page();
+        }
+        Err(error) => {
+            eprintln!("finitesitesd access task error: {error}");
             return internal_page();
         }
     }
@@ -216,18 +227,26 @@ async fn serve_path(
     // get. Wake is the density mechanism: idle apps are stopped and cost
     // ~0 memory until the first request brings them back.
     if site.kind == SiteKind::App {
-        let deploy = {
-            let engine = state.engine.lock().expect("engine mutex never poisoned");
-            engine.app_deploy_for(&site.id)
-        };
+        let app_site_id = site.id.clone();
+        let deploy = state
+            .serving_engines
+            .run(move |engine| engine.app_deploy_for(&app_site_id))
+            .await;
         let deploy = match deploy {
-            Ok(Some(deploy)) => deploy,
-            Ok(None) => {
+            Ok(Ok(Some(deploy))) => deploy,
+            Ok(Ok(None)) => {
                 eprintln!("finitesitesd: app site {} is not deployable", site.id);
                 return internal_page();
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 eprintln!("finitesitesd: cannot load app {}: {error}", site.id);
+                return internal_page();
+            }
+            Err(error) => {
+                eprintln!(
+                    "finitesitesd: app metadata task failed for {}: {error}",
+                    site.id
+                );
                 return internal_page();
             }
         };
@@ -266,8 +285,50 @@ async fn serve_path(
         let Some(request_path) = decode_request_path(uri.path()) else {
             return html_response(StatusCode::NOT_FOUND, pages::not_found());
         };
-        let engine = state.engine.lock().expect("engine mutex never poisoned");
-        return crate::documents::serve_document(&engine, &site, &request_path, &headers, &method);
+        let document_site = site.clone();
+        let prepared = state
+            .serving_engines
+            .run(
+                move |engine| -> Result<_, finitesites_engine::EngineError> {
+                    let files = engine.active_version_files(&document_site)?;
+                    let entry = engine
+                        .project_output_for_site(&document_site)?
+                        .and_then(|(_, output)| output.entry);
+                    Ok((files, entry))
+                },
+            )
+            .await;
+        let prepared = match prepared {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => {
+                eprintln!("finitesitesd document metadata error: {error}");
+                return internal_page();
+            }
+            Err(error) => {
+                eprintln!("finitesitesd document metadata task failed: {error}");
+                return internal_page();
+            }
+        };
+        let blobs = state.blobs.clone();
+        return match tokio::task::spawn_blocking(move || {
+            crate::documents::serve_document(
+                &blobs,
+                &site,
+                prepared.0,
+                prepared.1,
+                &request_path,
+                &headers,
+                &method,
+            )
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("finitesitesd document render task failed: {error}");
+                internal_page()
+            }
+        };
     }
 
     if method != Method::GET && method != Method::HEAD {
@@ -278,47 +339,45 @@ async fn serve_path(
         return html_response(StatusCode::NOT_FOUND, pages::not_found());
     };
 
-    let engine = state.engine.lock().expect("engine mutex never poisoned");
-    let lookup = engine.lookup_file(&site, &request_path);
-    let found = match lookup {
-        Ok(found) => found,
-        Err(error) => {
-            eprintln!("finitesitesd lookup error: {error}");
-            return internal_page();
-        }
-    };
+    let lookup_site = site.clone();
+    let found = state
+        .serving_engines
+        .run(
+            move |engine| match engine.lookup_file(&lookup_site, &request_path) {
+                Ok(Some(file)) => Ok(Some((file, StatusCode::OK))),
+                Ok(None) => engine
+                    .lookup_not_found_page(&lookup_site)
+                    .map(|file| file.map(|file| (file, StatusCode::NOT_FOUND))),
+                Err(error) => Err(error),
+            },
+        )
+        .await;
     match found {
-        Some(file) => blob_response(
-            &engine,
-            &site,
-            &file.sha256,
-            &file.path,
-            &headers,
-            StatusCode::OK,
-        ),
-        None => {
-            // The site's own 404 page, if published, else the platform page.
-            match engine.lookup_not_found_page(&site) {
-                Ok(Some(file)) => blob_response(
-                    &engine,
-                    &site,
-                    &file.sha256,
-                    &file.path,
-                    &headers,
-                    StatusCode::NOT_FOUND,
-                ),
-                Ok(None) => html_response(StatusCode::NOT_FOUND, pages::not_found()),
-                Err(error) => {
-                    eprintln!("finitesitesd 404 lookup error: {error}");
-                    internal_page()
-                }
-            }
+        Ok(Ok(Some((file, status)))) => {
+            blob_response(
+                &state.blobs,
+                &site,
+                &file.sha256,
+                &file.path,
+                &headers,
+                status,
+            )
+            .await
+        }
+        Ok(Ok(None)) => html_response(StatusCode::NOT_FOUND, pages::not_found()),
+        Ok(Err(error)) => {
+            eprintln!("finitesitesd lookup error: {error}");
+            internal_page()
+        }
+        Err(error) => {
+            eprintln!("finitesitesd lookup task error: {error}");
+            internal_page()
         }
     }
 }
 
-fn blob_response(
-    engine: &finitesites_engine::Engine,
+async fn blob_response(
+    blobs: &BlobStore,
     site: &SiteRecord,
     sha256: &str,
     served_path: &str,
@@ -347,10 +406,16 @@ fn blob_response(
             .expect("static response builds");
     }
 
-    let bytes = match engine.read_blob(sha256) {
-        Ok(bytes) => bytes,
-        Err(error) => {
+    let blobs = blobs.clone();
+    let sha256 = sha256.to_string();
+    let bytes = match tokio::task::spawn_blocking(move || blobs.get(&sha256)).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
             eprintln!("finitesitesd blob read error: {error}");
+            return internal_page();
+        }
+        Err(error) => {
+            eprintln!("finitesitesd blob read task failed: {error}");
             return internal_page();
         }
     };
@@ -438,7 +503,7 @@ async fn request_link(
     headers: HeaderMap,
     Form(form): Form<RequestLinkForm>,
 ) -> Response {
-    let site = match resolve_request_site(&state, &headers) {
+    let site = match resolve_request_site(&state, &headers).await {
         Ok(Some(site)) => site,
         Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
         Err(error) => {
@@ -500,7 +565,7 @@ async fn redeem_link(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let site = match resolve_request_site(&state, &headers) {
+    let site = match resolve_request_site(&state, &headers).await {
         Ok(Some(site)) => site,
         Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
         Err(error) => {
@@ -570,7 +635,7 @@ async fn native_session(
     if body.len() as u64 > MAX_NATIVE_VIEWER_AUTH_BODY_BYTES {
         return bad_request_page();
     }
-    let site = match resolve_request_site(&state, &headers) {
+    let site = match resolve_request_site(&state, &headers).await {
         Ok(Some(site)) => site,
         Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
         Err(error) => {
@@ -710,6 +775,20 @@ mod tests {
         PARTITIONED_VIEWER_COOKIE_NAME, decode_request_path, secure_viewer_cookie_context,
         viewer_cookie_headers,
     };
+
+    #[test]
+    fn serving_hot_path_never_takes_the_control_engine_mutex() {
+        let source = include_str!("sites.rs");
+        let start = source.find("async fn serve_path(").unwrap();
+        let end = source[start..].find("async fn blob_response(").unwrap() + start;
+        let serve_path = &source[start..end];
+        assert!(!serve_path.contains("state.engine.lock"));
+        assert!(serve_path.contains("serving_engines"));
+
+        let documents = include_str!("documents.rs");
+        assert!(!documents.contains("engine.read_blob"));
+        assert!(!documents.contains("use finitesites_engine::Engine"));
+    }
 
     #[test]
     fn decode_request_path_rules() {

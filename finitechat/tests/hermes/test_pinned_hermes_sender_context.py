@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import importlib.util
 import os
@@ -8,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gateway.config import GatewayConfig, Platform
+from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.platforms.base import build_session_key
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource, build_session_context, build_session_context_prompt
 from gateway.session_context import get_session_env
@@ -40,6 +42,9 @@ def load_adapter_module():
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+PINNED_ADAPTER_MODULE = load_adapter_module()
 
 
 class PinnedHermesSenderContextTests(unittest.TestCase):
@@ -145,6 +150,81 @@ class PinnedHermesSenderContextTests(unittest.TestCase):
         self.assertNotIn(account_id, prompt)
         self.assertIn("Multi-user thread", prompt)
         self.assertIn(account_id, combined_prompt)
+
+
+class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_018_owner_task_blocks_ack_until_followup_turn_begins(self):
+        module = PINNED_ADAPTER_MODULE
+        adapter = module.FiniteChatAdapter(
+            PlatformConfig(
+                enabled=True,
+                typing_indicator=False,
+                extra={
+                    "home": "/tmp/finite-agent-home",
+                    "finitechat_bin": "/bin/echo",
+                },
+            )
+        )
+        bridge_calls = []
+        handler_events = []
+        handler_started = asyncio.Event()
+        finish_handler = asyncio.Event()
+
+        async def fake_json(action, payload, *, timeout):
+            bridge_calls.append((action, payload, timeout))
+            return module._FiniteChatResult(True, {}, None, False)
+
+        async def handler(event):
+            handler_events.append(event)
+            handler_started.set()
+            await finish_handler.wait()
+            return ""
+
+        adapter._finitechat_json = fake_json
+        adapter.set_message_handler(handler)
+        source = adapter.build_source(
+            chat_id="room-agent-1",
+            chat_type="dm",
+            user_id="alice",
+            thread_id="chat-build-1",
+        )
+        session_key = build_session_key(source)
+        owner_release = asyncio.Event()
+        owner = asyncio.create_task(owner_release.wait())
+        adapter._active_sessions[session_key] = asyncio.Event()
+        adapter._session_tasks[session_key] = owner
+        raw_event = {
+            "room_id": "room-agent-1",
+            "seq": 61,
+            "message_id": "msg-61",
+            "conversation_id": "topic-build",
+            "segment_id": "chat-build-1",
+            "text": "queued on real Hermes",
+            "message_type": "text",
+            "source": {
+                "platform": "finitechat",
+                "chat_id": "room-agent-1",
+                "chat_type": "dm",
+                "user_id": "alice",
+            },
+        }
+
+        await adapter._handle_finitechat_event(raw_event)
+        self.assertEqual(handler_events, [])
+        self.assertEqual(bridge_calls, [])
+        admission = adapter._admission_tasks[session_key]
+
+        owner_release.set()
+        await owner
+        await asyncio.wait_for(handler_started.wait(), timeout=1)
+        await asyncio.wait_for(admission, timeout=1)
+
+        self.assertEqual([event.text for event in handler_events], ["queued on real Hermes"])
+        self.assertEqual([call[0] for call in bridge_calls], ["activity", "ack"])
+        self.assertEqual(bridge_calls[-1][1]["message_id"], "msg-61")
+
+        finish_handler.set()
+        await adapter.cancel_background_tasks()
 
 
 if __name__ == "__main__":
