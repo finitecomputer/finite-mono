@@ -24,6 +24,7 @@ pub const DEFAULT_SPARK_BASE_URL: &str = "https://inference.finite.computer/v1";
 pub const DEFAULT_VISION_MODEL: &str = "nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast";
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v1-5";
 pub const DEFAULT_EMBEDDING_MODEL_VERSION: &str = "nomic-embed-text-v1-5/2026-07-21";
+pub const VERIFIED_EMBEDDING_PLAINTEXT_POLICY: &str = "verified-no-content-logging-no-retention-v1";
 pub const IMAGE_PROMPT_VERSION: &str = "aeon-image-analysis-v1";
 pub const AUDIO_PROMPT_VERSION: &str = "aeon-audio-understanding-v1";
 pub const VIDEO_PROMPT_VERSION: &str = "aeon-video-understanding-v1";
@@ -57,6 +58,8 @@ pub struct WorkerConfig {
     pub embedding_model: Option<String>,
     pub embedding_model_version: Option<String>,
     pub embedding_concurrency: usize,
+    pub embedding_plaintext_policy_verified: bool,
+    pub embedding_policy_evidence_id: Option<String>,
     pub max_image_bytes: u64,
     pub max_inline_image_bytes: u64,
     pub max_output_chars: usize,
@@ -98,6 +101,14 @@ impl WorkerConfig {
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(4)
                 .clamp(1, 16),
+            embedding_plaintext_policy_verified: non_empty_env(
+                "FINITE_SPECIALIZATION_EMBEDDING_PLAINTEXT_POLICY",
+            )
+            .as_deref()
+                == Some(VERIFIED_EMBEDDING_PLAINTEXT_POLICY),
+            embedding_policy_evidence_id: non_empty_env(
+                "FINITE_SPECIALIZATION_EMBEDDING_POLICY_EVIDENCE_ID",
+            ),
             max_image_bytes: non_empty_env("FINITE_SPECIALIZATION_MAX_IMAGE_BYTES")
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_MAX_IMAGE_BYTES)
@@ -527,6 +538,13 @@ async fn embeddings(
     request: Request,
 ) -> Result<Json<Value>, WorkerError> {
     authenticate_worker_request(&state.config, request.headers())?;
+    if !state.config.embedding_plaintext_policy_verified
+        || state.config.embedding_policy_evidence_id.is_none()
+    {
+        return Err(WorkerError::unavailable(
+            "embedding plaintext policy is not verified",
+        ));
+    }
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(state.config.request_deadline_seconds);
     let _permit = Arc::clone(&state.embedding_slots)
@@ -759,6 +777,21 @@ async fn health(State(state): State<Arc<WorkerState>>) -> Json<Value> {
     Json(json!({
         "ok": true,
         "service": "finite-specialization-worker",
+        "embedding": {
+            "enabled": state.config.embedding_model.is_some()
+                && state.config.embedding_model_version.is_some()
+                && state.config.spark_bearer_token.is_some()
+                && state.config.embedding_plaintext_policy_verified
+                && state.config.embedding_policy_evidence_id.is_some(),
+            "model": state.config.embedding_model,
+            "modelVersion": state.config.embedding_model_version,
+            "plaintextPolicy": if state.config.embedding_plaintext_policy_verified {
+                "verified"
+            } else {
+                "unverified"
+            },
+            "policyEvidenceId": state.config.embedding_policy_evidence_id,
+        },
         "capabilities": capabilities,
     }))
 }
@@ -3440,6 +3473,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unverified_embedding_policy_rejects_before_body_read_or_upstream_transport() {
+        let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        upstream.set_nonblocking(true).unwrap();
+        let mut config = test_config(&format!("http://{}", upstream.local_addr().unwrap()));
+        config.embedding_plaintext_policy_verified = false;
+        config.embedding_policy_evidence_id = None;
+        let response = app(config)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/embeddings")
+                    .header("authorization", "Bearer worker-secret")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("this body must not be parsed"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(matches!(
+            upstream.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[tokio::test]
     async fn oversized_embedding_upstream_response_is_rejected() {
         let upstream_url = spawn_spark_mock(
             Arc::new(Mutex::new(None)),
@@ -4041,6 +4101,8 @@ mod tests {
             embedding_model: Some("embed-test".to_string()),
             embedding_model_version: Some("embed-test-v1".to_string()),
             embedding_concurrency: 4,
+            embedding_plaintext_policy_verified: true,
+            embedding_policy_evidence_id: Some("test-review-2026-07-21".to_owned()),
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_inline_image_bytes: DEFAULT_MAX_INLINE_IMAGE_BYTES,
             max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,

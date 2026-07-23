@@ -1,9 +1,13 @@
 # Hosted Web Chat snapshot and empty-target restore
 
-This runbook covers the Hosted Web Chat Recovery Set only: the Hosted Web
-Device identity, encrypted client stores and Agent bindings; the complete
-Finite Chat server SQLite database; and a custom-format SaaS Core Postgres
-dump. The separately retained Agent Runtime is not in this snapshot.
+This runbook covers snapshot format
+`finite.hosted-web-chat-recovery-snapshot.v2`. Its complete Recovery Set is:
+the Hosted Web Device identity, encrypted client stores, and Agent bindings;
+the complete Finite Chat server SQLite database; a custom-format SaaS Core
+Postgres dump; the FiniteBrain SQLite database; and the Finite Identity SQLite
+database. The separately retained Agent Runtime is not in this snapshot. A v1
+snapshot is incomplete for the current stack and the restore tool rejects it
+instead of silently omitting Brain and Finite Identity.
 
 **Current cadence, 2026-07-20:** the snapshot is deploy/manual-triggered. The
 former 15-minute timer was removed because stopping Chat and every Hosted
@@ -100,12 +104,17 @@ age=$(( $(date +%s) - $(stat -Lc %Y "$latest") ))
 test "$age" -le 604800      # current health threshold only
 test "$age" -le 900         # separate admission/RPO gate; expected to fail today
 (cd "$latest" && sha256sum --check manifest.sha256)
+test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v2
+test -f "$latest/recovery-set.tsv"
 ```
 
-The snapshot unit briefly fences both SQLite writers, copies identity and
-encrypted binding files, uses SQLite's backup API for every client database
-and the server database, takes a `pg_dump --format=custom`, verifies each
-artifact, and writes only relative paths and hashes to the manifest.
+The snapshot unit briefly fences every writer in the Recovery Set, copies
+identity and encrypted binding files, uses SQLite's backup API for every
+Hosted Device, Chat, Brain, and Finite Identity database, takes a
+`pg_dump --format=custom`, verifies each artifact, and writes only relative
+paths and hashes to the integrity manifest. `recovery-set.tsv` binds the format
+version to the five component and artifact identities; snapshot health and the
+restore preflight must validate both files.
 
 ## Empty-target drill
 
@@ -113,7 +122,9 @@ artifact, and writes only relative paths and hashes to the manifest.
    its canonical and legacy associated Rooms, plus one encrypted attachment.
    Record identifiers in an encrypted evidence file; never put them in logs or
    this public repository.
-2. Provision an empty isolated target. Public ingress, email, webhooks, push,
+2. Provision an empty isolated target. This is the restore boundary: the
+   target Recovery Set directory must not exist or must be empty, and no target
+   service may have initialized a database there. Public ingress, email, webhooks, push,
    billing jobs, and other outbound side effects stay disabled. Fence the
    separately retained Agent Runtime so it cannot contact both stacks.
 3. Extract one Borg archive into a temporary directory outside the target.
@@ -133,11 +144,17 @@ artifact, and writes only relative paths and hashes to the manifest.
    as the Finite Chat database. Preserve ownership and mode from the target's
    Nix units. Create an empty `finite_core`, then restore with
    `pg_restore --exit-on-error --single-transaction --clean --if-exists`.
-6. Start Postgres, SaaS Core, Finite Chat, Hosted Web Device, and dashboard in
+   Install `recovery/finite-brain/finite-brain.sqlite3` and
+   `recovery/finite-identity/identity.db` into their target StateDirectories.
+6. Start Postgres, SaaS Core, Finite Identity, FiniteBrain, Finite Chat, Hosted
+   Web Device, and dashboard in
    isolated mode. Keep public traffic and outbound side effects off.
-7. Compare Account, Device, Room, Topic, Chat, message, attachment, Project,
-   Runtime, and Agent identifiers with the encrypted preflight evidence. Open
-   all retained conversations, decrypt history, and download the attachment.
+7. Compare Account, human identity/Nostr identity binding, Device, Room, Topic,
+   Chat, message, attachment, Project, Runtime, Agent, Brain, Folder, and
+   encrypted Brain object counts with the encrypted preflight evidence. Sign in
+   as the restored hosted human identity, open the restored Brain through the
+   normal product path, read its retained content, open all retained
+   conversations, decrypt history, and download the attachment.
 8. Reconnect only the fenced retained Agent Runtime. Verify the durable owner
    claim replays through the canonical Room and one fresh Agent turn completes.
 9. Paul performs the browser checks. Record date, archive name, component
@@ -145,6 +162,15 @@ artifact, and writes only relative paths and hashes to the manifest.
 
 Do not switch traffic as part of the drill. A production traffic switch needs
 its own authorization and rollback plan.
+
+The backup boundary is the service-consistent v2 snapshot directory after its
+atomic staging rename. The restore boundary is the verified isolated staging
+directory before its atomic rename into the empty target. The rollback boundary
+is the untouched previous target plus the selected immutable snapshot/Borg
+archive: never overwrite a previous target during this drill. To exercise the
+activation boundary, run once with `FINITE_RESTORE_FAIL_AFTER_STAGE=1`; the
+tool must remove its staging path, leave the target empty/unchanged, and permit
+an exact retry after the failure injection is removed.
 
 Schedule the first drill immediately after the first verified archive and
 repeat it before Phase 11 authorizes additional paid/Launch Code creation and
@@ -154,7 +180,8 @@ this public runbook does not invent an appointment.
 
 ## Negative drill
 
-Before admission, prove that a wrong key, truncated archive, modified
-artifact, missing database, and non-empty target each fail before target
-mutation. After any schema or snapshot-format change, repeat both positive and
-negative drills.
+Before admission, prove that a wrong key, truncated archive, modified artifact,
+v1/wrong format, mismatched `recovery-set.tsv`, missing Chat/Core/Brain/Identity
+database, unsafe manifest path, non-empty target, and injected post-staging
+failure each fail before target mutation. After any schema or snapshot-format
+change, repeat both positive and negative drills.

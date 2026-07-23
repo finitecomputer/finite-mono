@@ -73,13 +73,23 @@ This does not pass or replace the canonical real-chat acceptance. It only
 skips the three inference reply assertions; the Hosted Web Device must still
 connect, and all Brain/Apple assertions still run.
 
-To run the destructive Greenfield Brain setup matrix, add
-`DEVFINITY_BRAIN_SETUP_MATRIX=1` to that command. The matrix resets only the
-local FiniteBrain database and the test agent's `fbrain` working state between
-cases. It proves agent-first and user-first Personal Brain setup, agent-first
-Org-Brain-first access, user-first Org Brain setup with the selected agent, and
-user-first human-only Org Brain setup. Do not use this option against shared or
-production state.
+The complete Greenfield Brain setup/deletion matrix is a separate disposable
+gate:
+
+```sh
+just brain-product-matrix
+```
+
+It launches the canonical image through the local Docker Runner against a fresh
+temporary devfinity state root and a deterministic OpenAI-compatible model
+stub. The model still drives real Hermes terminal tool calls, reads the
+installed managed FiniteBrain skill, invokes the built `fbrain`, signs real
+Brain HTTP, and crosses Hosted Device and Product Client boundaries. The gate
+proves negative, unclear, and affirmative Personal setup, agent-first and
+user-first Organization cases, durable content, duplicate protection, and
+restart behavior. It is required in pull-request CI on the isolated Docker
+runner. The ordinary persisted Apple SaaS smoke never runs this destructive
+scenario reset.
 
 Rerun the real launch/chat/restart acceptance test at any time with:
 
@@ -141,6 +151,7 @@ just dev up
 just dev up --headless
 just dev saas-smoke
 just dev smoke
+just brain-product-matrix
 just dev rust-smoke
 just dev status
 just dev cleanup

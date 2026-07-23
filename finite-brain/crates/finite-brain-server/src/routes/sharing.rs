@@ -13,7 +13,7 @@ pub(crate) async fn create_share_link_handler(
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
-    let recipient_identity = resolve_and_record_identity(&state, &request.recipient_npub)?;
+    let recipient_identity = resolve_and_record_identity(&state, &request.recipient_npub).await?;
     let recipient = UserId::new(recipient_identity.npub.clone())?;
     let current_key_version = {
         let store = state.store.lock().map_err(lock_error)?;
@@ -226,7 +226,7 @@ pub(crate) async fn create_shared_folder_invitation_handler(
     let source_folder_id = FolderId::new(source_folder_id)?;
     let destination_brain_id = BrainId::new(request.destination_brain_id)?;
     let destination_admin_identity =
-        resolve_and_record_identity(&state, &request.destination_admin_npub)?;
+        resolve_and_record_identity(&state, &request.destination_admin_npub).await?;
     let destination_admin = UserId::new(destination_admin_identity.npub.clone())?;
     let current_key_version = {
         let store = state.store.lock().map_err(lock_error)?;
@@ -394,7 +394,7 @@ pub(crate) async fn update_shared_folder_connection_members_handler(
     let actor = UserId::new(actor)?;
     let request: UpdateSharedFolderConnectionMembersRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let target_identity = resolve_and_record_identity(&state, &request.target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &request.target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     let now = server_timestamp(&state);
     let connection = {

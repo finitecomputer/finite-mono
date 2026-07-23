@@ -62,16 +62,32 @@ pub(crate) fn sync_once_with_local_paths(
             ))),
         },
     });
-    if let Some(Err(error)) = reconciliation {
-        let message = error.to_string();
-        let _ = mutate_agent_state(env, |state, now| {
-            state.add_activity(
-                now,
-                "search.index.blocked",
-                format!("Search index reconciliation failed: {message}"),
-            );
-            Ok(())
-        });
+    match reconciliation {
+        Some(Err(error)) => {
+            let message = error.to_string();
+            let _ = mutate_agent_state(env, |state, now| {
+                state.search_lifecycle.reconciliation_pending = true;
+                state.search_lifecycle.consecutive_failures = state
+                    .search_lifecycle
+                    .consecutive_failures
+                    .saturating_add(1)
+                    .min(8);
+                state.add_activity(
+                    now,
+                    "search.index.blocked",
+                    format!("Search index reconciliation failed: {message}"),
+                );
+                Ok(())
+            });
+        }
+        Some(Ok(_)) => {
+            let _ = mutate_agent_state(env, |state, _| {
+                state.search_lifecycle.reconciliation_pending = false;
+                state.search_lifecycle.consecutive_failures = 0;
+                Ok(())
+            });
+        }
+        None => {}
     }
     report
 }

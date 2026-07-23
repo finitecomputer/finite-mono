@@ -20,6 +20,11 @@ pub(crate) fn validate_sync_input(input: &SyncRecordInput) -> Result<(), StoreEr
             reason: "payload JSON is required".to_owned(),
         });
     }
+    serde_json::from_str::<serde_json::Value>(input.payload_json()).map_err(|_| {
+        StoreError::InvalidRecord {
+            reason: "payload JSON is invalid".to_owned(),
+        }
+    })?;
     let expected_kind = match input {
         SyncRecordInput::Control(record)
             if record.record_type == SyncRecordType::FolderKeyGrant =>

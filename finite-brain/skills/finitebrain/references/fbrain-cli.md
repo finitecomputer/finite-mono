@@ -44,7 +44,7 @@ fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list|grant|revoke
 fbrain brain list|create|bootstrap-personal|metadata|export
-fbrain folder create|list
+fbrain folder create|list|delete
 fbrain mount list
 fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
 fbrain invites create|show|accept|revoke

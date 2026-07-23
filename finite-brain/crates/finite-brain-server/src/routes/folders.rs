@@ -1,4 +1,6 @@
 use crate::*;
+use finite_brain_core::BRAIN_CAPACITY_ENVELOPE;
+use finite_brain_store::FolderDeletionExpectation;
 
 pub(crate) async fn delete_folder_handler(
     State(state): State<ServerState>,
@@ -11,6 +13,36 @@ pub(crate) async fn delete_folder_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: FolderDeleteRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let expectation = {
+        let folder_ids = &request.expected_folder_ids;
+        let object_count = request.expected_object_count;
+        if folder_ids.is_empty() || folder_ids.len() > BRAIN_CAPACITY_ENVELOPE.folders {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "expectedFolderIds is outside the accepted Folder envelope",
+            ));
+        }
+        let parsed = folder_ids
+            .iter()
+            .map(|folder_id| FolderId::new(folder_id.clone()))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if parsed.len() != folder_ids.len() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "expectedFolderIds contains duplicate Folder identities",
+            ));
+        }
+        if object_count > BRAIN_CAPACITY_ENVELOPE.current_objects {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "expectedObjectCount is outside the accepted object envelope",
+            ));
+        }
+        FolderDeletionExpectation {
+            folder_ids: parsed,
+            object_count,
+        }
+    };
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let submitted_event = Event::from_json(request.deletion_event.to_string()).map_err(|_| {
@@ -74,6 +106,7 @@ pub(crate) async fn delete_folder_handler(
             &payload_json,
             &deleted_at,
             APP_SPECIFIC_KIND,
+            Some(&expectation),
         )?
     };
     Ok(Json(FolderDeleteResponse {
@@ -81,6 +114,11 @@ pub(crate) async fn delete_folder_handler(
         duplicate: outcome.duplicate,
         folder_count: outcome.folder_count,
         object_count: outcome.object_count,
+        deleted_folder_ids: outcome
+            .deleted_folder_ids
+            .into_iter()
+            .map(|folder_id| folder_id.to_string())
+            .collect(),
     }))
 }
 
@@ -106,7 +144,7 @@ pub(crate) async fn create_folder_handler(
         current_key_version: 1,
         shared_folder_source: request.shared_folder_source.unwrap_or(false),
     };
-    let access_user_ids = resolve_user_id_set(&state, request.access_user_ids)?;
+    let access_user_ids = resolve_user_id_set(&state, request.access_user_ids).await?;
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
         &brain_id,
@@ -201,7 +239,7 @@ pub(crate) async fn grant_folder_access_handler(
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
-    let target_identity = resolve_and_record_identity(&state, &request.target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &request.target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     let current_key_version = {
         let store = state.store.lock().map_err(lock_error)?;
@@ -278,7 +316,7 @@ pub(crate) async fn remove_folder_access_handler(
     )?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
-    let target_identity = resolve_and_record_identity(&state, &target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     {
         let store = state.store.lock().map_err(lock_error)?;

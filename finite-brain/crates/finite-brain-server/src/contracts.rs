@@ -157,6 +157,10 @@ pub struct ObjectDeleteRequest {
 #[serde(rename_all = "camelCase")]
 pub struct FolderDeleteRequest {
     pub deletion_event: serde_json::Value,
+    /// Exact Folder identities and object count shown by the confirming client.
+    /// Both are mandatory and checked in the deletion transaction.
+    pub expected_folder_ids: Vec<String>,
+    pub expected_object_count: usize,
 }
 
 /// Counts and sync cursor returned after permanent Folder deletion.
@@ -167,6 +171,7 @@ pub struct FolderDeleteResponse {
     pub duplicate: bool,
     pub folder_count: usize,
     pub object_count: usize,
+    pub deleted_folder_ids: Vec<String>,
 }
 
 /// Object write response.

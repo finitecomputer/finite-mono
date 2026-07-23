@@ -16,6 +16,8 @@ pub(crate) struct AgentState {
     pub(crate) auth_npub: Option<String>,
     pub(crate) daemon: DaemonState,
     pub(crate) sync: AgentSyncState,
+    #[serde(default)]
+    pub(crate) search_lifecycle: SearchLifecycleState,
     pub(crate) conflicts: Vec<ConflictEntry>,
     pub(crate) activity: Vec<ActivityEntry>,
     pub(crate) created_at: String,
@@ -44,6 +46,7 @@ impl AgentState {
                 mode: "automatic".to_owned(),
                 status: "idle".to_owned(),
             },
+            search_lifecycle: SearchLifecycleState::default(),
             conflicts: Vec::new(),
             activity: Vec::new(),
             created_at: now.to_owned(),
@@ -65,8 +68,26 @@ impl AgentState {
             kind,
             message: message.into(),
         });
+        const MAX_ACTIVITY_ENTRIES: usize = 256;
+        if self.activity.len() > MAX_ACTIVITY_ENTRIES {
+            self.activity
+                .drain(..self.activity.len() - MAX_ACTIVITY_ENTRIES);
+        }
         self.updated_at = at;
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchLifecycleState {
+    #[serde(default)]
+    pub(crate) reconciliation_pending: bool,
+    #[serde(default)]
+    pub(crate) consecutive_failures: u32,
+    #[serde(default)]
+    pub(crate) semantic_refresh_pending: bool,
+    #[serde(default)]
+    pub(crate) semantic_consecutive_failures: u32,
 }
 
 fn activity_id(at: &str, index: usize, kind: &str) -> String {

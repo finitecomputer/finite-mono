@@ -757,10 +757,9 @@ fn request_authorized_embeddings(
     sections: &[&SectionForEmbedding],
     input_offset: usize,
 ) -> Result<Option<EmbeddingProviderResponse>, CliError> {
-    if with_authorized_admission(connection, admission_lock, admission_path, || Ok(()))?.is_none() {
-        return Ok(None);
-    }
-    request_embeddings(provider, sections, input_offset).map(Some)
+    with_authorized_admission(connection, admission_lock, admission_path, || {
+        request_embeddings(provider, sections, input_offset)
+    })
 }
 
 fn with_authorized_admission<T>(
@@ -769,8 +768,18 @@ fn with_authorized_admission<T>(
     admission_path: &Path,
     action: impl FnOnce() -> Result<T, CliError>,
 ) -> Result<Option<T>, CliError> {
+    if admission_path.parent().is_some_and(|directory| {
+        directory.join("semantic-revoking").exists() || directory.join("access-revoked").exists()
+    }) {
+        return Ok(None);
+    }
     let _admission = SharedAdmission::acquire(admission_lock)?;
     if !lock_matches_path(admission_lock, admission_path) {
+        return Ok(None);
+    }
+    if admission_path.parent().is_some_and(|directory| {
+        directory.join("semantic-revoking").exists() || directory.join("access-revoked").exists()
+    }) {
         return Ok(None);
     }
     let enabled: bool = connection
@@ -786,7 +795,7 @@ fn with_authorized_admission<T>(
     action().map(Some)
 }
 
-fn lock_matches_path(file: &File, path: &Path) -> bool {
+pub(crate) fn lock_matches_path(file: &File, path: &Path) -> bool {
     let Ok(open_metadata) = file.metadata() else {
         return false;
     };

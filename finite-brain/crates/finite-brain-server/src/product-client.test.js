@@ -869,6 +869,16 @@ for (const invitationAcceptanceSource of [
   );
 }
 assert.ok(
+  createOrganizationBrainFromInputSource.indexOf("const name = input?.value.trim()")
+    < createOrganizationBrainFromInputSource.indexOf("await beginExplicitBrainCreation()"),
+  "Organization creation must snapshot its submitted name before an async session transition"
+);
+assert.ok(
+  createOrganizationBrainFromInputSource.indexOf("const includeAgentAdmin = Boolean")
+    < createOrganizationBrainFromInputSource.indexOf("await beginExplicitBrainCreation()"),
+  "Organization creation must snapshot its Agent choice before an async session transition"
+);
+assert.ok(
   createOrganizationBrainFromInputSource.indexOf("state.pendingOrganizationCreation = null;")
     > createOrganizationBrainFromInputSource.indexOf("await finishExplicitBrainCreation(metadata, creation);"),
   "An ambiguous post-create refresh failure must retain the stable Organization Brain retry identity"
@@ -1255,6 +1265,16 @@ assert.equal(
   JSON.stringify(["signer connected", "organization", "1 folders", "2 grants", "1 mounts"])
 );
 assert.equal(client.personalBrainIdForPubkey("ab".repeat(32)), "personal-abababababababab");
+const firstSameNameBrainId = client.brainIdFromName("org", "Same Name", {
+  createdAt: 1_784_739_617_779,
+  entropy: new Uint8Array(8).fill(0x11),
+});
+const secondSameNameBrainId = client.brainIdFromName("org", "Same Name", {
+  createdAt: 1_784_739_617_779,
+  entropy: new Uint8Array(8).fill(0x22),
+});
+assert.notEqual(firstSameNameBrainId, secondSameNameBrainId);
+assert.match(firstSameNameBrainId, /^org-same-name-[a-z0-9]+-(?:11){8}$/u);
 assert.equal(client.brainTargetFromSearch("?brainId=org-acme"), "org-acme");
 assert.equal(client.brainTargetFromSearch("?brainId=../../personal"), null);
 assert.equal(

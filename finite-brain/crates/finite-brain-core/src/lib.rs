@@ -29,6 +29,40 @@ const MAX_USER_ID_LEN: usize = 128;
 const MAX_DISPLAY_NAME_LEN: usize = 128;
 const MAX_SAFE_RELATIVE_PATH_LEN: usize = 1024;
 const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS: usize = 100;
+/// Version of the accepted Brain state envelope that keeps direct deletion bounded.
+pub const BRAIN_CAPACITY_ENVELOPE_VERSION: &str = "finite.brain.capacity.v1";
+/// One centrally governed accepted-state envelope for all durable Brain mutations.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct BrainCapacityEnvelope {
+    pub folders: usize,
+    pub folder_depth: usize,
+    pub current_objects: usize,
+    pub sync_records: usize,
+    pub members: usize,
+    pub folder_access_entries: usize,
+    pub folder_key_grants: usize,
+    pub invitations: usize,
+    pub share_links: usize,
+    pub mounts: usize,
+    pub shared_connections: usize,
+    pub delegations: usize,
+}
+
+/// Accepted state guaranteed to remain removable by one atomic direct deletion.
+pub const BRAIN_CAPACITY_ENVELOPE: BrainCapacityEnvelope = BrainCapacityEnvelope {
+    folders: 1_000,
+    folder_depth: 32,
+    current_objects: 10_000,
+    sync_records: 100_000,
+    members: 1_000,
+    folder_access_entries: 10_000,
+    folder_key_grants: 10_000,
+    invitations: 1_000,
+    share_links: 1_000,
+    mounts: 1_000,
+    shared_connections: 1_000,
+    delegations: 10_000,
+};
 /// Maximum number of Folder rotations accepted in one Personal Agent request.
 pub const MAX_PERSONAL_AGENT_ROTATION_FOLDERS: usize = 100;
 /// Maximum Folder Key Grants accepted for one Folder rotation.

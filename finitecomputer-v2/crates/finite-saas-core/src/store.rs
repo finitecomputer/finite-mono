@@ -8895,10 +8895,10 @@ where
 {
     Ok(client
         .query_opt(
-            "SELECT grant.id
-             FROM finite_private_grants grant
-             JOIN users usr ON usr.id = grant.user_id
-             WHERE usr.workos_user_id = $1 AND grant.status = 'active'",
+            "SELECT grant_record.id
+             FROM finite_private_grants grant_record
+             JOIN users usr ON usr.id = grant_record.user_id
+             WHERE usr.workos_user_id = $1 AND grant_record.status = 'active'",
             &[&workos_user_id],
         )
         .await

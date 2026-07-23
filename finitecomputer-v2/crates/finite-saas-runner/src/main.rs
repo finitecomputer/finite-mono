@@ -85,8 +85,27 @@ fn run_cycle() -> Result<RunOnceOutcome> {
     );
     let finite_private_api_key_override =
         optional_env_value("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE");
-    let finite_private_specialization_worker_api_key =
+    let configured_specialization_worker_api_key =
         optional_env_value("FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY");
+    let specialization_policy_evidence =
+        optional_env_value("FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_POLICY_EVIDENCE_ID");
+    let specialization_deployment_verified = optional_bool(
+        "FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_DEPLOYMENT_VERIFIED",
+        false,
+    )?;
+    // The bearer token alone never enables plaintext egress. Operators must
+    // attest that the deployed digest exposes the verified-policy health
+    // contract and name the reviewed evidence. Until then Runner withholds the
+    // entire specialization bundle from newly launched runtimes.
+    let finite_private_specialization_worker_api_key = if specialization_deployment_verified
+        && specialization_policy_evidence
+            .as_deref()
+            .is_some_and(|evidence| !evidence.trim().is_empty())
+    {
+        configured_specialization_worker_api_key
+    } else {
+        None
+    };
     let runtime_environment = optional_runtime_environment()?;
     let runtime_secret_environment = optional_runtime_secret_environment()?;
     let agent_identity_authority = optional_agent_identity_authority()?;

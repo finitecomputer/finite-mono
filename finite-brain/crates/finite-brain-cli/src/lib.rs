@@ -671,6 +671,7 @@ fn daemon_watch<W: Write>(
         state.daemon.watch_strategy = Some(watch_strategy.to_owned());
         state.daemon.last_local_change_count = None;
         state.sync.status = "watching".to_owned();
+        state.search_lifecycle.semantic_refresh_pending = env.embedding_provider.is_some();
         state.add_activity(
             now,
             "daemon.watch.started",
@@ -692,7 +693,9 @@ fn daemon_watch<W: Write>(
             Ok(())
         })?;
     }
+    let mut semantic_refresh_pending = env.embedding_provider.is_some();
     let mut semantic_worker = None;
+    let mut semantic_retry_ticks = 0_usize;
 
     let mut ticks = 0_usize;
     let mut failures = 0_usize;
@@ -712,7 +715,14 @@ fn daemon_watch<W: Write>(
         let local_changes_due = local_change_count.unwrap_or_default() > 0;
         let remote_poll_due =
             remote_poll_ticks.is_some_and(|interval| ticks.is_multiple_of(interval));
-        let should_sync = !file_aware || ticks == 1 || local_changes_due || remote_poll_due;
+        let reconciliation_pending = read_agent_state(&root)?
+            .search_lifecycle
+            .reconciliation_pending;
+        let should_sync = !file_aware
+            || ticks == 1
+            || local_changes_due
+            || remote_poll_due
+            || reconciliation_pending;
 
         if should_sync {
             match sync_once_with_local_paths(
@@ -722,12 +732,28 @@ fn daemon_watch<W: Write>(
                 Some(discovered_local_paths),
             ) {
                 Ok(report) => {
+                    if report.record_count > 0 || local_changes_due {
+                        semantic_refresh_pending = env.embedding_provider.is_some();
+                        if semantic_refresh_pending {
+                            mutate_agent_state(env, |state, _| {
+                                state.search_lifecycle.semantic_refresh_pending = true;
+                                Ok(())
+                            })?;
+                        }
+                    }
                     last_status = Some(report.status);
                     last_error = None;
                     consecutive_failures = 0;
                     retry_backoff_millis = 0;
                 }
                 Err(error) => {
+                    if local_changes_due && env.embedding_provider.is_some() {
+                        semantic_refresh_pending = true;
+                        mutate_agent_state(env, |state, _| {
+                            state.search_lifecycle.semantic_refresh_pending = true;
+                            Ok(())
+                        })?;
+                    }
                     failures += 1;
                     consecutive_failures += 1;
                     retry_backoff_millis = daemon_retry_backoff_millis(poll, consecutive_failures);
@@ -750,13 +776,8 @@ fn daemon_watch<W: Write>(
             retry_backoff_millis = 0;
             last_status = Some("idle-no-local-changes".to_owned());
             last_error = None;
-            mutate_agent_state(env, |state, now| {
+            mutate_agent_state(env, |state, _| {
                 state.sync.status = "idle-no-local-changes".to_owned();
-                state.add_activity(
-                    now,
-                    "daemon.watch.idle",
-                    "No local Brain Working Tree changes detected",
-                );
                 Ok(())
             })?;
         }
@@ -783,27 +804,35 @@ fn daemon_watch<W: Write>(
             Ok(())
         })?;
 
-        if semantic_worker.is_none() {
+        if semantic_worker
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+            && let Some(worker) = semantic_worker.take()
+        {
+            if record_semantic_worker_result(env, worker.join()) {
+                let failures = read_agent_state(&root)?
+                    .search_lifecycle
+                    .semantic_consecutive_failures as usize;
+                semantic_retry_ticks = 1_usize << failures.saturating_sub(1).min(3);
+            } else {
+                semantic_retry_ticks = 0;
+            }
+        }
+        if semantic_worker.is_none() && !semantic_refresh_pending {
+            if semantic_retry_ticks > 0 {
+                semantic_retry_ticks -= 1;
+            } else if env.embedding_provider.is_some() && semantic_refresh_required(&root)? {
+                semantic_refresh_pending = true;
+            }
+        }
+        if semantic_worker.is_none() && semantic_refresh_pending && semantic_retry_ticks == 0 {
             semantic_worker = env.embedding_provider.clone().map(|provider| {
                 let root = root.clone();
                 std::thread::spawn(move || refresh_semantic_indexes(&root, &provider))
             });
+            semantic_refresh_pending = false;
         }
         let should_stop = max_ticks.is_some_and(|limit| ticks >= limit);
-        if semantic_worker
-            .as_ref()
-            .is_some_and(std::thread::JoinHandle::is_finished)
-        {
-            if let Some(worker) = semantic_worker.take() {
-                record_semantic_worker_result(env, worker.join());
-            }
-            if !should_stop {
-                semantic_worker = env.embedding_provider.clone().map(|provider| {
-                    let root = root.clone();
-                    std::thread::spawn(move || refresh_semantic_indexes(&root, &provider))
-                });
-            }
-        }
         if should_stop {
             break;
         }
@@ -858,28 +887,43 @@ fn daemon_watch<W: Write>(
 fn record_semantic_worker_result(
     env: &CliEnvironment,
     result: std::thread::Result<Result<SemanticRefreshReport, CliError>>,
-) {
-    let (kind, detail) = match result {
-        Ok(Ok(report)) => (
+) -> bool {
+    let failed = !matches!(&result, Ok(Ok(report)) if report.failed_folders == 0);
+    let event = match &result {
+        Ok(Ok(report)) if report.rebuilt_folders > 0 || report.failed_folders > 0 => Some((
             "search.semantic.refresh",
             format!(
                 "Semantic refresh selected={} rebuilt={} failed={}",
                 report.selected_folders, report.rebuilt_folders, report.failed_folders
             ),
-        ),
-        Ok(Err(_)) => (
+        )),
+        Ok(Ok(_)) => None,
+        Ok(Err(_)) => Some((
             "search.semantic.refresh_failed",
             "Semantic refresh failed before Folder isolation".to_owned(),
-        ),
-        Err(_) => (
+        )),
+        Err(_) => Some((
             "search.semantic.refresh_failed",
             "Semantic refresh worker stopped unexpectedly".to_owned(),
-        ),
+        )),
     };
     let _ = mutate_agent_state(env, |state, now| {
-        state.add_activity(now, kind, detail);
+        state.search_lifecycle.semantic_refresh_pending = failed;
+        state.search_lifecycle.semantic_consecutive_failures = if failed {
+            state
+                .search_lifecycle
+                .semantic_consecutive_failures
+                .saturating_add(1)
+                .min(8)
+        } else {
+            0
+        };
+        if let Some((kind, detail)) = event {
+            state.add_activity(now, kind, detail);
+        }
         Ok(())
     });
+    failed
 }
 
 fn daemon_watch_remote_poll_ticks(args: &[String]) -> Result<Option<usize>, CliError> {
@@ -1299,11 +1343,13 @@ fn resolve<W: Write>(
         .first()
         .ok_or(CliError::MissingArgument("conflict-id"))?;
     let mut found = false;
+    let mut resolved_path = None;
     mutate_agent_state(env, |state, now| {
         for conflict in &mut state.conflicts {
             if conflict.id == *conflict_id {
                 conflict.state = ConflictState::Resolved;
                 conflict.resolved_at = Some(now.clone());
+                resolved_path.clone_from(&conflict.path);
                 found = true;
             }
         }
@@ -1317,6 +1363,12 @@ fn resolve<W: Write>(
         );
         Ok(())
     })?;
+    if let Some(path) = resolved_path {
+        let root = current_tree_root(env)?;
+        if root.join(".finitebrain/search-indexes").is_dir() {
+            reconcile_local_search_paths(&root, &[path])?;
+        }
+    }
     if json {
         write_json(output, &serde_json::json!({ "resolved": conflict_id }))
     } else {
@@ -1790,6 +1842,44 @@ fn folder<W: Write>(
                 .iter()
                 .find(|folder| folder.id == *folder_id)
                 .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
+            let mut expected_folder_ids = BTreeSet::from([folder_id.clone()]);
+            loop {
+                let before = expected_folder_ids.len();
+                for candidate in &metadata.folders {
+                    if candidate
+                        .parent_folder_id
+                        .as_ref()
+                        .is_some_and(|parent| expected_folder_ids.contains(parent))
+                    {
+                        expected_folder_ids.insert(candidate.id.clone());
+                    }
+                }
+                if expected_folder_ids.len() == before {
+                    break;
+                }
+            }
+            let bootstrap_route = format!("/_admin/brains/{brain_id}/sync/bootstrap");
+            let bootstrap = signed_json_request(env, args, "GET", &bootstrap_route, None)?;
+            let expected_object_count = bootstrap
+                .get("objects")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    CliError::InvalidInput(
+                        "Folder deletion confirmation could not read current objects".to_owned(),
+                    )
+                })?
+                .iter()
+                .filter(|object| {
+                    !object
+                        .get("deleted")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                        && object
+                            .get("folderId")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|folder| expected_folder_ids.contains(folder))
+                })
+                .count();
             let deletion_event = admin_access_change_event(
                 env,
                 &brain_id,
@@ -1804,8 +1894,30 @@ fn folder<W: Write>(
                 args,
                 "DELETE",
                 &route,
-                Some(serde_json::json!({ "deletionEvent": deletion_event })),
+                Some(serde_json::json!({
+                    "deletionEvent": deletion_event,
+                    "expectedFolderIds": expected_folder_ids,
+                    "expectedObjectCount": expected_object_count
+                })),
             )?;
+            let deleted_folder_ids = response
+                .get("deletedFolderIds")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    CliError::InvalidInput(
+                        "Folder deletion response did not include deletedFolderIds".to_owned(),
+                    )
+                })?
+                .iter()
+                .map(|folder_id| {
+                    folder_id.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                        CliError::InvalidInput(
+                            "Folder deletion response contained an invalid Folder id".to_owned(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            update_local_folders_after_delete(env, &brain_id, &deleted_folder_ids)?;
             write_command_response(output, json, &response)
         }
         other => Err(CliError::InvalidCommand(format!("folder {other}"))),
@@ -2923,6 +3035,82 @@ mod tests {
                             "count": 1,
                             "hasMore": false,
                             "nextSequence": 7
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    (
+                        "404 Not Found",
+                        serde_json::json!({ "error": "not found" }).to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    fn start_folder_deletion_sync_server() -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 2 && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                requests.push(request_line.clone());
+                let (status, body) = if request_line.contains("/export") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brain": {
+                                "id": "brain",
+                                "kind": "personal",
+                                "name": "Brain",
+                                "ownerUserId": null
+                            },
+                            "folders": [],
+                            "keyGrants": [],
+                            "accessState": { "members": [], "admins": [] }
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/sync/records") {
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "afterSequence": 7,
+                            "latestSequence": 8,
+                            "records": [{
+                                "sequence": 8,
+                                "recordEventId": "evt-delete-general",
+                                "recordType": "brain_admin_access_change",
+                                "folderId": null,
+                                "objectId": null,
+                                "revision": null,
+                                "actorNpub": "npub-admin",
+                                "clientCreatedAt": "2026-06-24T20:46:36Z",
+                                "payloadJson": serde_json::json!({
+                                    "recordType": "folder_subtree_tombstone",
+                                    "folderId": "general",
+                                    "folderIds": ["general"]
+                                }).to_string(),
+                                "recordEventKind": APP_SPECIFIC_KIND
+                            }],
+                            "count": 1,
+                            "hasMore": false,
+                            "nextSequence": 8
                         })
                         .to_string(),
                     )
@@ -6237,7 +6425,7 @@ mod tests {
             state
                 .activity
                 .iter()
-                .any(|entry| entry.kind == "daemon.watch.idle")
+                .all(|entry| entry.kind != "daemon.watch.idle")
         );
     }
 
@@ -6370,6 +6558,21 @@ mod tests {
             "# Recovery Runbook\n\nRoutine service recovery procedure.\n",
         )
         .unwrap();
+        fs::write(
+            tree.join("General/weak-cobalt.md"),
+            "# Notes\n\nA passing cobalt reference.\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("Research/strong-cobalt-a.md"),
+            "# Cobalt Cobalt Cobalt\n\nCobalt cobalt cobalt cobalt cobalt evidence.\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("Research/strong-cobalt-b.md"),
+            "# Cobalt analysis\n\nCobalt cobalt cobalt cobalt repeated analysis.\n",
+        )
+        .unwrap();
 
         let mut env = env_for(&tmp);
         env.cwd = tree.join("General");
@@ -6413,6 +6616,26 @@ mod tests {
         run_with_env(["search", "OPS-142", "--json"], env, &mut filename_output).unwrap();
         let filename_report: Value = serde_json::from_slice(&filename_output).unwrap();
         assert_eq!(filename_report["results"][0]["pagePath"], "OPS-142.md");
+
+        let mut global_output = Vec::new();
+        let mut global_env = env_for(&tmp);
+        global_env.cwd = tree.clone();
+        run_with_env(
+            ["search", "cobalt", "--json"],
+            global_env,
+            &mut global_output,
+        )
+        .unwrap();
+        let global_report: Value = serde_json::from_slice(&global_output).unwrap();
+        assert_eq!(
+            global_report["results"][0]["pagePath"],
+            "strong-cobalt-a.md"
+        );
+        assert_eq!(
+            global_report["results"][1]["pagePath"],
+            "strong-cobalt-b.md"
+        );
+        assert_eq!(global_report["results"][2]["pagePath"], "weak-cobalt.md");
 
         fs::write(
             tree.join("General/plain.md"),
@@ -7139,8 +7362,6 @@ mod tests {
             });
             accepted_rx.recv_timeout(Duration::from_secs(3)).unwrap();
             let (control_done_tx, control_done_rx) = std::sync::mpsc::channel();
-            let (published_tx, published_rx) = std::sync::mpsc::channel();
-            let (continue_tx, continue_rx) = std::sync::mpsc::channel();
             let control_tree = tree.clone();
             let mut control_env = env_for(&tmp);
             control_env.cwd = control_tree.clone();
@@ -7150,9 +7371,6 @@ mod tests {
                     tree_state.folder_roots[0].can_read = false;
                     tree_state.folder_roots[0].metadata_only = true;
                     write_working_tree_state(&control_tree, &tree_state).unwrap();
-                    published_tx.send(()).unwrap();
-                    continue_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-                    reconcile_search_indexes(&control_tree).unwrap();
                 } else {
                     run_with_env(
                         ["search-index", "disable", "--folder", "general", "--json"],
@@ -7163,50 +7381,25 @@ mod tests {
                 }
                 control_done_tx.send(()).unwrap();
             });
-            if revoke_access {
-                published_rx
-                    .recv_timeout(Duration::from_millis(500))
-                    .expect("access publication must not wait for remote embedding I/O");
-                let published = read_working_tree_state(&tree).unwrap();
-                assert!(!published.folder_roots[0].can_read);
-                assert!(index_path.parent().unwrap().exists());
-                let connection = rusqlite::Connection::open(&index_path).unwrap();
-                let (enabled, vectors): (bool, usize) = connection
-                    .query_row(
-                        "SELECT enabled, (SELECT count(*) FROM semantic_vectors)
-                           FROM semantic_settings WHERE singleton = 1",
-                        [],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .unwrap();
-                assert!(!enabled);
-                assert_eq!(vectors, 0);
-            } else {
-                control_done_rx
-                    .recv_timeout(Duration::from_millis(500))
-                    .expect("semantic control must not wait for remote embedding I/O");
-                let connection = rusqlite::Connection::open(&index_path).unwrap();
-                let (enabled, vectors): (bool, usize) = connection
-                    .query_row(
-                        "SELECT enabled, (SELECT count(*) FROM semantic_vectors)
-                           FROM semantic_settings WHERE singleton = 1",
-                        [],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .unwrap();
-                assert!(!enabled);
-                assert_eq!(vectors, 0);
-            }
+            thread::sleep(Duration::from_millis(250));
+            assert!(
+                matches!(
+                    control_done_rx.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ),
+                "revocation returned before admitted provider work drained"
+            );
             release_tx.send(()).unwrap();
             let refresh = worker.join().unwrap();
             assert_eq!(refresh.rebuilt_folders, 0);
             assert_eq!(server.join().unwrap(), 1);
+            control_done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("revocation did not finish after admitted work drained");
             if revoke_access {
-                continue_tx.send(()).unwrap();
-                control_done_rx
-                    .recv_timeout(Duration::from_millis(500))
-                    .unwrap();
                 control.join().unwrap();
+                let published = read_working_tree_state(&tree).unwrap();
+                assert!(!published.folder_roots[0].can_read);
                 assert!(!index_path.parent().unwrap().exists());
             } else {
                 control.join().unwrap();
@@ -7821,7 +8014,7 @@ mod tests {
         let mut state = read_working_tree_state(&tree).unwrap();
         state.folder_roots[0].can_read = false;
         state.folder_roots[0].metadata_only = true;
-        write_json_file(&tree.join(".finitebrain/working-tree-state.json"), &state).unwrap();
+        write_working_tree_state(&tree, &state).unwrap();
         let mut output = Vec::new();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
@@ -7842,18 +8035,28 @@ mod tests {
         let tree = tmp.path().join("brain");
         initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
+        fs::create_dir_all(tree.join("Research")).unwrap();
         write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
             &BrainWorkingTreeStateManifest {
                 version: WORKING_TREE_STATE_VERSION.to_owned(),
-                folder_roots: vec![WorkingTreeFolderRoot {
-                    folder_id: "general".to_owned(),
-                    source_brain_id: None,
-                    path: "General".to_owned(),
-                    can_read: true,
-                    metadata_only: false,
-                }],
+                folder_roots: vec![
+                    WorkingTreeFolderRoot {
+                        folder_id: "general".to_owned(),
+                        source_brain_id: None,
+                        path: "General".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "research".to_owned(),
+                        source_brain_id: None,
+                        path: "Research".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                ],
                 objects: Vec::new(),
                 sync: WorkingTreeSyncState { latest_sequence: 0 },
             },
@@ -7870,13 +8073,32 @@ mod tests {
         )
         .unwrap();
         fs::write(tree.join("General/z-broken.md"), "# Guard\n\nSmall text.\n").unwrap();
+        fs::write(
+            tree.join("Research/unrelated.md"),
+            "# Unrelated\n\nInitially indexable.\n",
+        )
+        .unwrap();
         reconcile_search_indexes(&tree).unwrap();
-        let index_directory = fs::read_dir(tree.join(".finitebrain/search-indexes"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let mut general_index_directory = None;
+        let mut research_index_directory = None;
+        for entry in fs::read_dir(tree.join(".finitebrain/search-indexes")).unwrap() {
+            let directory = entry.unwrap().path();
+            let folder_id: String = rusqlite::Connection::open(directory.join("index.sqlite3"))
+                .unwrap()
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'folder_id'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            match folder_id.as_str() {
+                "general" => general_index_directory = Some(directory),
+                "research" => research_index_directory = Some(directory),
+                _ => panic!("unexpected indexed Folder {folder_id}"),
+            }
+        }
+        let index_directory = general_index_directory.unwrap();
+        let research_index_directory = research_index_directory.unwrap();
         let index_path = index_directory.join("index.sqlite3");
         let stable_rowid = rusqlite::Connection::open(&index_path)
             .unwrap()
@@ -7891,6 +8113,12 @@ mod tests {
         // high-seam assertion that the hot path follows the sync report only.
         fs::write(
             tree.join("General/stable.md"),
+            "x".repeat((4 * 1024 * 1024) + 1),
+        )
+        .unwrap();
+        fs::remove_dir_all(&research_index_directory).unwrap();
+        fs::write(
+            tree.join("Research/unrelated.md"),
             "x".repeat((4 * 1024 * 1024) + 1),
         )
         .unwrap();
@@ -7922,6 +8150,10 @@ mod tests {
         };
 
         assert_eq!(reconcile_search_changes(&tree, &report).unwrap(), 1);
+        assert!(
+            !research_index_directory.exists(),
+            "hot reconciliation must not initialize an unrelated missing Folder index"
+        );
         let connection = rusqlite::Connection::open(&index_path).unwrap();
         let changed_body: String = connection
             .query_row(
@@ -8526,19 +8758,15 @@ mod tests {
         )
         .unwrap();
         fs::write(tree.join("General/local.md"), "# Local\n\nAmber text.\n").unwrap();
-        let bootstrap_report = SyncOnceReport {
-            status: "bootstrapped".to_owned(),
-            latest_sequence: 1,
-            record_count: 0,
-            server_url: "http://127.0.0.1".to_owned(),
-            local_changes: Vec::new(),
-            remote_changes: Vec::new(),
-            conflicts: Vec::new(),
-        };
-        assert!(reconcile_search_changes(&tree, &bootstrap_report).unwrap() > 0);
-        fs::write(tree.join("General/local.md"), "# Local\n\nCobalt text.\n").unwrap();
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
+        run_with_env(
+            ["search", "amber", "--folder", "general", "--json"],
+            env.clone(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        fs::write(tree.join("General/local.md"), "# Local\n\nCobalt text.\n").unwrap();
 
         assert!(sync_once(&env, &[], "test.failed-sync").is_err());
 
@@ -8619,6 +8847,82 @@ mod tests {
             !requests
                 .iter()
                 .any(|request| request.contains("/_admin/brains/brain/sync/bootstrap"))
+        );
+    }
+
+    #[test]
+    fn sync_now_removes_a_permanently_deleted_folder_projection() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = setup_incremental_tree(&tmp, 7);
+        let markdown = "# Must disappear\n";
+        fs::write(tree.join("General/deleted.md"), markdown).unwrap();
+        let mut state = read_working_tree_state(&tree).unwrap();
+        state.objects.push(WorkingTreeObjectManifestEntry {
+            folder_id: "general".to_owned(),
+            source_brain_id: None,
+            path: "deleted.md".to_owned(),
+            object_id: "obj_deleted00001".to_owned(),
+            revision: 1,
+            key_version: 1,
+            content_type: "text/markdown".to_owned(),
+            content_hash: finite_brain_core::sha256_hex(markdown.as_bytes()),
+        });
+        write_json_file(&tree.join(".finitebrain/working-tree-state.json"), &state).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/encrypted-sync/bootstrap.json"),
+            &serde_json::json!({
+                "latestSequence": 7,
+                "objects": [{
+                    "folderId": "general",
+                    "objectId": "obj_deleted00001",
+                    "revision": 1,
+                    "ciphertext": "opaque",
+                    "deleted": false
+                }]
+            }),
+        )
+        .unwrap();
+
+        let (server_url, server) = start_folder_deletion_sync_server();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let mut output = Vec::new();
+        run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["status"], "applied-remote-records");
+        assert_eq!(
+            report["remoteChanges"][0]["action"],
+            "delete-folder-subtree"
+        );
+        assert!(
+            !tree.join("General").exists(),
+            "a deleted Folder tombstone must remove its full local projection root"
+        );
+        let state = read_working_tree_state(&tree).unwrap();
+        assert!(state.folder_roots.is_empty());
+        assert!(state.objects.is_empty());
+        assert_eq!(state.sync.latest_sequence, 8);
+
+        let requests = server.join().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.contains("/sync/records"))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.contains("/sync/bootstrap"))
         );
     }
 

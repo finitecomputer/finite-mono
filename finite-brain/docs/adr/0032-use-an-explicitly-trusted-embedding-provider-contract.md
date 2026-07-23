@@ -20,6 +20,14 @@ credential values securely at startup; search and indexing code see only the
 adapter interface. Provider secrets are never stored in the Working Tree,
 search index, repository, or synced Brain state.
 
+Semantic egress is fail-closed behind the deployment policy contract
+`verified-no-content-logging-no-retention-v1`. The runtime injects an endpoint
+and independently revocable worker credential only when the specialization
+deployment also presents a private evidence identifier for reviewed upstream
+logging and retention controls. The worker authenticates the request and
+checks that policy before reading its body or contacting upstream. Missing,
+revoked, or inconsistent configuration leaves search lexical-only.
+
 ## Consequences
 
 - The centralized beta provider is a temporary rollout choice, not the intended
@@ -43,6 +51,13 @@ search index, repository, or synced Brain state.
   invalidation when the model contract changes.
 - Query-embedding requests contain only the query text. Query text is not
   retained or logged by the provider.
+- Provider health and deployment evidence expose only enablement, model name,
+  model version, policy identity, and the non-secret evidence identifier.
+  Request diagnostics are restricted to status, timing, batch size, and model
+  identity; bodies and bearer credentials are never logged.
+- Rollback revokes the worker credential and removes the runtime endpoint.
+  Existing lexical indexes and authoritative Markdown remain available while
+  all future semantic egress is disabled.
 - Returned vectors and their search metadata remain client-side derived state
   and are not uploaded through FiniteBrain sync.
 - The search index records provider model identity and version so derived

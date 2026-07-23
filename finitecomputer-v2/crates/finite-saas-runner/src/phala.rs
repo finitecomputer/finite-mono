@@ -9,10 +9,10 @@
 use super::{
     DEFAULT_DOCKER_CONTAINER_PORT, DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITECHAT_SERVER_URL,
     DEFAULT_RUNTIME_READY_INTERVAL, DEFAULT_RUNTIME_READY_TIMEOUT, DockerEquivalentRuntimeEnv,
-    FINITE_SPECIALIZATION_WORKER_API_KEY_ENV, RunnerError, RuntimeLaunchFacts,
-    RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions, RuntimeUpgradeFacts,
-    control_runtime_spec, creation_runtime_spec, docker_equivalent_runtime_env,
-    state_preserving_runtime_capabilities, wait_for_http_json_ready,
+    FBRAIN_EMBEDDING_BEARER_TOKEN_ENV, FINITE_SPECIALIZATION_WORKER_API_KEY_ENV, RunnerError,
+    RuntimeLaunchFacts, RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions,
+    RuntimeUpgradeFacts, control_runtime_spec, creation_runtime_spec,
+    docker_equivalent_runtime_env, state_preserving_runtime_capabilities, wait_for_http_json_ready,
 };
 use crate::phala_inventory::{
     AppRevision, AppsPage, CurrentUserResponse, FiniteProviderInventory, InventoryContractError,
@@ -620,8 +620,10 @@ fn phala_compose(
     for (key, value) in &mut environment {
         if matches!(key.as_str(), "FINITE_PRIVATE_API_KEY" | "OPENAI_API_KEY") {
             *value = "${FINITE_PRIVATE_API_KEY:?FINITE_PRIVATE_API_KEY is required}".to_string();
-        } else if key == FINITE_SPECIALIZATION_WORKER_API_KEY_ENV
-            || options.secret_environment.contains_key(key)
+        } else if matches!(
+            key.as_str(),
+            FINITE_SPECIALIZATION_WORKER_API_KEY_ENV | FBRAIN_EMBEDDING_BEARER_TOKEN_ENV
+        ) || options.secret_environment.contains_key(key)
         {
             *value = format!("${{{key}:?{key} is required}}");
         }

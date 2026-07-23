@@ -63,6 +63,14 @@ runtime-image-contract:
 stripe-price-contract:
     python3 scripts/check_stripe_price_contract.py
 
+# Synthetic empty-target proof for the complete hosted Recovery Set contract.
+hosted-recovery-contract:
+    infra/scripts/test-hosted-web-chat-restore
+
+# Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
+brain-product-matrix:
+    scripts/devfinity-brain-product-matrix
+
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity

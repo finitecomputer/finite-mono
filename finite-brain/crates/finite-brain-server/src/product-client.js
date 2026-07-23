@@ -660,7 +660,7 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
-  function brainIdFromName(prefix, name) {
+  function brainIdFromName(prefix, name, options = {}) {
     const slug =
       String(name || prefix)
         .trim()
@@ -668,7 +668,9 @@ const FiniteBrainProductClient = (() => {
         .replace(/[^a-z0-9_-]+/g, "-")
         .replace(/^-+|-+$/g, "")
         .slice(0, 48) || prefix;
-    return `${prefix}-${slug}-${Date.now().toString(36)}`.slice(0, 128);
+    const createdAt = Number.isFinite(options.createdAt) ? options.createdAt : Date.now();
+    const entropy = options.entropy || crypto.getRandomValues(new Uint8Array(8));
+    return `${prefix}-${slug}-${createdAt.toString(36)}-${bytesToHex(entropy)}`.slice(0, 128);
   }
 
   function rememberVisibleBrain(metadata) {
@@ -5515,7 +5517,13 @@ const FiniteBrainProductClient = (() => {
     const route = `/_admin/brains/${encodeURIComponent(brainId)}/folders/${encodeURIComponent(folder.id)}`;
     const result = await protectedRequest(route, {
       method: "DELETE",
-      body: JSON.stringify({ deletionEvent }),
+      // protectedRequest signs this complete body, binding the exact scope
+      // shown in the destructive confirmation to the atomic store snapshot.
+      body: JSON.stringify({
+        deletionEvent,
+        expectedFolderIds: summary.folderIds,
+        expectedObjectCount: summary.objectCount,
+      }),
     });
     requireCurrentSessionEpoch(sessionEpoch);
     const deletedIds = new Set(summary.folderIds);
@@ -8818,11 +8826,11 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function createOrganizationBrainFromInput(inputId) {
-    const creation = await beginExplicitBrainCreation();
     const input = $(inputId);
     const name = input?.value.trim() || "New organization";
+    const includeAgentAdmin = Boolean($("manageOrganizationAddAgentInput")?.checked);
+    const creation = await beginExplicitBrainCreation();
     try {
-      const includeAgentAdmin = Boolean($("manageOrganizationAddAgentInput")?.checked);
       const agentIdentity = suggestedAgentIdentityFromNavigation();
       const signature = JSON.stringify({
         agent: includeAgentAdmin ? agentIdentity?.email || agentIdentity?.npub || null : null,
@@ -11965,6 +11973,7 @@ const FiniteBrainProductClient = (() => {
     buildAuthEventTemplate,
     buildBrainAuthorizationHeader,
     brainTargetFromSearch,
+    brainIdFromName,
     buildFolderAccessRemovalRequest,
     buildEmailInviteAuthorizationEvent,
     buildEmailInviteClaimProofEvent,

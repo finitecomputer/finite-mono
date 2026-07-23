@@ -7,10 +7,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use finite_brain_core::{
-    BootstrapOutput, Brain, BrainId, BrainKind, BrainMember, CoreError, DisplayName, Folder,
-    FolderAccessMode, FolderId, FolderKeyRecipientPolicy, FolderRole, FolderRotationFanout,
-    FolderRotationOperation, ObjectId, RequiredFolderKeyGrant, SafeRelativePath, UserId,
-    required_folder_key_recipients, validate_folder_rotation_fanout,
+    BRAIN_CAPACITY_ENVELOPE, BootstrapOutput, Brain, BrainId, BrainKind, BrainMember, CoreError,
+    DisplayName, Folder, FolderAccessMode, FolderId, FolderKeyRecipientPolicy, FolderRole,
+    FolderRotationFanout, FolderRotationOperation, ObjectId, RequiredFolderKeyGrant,
+    SafeRelativePath, UserId, required_folder_key_recipients, validate_folder_rotation_fanout,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -30,7 +30,7 @@ mod sync_records;
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
 const MAX_PULL_LIMIT: u64 = 1_000;
-const MAX_BOOTSTRAP_FOLDERS: usize = 1_000;
+const MAX_BOOTSTRAP_FOLDERS: usize = BRAIN_CAPACITY_ENVELOPE.folders;
 const MAX_BOOTSTRAP_GRANTS: usize = 10_000;
 const MAX_LINK_LIST_ROWS: i64 = 200;
 const APP_SPECIFIC_KIND: u16 = 30_078;
@@ -70,6 +70,12 @@ pub enum StoreError {
     RebootstrapRequired { retention_floor: u64 },
     /// A singleton invitation or share link is unavailable to this actor.
     UnavailableLink { kind: &'static str },
+    /// A mutation would exceed the governed accepted-state envelope.
+    CapacityExceeded {
+        limit: String,
+        max: usize,
+        current: usize,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -101,6 +107,14 @@ impl fmt::Display for StoreError {
                 )
             }
             Self::UnavailableLink { kind } => write!(f, "{kind} unavailable"),
+            Self::CapacityExceeded {
+                limit,
+                max,
+                current,
+            } => write!(
+                f,
+                "capacity exceeded for {limit}: current {current}, maximum {max}"
+            ),
         }
     }
 }
@@ -115,10 +129,26 @@ impl From<CoreError> for StoreError {
 
 impl From<rusqlite::Error> for StoreError {
     fn from(value: rusqlite::Error) -> Self {
+        if let Some((limit, max)) = parse_capacity_error(&value.to_string()) {
+            return Self::CapacityExceeded {
+                limit,
+                max,
+                current: max.saturating_add(1),
+            };
+        }
         Self::Database {
             message: value.to_string(),
         }
     }
+}
+
+fn parse_capacity_error(message: &str) -> Option<(String, usize)> {
+    let marker = "finite_capacity:";
+    let encoded = message.split(marker).nth(1)?;
+    let mut parts = encoded.split(':');
+    let limit = parts.next()?.to_owned();
+    let max = parts.next()?.split_whitespace().next()?.parse().ok()?;
+    Some((limit, max))
 }
 
 /// Stored Folder Key Grant metadata. The encrypted key remains opaque to the server.
@@ -157,6 +187,8 @@ pub struct StoredBrain {
     pub grants: Vec<FolderKeyGrantMetadata>,
     /// Folders that still need current grants.
     pub setup_incomplete_folder_ids: BTreeSet<FolderId>,
+    /// Exact pre-deletion readers allowed to observe each subtree tombstone.
+    pub folder_deletion_audience: BTreeMap<String, BTreeSet<UserId>>,
 }
 
 /// One active Personal Agent relationship owned by a Personal Brain.
@@ -330,6 +362,29 @@ pub struct FolderSubtreeDeletion {
     pub sequence: u64,
     pub duplicate: bool,
     pub folder_count: usize,
+    pub object_count: usize,
+    pub deleted_folder_ids: Vec<FolderId>,
+    /// Content-free deterministic accounting for the bounded delete transaction.
+    pub work: FolderDeletionWork,
+}
+
+/// Deterministic work counters for one direct Folder subtree deletion.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct FolderDeletionWork {
+    pub descendants_visited: usize,
+    pub objects_collected: usize,
+    pub audience_collected: usize,
+    pub invitations_scanned: usize,
+    pub invitations_deleted: usize,
+    pub mutation_statements: usize,
+    pub max_statement_parameters: usize,
+    pub retry_attempts: usize,
+}
+
+/// Optional HTTP-signed scope shown to a user before destructive confirmation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderDeletionExpectation {
+    pub folder_ids: BTreeSet<FolderId>,
     pub object_count: usize,
 }
 
@@ -837,7 +892,32 @@ impl BrainStore {
             folder_access,
             grants: self.load_grants(brain_id)?,
             setup_incomplete_folder_ids: self.load_setup_incomplete_folder_ids(brain_id)?,
+            folder_deletion_audience: self.load_folder_deletion_audience(brain_id)?,
         })
+    }
+
+    fn load_folder_deletion_audience(
+        &self,
+        brain_id: &BrainId,
+    ) -> Result<BTreeMap<String, BTreeSet<UserId>>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT deletion_event_id, actor_npub
+               FROM folder_deletion_audience
+               WHERE brain_id = ?1
+               ORDER BY deletion_event_id, actor_npub"#,
+        )?;
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut audience = BTreeMap::<String, BTreeSet<UserId>>::new();
+        for row in rows {
+            let (event_id, actor_npub) = row?;
+            audience
+                .entry(event_id)
+                .or_default()
+                .insert(UserId::new(actor_npub)?);
+        }
+        Ok(audience)
     }
 
     /// Upsert verified display metadata for a canonical Nostr identity.
@@ -2811,13 +2891,18 @@ fn map_insert_error(
     value: &str,
 ) -> impl FnOnce(rusqlite::Error) -> StoreError {
     let value = value.to_owned();
-    move |error| match error {
-        rusqlite::Error::SqliteFailure(inner, _)
-            if matches!(inner.code, rusqlite::ErrorCode::ConstraintViolation) =>
-        {
-            StoreError::DuplicateId { field, value }
+    move |error| {
+        if parse_capacity_error(&error.to_string()).is_some() {
+            return StoreError::from(error);
         }
-        other => StoreError::from(other),
+        match error {
+            rusqlite::Error::SqliteFailure(inner, _)
+                if matches!(inner.code, rusqlite::ErrorCode::ConstraintViolation) =>
+            {
+                StoreError::DuplicateId { field, value }
+            }
+            other => StoreError::from(other),
+        }
     }
 }
 
@@ -3276,8 +3361,10 @@ mod tests {
 
         assert_eq!(
             store.create_brain_bootstrap(&output, &[]).unwrap_err(),
-            StoreError::BrokenInvariant {
-                reason: format!("bootstrap folder count exceeds limit {MAX_BOOTSTRAP_FOLDERS}")
+            StoreError::CapacityExceeded {
+                limit: "brain_folders".to_owned(),
+                max: MAX_BOOTSTRAP_FOLDERS,
+                current: MAX_BOOTSTRAP_FOLDERS + 1,
             }
         );
     }
@@ -4457,11 +4544,42 @@ mod tests {
                     r#"{"recordType":"folder_subtree_tombstone"}"#,
                     "2026-06-23T00:00:00Z",
                     APP_SPECIFIC_KIND,
+                    None,
                 )
                 .unwrap_err(),
             StoreError::Conflict {
                 reason: "Folder Key version changed before deletion".to_owned(),
                 current_revision: Some(1),
+            }
+        );
+        assert!(store.folder_exists(&brain_id, &child.id).unwrap());
+
+        let stale_confirmation = FolderDeletionExpectation {
+            folder_ids: [
+                FolderId::new("strategy").unwrap(),
+                FolderId::new("strategy-child").unwrap(),
+            ]
+            .into_iter()
+            .collect(),
+            object_count: 1,
+        };
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &brain_id,
+                    &FolderId::new("strategy").unwrap(),
+                    &admin,
+                    1,
+                    "event-delete-stale-confirmation",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                    Some(&stale_confirmation),
+                )
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "Folder subtree changed after destructive confirmation".to_owned(),
+                current_revision: None,
             }
         );
         assert!(store.folder_exists(&brain_id, &child.id).unwrap());
@@ -4476,9 +4594,23 @@ mod tests {
                 r#"{"recordType":"folder_subtree_tombstone"}"#,
                 "2026-06-23T00:00:00Z",
                 APP_SPECIFIC_KIND,
+                None,
             )
             .unwrap();
         assert_eq!(deleted.folder_count, 2);
+        assert_eq!(
+            deleted.work,
+            FolderDeletionWork {
+                descendants_visited: 2,
+                objects_collected: 0,
+                audience_collected: 1,
+                invitations_scanned: 0,
+                invitations_deleted: 0,
+                mutation_statements: 8,
+                max_statement_parameters: 10,
+                retry_attempts: 0,
+            }
+        );
         let retry = store
             .delete_folder_subtree(
                 &brain_id,
@@ -4489,9 +4621,11 @@ mod tests {
                 r#"{"recordType":"folder_subtree_tombstone"}"#,
                 "2026-06-23T00:00:00Z",
                 APP_SPECIFIC_KIND,
+                None,
             )
             .unwrap();
         assert!(retry.duplicate);
+        assert_eq!(retry.work, FolderDeletionWork::default());
         assert_eq!(retry.folder_count, deleted.folder_count);
         assert_eq!(retry.object_count, deleted.object_count);
         assert!(!store.folder_exists(&brain_id, &child.id).unwrap());
@@ -4514,6 +4648,92 @@ mod tests {
                 reason: "deleted Folder identities cannot be reused".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn folder_depth_accepts_exact_boundary_and_rejects_one_over_without_mutation() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let mut parent = FolderId::new("strategy").unwrap();
+
+        for depth in 3..=BRAIN_CAPACITY_ENVELOPE.folder_depth {
+            let id = FolderId::new(format!("depth-{depth}")).unwrap();
+            let folder = Folder {
+                id: id.clone(),
+                name: DisplayName::new("folder_name", format!("Depth {depth}")).unwrap(),
+                parent_folder_id: Some(parent.clone()),
+                path: SafeRelativePath::new("folder_path", format!("Strategy/depth-{depth}"))
+                    .unwrap(),
+                ..strategy_folder()
+            };
+            store
+                .create_folder(
+                    &brain_id,
+                    &folder,
+                    &BTreeSet::new(),
+                    &[grant(
+                        &format!("grant-depth-{depth}"),
+                        id.as_str(),
+                        1,
+                        admin.as_str(),
+                        admin.as_str(),
+                    )],
+                )
+                .unwrap();
+            parent = id;
+        }
+
+        let one_over_depth = BRAIN_CAPACITY_ENVELOPE.folder_depth + 1;
+        let one_over = Folder {
+            id: FolderId::new(format!("depth-{one_over_depth}")).unwrap(),
+            name: DisplayName::new("folder_name", format!("Depth {one_over_depth}")).unwrap(),
+            parent_folder_id: Some(parent),
+            path: SafeRelativePath::new("folder_path", format!("Strategy/depth-{one_over_depth}"))
+                .unwrap(),
+            ..strategy_folder()
+        };
+        assert_eq!(
+            store
+                .create_folder(
+                    &brain_id,
+                    &one_over,
+                    &BTreeSet::new(),
+                    &[grant(
+                        "grant-depth-one-over",
+                        one_over.id.as_str(),
+                        1,
+                        admin.as_str(),
+                        admin.as_str(),
+                    )],
+                )
+                .unwrap_err(),
+            StoreError::CapacityExceeded {
+                limit: "folder_depth".to_owned(),
+                max: BRAIN_CAPACITY_ENVELOPE.folder_depth,
+                current: one_over_depth,
+            }
+        );
+        assert!(!store.folder_exists(&brain_id, &one_over.id).unwrap());
+        let accepted_depth: usize = store
+            .conn
+            .query_row(
+                "WITH RECURSIVE ancestors(id, depth) AS (
+                    SELECT ?1, 1
+                    UNION ALL
+                    SELECT f.parent_folder_id, ancestors.depth + 1
+                    FROM folders f
+                    JOIN ancestors ON f.brain_id = ?2 AND f.id = ancestors.id
+                    WHERE f.parent_folder_id IS NOT NULL
+                 ) SELECT MAX(depth) FROM ancestors",
+                params![
+                    format!("depth-{}", BRAIN_CAPACITY_ENVELOPE.folder_depth),
+                    brain_id.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(accepted_depth, BRAIN_CAPACITY_ENVELOPE.folder_depth);
     }
 
     #[test]
@@ -4554,6 +4774,7 @@ mod tests {
                     r#"{"recordType":"folder_subtree_tombstone"}"#,
                     "2026-06-23T00:00:00Z",
                     APP_SPECIFIC_KIND,
+                    None,
                 )
                 .unwrap_err(),
             StoreError::InvalidRecord {

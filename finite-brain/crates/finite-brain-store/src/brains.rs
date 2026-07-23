@@ -171,13 +171,17 @@ impl BrainStore {
         identity_aliases: &[IdentityAlias],
     ) -> Result<(), StoreError> {
         if output.brain.folders.len() > MAX_BOOTSTRAP_FOLDERS {
-            return Err(StoreError::BrokenInvariant {
-                reason: format!("bootstrap folder count exceeds limit {MAX_BOOTSTRAP_FOLDERS}"),
+            return Err(StoreError::CapacityExceeded {
+                limit: "brain_folders".to_owned(),
+                max: MAX_BOOTSTRAP_FOLDERS,
+                current: output.brain.folders.len(),
             });
         }
         if grants.len() > MAX_BOOTSTRAP_GRANTS {
-            return Err(StoreError::BrokenInvariant {
-                reason: format!("bootstrap grant count exceeds limit {MAX_BOOTSTRAP_GRANTS}"),
+            return Err(StoreError::CapacityExceeded {
+                limit: "folder_key_grants".to_owned(),
+                max: MAX_BOOTSTRAP_GRANTS,
+                current: grants.len(),
             });
         }
         validate_bootstrap_output(output)?;

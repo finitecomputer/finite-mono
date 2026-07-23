@@ -13,8 +13,8 @@ use nostr::{Kind, Tag};
 use crate::{
     APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
     SessionFolderKeyring, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
-    normalize_folder_access, read_working_tree_state, sign_event, signed_json_request, tag_vec,
-    timestamp, unix_timestamp, write_working_tree_state,
+    normalize_folder_access, read_agent_state, read_working_tree_state, sign_event,
+    signed_json_request, tag_vec, timestamp, unix_timestamp, write_working_tree_state,
 };
 
 pub(crate) fn fetch_brain_metadata(
@@ -330,6 +330,68 @@ pub(crate) fn update_local_folder_after_create(
     }
     mutate_agent_state(env, |state, now| {
         state.add_activity(now, "folder.created", format!("Folder {folder_id} created"));
+        Ok(())
+    })
+}
+
+pub(crate) fn update_local_folders_after_delete(
+    env: &CliEnvironment,
+    brain_id: &str,
+    deleted_folder_ids: &[String],
+) -> Result<(), CliError> {
+    let Some(root) = find_agent_state(&env.cwd)? else {
+        return Ok(());
+    };
+    let agent = read_agent_state(&root)?;
+    if agent.brain_id != brain_id {
+        return Ok(());
+    }
+    let deleted = deleted_folder_ids
+        .iter()
+        .map(|folder_id| {
+            FolderId::new(folder_id.clone())
+                .map(|folder_id| folder_id.to_string())
+                .map_err(|error| CliError::InvalidInput(error.to_string()))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if deleted.is_empty() {
+        return Err(CliError::InvalidInput(
+            "Folder deletion response did not identify the deleted subtree".to_owned(),
+        ));
+    }
+
+    let mut tree = read_working_tree_state(&root)?;
+    let deleted_paths = tree
+        .folder_roots
+        .iter()
+        .filter(|folder| folder.source_brain_id.is_none() && deleted.contains(&folder.folder_id))
+        .map(|folder| {
+            SafeRelativePath::new("folder_path", folder.path.clone())
+                .map_err(|error| CliError::InvalidInput(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for path in deleted_paths {
+        let path = root.join(path.as_str());
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(path)?;
+        } else if metadata.is_dir() {
+            fs::remove_dir_all(path)?;
+        }
+    }
+    tree.folder_roots
+        .retain(|folder| folder.source_brain_id.is_some() || !deleted.contains(&folder.folder_id));
+    tree.objects
+        .retain(|object| object.source_brain_id.is_some() || !deleted.contains(&object.folder_id));
+    write_working_tree_state(&root, &tree)?;
+    mutate_agent_state(env, |state, now| {
+        state.add_activity(
+            now,
+            "folder.deleted",
+            format!("Deleted {} Folder projection(s)", deleted.len()),
+        );
         Ok(())
     })
 }

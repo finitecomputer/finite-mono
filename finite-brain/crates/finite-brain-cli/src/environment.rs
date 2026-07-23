@@ -61,7 +61,7 @@ impl CliEnvironment {
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(10)
-                        .clamp(1, 120),
+                        .clamp(1, 5),
                 ),
             });
         Self {

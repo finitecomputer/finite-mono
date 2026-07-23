@@ -54,6 +54,9 @@ pub const DEFAULT_FINITE_AGENT_PICTURE_URL: &str =
 const FINITE_PRIVATE_PROFILE_ID: &str = "finite-private";
 const FINITE_SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
 const FINITE_SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
+const FBRAIN_EMBEDDING_ENDPOINT_ENV: &str = "FBRAIN_EMBEDDING_ENDPOINT";
+const FBRAIN_EMBEDDING_BEARER_TOKEN_ENV: &str = "FBRAIN_EMBEDDING_BEARER_TOKEN";
+const DEFAULT_FBRAIN_EMBEDDING_ENDPOINT: &str = "https://specialization.finite.vip";
 const DEFAULT_DOCKER_CONTAINER_PORT: u16 = 8080;
 const MAX_RUNTIME_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_ENVIRONMENT_KEY_BYTES: usize = 128;
@@ -1930,6 +1933,8 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
             | "FINITECHAT_HERMES_API_MODE"
             | "FINITE_SPECIALIZATION_BUNDLE"
             | "FINITE_SPECIALIZATION_WORKER_API_KEY"
+            | "FBRAIN_EMBEDDING_ENDPOINT"
+            | "FBRAIN_EMBEDDING_BEARER_TOKEN"
             | "OPENAI_API_KEY"
     )
 }
@@ -2373,6 +2378,48 @@ impl DockerLauncher {
             self.config.readiness_interval,
         )
     }
+
+    fn validate_pinned_local_image(&self) -> Result<(), RunnerError> {
+        if self.config.pull_policy.as_deref().map(str::trim) != Some("never") {
+            return Ok(());
+        }
+        let Some((local_reference, expected_digest)) = self.config.image.rsplit_once("@sha256:")
+        else {
+            return Ok(());
+        };
+        if local_reference.is_empty()
+            || expected_digest.len() != 64
+            || !expected_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "local Docker image reference has an invalid sha256 pin".to_string(),
+            ));
+        }
+        let actual = self
+            .run_command_capture(
+                PlannedCommand {
+                    program: self.config.docker_bin.clone(),
+                    cwd: None,
+                    args: vec![
+                        OsString::from("image"),
+                        OsString::from("inspect"),
+                        OsString::from("--format"),
+                        OsString::from("{{.Id}}"),
+                        OsString::from(local_reference),
+                    ],
+                    env: Vec::new(),
+                },
+                self.config.command_timeout,
+            )?
+            .trim()
+            .to_ascii_lowercase();
+        if actual != format!("sha256:{}", expected_digest.to_ascii_lowercase()) {
+            return Err(RunnerError::RuntimeLaunch(
+                "local Docker image does not match the promoted artifact digest".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl RuntimeLauncher for DockerLauncher {
@@ -2385,7 +2432,8 @@ impl RuntimeLauncher for DockerLauncher {
     }
 
     fn validate_ready(&self) -> Result<(), RunnerError> {
-        self.config.validate()
+        self.config.validate()?;
+        self.validate_pinned_local_image()
     }
 
     fn uses_core_runtime_heartbeat(&self) -> bool {
@@ -2634,6 +2682,8 @@ fn docker_run_command(
         OsString::from(&plan.container_name),
         OsString::from("--restart"),
         OsString::from("unless-stopped"),
+        OsString::from("--add-host"),
+        OsString::from("host.docker.internal:host-gateway"),
         OsString::from("-p"),
         OsString::from(format!(
             "127.0.0.1:{}:{}",
@@ -2676,7 +2726,16 @@ fn docker_run_command(
             (OsString::from(key), OsString::from(value))
         })
         .collect();
-    args.push(OsString::from(config.image.trim()));
+    let image = if config.pull_policy.as_deref().map(str::trim) == Some("never") {
+        config
+            .image
+            .rsplit_once("@sha256:")
+            .map(|(local_reference, _)| local_reference)
+            .unwrap_or(config.image.trim())
+    } else {
+        config.image.trim()
+    };
+    args.push(OsString::from(image));
 
     PlannedCommand {
         program: config.docker_bin.clone(),
@@ -2822,6 +2881,14 @@ fn docker_equivalent_runtime_env(
                 ),
                 (
                     FINITE_SPECIALIZATION_WORKER_API_KEY_ENV.to_string(),
+                    specialization_bundle.worker_api_key.clone(),
+                ),
+                (
+                    FBRAIN_EMBEDDING_ENDPOINT_ENV.to_string(),
+                    DEFAULT_FBRAIN_EMBEDDING_ENDPOINT.to_string(),
+                ),
+                (
+                    FBRAIN_EMBEDDING_BEARER_TOKEN_ENV.to_string(),
                     specialization_bundle.worker_api_key.clone(),
                 ),
             ]);
@@ -5218,6 +5285,16 @@ mod tests {
             FINITE_SPECIALIZATION_WORKER_API_KEY_ENV,
             "specialization-worker-secret",
         );
+        assert_env(
+            &env,
+            FBRAIN_EMBEDDING_ENDPOINT_ENV,
+            DEFAULT_FBRAIN_EMBEDDING_ENDPOINT,
+        );
+        assert_env(
+            &env,
+            FBRAIN_EMBEDDING_BEARER_TOKEN_ENV,
+            "specialization-worker-secret",
+        );
         let mut options_without_specialization = options.clone();
         options_without_specialization
             .finite_private
@@ -5236,6 +5313,9 @@ mod tests {
                 .iter()
                 .all(|(key, _)| key != FINITE_SPECIALIZATION_WORKER_API_KEY_ENV)
         );
+        assert!(env_without_specialization.iter().all(|(key, _)| {
+            key != FBRAIN_EMBEDDING_ENDPOINT_ENV && key != FBRAIN_EMBEDDING_BEARER_TOKEN_ENV
+        }));
         assert_env(&env, "FINITE_SITES_API", "http://192.168.64.1:18789");
         assert!(
             env.iter()
@@ -5245,6 +5325,10 @@ mod tests {
         let command = docker_run_command(&config, &plan, &lease, &options);
         let args = os_strings_to_strings(&command.args);
         assert!(args.windows(2).any(|pair| pair == ["--pull", "missing"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--add-host", "host.docker.internal:host-gateway"] })
+        );
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["-p", "127.0.0.1:18081:8080"])
@@ -5263,6 +5347,20 @@ mod tests {
         assert!(!format!("{command:?}").contains("fpk_live_test"));
         assert_eq!(
             args.last().map(String::as_str),
+            Some("ghcr.io/finitecomputer/finite-chat-hermes-runtime:local")
+        );
+
+        let mut pinned_local = config.clone();
+        pinned_local.image = format!(
+            "ghcr.io/finitecomputer/finite-chat-hermes-runtime:local@sha256:{}",
+            "a".repeat(64)
+        );
+        pinned_local.pull_policy = Some("never".to_string());
+        let pinned_command = docker_run_command(&pinned_local, &plan, &lease, &options);
+        assert_eq!(
+            os_strings_to_strings(&pinned_command.args)
+                .last()
+                .map(String::as_str),
             Some("ghcr.io/finitecomputer/finite-chat-hermes-runtime:local")
         );
     }
