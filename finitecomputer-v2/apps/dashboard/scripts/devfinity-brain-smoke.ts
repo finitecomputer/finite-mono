@@ -272,8 +272,10 @@ async function createOrganizationBrain(
 
 async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
   await openManageBrains(brain);
-  const selected = await brain.locator("#manageBrainsCurrentDetail").textContent();
-  assert.match(selected || "", /Session unlocked/u);
+  assert.equal(
+    await brain.locator(".obsidian-shell").getAttribute("data-session-status"),
+    "unlocked",
+  );
   const selectedBrain = brain.locator("#manageBrainsList .brain-switch-button.selected");
   await selectedBrain.waitFor({ state: "visible", timeout: 30_000 });
   assert.equal(
