@@ -786,6 +786,34 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         ),
         "inference change did not use the runtime command channel"
       );
+      const connectionsPath =
+        "/dashboard/machines/runtime_completed-oslo-bot/connections";
+      const connectionsSidebar = page.getByRole("navigation", {
+        name: "Agent, topics, and chats",
+      });
+      const generalChatOnConnections = connectionsSidebar.getByRole("button", {
+        name: "General",
+        exact: true,
+      });
+      await generalChatOnConnections.hover();
+      await connectionsSidebar
+        .getByRole("button", { name: "Rename General", exact: true })
+        .click();
+      const sidebarRenameDialog = page.getByRole("dialog", {
+        name: "Rename chat",
+      });
+      await sidebarRenameDialog
+        .getByRole("textbox", { name: "Name" })
+        .fill("Sidebar QA");
+      await sidebarRenameDialog.getByRole("button", { name: "Save" }).click();
+      await connectionsSidebar
+        .getByRole("button", { name: "Sidebar QA", exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        new URL(page.url()).pathname,
+        connectionsPath,
+        "renaming a sidebar chat must preserve the current non-chat route"
+      );
 
       await page.getByRole("main").evaluate((element) => {
         element.scrollTop = 120;
@@ -803,6 +831,32 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await brainFrame.getByText("Brain API ready").waitFor({ state: "visible" });
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/chat`
+      );
+
+      const chatSidebar = page.getByRole("navigation", {
+        name: "Agent, topics, and chats",
+      });
+      await chatSidebar
+        .getByRole("button", { name: "New chat in General", exact: true })
+        .waitFor({ state: "visible" });
+      await chatSidebar
+        .getByRole("button", { name: "Collapse General", exact: true })
+        .click();
+      await chatSidebar
+        .getByRole("button", { name: "Sidebar QA", exact: true })
+        .waitFor({ state: "hidden" });
+      await chatSidebar
+        .getByRole("button", { name: "Expand General", exact: true })
+        .click();
+      await chatSidebar
+        .getByRole("button", { name: "Sidebar QA", exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        await chatSidebar
+          .getByRole("button", { name: /^(?:Archive|Unarchive) /u })
+          .count(),
+        0,
+        "the sidebar must not present browser-local archive as durable chat state"
       );
 
       await page.getByRole("button", { name: "Rename chat" }).click();

@@ -519,6 +519,13 @@ pub struct MeResponse {
     pub agent_creation_requests: Vec<AgentCreationRequestSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardSummaryResponse {
+    pub me: MeResponse,
+    pub billing: BillingOverview,
+    pub finite_private_usage: Option<FinitePrivateUsageStatus>,
+}
+
 /// A user-facing import choice. Source-host and machine identifiers stay on
 /// the internal compatibility path and never become browser authorization or
 /// navigation keys.
@@ -921,6 +928,7 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
             post(admin_reset_finite_private_usage_window),
         )
         .route("/api/core/v1/me", get(me))
+        .route("/api/core/v1/me/dashboard-summary", get(dashboard_summary))
         .route(
             "/api/core/v1/me/finite-private/usage",
             get(finite_private_usage_status_for_user),
@@ -1668,6 +1676,54 @@ async fn me(
     headers: HeaderMap,
 ) -> Result<Json<MeResponse>, ApiError> {
     let identity = require_verified_identity(&state, &headers).await?;
+    link_verified_identity(&state, &identity).await?;
+    Ok(Json(me_response_for_identity(&state, &identity).await?))
+}
+
+async fn dashboard_summary(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<DashboardSummaryResponse>, ApiError> {
+    // This route deliberately performs the same fresh WorkOS verification as
+    // every other owner route. It only removes duplicate verification caused
+    // by the dashboard fanning one page render out across three Core requests.
+    let identity = require_verified_identity(&state, &headers).await?;
+    link_verified_identity(&state, &identity).await?;
+
+    let billing_input = LinkVerifiedUserInput {
+        verified_email: identity.email.clone(),
+        workos_user_id: identity.workos_user_id.clone(),
+        now: None,
+    };
+    let (me, billing, finite_private_usage) = tokio::try_join!(
+        me_response_for_identity(&state, &identity),
+        async {
+            state
+                .store
+                .billing_overview(billing_input)
+                .await
+                .map_err(ApiError::from)
+        },
+        async {
+            state
+                .store
+                .finite_private_usage_status_for_workos_user(&identity.workos_user_id, None)
+                .await
+                .map_err(ApiError::from)
+        },
+    )?;
+
+    Ok(Json(DashboardSummaryResponse {
+        me,
+        billing,
+        finite_private_usage,
+    }))
+}
+
+async fn link_verified_identity(
+    state: &CoreApiState,
+    identity: &VerifiedIdentity,
+) -> Result<(), ApiError> {
     state
         .store
         .link_verified_user(LinkVerifiedUserInput {
@@ -1676,6 +1732,13 @@ async fn me(
             now: None,
         })
         .await?;
+    Ok(())
+}
+
+async fn me_response_for_identity(
+    state: &CoreApiState,
+    identity: &VerifiedIdentity,
+) -> Result<MeResponse, ApiError> {
     let claimable_candidates = state
         .store
         .claimable_candidates_for_email(Some(&identity.email))
@@ -1688,9 +1751,9 @@ async fn me(
         .store
         .agent_creation_requests_for_workos_user(&identity.workos_user_id)
         .await?;
-    Ok(Json(MeResponse {
-        email: identity.email,
-        workos_user_id: identity.workos_user_id,
+    Ok(MeResponse {
+        email: identity.email.clone(),
+        workos_user_id: identity.workos_user_id.clone(),
         claimable_candidates: claimable_candidates
             .into_iter()
             .map(ClaimableProjectSummary::from)
@@ -1700,7 +1763,7 @@ async fn me(
             .into_iter()
             .map(AgentCreationRequestSummary::from)
             .collect(),
-    }))
+    })
 }
 
 async fn resolve_runtime_route(
@@ -3845,6 +3908,65 @@ mod tests {
         assert_eq!(me.claimable_candidates[0].display_name, "Smoke");
         assert!(me.projects.is_empty());
         assert!(me.agent_creation_requests.is_empty());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/me/billing")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_test",
+                                "test@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let billing_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/me/dashboard-summary")
+                    .header(
+                        "authorization",
+                        format!(
+                            "Bearer {}",
+                            access_token_with_subject(
+                                "user_workos_test",
+                                "test@finite.vip",
+                                true,
+                                None,
+                            )
+                        ),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(summary["me"], me_json);
+        assert_eq!(summary["billing"], billing_json);
+        assert!(summary["finite_private_usage"].is_null());
 
         let claim = serde_json::to_vec(&ClaimImportsRequest {
             selected_candidate_ids: vec![me.claimable_candidates[0].id.clone()],

@@ -33,8 +33,8 @@ import {
   messageContent,
   messagesForChat,
   nextChatSnapshotGeneration,
-  pendingTurnIsComplete,
   pendingTurnMatchesSelection,
+  reconcilePendingChatTurns,
   recordChatSnapshot,
   roomDetailsForSelection,
   selectedChat as selectChat,
@@ -529,8 +529,10 @@ export function App() {
   useEffect(() => {
     if (!state) return;
     setPendingAgentTurns((turns) => {
-      const pending = turns.filter(
-        (turn) => !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
+      const pending = reconcilePendingChatTurns(
+        turns,
+        state.messages,
+        state.identity.account_id
       );
       return pending.length === turns.length ? turns : pending;
     });
@@ -664,7 +666,7 @@ export function App() {
       : null;
     if (pendingTurn) {
       setPendingAgentTurns((turns) => [
-        ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selection)),
+        ...turns,
         pendingTurn,
       ]);
     }

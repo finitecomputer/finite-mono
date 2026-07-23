@@ -7,9 +7,9 @@
 
 mod schema;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 
 use finitesites_proto::{ManifestFile, ids};
@@ -489,19 +489,20 @@ const SITE_SELECT: &str = "
 
 pub struct Store {
     conn: Connection,
+    path: Option<PathBuf>,
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         let conn = Connection::open(path)?;
-        Self::initialize(conn)
+        Self::initialize(conn, Some(path.to_path_buf()))
     }
 
     pub fn open_in_memory() -> Result<Store, StoreError> {
-        Self::initialize(Connection::open_in_memory()?)
+        Self::initialize(Connection::open_in_memory()?, None)
     }
 
-    fn initialize(conn: Connection) -> Result<Store, StoreError> {
+    fn initialize(conn: Connection, path: Option<PathBuf>) -> Result<Store, StoreError> {
         // WAL lets the operator `finitesitesd allow` while the server runs.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -572,7 +573,25 @@ impl Store {
         Self::migrate_versions_git_ref_event_index(&conn)?;
         Self::migrate_legacy_sites_shape(&conn)?;
         Self::migrate_legacy_allowed_pubkeys(&conn)?;
-        Ok(Store { conn })
+        Ok(Store { conn, path })
+    }
+
+    /// Open an independent read-only connection to the same on-disk registry.
+    /// WAL permits these serving readers to run concurrently with the single
+    /// control-plane writer.
+    pub fn open_reader(&self) -> Result<Store, StoreError> {
+        let path = self.path.as_deref().ok_or(StoreError::Conflict(
+            "in-memory registry cannot open a serving reader",
+        ))?;
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.pragma_update(None, "query_only", true)?;
+        Ok(Store {
+            conn,
+            path: Some(path.to_path_buf()),
+        })
     }
 
     /// Add a column to an existing table when it is missing. Probing with a
@@ -3422,6 +3441,25 @@ mod tests {
             .create_site_with_claim("site_1", "claim_1", name, OWNER, NOW)
             .unwrap();
         store
+    }
+
+    #[test]
+    fn serving_reader_observes_committed_writes_and_rejects_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("registry.db");
+        let mut writer = Store::open(&path).unwrap();
+        let reader = writer.open_reader().unwrap();
+
+        assert!(!reader.is_pubkey_allowed(OWNER).unwrap());
+        writer.allow_pubkey(OWNER, "reader test", NOW).unwrap();
+        assert!(reader.is_pubkey_allowed(OWNER).unwrap());
+
+        let write = reader.conn.execute(
+            "INSERT INTO allowed_pubkeys (pubkey, note, created_at)
+             VALUES (?1, 'must fail', ?2)",
+            params![OTHER_KEY, NOW],
+        );
+        assert!(write.is_err(), "serving reader must remain query-only");
     }
 
     fn project_output(site_name: &str) -> ProjectOutputApply {

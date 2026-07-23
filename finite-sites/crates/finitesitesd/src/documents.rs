@@ -8,7 +8,8 @@ use axum::body::Body;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use finitesites_engine::{Engine, FoundFile};
+use finitesites_blob::BlobStore;
+use finitesites_engine::FoundFile;
 use finitesites_store::SiteRecord;
 use pulldown_cmark::{Event, Options, Parser, html};
 use sha2::Digest as _;
@@ -26,8 +27,10 @@ struct MarkdownPage {
 }
 
 pub fn serve_document(
-    engine: &Engine,
+    blobs: &BlobStore,
     site: &SiteRecord,
+    files: Vec<FoundFile>,
+    entry: Option<String>,
     request_path: &str,
     headers: &HeaderMap,
     method: &Method,
@@ -36,49 +39,41 @@ pub fn serve_document(
         return platform_html(StatusCode::METHOD_NOT_ALLOWED, pages::not_found());
     }
 
-    let files = match engine.active_version_files(site) {
-        Ok(files) => files,
-        Err(error) => {
-            eprintln!("finitesitesd document files error: {error}");
-            return platform_html(StatusCode::INTERNAL_SERVER_ERROR, pages::not_found());
-        }
-    };
-    let pages = document_pages(engine, site, &files);
+    let pages = document_pages(blobs, &files, entry.as_deref());
 
     if request_path == "/llms-full.txt" {
-        return llms_full_response(engine, site, &pages, headers, method);
+        return llms_full_response(blobs, site, &pages, headers, method);
     }
 
     if request_path.ends_with(".md") {
         if let Some(page) = page_for_companion(&pages, request_path) {
-            return markdown_blob_response(engine, site, page, headers, method);
+            return markdown_blob_response(blobs, site, &files, page, headers, method);
         }
         return platform_html(StatusCode::NOT_FOUND, crate::pages::not_found());
     }
 
     if let Some(page) = page_for_route(&pages, request_path) {
-        return rendered_page_response(engine, site, &pages, page, headers, method);
+        return rendered_page_response(blobs, site, &pages, page, headers, method);
     }
 
     if request_path == "/" {
         return generated_index_response(site, &pages, method);
     }
 
-    if let Some(asset) = exact_asset(engine, site, request_path) {
-        return blob_response(engine, site, &asset, headers, method, StatusCode::OK);
+    if let Some(asset) = exact_asset(&files, request_path) {
+        return blob_response(blobs, site, asset, headers, method, StatusCode::OK);
     }
 
     platform_html(StatusCode::NOT_FOUND, crate::pages::not_found())
 }
 
-fn document_pages(engine: &Engine, site: &SiteRecord, files: &[FoundFile]) -> Vec<MarkdownPage> {
-    let entry = engine
-        .project_output_for_site(site)
-        .ok()
-        .flatten()
-        .and_then(|(_, output)| output.entry)
-        .unwrap_or_else(|| "index.md".to_string());
-    let entry_path = ensure_absolute_markdown_path(&entry);
+fn document_pages(
+    blobs: &BlobStore,
+    files: &[FoundFile],
+    entry: Option<&str>,
+) -> Vec<MarkdownPage> {
+    let entry = entry.unwrap_or("index.md");
+    let entry_path = ensure_absolute_markdown_path(entry);
 
     let mut pages = Vec::new();
     // Bounded by MAX_MANIFEST_FILES.
@@ -88,7 +83,7 @@ fn document_pages(engine: &Engine, site: &SiteRecord, files: &[FoundFile]) -> Ve
         }
         let route = route_for_markdown_path(&file.path, &entry_path);
         let companion = companion_for_markdown_path(&file.path, &entry_path);
-        let title = markdown_title(engine, file).unwrap_or_else(|| title_from_path(&file.path));
+        let title = markdown_title(blobs, file).unwrap_or_else(|| title_from_path(&file.path));
         pages.push(MarkdownPage {
             path: file.path.clone(),
             route,
@@ -153,8 +148,8 @@ fn page_for_companion<'a>(
     pages.iter().find(|page| page.companion == request_path)
 }
 
-fn markdown_title(engine: &Engine, file: &FoundFile) -> Option<String> {
-    let bytes = engine.read_blob(&file.sha256).ok()?;
+fn markdown_title(blobs: &BlobStore, file: &FoundFile) -> Option<String> {
+    let bytes = blobs.get(&file.sha256).ok()?;
     let markdown = String::from_utf8(bytes).ok()?;
     let markdown = strip_frontmatter(&markdown);
     // Bounded by MAX_FILE_BYTES.
@@ -186,7 +181,7 @@ fn title_from_path(path: &str) -> String {
 }
 
 fn llms_full_response(
-    engine: &Engine,
+    blobs: &BlobStore,
     site: &SiteRecord,
     pages: &[MarkdownPage],
     headers: &HeaderMap,
@@ -202,7 +197,7 @@ fn llms_full_response(
         body.push_str("## ");
         body.push_str(&page.path);
         body.push_str("\n\n");
-        match engine.read_blob(&page.sha256) {
+        match blobs.get(&page.sha256) {
             Ok(bytes) => body.push_str(&String::from_utf8_lossy(&bytes)),
             Err(error) => {
                 eprintln!("finitesitesd document llms-full blob error: {error}");
@@ -215,27 +210,28 @@ fn llms_full_response(
 }
 
 fn markdown_blob_response(
-    engine: &Engine,
+    blobs: &BlobStore,
     site: &SiteRecord,
+    files: &[FoundFile],
     page: &MarkdownPage,
     headers: &HeaderMap,
     method: &Method,
 ) -> Response {
-    let Some(file) = engine.lookup_exact_file(site, &page.path).ok().flatten() else {
+    let Some(file) = exact_asset(files, &page.path) else {
         return platform_html(StatusCode::NOT_FOUND, crate::pages::not_found());
     };
-    blob_response(engine, site, &file, headers, method, StatusCode::OK)
+    blob_response(blobs, site, file, headers, method, StatusCode::OK)
 }
 
 fn rendered_page_response(
-    engine: &Engine,
+    blobs: &BlobStore,
     site: &SiteRecord,
     pages: &[MarkdownPage],
     page: &MarkdownPage,
     headers: &HeaderMap,
     method: &Method,
 ) -> Response {
-    let bytes = match engine.read_blob(&page.sha256) {
+    let bytes = match blobs.get(&page.sha256) {
         Ok(bytes) => bytes,
         Err(error) => {
             eprintln!("finitesitesd document blob error: {error}");
@@ -312,12 +308,12 @@ fn generated_index_response(
         .expect("document index response builds")
 }
 
-fn exact_asset(engine: &Engine, site: &SiteRecord, request_path: &str) -> Option<FoundFile> {
-    engine.lookup_exact_file(site, request_path).ok().flatten()
+fn exact_asset<'a>(files: &'a [FoundFile], request_path: &str) -> Option<&'a FoundFile> {
+    files.iter().find(|file| file.path == request_path)
 }
 
 fn blob_response(
-    engine: &Engine,
+    blobs: &BlobStore,
     site: &SiteRecord,
     file: &FoundFile,
     headers: &HeaderMap,
@@ -336,7 +332,7 @@ fn blob_response(
             .body(Body::empty())
             .expect("document asset response builds");
     }
-    let bytes = match engine.read_blob(&file.sha256) {
+    let bytes = match blobs.get(&file.sha256) {
         Ok(bytes) => bytes,
         Err(error) => {
             eprintln!("finitesitesd document asset blob error: {error}");

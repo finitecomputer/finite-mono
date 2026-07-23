@@ -1535,6 +1535,24 @@ impl Engine {
         Ok(self.blobs.get(sha256)?)
     }
 
+    /// Clone the immutable content-addressed blob handle for serving work that
+    /// must run after the registry lock has been released.
+    pub fn blob_store(&self) -> BlobStore {
+        self.blobs.clone()
+    }
+
+    /// Open an independent read-only registry connection for the serving
+    /// plane. It shares immutable blobs and verification material, while
+    /// control-plane mutations remain on the original Engine.
+    pub fn serving_reader(&self) -> Result<Engine, EngineError> {
+        Ok(Engine {
+            store: self.store.open_reader()?,
+            blobs: self.blobs.clone(),
+            cookie_secret: self.cookie_secret,
+            config: self.config.clone(),
+        })
+    }
+
     /// Filesystem path of a blob, for streaming large bundles.
     pub fn blob_file_path(&self, sha256: &str) -> std::path::PathBuf {
         self.blobs.file_path(sha256)

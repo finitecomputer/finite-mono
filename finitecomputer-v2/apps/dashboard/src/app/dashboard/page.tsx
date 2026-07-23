@@ -43,9 +43,7 @@ import {
   coreProjectLaunchStatusLabel,
   coreProjectLabel,
   loadCoreFinitePrivateAdminState,
-  loadCoreFinitePrivateUsageStatus,
-  loadCoreBillingOverview,
-  loadCoreMe,
+  loadCoreDashboardSummary,
   type CoreAgentCreationRequestSummary,
   type CoreFinitePrivateAdminStateResult,
   type CoreFinitePrivateApiKey,
@@ -131,16 +129,8 @@ export default async function DashboardPage({
     getAccountAuthContext(),
   ]);
 
-  const core = await loadCoreMe();
+  const { core, billing, finitePrivateUsage } = await loadCoreDashboardSummary();
   if (core.configured || !viewer.isAdmin) {
-    // The checkout-return sync poll must observe Core directly, not a cached
-    // read, so the webhook-arrival flip is seen as soon as it lands.
-    const [billing, finitePrivateUsage] = await Promise.all([
-      loadCoreBillingOverview({
-        cacheMode: billingReturnParam === "success" ? "fresh" : "swr",
-      }),
-      loadCoreFinitePrivateUsageStatus(),
-    ]);
     const draft = await unsealAgentOnboardingDraft(
       (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
       account.workosUserId

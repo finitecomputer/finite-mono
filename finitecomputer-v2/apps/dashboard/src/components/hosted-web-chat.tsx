@@ -79,9 +79,9 @@ import {
   attachmentSendError,
   liveActivityLabel as sharedLiveActivityLabel,
   messageContent,
-  pendingTurnIsComplete,
   pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
+  reconcilePendingChatTurns,
   transcriptItems,
   type ChatSelection,
   type PendingChatTurn,
@@ -304,10 +304,14 @@ export function HostedWebChat({
   useEffect(() => {
     if (!state) return;
     setPendingAgentTurns((turns) => {
-      const pending = turns.filter(
+      const fresh = turns.filter(
         (turn) =>
           pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
-          && !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
+      );
+      const pending = reconcilePendingChatTurns(
+        fresh,
+        state.messages,
+        state.identity.account_id
       );
       return pending.length === turns.length ? turns : pending;
     });
@@ -452,7 +456,7 @@ export function HostedWebChat({
     if (pendingTurn) {
       setLeaseNowMs(pendingTurnStartedAtMs);
       setPendingAgentTurns((turns) => [
-        ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selectedChatSelection)),
+        ...turns,
         pendingTurn,
       ]);
     }

@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0"
 axum = "0.8"
 clap = { version = "4.5", features = ["derive"] }
+deadpool-postgres = "0.14"
 finite-core = { path = "../finite-core" }
 futures-util = "0.3"
 getrandom = "0.2"
