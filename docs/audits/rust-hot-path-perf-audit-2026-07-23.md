@@ -14,6 +14,11 @@ Finite Chat path before the harder-to-roll-out Finite Private limiter:
 1. `finitechat-core` as exercised by the Electron daemon; and
 2. the resident `finitechat-cli` Hermes/user bridge.
 
+After the first two fixes were reviewed, Paul explicitly asked for continued
+scanning under the hard rule that existing Finite Chat users must retain open,
+sync, send, restart, and recovery behavior. One further Core sync fix met that
+bar and is recorded below.
+
 This audit does not profile production, generate load, change a database
 schema, redesign the async runtime, or touch the Finite Private limiter.
 Existing work in `finitechat/docs/perf-audit.md` and
@@ -56,7 +61,49 @@ scripts/with-dev-env cargo test --release -p finitechat-core \
   app_runtime_idle_tick_with_full_projection_history -- --ignored --nocapture
 ```
 
-### P2 — resident bridge no-op wakes caused repeated encrypted-history scans
+### P2 — healthy multi-room sync reloaded the full encrypted MLS Device per room
+
+- **Path:** `CoreState::sync_with_projection` in
+  `finitechat/crates/finitechat-core/src/lib.rs`.
+- **Trigger:** every normal app or Agent bridge sync across joined rooms.
+- **Cost before:** Core loaded, AES-GCM-decrypted, validated, and reconstructed
+  the complete `FiniteChatDevice` before each room attempt. The complete Device
+  contains every MLS group and OpenMLS storage record, so the cost was
+  **O(rooms × total MLS device state) per sync**, even when every room was
+  healthy and idle.
+- **Why the old boundary existed:** MLS processing can mutate an in-memory
+  group before rejecting malformed ciphertext. A failed room must not poison
+  later rooms or advance its durable cursor.
+- **Measured evidence:** the checked-in ignored release harness creates 20
+  real encrypted rooms against the live local HTTP server and measures ten
+  idle ticks.
+  - before: p50 **30.724 ms**, average **31.818 ms**, max **39.715 ms**;
+  - after: p50 **3.895 ms**, average **3.898 ms**, max **4.167 ms**;
+  - p50 improvement: approximately **7.9×** on this development machine.
+- **User impact:** accounts with many rooms paid repeated full-store decryption
+  before AppState or Hermes could observe each update. The multiplier grew with
+  both room count and accumulated MLS state.
+- **Smallest corrective boundary:** run a healthy room against the current
+  in-memory Device. `run_room_sync_tick` already guarantees it saves neither
+  Device nor application rows when the room attempt fails. On **every** error,
+  Core reloads the last encrypted durable snapshot before classifying the
+  failure or continuing to another room. Thus the common healthy path avoids
+  reloads while the failed-room rollback boundary remains unchanged.
+
+Reproduce:
+
+```sh
+scripts/with-dev-env cargo test --release -p finitechat-core \
+  app_runtime_idle_tick_with_many_rooms -- --ignored --nocapture
+```
+
+The existing
+`app_runtime_agent_bridge_quarantines_broken_room_and_delivers_fresh_room_command`
+regression corrupts one room's MLS ciphertext and proves that its in-memory and
+durable cursor do not advance, a healthy later room still delivers, and the
+runtime stays degraded-ready instead of bricking Chat.
+
+### P3 — resident bridge no-op wakes caused repeated encrypted-history scans
 
 - **Path:** `start_resident_bridge_sync` →
   `signal_bridge_update` → `run_hermes_inbound_stream` /
@@ -96,6 +143,8 @@ The optimization deliberately keeps these semantics:
 - sync hints remain advisory; Core still pulls and validates durable entries;
 - heartbeat reconciliation remains in place for missed-hint recovery;
 - startup still reconstructs the full projection from encrypted durable state;
+- a failed room still restores the last durable Device before any later room
+  runs;
 - outbox retries retain the same idempotency material and restart behavior;
 - Hermes inbox durability, per-room cursors, event ordering, and ACK behavior
   are unchanged; and

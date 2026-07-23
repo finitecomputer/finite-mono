@@ -6995,6 +6995,18 @@ impl CoreState {
             .unwrap_or_else(current_unix_seconds))
     }
 
+    fn reload_persisted_device(&mut self) -> Result<(), FiniteChatCoreError> {
+        let config = FiniteChatDeviceConfig {
+            account_secret_key: self.account_secret.clone(),
+            device_id: self.device.device_ref().device_id.clone(),
+            now_unix_seconds: self.now_unix_seconds()?,
+            credential_not_before_unix_seconds: 0,
+            credential_not_after_unix_seconds: u64::MAX,
+        };
+        self.device = self.store.load_device(config).map_err(store_error)?;
+        Ok(())
+    }
+
     fn refresh_device_clock(&mut self) -> Result<(), FiniteChatCoreError> {
         let now = self.now_unix_seconds()?;
         self.device.set_now_unix_seconds(now);
@@ -7966,35 +7978,25 @@ impl CoreState {
             }
         }
 
-        // MLS failures are scoped to one room. Reload a persisted Device
-        // candidate before each attempt so an invalid entry can be rejected
-        // and discarded without poisoning the Device used for later rooms.
+        // MLS failures are scoped to one room. A failed room attempt may have
+        // changed the in-memory Device, so restore the last durable snapshot
+        // before continuing to later rooms.
         // `run_room_sync_tick` persists only after the full bounded room tick
         // succeeds, so a failed room keeps its prior durable cursor and MLS
         // state while healthy rooms continue.
         for cursor in self.device.room_sync_cursors() {
-            let config = FiniteChatDeviceConfig {
-                account_secret_key: self.account_secret.clone(),
-                device_id: self.device.device_ref().device_id.clone(),
-                now_unix_seconds: self.now_unix_seconds()?,
-                credential_not_before_unix_seconds: 0,
-                credential_not_after_unix_seconds: u64::MAX,
-            };
-            let mut candidate = self.store.load_device(config).map_err(store_error)?;
             let server_url = cursor.server_url.unwrap_or_else(|| self.server_url.clone());
             let mut delivery = self.delivery_for(&server_url);
             match run_room_sync_tick(
                 &mut self.store,
-                &mut candidate,
+                &mut self.device,
                 &mut delivery,
                 &options,
                 &cursor.room_id,
             ) {
-                Ok(report) => {
-                    self.device = candidate;
-                    projection.merge_report(report, &owner);
-                }
+                Ok(report) => projection.merge_report(report, &owner),
                 Err(error) => {
+                    self.reload_persisted_device()?;
                     let quarantined_room_failure = matches!(
                         &error,
                         RuntimeWorkerError::Client(_)
@@ -10832,6 +10834,46 @@ mod tests {
         println!(
             "idle runtime tick with {HISTORY_ITEMS} messages + {HISTORY_ITEMS} events: \
              n={SAMPLES} p50={p50:?} average={:?} max={:?}",
+            total / SAMPLES as u32,
+            samples.last().unwrap()
+        );
+    }
+
+    #[test]
+    #[ignore = "timing harness; run explicitly in release mode"]
+    fn app_runtime_idle_tick_with_many_rooms() {
+        const ROOMS: usize = 20;
+        const SAMPLES: usize = 10;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let core = CoreState::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("app").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "perf-many-rooms".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let mut state = AppRuntimeState::new(core).unwrap();
+        for index in 0..ROOMS {
+            state
+                .create_room(format!("Performance room {index}"))
+                .unwrap();
+        }
+
+        state.runtime_tick().unwrap();
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            state.runtime_tick().unwrap();
+            samples.push(started.elapsed());
+        }
+        samples.sort();
+        let p50 = samples[samples.len() / 2];
+        let total = samples.iter().copied().sum::<Duration>();
+        println!(
+            "idle runtime tick with {ROOMS} rooms: n={SAMPLES} p50={p50:?} average={:?} max={:?}",
             total / SAMPLES as u32,
             samples.last().unwrap()
         );

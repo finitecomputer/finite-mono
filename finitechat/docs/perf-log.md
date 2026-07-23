@@ -331,6 +331,12 @@ June device-save/server-clone work. The full report is
   5,000 stored events and rebuilt the same projection. The new ignored harness
   measures the maximum retained history: p50 **88.050 ms → 175 µs**
   (approximately **502×**). Startup remains the full-rebuild boundary.
+- Healthy multi-room sync loaded/decrypted/reconstructed the complete MLS
+  Device once per room. The 20-real-room harness measures p50
+  **30.724 ms → 3.895 ms** (approximately **7.9×**). The common path now keeps
+  the live Device; every room error restores the unchanged durable snapshot
+  before failure classification or the next room, preserving corrupted-room
+  quarantine.
 - The resident Hermes bridge signalled every consumer on every successful
   ten-second reconciliation, even with no updates. Each wake could reopen and
   decrypt the 5,000-event recovery window; cold Hermes collection scanned it
