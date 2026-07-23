@@ -13,7 +13,9 @@ const {
   parseAccountBinding,
   parseDeviceLinkPublicResponse,
   parseLocalDaemonIdentity,
+  shouldExposeLocalChatBridge,
   trustedDashboardIpcFrame,
+  trustedDashboardMicrophonePermission,
 } = require("./dashboard-security.cjs");
 
 const productionDashboard = "https://finite.computer";
@@ -63,6 +65,73 @@ test("privileged dashboard documents stay on the exact dashboard subtree", () =>
     ),
     false
   );
+});
+
+test("only an explicit development fixture can omit the local chat bridge", () => {
+  assert.equal(
+    shouldExposeLocalChatBridge({ isPackaged: false, disabledInDevelopment: false }),
+    true
+  );
+  assert.equal(
+    shouldExposeLocalChatBridge({ isPackaged: false, disabledInDevelopment: true }),
+    false
+  );
+  assert.equal(
+    shouldExposeLocalChatBridge({ isPackaged: true, disabledInDevelopment: true }),
+    true
+  );
+});
+
+test("only dashboard main-frame audio requests receive microphone permission", () => {
+  const trustedRequest = {
+    permission: "media",
+    requestingOrigin: productionDashboard,
+    requestingUrl: `${productionDashboard}/dashboard/machines/runtime/chat`,
+    securityOrigin: productionDashboard,
+    isMainFrame: true,
+    mediaTypes: ["audio"],
+  };
+  assert.equal(
+    trustedDashboardMicrophonePermission(trustedRequest, productionDashboard),
+    true
+  );
+  assert.equal(
+    trustedDashboardMicrophonePermission(
+      { ...trustedRequest, mediaTypes: undefined, mediaType: "audio" },
+      productionDashboard
+    ),
+    true
+  );
+  assert.equal(
+    trustedDashboardMicrophonePermission(
+      {
+        ...trustedRequest,
+        requestingOrigin: `${productionDashboard}/`,
+        securityOrigin: `${productionDashboard}/`,
+      },
+      productionDashboard
+    ),
+    true
+  );
+  for (const request of [
+    { ...trustedRequest, isMainFrame: false },
+    {
+      ...trustedRequest,
+      requestingOrigin: "https://evil.example",
+      requestingUrl: "https://evil.example/dashboard",
+      securityOrigin: "https://evil.example",
+    },
+    { ...trustedRequest, requestingUrl: `${productionDashboard}/login` },
+    { ...trustedRequest, mediaTypes: ["video"] },
+    { ...trustedRequest, mediaTypes: ["audio", "video"] },
+    { ...trustedRequest, mediaTypes: [] },
+    { ...trustedRequest, permission: "display-capture" },
+  ]) {
+    assert.equal(
+      trustedDashboardMicrophonePermission(request, productionDashboard),
+      false
+    );
+  }
 });
 
 test("unprivileged auth navigation allows HTTPS providers but never active content schemes", () => {

@@ -51,20 +51,20 @@ test("normalizeEmail lowercases and trims", () => {
 
 test("admins see every machine", () => {
   const machines = [
-    machine({ id: "skyler-finite", email: "skyler@finite.vip" }),
+    machine({ id: "fixture-owner", email: "fixture-owner@example.test" }),
     machine({ id: "test-finite", email: "test@finite.vip" }),
   ];
 
   assert.equal(isAdminEmail(dashboardState, "paul@finite.vip"), true);
   assert.deepEqual(
     visibleMachinesForViewer(machines, dashboardState, "paul@finite.vip").map((entry) => entry.workload.id),
-    ["skyler-finite", "test-finite"],
+    ["fixture-owner", "test-finite"],
   );
 });
 
 test("non-admin only sees owned or invited machines", () => {
   const machines = [
-    machine({ id: "skyler-finite", email: "skyler@finite.vip" }),
+    machine({ id: "fixture-owner", email: "fixture-owner@example.test" }),
     machine({
       id: "test-finite",
       email: "someone-else@finite.vip",

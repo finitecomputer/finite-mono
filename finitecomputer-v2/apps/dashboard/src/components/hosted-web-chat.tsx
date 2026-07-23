@@ -23,6 +23,7 @@ import {
   ExternalLinkIcon,
   FileTextIcon,
   Loader2Icon,
+  MicIcon,
   MonitorIcon,
   PanelLeftIcon,
   PaperclipIcon,
@@ -30,6 +31,7 @@ import {
   RefreshCwIcon,
   RotateCcwIcon,
   Share2Icon,
+  SquareIcon,
   WrenchIcon,
   XIcon,
 } from "lucide-react";
@@ -62,6 +64,16 @@ import type {
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import {
+  AUDIO_RECORDING_BITS_PER_SECOND,
+  audioRecordingErrorMessage,
+  audioRecordingDurationLabel,
+  audioRecordingFilename,
+  MAX_AUDIO_RECORDING_BYTES,
+  MAX_AUDIO_RECORDING_SECONDS,
+  supportedAudioRecordingFormat,
+  type AudioRecordingFormat,
+} from "@/lib/audio-recording";
+import {
   activityLeaseIsFresh,
   beginPendingChatTurn,
   attachmentSendError,
@@ -86,6 +98,8 @@ type PendingAttachment = {
   file: File;
   previewUrl: string | null;
 };
+
+type AudioRecordingState = "idle" | "requesting" | "recording" | "stopping";
 
 type PreviewSite = {
   id: string;
@@ -128,6 +142,9 @@ export function HostedWebChat({
   const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);
   const [leaseNowMs, setLeaseNowMs] = useState(() => Date.now());
   const [isDragOver, setIsDragOver] = useState(false);
+  const [audioRecordingState, setAudioRecordingState] =
+    useState<AudioRecordingState>("idle");
+  const [audioRecordingElapsedSeconds, setAudioRecordingElapsedSeconds] = useState(0);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameTitle, setRenameTitle] = useState("");
   const [browserOpen, setBrowserOpen] = useState(false);
@@ -141,6 +158,16 @@ export function HostedWebChat({
   const latestSiteIdRef = useRef<string | null>(null);
   const shouldFollowScrollRef = useRef(true);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
+  const audioRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioRecordingStreamRef = useRef<MediaStream | null>(null);
+  const audioRecordingChunksRef = useRef<Blob[]>([]);
+  const audioRecordingFormatRef = useRef<AudioRecordingFormat | null>(null);
+  const audioRecordingBytesRef = useRef(0);
+  const audioRecordingStartedAtMsRef = useRef<number | null>(null);
+  const audioRecordingTimerRef = useRef<number | null>(null);
+  const audioRecordingLimitTimerRef = useRef<number | null>(null);
+  const audioRecordingFailedRef = useRef(false);
+  const audioRecordingMountedRef = useRef(true);
   const markedReadSeqRef = useRef(new Map<string, number>());
   const mobilePreview = useMediaQuery("(max-width: 980px)");
   const allowedRoomIds = useMemo(() => {
@@ -345,6 +372,22 @@ export function HostedWebChat({
     []
   );
 
+  useEffect(() => {
+    audioRecordingMountedRef.current = true;
+    return () => {
+      audioRecordingMountedRef.current = false;
+      clearAudioRecordingTimers();
+      const recorder = audioRecorderRef.current;
+      if (recorder) {
+        recorder.ondataavailable = null;
+        recorder.onerror = null;
+        recorder.onstop = null;
+        if (recorder.state !== "inactive") recorder.stop();
+      }
+      audioRecordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
   useEffect(
     () => () => {
       if (typingTimerRef.current !== null) {
@@ -399,6 +442,7 @@ export function HostedWebChat({
       || !selectedTopic
       || !selectedChat
       || sending
+      || audioRecordingState !== "idle"
     ) return;
     setSending(true);
     setActionError(null);
@@ -448,6 +492,10 @@ export function HostedWebChat({
   }
 
   function addFiles(files: FileList | File[]) {
+    if (audioRecordingState !== "idle") {
+      setActionError("Stop the audio recording before adding another attachment.");
+      return;
+    }
     const incoming = Array.from(files);
     const accepted = incoming.filter((file) => file.size <= MAX_ATTACHMENT_BYTES);
     const oversized = incoming.find((file) => file.size > MAX_ATTACHMENT_BYTES);
@@ -489,6 +537,184 @@ export function HostedWebChat({
       if (removed) revokeAttachmentPreview(removed);
       return current.filter((attachment) => attachment.id !== id);
     });
+  }
+
+  function clearAudioRecordingTimers() {
+    if (audioRecordingTimerRef.current !== null) {
+      window.clearInterval(audioRecordingTimerRef.current);
+      audioRecordingTimerRef.current = null;
+    }
+    if (audioRecordingLimitTimerRef.current !== null) {
+      window.clearTimeout(audioRecordingLimitTimerRef.current);
+      audioRecordingLimitTimerRef.current = null;
+    }
+  }
+
+  function releaseAudioRecording() {
+    clearAudioRecordingTimers();
+    audioRecordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    audioRecordingStreamRef.current = null;
+    audioRecorderRef.current = null;
+    audioRecordingChunksRef.current = [];
+    audioRecordingFormatRef.current = null;
+    audioRecordingBytesRef.current = 0;
+    audioRecordingStartedAtMsRef.current = null;
+  }
+
+  async function startAudioRecording() {
+    if (
+      audioRecordingState !== "idle"
+      || typeof MediaRecorder === "undefined"
+      || !navigator.mediaDevices?.getUserMedia
+    ) {
+      if (audioRecordingState === "idle") {
+        setActionError("Audio recording is not supported in this browser.");
+      }
+      return;
+    }
+    if (attachments.length >= MAX_ATTACHMENTS) {
+      setActionError(`You can attach up to ${MAX_ATTACHMENTS} files at a time.`);
+      return;
+    }
+    const attachedBytes = attachments.reduce(
+      (total, attachment) => total + attachment.file.size,
+      0
+    );
+    if (attachedBytes + MAX_AUDIO_RECORDING_BYTES > MAX_ATTACHMENT_TOTAL_BYTES) {
+      setActionError(
+        `Remove attachments to leave ${formatBytes(MAX_AUDIO_RECORDING_BYTES)} available for recording.`
+      );
+      return;
+    }
+    const format = supportedAudioRecordingFormat((mimeType) =>
+      MediaRecorder.isTypeSupported(mimeType)
+    );
+    if (!format) {
+      setActionError("This browser does not support a compatible audio recording format.");
+      return;
+    }
+
+    setActionError(null);
+    setAudioRecordingState("requesting");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
+      if (!audioRecordingMountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      audioRecordingStreamRef.current = stream;
+      const recorder = new MediaRecorder(stream, {
+        mimeType: format.recorderMimeType,
+        audioBitsPerSecond: AUDIO_RECORDING_BITS_PER_SECOND,
+      });
+      audioRecorderRef.current = recorder;
+      audioRecordingChunksRef.current = [];
+      audioRecordingFormatRef.current = format;
+      audioRecordingBytesRef.current = 0;
+      audioRecordingFailedRef.current = false;
+
+      const stopRecorder = () => {
+        if (recorder.state === "inactive") return;
+        clearAudioRecordingTimers();
+        if (audioRecordingMountedRef.current) setAudioRecordingState("stopping");
+        try {
+          recorder.stop();
+        } catch (reason) {
+          releaseAudioRecording();
+          if (audioRecordingMountedRef.current) {
+            setAudioRecordingState("idle");
+            setActionError(audioRecordingErrorMessage(reason));
+          }
+        }
+      };
+      recorder.ondataavailable = (event) => {
+        if (event.data.size === 0) return;
+        audioRecordingChunksRef.current.push(event.data);
+        audioRecordingBytesRef.current += event.data.size;
+        if (audioRecordingBytesRef.current >= MAX_AUDIO_RECORDING_BYTES) {
+          stopRecorder();
+        }
+      };
+      recorder.onerror = () => {
+        audioRecordingFailedRef.current = true;
+        if (audioRecordingMountedRef.current) {
+          setActionError("The microphone recording was interrupted. Try again.");
+        }
+      };
+      recorder.onstop = () => {
+        const chunks = audioRecordingChunksRef.current;
+        const completedFormat = audioRecordingFormatRef.current;
+        const failed = audioRecordingFailedRef.current;
+        releaseAudioRecording();
+        if (!audioRecordingMountedRef.current) return;
+        setAudioRecordingState("idle");
+        if (failed || !completedFormat) return;
+        const file = new File(
+          chunks,
+          audioRecordingFilename(new Date(), completedFormat),
+          {
+            type: completedFormat.fileMimeType,
+            lastModified: Date.now(),
+          }
+        );
+        if (file.size === 0) {
+          setActionError("The microphone recording was empty. Try again.");
+          return;
+        }
+        addFiles([file]);
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      };
+      recorder.start(1_000);
+      const startedAtMs = Date.now();
+      audioRecordingStartedAtMsRef.current = startedAtMs;
+      setAudioRecordingElapsedSeconds(0);
+      audioRecordingTimerRef.current = window.setInterval(() => {
+        const startedAt = audioRecordingStartedAtMsRef.current;
+        if (startedAt === null) return;
+        setAudioRecordingElapsedSeconds(
+          Math.min(
+            MAX_AUDIO_RECORDING_SECONDS,
+            Math.floor((Date.now() - startedAt) / 1_000)
+          )
+        );
+      }, 1_000);
+      audioRecordingLimitTimerRef.current = window.setTimeout(
+        stopRecorder,
+        MAX_AUDIO_RECORDING_SECONDS * 1_000
+      );
+      setAudioRecordingState("recording");
+    } catch (reason) {
+      releaseAudioRecording();
+      if (audioRecordingMountedRef.current) {
+        setAudioRecordingState("idle");
+        setActionError(audioRecordingErrorMessage(reason));
+      }
+    }
+  }
+
+  function stopAudioRecording() {
+    const recorder = audioRecorderRef.current;
+    if (audioRecordingState !== "recording" || !recorder) return;
+    clearAudioRecordingTimers();
+    setAudioRecordingState("stopping");
+    try {
+      recorder.stop();
+    } catch (reason) {
+      releaseAudioRecording();
+      setAudioRecordingState("idle");
+      setActionError(audioRecordingErrorMessage(reason));
+    }
+  }
+
+  function toggleAudioRecording() {
+    if (audioRecordingState === "recording") {
+      stopAudioRecording();
+    } else if (audioRecordingState === "idle") {
+      void startAudioRecording();
+    }
   }
 
   async function renameChat(event: FormEvent) {
@@ -764,12 +990,57 @@ export function HostedWebChat({
                       >
                         <PaperclipIcon className="size-4" />
                       </button>
+                      <button
+                        type="button"
+                        className={`finite-chat__tool-button finite-chat__record-button ${
+                          audioRecordingState === "recording" ? "is-recording" : ""
+                        }`}
+                        disabled={
+                          audioRecordingState === "recording"
+                            ? false
+                            : !connected
+                              || sending
+                              || audioRecordingState !== "idle"
+                        }
+                        aria-label={
+                          audioRecordingState === "recording"
+                            ? "Stop audio recording"
+                            : "Start audio recording"
+                        }
+                        aria-pressed={audioRecordingState === "recording"}
+                        title={
+                          audioRecordingState === "recording"
+                            ? "Stop recording"
+                            : "Record audio (10 minute limit)"
+                        }
+                        onClick={toggleAudioRecording}
+                      >
+                        {audioRecordingState === "requesting"
+                          || audioRecordingState === "stopping"
+                          ? <Loader2Icon className="size-4 finite-chat__spin" />
+                          : audioRecordingState === "recording"
+                            ? <SquareIcon className="size-3.5" fill="currentColor" />
+                            : <MicIcon className="size-4" />}
+                      </button>
+                      {audioRecordingState === "recording" ? (
+                        <span className="finite-chat__recording-status" role="status">
+                          <span aria-hidden />
+                          Recording {audioRecordingDurationLabel(audioRecordingElapsedSeconds)}
+                          {" / "}
+                          {audioRecordingDurationLabel(MAX_AUDIO_RECORDING_SECONDS)}
+                        </span>
+                      ) : null}
                     </div>
                     <button
                       type="submit"
                       className="finite-chat__send-button"
                       aria-label="Send message"
-                      disabled={!connected || (!draft.trim() && attachments.length === 0) || sending}
+                      disabled={
+                        !connected
+                        || (!draft.trim() && attachments.length === 0)
+                        || sending
+                        || audioRecordingState !== "idle"
+                      }
                     >
                       {sending ? <Loader2Icon className="finite-chat__spin" /> : <ArrowUpIcon />}
                     </button>

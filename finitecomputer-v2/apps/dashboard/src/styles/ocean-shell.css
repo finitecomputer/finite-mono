@@ -3109,6 +3109,33 @@ button.ocean-pill-button {
   color: var(--text-primary);
 }
 
+.finite-chat__record-button.is-recording {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.finite-chat__record-button.is-recording:hover {
+  background: color-mix(in srgb, var(--danger-bg), var(--danger-text) 10%);
+  color: var(--danger-text);
+}
+
+.finite-chat__recording-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--danger-text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.finite-chat__recording-status > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: finiteChatRecordingPulse 1.4s ease-in-out infinite;
+}
+
 .finite-chat__stop-button {
   color: var(--danger-text);
 }
@@ -3123,6 +3150,17 @@ button.ocean-pill-button {
 .finite-chat__send-button:disabled {
   cursor: not-allowed;
   opacity: 0.48;
+}
+
+@keyframes finiteChatRecordingPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .finite-chat__command-menu {
