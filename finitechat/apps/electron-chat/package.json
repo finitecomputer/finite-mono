@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "dev:renderer": "vite --host 127.0.0.1",
-    "dev:electron": "FINITECHAT_DASHBOARD_URL=http://127.0.0.1:3000 FINITECHAT_DAEMON_BINARY=target/debug/finitechatd electron .",
+    "dev:electron": "FINITECHAT_DASHBOARD_URL=http://127.0.0.1:13002 FINITECHAT_DAEMON_BINARY=target/debug/finitechatd electron .",
+    "dev:electron:fixture": "node scripts/run-electron-web-design-fixture.mjs",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --test electron/*.test.cjs",

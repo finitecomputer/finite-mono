@@ -4,11 +4,12 @@ import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 
-const MACHINE_ID = "skyler-fixture";
+const MACHINE_ID = "web-design-fixture";
 const RUNTIME_ID = "runtime_web_design";
 const CORE_TOKEN = "web-design-core-token";
 const DEVICE_TOKEN = "web-design-hosted-device-token";
 const WORKOS_USER_ID = "user_web_design";
+const FIXTURE_EMAIL = "fixture-user@example.test";
 const DEFAULT_PORT = 13002;
 const VALID_SCENARIOS = new Set(["healthy", "unavailable", "recovering"]);
 
@@ -20,10 +21,17 @@ type FixtureState = {
   messages: Array<Record<string, unknown>>;
 };
 
+type FixtureAttachment = {
+  bytes: Buffer;
+  filename: string;
+  mimeType: string;
+};
+
 const dashboardDir = process.cwd();
 const repoRoot = path.resolve(dashboardDir, "../../..");
 const stateDir = path.join(repoRoot, ".local-state", "web-design-fixture");
 const statePath = path.join(stateDir, "chat.json");
+const attachmentsDir = path.join(stateDir, "attachments");
 const scenarioPath = path.join(stateDir, "scenario");
 const resetPath = path.join(stateDir, "reset-generation");
 
@@ -78,6 +86,7 @@ if (command === "reset") {
   fs.mkdirSync(stateDir, { recursive: true });
   fs.rmSync(statePath, { force: true });
   fs.rmSync(`${statePath}.tmp`, { force: true });
+  fs.rmSync(attachmentsDir, { force: true, recursive: true });
   writeScenario("healthy");
   fs.writeFileSync(resetPath, `${process.hrtime.bigint()}\n`, { mode: 0o600 });
   console.log("Reset only the local web design fixture state.");
@@ -98,6 +107,7 @@ async function serve() {
   let state = loadState();
   let recoveringFailuresRemaining = 2;
   const streams = new Set<ServerResponse>();
+  const attachments = loadAttachments(state);
   const closeStreams = () => {
     for (const stream of streams) stream.end();
     streams.clear();
@@ -222,7 +232,7 @@ async function serve() {
         FINITECHAT_HOSTED_API_TOKEN: DEVICE_TOKEN,
         FC_HOSTED_WEB_DEVICE_URL: `http://127.0.0.1:${hostedPort}`,
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
-        FC_DASHBOARD_DEV_EMAIL: "skyler@finite.vip",
+        FC_DASHBOARD_DEV_EMAIL: FIXTURE_EMAIL,
         FC_DASHBOARD_DEV_WORKOS_USER_ID: WORKOS_USER_ID,
         FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "web-design-access-token",
         FC_DASHBOARD_RUNTIME_MODE: "canary",
@@ -291,6 +301,23 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
     writeJson(response, 200, appState());
     return;
   }
+  if (request.method === "GET" && requestPath.startsWith("/v1/app/attachments/")) {
+    const attachmentId = requestPath.split("/").at(-1) ?? "";
+    const attachment = attachments.get(attachmentId);
+    if (!attachment) {
+      writeJson(response, 404, { error: "attachment not found" });
+      return;
+    }
+    response.writeHead(200, {
+      "cache-control": "private, no-store",
+      "content-disposition": `inline; filename="${attachment.filename.replaceAll('"', "_")}"`,
+      "content-length": String(attachment.bytes.length),
+      "content-type": attachment.mimeType,
+      "x-content-type-options": "nosniff",
+    });
+    response.end(attachment.bytes);
+    return;
+  }
   if (request.method === "GET" && requestPath === "/v1/app/updates") {
     response.writeHead(200, {
       "cache-control": "no-cache",
@@ -305,6 +332,57 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
   if (request.method === "POST" && requestPath === "/v1/app/actions") {
     const action = await readJson(request);
     applyAction(action as Record<string, unknown>);
+    writeJson(response, 200, appState());
+    emitState();
+    return;
+  }
+  if (
+    request.method === "POST"
+    && requestPath === "/v1/app/agent-bindings/open"
+  ) {
+    writeJson(response, 200, appState());
+    return;
+  }
+  if (request.method === "POST" && requestPath === "/v1/app/attachments") {
+    const contentType = request.headers["content-type"] ?? "";
+    const body = await readBytes(request);
+    const formData = await new Response(body, {
+      headers: { "content-type": contentType },
+    }).formData();
+    const file = formData.getAll("files").find((value) => typeof value !== "string");
+    if (!file) {
+      writeJson(response, 400, { error: "fixture attachment is missing" });
+      return;
+    }
+    const attachmentId = `attachment_design_${state.rev}`;
+    const filename = file.name || "recording";
+    const mimeType = file.type || "application/octet-stream";
+    const bytes = Buffer.from(await file.arrayBuffer());
+    persistAttachment(attachmentId, bytes);
+    attachments.set(attachmentId, {
+      bytes,
+      filename,
+      mimeType,
+    });
+    const caption = String(formData.get("caption") ?? "").trim();
+    state.messages.push(
+      attachmentMessage(
+        caption,
+        state.messages.length + 1,
+        attachmentId,
+        filename,
+        mimeType
+      )
+    );
+    state.messages.push(
+      message(
+        "This is a deterministic fixture reply to your attachment.",
+        false,
+        state.messages.length + 1
+      )
+    );
+    state.rev += 1;
+    saveState();
     writeJson(response, 200, appState());
     emitState();
     return;
@@ -361,13 +439,22 @@ function appState() {
     profiles: [{ account_id: "agent_design", npub: "npub1webdesignfixture", display_name: "Moss", about: "A deterministic local design collaborator", picture: null, stale: false, is_agent: true }],
     devices: [{ account_id: "web-design-user", device_id: "hosted-web", active: true, current_device: true, revoked: false, room_count: 1 }],
     typing_members: [],
+    hosted_agent_binding: {
+      version: 1,
+      project_id: "project_web_design",
+      human_account_id: "web-design-user",
+      agent_account_id: "agent_design",
+      agent_npub: "npub1webdesignfixture",
+      canonical_room_id: "room_design",
+      associated_room_ids: [],
+    },
     flow: { notice_text: null, notice_busy: false, scan_in_flight: false, scan_result: "" },
   };
 }
 
 function coreMe() {
   return {
-    email: "skyler@finite.vip",
+    email: FIXTURE_EMAIL,
     workos_user_id: WORKOS_USER_ID,
     claimable_candidates: [],
     agent_creation_requests: [],
@@ -395,6 +482,44 @@ function loadState(): FixtureState {
   return initialState();
 }
 
+function loadAttachments(state: FixtureState) {
+  const attachments = new Map<string, FixtureAttachment>();
+  for (const entry of state.messages) {
+    const media = Array.isArray(entry.media) ? entry.media : [];
+    for (const item of media) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const attachment = item as Record<string, unknown>;
+      const attachmentId = attachment.attachment_id;
+      const filename = attachment.filename;
+      const mimeType = attachment.mime_type;
+      if (
+        typeof attachmentId !== "string"
+        || !/^attachment_design_[0-9]+$/u.test(attachmentId)
+        || typeof filename !== "string"
+        || typeof mimeType !== "string"
+      ) {
+        continue;
+      }
+      try {
+        attachments.set(attachmentId, {
+          bytes: fs.readFileSync(path.join(attachmentsDir, attachmentId)),
+          filename,
+          mimeType,
+        });
+      } catch {}
+    }
+  }
+  return attachments;
+}
+
+function persistAttachment(attachmentId: string, bytes: Buffer) {
+  fs.mkdirSync(attachmentsDir, { recursive: true });
+  const destination = path.join(attachmentsDir, attachmentId);
+  const temporaryPath = `${destination}.tmp`;
+  fs.writeFileSync(temporaryPath, bytes, { mode: 0o600 });
+  fs.renameSync(temporaryPath, destination);
+}
+
 function initialState(): FixtureState {
   return {
     rev: 1,
@@ -409,6 +534,27 @@ function initialState(): FixtureState {
 
 function message(text: string, isMine: boolean, seq: number) {
   return { room_id: "room_design", seq, message_id: `message_${seq}`, conversation_id: "topic_design", chat_id: "chat_design", sender_account_id: isMine ? "web-design-user" : "agent_design", sender_display_name: isMine ? "You" : "Moss", text, display_content: text, kind: "message", status: "complete", final_delivery: !isMine, edit_of_message_id: null, is_mine: isMine, media: [], timestamp_unix_seconds: 1_783_000_000 + seq, display_timestamp: "10:30 AM" };
+}
+
+function attachmentMessage(
+  caption: string,
+  seq: number,
+  attachmentId: string,
+  filename: string,
+  mimeType: string
+) {
+  return {
+    ...message(caption, true, seq),
+    kind: "media",
+    media: [{
+      attachment_id: attachmentId,
+      mime_type: mimeType,
+      filename,
+      kind: mimeType.startsWith("audio/") ? "VoiceNote" : "File",
+      width: null,
+      height: null,
+    }],
+  };
 }
 
 function saveState() {
@@ -437,6 +583,14 @@ async function readJson(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+async function readBytes(request: IncomingMessage) {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown) {

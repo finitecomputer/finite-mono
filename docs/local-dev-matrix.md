@@ -67,7 +67,7 @@ just dev web-design
 Open:
 
 ```text
-http://127.0.0.1:13002/dashboard/machines/skyler-fixture/chat
+http://127.0.0.1:13002/dashboard/machines/runtime_web_design/chat
 ```
 
 This launches the real dashboard components and routes. Only Core and the
@@ -148,7 +148,7 @@ nix develop
 just chat-local-msb-check
 just chat-local-bootstrap smoke-finite
 # Add at least one model/provider key to .state/chat-local/.env.
-just chat-local-up smoke-finite skyler@finite.vip 3100
+just chat-local-up smoke-finite fixture-user@example.test 3100
 ```
 
 Open:

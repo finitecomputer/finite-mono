@@ -266,6 +266,10 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     await waitForDashboard(paidDashboardPort, paidDashboardOutput);
     browser = await chromium.launch({
       headless: true,
+      args: [
+        "--use-fake-device-for-media-stream",
+        "--use-fake-ui-for-media-stream",
+      ],
       ...chromiumLaunchOptions(),
     });
 
@@ -893,6 +897,20 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByRole("paragraph")
         .filter({ hasText: message })
         .waitFor({ state: "visible", timeout: 15_000 });
+
+      await page.getByRole("button", { name: "Start audio recording" }).click();
+      await page.getByRole("status").filter({ hasText: "Recording 0:00 / 10:00" }).waitFor({
+        state: "visible",
+      });
+      await page.waitForTimeout(300);
+      await page.getByRole("button", { name: "Stop audio recording" }).click();
+      const recordedAttachment = page
+        .locator(".finite-chat__attachment-chip")
+        .filter({ hasText: "voice-" });
+      await recordedAttachment.waitFor({ state: "visible", timeout: 15_000 });
+      assert.match(await recordedAttachment.innerText(), /\.webm$/u);
+      await recordedAttachment.getByRole("button").click();
+      await recordedAttachment.waitFor({ state: "hidden" });
 
       await page.locator('input[type="file"]').setInputFiles({
         name: "browser-proof.png",

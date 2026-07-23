@@ -75,6 +75,10 @@ function isDashboardDocumentUrl(value, baseUrl) {
   return pathname === "/dashboard" || pathname.startsWith("/dashboard/");
 }
 
+function shouldExposeLocalChatBridge({ isPackaged, disabledInDevelopment }) {
+  return isPackaged === true || disabledInDevelopment !== true;
+}
+
 function isGoogleWorkspaceStartUrl(value, baseUrl) {
   if (!isDashboardOriginUrl(value, baseUrl)) {
     return false;
@@ -111,6 +115,41 @@ function isAllowedUnprivilegedNavigation(value, baseUrl) {
 
 function trustedDashboardIpcFrame({ frameUrl, isMainFrame }, baseUrl) {
   return isMainFrame === true && isDashboardDocumentUrl(frameUrl, baseUrl);
+}
+
+function trustedDashboardMicrophonePermission(
+  {
+    permission,
+    requestingOrigin,
+    requestingUrl,
+    securityOrigin,
+    isMainFrame,
+    mediaType,
+    mediaTypes,
+  },
+  baseUrl
+) {
+  if (
+    permission !== "media"
+    || isMainFrame !== true
+    || !isDashboardDocumentUrl(requestingUrl, baseUrl)
+  ) {
+    return false;
+  }
+  const dashboardOrigin = normalizeDashboardBaseUrl(baseUrl);
+  for (const origin of [requestingOrigin, securityOrigin]) {
+    if (origin === undefined) continue;
+    try {
+      if (normalizeDashboardBaseUrl(origin) === dashboardOrigin) continue;
+    } catch {}
+    return false;
+  }
+  const requestedMediaTypes = Array.isArray(mediaTypes)
+    ? mediaTypes
+    : mediaType
+      ? [mediaType]
+      : [];
+  return requestedMediaTypes.length === 1 && requestedMediaTypes[0] === "audio";
 }
 
 function assertDesktopChatAction(action) {
@@ -269,5 +308,7 @@ module.exports = {
   parseDeviceLinkPublicRequest,
   parseDeviceLinkPublicResponse,
   parseLocalDaemonIdentity,
+  shouldExposeLocalChatBridge,
   trustedDashboardIpcFrame,
+  trustedDashboardMicrophonePermission,
 };

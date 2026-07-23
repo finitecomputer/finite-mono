@@ -90,10 +90,11 @@ info = replacePlistString(
 fs.writeFileSync(infoPath, info);
 
 const signingIdentity = process.env.FINITECHAT_CODESIGN_IDENTITY?.trim();
+const appEntitlements = path.join(appRoot, "build", "entitlements.mac.plist");
 if (signingIdentity) {
   await signReleaseBundle(outputApp, packagedDaemon, signingIdentity);
 } else {
-  signAlphaBundle(outputApp, packagedDaemon);
+  signAlphaBundle(outputApp, packagedDaemon, appEntitlements);
 }
 
 console.log(outputApp);
@@ -131,7 +132,7 @@ function escapeXml(value) {
     .replaceAll("'", "&apos;");
 }
 
-function signAlphaBundle(appPath, daemonPath) {
+function signAlphaBundle(appPath, daemonPath, appEntitlements) {
   const frameworks = path.join(appPath, "Contents", "Frameworks");
   const electronFramework = path.join(
     frameworks,
@@ -163,13 +164,17 @@ function signAlphaBundle(appPath, daemonPath) {
   // alpha uses an ad-hoc identity; release distribution still requires the
   // normal Developer ID and notarization workflow.
   for (const codePath of nestedCode) {
-    execFileSync("/usr/bin/codesign", [
+    const codesignArguments = [
       "--force",
       "--sign",
       "-",
       "--timestamp=none",
-      codePath,
-    ]);
+    ];
+    if (codePath === appPath) {
+      codesignArguments.push("--entitlements", appEntitlements);
+    }
+    codesignArguments.push(codePath);
+    execFileSync("/usr/bin/codesign", codesignArguments);
   }
   execFileSync("/usr/bin/codesign", [
     "--verify",

@@ -2952,7 +2952,7 @@ mod tests {
             .provision_machine(&ProvisionMachineInput {
                 machine_id: "skyler-finite".to_string(),
                 display_name: "Skyler".to_string(),
-                email: "skyler@finite.vip".to_string(),
+                email: "fixture-user@example.test".to_string(),
                 runtime_profile: None,
                 home_volume_size: "20Gi".to_string(),
                 hostname: "skyler-opencode.finite.vip".to_string(),
@@ -3055,7 +3055,7 @@ mod tests {
             .provision_machine(&ProvisionMachineInput {
                 machine_id: "skyler-finite".to_string(),
                 display_name: "Skyler".to_string(),
-                email: "skyler@finite.vip".to_string(),
+                email: "fixture-user@example.test".to_string(),
                 runtime_profile: None,
                 home_volume_size: "20Gi".to_string(),
                 hostname: "skyler-opencode.trf.finite.computer".to_string(),
