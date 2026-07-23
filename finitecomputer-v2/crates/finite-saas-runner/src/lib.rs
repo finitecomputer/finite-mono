@@ -5232,19 +5232,27 @@ mod tests {
         let bundled =
             read_repo_file("../finite-skills/skills/software-development/finitebrain/SKILL.md");
         let package = read_repo_file("../finite-brain/skills/finitebrain/SKILL.md");
+        let bundled_creation = read_repo_file(
+            "../finite-skills/skills/software-development/finitebrain/references/brain-creation.md",
+        );
+        let package_creation =
+            read_repo_file("../finite-brain/skills/finitebrain/references/brain-creation.md");
 
         assert_eq!(bundled, package);
+        assert_eq!(bundled_creation, package_creation);
         assert!(bundled.contains("FINITE_BRAIN_SERVER_URL"));
         assert!(bundled.contains("FBRAIN_CONFIG_DIR"));
         assert!(bundled.contains("FBRAIN_WORKING_TREE_ROOT"));
-        assert!(bundled.contains("bootstrap-personal --server"));
+        assert!(bundled.contains("Before creating any Brain, run `brain list --json`"));
+        assert!(bundled.contains("never create an agent-owned Personal Brain"));
         assert!(bundled.contains("role `personal_agent`"));
-        assert!(bundled.contains("## Agent-Created Organization Brains"));
-        assert!(bundled.contains("authenticated `event.source.user_id`"));
-        assert!(bundled.contains("--requesting-user-npub \"$AUTHENTICATED_SENDER_ID\""));
-        assert!(bundled.contains("report the Brain name and that both you and the requester are"));
-        assert!(bundled.contains("do not guess"));
-        assert!(bundled.contains("agent-only Organization Brain"));
+        assert!(bundled.contains("[brain-creation.md](references/brain-creation.md)"));
+        assert!(bundled_creation.contains("authenticated `event.source.user_id`"));
+        assert!(bundled_creation.contains("--requesting-user-npub \"$AUTHENTICATED_SENDER_ID\""));
+        assert!(bundled_creation.contains("both the agent and authenticated"));
+        assert!(bundled_creation.contains("requester are active admins"));
+        assert!(bundled_creation.contains("are not requester authority"));
+        assert!(bundled_creation.contains("agent-only Organization Brain"));
         assert!(!bundled.contains("/brain setup"));
         assert!(!bundled.contains("personal-brain-bootstrap-authorizations"));
         assert!(!bundled.contains("SERVER=\"https://finite.computer\""));
