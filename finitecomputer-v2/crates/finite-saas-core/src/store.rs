@@ -65,6 +65,7 @@ use crate::{
     validate_runtime_capabilities_policy, validate_runtime_retirement_snapshot_receipt,
     validate_runtime_spec_binding, validate_runtime_spec_environment,
 };
+use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -72,8 +73,10 @@ use std::sync::Arc;
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::Mutex;
-use tokio_postgres::{Client, GenericClient, NoTls, Row};
+use tokio_postgres::{GenericClient, NoTls, Row};
 use tracing::Instrument;
+
+const DEFAULT_POSTGRES_POOL_SIZE: usize = 8;
 
 #[derive(Clone)]
 pub enum CoreStore {
@@ -90,7 +93,7 @@ pub struct MemoryCoreStore {
 
 #[derive(Clone)]
 pub struct PostgresCoreStore {
-    client: Arc<Mutex<Client>>,
+    pool: Pool,
     runtime_environment: Arc<BTreeMap<String, String>>,
     runtime_secret_references: Arc<Vec<String>>,
 }
@@ -1424,24 +1427,45 @@ fn memory_launch_code_batch_details(
 
 impl PostgresCoreStore {
     pub async fn connect(database_url: &str) -> CoreResult<Self> {
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls)
-            .await
-            .map_err(store_error)?;
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                eprintln!("finite-saas-core postgres connection error: {error}");
-            }
-        });
-
-        Ok(Self {
-            client: Arc::new(Mutex::new(client)),
+        let config = database_url
+            .parse()
+            .map_err(|error| pool_config_error("invalid Postgres URL", error))?;
+        let manager = Manager::from_config(
+            config,
+            NoTls,
+            ManagerConfig {
+                // Avoid adding a validation round trip to every store method.
+                // Normal query/connection failures still surface through the
+                // existing structured database error path.
+                recycling_method: RecyclingMethod::Fast,
+            },
+        );
+        let pool = Pool::builder(manager)
+            .max_size(DEFAULT_POSTGRES_POOL_SIZE)
+            .build()
+            .map_err(|error| pool_config_error("cannot build Postgres pool", error))?;
+        let store = Self {
+            pool,
             runtime_environment: Arc::new(BTreeMap::new()),
             runtime_secret_references: Arc::new(Vec::new()),
+        };
+        // Fail startup/retry at the same boundary as the former eager
+        // connection. Deadpool otherwise opens its first connection lazily.
+        let _ = store.connection().await?;
+        Ok(store)
+    }
+
+    async fn connection(&self) -> CoreResult<Object> {
+        self.pool.get().await.map_err(|error| {
+            CoreError::Database(Box::new(StoreErrorDetail {
+                message: format!("Postgres pool checkout failed: {error}"),
+                ..StoreErrorDetail::default()
+            }))
         })
     }
 
     pub async fn migrate(&self) -> CoreResult<()> {
-        let client = self.client.lock().await;
+        let client = self.connection().await?;
         client
             .batch_execute(CORE_SCHEMA_SQL)
             .await
@@ -1453,9 +1477,9 @@ impl PostgresCoreStore {
         records: Vec<ExistingHostProjectImport>,
         options: ReconcileExistingHostImportsOptions,
     ) -> CoreResult<ReconcileExistingHostImportsReport> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let report = postgres_reconcile_existing_host_imports(&tx, &records, options).await?;
+        let report = postgres_reconcile_existing_host_imports(&*tx, &records, options).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(report)
     }
@@ -1464,9 +1488,9 @@ impl PostgresCoreStore {
         &self,
         input: ClaimProjectImportsInput,
     ) -> CoreResult<ClaimProjectImportsResult> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_claim_project_imports(&tx, input).await?;
+        let result = postgres_claim_project_imports(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1480,7 +1504,7 @@ impl PostgresCoreStore {
             batch: prepared.batch.clone(),
             codes: prepared.issued_codes,
         };
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let code_count = i32::try_from(prepared.batch.code_count)
             .map_err(|_| CoreError::InvalidLaunchCodeBatchSize)?;
@@ -1523,8 +1547,8 @@ impl PostgresCoreStore {
     }
 
     pub async fn list_launch_code_batches(&self) -> CoreResult<Vec<LaunchCodeBatchDetails>> {
-        let client = self.client.lock().await;
-        postgres_list_launch_code_batches(&*client).await
+        let client = self.connection().await?;
+        postgres_list_launch_code_batches(&**client).await
     }
 
     pub async fn revoke_launch_code_batch(
@@ -1537,7 +1561,7 @@ impl PostgresCoreStore {
         }
         let now = input.now.unwrap_or(current_time_iso()?);
         parse_time(&now)?;
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let row = tx
             .query_opt(
@@ -1554,7 +1578,7 @@ impl PostgresCoreStore {
             .map_err(store_error)?
             .ok_or(CoreError::LaunchCodeBatchNotFound)?;
         let batch = launch_code_batch_from_row(&row)?;
-        let details = postgres_launch_code_batch_details(&tx, batch).await?;
+        let details = postgres_launch_code_batch_details(&*tx, batch).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(details)
     }
@@ -1563,9 +1587,9 @@ impl PostgresCoreStore {
         &self,
         input: AdminRuntimeUpgradeInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_upgrade(&tx, input).await?;
+        let result = postgres_admin_request_runtime_upgrade(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1574,9 +1598,9 @@ impl PostgresCoreStore {
         &self,
         input: AdminRuntimeUpgradeExactInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_upgrade_exact(&tx, input).await?;
+        let result = postgres_admin_request_runtime_upgrade_exact(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1585,9 +1609,9 @@ impl PostgresCoreStore {
         &self,
         input: AdminRuntimeRetireExactInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_retire_exact(&tx, input).await?;
+        let result = postgres_admin_request_runtime_retire_exact(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1596,8 +1620,8 @@ impl PostgresCoreStore {
         &self,
         request_id: &str,
     ) -> CoreResult<RuntimeControlRequest> {
-        let client = self.client.lock().await;
-        postgres_runtime_control_request(&*client, request_id).await
+        let client = self.connection().await?;
+        postgres_runtime_control_request(&**client, request_id).await
     }
 
     pub async fn request_agent_creation(
@@ -1613,9 +1637,9 @@ impl PostgresCoreStore {
         input: RequestAgentCreationInput,
         configuration: AgentCreationConfiguration,
     ) -> CoreResult<RequestAgentCreationResult> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_request_agent_creation(&tx, input, configuration).await?;
+        let result = postgres_request_agent_creation(&*tx, input, configuration).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1624,10 +1648,10 @@ impl PostgresCoreStore {
         &self,
         input: RequestRuntimeRestartInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
-            postgres_request_runtime_control(&tx, input, RuntimeControlKind::Restart).await?;
+            postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Restart).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1636,10 +1660,10 @@ impl PostgresCoreStore {
         &self,
         input: RequestRuntimeRecoverKnownGoodChatInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_request_runtime_control(
-            &tx,
+            &*tx,
             input,
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
         )
@@ -1652,9 +1676,10 @@ impl PostgresCoreStore {
         &self,
         input: RequestRuntimeStopInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_request_runtime_control(&tx, input, RuntimeControlKind::Stop).await?;
+        let result =
+            postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Stop).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1663,10 +1688,10 @@ impl PostgresCoreStore {
         &self,
         input: RequestRuntimeDestroyInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
-            postgres_request_runtime_control(&tx, input, RuntimeControlKind::Destroy).await?;
+            postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Destroy).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1678,10 +1703,10 @@ impl PostgresCoreStore {
         let now = input.now.unwrap_or(current_time_iso()?);
         let verified_email = normalize_owner_email(Some(&input.verified_email))
             .ok_or(CoreError::MissingVerifiedEmail)?;
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let user = ensure_linked_user_row(
-            &tx,
+            &*tx,
             &verified_email,
             &input.workos_user_id,
             BillingClass::Standard,
@@ -1718,10 +1743,10 @@ impl PostgresCoreStore {
         if workos_user_id.is_empty() {
             return Err(CoreError::MissingWorkosUserId);
         }
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let user = ensure_linked_user_row(
-            &tx,
+            &*tx,
             &verified_email,
             &workos_user_id,
             BillingClass::Standard,
@@ -1739,12 +1764,12 @@ impl PostgresCoreStore {
         // Read-only: no global lock, no full-state rewrite, no writes at all.
         // A read that wrote the whole DB was anti-pattern #3; this is targeted
         // SELECTs inside a READ ONLY transaction.
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         tx.execute("SET TRANSACTION READ ONLY", &[])
             .await
             .map_err(store_error)?;
-        let overview = postgres_billing_overview(&tx, input).await?;
+        let overview = postgres_billing_overview(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(overview)
     }
@@ -1753,9 +1778,9 @@ impl PostgresCoreStore {
         &self,
         input: LinkStripeCustomerInput,
     ) -> CoreResult<CustomerBillingAccount> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let account = postgres_link_stripe_customer(&tx, input).await?;
+        let account = postgres_link_stripe_customer(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(account)
     }
@@ -1764,9 +1789,9 @@ impl PostgresCoreStore {
         &self,
         input: SyncStripeSubscriptionInput,
     ) -> CoreResult<CustomerBillingAccount> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let account = postgres_sync_stripe_subscription(&tx, input).await?;
+        let account = postgres_sync_stripe_subscription(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(account)
     }
@@ -1775,10 +1800,10 @@ impl PostgresCoreStore {
         &self,
         input: LeaseAgentCreationRequestInput,
     ) -> CoreResult<Option<AgentCreationLease>> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_lease_agent_creation_request(
-            &tx,
+            &*tx,
             input,
             self.runtime_environment.as_ref(),
             self.runtime_secret_references.as_ref(),
@@ -1792,9 +1817,9 @@ impl PostgresCoreStore {
         &self,
         input: RecordProviderOperationTransitionInput,
     ) -> CoreResult<ProviderOperationEnvelope> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_record_provider_operation_transition(&tx, input).await?;
+        let result = postgres_record_provider_operation_transition(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1803,10 +1828,10 @@ impl PostgresCoreStore {
         &self,
         input: LeaseRuntimeControlRequestInput,
     ) -> CoreResult<Option<RuntimeControlLease>> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_lease_runtime_control_request(
-            &tx,
+            &*tx,
             input,
             self.runtime_environment.as_ref(),
             self.runtime_secret_references.as_ref(),
@@ -1820,10 +1845,10 @@ impl PostgresCoreStore {
         &self,
         input: CompleteRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_complete_runtime_control_request(
-            &tx,
+            &*tx,
             input,
             self.runtime_secret_references.as_ref(),
         )
@@ -1836,9 +1861,9 @@ impl PostgresCoreStore {
         &self,
         input: FailRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_fail_runtime_control_request(&tx, input).await?;
+        let result = postgres_fail_runtime_control_request(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1847,9 +1872,9 @@ impl PostgresCoreStore {
         &self,
         input: RenewRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_renew_runtime_control_request(&tx, input).await?;
+        let result = postgres_renew_runtime_control_request(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1858,9 +1883,9 @@ impl PostgresCoreStore {
         &self,
         input: RetryRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_retry_runtime_control_request(&tx, input).await?;
+        let result = postgres_retry_runtime_control_request(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1869,9 +1894,9 @@ impl PostgresCoreStore {
         &self,
         input: CompleteAgentCreationRequestInput,
     ) -> CoreResult<AgentCreationLease> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_complete_agent_creation_request(&tx, input).await?;
+        let result = postgres_complete_agent_creation_request(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1880,9 +1905,9 @@ impl PostgresCoreStore {
         &self,
         input: RegisterAgentCreationRuntimeInput,
     ) -> CoreResult<AgentCreationLease> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_register_agent_creation_runtime(&tx, input).await?;
+        let result = postgres_register_agent_creation_runtime(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1891,9 +1916,9 @@ impl PostgresCoreStore {
         &self,
         input: FailAgentCreationRequestInput,
     ) -> CoreResult<AgentCreationRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_fail_agent_creation_request(&tx, input).await?;
+        let result = postgres_fail_agent_creation_request(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1902,17 +1927,17 @@ impl PostgresCoreStore {
         &self,
         input: CancelAgentCreationRequestInput,
     ) -> CoreResult<AgentCreationRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_cancel_agent_creation_request(&tx, input).await?;
+        let result = postgres_cancel_agent_creation_request(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
 
     pub async fn record_runtime_heartbeat(&self, relay_token: &str) -> CoreResult<RelayHeartbeat> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_record_runtime_heartbeat(&tx, relay_token).await?;
+        let result = postgres_record_runtime_heartbeat(&*tx, relay_token).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -1921,40 +1946,40 @@ impl PostgresCoreStore {
         &self,
         relay_token: &str,
     ) -> CoreResult<RelayEventsOutput> {
-        let client = self.client.lock().await;
-        postgres_relay_events_for_runtime(&*client, relay_token).await
+        let client = self.connection().await?;
+        postgres_relay_events_for_runtime(&**client, relay_token).await
     }
 
     pub async fn runtime_heartbeat_for_machine(
         &self,
         source_machine_id: &str,
     ) -> CoreResult<RelayHeartbeat> {
-        let client = self.client.lock().await;
-        postgres_runtime_heartbeat_for_machine(&*client, source_machine_id).await
+        let client = self.connection().await?;
+        postgres_runtime_heartbeat_for_machine(&**client, source_machine_id).await
     }
 
     pub async fn claimable_candidates_for_email(
         &self,
         email: Option<&str>,
     ) -> CoreResult<Vec<ProjectImportCandidate>> {
-        let client = self.client.lock().await;
-        postgres_claimable_candidates_for_email(&*client, email).await
+        let client = self.connection().await?;
+        postgres_claimable_candidates_for_email(&**client, email).await
     }
 
     pub async fn visible_projects_for_workos_user(
         &self,
         workos_user_id: &str,
     ) -> CoreResult<Vec<VisibleProject>> {
-        let client = self.client.lock().await;
-        postgres_visible_projects_for_workos_user(&*client, workos_user_id).await
+        let client = self.connection().await?;
+        postgres_visible_projects_for_workos_user(&**client, workos_user_id).await
     }
 
     pub async fn agent_creation_requests_for_workos_user(
         &self,
         workos_user_id: &str,
     ) -> CoreResult<Vec<AgentCreationRequest>> {
-        let client = self.client.lock().await;
-        postgres_agent_creation_requests_for_workos_user(&*client, workos_user_id).await
+        let client = self.connection().await?;
+        postgres_agent_creation_requests_for_workos_user(&**client, workos_user_id).await
     }
 
     pub async fn source_host_relay_endpoint(
@@ -1962,34 +1987,34 @@ impl PostgresCoreStore {
         source_host_id: &str,
     ) -> CoreResult<Option<SourceHostRelayEndpoint>> {
         let source_host_id = normalize_source_host_id(source_host_id)?;
-        let client = self.client.lock().await;
-        select_source_host_relay(&*client, &source_host_id).await
+        let client = self.connection().await?;
+        select_source_host_relay(&**client, &source_host_id).await
     }
 
     pub async fn upsert_source_host_relay_endpoint(
         &self,
         input: UpsertSourceHostRelayEndpointInput,
     ) -> CoreResult<SourceHostRelayEndpoint> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let endpoint = postgres_upsert_source_host_relay_endpoint(&tx, input).await?;
+        let endpoint = postgres_upsert_source_host_relay_endpoint(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(endpoint)
     }
 
     pub async fn runtime_artifact(&self, id: &str) -> CoreResult<Option<RuntimeArtifact>> {
         let id = trim_to_option(Some(id)).ok_or(CoreError::MissingRuntimeArtifactId)?;
-        let client = self.client.lock().await;
-        select_runtime_artifact(&*client, &id).await
+        let client = self.connection().await?;
+        select_runtime_artifact(&**client, &id).await
     }
 
     pub async fn upsert_runtime_artifact(
         &self,
         input: UpsertRuntimeArtifactInput,
     ) -> CoreResult<RuntimeArtifact> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let artifact = postgres_upsert_runtime_artifact(&tx, input).await?;
+        let artifact = postgres_upsert_runtime_artifact(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(artifact)
     }
@@ -1998,9 +2023,9 @@ impl PostgresCoreStore {
         &self,
         input: ApproveFinitePrivateGrantInput,
     ) -> CoreResult<FinitePrivateGrant> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let grant = postgres_approve_finite_private_grant(&tx, input).await?;
+        let grant = postgres_approve_finite_private_grant(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(grant)
     }
@@ -2009,9 +2034,9 @@ impl PostgresCoreStore {
         &self,
         input: IssueFinitePrivateApiKeyInput,
     ) -> CoreResult<FinitePrivateApiKey> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let key = postgres_issue_finite_private_api_key(&tx, input).await?;
+        let key = postgres_issue_finite_private_api_key(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(key)
     }
@@ -2020,9 +2045,9 @@ impl PostgresCoreStore {
         &self,
         input: ProvisionFinitePrivateRuntimeKeyInput,
     ) -> CoreResult<ProvisionFinitePrivateRuntimeKeyResult> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_provision_finite_private_runtime_key(&tx, input).await?;
+        let result = postgres_provision_finite_private_runtime_key(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2031,9 +2056,9 @@ impl PostgresCoreStore {
         &self,
         input: RevokeFinitePrivateGrantInput,
     ) -> CoreResult<FinitePrivateGrant> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let grant = postgres_revoke_finite_private_grant(&tx, input).await?;
+        let grant = postgres_revoke_finite_private_grant(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(grant)
     }
@@ -2042,9 +2067,9 @@ impl PostgresCoreStore {
         &self,
         input: RevokeFinitePrivateApiKeyInput,
     ) -> CoreResult<FinitePrivateApiKey> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let key = postgres_revoke_finite_private_api_key(&tx, input).await?;
+        let key = postgres_revoke_finite_private_api_key(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(key)
     }
@@ -2053,9 +2078,9 @@ impl PostgresCoreStore {
         &self,
         input: RotateFinitePrivateApiKeyInput,
     ) -> CoreResult<FinitePrivateApiKey> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let key = postgres_rotate_finite_private_api_key(&tx, input).await?;
+        let key = postgres_rotate_finite_private_api_key(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(key)
     }
@@ -2064,25 +2089,25 @@ impl PostgresCoreStore {
         &self,
         input: ResetFinitePrivateUsageWindowInput,
     ) -> CoreResult<FinitePrivateGrant> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let grant = postgres_reset_finite_private_usage_window(&tx, input).await?;
+        let grant = postgres_reset_finite_private_usage_window(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(grant)
     }
 
     pub async fn admin_runtime_overviews(&self) -> CoreResult<Vec<AdminRuntimeOverview>> {
-        let client = self.client.lock().await;
-        postgres_admin_runtime_overviews(&*client).await
+        let client = self.connection().await?;
+        postgres_admin_runtime_overviews(&**client).await
     }
 
     pub async fn admin_archive_unrecoverable_runtime(
         &self,
         input: AdminArchiveUnrecoverableRuntimeInput,
     ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let receipt = postgres_admin_archive_unrecoverable_runtime(&tx, input).await?;
+        let receipt = postgres_admin_archive_unrecoverable_runtime(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(receipt)
     }
@@ -2091,10 +2116,10 @@ impl PostgresCoreStore {
         &self,
         input: AdminRuntimeControlInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
-            postgres_admin_request_runtime_control(&tx, input, RuntimeControlKind::Restart, None)
+            postgres_admin_request_runtime_control(&*tx, input, RuntimeControlKind::Restart, None)
                 .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
@@ -2104,10 +2129,10 @@ impl PostgresCoreStore {
         &self,
         input: AdminRuntimeControlInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_control(
-            &tx,
+            &*tx,
             input,
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
             None,
@@ -2121,9 +2146,9 @@ impl PostgresCoreStore {
         &self,
         input: AdminIssueFinitePrivateFriendKeyInput,
     ) -> CoreResult<AdminIssuedFinitePrivateKey> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_issue_finite_private_friend_key(&tx, input).await?;
+        let result = postgres_admin_issue_finite_private_friend_key(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2132,9 +2157,9 @@ impl PostgresCoreStore {
         &self,
         input: AdminRotateFinitePrivateApiKeyInput,
     ) -> CoreResult<FinitePrivateApiKey> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_rotate_finite_private_api_key(&tx, input).await?;
+        let result = postgres_admin_rotate_finite_private_api_key(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2143,9 +2168,9 @@ impl PostgresCoreStore {
         &self,
         input: AdminRevokeFinitePrivateApiKeyInput,
     ) -> CoreResult<FinitePrivateApiKey> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_revoke_finite_private_api_key(&tx, input).await?;
+        let result = postgres_admin_revoke_finite_private_api_key(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2154,9 +2179,9 @@ impl PostgresCoreStore {
         &self,
         input: AdminResetFinitePrivateUsageWindowInput,
     ) -> CoreResult<FinitePrivateGrant> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_reset_finite_private_usage_window(&tx, input).await?;
+        let result = postgres_admin_reset_finite_private_usage_window(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2164,22 +2189,22 @@ impl PostgresCoreStore {
     pub async fn finite_private_admin_audit_events(
         &self,
     ) -> CoreResult<Vec<FinitePrivateAdminAuditEvent>> {
-        let client = self.client.lock().await;
-        postgres_finite_private_admin_audit_events(&*client).await
+        let client = self.connection().await?;
+        postgres_finite_private_admin_audit_events(&**client).await
     }
 
     pub async fn finite_private_admin_state(&self) -> CoreResult<FinitePrivateAdminState> {
-        let client = self.client.lock().await;
-        postgres_finite_private_admin_state(&*client).await
+        let client = self.connection().await?;
+        postgres_finite_private_admin_state(&**client).await
     }
 
     pub async fn reserve_finite_private_usage(
         &self,
         input: ReserveFinitePrivateUsageInput,
     ) -> CoreResult<FinitePrivateUsageDecision> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let decision = postgres_reserve_finite_private_usage(&tx, input).await?;
+        let decision = postgres_reserve_finite_private_usage(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(decision)
     }
@@ -2188,9 +2213,9 @@ impl PostgresCoreStore {
         &self,
         input: SettleFinitePrivateReservationInput,
     ) -> CoreResult<SettleFinitePrivateReservationResult> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_settle_finite_private_reservation(&tx, input).await?;
+        let result = postgres_settle_finite_private_reservation(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2201,10 +2226,10 @@ impl PostgresCoreStore {
         claim_notice: bool,
         now: Option<String>,
     ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_finite_private_usage_status_for_api_key(
-            &tx,
+            &*tx,
             presented_api_key,
             claim_notice,
             now,
@@ -2219,10 +2244,10 @@ impl PostgresCoreStore {
         workos_user_id: &str,
         now: Option<String>,
     ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
-            postgres_finite_private_usage_status_for_workos_user(&tx, workos_user_id, now).await?;
+            postgres_finite_private_usage_status_for_workos_user(&*tx, workos_user_id, now).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2232,10 +2257,10 @@ impl PostgresCoreStore {
         presented_api_key: &str,
         now: Option<String>,
     ) -> CoreResult<FinitePrivateDailyResetResult> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
-            postgres_claim_finite_private_daily_reset_for_api_key(&tx, presented_api_key, now)
+            postgres_claim_finite_private_daily_reset_for_api_key(&*tx, presented_api_key, now)
                 .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
@@ -2246,10 +2271,10 @@ impl PostgresCoreStore {
         workos_user_id: &str,
         now: Option<String>,
     ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
-        let mut client = self.client.lock().await;
+        let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
-            postgres_claim_finite_private_daily_reset_for_workos_user(&tx, workos_user_id, now)
+            postgres_claim_finite_private_daily_reset_for_workos_user(&*tx, workos_user_id, now)
                 .await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
@@ -9315,6 +9340,13 @@ fn optional_json_column(row: &Row, name: &str) -> CoreResult<Option<Value>> {
     Ok(row.get(name))
 }
 
+fn pool_config_error(context: &str, error: impl std::fmt::Display) -> CoreError {
+    CoreError::Database(Box::new(StoreErrorDetail {
+        message: format!("{context}: {error}"),
+        ..StoreErrorDetail::default()
+    }))
+}
+
 /// Convert a Postgres error into a structured `CoreError::Database`, preserving
 /// the `as_db_error()` fields (SQLSTATE code, constraint, table, column, DETAIL)
 /// that `error.to_string()` used to flatten into the useless string "db error".
@@ -9651,6 +9683,38 @@ mod tests {
                 "{method_name} must stay on row-scoped SQL helpers, not full-state persistence"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_pool_does_not_head_of_line_block_independent_reads() {
+        with_isolated_postgres(|database| async move {
+            let CoreStore::Postgres(store) = database.store.clone() else {
+                panic!("isolated Postgres harness returned memory store");
+            };
+            assert_eq!(store.pool.status().max_size, DEFAULT_POSTGRES_POOL_SIZE);
+
+            let slow_store = store.clone();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let slow_query = tokio::spawn(async move {
+                let client = slow_store.connection().await.unwrap();
+                started_tx.send(()).unwrap();
+                client.query_one("SELECT pg_sleep(1)", &[]).await.unwrap();
+            });
+            started_rx.await.unwrap();
+            // Give Postgres time to enter pg_sleep. The assertion's 500 ms
+            // budget is still comfortably below the one-second slow query.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                store.list_launch_code_batches(),
+            )
+            .await
+            .expect("an unrelated read must use another pooled connection")
+            .unwrap();
+            slow_query.await.unwrap();
+        })
+        .await;
     }
 
     #[tokio::test]
