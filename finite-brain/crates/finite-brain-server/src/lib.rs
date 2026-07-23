@@ -622,10 +622,6 @@ pub fn router_with_state(state: ServerState) -> Router {
             post(ensure_organization_admin_handler),
         )
         .route(
-            "/_admin/brains/{brain_id}/collaboration/ensure-admin",
-            post(ensure_organization_admin_handler),
-        )
-        .route(
             "/_admin/brains/{brain_id}/admins/{target_npub}",
             axum::routing::delete(remove_admin_handler),
         )
@@ -7032,6 +7028,53 @@ mod tests {
             .find(|object| object.object_id == "obj_000000000001")
             .expect("current object");
         assert_eq!(object.revision, 2);
+    }
+
+    #[tokio::test]
+    async fn organization_collaboration_rejects_legacy_alias_and_oversized_snapshot() {
+        let admin_keys = Keys::generate();
+        let router = router_with_test_org_folders(&admin_keys).await;
+
+        let alias = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaboration/ensure-admin",
+            Some("{}".to_owned()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(alias.status(), StatusCode::NOT_FOUND);
+
+        let folders = (0..=MAX_COLLABORATION_FOLDERS)
+            .map(|index| {
+                serde_json::json!({
+                    "folderId": format!("folder-{index}"),
+                    "keyVersion": 1,
+                    "path": format!("Folder {index}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let oversized = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(
+                serde_json::json!({
+                    "targetNpub": npub(&Keys::generate()),
+                    "folders": folders,
+                    "grants": [],
+                    "accessChangeEvent": {}
+                })
+                .to_string(),
+            ),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
+        let body = read_text(oversized).await;
+        assert!(body.contains("exceeds 1000 entries"), "{body}");
     }
 
     #[tokio::test]

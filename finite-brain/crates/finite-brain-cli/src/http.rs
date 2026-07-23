@@ -128,11 +128,10 @@ pub(crate) fn signed_json_request_to_server(
         body.as_deref(),
     )?;
     if !(200..300).contains(&response.status) {
-        return Err(CliError::Http(format!(
-            "server returned {}: {}",
-            response.status,
-            response.body.trim()
-        )));
+        return Err(CliError::HttpStatus {
+            status: response.status,
+            body: response.body,
+        });
     }
     if response.body.trim().is_empty() {
         return Ok(serde_json::json!({ "status": "ok" }));

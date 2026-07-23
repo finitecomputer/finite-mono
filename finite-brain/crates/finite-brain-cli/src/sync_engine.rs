@@ -400,11 +400,12 @@ fn sync_bootstrap_reason(local_result: &LocalSyncResult, opened_grants: usize) -
 }
 
 fn is_rebootstrap_required_error(error: &CliError) -> bool {
-    matches!(error, CliError::Http(message) if message.contains("410") || message.contains("rebootstrap required"))
+    matches!(error, CliError::Http(message) if message.contains("rebootstrap required"))
+        || matches!(error, CliError::HttpStatus { status: 410, body } if body.contains("rebootstrap required"))
 }
 
 fn is_sync_records_route_unavailable(error: &CliError) -> bool {
-    matches!(error, CliError::Http(message) if message.contains("404"))
+    matches!(error, CliError::HttpStatus { status: 404, .. })
 }
 
 fn apply_incremental_records(
@@ -693,7 +694,7 @@ fn fetch_mounted_folder_sync_contexts(
     }
     let metadata = match fetch_brain_metadata_for_sync(env, server_url, brain_id) {
         Ok(metadata) => metadata,
-        Err(CliError::Http(_)) => return Ok(Vec::new()),
+        Err(CliError::Http(_)) | Err(CliError::HttpStatus { .. }) => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
     let mut used_paths = export
@@ -2283,7 +2284,7 @@ fn conflict_for_change(
 }
 
 fn is_http_conflict(error: &CliError) -> bool {
-    matches!(error, CliError::Http(message) if message.contains("409"))
+    matches!(error, CliError::HttpStatus { status: 409, .. })
 }
 
 fn mutate_agent_state_at_root<F>(root: &Path, now: String, f: F) -> Result<(), CliError>

@@ -71,6 +71,14 @@ pub(crate) fn ensure_organization_admin(
                 "recipientNpub": grant["recipientNpub"],
                 "wrappedEventJson": grant["wrappedEventJson"],
                 "createdAt": grant["createdAt"],
+                "accessChangeEvent": admin_access_change_event(
+                    env,
+                    brain_id,
+                    AdminAccessAction::GrantFolderAccess,
+                    Some(&folder.id),
+                    Some(&target),
+                    Some(folder.current_key_version),
+                )?,
             }));
         }
     }
@@ -114,6 +122,9 @@ pub(crate) fn ensure_organization_admin(
             "totalCount": metadata.folders.len(),
             "retryable": true,
         })),
+        // Preserve authoritative HTTP rejection as an error; only transport
+        // uncertainty may be rendered as an indeterminate receipt.
+        Err(error @ CliError::HttpStatus { .. }) => Err(error),
         Err(error) => Err(error),
     }
 }
@@ -339,7 +350,11 @@ pub(crate) fn admin_access_change_event(
         target_npub: target_npub.map(ToOwned::to_owned),
         key_version,
         note: None,
-        created_at: timestamp(env),
+        // The signed event's Nostr timestamp is produced from the process
+        // clock in `sign_event`; derive the payload timestamp from that same
+        // clock so the server's canonical event validation cannot reject a
+        // stale `FBRAIN_NOW` test/config value.
+        created_at: crate::timestamp_from_unix(unix_timestamp()),
     };
     let payload = AdminAccessChangePayload::new(&validation);
     let event = sign_event(

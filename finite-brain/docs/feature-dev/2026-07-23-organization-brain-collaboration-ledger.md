@@ -9,7 +9,7 @@
 - Feature branch: `codex/hybrid-wiki-search-slices-1-3`
 - Human owner: Austin Kelsay
 - Started: 2026-07-23
-- Current status: ticket 217 implemented and verified locally
+- Current status: ticket 217 review fixes implemented and verified
 - Skill setup status: configured for GitHub, canonical triage labels, and
   multi-context domain documentation
 
@@ -56,7 +56,7 @@ and Agents how to inspect and repair access.
 
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
-| #217 | server + CLI tracer | implemented | pending | none known | yes |
+| #217 | server + CLI tracer | verified | addressed | none known | server/CLI suites + two-Finite-Home acceptance green |
 | #218 | Product Client tracer | blocked by #217 | pending | pending | no |
 | #219 | managed skill + smoke tracer | blocked by #217 and #218 | pending | pending | no |
 
@@ -70,7 +70,7 @@ and Agents how to inspect and repair access.
 
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
-| #217 | `894d1ba` | `2026-07-23-issue-217-session.md` | final feature commit reported in handoff | pending | focused server/CLI suites green |
+| #217 | `894d1ba` | `2026-07-23-issue-217-session.md` | review-fix commit pending | addressed | focused server/CLI + built-process acceptance green |
 
 ## Open questions
 

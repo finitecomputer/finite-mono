@@ -13,9 +13,45 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+fn spawn_real_brain_server() -> (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    thread::JoinHandle<()>,
+) {
+    let (url_tx, url_rx) = mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let thread = thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let state = finite_brain_server::ServerState::new(
+                finite_brain_store::BrainStore::open_in_memory().unwrap(),
+                url.clone(),
+            )
+            .with_auth_clock(OffsetDateTime::now_utc().unix_timestamp() as u64, 300);
+            let router = finite_brain_server::router_with_state(state);
+            url_tx.send(url).unwrap();
+            tokio::select! {
+                result = axum::serve(listener, router) => result.unwrap(),
+                _ = shutdown_rx => {}
+            }
+        });
+    });
+    (url_rx.recv().unwrap(), shutdown_tx, thread)
+}
 
 fn fbrain() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fbrain"))
+}
+
+fn run_at_current_time(home: &Path, cwd: &Path, args: &[&str]) -> Output {
+    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    let mut command = command(home, cwd);
+    command.env("FBRAIN_NOW", now).args(args).output().unwrap()
 }
 
 fn command(home: &Path, cwd: &Path) -> Command {
@@ -181,6 +217,205 @@ fn setup_access_loss_tree(scratch: &TempDir) -> PathBuf {
     agent["conflicts"] = json!([]);
     write_json(&agent_path, &agent);
     tree
+}
+
+#[test]
+fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
+    let scratch = TempDir::new().unwrap();
+    let home_a = scratch.path().join("home-a");
+    let home_b = scratch.path().join("home-b");
+    fs::create_dir_all(&home_a).unwrap();
+    fs::create_dir_all(&home_b).unwrap();
+    let secret_a = scratch.path().join("secret-a");
+    let secret_b = scratch.path().join("secret-b");
+    fs::write(
+        &secret_a,
+        "0000000000000000000000000000000000000000000000000000000000000001\n",
+    )
+    .unwrap();
+    fs::write(
+        &secret_b,
+        "0000000000000000000000000000000000000000000000000000000000000002\n",
+    )
+    .unwrap();
+    assert!(
+        run(
+            &home_a,
+            &home_a,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret_a.to_str().unwrap(),
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            &home_b,
+            &home_b,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret_b.to_str().unwrap(),
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+
+    let (server_url, shutdown, server_thread) = spawn_real_brain_server();
+    let run = |home: &Path, cwd: &Path, args: &[&str]| run_at_current_time(home, cwd, args);
+    let create = run(
+        &home_a,
+        &home_a,
+        &[
+            "brain",
+            "create",
+            "acme",
+            "--kind",
+            "organization",
+            "--name",
+            "Acme",
+            "--server",
+            &server_url,
+            "--json",
+        ],
+    );
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let tree_a = home_a.join("tree-a");
+    let opened_a = run(
+        &home_a,
+        &home_a,
+        &[
+            "open",
+            "acme",
+            tree_a.to_str().unwrap(),
+            "--server",
+            &server_url,
+            "--json",
+        ],
+    );
+    assert!(
+        opened_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened_a.stderr)
+    );
+    let folder = run(
+        &home_a,
+        &tree_a,
+        &[
+            "folder",
+            "create",
+            "restricted",
+            "--brain",
+            "acme",
+            "--access",
+            "restricted",
+            "--name",
+            "Restricted",
+            "--path",
+            "Restricted",
+            "--server",
+            &server_url,
+            "--json",
+        ],
+    );
+    assert!(
+        folder.status.success(),
+        "{}",
+        String::from_utf8_lossy(&folder.stderr)
+    );
+    fs::write(
+        tree_a.join("Restricted/secret.md"),
+        "# Restricted\n\nRecipient-readable proof.\n",
+    )
+    .unwrap();
+    let synced_a = run(
+        &home_a,
+        &tree_a,
+        &["sync", "now", "--server", &server_url, "--json"],
+    );
+    assert!(
+        synced_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&synced_a.stderr)
+    );
+
+    let signer_b = run(&home_b, &home_b, &["signer", "public-key", "--json"]);
+    assert!(
+        signer_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signer_b.stderr)
+    );
+    let signer_b: Value = serde_json::from_slice(&signer_b.stdout).unwrap();
+    let target = signer_b["npub"].as_str().unwrap();
+    let ensure = run(
+        &home_a,
+        &tree_a,
+        &[
+            "collaborators",
+            "ensure-admin",
+            "--brain",
+            "acme",
+            "--target",
+            target,
+            "--server",
+            &server_url,
+            "--json",
+        ],
+    );
+    assert!(
+        ensure.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ensure.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&ensure.stdout).unwrap();
+    assert_eq!(receipt["state"], "complete", "{receipt}");
+
+    let tree_b = home_b.join("tree-b");
+    let opened_b = run(
+        &home_b,
+        &home_b,
+        &[
+            "open",
+            "acme",
+            tree_b.to_str().unwrap(),
+            "--server",
+            &server_url,
+            "--json",
+        ],
+    );
+    assert!(
+        opened_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened_b.stderr)
+    );
+    let synced_b = run(
+        &home_b,
+        &tree_b,
+        &["sync", "now", "--server", &server_url, "--json"],
+    );
+    assert!(
+        synced_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&synced_b.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(tree_b.join("Restricted/secret.md")).unwrap(),
+        "# Restricted\n\nRecipient-readable proof.\n"
+    );
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
 }
 
 fn spawn_provider(expected_requests: usize) -> (String, thread::JoinHandle<Vec<Value>>) {

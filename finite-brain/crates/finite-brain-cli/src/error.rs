@@ -14,6 +14,13 @@ pub enum CliError {
     InvalidSigner(String),
     InvalidInput(String),
     Http(String),
+    /// An authoritative HTTP response from the Brain server. Unlike a
+    /// transport error, this response is proof that the server rejected the
+    /// request and must not be reported as indeterminate mutation state.
+    HttpStatus {
+        status: u16,
+        body: String,
+    },
     Identity(String),
     InsecureWorkingTree {
         path: PathBuf,
@@ -56,6 +63,9 @@ impl fmt::Display for CliError {
             Self::InvalidSigner(reason) => write!(f, "invalid local signer: {reason}"),
             Self::InvalidInput(reason) => write!(f, "invalid input: {reason}"),
             Self::Http(reason) => write!(f, "http request failed: {reason}"),
+            Self::HttpStatus { status, body } => {
+                write!(f, "http request rejected with {status}: {}", body.trim())
+            }
             Self::Identity(reason) => write!(f, "finite identity error: {reason}"),
             Self::InsecureWorkingTree { path, reason } => write!(
                 f,

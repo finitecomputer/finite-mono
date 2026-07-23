@@ -259,7 +259,18 @@ fbrain permissions remove-member --brain <brain-id> --target <npub>
 fbrain permissions add-admin --brain <brain-id> --target <npub>
 fbrain permissions remove-admin --brain <brain-id> --target <npub>
 fbrain permissions grant-folder --brain <brain-id> --folder <folder-id> --target <npub>
+
+# Convergent Organization Brain role + current Folder readiness
+fbrain collaborators ensure-admin --brain <brain-id> --target <email|NIP-05|npub>
 ```
+
+`collaborators ensure-admin` is the normal email-first Organization Brain
+sharing operation. It grants the administrator role and every current Folder
+for which the acting Finite Home can open a current key. A `partial` receipt is
+safe progress, not completion: retry the same command from a Finite Home that
+can open the listed Folder keys after any key rotation or new Folder creation.
+Role-only `permissions add-admin` remains an advanced primitive and does not
+prove Folder Access Readiness.
 
 ## Invitations And Sharing
 

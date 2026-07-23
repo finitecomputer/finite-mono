@@ -127,7 +127,7 @@ where
         "folder" => folder(&args[1..], &env, json, output),
         "mount" | "mounts" => mount(&args[1..], &env, json, output),
         "permissions" | "permission" | "perms" => permissions(&args[1..], &env, json, output),
-        "collaborators" | "collaborator" => collaborators(&args[1..], &env, json, output),
+        "collaborators" => collaborators(&args[1..], &env, json, output),
         "invites" | "invite" => invites(&args[1..], &env, json, output),
         "share" | "shared" => share(&args[1..], &env, json, output),
         other => Err(CliError::InvalidCommand(other.to_owned())),
@@ -137,7 +137,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|grant|revoke\nbrain list|create [--requesting-user-npub <npub|hex>]|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --brain <brain-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|grant|revoke\nbrain list|create [--requesting-user-npub <npub|hex>]|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ncollaborators ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --brain <brain-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -2153,7 +2153,7 @@ fn collaborators<W: Write>(
     output: &mut W,
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
-        Some("ensure-admin") | Some("admin-ensure") => {
+        Some("ensure-admin") => {
             let brain_id = command_brain_id(args, env)?;
             let target = required_option_or_positional(args, "--target", 1, "target-identity")?;
             let response = ensure_organization_admin(env, args, &brain_id, &target)?;
@@ -2197,6 +2197,17 @@ fn collaborators<W: Write>(
                             writeln!(output, "- {path}: {outcome} ({reason})")?;
                         }
                     }
+                }
+                if state == "partial" {
+                    writeln!(
+                        output,
+                        "Retry from a Finite Home that can open each listed Folder's current key; new Folders or rotated keys require a fresh ensure-admin plan."
+                    )?;
+                } else if state == "indeterminate" {
+                    writeln!(
+                        output,
+                        "Transport was uncertain. Retry the same ensure-admin command; the server operation is convergent and will not duplicate current access."
+                    )?;
                 }
                 Ok(())
             }
@@ -2834,6 +2845,25 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    #[test]
+    fn collaboration_help_exposes_only_the_supported_command() {
+        let mut output = Vec::new();
+        help(&mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("collaborators ensure-admin --brain <brain-id>"));
+        assert!(!text.contains("admin-ensure"));
+    }
+
+    #[test]
+    fn authoritative_http_rejection_is_not_transport_uncertainty() {
+        let error = CliError::HttpStatus {
+            status: 403,
+            body: "forbidden".to_owned(),
+        };
+        assert!(matches!(error, CliError::HttpStatus { status: 403, .. }));
+        assert!(error.to_string().contains("rejected with 403"));
+    }
 
     fn env_for(tmp: &TempDir) -> CliEnvironment {
         CliEnvironment {

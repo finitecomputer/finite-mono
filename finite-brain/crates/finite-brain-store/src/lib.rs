@@ -3411,6 +3411,105 @@ mod tests {
     }
 
     #[test]
+    fn organization_collaboration_converges_membership_grants_and_folder_audit_records() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let target = UserId::new("npub-collaborator").unwrap();
+        let grants = [
+            grant(
+                "grant-team-notes-collaborator",
+                "team-notes",
+                1,
+                "npub-admin",
+                target.as_str(),
+            ),
+            grant(
+                "grant-private-project-collaborator",
+                "private-project",
+                1,
+                "npub-admin",
+                target.as_str(),
+            ),
+        ];
+        let accepted = grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.clone(),
+                    folder_access_control_record(
+                        &format!("{}-grant", grant.id),
+                        SyncRecordType::FolderKeyGrant,
+                        grant.folder_id.as_str(),
+                        "npub-admin",
+                    ),
+                    folder_access_control_record(
+                        &format!("{}-access", grant.id),
+                        SyncRecordType::BrainAdminAccessChange,
+                        grant.folder_id.as_str(),
+                        "npub-admin",
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let admin_record = SyncRecordInput::Control(ControlSyncRecord {
+            record_event_id: "collaboration-admin".to_owned(),
+            record_type: SyncRecordType::BrainAdminAccessChange,
+            folder_id: None,
+            actor_npub: UserId::new("npub-admin").unwrap(),
+            client_created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            payload_json: "{\"control\":true}".to_owned(),
+            record_event_kind: APP_SPECIFIC_KIND,
+        });
+
+        store
+            .ensure_organization_admin_with_grants(
+                &brain_id,
+                &target,
+                &accepted,
+                Some(&admin_record),
+            )
+            .unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == target)
+        );
+        assert!(stored.brain.admins.contains(&target));
+        assert_eq!(
+            stored
+                .grants
+                .iter()
+                .filter(|grant| grant.recipient_npub == target)
+                .count(),
+            2
+        );
+        assert_eq!(
+            stored
+                .folder_access
+                .get(&FolderId::new("private-project").unwrap()),
+            Some(&BTreeSet::from([target.clone()]))
+        );
+
+        let before_retry = store.sync_bootstrap(&brain_id).unwrap().latest_sequence;
+        store
+            .ensure_organization_admin_with_grants(
+                &brain_id,
+                &target,
+                &accepted,
+                Some(&admin_record),
+            )
+            .unwrap();
+        assert_eq!(
+            store.sync_bootstrap(&brain_id).unwrap().latest_sequence,
+            before_retry,
+            "retry must not duplicate grants or collaboration control records"
+        );
+    }
+
+    #[test]
     fn grants_restricted_folder_access_with_current_recipient_grant() {
         let mut store = store_with_strategy_folder();
         let brain_id = BrainId::new("acme").unwrap();

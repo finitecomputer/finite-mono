@@ -11,7 +11,7 @@ impl BrainStore {
         &mut self,
         brain_id: &BrainId,
         target: &UserId,
-        grants: &[(FolderKeyGrantMetadata, SyncRecordInput)],
+        grants: &[(FolderKeyGrantMetadata, SyncRecordInput, SyncRecordInput)],
         admin_record: Option<&SyncRecordInput>,
     ) -> Result<(), StoreError> {
         let mut stored = self.load_brain(brain_id)?;
@@ -36,7 +36,7 @@ impl BrainStore {
             stored.brain.admins.push(target.clone());
         }
 
-        for (grant, _) in grants {
+        for (grant, _, _) in grants {
             let folder = stored
                 .brain
                 .folders
@@ -75,7 +75,7 @@ impl BrainStore {
                 params![brain_id.as_str(), target.as_str()],
             )?;
         }
-        for (grant, record) in grants {
+        for (grant, record, access_record) in grants {
             let already_ready = stored.grants.iter().any(|existing| {
                 existing.folder_id == grant.folder_id
                     && existing.key_version == grant.key_version
@@ -97,13 +97,14 @@ impl BrainStore {
             sync_records::validate_sync_conflict(&tx, brain_id, record)?;
             let sequence = sync_records::next_sequence(&tx, brain_id)?;
             sync_records::insert_sync_record(&tx, brain_id, sequence, record)?;
+            sync_records::validate_sync_conflict(&tx, brain_id, access_record)?;
+            let sequence = sync_records::next_sequence(&tx, brain_id)?;
+            sync_records::insert_sync_record(&tx, brain_id, sequence, access_record)?;
         }
-        if !target_was_admin {
-            if let Some(record) = admin_record {
-                sync_records::validate_sync_conflict(&tx, brain_id, record)?;
-                let sequence = sync_records::next_sequence(&tx, brain_id)?;
-                sync_records::insert_sync_record(&tx, brain_id, sequence, record)?;
-            }
+        if !target_was_admin && let Some(record) = admin_record {
+            sync_records::validate_sync_conflict(&tx, brain_id, record)?;
+            let sequence = sync_records::next_sequence(&tx, brain_id)?;
+            sync_records::insert_sync_record(&tx, brain_id, sequence, record)?;
         }
         tx.commit()?;
         Ok(())

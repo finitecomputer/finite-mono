@@ -450,6 +450,10 @@ pub struct CollaborationGrantRequest {
     pub folder_id: String,
     #[serde(flatten)]
     pub grant: FolderKeyGrantRequest,
+    /// A Folder-scoped signed access-change proof for this grant. A single
+    /// Brain-level AddAdmin event is not sufficient evidence for Folder
+    /// access and would make the audit stream semantically ambiguous.
+    pub access_change_event: serde_json::Value,
 }
 
 /// Stable per-Folder desired-state outcome.
