@@ -108,6 +108,28 @@ Personal Agent; that relationship grants full operational Brain access without
 transferring ownership. Other limited Member Identities receive only their
 explicit restricted-Folder access.
 
+### Brain Role
+
+A Member Identity's Brain-wide authorization relationship, such as member,
+admin, or owner. A Brain Role does not by itself prove that the Member Identity
+can decrypt a Folder; readable Folder content also requires current Folder
+Access and a current Folder Key Grant. _Avoid_: Brain Access.
+
+### Folder Access Readiness
+
+The observable state in which a Member Identity is entitled to a Folder under
+current policy and holds a valid Folder Key Grant for the Folder's current key
+version. Policy entitlement without a current grant is incomplete and must not
+be presented as readable access. _Avoid_: Effective Access.
+
+### Organization Brain Collaboration
+
+The desired state in which a target Member Identity has the requested
+Organization Brain Role and Folder Access Readiness for every current Folder
+included by the collaboration scope. The default admin collaboration scope is
+all existing Organization Brain Folders; a partial collaboration names every
+unready Folder and remains safe to retry. _Avoid_: Admin Sharing, Brain Access.
+
 ### User Nostr Identity
 
 The human-controlled Nostr `npub` used across Hosted Web, Electron, and iOS.
