@@ -24,11 +24,17 @@ email address or completing a Magic Link flow.
   initial requesting-user Shares occur in one registry transaction. Replay is
   idempotent. The Agent Principal remains the Project owner; the human does not
   become the publisher or receive Git access.
-- Agents may supply `requesting_user_npub` only from authenticated Finite Chat
-  sender metadata. `event.source.user_id` is the sender's public-key account
-  ID; `fsite` accepts it directly and normalizes it to an npub. Agents must not
-  extract or guess identity from message text. If authenticated sender
-  identity is unavailable, Project Init creates no implicit Share.
+- During an authenticated Finite Chat terminal tool call, Hermes makes its
+  task-local session identity available and the Finite Chat adapter leases the
+  authenticated sender to `fsite` for only that tool call. `fsite` accepts the
+  lease only when the inherited platform shape, per-turn session key, sender,
+  and adapter-owned authenticated-turn marker all match. Hermes 0.18.2 exposes
+  the Finite plugin as `local`; the platform string alone is not the marker.
+  Standalone agents may still provide `requesting_user_npub` explicitly; if
+  it disagrees with an active authenticated lease, Project Init fails closed.
+  Agents must not extract or guess identity from message text. Without a
+  matching live lease or an explicit value, Project Init creates no implicit
+  Share.
 - Output owners can add or remove Native Principal Shares explicitly with
   `fsite project share ... --add-npub/--remove-npub`. Email Shares remain
   available for External Principals.

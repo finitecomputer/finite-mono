@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -48,6 +50,12 @@ PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
+REQUESTER_CONTEXT_DIR = "requester-context-v1"
+REQUESTER_CONTEXT_TTL_SECS = 15 * 60
+REQUESTER_CONTEXT_VERSION = 1
+_AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "finitechat_authenticated_turn_user", default=None
+)
 
 # Hermes 0.18.2 does not pass a semantic progress flag to platform adapters.
 # Pin its real registry prefix -> tool-name pairs and friendly prefix -> verb
@@ -172,6 +180,181 @@ def _load_local_env_defaults(path: Path | None = None) -> None:
 _load_local_env_defaults()
 
 
+class _RequesterContextBroker:
+    """Lease authenticated Finite sender context to turn-local subprocesses.
+
+    Hermes already isolates the session variables with ContextVars and copies
+    the active values into terminal subprocesses. The small file lease lets
+    `fsite` distinguish that live binding from arbitrary or stale environment
+    text without teaching Sites about Chat or Hermes.
+    """
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = root or _requester_context_root()
+        self._lock = threading.Lock()
+        self._leases: dict[str, dict[str, tuple[int, int]]] = {}
+        self._clear_on_start()
+
+    def before_tool_call(self, **kwargs: Any) -> None:
+        if str(kwargs.get("tool_name") or "") != "terminal":
+            return
+        session_key, user_id = _active_finite_session()
+        if session_key is None or user_id is None:
+            return
+        lease_id = _requester_context_lease_id(kwargs)
+        now = int(time.time())
+        with self._lock:
+            self._prune(now)
+            session_leases = self._leases.setdefault(session_key, {})
+            count, _ = session_leases.get(lease_id, (0, 0))
+            session_leases[lease_id] = (
+                count + 1,
+                now + REQUESTER_CONTEXT_TTL_SECS,
+            )
+            self._write(
+                session_key=session_key,
+                user_id=user_id,
+                expires_at_unix=now + REQUESTER_CONTEXT_TTL_SECS,
+            )
+
+    def after_tool_call(self, **kwargs: Any) -> None:
+        if str(kwargs.get("tool_name") or "") != "terminal":
+            return
+        session_key, _ = _active_finite_session()
+        if session_key is None:
+            return
+        lease_id = _requester_context_lease_id(kwargs)
+        with self._lock:
+            session_leases = self._leases.get(session_key)
+            if session_leases is None:
+                self._remove(session_key)
+                return
+            count, expires_at = session_leases.get(lease_id, (0, 0))
+            if count <= 1:
+                session_leases.pop(lease_id, None)
+            else:
+                session_leases[lease_id] = (count - 1, expires_at)
+            if not session_leases:
+                self._leases.pop(session_key, None)
+                self._remove(session_key)
+
+    def _clear_on_start(self) -> None:
+        try:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.root.chmod(0o700)
+            for path in self.root.iterdir():
+                if path.is_file() or path.is_symlink():
+                    path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("[finitechat] could not reset requester context leases: %s", exc)
+
+    def _prune(self, now: int) -> None:
+        for leases in self._leases.values():
+            for lease_id, (_, expires_at) in list(leases.items()):
+                if expires_at <= now:
+                    leases.pop(lease_id, None)
+        expired_keys = [session_key for session_key, leases in self._leases.items() if not leases]
+        for session_key in expired_keys:
+            self._leases.pop(session_key, None)
+            self._remove(session_key)
+        try:
+            for path in self.root.glob("*.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    expires_at = int(payload.get("expires_at_unix") or 0)
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    expires_at = 0
+                if expires_at <= now:
+                    path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _write(self, *, session_key: str, user_id: str, expires_at_unix: int) -> None:
+        try:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            final_path = self.root / _requester_context_filename(session_key)
+            temp_path = self.root / f".{final_path.name}.{os.getpid()}.tmp"
+            payload = {
+                "version": REQUESTER_CONTEXT_VERSION,
+                "session_key": session_key,
+                "platform": FINITE_PLATFORM_NAME,
+                "requesting_user_id": user_id,
+                "expires_at_unix": expires_at_unix,
+            }
+            with temp_path.open("w", encoding="utf-8") as handle:
+                os.chmod(temp_path, 0o600)
+                json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_path.replace(final_path)
+        except OSError as exc:
+            logger.warning("[finitechat] could not write requester context lease: %s", exc)
+
+    def _remove(self, session_key: str) -> None:
+        with contextlib.suppress(OSError):
+            (self.root / _requester_context_filename(session_key)).unlink(missing_ok=True)
+
+
+def _requester_context_root() -> Path:
+    finite_home = str(os.getenv("FINITE_HOME") or "").strip()
+    root = Path(finite_home).expanduser() if finite_home else Path.home() / ".finite"
+    return root / REQUESTER_CONTEXT_DIR
+
+
+def _requester_context_filename(session_key: str) -> str:
+    digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()
+    return f"{digest}.json"
+
+
+def _requester_context_lease_id(kwargs: dict[str, Any]) -> str:
+    return ":".join(
+        str(kwargs.get(name) or "")
+        for name in ("tool_call_id", "task_id", "turn_id", "api_request_id")
+    )
+
+
+def _active_finite_session() -> tuple[str | None, str | None]:
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return None, None
+    platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+    session_key = str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
+    user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
+    authenticated_turn_user = _AUTHENTICATED_FINITE_TURN_USER.get()
+    if (
+        # Hermes 0.18.2 maps plugin platforms that are not enum members to
+        # LOCAL. The adapter-owned ContextVar below is the Finite marker;
+        # the platform value is retained only as a fail-closed shape check.
+        platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value}
+        or not session_key
+        or FINITE_ACCOUNT_ID_PATTERN.fullmatch(user_id) is None
+        or authenticated_turn_user != user_id
+    ):
+        return None, None
+    return session_key, user_id
+
+
+def _authenticated_requester_for_event(event: MessageEvent) -> str | None:
+    if bool(getattr(event, "internal", False)):
+        return None
+    raw_message = getattr(event, "raw_message", None)
+    if not isinstance(raw_message, dict):
+        return None
+    raw_source = raw_message.get("source")
+    if not isinstance(raw_source, dict):
+        return None
+    authenticated_user_id = str(raw_source.get("user_id") or "").strip()
+    source_user_id = str(getattr(getattr(event, "source", None), "user_id", "") or "").strip()
+    if (
+        FINITE_ACCOUNT_ID_PATTERN.fullmatch(authenticated_user_id) is None
+        or source_user_id != authenticated_user_id
+    ):
+        return None
+    return authenticated_user_id
+
+
 def check_requirements() -> bool:
     return bool(_resolve_finitechat_command(""))
 
@@ -249,6 +432,25 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
         self._inbound_chat_routes: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+
+    async def _process_message_background(
+        self,
+        event: MessageEvent,
+        session_key: str,
+    ) -> None:
+        """Bind the authenticated Finite sender to this exact queued turn.
+
+        Hermes starts a fresh background task for every queued follow-up. The
+        event remains the authenticated source of truth even when Hermes
+        reuses a cached agent session, while ContextVar propagation carries
+        this marker into that turn's tool thread.
+        """
+        requester = _authenticated_requester_for_event(event)
+        token = _AUTHENTICATED_FINITE_TURN_USER.set(requester)
+        try:
+            await super()._process_message_background(event, session_key)
+        finally:
+            _AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
     async def connect(self, is_reconnect: bool = False, **_: Any) -> bool:
         if not self.home:
@@ -1603,6 +1805,11 @@ def _finite_platform() -> Platform:
 
 
 def register(ctx) -> None:
+    register_hook = getattr(ctx, "register_hook", None)
+    if callable(register_hook):
+        requester_context = _RequesterContextBroker()
+        register_hook("pre_tool_call", requester_context.before_tool_call)
+        register_hook("post_tool_call", requester_context.after_tool_call)
     ctx.register_platform(
         name=FINITE_PLATFORM_NAME,
         label="Finite Chat",

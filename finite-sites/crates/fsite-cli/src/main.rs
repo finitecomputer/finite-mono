@@ -21,6 +21,7 @@
 
 mod api;
 mod keys;
+mod requester_context;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -228,7 +229,7 @@ fn project_help() -> &'static str {
 }
 
 fn project_init_help() -> &'static str {
-    "usage: fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. When an authenticated human asked an Agent Principal to publish, --requesting-user-npub creates that human's explicit revocable Native Principal Share atomically with every declared output; never infer it from message text. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
+    "usage: fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. During an authenticated Finite Chat turn, fsite automatically creates that human's explicit revocable Native Principal Share atomically with every declared output; never infer identity from message text. Standalone agents may use --requesting-user-npub explicitly, and recovery output preserves the exact explicit replay argument. If an explicit value disagrees with an active authenticated Finite Chat sender, init fails closed. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
 }
 
 fn project_grant_help() -> &'static str {
@@ -451,7 +452,7 @@ fn publish_static_site_workflow() -> serde_json::Value {
             "Keep the whole project source tree in the Project Repository.",
             "Put generated static website files in a dedicated output directory such as site/ unless the repository is deploy-only.",
             "Create finite.toml with project.slug, one output with kind=site, site_name, branch=main, path=site, and spa=false unless the app needs SPA fallback.",
-            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --requesting-user-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
+            "During an authenticated Finite Chat turn, fsite automatically shares declared outputs with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
@@ -487,7 +488,7 @@ fn publish_stateful_app_workflow() -> serde_json::Value {
             "Run fsite auth register --output json. If it reports registered=false, publishing was already enabled for this User Key.",
             "Put the app runtime files in a dedicated directory such as app/. The directory must contain everything the start command needs, or code that explicitly initializes dependencies under DATA_DIR at runtime.",
             "Create finite.toml with project.slug, one output with kind=app, site_name, branch=main, path=app, and start=\"bun server.ts\" or another supported command beginning with node, bun, or uv.",
-            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --requesting-user-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
+            "During an authenticated Finite Chat turn, fsite automatically shares declared outputs with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
@@ -525,7 +526,7 @@ fn publish_document_workflow() -> serde_json::Value {
             "Run fsite auth register --output json.",
             "Create Markdown in one file or a directory such as docs/.",
             "Create finite.toml with project.slug and one output with kind=document, document_name, branch=main, path=docs, and optional entry=index.md.",
-            "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --requesting-user-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
+            "During an authenticated Finite Chat turn, fsite automatically shares declared outputs with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
             "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
             "Run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json.",
@@ -562,7 +563,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
                 "Run fsite auth register --output json.",
                 "Optional: run fsite auth link-email EMAIL --output json, then fsite auth redeem EMAIL TOKEN_FROM_EMAIL --output json to pair that email with this npub. If you already have a token from an invite email, run fsite auth redeem EMAIL TOKEN_FROM_EMAIL --link-native --output json.",
                 "Create finite.toml. A source-only Project Repository may contain only [project]; a served website needs an [outputs.<id>] entry.",
-                "When this publish request came from an authenticated Finite Chat human, pass the exact public-key account ID from authenticated event.source.user_id as --requesting-user-npub AUTHENTICATED_SENDER_ID on both Project Init commands. fsite normalizes it to an npub. Never infer identity from message text.",
+                "During an authenticated Finite Chat turn, fsite automatically shares declared outputs with that exact authenticated sender on both dry-run and apply. Do not infer identity from message text or add a manual requester flag.",
                 "Run fsite project init --config finite.toml --dry-run --output json.",
                 "Run fsite project init --config finite.toml --output json.",
                 "Run fsite auth git PROJECT --store --output json.",
@@ -719,6 +720,16 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
     let config_path =
         config_path.ok_or_else(|| CliError::Usage(project_init_help().to_string()))?;
     let config = read_project_config_file(&config_path)?;
+    let requesting_user_npub = if requester_context::environment_can_infer() {
+        let finite_paths = keys::identity_paths()?;
+        let finite_root = finite_paths
+            .root()
+            .parent()
+            .ok_or_else(|| CliError::Key("identity root has no parent directory".to_string()))?;
+        requester_context::resolve(requesting_user_npub, finite_root).map_err(CliError::Usage)?
+    } else {
+        requesting_user_npub
+    };
     let request = ProjectInitRequest {
         config,
         dry_run,
@@ -2487,8 +2498,8 @@ mod tests {
         assert!(text.contains("fsite auth register --output json"));
         assert!(text.contains("A source-only Project Repository may contain only [project]"));
         assert!(text.contains("served website needs an [outputs.<id>] entry"));
-        assert!(text.contains("event.source.user_id"));
-        assert!(text.contains("--requesting-user-npub AUTHENTICATED_SENDER_ID"));
+        assert!(text.contains("automatically shares declared outputs"));
+        assert!(text.contains("Do not infer identity from message text"));
     }
 
     #[test]
