@@ -2539,7 +2539,6 @@ impl AppRuntimeState {
         let room_sync_failure_count = synced.room_sync_failures.len();
         self.apply_projection_events(synced.events)?;
         self.append_messages(synced.result.messages);
-        self.reload_chat_projection_from_store()?;
         self.materialize_known_connected_rooms()?;
         self.request_missing_link_device_bootstraps()?;
         self.drain_undelivered_outbox(MAX_OUTBOX_DRAIN_PER_TICK)?;
@@ -5772,55 +5771,6 @@ impl AppRuntimeState {
         }
         self.repair_selected_topic();
         self.sync_selected_room_messages();
-    }
-
-    fn reload_chat_projection_from_store(&mut self) -> Result<(), FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
-        let stored_messages = self
-            .core
-            .store
-            .load_app_messages(&owner, MAX_APP_MESSAGES_U32)
-            .map_err(store_error)?;
-        let delivered_local_messages = stored_messages
-            .iter()
-            .filter(|message| message.sender == owner)
-            .map(|message| (message.room_id.clone(), message.message_id.clone()))
-            .collect::<BTreeSet<_>>();
-        let stored_events = self
-            .core
-            .store
-            .load_app_events(&owner, MAX_APP_MESSAGES_U32)
-            .map_err(store_error)?;
-        let mut chat_projection =
-            ChatProjectionState::from_stored(stored_messages, stored_events, &owner);
-        let stored_outbox = self
-            .core
-            .store
-            .load_app_outbox(&owner)
-            .map_err(store_error)?;
-        let mut visible_outbox = Vec::new();
-        for message in stored_outbox {
-            if delivered_local_messages
-                .contains(&(message.room_id.clone(), message.message_id.clone()))
-            {
-                self.core
-                    .store
-                    .delete_app_outbox_message(&owner, &message.room_id, &message.message_id)
-                    .map_err(store_error)?;
-            } else {
-                visible_outbox.push(message);
-            }
-        }
-        chat_projection.append_messages(
-            visible_outbox
-                .into_iter()
-                .filter_map(|message| chat_message_from_outbox(message, &owner))
-                .collect(),
-            &owner,
-        );
-        self.chat_projection = chat_projection;
-        self.sync_chat_projection();
-        Ok(())
     }
 
     fn sync_selected_room_messages(&mut self) {
@@ -10816,8 +10766,76 @@ mod tests {
         NostrProfileRecord, PutNostrProfileRequest,
     };
     use finitechat_server::{HttpServerState, http_router};
+    use std::time::{Duration, Instant};
 
     const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    #[ignore = "timing harness; run explicitly in release mode"]
+    fn app_runtime_idle_tick_with_full_projection_history() {
+        const HISTORY_ITEMS: usize = MAX_APP_MESSAGES;
+        const SAMPLES: usize = 10;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let mut core = CoreState::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("app").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "perf-electron".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let owner = core.device.device_ref().clone();
+        let plaintext = encode_application_event(
+            DurableAppEventKind::ChatMessage,
+            None,
+            &encode_text_message_payload("projection history", None).unwrap(),
+        )
+        .unwrap();
+        let messages = (0..HISTORY_ITEMS)
+            .map(|index| StoredAppMessage {
+                room_id: "perf-room".to_owned(),
+                seq: index as u64 + 1,
+                message_id: format!("perf-message-{index}"),
+                sender: owner.clone(),
+                plaintext: plaintext.clone(),
+                timestamp_unix_seconds: NOW + index as u64,
+            })
+            .collect::<Vec<_>>();
+        let events = messages
+            .iter()
+            .map(|message| StoredAppEvent {
+                room_id: message.room_id.clone(),
+                seq: message.seq,
+                message_id: message.message_id.clone(),
+                sender: message.sender.clone(),
+                plaintext: message.plaintext.clone(),
+                timestamp_unix_seconds: message.timestamp_unix_seconds,
+            })
+            .collect::<Vec<_>>();
+        core.store
+            .save_app_messages_and_events(&owner, &messages, &events, MAX_APP_MESSAGES_U32)
+            .unwrap();
+        let mut state = AppRuntimeState::new(core).unwrap();
+
+        state.runtime_tick().unwrap();
+        let mut samples = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            state.runtime_tick().unwrap();
+            samples.push(started.elapsed());
+        }
+        samples.sort();
+        let p50 = samples[samples.len() / 2];
+        let total = samples.iter().copied().sum::<Duration>();
+        println!(
+            "idle runtime tick with {HISTORY_ITEMS} messages + {HISTORY_ITEMS} events: \
+             n={SAMPLES} p50={p50:?} average={:?} max={:?}",
+            total / SAMPLES as u32,
+            samples.last().unwrap()
+        );
+    }
 
     #[test]
     fn server_contract_check_rejects_old_health_without_contract_version() {

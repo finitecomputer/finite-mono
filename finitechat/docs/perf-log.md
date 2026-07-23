@@ -319,3 +319,22 @@ is the right deep-link path for this proof, but it is not the final onboarding
 UX by itself. A polished product flow should still present a clear invite
 entry/import path when the app is opened normally, and should explain whether
 the user is generating a fresh device key or importing an existing account key.
+
+### 2026-07-23 — Core/Electron and resident bridge follow-up
+
+Plan 10's bounded follow-up audited two new hot paths rather than repeating the
+June device-save/server-clone work. The full report is
+`docs/audits/rust-hot-path-perf-audit-2026-07-23.md`.
+
+- Core's normal runtime tick already applied fresh events/messages to its
+  in-memory projection, then loaded/decrypted up to 5,000 stored messages and
+  5,000 stored events and rebuilt the same projection. The new ignored harness
+  measures the maximum retained history: p50 **88.050 ms → 175 µs**
+  (approximately **502×**). Startup remains the full-rebuild boundary.
+- The resident Hermes bridge signalled every consumer on every successful
+  ten-second reconciliation, even with no updates. Each wake could reopen and
+  decrypt the 5,000-event recovery window; cold Hermes collection scanned it
+  twice. Empty reconciliations no longer wake consumers, initialized inboxes
+  return before store access, and cold initialization/recovery share one scan.
+- Finite Private limiter reserve/settle was intentionally deferred until an
+  approved load result and rollout path select it.
