@@ -27,7 +27,9 @@ email address or completing a Magic Link flow.
 - During an authenticated Finite Chat terminal tool call, Hermes makes its
   task-local session identity available and the Finite Chat adapter leases the
   authenticated sender to `fsite` for only that tool call. `fsite` accepts the
-  lease only when the inherited platform, session, and sender all match.
+  lease only when the inherited platform shape, per-turn session key, sender,
+  and adapter-owned authenticated-turn marker all match. Hermes 0.18.2 exposes
+  the Finite plugin as `local`; the platform string alone is not the marker.
   Standalone agents may still provide `requesting_user_npub` explicitly; if
   it disagrees with an active authenticated lease, Project Init fails closed.
   Agents must not extract or guess identity from message text. Without a

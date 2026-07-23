@@ -14,6 +14,13 @@ from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = REPO_ROOT / "integrations" / "hermes" / "finitechat" / "adapter.py"
+GATEWAY_MODULE_NAMES = (
+    "gateway",
+    "gateway.config",
+    "gateway.platforms",
+    "gateway.platforms.base",
+    "gateway.session_context",
+)
 
 
 class Platform(Enum):
@@ -92,6 +99,9 @@ class BasePlatformAdapter:
     async def handle_message(self, event: MessageEvent) -> None:
         self.handled_messages.append(event)
 
+    async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
+        self.handled_messages.append(event)
+
 
 def install_gateway_stubs() -> None:
     gateway = types.ModuleType("gateway")
@@ -156,7 +166,17 @@ class MockPluginContext:
 
 class FinitePlatformAdapterTests(unittest.TestCase):
     def setUp(self):
+        self.original_gateway_modules = {
+            name: sys.modules.get(name) for name in GATEWAY_MODULE_NAMES
+        }
         self.module = load_adapter_module()
+
+    def tearDown(self):
+        for name, module in self.original_gateway_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
     def adapter(self, room_id: str | None = "room-agent-1"):
         extra = {"home": "/tmp/finite-agent-home", "finitechat_bin": "/bin/echo"}
@@ -205,40 +225,56 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             broker = self.module._RequesterContextBroker(Path(finite_home) / "contexts")
             session_context = cast(Any, sys.modules["gateway.session_context"])
             session_context.values = {
-                "HERMES_SESSION_PLATFORM": "finitechat",
-                "HERMES_SESSION_ID": "session-a",
+                "HERMES_SESSION_PLATFORM": "local",
+                "HERMES_SESSION_KEY": "finitechat:room-a:thread-a",
                 "HERMES_SESSION_USER_ID": "a1" * 32,
             }
-            hook = {"tool_name": "terminal", "tool_call_id": "call-a"}
-            broker.before_tool_call(**hook)
-            context_path = broker.root / self.module._requester_context_filename("session-a")
-            payload = json.loads(context_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["requesting_user_id"], "a1" * 32)
-            self.assertEqual(payload["platform"], "finitechat")
+            token = self.module._AUTHENTICATED_FINITE_TURN_USER.set("a1" * 32)
+            try:
+                hook = {"tool_name": "terminal", "tool_call_id": "call-a"}
+                broker.before_tool_call(**hook)
+                context_path = broker.root / self.module._requester_context_filename(
+                    "finitechat:room-a:thread-a"
+                )
+                payload = json.loads(context_path.read_text(encoding="utf-8"))
+                self.assertEqual(payload["requesting_user_id"], "a1" * 32)
+                self.assertEqual(payload["platform"], "finitechat")
 
-            broker.after_tool_call(**hook)
-            self.assertFalse(context_path.exists())
+                broker.after_tool_call(**hook)
+                self.assertFalse(context_path.exists())
+            finally:
+                self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
             session_context.values["HERMES_SESSION_USER_ID"] = "b2" * 32
-            broker.before_tool_call(**hook)
-            payload = json.loads(context_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["requesting_user_id"], "b2" * 32)
+            token = self.module._AUTHENTICATED_FINITE_TURN_USER.set("b2" * 32)
+            try:
+                broker.before_tool_call(**hook)
+                payload = json.loads(context_path.read_text(encoding="utf-8"))
+                self.assertEqual(payload["requesting_user_id"], "b2" * 32)
+            finally:
+                broker.after_tool_call(**hook)
+                self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
     def test_non_finite_invalid_and_non_terminal_hooks_never_lease(self):
         with tempfile.TemporaryDirectory() as finite_home:
             broker = self.module._RequesterContextBroker(Path(finite_home) / "contexts")
             session_context = cast(Any, sys.modules["gateway.session_context"])
             valid = {
-                "HERMES_SESSION_PLATFORM": "finitechat",
-                "HERMES_SESSION_ID": "session-a",
+                "HERMES_SESSION_PLATFORM": "local",
+                "HERMES_SESSION_KEY": "finitechat:room-a:thread-a",
                 "HERMES_SESSION_USER_ID": "a1" * 32,
             }
-            session_context.values = {**valid, "HERMES_SESSION_PLATFORM": "telegram"}
-            broker.before_tool_call(tool_name="terminal", tool_call_id="call-a")
-            session_context.values = {**valid, "HERMES_SESSION_USER_ID": "not-a-pubkey"}
-            broker.before_tool_call(tool_name="terminal", tool_call_id="call-a")
             session_context.values = valid
-            broker.before_tool_call(tool_name="read_file", tool_call_id="call-a")
+            broker.before_tool_call(tool_name="terminal", tool_call_id="call-a")
+            token = self.module._AUTHENTICATED_FINITE_TURN_USER.set("b2" * 32)
+            try:
+                broker.before_tool_call(tool_name="terminal", tool_call_id="call-a")
+                session_context.values = {**valid, "HERMES_SESSION_PLATFORM": "telegram"}
+                broker.before_tool_call(tool_name="terminal", tool_call_id="call-a")
+                session_context.values = valid
+                broker.before_tool_call(tool_name="read_file", tool_call_id="call-a")
+            finally:
+                self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
             self.assertEqual(list(broker.root.glob("*.json")), [])
 
     def test_parallel_terminal_leases_are_reference_counted_and_restart_clears_them(self):
@@ -247,24 +283,56 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             broker = self.module._RequesterContextBroker(root)
             session_context = cast(Any, sys.modules["gateway.session_context"])
             session_context.values = {
-                "HERMES_SESSION_PLATFORM": "finitechat",
-                "HERMES_SESSION_ID": "session-a",
+                "HERMES_SESSION_PLATFORM": "local",
+                "HERMES_SESSION_KEY": "finitechat:room-a:thread-a",
                 "HERMES_SESSION_USER_ID": "a1" * 32,
             }
-            first = {"tool_name": "terminal", "tool_call_id": "call-a"}
-            second = {"tool_name": "terminal", "tool_call_id": "call-b"}
-            broker.before_tool_call(**first)
-            broker.before_tool_call(**second)
-            context_path = root / self.module._requester_context_filename("session-a")
-            broker.after_tool_call(**first)
-            self.assertTrue(context_path.exists())
-            broker.after_tool_call(**second)
-            self.assertFalse(context_path.exists())
+            token = self.module._AUTHENTICATED_FINITE_TURN_USER.set("a1" * 32)
+            try:
+                first = {"tool_name": "terminal", "tool_call_id": "call-a"}
+                second = {"tool_name": "terminal", "tool_call_id": "call-b"}
+                broker.before_tool_call(**first)
+                broker.before_tool_call(**second)
+                context_path = root / self.module._requester_context_filename(
+                    "finitechat:room-a:thread-a"
+                )
+                broker.after_tool_call(**first)
+                self.assertTrue(context_path.exists())
+                broker.after_tool_call(**second)
+                self.assertFalse(context_path.exists())
 
-            broker.before_tool_call(**first)
-            self.assertTrue(context_path.exists())
-            self.module._RequesterContextBroker(root)
-            self.assertFalse(context_path.exists())
+                broker.before_tool_call(**first)
+                self.assertTrue(context_path.exists())
+                self.module._RequesterContextBroker(root)
+                self.assertFalse(context_path.exists())
+            finally:
+                broker.after_tool_call(**first)
+                self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
+
+    def test_duplicate_hook_id_is_reference_counted(self):
+        with tempfile.TemporaryDirectory() as finite_home:
+            root = Path(finite_home) / "contexts"
+            broker = self.module._RequesterContextBroker(root)
+            session_context = cast(Any, sys.modules["gateway.session_context"])
+            session_context.values = {
+                "HERMES_SESSION_PLATFORM": "local",
+                "HERMES_SESSION_KEY": "finitechat:room-a:thread-a",
+                "HERMES_SESSION_USER_ID": "a1" * 32,
+            }
+            token = self.module._AUTHENTICATED_FINITE_TURN_USER.set("a1" * 32)
+            try:
+                hook = {"tool_name": "terminal", "tool_call_id": "duplicate"}
+                context_path = root / self.module._requester_context_filename(
+                    "finitechat:room-a:thread-a"
+                )
+                broker.before_tool_call(**hook)
+                broker.before_tool_call(**hook)
+                broker.after_tool_call(**hook)
+                self.assertTrue(context_path.exists())
+                broker.after_tool_call(**hook)
+                self.assertFalse(context_path.exists())
+            finally:
+                self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
     def test_expired_orphan_lease_cannot_keep_a_later_terminal_context_alive(self):
         with tempfile.TemporaryDirectory() as finite_home:
@@ -272,10 +340,11 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             broker = self.module._RequesterContextBroker(root)
             session_context = cast(Any, sys.modules["gateway.session_context"])
             session_context.values = {
-                "HERMES_SESSION_PLATFORM": "finitechat",
-                "HERMES_SESSION_ID": "session-a",
+                "HERMES_SESSION_PLATFORM": "local",
+                "HERMES_SESSION_KEY": "finitechat:room-a:thread-a",
                 "HERMES_SESSION_USER_ID": "a1" * 32,
             }
+            token = self.module._AUTHENTICATED_FINITE_TURN_USER.set("a1" * 32)
             original_time = self.module.time.time
             try:
                 self.module.time.time = lambda: 100
@@ -286,8 +355,41 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 broker.after_tool_call(**current)
             finally:
                 self.module.time.time = original_time
-            context_path = root / self.module._requester_context_filename("session-a")
+                self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
+            context_path = root / self.module._requester_context_filename(
+                "finitechat:room-a:thread-a"
+            )
             self.assertFalse(context_path.exists())
+
+    def test_background_turn_wrapper_marks_only_authenticated_finite_events(self):
+        module = cast(Any, self.module)
+        adapter = self.adapter()
+        observed: list[str | None] = []
+        original = BasePlatformAdapter._process_message_background
+
+        async def observe(self, event, session_key):
+            _ = (self, event, session_key)
+            observed.append(module._AUTHENTICATED_FINITE_TURN_USER.get())
+
+        BasePlatformAdapter._process_message_background = observe
+        authenticated = MessageEvent(
+            text="publish",
+            source=types.SimpleNamespace(user_id="a1" * 32),
+            raw_message={"source": {"user_id": "a1" * 32}},
+        )
+        internal = MessageEvent(
+            text="background completion",
+            source=types.SimpleNamespace(user_id="a1" * 32),
+            raw_message={"source": {"user_id": "a1" * 32}},
+            internal=True,
+        )
+        try:
+            asyncio.run(adapter._process_message_background(authenticated, "session"))
+            asyncio.run(adapter._process_message_background(internal, "session"))
+        finally:
+            BasePlatformAdapter._process_message_background = original
+        self.assertEqual(observed, ["a1" * 32, None])
+        self.assertIsNone(module._AUTHENTICATED_FINITE_TURN_USER.get())
 
     def test_adapter_disables_edit_streaming_for_ios_rendering_compatibility(self):
         self.assertFalse(self.module.FiniteChatAdapter.SUPPORTS_MESSAGE_EDITING)
