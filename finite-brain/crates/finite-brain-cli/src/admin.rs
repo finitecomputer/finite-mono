@@ -13,8 +13,9 @@ use nostr::{Kind, Tag};
 use crate::{
     APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
     SessionFolderKeyring, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
-    normalize_folder_access, read_agent_state, read_working_tree_state, sign_event,
-    signed_json_request, tag_vec, timestamp, unix_timestamp, write_working_tree_state,
+    normalize_folder_access, open_brain_session_folder_keys, read_agent_state,
+    read_working_tree_state, sign_event, signed_json_request, tag_vec, timestamp, unix_timestamp,
+    write_working_tree_state,
 };
 
 pub(crate) fn fetch_brain_metadata(
@@ -25,6 +26,96 @@ pub(crate) fn fetch_brain_metadata(
     let path = format!("/_admin/brains/{brain_id}/metadata");
     let response = signed_json_request(env, args, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
+}
+
+/// Plan and submit one convergent Organization Brain collaboration request.
+/// Folder Keys are opened only in the local session keyring and converted to
+/// opaque recipient-wrapped grants before crossing the HTTP boundary.
+pub(crate) fn ensure_organization_admin(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    target_input: &str,
+) -> Result<serde_json::Value, CliError> {
+    let target = resolve_identity_npub(env, args, target_input)?;
+    let metadata = fetch_brain_metadata(env, args, brain_id)?;
+    if metadata.kind != "organization" {
+        return Err(CliError::InvalidInput(
+            "collaborators ensure-admin requires an Organization Brain".to_owned(),
+        ));
+    }
+    let keyring = open_brain_session_folder_keys(env, args, brain_id)?;
+    let auth = load_signer(env)?;
+    let mut folders = Vec::with_capacity(metadata.folders.len());
+    let mut grants = Vec::new();
+    for folder in &metadata.folders {
+        folders.push(serde_json::json!({
+            "folderId": folder.id,
+            "keyVersion": folder.current_key_version,
+            "path": folder.path,
+        }));
+        if let Some(folder_key) = keyring.get(brain_id, &folder.id, folder.current_key_version) {
+            let grant = folder_key_grant_request(
+                &auth,
+                brain_id,
+                &folder.id,
+                folder.current_key_version,
+                &target,
+                folder_key,
+                env,
+            )?;
+            grants.push(serde_json::json!({
+                "folderId": folder.id,
+                "id": grant["id"],
+                "keyVersion": grant["keyVersion"],
+                "recipientNpub": grant["recipientNpub"],
+                "wrappedEventJson": grant["wrappedEventJson"],
+                "createdAt": grant["createdAt"],
+            }));
+        }
+    }
+    let access_change_event = admin_access_change_event(
+        env,
+        brain_id,
+        AdminAccessAction::AddAdmin,
+        None,
+        Some(&target),
+        None,
+    )?;
+    let route = format!("/_admin/brains/{brain_id}/collaborators/ensure-admin");
+    let request = signed_json_request(
+        env,
+        args,
+        "POST",
+        &route,
+        Some(serde_json::json!({
+            "targetNpub": target.clone(),
+            "folders": folders.clone(),
+            "grants": grants,
+            "accessChangeEvent": access_change_event,
+        })),
+    );
+    match request {
+        Ok(response) => Ok(response),
+        Err(CliError::Http(_)) => Ok(serde_json::json!({
+            "brainId": brain_id,
+            "targetNpub": target,
+            "state": "indeterminate",
+            "brainRole": "unknown",
+            "folders": folders.into_iter().map(|folder| serde_json::json!({
+                "folderId": folder["folderId"],
+                "path": folder["path"],
+                "expectedKeyVersion": folder["keyVersion"],
+                "outcome": "failed",
+                "reason": "transportUncertain",
+                "retryable": true,
+            })).collect::<Vec<_>>(),
+            "readyCount": 0,
+            "totalCount": metadata.folders.len(),
+            "retryable": true,
+        })),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn resolve_identity_npub(

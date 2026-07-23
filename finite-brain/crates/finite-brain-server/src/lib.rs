@@ -618,6 +618,14 @@ pub fn router_with_state(state: ServerState) -> Router {
         )
         .route("/_admin/brains/{brain_id}/admins", post(add_admin_handler))
         .route(
+            "/_admin/brains/{brain_id}/collaborators/ensure-admin",
+            post(ensure_organization_admin_handler),
+        )
+        .route(
+            "/_admin/brains/{brain_id}/collaboration/ensure-admin",
+            post(ensure_organization_admin_handler),
+        )
+        .route(
             "/_admin/brains/{brain_id}/admins/{target_npub}",
             axum::routing::delete(remove_admin_handler),
         )

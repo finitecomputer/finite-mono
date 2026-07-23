@@ -127,6 +127,7 @@ where
         "folder" => folder(&args[1..], &env, json, output),
         "mount" | "mounts" => mount(&args[1..], &env, json, output),
         "permissions" | "permission" | "perms" => permissions(&args[1..], &env, json, output),
+        "collaborators" | "collaborator" => collaborators(&args[1..], &env, json, output),
         "invites" | "invite" => invites(&args[1..], &env, json, output),
         "share" | "shared" => share(&args[1..], &env, json, output),
         other => Err(CliError::InvalidCommand(other.to_owned())),
@@ -2142,6 +2143,66 @@ fn permissions<W: Write>(
         }
         Some(other) => Err(CliError::InvalidCommand(format!("permissions {other}"))),
         None => Err(CliError::MissingArgument("permissions command")),
+    }
+}
+
+fn collaborators<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str) {
+        Some("ensure-admin") | Some("admin-ensure") => {
+            let brain_id = command_brain_id(args, env)?;
+            let target = required_option_or_positional(args, "--target", 1, "target-identity")?;
+            let response = ensure_organization_admin(env, args, &brain_id, &target)?;
+            if json {
+                write_json(output, &response)
+            } else {
+                let state = response
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("indeterminate");
+                let ready = response
+                    .get("readyCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let total = response
+                    .get("totalCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                writeln!(
+                    output,
+                    "Organization Brain collaboration: {state} ({ready}/{total} folders ready)"
+                )?;
+                if let Some(folders) = response
+                    .get("folders")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for folder in folders {
+                        let path = folder
+                            .get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("?");
+                        let outcome = folder
+                            .get("outcome")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("failed");
+                        if outcome != "granted" && outcome != "alreadyReady" {
+                            let reason = folder
+                                .get("reason")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("unknown");
+                            writeln!(output, "- {path}: {outcome} ({reason})")?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+        Some(other) => Err(CliError::InvalidCommand(format!("collaborators {other}"))),
+        None => Err(CliError::MissingArgument("collaborators command")),
     }
 }
 

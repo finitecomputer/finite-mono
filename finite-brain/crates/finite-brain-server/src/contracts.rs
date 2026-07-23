@@ -420,6 +420,83 @@ pub struct GrantFolderAccessResponse {
     pub outcome: GrantFolderAccessResponseOutcome,
 }
 
+/// One Folder/key-version entry in an Organization Brain collaboration snapshot.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationFolderSnapshot {
+    pub folder_id: String,
+    pub key_version: u32,
+    pub path: String,
+}
+
+/// Client-prepared desired-state Organization Brain collaboration request.
+///
+/// The server receives only opaque wrapped grants. `folders` is the exact
+/// inventory/key-version snapshot observed by the trusted client; grants may
+/// intentionally omit entries whose source key was unavailable locally.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureOrganizationAdminRequest {
+    pub target_npub: String,
+    pub folders: Vec<CollaborationFolderSnapshot>,
+    pub grants: Vec<CollaborationGrantRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+/// One client-prepared wrapped grant tied to its Folder identity.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationGrantRequest {
+    pub folder_id: String,
+    #[serde(flatten)]
+    pub grant: FolderKeyGrantRequest,
+}
+
+/// Stable per-Folder desired-state outcome.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CollaborationFolderOutcome {
+    Granted,
+    AlreadyReady,
+    MissingSourceKey,
+    StaleVersion,
+    Failed,
+}
+
+/// One safe Folder result in a collaboration receipt.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationFolderReceipt {
+    pub folder_id: String,
+    pub path: String,
+    pub expected_key_version: u32,
+    pub outcome: CollaborationFolderOutcome,
+    pub reason: Option<String>,
+    pub retryable: bool,
+}
+
+/// Typed Organization Brain collaboration receipt shared by CLI and clients.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollaborationReceiptState {
+    Complete,
+    Partial,
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureOrganizationAdminResponse {
+    pub brain_id: String,
+    pub target_npub: String,
+    pub state: CollaborationReceiptState,
+    pub brain_role: String,
+    pub folders: Vec<CollaborationFolderReceipt>,
+    pub ready_count: usize,
+    pub total_count: usize,
+    pub retryable: bool,
+}
+
 /// Stable machine-readable outcome for a Folder access grant.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
