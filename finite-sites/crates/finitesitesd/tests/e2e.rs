@@ -2133,7 +2133,10 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
 
         let bodies = outbox_bodies(&server.outbox);
         assert_eq!(bodies.len(), 1);
-        assert!(bodies[0].contains("You've been invited to view finitechat-native-mockup"));
+        assert!(bodies[0].contains("finitechat-native-mockup has been shared with you."));
+        assert!(bodies[0].contains("To view it, open this sign-in link:"));
+        assert!(bodies[0].contains("For your agent"));
+        assert!(bodies[0].contains("ask it to read this email"));
         assert!(bodies[0].contains("/llms.txt"));
         let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
         let link = outbox_link(&server.outbox);
