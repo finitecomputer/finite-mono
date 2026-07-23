@@ -1,0 +1,27 @@
+{
+  "id": "cvm_crypto_01",
+  "name": "finite-agent-fixture-01",
+  "app_id": "0000000000000000000000000000000000000000",
+  "vm_uuid": "vm_crypto_01",
+  "status": "running",
+  "kms_type": "phala",
+  "resource": {
+    "instance_type": "tdx.medium",
+    "vcpu": 2,
+    "memory_in_gb": 4.0,
+    "disk_in_gb": 40,
+    "compute_billing_price": "0.116",
+    "billing_period": "hourly"
+  },
+  "endpoints": [
+    {
+      "app": "https://crypto-fixture.example.invalid",
+      "instance": ""
+    }
+  ],
+  "public_logs": false,
+  "public_sysinfo": false,
+  "listed": false,
+  "deleted_at": null,
+  "compose_hash": "compose-fixture-crypto-01"
+}

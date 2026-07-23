@@ -8,9 +8,11 @@
 use super::{
     DEFAULT_DOCKER_CONTAINER_PORT, DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITECHAT_SERVER_URL,
     DEFAULT_RUNTIME_READY_INTERVAL, DEFAULT_RUNTIME_READY_TIMEOUT, DockerEquivalentRuntimeEnv,
-    RunnerError, RuntimeLaunchFacts, RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions,
-    RuntimeUpgradeFacts, control_runtime_spec, creation_runtime_spec,
-    docker_equivalent_runtime_env, state_preserving_runtime_capabilities, wait_for_http_json_ready,
+    FINITE_PRIVATE_PROFILE_ID, ProviderOperationJournal, RunnerError, RuntimeLaunchFacts,
+    RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions, RuntimeUpgradeFacts,
+    control_runtime_spec, creation_runtime_spec, docker_equivalent_runtime_env,
+    hash_runtime_relay_token, random_runtime_bootstrap_token,
+    state_preserving_runtime_capabilities, wait_for_http_json_ready,
 };
 use crate::phala_inventory::{
     AppRevision, AppsPage, CurrentUserResponse, FiniteProviderInventory, InventoryContractError,
@@ -21,7 +23,8 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use finite_saas_core::{
     AgentCreationLease, ProviderOperationEnvelope, ProviderOperationTransition,
     ProviderRuntimeHandleEnvelope, ProviderRuntimeHandleV1, RunnerClass, RunnerLeaseCapacity,
-    RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeControlLease,
+    RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeControlLease, RuntimePlacement,
+    RuntimeResourceClass, RuntimeSummaryStatus,
 };
 use rand::RngCore;
 use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
@@ -215,11 +218,11 @@ impl PhalaRuntimeHandleV1 {
         }
     }
 
-    #[cfg(test)]
     fn core_envelope(&self) -> ProviderRuntimeHandleEnvelope {
         ProviderRuntimeHandleEnvelope::V1(ProviderRuntimeHandleV1 {
             runner_class: RunnerClass::Phala,
-            opaque: serde_json::to_value(PhalaRuntimeHandleEnvelope::V1(self.clone())).unwrap(),
+            opaque: serde_json::to_value(PhalaRuntimeHandleEnvelope::V1(self.clone()))
+                .expect("Phala provider handle serialization is infallible"),
         })
     }
 }
@@ -445,6 +448,95 @@ impl PhalaLauncher {
             self.config.readiness_interval,
         )
     }
+
+    fn launch_facts(
+        &self,
+        config: &PhalaConfig,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+        correlation_name: &str,
+        handle: PhalaRuntimeHandleV1,
+        cvm: &CvmInfo,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        let base_url = cvm
+            .public_application_endpoint()
+            .map_err(runner_api_error)?
+            .trim_end_matches('/')
+            .to_string();
+        let contact_url = format!("{base_url}/contact");
+        let runtime_bootstrap_token = random_runtime_bootstrap_token();
+        let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        Ok(RuntimeLaunchFacts {
+            source_host_id: config.source_host_id.clone(),
+            source_machine_id: correlation_name.to_string(),
+            runtime_artifact_id: config.runtime_artifact_id.clone(),
+            state_schema_version: config.runtime_state_schema_version.clone(),
+            provider_runtime_handle: Some(handle.core_envelope()),
+            contact_endpoint: Some(contact_url.clone()),
+            runtime_relay_token_hash,
+            display_name: Some(lease.project.display_name.clone()),
+            hostname: None,
+            runtime_host: Some(base_url),
+            runtime_status: RuntimeSummaryStatus::Online,
+            active_inference_profile: options
+                .finite_private
+                .as_ref()
+                .map(|_| FINITE_PRIVATE_PROFILE_ID.to_string()),
+            hermes_available: Some(true),
+            published_app_urls: vec![contact_url],
+        })
+    }
+
+    fn verified_existing_handle(
+        &self,
+        operation: &ProviderOperationEnvelope,
+    ) -> Result<Option<PhalaRuntimeHandleV1>, RunnerError> {
+        operation
+            .v1()
+            .transitions
+            .iter()
+            .rev()
+            .find_map(|record| match &record.transition {
+                ProviderOperationTransition::ProviderHandleRecorded {
+                    provider_runtime_handle,
+                } => Some(provider_runtime_handle),
+                _ => None,
+            })
+            .map(decode_runtime_handle)
+            .transpose()
+    }
+
+    fn reconcile_commit_started(
+        &self,
+        correlation_name: &str,
+        provision: &PersistedProvision,
+    ) -> Result<PhalaRuntimeHandleV1, RunnerError> {
+        let matches = self
+            .client()?
+            .cvm_inventory()
+            .map_err(runner_api_error)?
+            .into_iter()
+            .filter(|cvm| {
+                cvm.deleted_at.is_none()
+                    && cvm.name == correlation_name
+                    && cvm.app_id.as_deref() == Some(provision.app_id())
+            })
+            .collect::<Vec<_>>();
+        let [cvm] = matches.as_slice() else {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala commit outcome could not be reconciled to exactly one matching CVM"
+                    .to_string(),
+            ));
+        };
+        cvm.verify_finite_runtime().map_err(runner_api_error)?;
+        let handle = PhalaRuntimeHandleV1 {
+            cvm_id: cvm.id.clone(),
+            app_id: provision.app_id().to_string(),
+        };
+        handle.validate()?;
+        Ok(handle)
+    }
 }
 
 impl RuntimeLauncher for PhalaLauncher {
@@ -563,15 +655,265 @@ impl RuntimeLauncher for PhalaLauncher {
             config.runtime_state_schema_version = Some(spec.state_schema_version.clone());
         }
         config.validate()?;
-        // Render and validate the reviewed compose contract in memory only.
-        // Provider mutation stays behind the separately approved canary
-        // activation even though the two prerequisite boundaries now exist.
+        // Direct launch remains non-mutating. The activated canary path must
+        // receive Core's journal capability through
+        // launch_with_provider_operation.
         let _compose = phala_compose(&config, lease, options)?;
         Err(RunnerError::RuntimeLaunch(
-            "Phala creation is disabled until the separately approved canary activation wires the reviewed boundaries into the provider mutation state machine"
-                .to_string(),
+            "Phala creation requires the Core-owned provider-operation journal".to_string(),
         ))
     }
+
+    fn launch_with_provider_operation(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+        journal: &mut dyn ProviderOperationJournal,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        let mut config = self.config.clone();
+        if let Some(spec) = creation_runtime_spec(lease, RunnerClass::Phala)? {
+            config.image = spec.runtime_image_digest.clone();
+            config.runtime_artifact_id = Some(spec.runtime_artifact_id.clone());
+            config.runtime_artifact_kind = Some(RuntimeArtifactKind::OciImage);
+            config.runtime_state_schema_version = Some(spec.state_schema_version.clone());
+        }
+        config.validate()?;
+        let placement = lease
+            .request
+            .placement
+            .or(lease.project.placement)
+            .ok_or_else(|| {
+                RunnerError::RuntimeLaunch(
+                    "Phala creation lease did not contain a Core-owned placement".to_string(),
+                )
+            })?;
+        if placement
+            != (RuntimePlacement {
+                runner_class: RunnerClass::Phala,
+                runtime_resource_class: RuntimeResourceClass::Vcpu2Memory4Gib,
+            })
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala creation lease had an unexpected placement".to_string(),
+            ));
+        }
+        validate_capacity_reservation(lease, placement)?;
+
+        let correlation_name = phala_cvm_name_for_request_id(&lease.request.id);
+        let compose = phala_compose(&config, lease, options)?;
+        let environment = phala_runtime_environment(&config, lease, options);
+        let mut operation = lease.provider_operation.clone();
+
+        if let Some(existing) = operation.as_ref() {
+            validate_provider_operation_identity(
+                existing,
+                &lease.request.id,
+                &correlation_name,
+                placement,
+            )?;
+            if let Some(handle) = self.verified_existing_handle(existing)? {
+                let cvm = self.wait_for_running(&handle)?;
+                self.check_runtime_health(&cvm)?;
+                return self.launch_facts(&config, lease, options, &correlation_name, handle, &cvm);
+            }
+        }
+
+        if operation.is_none() {
+            operation = Some(journal.record(
+                &correlation_name,
+                placement,
+                ProviderOperationTransition::CorrelationReserved,
+            )?);
+        }
+        let last_transition = operation.as_ref().and_then(last_provider_transition);
+        if matches!(
+            last_transition,
+            Some(ProviderOperationTransition::ProvisionStarted)
+                | Some(ProviderOperationTransition::ProvisionUnknown { .. })
+        ) {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala provision outcome is unresolved; provider inventory must be reconciled before retry"
+                    .to_string(),
+            ));
+        }
+
+        if matches!(
+            last_transition,
+            None | Some(ProviderOperationTransition::CorrelationReserved)
+        ) {
+            journal.record(
+                &correlation_name,
+                placement,
+                ProviderOperationTransition::ProvisionStarted,
+            )?;
+            let request = ProvisionCvmRequest::finite_private(&correlation_name, compose)
+                .map_err(runner_api_error)?;
+            let provision = match self.client()?.provision_cvm(&request) {
+                Ok(provision) => provision,
+                Err(error @ PhalaApiError::AmbiguousMutation { .. }) => {
+                    let _ = journal.record(
+                        &correlation_name,
+                        placement,
+                        ProviderOperationTransition::ProvisionUnknown {
+                            provider_facts: serde_json::json!({
+                                "correlationName": correlation_name,
+                            }),
+                        },
+                    );
+                    return Err(runner_api_error(error));
+                }
+                Err(error) => return Err(runner_api_error(error)),
+            };
+            let provider_facts = serde_json::to_value(
+                PhalaProvisionFactsV1::from_provision(&provision).map_err(runner_api_error)?,
+            )
+            .map_err(|_| {
+                RunnerError::RuntimeLaunch(
+                    "Phala provision facts could not be serialized".to_string(),
+                )
+            })?;
+            operation = Some(journal.record(
+                &correlation_name,
+                placement,
+                ProviderOperationTransition::Provisioned { provider_facts },
+            )?);
+        }
+
+        let operation = operation.ok_or_else(|| {
+            RunnerError::RuntimeLaunch("Phala provider operation was not persisted".to_string())
+        })?;
+        let provision =
+            PersistedProvision::from_core_operation(&operation).map_err(runner_api_error)?;
+        if matches!(
+            last_provider_transition(&operation),
+            Some(ProviderOperationTransition::CommitStarted)
+        ) {
+            let handle = self.reconcile_commit_started(&correlation_name, &provision)?;
+            let cvm = self.wait_for_running(&handle)?;
+            self.check_runtime_health(&cvm)?;
+            return self.launch_facts(&config, lease, options, &correlation_name, handle, &cvm);
+        }
+        if !matches!(
+            last_provider_transition(&operation),
+            Some(ProviderOperationTransition::Provisioned { .. })
+        ) {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala provider operation was at an unsupported creation boundary".to_string(),
+            ));
+        }
+
+        let encrypted = self
+            .client()?
+            .encrypt_environment_for_provision(&provision, &environment)
+            .map_err(runner_api_error)?;
+        journal.record(
+            &correlation_name,
+            placement,
+            ProviderOperationTransition::CommitStarted,
+        )?;
+        let action = self
+            .client()?
+            .commit_provision(&provision, &encrypted)
+            .map_err(runner_api_error)?;
+        validate_provider_id(&action.id).map_err(runner_api_error)?;
+        if !action.name.is_empty() && action.name != correlation_name {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala commit returned a different correlation name".to_string(),
+            ));
+        }
+        let handle = PhalaRuntimeHandleV1 {
+            cvm_id: action.id,
+            app_id: provision.app_id().to_string(),
+        };
+        handle.validate()?;
+        let cvm = self.wait_for_running(&handle)?;
+        self.check_runtime_health(&cvm)?;
+        self.launch_facts(&config, lease, options, &correlation_name, handle, &cvm)
+    }
+}
+
+fn decode_runtime_handle(
+    outer: &ProviderRuntimeHandleEnvelope,
+) -> Result<PhalaRuntimeHandleV1, RunnerError> {
+    if outer.runner_class() != RunnerClass::Phala {
+        return Err(RunnerError::RuntimeLaunch(
+            "provider handle does not belong to the Phala runner".to_string(),
+        ));
+    }
+    let ProviderRuntimeHandleEnvelope::V1(ProviderRuntimeHandleV1 { opaque, .. }) = outer;
+    let envelope: PhalaRuntimeHandleEnvelope =
+        serde_json::from_value(opaque.clone()).map_err(|_| {
+            RunnerError::RuntimeLaunch(
+                "Phala runtime provider handle was invalid or unsupported".to_string(),
+            )
+        })?;
+    let PhalaRuntimeHandleEnvelope::V1(handle) = envelope;
+    handle.validate()?;
+    Ok(handle)
+}
+
+fn last_provider_transition(
+    operation: &ProviderOperationEnvelope,
+) -> Option<&ProviderOperationTransition> {
+    operation
+        .v1()
+        .transitions
+        .last()
+        .map(|record| &record.transition)
+}
+
+fn validate_provider_operation_identity(
+    operation: &ProviderOperationEnvelope,
+    request_id: &str,
+    correlation_name: &str,
+    placement: RuntimePlacement,
+) -> Result<(), RunnerError> {
+    let operation = operation.v1();
+    if operation.agent_creation_request_id != request_id
+        || operation.correlation_id != correlation_name
+        || operation.placement != placement
+    {
+        return Err(RunnerError::RuntimeLaunch(
+            "Core provider operation did not match the Phala creation lease".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_capacity_reservation(
+    lease: &AgentCreationLease,
+    placement: RuntimePlacement,
+) -> Result<(), RunnerError> {
+    let reservation = lease
+        .in_flight_capacity_reservation
+        .as_ref()
+        .ok_or_else(|| {
+            RunnerError::RuntimeLaunch(
+                "Phala creation requires Core's in-flight capacity acknowledgement".to_string(),
+            )
+        })?
+        .v1();
+    let operation_boundary = lease
+        .provider_operation
+        .as_ref()
+        .and_then(last_provider_transition);
+    let before_billable_resource = matches!(
+        operation_boundary,
+        None | Some(ProviderOperationTransition::CorrelationReserved)
+            | Some(ProviderOperationTransition::Provisioned { .. })
+    );
+    if reservation.request_id != lease.request.id
+        || reservation.placement != placement
+        || reservation.max_sandbox_count != 1
+        || reservation.core_in_flight_count != 1
+        || reservation.provider_inventory_count > 1
+        || (before_billable_resource && reservation.provider_inventory_count != 0)
+    {
+        return Err(RunnerError::RuntimeLaunch(
+            "Core's Phala in-flight capacity acknowledgement was invalid".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn runner_api_error(error: PhalaApiError) -> RunnerError {
@@ -1229,6 +1571,13 @@ impl PhalaApiClient {
                 Ok(response) => return Ok(response),
                 Err(ureq::Error::Status(_, response)) => {
                     let error = decode_status_error(operation, response)?;
+                    if request_kind == RequestKind::Mutation && error.is_retryable() {
+                        // Phala mutations have no provider idempotency key.
+                        // A transient response cannot prove that the server
+                        // did not accept the operation, so the Core journal
+                        // must reconcile it instead of this client retrying.
+                        return Err(PhalaApiError::AmbiguousMutation { operation });
+                    }
                     if error.is_retryable() && attempt < self.retry_policy.max_retries {
                         let delay = self.retry_policy.delay_for(attempt, error.retry_after());
                         if !delay.is_zero() {
@@ -2057,6 +2406,10 @@ impl PersistedProvision {
         Ok(Self { facts })
     }
 
+    fn app_id(&self) -> &str {
+        &self.facts.app_id
+    }
+
     #[cfg(test)]
     fn fixture(app_id: &str, compose_hash: &str) -> Self {
         Self {
@@ -2375,8 +2728,9 @@ mod tests {
     use crate::FinitePrivateLaunchKey;
     use finite_saas_core::{
         AgentCreationRequest, AgentCreationRequestStatus, AgentRuntime, HostOwnedRuntimeFacts,
-        Project, RuntimeControlKind, RuntimeControlRequest, RuntimeControlRequestStatus,
-        RuntimeSummaryStatus,
+        InFlightCapacityReservationEnvelope, InFlightCapacityReservationV1, Project,
+        ProviderOperationTransitionRecord, ProviderOperationV1, RuntimeControlKind,
+        RuntimeControlRequest, RuntimeControlRequestStatus, RuntimeSummaryStatus,
     };
     use std::collections::{BTreeMap, VecDeque};
     use std::io::{Read, Write};
@@ -2387,6 +2741,10 @@ mod tests {
 
     const FIXTURE_API_KEY: &str = "fixture-api-key-not-a-secret";
     const FIXTURE_CVM_ID: &str = "cvm_fixture_01";
+    const SIGNED_CRYPTO_KEY: &str = r#"{
+      "public_key":"e33a1832c6562067ff8f844a61e51ad051f1180b66ec2551fb0251735f3ee90a",
+      "signature":"8542c49081fbf4e03f62034f13fbf70630bdf256a53032e38465a27c36fd6bed7a5e7111652004aef37f7fd92fbfc1285212c4ae6a6154203a48f5e16cad2cef00"
+    }"#;
 
     #[derive(Debug)]
     struct CapturedRequest {
@@ -2612,6 +2970,8 @@ mod tests {
     }
 
     fn sample_creation_lease() -> AgentCreationLease {
+        let placement =
+            RuntimePlacement::for_hosting_tier(finite_saas_core::HostingTier::Confidential);
         AgentCreationLease {
             project: Project {
                 id: "project_123".to_string(),
@@ -2621,7 +2981,7 @@ mod tests {
                 agent_email: None,
                 import_candidate_id: None,
                 hosting_tier: None,
-                placement: None,
+                placement: Some(placement),
                 created_at: "2026-07-01T00:00:00Z".to_string(),
                 updated_at: "2026-07-01T00:00:00Z".to_string(),
             },
@@ -2634,7 +2994,7 @@ mod tests {
                 display_name: "Fixture Agent".to_string(),
                 runner_class: RunnerClass::Phala,
                 hosting_tier: None,
-                placement: None,
+                placement: Some(placement),
                 desired_runtime_artifact_id: None,
                 runtime_spec: None,
                 profile_picture_url: None,
@@ -2649,8 +3009,64 @@ mod tests {
                 updated_at: "2026-07-01T00:00:00Z".to_string(),
             },
             provider_operation: None,
-            in_flight_capacity_reservation: None,
+            in_flight_capacity_reservation: Some(InFlightCapacityReservationEnvelope::V1(
+                InFlightCapacityReservationV1 {
+                    request_id: "agent_request_Fixture.01".to_string(),
+                    placement,
+                    provider_inventory_count: 0,
+                    core_in_flight_count: 1,
+                    max_sandbox_count: 1,
+                },
+            )),
         }
+    }
+
+    #[derive(Default)]
+    struct FakeProviderOperationJournal {
+        operation: Option<ProviderOperationEnvelope>,
+    }
+
+    impl ProviderOperationJournal for FakeProviderOperationJournal {
+        fn record(
+            &mut self,
+            correlation_id: &str,
+            placement: RuntimePlacement,
+            transition: ProviderOperationTransition,
+        ) -> Result<ProviderOperationEnvelope, RunnerError> {
+            let mut operation = self.operation.take().unwrap_or_else(|| {
+                ProviderOperationEnvelope::V1(ProviderOperationV1 {
+                    agent_creation_request_id: "agent_request_Fixture.01".to_string(),
+                    correlation_id: correlation_id.to_string(),
+                    placement,
+                    transitions: Vec::new(),
+                })
+            });
+            let sequence = operation.v1().transitions.len() as u32;
+            let ProviderOperationEnvelope::V1(operation_v1) = &mut operation;
+            operation_v1
+                .transitions
+                .push(ProviderOperationTransitionRecord {
+                    sequence,
+                    transition,
+                    recorded_at: format!("2026-07-23T12:00:{sequence:02}Z"),
+                });
+            self.operation = Some(operation.clone());
+            Ok(operation)
+        }
+    }
+
+    fn creation_lease_with_operation(
+        operation: ProviderOperationEnvelope,
+        provider_inventory_count: u32,
+    ) -> AgentCreationLease {
+        let mut lease = sample_creation_lease();
+        lease.provider_operation = Some(operation);
+        let InFlightCapacityReservationEnvelope::V1(reservation) = lease
+            .in_flight_capacity_reservation
+            .as_mut()
+            .expect("fixture reservation");
+        reservation.provider_inventory_count = provider_inventory_count;
+        lease
     }
 
     fn sample_control_lease(
@@ -2963,7 +3379,11 @@ mod tests {
         let launch_error = launcher
             .launch(&sample_creation_lease(), &RuntimeLaunchOptions::default())
             .unwrap_err();
-        assert!(launch_error.to_string().contains("creation is disabled"));
+        assert!(
+            launch_error
+                .to_string()
+                .contains("requires the Core-owned provider-operation journal")
+        );
         assert!(server.requests().is_empty());
     }
 
@@ -3200,13 +3620,17 @@ mod tests {
     }
 
     #[test]
-    fn create_upgrade_and_destroy_are_fail_closed_without_provider_mutation() {
+    fn create_without_core_journal_and_unapproved_lifecycle_paths_are_fail_closed() {
         let server = FakePhalaServer::start(Vec::new());
         let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
         let creation = launcher
             .launch(&sample_creation_lease(), &RuntimeLaunchOptions::default())
             .unwrap_err();
-        assert!(creation.to_string().contains("creation is disabled"));
+        assert!(
+            creation
+                .to_string()
+                .contains("requires the Core-owned provider-operation journal")
+        );
 
         let control = sample_control_lease(
             RuntimeControlKind::Upgrade,
@@ -3221,6 +3645,200 @@ mod tests {
         );
         assert!(launcher.destroy_runtime(&control).is_err());
         assert!(server.requests().is_empty());
+    }
+
+    #[test]
+    fn core_journaled_creation_crosses_each_boundary_once_and_never_sends_plaintext_secrets() {
+        let server = FakePhalaServer::start(vec![
+            json_response(include_str!(
+                "../tests/fixtures/phala/provision_crypto.json"
+            )),
+            json_response(SIGNED_CRYPTO_KEY),
+            json_response(include_str!("../tests/fixtures/phala/action-crypto.json")),
+            json_response(include_str!(
+                "../tests/fixtures/phala/cvm-detail-crypto.json"
+            )),
+        ]);
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+        let mut journal = FakeProviderOperationJournal::default();
+        let options = RuntimeLaunchOptions {
+            secret_environment: BTreeMap::from([(
+                "FINITE_SPECIALIZATION_WORKER_API_KEY".to_string(),
+                "never-send-this-plaintext".to_string(),
+            )]),
+            ..RuntimeLaunchOptions::default()
+        };
+
+        let facts = launcher
+            .launch_with_provider_operation(&sample_creation_lease(), &options, &mut journal)
+            .unwrap();
+
+        assert_eq!(facts.source_machine_id, "finite-agent-fixture-01");
+        assert_eq!(
+            facts.runtime_host.as_deref(),
+            Some("https://crypto-fixture.example.invalid")
+        );
+        assert_eq!(
+            journal
+                .operation
+                .as_ref()
+                .unwrap()
+                .v1()
+                .transitions
+                .iter()
+                .map(|record| std::mem::discriminant(&record.transition))
+                .collect::<Vec<_>>(),
+            vec![
+                std::mem::discriminant(&ProviderOperationTransition::CorrelationReserved),
+                std::mem::discriminant(&ProviderOperationTransition::ProvisionStarted),
+                std::mem::discriminant(&ProviderOperationTransition::Provisioned {
+                    provider_facts: serde_json::Value::Null,
+                }),
+                std::mem::discriminant(&ProviderOperationTransition::CommitStarted),
+            ]
+        );
+        let requests = server.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| (request.method.as_str(), request.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/api/v1/cvms/provision"),
+                (
+                    "GET",
+                    "/api/v1/kms/phala/pubkey/0000000000000000000000000000000000000000"
+                ),
+                ("POST", "/api/v1/cvms"),
+                ("GET", "/api/v1/cvms/cvm_crypto_01"),
+            ]
+        );
+        assert!(requests.iter().all(|request| {
+            !String::from_utf8_lossy(&request.body).contains("never-send-this-plaintext")
+        }));
+    }
+
+    #[test]
+    fn ambiguous_provision_is_journaled_and_retry_never_reprovisions() {
+        let first_server = FakePhalaServer::start(vec![FixtureResponse::Close]);
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), first_server.client());
+        let mut journal = FakeProviderOperationJournal::default();
+
+        let error = launcher
+            .launch_with_provider_operation(
+                &sample_creation_lease(),
+                &RuntimeLaunchOptions::default(),
+                &mut journal,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("outcome is unknown"));
+        assert_eq!(first_server.requests().len(), 1);
+        assert!(matches!(
+            last_provider_transition(journal.operation.as_ref().unwrap()),
+            Some(ProviderOperationTransition::ProvisionUnknown { .. })
+        ));
+
+        let retry_server = FakePhalaServer::start(Vec::new());
+        let mut retry_launcher =
+            PhalaLauncher::with_client(launcher_config(), retry_server.client());
+        let retry_lease = creation_lease_with_operation(journal.operation.clone().unwrap(), 0);
+        let mut retry_journal = FakeProviderOperationJournal {
+            operation: journal.operation,
+        };
+        let retry_error = retry_launcher
+            .launch_with_provider_operation(
+                &retry_lease,
+                &RuntimeLaunchOptions::default(),
+                &mut retry_journal,
+            )
+            .unwrap_err();
+        assert!(retry_error.to_string().contains("must be reconciled"));
+        assert!(retry_server.requests().is_empty());
+    }
+
+    #[test]
+    fn reserved_operation_cannot_mutate_when_provider_inventory_already_consumes_cap() {
+        let placement =
+            RuntimePlacement::for_hosting_tier(finite_saas_core::HostingTier::Confidential);
+        let mut journal = FakeProviderOperationJournal::default();
+        let operation = journal
+            .record(
+                "finite-agent-fixture-01",
+                placement,
+                ProviderOperationTransition::CorrelationReserved,
+            )
+            .unwrap();
+        let lease = creation_lease_with_operation(operation, 1);
+        let server = FakePhalaServer::start(Vec::new());
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), server.client());
+
+        let error = launcher
+            .launch_with_provider_operation(&lease, &RuntimeLaunchOptions::default(), &mut journal)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("capacity acknowledgement was invalid")
+        );
+        assert!(server.requests().is_empty());
+    }
+
+    #[test]
+    fn ambiguous_commit_retry_adopts_exact_inventory_match_without_second_commit() {
+        let first_server = FakePhalaServer::start(vec![
+            json_response(include_str!(
+                "../tests/fixtures/phala/provision_crypto.json"
+            )),
+            json_response(SIGNED_CRYPTO_KEY),
+            FixtureResponse::Close,
+        ]);
+        let mut launcher = PhalaLauncher::with_client(launcher_config(), first_server.client());
+        let mut journal = FakeProviderOperationJournal::default();
+
+        let error = launcher
+            .launch_with_provider_operation(
+                &sample_creation_lease(),
+                &RuntimeLaunchOptions::default(),
+                &mut journal,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("outcome is unknown"));
+        assert!(matches!(
+            last_provider_transition(journal.operation.as_ref().unwrap()),
+            Some(ProviderOperationTransition::CommitStarted)
+        ));
+
+        let retry_server = FakePhalaServer::start(vec![
+            json_response(include_str!("../tests/fixtures/phala/cvm-list-crypto.json")),
+            json_response(include_str!(
+                "../tests/fixtures/phala/cvm-detail-crypto.json"
+            )),
+        ]);
+        let mut retry_launcher =
+            PhalaLauncher::with_client(launcher_config(), retry_server.client());
+        let retry_lease = creation_lease_with_operation(journal.operation.clone().unwrap(), 1);
+        let mut retry_journal = FakeProviderOperationJournal {
+            operation: journal.operation,
+        };
+        let facts = retry_launcher
+            .launch_with_provider_operation(
+                &retry_lease,
+                &RuntimeLaunchOptions::default(),
+                &mut retry_journal,
+            )
+            .unwrap();
+        assert_eq!(facts.source_machine_id, "finite-agent-fixture-01");
+        assert_eq!(
+            retry_server
+                .requests()
+                .iter()
+                .map(|request| (request.method.as_str(), request.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("GET", "/api/v1/cvms/paginated?page=1&page_size=100"),
+                ("GET", "/api/v1/cvms/cvm_crypto_01"),
+            ]
+        );
     }
 
     #[test]
@@ -3609,6 +4227,27 @@ mod tests {
             error,
             PhalaApiError::AmbiguousMutation {
                 operation: "restart_cvm"
+            }
+        );
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn transient_mutation_status_is_ambiguous_and_never_retried() {
+        let server = FakePhalaServer::start(vec![FixtureResponse::Http {
+            status: 503,
+            headers: vec![("Retry-After", "0")],
+            body: r#"{"message":"fixture transient"}"#,
+        }]);
+        let request = ProvisionCvmRequest::finite_private(
+            "finite-agent-fixture-01",
+            "services:\n  agent:\n    image: example.invalid/finite@sha256:fixture",
+        )
+        .unwrap();
+        assert_eq!(
+            server.client().provision_cvm(&request).unwrap_err(),
+            PhalaApiError::AmbiguousMutation {
+                operation: "provision_cvm"
             }
         );
         assert_eq!(server.requests().len(), 1);

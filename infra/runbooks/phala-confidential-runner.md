@@ -1,11 +1,11 @@
-# Phala confidential Runner — dark worker and API-only operations
+# Phala confidential Runner — single canary and API-only operations
 
 This runbook covers the separately fenced Phala worker defined by
-`infra/nixos/modules/finite-saas-phala-runner.nix`. The checked-in unit is
-**dark**: it has no `wantedBy`, no timer, is hard-drained, and has ordinary
-capacity one. Merging or deploying its definition does not authorize starting
-it, creating a Phala resource, installing credentials, enabling Confidential
-placement, or admitting a customer.
+`infra/nixos/modules/finite-saas-phala-runner.nix`. The ACTIVE readiness run
+authorizes this checked-in generation to start automatically and admit exactly
+one internal Confidential launch-code canary owned by `paul@finite.vip`. It
+does not authorize a second resource, Stripe activation, customer admission,
+provider-console creation, deletion, or a higher cap.
 
 Phala and Kata may initially share finite-lat-1. That is a common host failure
 domain, not high availability. They remain different worker identities,
@@ -56,16 +56,15 @@ replace the pinned origin with a general outbound proxy or configurable URL.
 
 ## Preconditions — all required before a live start
 
-1. The Phala readiness run is ACTIVE and the Stripe prerequisite named there
-   is closed. Starting a live worker or spending money has separate explicit
-   authorization.
+1. The Phala readiness run is ACTIVE and records explicit authorization for
+   this one internal paid canary. The Stripe activation run remains PAUSED.
 2. The shipped `finite-saas-runner` uses the reviewed typed HTTPS adapter for
    every Phala operation. Source/static checks show no Phala subprocess,
    `FC_RUNNER_PHALA_BIN`, provider CLI package, or delete capability.
-3. Core has additive placement/handle readers, a credential keyring entry
-   bound to the fixed worker identity, class and source host, and creation is
-   disabled. The previous Core/Runner generation can still read/control the
-   new opaque handle envelope.
+3. Core has additive placement/handle readers and a distinct credential
+   keyring entry bound to the fixed worker identity, class and source host.
+   The previous Core/Runner generation can still read/control the new opaque
+   handle envelope.
 4. The exact canonical Runtime digest passed local Docker and the immediately
    preceding Kata rung. The same Core artifact id is in
    `/etc/finite/phala-runner.env`; no mutable image reference is accepted.
@@ -82,7 +81,7 @@ replace the pinned origin with a general outbound proxy or configurable URL.
    `infra/hosts/lat1/systemd/phala-runner.env.example`, is `root:root 0600`, and
    contains non-empty distinct credentials. Never print or `source` it.
 
-If any precondition is false, leave the unit dark and stop.
+If any precondition is false, drain the worker and stop.
 
 The repository now supplies the two code prerequisites for this boundary.
 Runner verifies the provision-bound, KMS-signed X25519 key against the returned
@@ -91,30 +90,28 @@ and pins independent encryption plus official dstack signature vectors. Core
 atomically serializes Phala leases, combines the submitted provider count with
 all Core `launching` requests, and returns a versioned reservation
 acknowledgement. A green provider preflight can therefore advertise its real
-count to Core; a failure still drains. The checked-in dark worker remains
-explicitly drained, and provider creation/update remain disabled until the
-separately approved canary activation wires and exercises those boundaries.
-Do not bypass that activation by constructing encrypted envelopes or provider
-requests from an operations shell.
+count to Core; a failure still drains. Creation is enabled only through the
+Core-owned append-only provider-operation journal. Update and provider delete
+remain disabled. Do not bypass that path by constructing encrypted envelopes
+or provider requests from an operations shell.
 
-## Dark deployment verification
+## Canary deployment verification
 
-A separately authorized Nix deployment may install the definition while it
-remains dark. These read-only checks must all pass:
+After the exact merged generation is deployed, these read-only checks must all
+pass:
 
 ```sh
-systemctl is-enabled finite-saas-runner-phala.service  # expected: disabled
-systemctl is-active finite-saas-runner-phala.service   # expected: inactive
+systemctl is-enabled finite-saas-runner-phala.service  # expected: enabled
+systemctl is-active finite-saas-runner-phala.service   # expected: active
 systemctl cat finite-saas-runner-phala.service
 systemd-analyze security finite-saas-runner-phala.service
 ```
 
-Inspect only non-secret unit facts. Confirm there is no timer, `WantedBy`,
-containerd requirement, socket access, provider CLI path, or privilege. Do not
-use `systemctl enable` as an activation shortcut. A future canary generation
-must deliberately change the checked-in drain/start policy after all gates and
-authorization; rollback changes new admission back off while retaining
-lifecycle control for known CVMs.
+Inspect only non-secret unit facts. Confirm there is no timer, containerd
+requirement, socket access, provider CLI path, or privilege; `WantedBy` must be
+exactly `multi-user.target`. Activation comes only from the checked-in Nix
+generation, never an imperative `systemctl enable`. Rollback changes new
+admission back off while retaining lifecycle control for known CVMs.
 
 ## API request discipline
 
@@ -399,11 +396,10 @@ changing placement, abandoning a handle, or deleting a resource.
 
 ## Worker service operations
 
-Only after every precondition and explicit live-start authorization, a dark
-preflight can be run with the checked-in drain still true:
+After every precondition and exact-generation deployment:
 
 ```sh
-systemctl start finite-saas-runner-phala.service
+systemctl is-enabled finite-saas-runner-phala.service
 systemctl status finite-saas-runner-phala.service
 journalctl -u finite-saas-runner-phala.service --since today
 ```
@@ -411,8 +407,8 @@ journalctl -u finite-saas-runner-phala.service --since today
 Logs must contain only redacted operation/state facts. Stop immediately if a
 secret, encrypted environment, user content, raw quote, or full provider
 response appears. `systemctl stop finite-saas-runner-phala.service` stops only
-the control worker; it does not change a CVM. Keep the unit disabled until a
-reviewed Nix generation deliberately supplies the accepted start policy.
+the control worker; it does not change a CVM. Do not use imperative enablement
+or provider-console mutation.
 
 ## Stop and escalate
 

@@ -1,17 +1,19 @@
 use finite_saas_core::{
     AgentCreationLease, AgentCreationRequest, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput, ProviderRuntimeHandleEnvelope,
+    FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RegisterAgentCreationRuntimeInput, RelayHeartbeat, RenewRuntimeControlRequestInput,
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeResourceClass,
-    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePlacement,
+    RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
+    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
     runtime_relay_token_hash as hash_runtime_relay_token,
 };
 #[cfg(test)]
-use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1, RuntimePlacement};
+use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -495,7 +497,20 @@ where
                 });
             }
         };
-        match self.launcher.launch(&lease, &launch_options) {
+        let launch = {
+            let mut provider_operation_journal = QueueProviderOperationJournal {
+                queue: &mut self.queue,
+                request_id: &request_id,
+                runner_id: &self.runner_id,
+                lease_token: &lease_token,
+            };
+            self.launcher.launch_with_provider_operation(
+                &lease,
+                &launch_options,
+                &mut provider_operation_journal,
+            )
+        };
+        match launch {
             Ok(facts) => {
                 let launch_result = self.queue.register_agent_creation_runtime(
                     &request_id,
@@ -1128,6 +1143,12 @@ pub trait AgentCreationQueue {
         input: RegisterAgentCreationRuntimeInput,
     ) -> Result<AgentCreationLease, RunnerError>;
 
+    fn record_provider_operation_transition(
+        &mut self,
+        request_id: &str,
+        input: RecordProviderOperationTransitionRequest,
+    ) -> Result<ProviderOperationEnvelope, RunnerError>;
+
     fn runtime_heartbeat_for_machine(
         &mut self,
         source_machine_id: &str,
@@ -1144,6 +1165,45 @@ pub trait AgentCreationQueue {
         request_id: &str,
         input: FailAgentCreationRequestInput,
     ) -> Result<AgentCreationRequest, RunnerError>;
+}
+
+pub trait ProviderOperationJournal {
+    fn record(
+        &mut self,
+        correlation_id: &str,
+        placement: RuntimePlacement,
+        transition: ProviderOperationTransition,
+    ) -> Result<ProviderOperationEnvelope, RunnerError>;
+}
+
+struct QueueProviderOperationJournal<'a, Q> {
+    queue: &'a mut Q,
+    request_id: &'a str,
+    runner_id: &'a str,
+    lease_token: &'a str,
+}
+
+impl<Q> ProviderOperationJournal for QueueProviderOperationJournal<'_, Q>
+where
+    Q: AgentCreationQueue,
+{
+    fn record(
+        &mut self,
+        correlation_id: &str,
+        placement: RuntimePlacement,
+        transition: ProviderOperationTransition,
+    ) -> Result<ProviderOperationEnvelope, RunnerError> {
+        self.queue.record_provider_operation_transition(
+            self.request_id,
+            RecordProviderOperationTransitionRequest {
+                runner_id: self.runner_id.to_string(),
+                lease_token: self.lease_token.to_string(),
+                correlation_id: correlation_id.to_string(),
+                placement,
+                transition,
+            },
+        )
+    }
 }
 
 pub trait RuntimeLauncher {
@@ -1215,6 +1275,14 @@ pub trait RuntimeLauncher {
         lease: &AgentCreationLease,
         options: &RuntimeLaunchOptions,
     ) -> Result<RuntimeLaunchFacts, RunnerError>;
+    fn launch_with_provider_operation(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+        _journal: &mut dyn ProviderOperationJournal,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        self.launch(lease, options)
+    }
     fn cleanup_failed_launch(&mut self, _facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
         Ok(())
     }
@@ -1298,6 +1366,15 @@ where
         options: &RuntimeLaunchOptions,
     ) -> Result<RuntimeLaunchFacts, RunnerError> {
         (**self).launch(lease, options)
+    }
+
+    fn launch_with_provider_operation(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+        journal: &mut dyn ProviderOperationJournal,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        (**self).launch_with_provider_operation(lease, options, journal)
     }
 
     fn cleanup_failed_launch(&mut self, facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {
@@ -2122,6 +2199,20 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
         self.post_json(
             &format!(
                 "/api/core/v1/agent-creation-requests/{}/runtime",
+                request_id
+            ),
+            &input,
+        )
+    }
+
+    fn record_provider_operation_transition(
+        &mut self,
+        request_id: &str,
+        input: RecordProviderOperationTransitionRequest,
+    ) -> Result<ProviderOperationEnvelope, RunnerError> {
+        self.post_json(
+            &format!(
+                "/api/core/v1/agent-creation-requests/{}/provider-operation/transitions",
                 request_id
             ),
             &input,
@@ -3644,7 +3735,7 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn random_runtime_bootstrap_token() -> String {
+pub(crate) fn random_runtime_bootstrap_token() -> String {
     let mut bytes = [0_u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
@@ -5722,6 +5813,7 @@ mod tests {
         retried_runtime_control: Vec<RetryRuntimeControlRequestInput>,
         provisioned: Vec<ProvisionFinitePrivateRuntimeKeyInput>,
         registered: Vec<RegisterAgentCreationRuntimeInput>,
+        provider_operation_transitions: Vec<RecordProviderOperationTransitionRequest>,
         heartbeat_checks: Vec<String>,
         completed: Vec<CompleteAgentCreationRequestInput>,
         failed: Vec<FailAgentCreationRequestInput>,
@@ -5745,6 +5837,7 @@ mod tests {
                 retried_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
                 registered: Vec::new(),
+                provider_operation_transitions: Vec::new(),
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
@@ -5768,6 +5861,7 @@ mod tests {
                 retried_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
                 registered: Vec::new(),
+                provider_operation_transitions: Vec::new(),
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
@@ -5791,6 +5885,7 @@ mod tests {
                 retried_runtime_control: Vec::new(),
                 provisioned: Vec::new(),
                 registered: Vec::new(),
+                provider_operation_transitions: Vec::new(),
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
@@ -5903,6 +5998,17 @@ mod tests {
         ) -> Result<AgentCreationLease, RunnerError> {
             self.registered.push(input);
             Ok(sample_lease("agent_request_123"))
+        }
+
+        fn record_provider_operation_transition(
+            &mut self,
+            _request_id: &str,
+            input: RecordProviderOperationTransitionRequest,
+        ) -> Result<ProviderOperationEnvelope, RunnerError> {
+            self.provider_operation_transitions.push(input);
+            Err(RunnerError::CoreRequest(
+                "fake queue has no provider-operation state machine".to_string(),
+            ))
         }
 
         fn runtime_heartbeat_for_machine(
