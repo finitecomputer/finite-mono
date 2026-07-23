@@ -238,6 +238,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Failed containerized matrix runs intentionally preserve root-owned
+          # diagnostics under ignored .local-state paths. Each run creates a
+          # fresh state directory, so checkout must not try to delete them.
+          clean: false
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: Swatinem/rust-cache@v2
       - name: Install Brain matrix browser
