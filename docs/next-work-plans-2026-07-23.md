@@ -64,12 +64,15 @@ make immediate sense to humans and retain a compact agent handoff.
   `max-age=0`, while Cloudflare changed cacheable JS/CSS to a four-hour browser
   TTL. Fresh HTML could therefore load old assets. `no-store` survives the edge
   unchanged.
-- [PR #196](https://github.com/finitecomputer/finite-mono/pull/196) is
-  **not ready to merge**. Its first implementation used
-  `HERMES_SESSION_ID`, which is absent on cached later turns. The corrected
-  design must use the every-turn session key and an authenticated Finite-turn
-  marker; Finite currently appears as Hermes `LOCAL`, so a platform-name check
-  alone is insufficient.
+- [PR #196](https://github.com/finitecomputer/finite-mono/pull/196) is merged.
+  Its corrected implementation uses the every-turn session key plus an
+  adapter-owned authenticated Finite-turn marker and covers a cached second
+  turn. It does not depend on `HERMES_SESSION_ID`, which is absent on cached
+  later turns, or on the Hermes platform name alone, because Finite currently
+  appears as `LOCAL`.
+- Release, Sites deployment, and Agent Runtime rollout remain separate live
+  actions in
+  [`infra/deployment-queue.md`](../infra/deployment-queue.md).
 
 ### Bounded implementation
 

@@ -52,10 +52,15 @@ promoted artifact and either explicit Project ids or `--roll-all` plus an
 already-target canary, then requires the prepared plan hash before mutation.
 Never infer a bot rollout from the word “deploy.”
 
+Merged work not yet known to be released or deployed is tracked by surface in
+[`deployment-queue.md`](deployment-queue.md). The queue is a handoff, not
+production-mutation authority.
+
 ## Layout
 
 ```
 infra/
+  deployment-queue.md  # merged work awaiting a release/deploy/rollout
   nixos/       # finite-lat-1 AS CODE — the live definition of the app server
   hosts/
     lat1/      # finite-lat-1 (64.34.82.77) — PRE-CUTOVER k3s reference only (superseded by infra/nixos/)
