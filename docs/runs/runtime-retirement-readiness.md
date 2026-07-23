@@ -303,6 +303,34 @@ membership, deactivate the Runtime link, remove relay credentials, revoke
 scoped Finite Private keys, and retain all Project, Runtime, link, and audit
 history. This releases inventory; it does not claim or create a backup.
 
+### Operator retirement for managed test deploys
+
+An operator may retire a clearly identified Finite-managed test deployment with
+`finite-saas-core runtime-retire-exact`. The command requires the reviewed
+Project, Runtime, source host, and source machine identifiers, records the
+operator identity in the existing admin audit log, and fails closed if the
+active binding changed. It enqueues the normal `destroy` control and waits for
+the same encrypted off-host Recovery Snapshot, verified readback, compute
+removal, credential revocation, and Core offboarding used by owner retirement.
+It is not an unrecoverable archive, owner impersonation, direct database edit,
+or container deletion.
+
+Run it only from the root-only Core environment on the deployed host:
+
+```console
+finite-saas-core runtime-retire-exact \
+  --project-id <project> \
+  --expected-agent-runtime-id <runtime> \
+  --expected-source-host-id <host> \
+  --expected-source-machine-id <machine> \
+  --admin-email <operator-email> \
+  --admin-workos-user-id <operator-workos-user-id>
+```
+
+The command prints the terminal control request. A failure or timeout retains
+the same retryable request and recovery state; do not enqueue another target or
+fall back to manual cleanup.
+
 ### Product surface
 
 - Rename the existing disabled **Remove agent** action to **Retire agent**.

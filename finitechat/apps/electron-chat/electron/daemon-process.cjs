@@ -157,6 +157,100 @@ function loadOrCreateDeviceId({
   return deviceId;
 }
 
+function pathExists(filePath, fileSystem = fs) {
+  try {
+    fileSystem.statSync(filePath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+/**
+ * Preserve a revoked Device's complete local cryptographic profile, then
+ * clear only the identity fields needed for the existing link flow to create
+ * a fresh Device. The dashboard Chromium profile and sign-in session stay in
+ * place. Any partial filesystem failure rolls the old profile back.
+ */
+function archiveRevokedDeviceProfile({
+  userDataDirectory,
+  daemonDataDirectory,
+  settingsFile,
+  secretFile,
+  deviceId,
+  now = new Date(),
+  randomUUID = crypto.randomUUID,
+  fileSystem = fs,
+}) {
+  if (!path.isAbsolute(userDataDirectory) || !validDeviceId(deviceId)) {
+    throw new Error("Finite Chat cannot archive an invalid Device profile");
+  }
+  const settings = readJsonObject(settingsFile, fileSystem);
+  if (settings.deviceId !== deviceId) {
+    throw new Error("Finite Chat Device settings changed before recovery");
+  }
+
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  const backupRoot = path.join(userDataDirectory, "revoked-device-backups");
+  const backupDirectory = path.join(backupRoot, `${stamp}-${randomUUID()}`);
+  const backupDaemonDirectory = path.join(backupDirectory, "finitechatd");
+  const backupSecretFile = path.join(backupDirectory, "account-secret.safe");
+  const backupSettingsFile = path.join(backupDirectory, "desktop-settings.json");
+  const settingsExisted = pathExists(settingsFile, fileSystem);
+  let movedDaemon = false;
+  let movedSecret = false;
+
+  fileSystem.mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+  fileSystem.mkdirSync(backupDirectory, { recursive: false, mode: 0o700 });
+  try {
+    writeJsonObject(backupSettingsFile, settings, fileSystem);
+    if (pathExists(daemonDataDirectory, fileSystem)) {
+      fileSystem.renameSync(daemonDataDirectory, backupDaemonDirectory);
+      movedDaemon = true;
+    }
+    if (pathExists(secretFile, fileSystem)) {
+      fileSystem.renameSync(secretFile, backupSecretFile);
+      movedSecret = true;
+    }
+
+    const nextSettings = { ...settings };
+    delete nextSettings.deviceId;
+    delete nextSettings.pendingDeviceLink;
+    writeJsonObject(settingsFile, nextSettings, fileSystem);
+    writeJsonObject(
+      path.join(backupDirectory, "recovery.json"),
+      {
+        version: 1,
+        reason: "device_revoked",
+        device_id: deviceId,
+        archived_at: now.toISOString(),
+      },
+      fileSystem
+    );
+    return { backupDirectory };
+  } catch (error) {
+    try {
+      if (settingsExisted) {
+        writeJsonObject(settingsFile, settings, fileSystem);
+      } else {
+        fileSystem.rmSync(settingsFile, { force: true });
+      }
+      if (movedSecret && !pathExists(secretFile, fileSystem)) {
+        fileSystem.renameSync(backupSecretFile, secretFile);
+      }
+      if (movedDaemon && !pathExists(daemonDataDirectory, fileSystem)) {
+        fileSystem.renameSync(backupDaemonDirectory, daemonDataDirectory);
+      }
+      fileSystem.rmSync(backupDirectory, { recursive: true, force: true });
+    } catch {
+      // Preserve the original failure. The bounded backup path remains the
+      // recovery boundary if a rollback operation itself cannot complete.
+    }
+    throw error;
+  }
+}
+
 class AccountSecretStore {
   constructor({ secretPath, safeStorage, fileSystem = fs }) {
     this.secretPath = secretPath;
@@ -995,6 +1089,7 @@ module.exports = {
   directoryHasEntries,
   legacyHostnameDeviceId,
   loadOrCreateDeviceId,
+  archiveRevokedDeviceProfile,
   parseReadyRecord,
   parseDeviceLinkReadyRecord,
   parseDeviceLinkSecretRecord,

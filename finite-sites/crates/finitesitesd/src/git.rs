@@ -266,18 +266,32 @@ async fn handle_git(
             if wants_receive_pack && response.status().is_success() && state.git_auto_reconcile {
                 let state = state.clone();
                 let project_id = auth.project_id().to_string();
-                tokio::task::spawn_blocking(move || {
+                let reconcile = tokio::task::spawn_blocking(move || {
                     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-                    if let Err(error) = reconcile_pending_events_with_apps(
+                    reconcile_pending_events_with_apps(
                         &mut engine,
                         &state.data_dir,
                         Some(&project_id),
                         now_unix(),
                         Some(&state.apps),
-                    ) {
+                    )
+                })
+                .await;
+                match reconcile {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
                         eprintln!("git receive-pack reconcile failed: {error}");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "git ref accepted but deploy failed; push a correcting commit",
+                        )
+                            .into_response();
                     }
-                });
+                    Err(_join) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "git deploy task failed")
+                            .into_response();
+                    }
+                }
             }
             response
         }

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -24,7 +26,13 @@ from pathlib import Path
 from typing import Any
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    SendResult,
+    build_session_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +53,39 @@ STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
 SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
+ADMISSION_RECHECK_SECS = 0.05
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
+REQUESTER_CONTEXT_DIR = "requester-context-v1"
+REQUESTER_CONTEXT_TTL_SECS = 15 * 60
+REQUESTER_CONTEXT_VERSION = 1
+_AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "finitechat_authenticated_turn_user", default=None
+)
+APPROVAL_CONTROL_TEXT = frozenset(
+    {
+        "approve",
+        "yes",
+        "ok",
+        "okay",
+        "confirm",
+        "y",
+        "👍",
+        "deny",
+        "no",
+        "reject",
+        "cancel",
+        "n",
+        "👎",
+        "always",
+        "approve always",
+        "always approve",
+        "session",
+        "approve session",
+        "session approve",
+    }
+)
 
 # Hermes 0.18.2 does not pass a semantic progress flag to platform adapters.
 # Pin its real registry prefix -> tool-name pairs and friendly prefix -> verb
@@ -172,6 +210,181 @@ def _load_local_env_defaults(path: Path | None = None) -> None:
 _load_local_env_defaults()
 
 
+class _RequesterContextBroker:
+    """Lease authenticated Finite sender context to turn-local subprocesses.
+
+    Hermes already isolates the session variables with ContextVars and copies
+    the active values into terminal subprocesses. The small file lease lets
+    `fsite` distinguish that live binding from arbitrary or stale environment
+    text without teaching Sites about Chat or Hermes.
+    """
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = root or _requester_context_root()
+        self._lock = threading.Lock()
+        self._leases: dict[str, dict[str, tuple[int, int]]] = {}
+        self._clear_on_start()
+
+    def before_tool_call(self, **kwargs: Any) -> None:
+        if str(kwargs.get("tool_name") or "") != "terminal":
+            return
+        session_key, user_id = _active_finite_session()
+        if session_key is None or user_id is None:
+            return
+        lease_id = _requester_context_lease_id(kwargs)
+        now = int(time.time())
+        with self._lock:
+            self._prune(now)
+            session_leases = self._leases.setdefault(session_key, {})
+            count, _ = session_leases.get(lease_id, (0, 0))
+            session_leases[lease_id] = (
+                count + 1,
+                now + REQUESTER_CONTEXT_TTL_SECS,
+            )
+            self._write(
+                session_key=session_key,
+                user_id=user_id,
+                expires_at_unix=now + REQUESTER_CONTEXT_TTL_SECS,
+            )
+
+    def after_tool_call(self, **kwargs: Any) -> None:
+        if str(kwargs.get("tool_name") or "") != "terminal":
+            return
+        session_key, _ = _active_finite_session()
+        if session_key is None:
+            return
+        lease_id = _requester_context_lease_id(kwargs)
+        with self._lock:
+            session_leases = self._leases.get(session_key)
+            if session_leases is None:
+                self._remove(session_key)
+                return
+            count, expires_at = session_leases.get(lease_id, (0, 0))
+            if count <= 1:
+                session_leases.pop(lease_id, None)
+            else:
+                session_leases[lease_id] = (count - 1, expires_at)
+            if not session_leases:
+                self._leases.pop(session_key, None)
+                self._remove(session_key)
+
+    def _clear_on_start(self) -> None:
+        try:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.root.chmod(0o700)
+            for path in self.root.iterdir():
+                if path.is_file() or path.is_symlink():
+                    path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("[finitechat] could not reset requester context leases: %s", exc)
+
+    def _prune(self, now: int) -> None:
+        for leases in self._leases.values():
+            for lease_id, (_, expires_at) in list(leases.items()):
+                if expires_at <= now:
+                    leases.pop(lease_id, None)
+        expired_keys = [session_key for session_key, leases in self._leases.items() if not leases]
+        for session_key in expired_keys:
+            self._leases.pop(session_key, None)
+            self._remove(session_key)
+        try:
+            for path in self.root.glob("*.json"):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    expires_at = int(payload.get("expires_at_unix") or 0)
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    expires_at = 0
+                if expires_at <= now:
+                    path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _write(self, *, session_key: str, user_id: str, expires_at_unix: int) -> None:
+        try:
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            final_path = self.root / _requester_context_filename(session_key)
+            temp_path = self.root / f".{final_path.name}.{os.getpid()}.tmp"
+            payload = {
+                "version": REQUESTER_CONTEXT_VERSION,
+                "session_key": session_key,
+                "platform": FINITE_PLATFORM_NAME,
+                "requesting_user_id": user_id,
+                "expires_at_unix": expires_at_unix,
+            }
+            with temp_path.open("w", encoding="utf-8") as handle:
+                os.chmod(temp_path, 0o600)
+                json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_path.replace(final_path)
+        except OSError as exc:
+            logger.warning("[finitechat] could not write requester context lease: %s", exc)
+
+    def _remove(self, session_key: str) -> None:
+        with contextlib.suppress(OSError):
+            (self.root / _requester_context_filename(session_key)).unlink(missing_ok=True)
+
+
+def _requester_context_root() -> Path:
+    finite_home = str(os.getenv("FINITE_HOME") or "").strip()
+    root = Path(finite_home).expanduser() if finite_home else Path.home() / ".finite"
+    return root / REQUESTER_CONTEXT_DIR
+
+
+def _requester_context_filename(session_key: str) -> str:
+    digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()
+    return f"{digest}.json"
+
+
+def _requester_context_lease_id(kwargs: dict[str, Any]) -> str:
+    return ":".join(
+        str(kwargs.get(name) or "")
+        for name in ("tool_call_id", "task_id", "turn_id", "api_request_id")
+    )
+
+
+def _active_finite_session() -> tuple[str | None, str | None]:
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return None, None
+    platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+    session_key = str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
+    user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
+    authenticated_turn_user = _AUTHENTICATED_FINITE_TURN_USER.get()
+    if (
+        # Hermes 0.18.2 maps plugin platforms that are not enum members to
+        # LOCAL. The adapter-owned ContextVar below is the Finite marker;
+        # the platform value is retained only as a fail-closed shape check.
+        platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value}
+        or not session_key
+        or FINITE_ACCOUNT_ID_PATTERN.fullmatch(user_id) is None
+        or authenticated_turn_user != user_id
+    ):
+        return None, None
+    return session_key, user_id
+
+
+def _authenticated_requester_for_event(event: MessageEvent) -> str | None:
+    if bool(getattr(event, "internal", False)):
+        return None
+    raw_message = getattr(event, "raw_message", None)
+    if not isinstance(raw_message, dict):
+        return None
+    raw_source = raw_message.get("source")
+    if not isinstance(raw_source, dict):
+        return None
+    authenticated_user_id = str(raw_source.get("user_id") or "").strip()
+    source_user_id = str(getattr(getattr(event, "source", None), "user_id", "") or "").strip()
+    if (
+        FINITE_ACCOUNT_ID_PATTERN.fullmatch(authenticated_user_id) is None
+        or source_user_id != authenticated_user_id
+    ):
+        return None
+    return authenticated_user_id
+
+
 def check_requirements() -> bool:
     return bool(_resolve_finitechat_command(""))
 
@@ -249,6 +462,31 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
         self._inbound_chat_routes: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+        # The Rust inbox is the durable queue. Keep at most its first blocked
+        # ordinary text event per Hermes session in memory while the current
+        # owner task finishes. Later events remain only in the inbox and are
+        # redelivered after this head event is ACKed.
+        self._deferred_admissions: dict[str, tuple[MessageEvent, str, Any, str, str]] = {}
+        self._admission_tasks: dict[str, asyncio.Task] = {}
+
+    async def _process_message_background(
+        self,
+        event: MessageEvent,
+        session_key: str,
+    ) -> None:
+        """Bind the authenticated Finite sender to this exact queued turn.
+
+        Hermes starts a fresh background task for every queued follow-up. The
+        event remains the authenticated source of truth even when Hermes
+        reuses a cached agent session, while ContextVar propagation carries
+        this marker into that turn's tool thread.
+        """
+        requester = _authenticated_requester_for_event(event)
+        token = _AUTHENTICATED_FINITE_TURN_USER.set(requester)
+        try:
+            await super()._process_message_background(event, session_key)
+        finally:
+            _AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
     async def connect(self, is_reconnect: bool = False, **_: Any) -> bool:
         if not self.home:
@@ -290,6 +528,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
             self._poll_task = None
+        await self._cancel_admission_tasks()
         await self._stop_service()
         await self.cancel_background_tasks()
         self._mark_disconnected()
@@ -727,6 +966,41 @@ class FiniteChatAdapter(BasePlatformAdapter):
             ),
             internal=bool(raw_event.get("internal") or False),
         )
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+        if self._should_defer_admission(event, session_key):
+            self._defer_admission(
+                session_key,
+                event,
+                room_id,
+                seq,
+                message_id,
+                event_key or "",
+            )
+            return
+
+        await self._admit_finitechat_event(
+            event,
+            room_id,
+            seq,
+            message_id,
+            event_key or "",
+        )
+
+    async def _admit_finitechat_event(
+        self,
+        event: MessageEvent,
+        room_id: str,
+        seq: Any,
+        message_id: str,
+        event_key: str,
+    ) -> None:
+        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
+        conversation_id = _string_or_none(raw_event.get("conversation_id"))
+        segment_id = _string_or_none(raw_event.get("segment_id"))
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = await self._set_processing_activity(room_id, activity_metadata)
         try:
@@ -738,6 +1012,116 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
             raise
+
+    def _should_defer_admission(self, event: MessageEvent, session_key: str) -> bool:
+        if event.message_type != MessageType.TEXT or event.internal:
+            return False
+        if (event.text or "").lstrip().startswith("/"):
+            return False
+        if self._is_immediate_text_control(event, session_key):
+            return False
+        return session_key in self._deferred_admissions or self._session_is_active(session_key)
+
+    @staticmethod
+    def _is_immediate_text_control(event: MessageEvent, session_key: str) -> bool:
+        try:
+            from tools import clarify_gateway
+
+            if (
+                clarify_gateway.get_pending_for_session(
+                    session_key,
+                    include_choice_prompts=True,
+                )
+                is not None
+            ):
+                return True
+        except Exception:
+            pass
+
+        if (event.text or "").strip().lower() not in APPROVAL_CONTROL_TEXT:
+            return False
+        try:
+            from tools.approval import has_blocking_approval
+
+            return bool(has_blocking_approval(session_key))
+        except Exception:
+            return False
+
+    def _session_is_active(self, session_key: str) -> bool:
+        if session_key not in self._active_sessions:
+            return False
+        self._heal_stale_session_lock(session_key)
+        return session_key in self._active_sessions
+
+    def _defer_admission(
+        self,
+        session_key: str,
+        event: MessageEvent,
+        room_id: str,
+        seq: Any,
+        message_id: str,
+        event_key: str,
+    ) -> None:
+        if session_key in self._deferred_admissions:
+            return
+        self._deferred_admissions[session_key] = (
+            event,
+            room_id,
+            seq,
+            message_id,
+            event_key,
+        )
+        task = asyncio.create_task(self._admit_when_session_idle(session_key))
+        self._admission_tasks[session_key] = task
+
+    async def _admit_when_session_idle(self, session_key: str) -> None:
+        try:
+            while self._session_is_active(session_key):
+                admission = self._deferred_admissions.get(session_key)
+                if admission is None:
+                    return
+                owner = self._session_tasks.get(session_key)
+                if owner is not None and not owner.done():
+                    await asyncio.wait({owner}, timeout=ADMISSION_RECHECK_SECS)
+                else:
+                    await asyncio.sleep(ADMISSION_RECHECK_SECS)
+
+            admission = self._deferred_admissions.get(session_key)
+            if admission is None:
+                return
+            event, room_id, seq, message_id, event_key = admission
+            await self._admit_finitechat_event(
+                event,
+                room_id,
+                seq,
+                message_id,
+                event_key,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The inbox still owns the unacknowledged event. Dropping only the
+            # ephemeral gate lets the next stream delivery retry it.
+            logger.error(
+                "[finitechat] deferred admission failed for session %s: %s",
+                session_key,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            current = asyncio.current_task()
+            if self._admission_tasks.get(session_key) is current:
+                self._admission_tasks.pop(session_key, None)
+                self._deferred_admissions.pop(session_key, None)
+
+    async def _cancel_admission_tasks(self) -> None:
+        tasks = list(self._admission_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._admission_tasks.clear()
+        self._deferred_admissions.clear()
 
     async def _set_processing_activity(
         self,
@@ -1603,6 +1987,11 @@ def _finite_platform() -> Platform:
 
 
 def register(ctx) -> None:
+    register_hook = getattr(ctx, "register_hook", None)
+    if callable(register_hook):
+        requester_context = _RequesterContextBroker()
+        register_hook("pre_tool_call", requester_context.before_tool_call)
+        register_hook("post_tool_call", requester_context.after_tool_call)
     ctx.register_platform(
         name=FINITE_PLATFORM_NAME,
         label="Finite Chat",

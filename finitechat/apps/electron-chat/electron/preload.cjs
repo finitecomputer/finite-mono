@@ -1,44 +1,61 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("finiteChatDesktop", {
-  daemonConnection: () => ipcRenderer.invoke("finitechat:daemon-connection"),
+// Sandboxed preloads may require Electron but not sibling files. Keep this
+// public, non-secret projection self-contained and mirror its constants in the
+// main-process validators' tests.
+const DESKTOP_BRIDGE_CONTRACT_VERSION = 2;
+const attachmentMediaScheme = "finitechat-media";
+const maxOpaqueIdBytes = 1024;
+
+function attachmentMediaUrl({ room_id, message_id, attachment_id } = {}) {
+  const values = [room_id, message_id, attachment_id];
+  if (!values.every(validOpaqueId)) {
+    throw new Error("Finite Chat attachment media identifier is invalid");
+  }
+  return `${attachmentMediaScheme}://attachment/${values.map(encodeURIComponent).join("/")}`;
+}
+
+function validOpaqueId(value) {
+  return (
+    typeof value === "string"
+    && value.length > 0
+    && new TextEncoder().encode(value).byteLength <= maxOpaqueIdBytes
+    && value !== "."
+    && value !== ".."
+    && !/[\\/]/u.test(value)
+    && !/[\p{Cc}\p{Cf}]/u.test(value)
+  );
+}
+
+function subscribe(channel, callback, start) {
+  if (typeof callback !== "function") {
+    throw new TypeError("Finite Chat desktop subscription requires a callback");
+  }
+  const listener = (_event, value) => callback(value);
+  ipcRenderer.on(channel, listener);
+  if (start) {
+    void ipcRenderer.invoke(start).catch(() => {});
+  }
+  return () => ipcRenderer.removeListener(channel, listener);
+}
+
+contextBridge.exposeInMainWorld("finiteChatDesktop", Object.freeze({
+  version: DESKTOP_BRIDGE_CONTRACT_VERSION,
+  capabilities: Object.freeze([
+    "local-chat-v1",
+    "automatic-device-link-v1",
+    "revoked-device-recovery-v1",
+  ]),
+  ensureLocalDevice: () => ipcRenderer.invoke("finitechat:ensure-local-device"),
+  recoverLocalDevice: () => ipcRenderer.invoke("finitechat:recover-local-device"),
   daemonState: () => ipcRenderer.invoke("finitechat:daemon-state"),
   dispatchDaemonAction: (action) => ipcRenderer.invoke("finitechat:daemon-action", action),
   uploadDaemonAttachments: (upload) => ipcRenderer.invoke("finitechat:daemon-attachments", upload),
-  consumePendingTargetUrl: () => ipcRenderer.invoke("finitechat:consume-pending-target-url"),
-  identityStatus: () => ipcRenderer.invoke("finitechat:identity-status"),
-  onboardingStatus: () => ipcRenderer.invoke("finitechat:onboarding-status"),
-  completeOnboarding: () => ipcRenderer.invoke("finitechat:complete-onboarding"),
-  clearAccountSecret: () => ipcRenderer.invoke("finitechat:clear-account-secret"),
-  beginDeviceLink: () => ipcRenderer.invoke("finitechat:begin-device-link"),
-  openDeviceLinkApproval: (approvalUrl) =>
-    ipcRenderer.invoke("finitechat:open-device-link-approval", approvalUrl),
-  cancelDeviceLink: () => ipcRenderer.invoke("finitechat:cancel-device-link"),
-  copyText: (text) => ipcRenderer.invoke("finitechat:copy-text", text),
-  onTargetUrl: (callback) => {
-    const listener = (_event, url) => callback(url);
-    ipcRenderer.on("finitechat:target-url", listener);
-    return () => ipcRenderer.removeListener("finitechat:target-url", listener);
-  },
-  onDaemonUpdate: (callback) => {
-    const listener = (_event, state) => callback(state);
-    ipcRenderer.on("finitechat:daemon-update", listener);
-    return () => ipcRenderer.removeListener("finitechat:daemon-update", listener);
-  },
-  onDaemonGeneration: (callback) => {
-    const listener = (_event, generation) => callback(generation);
-    ipcRenderer.on("finitechat:daemon-generation", listener);
-    void ipcRenderer.invoke("finitechat:daemon-subscribe").catch(() => {});
-    return () => ipcRenderer.removeListener("finitechat:daemon-generation", listener);
-  },
-  onDaemonError: (callback) => {
-    const listener = (_event, message) => callback(message);
-    ipcRenderer.on("finitechat:daemon-error", listener);
-    return () => ipcRenderer.removeListener("finitechat:daemon-error", listener);
-  },
-  onDeviceLinkStatus: (callback) => {
-    const listener = (_event, status) => callback(status);
-    ipcRenderer.on("finitechat:device-link-status", listener);
-    return () => ipcRenderer.removeListener("finitechat:device-link-status", listener);
-  },
-});
+  attachmentUrl: (coordinates) => attachmentMediaUrl(coordinates),
+  onDaemonUpdate: (callback) => subscribe("finitechat:daemon-update", callback),
+  onDaemonGeneration: (callback) =>
+    subscribe("finitechat:daemon-generation", callback, "finitechat:daemon-subscribe"),
+  onDaemonError: (callback) => subscribe("finitechat:daemon-error", callback),
+  onDeviceLinkStatus: (callback) =>
+    subscribe("finitechat:device-link-status", callback, "finitechat:device-link-subscribe"),
+}));

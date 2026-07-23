@@ -219,7 +219,7 @@ function checkStaticShell() {
     "revokeShareLinkButton",
     "accessResultPanel",
     "accessBusyStatus",
-    "brainManagementTitle",
+    "manageBrainsModalTitle",
     "brainPeopleList",
     "brainInvitationList",
     "brainInvitationCount",
@@ -503,8 +503,6 @@ function checkStaticShell() {
     "right-sidebar",
     "sidebar-footer",
     "status-bar",
-    "outgoingLinkList",
-    "backlinkList",
     "pageStatusDetail",
     "brainStatusDetail",
     "activityLog",
@@ -517,6 +515,17 @@ function checkStaticShell() {
     "accessAcceptSection",
   ]) {
     assertNotIncludes(html, marker, "Product Client HTML");
+  }
+
+  for (const marker of [
+    "pageLinkContextPanel",
+    "outgoingLinkList",
+    "backlinkList",
+    "unlinkedMentionList",
+    "Linked mentions",
+    "Unlinked mentions",
+  ]) {
+    assertIncludes(html, marker, "Product Client HTML");
   }
 
   for (const marker of [

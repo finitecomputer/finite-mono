@@ -37,7 +37,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0013_double_finite_private_default.sql"),
     "\n",
-    include_str!("../migrations/0014_finite_private_user_controls.sql")
+    include_str!("../migrations/0014_finite_private_user_controls.sql"),
+    "\n",
+    include_str!("../migrations/0015_runner_capacity_fences.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -449,6 +451,8 @@ pub enum CoreError {
     InvalidProviderOperationCorrelation,
     #[error("provider operation facts are invalid or contain secret material")]
     InvalidProviderOperationFacts,
+    #[error("Runner capacity could not produce a safe in-flight reservation")]
+    InvalidInFlightCapacityReservation,
     #[error("provider operation identity does not match the creation request")]
     ProviderOperationIdentityMismatch,
     #[error("provider operation transition is out of order")]
@@ -1462,6 +1466,21 @@ pub struct AdminRuntimeUpgradeExactInput {
     pub now: Option<String>,
 }
 
+/// Operator-only retirement input bound to the exact active Runtime observed
+/// before enqueueing. Retirement still runs through the normal verified
+/// Recovery Snapshot and offboarding lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRuntimeRetireExactInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub now: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeControlExpectedBinding {
     pub agent_runtime_id: String,
@@ -1684,6 +1703,13 @@ pub struct RunnerLeaseCapacity {
 }
 
 impl RunnerLeaseCapacity {
+    /// Phala provider inventory can lag an accepted paid provision. Core must
+    /// therefore reserve and count the in-flight creation atomically instead
+    /// of letting the worker make a second, racy capacity decision.
+    pub fn requires_core_in_flight_reservation(&self) -> bool {
+        self.runner_classes.as_slice() == [RunnerClass::Phala]
+    }
+
     pub fn validate_runtime_capability_policy(&self) -> CoreResult<()> {
         let Some(capabilities) = self.runtime_capabilities.as_ref() else {
             return Ok(());
@@ -1718,7 +1744,9 @@ impl RunnerLeaseCapacity {
     }
 
     pub fn accepts_agent_creation(&self) -> bool {
-        !self.runner_classes.is_empty() && !self.draining && !self.sandbox_limit_reached()
+        !self.runner_classes.is_empty()
+            && !self.draining
+            && (self.requires_core_in_flight_reservation() || !self.sandbox_limit_reached())
     }
 
     pub fn supports_runner_class(&self, runner_class: RunnerClass) -> bool {
@@ -1736,7 +1764,7 @@ impl RunnerLeaseCapacity {
             Some("runner advertises no classes")
         } else if self.draining {
             Some("runner is draining")
-        } else if self.sandbox_limit_reached() {
+        } else if !self.requires_core_in_flight_reservation() && self.sandbox_limit_reached() {
             Some("runner sandbox capacity is full")
         } else {
             None
@@ -1751,6 +1779,89 @@ impl RunnerLeaseCapacity {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct InFlightCapacityBounds {
+    runner_class: RunnerClass,
+    provider_inventory_count: u32,
+    max_sandbox_count: u32,
+}
+
+fn in_flight_capacity_bounds(
+    capacity: &RunnerLeaseCapacity,
+) -> CoreResult<Option<InFlightCapacityBounds>> {
+    if !capacity.requires_core_in_flight_reservation() {
+        return Ok(None);
+    }
+    let provider_inventory_count = capacity
+        .active_sandbox_count
+        .ok_or(CoreError::InvalidInFlightCapacityReservation)?;
+    let max_sandbox_count = capacity
+        .max_sandbox_count
+        .filter(|maximum| *maximum > 0)
+        .ok_or(CoreError::InvalidInFlightCapacityReservation)?;
+    if provider_inventory_count > max_sandbox_count {
+        return Err(CoreError::InvalidInFlightCapacityReservation);
+    }
+    Ok(Some(InFlightCapacityBounds {
+        runner_class: RunnerClass::Phala,
+        provider_inventory_count,
+        max_sandbox_count,
+    }))
+}
+
+fn in_flight_capacity_reservation(
+    request: &AgentCreationRequest,
+    placement: Option<RuntimePlacement>,
+    capacity: InFlightCapacityBounds,
+    core_in_flight_count: u32,
+) -> CoreResult<InFlightCapacityReservationEnvelope> {
+    let placement = placement.ok_or(CoreError::InvalidInFlightCapacityReservation)?;
+    if request.runner_class != capacity.runner_class
+        || placement.runner_class != capacity.runner_class
+        || core_in_flight_count == 0
+        || core_in_flight_count > capacity.max_sandbox_count
+    {
+        return Err(CoreError::InvalidInFlightCapacityReservation);
+    }
+    Ok(InFlightCapacityReservationEnvelope::V1(
+        InFlightCapacityReservationV1 {
+            request_id: request.id.clone(),
+            placement,
+            provider_inventory_count: capacity.provider_inventory_count,
+            core_in_flight_count,
+            max_sandbox_count: capacity.max_sandbox_count,
+        },
+    ))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "schema", content = "reservation")]
+pub enum InFlightCapacityReservationEnvelope {
+    #[serde(rename = "in_flight_capacity_reservation.v1")]
+    V1(InFlightCapacityReservationV1),
+}
+
+impl InFlightCapacityReservationEnvelope {
+    pub const fn v1(&self) -> &InFlightCapacityReservationV1 {
+        match self {
+            Self::V1(reservation) => reservation,
+        }
+    }
+}
+
+/// Core's atomic acknowledgement that one creation request owns an in-flight
+/// provider-capacity slot. `provider_inventory_count` is the exact count the
+/// Runner submitted with its lease request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InFlightCapacityReservationV1 {
+    pub request_id: String,
+    pub placement: RuntimePlacement,
+    pub provider_inventory_count: u32,
+    pub core_in_flight_count: u32,
+    pub max_sandbox_count: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCreationLease {
@@ -1761,6 +1872,11 @@ pub struct AgentCreationLease {
     /// acknowledgment needed to reconcile an interrupted provider call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_operation: Option<ProviderOperationEnvelope>,
+    /// Present for Runner classes whose provider inventory can lag a paid
+    /// creation. Current Phala workers require this acknowledgement before
+    /// their first provider mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight_capacity_reservation: Option<InFlightCapacityReservationEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2509,6 +2625,28 @@ impl BridgeCoreState {
         )
     }
 
+    pub fn admin_request_runtime_retire_exact(
+        &mut self,
+        input: AdminRuntimeRetireExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let expected = RuntimeControlExpectedBinding {
+            agent_runtime_id: input.expected_agent_runtime_id,
+            source_host_id: input.expected_source_host_id,
+            source_machine_id: input.expected_source_machine_id,
+        };
+        self.admin_request_runtime_control_bound(
+            AdminRuntimeControlInput {
+                admin_verified_email: input.admin_verified_email,
+                admin_workos_user_id: input.admin_workos_user_id,
+                project_id: input.project_id,
+                now: input.now,
+            },
+            RuntimeControlKind::Destroy,
+            None,
+            Some(&expected),
+        )
+    }
+
     pub fn admin_archive_unrecoverable_runtime(
         &mut self,
         input: AdminArchiveUnrecoverableRuntimeInput,
@@ -2841,12 +2979,40 @@ impl BridgeCoreState {
         {
             return Ok(None);
         }
+        let in_flight_capacity = input
+            .runner_capacity
+            .as_ref()
+            .map(in_flight_capacity_bounds)
+            .transpose()?
+            .flatten();
+        let core_in_flight_before = in_flight_capacity.map_or(0, |capacity| {
+            self.agent_creation_requests
+                .values()
+                .filter(|request| {
+                    request.runner_class == capacity.runner_class
+                        && request.status == AgentCreationRequestStatus::Launching
+                })
+                .count()
+                .try_into()
+                .unwrap_or(u32::MAX)
+        });
+        let may_reserve_new = in_flight_capacity.is_none_or(|capacity| {
+            capacity
+                .provider_inventory_count
+                .saturating_add(core_in_flight_before)
+                < capacity.max_sandbox_count
+        });
         let lease_expires_at = (now_time + Duration::seconds(lease_seconds)).format(&Rfc3339)?;
 
         let request_id = self
             .agent_creation_requests
             .values()
             .filter(|request| self.agent_creation_request_is_leasable(request, now_time))
+            .filter(|request| {
+                in_flight_capacity.is_none()
+                    || request.status == AgentCreationRequestStatus::Launching
+                    || may_reserve_new
+            })
             .filter(|request| {
                 input
                     .runner_capacity
@@ -2952,10 +3118,26 @@ impl BridgeCoreState {
             request.clone()
         };
         let provider_operation = self.provider_operations.get(&request.id).cloned();
+        let in_flight_capacity_reservation = in_flight_capacity
+            .map(|capacity| {
+                let core_in_flight_count = self
+                    .agent_creation_requests
+                    .values()
+                    .filter(|candidate| {
+                        candidate.runner_class == capacity.runner_class
+                            && candidate.status == AgentCreationRequestStatus::Launching
+                    })
+                    .count()
+                    .try_into()
+                    .unwrap_or(u32::MAX);
+                in_flight_capacity_reservation(&request, placement, capacity, core_in_flight_count)
+            })
+            .transpose()?;
         Ok(Some(AgentCreationLease {
             project,
             request,
             provider_operation,
+            in_flight_capacity_reservation,
         }))
     }
 
@@ -3348,6 +3530,7 @@ impl BridgeCoreState {
                 .published_app_urls
                 .clone()
                 .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+            let contact_endpoint = runtime_upgrade_contact_endpoint(&published_app_urls)?;
             if reported_id != target.id || reported_schema != target.state_schema_version {
                 return Err(CoreError::RuntimeUpgradeCompletionMismatch);
             }
@@ -3389,6 +3572,7 @@ impl BridgeCoreState {
                 reported_schema,
                 runtime_host,
                 published_app_urls,
+                contact_endpoint,
                 upgraded_spec,
                 input.runtime_capabilities.clone(),
             ))
@@ -3434,11 +3618,19 @@ impl BridgeCoreState {
         };
         if let Some(runtime) = self.agent_runtimes.get_mut(&request.agent_runtime_id) {
             runtime.host_facts.runtime_status = completed_status;
-            if let Some((artifact_id, schema, runtime_host, published_app_urls, _, capabilities)) =
-                upgrade_facts.as_ref()
+            if let Some((
+                artifact_id,
+                schema,
+                runtime_host,
+                published_app_urls,
+                contact_endpoint,
+                _,
+                capabilities,
+            )) = upgrade_facts.as_ref()
             {
                 runtime.runtime_artifact_id = Some(artifact_id.clone());
                 runtime.state_schema_version = Some(schema.clone());
+                runtime.contact_endpoint = Some(contact_endpoint.clone());
                 runtime.host_facts.runtime_host = runtime_host.clone();
                 runtime.host_facts.published_app_urls = published_app_urls.clone();
                 runtime.host_facts.hermes_available = Some(true);
@@ -3457,7 +3649,7 @@ impl BridgeCoreState {
             .get_mut(&request.agent_runtime_id)
         {
             snapshot.status = completed_status;
-            if let Some((_, _, runtime_host, _, _, _)) = upgrade_facts.as_ref() {
+            if let Some((_, _, runtime_host, _, _, _, _)) = upgrade_facts.as_ref() {
                 snapshot.runtime_host = runtime_host.clone();
                 snapshot.hermes_available = Some(true);
             }
@@ -3466,7 +3658,7 @@ impl BridgeCoreState {
             }
             snapshot.updated_at = now.clone();
         }
-        if let Some((artifact_id, _, _, _, Some(runtime_spec), _)) = upgrade_facts.as_ref()
+        if let Some((artifact_id, _, _, _, _, Some(runtime_spec), _)) = upgrade_facts.as_ref()
             && let Some(creation) = self.agent_creation_requests.values_mut().find(|creation| {
                 creation.agent_runtime_id.as_deref() == Some(request.agent_runtime_id.as_str())
             })
@@ -3775,6 +3967,7 @@ impl BridgeCoreState {
             project,
             request: request.clone(),
             provider_operation: self.provider_operations.get(&input.request_id).cloned(),
+            in_flight_capacity_reservation: None,
         })
     }
 
@@ -3971,6 +4164,7 @@ impl BridgeCoreState {
             project,
             request: request.clone(),
             provider_operation: self.provider_operations.get(&input.request_id).cloned(),
+            in_flight_capacity_reservation: None,
         })
     }
 
@@ -6848,6 +7042,23 @@ pub(crate) fn normalize_runtime_contact_endpoint(
     Ok(Some(value.trim_end_matches('/').to_string()))
 }
 
+pub(crate) fn runtime_upgrade_contact_endpoint(
+    published_app_urls: &[String],
+) -> CoreResult<String> {
+    let mut contact_endpoint = None;
+    for published_url in published_app_urls {
+        let normalized = normalize_runtime_contact_endpoint(Some(published_url))?
+            .ok_or(CoreError::RuntimeUpgradeCompletionMismatch)?;
+        if !normalized.ends_with("/contact") {
+            continue;
+        }
+        if contact_endpoint.replace(normalized).is_some() {
+            return Err(CoreError::RuntimeUpgradeCompletionMismatch);
+        }
+    }
+    contact_endpoint.ok_or(CoreError::RuntimeUpgradeCompletionMismatch)
+}
+
 pub(crate) fn merge_provider_runtime_handle(
     existing: Option<&AgentRuntime>,
     incoming: Option<ProviderRuntimeHandleEnvelope>,
@@ -7607,6 +7818,15 @@ mod tests {
     const NOW: &str = "2026-05-25T12:00:00Z";
     const LATER: &str = "2026-05-25T13:00:00Z";
 
+    fn phala_runner_capacity(provider_inventory_count: u32) -> RunnerLeaseCapacity {
+        RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::Phala],
+            max_sandbox_count: Some(1),
+            active_sandbox_count: Some(provider_inventory_count),
+            ..RunnerLeaseCapacity::default()
+        }
+    }
+
     fn issue_test_launch_code(state: &mut BridgeCoreState) -> String {
         let prepared =
             launch_codes::prepare_launch_code_batch(launch_codes::IssueLaunchCodeBatchInput {
@@ -8001,7 +8221,6 @@ mod tests {
                 lease_token: "phala-lease".to_string(),
                 lease_seconds: Some(300),
                 runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Phala],
                     runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                         RuntimeCapabilitiesV1 {
                             restart: true,
@@ -8009,7 +8228,7 @@ mod tests {
                             ..RuntimeCapabilitiesV1::default()
                         },
                     )),
-                    ..RunnerLeaseCapacity::default()
+                    ..phala_runner_capacity(0)
                 }),
                 now: Some(LATER.to_string()),
             })
@@ -8046,6 +8265,92 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(error, CoreError::RuntimeCapabilitiesNotAuthorized));
+    }
+
+    #[test]
+    fn phala_capacity_reservation_is_atomic_and_releases_only_the_existing_in_flight_request() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let mut request_ids = Vec::new();
+        for index in 0..2 {
+            let launch_code = issue_test_launch_code(&mut state);
+            for batch in state.launch_code_batches.values_mut() {
+                batch.hosting_tier = Some(HostingTier::Confidential);
+            }
+            let requested = state
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: format!("confidential-{index}@finite.vip"),
+                    workos_user_id: format!("user_workos_confidential_{index}"),
+                    display_name: format!("Confidential Agent {index}"),
+                    launch_code,
+                    idempotency_key: format!("confidential-submit-{index}"),
+                    now: Some(NOW.to_string()),
+                })
+                .unwrap();
+            request_ids.push(requested.request.id);
+        }
+
+        let first = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "phala-runner-a".to_string(),
+                source_host_id: Some("phala-host".to_string()),
+                lease_token: "phala-lease-a".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(phala_runner_capacity(0)),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        assert!(request_ids.contains(&first.request.id));
+        let waiting_request_id = request_ids
+            .iter()
+            .find(|request_id| request_id.as_str() != first.request.id)
+            .unwrap();
+        let reservation = first.in_flight_capacity_reservation.as_ref().unwrap().v1();
+        assert_eq!(reservation.request_id, first.request.id);
+        assert_eq!(
+            reservation.placement,
+            RuntimePlacement::for_hosting_tier(HostingTier::Confidential)
+        );
+        assert_eq!(reservation.provider_inventory_count, 0);
+        assert_eq!(reservation.core_in_flight_count, 1);
+        assert_eq!(reservation.max_sandbox_count, 1);
+
+        let second = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "phala-runner-b".to_string(),
+                source_host_id: Some("phala-host".to_string()),
+                lease_token: "phala-lease-b".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(phala_runner_capacity(0)),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        assert!(second.is_none());
+
+        let resumed = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "phala-runner-c".to_string(),
+                source_host_id: Some("phala-host".to_string()),
+                lease_token: "phala-lease-c".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(phala_runner_capacity(1)),
+                now: Some("2026-05-25T14:00:00Z".to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.request.id, first.request.id);
+        let reservation = resumed
+            .in_flight_capacity_reservation
+            .as_ref()
+            .unwrap()
+            .v1();
+        assert_eq!(reservation.provider_inventory_count, 1);
+        assert_eq!(reservation.core_in_flight_count, 1);
+        assert_eq!(
+            state.agent_creation_requests[waiting_request_id].status,
+            AgentCreationRequestStatus::Requested
+        );
     }
 
     #[test]
@@ -8088,10 +8393,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: "phala-lease".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: Some(RunnerLeaseCapacity {
-                    runner_classes: vec![RunnerClass::Phala],
-                    ..RunnerLeaseCapacity::default()
-                }),
+                runner_capacity: Some(phala_runner_capacity(0)),
                 now: Some(LATER.to_string()),
             })
             .unwrap();
@@ -11625,6 +11927,7 @@ mod tests {
             "finite_private_reservations",
             "finite_private_daily_resets",
             "finite_private_notice_claims",
+            "runner_capacity_fences",
         ] {
             assert!(CORE_SCHEMA_SQL.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")));
         }
@@ -11928,6 +12231,69 @@ mod tests {
             !actions
                 .iter()
                 .any(|(action, _)| action == "runtime.admin_recover_known_good_chat")
+        );
+    }
+
+    #[test]
+    fn admin_runtime_retirement_requires_the_exact_active_binding() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "owner@finite.vip",
+            "user_workos_owner_retire",
+            "retire-submit",
+            "oslo-agent-retire",
+            "artifact-v1",
+            "2026-07-22T15:00:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            runtime_retirement: true,
+            ..*kata_runtime_capabilities().v1()
+        }));
+
+        let changed_binding = state
+            .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "user_workos_admin_retire".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: "runtime-replaced-after-review".to_string(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "oslo-agent-retire".to_string(),
+                now: Some("2026-07-22T15:01:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(changed_binding, CoreError::RuntimeSpecMismatch));
+        assert!(state.runtime_control_requests.is_empty());
+
+        let retirement = state
+            .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+                admin_verified_email: "Admin@Finite.VIP".to_string(),
+                admin_workos_user_id: "user_workos_admin_retire".to_string(),
+                project_id,
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "oslo-agent-retire".to_string(),
+                now: Some("2026-07-22T15:02:00Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(retirement.kind, RuntimeControlKind::Destroy);
+        assert_eq!(retirement.agent_runtime_id, runtime_id);
+        assert_eq!(retirement.status, RuntimeControlRequestStatus::Requested);
+        assert!(
+            state
+                .finite_private_admin_audit_events
+                .values()
+                .any(|event| {
+                    event.action == "runtime.admin_destroy"
+                        && event.actor == "admin@finite.vip"
+                        && event.target_id == retirement.agent_runtime_id
+                })
         );
     }
 
@@ -12301,7 +12667,7 @@ mod tests {
                 runtime_artifact_id: Some("artifact-v1".to_string()),
                 state_schema_version: None,
                 provider_runtime_handle: None,
-                contact_endpoint: None,
+                contact_endpoint: Some("http://127.0.0.1:41001/contact".to_string()),
                 runtime_capabilities: Some(kata_runtime_capabilities()),
                 display_name: None,
                 hostname: None,
@@ -12605,6 +12971,10 @@ mod tests {
         let runtime = &state.agent_runtimes[&runtime_id];
         assert_eq!(runtime.runtime_artifact_id.as_deref(), Some("artifact-v2"));
         assert_eq!(runtime.source_machine_id, "finite-kata-upgrade");
+        assert_eq!(
+            runtime.contact_endpoint.as_deref(),
+            Some("http://127.0.0.1:41002/contact")
+        );
         assert_eq!(runtime.host_facts.runtime_host, "http://127.0.0.1:41002");
         assert!(
             runtime

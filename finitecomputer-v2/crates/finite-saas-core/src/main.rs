@@ -4,9 +4,10 @@ use finite_saas_core::api::router_with_agent_creation_placement;
 use finite_saas_core::auth::CoreAuth;
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
-    AdminArchiveUnrecoverableRuntimeInput, AdminRuntimeOverview, AdminRuntimeUpgradeExactInput,
-    ApproveFinitePrivateGrantInput, CoreResult, ExistingHostProjectImport, FinitePrivateApiKey,
-    FinitePrivateGrant, IssueFinitePrivateApiKeyInput, ReconcileExistingHostImportsOptions,
+    AdminArchiveUnrecoverableRuntimeInput, AdminRuntimeOverview, AdminRuntimeRetireExactInput,
+    AdminRuntimeUpgradeExactInput, ApproveFinitePrivateGrantInput, CoreResult,
+    ExistingHostProjectImport, FinitePrivateApiKey, FinitePrivateGrant,
+    IssueFinitePrivateApiKeyInput, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RuntimeArtifact, RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus,
@@ -119,6 +120,9 @@ enum Command {
     /// Roll active, upgrade-capable Agent Runtimes to one explicit artifact.
     #[command(name = "runtime-artifact-rollout")]
     RuntimeArtifactRollout(RuntimeArtifactRolloutCliArgs),
+    /// Retire one exact Runtime through the verified Recovery Snapshot lifecycle.
+    #[command(name = "runtime-retire-exact")]
+    RuntimeRetireExact(RuntimeRetireExactCliArgs),
     /// Archive a legacy Runtime only after exact binding and absence attestations.
     #[command(name = "runtime-archive-unrecoverable")]
     RuntimeArchiveUnrecoverable(RuntimeArchiveUnrecoverableCliArgs),
@@ -335,6 +339,30 @@ struct RuntimeArchiveUnrecoverableCliArgs {
     now: Option<String>,
 }
 
+#[derive(Debug, clap::Args)]
+struct RuntimeRetireExactCliArgs {
+    #[arg(long)]
+    project_id: String,
+    #[arg(long)]
+    expected_agent_runtime_id: String,
+    #[arg(long)]
+    expected_source_host_id: String,
+    #[arg(long)]
+    expected_source_machine_id: String,
+    #[arg(long)]
+    admin_email: String,
+    #[arg(long)]
+    admin_workos_user_id: String,
+    #[arg(
+        long = "wait-timeout-seconds",
+        default_value_t = 1800,
+        value_parser = clap::value_parser!(u64).range(60..=3600)
+    )]
+    wait_timeout_seconds: u64,
+    #[arg(long)]
+    now: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CoreImportManifestInput {
     source_host_id: String,
@@ -431,6 +459,7 @@ async fn main() -> Result<()> {
             print_json(&artifact)
         }
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
+        Command::RuntimeRetireExact(args) => runtime_retire_exact_command(args).await,
         Command::RuntimeArchiveUnrecoverable(args) => {
             let receipt = runtime_archive_unrecoverable_command(args).await?;
             print_json(&receipt)
@@ -1248,6 +1277,58 @@ async fn runtime_archive_unrecoverable_command(
         .map_err(Into::into)
 }
 
+async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs) -> Result<()> {
+    let project_id = required_cli_value(args.project_id, "--project-id")?;
+    let expected_agent_runtime_id = required_cli_value(
+        args.expected_agent_runtime_id,
+        "--expected-agent-runtime-id",
+    )?;
+    let expected_source_host_id =
+        required_cli_value(args.expected_source_host_id, "--expected-source-host-id")?;
+    let expected_source_machine_id = required_cli_value(
+        args.expected_source_machine_id,
+        "--expected-source-machine-id",
+    )?;
+    let admin_verified_email = required_cli_value(args.admin_email, "--admin-email")?;
+    let admin_workos_user_id =
+        required_cli_value(args.admin_workos_user_id, "--admin-workos-user-id")?;
+    let store = postgres_store_from_env().await?;
+    let request = store
+        .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
+            admin_verified_email,
+            admin_workos_user_id,
+            project_id,
+            expected_agent_runtime_id,
+            expected_source_host_id,
+            expected_source_machine_id,
+            now: args.now,
+        })
+        .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(args.wait_timeout_seconds);
+    let mut current = request;
+    loop {
+        current = store.runtime_control_request(&current.id).await?;
+        if matches!(
+            current.status,
+            RuntimeControlRequestStatus::Succeeded | RuntimeControlRequestStatus::Failed
+        ) {
+            break;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            print_json(&current)?;
+            bail!("runtime retirement timed out; the same request remains retryable");
+        }
+        sleep(Duration::from_secs(2).min(deadline.saturating_duration_since(now))).await;
+    }
+    print_json(&current)?;
+    if current.status != RuntimeControlRequestStatus::Succeeded {
+        bail!("runtime retirement failed; the same request remains retryable");
+    }
+    Ok(())
+}
+
 async fn finite_private_grant_approve(
     email: String,
     workos_user_id: Option<String>,
@@ -2042,6 +2123,35 @@ mod tests {
                 "--confirm-owner-acknowledged-unrecoverable",
             ]))
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn exact_retirement_cli_requires_the_complete_binding_and_bounded_timeout() {
+        let common = [
+            "finite-saas-core",
+            "runtime-retire-exact",
+            "--project-id",
+            "project-a",
+            "--expected-agent-runtime-id",
+            "runtime-a",
+            "--expected-source-host-id",
+            "lat1",
+            "--expected-source-machine-id",
+            "finite-kata-a",
+            "--admin-email",
+            "admin@finite.vip",
+            "--admin-workos-user-id",
+            "workos-admin",
+        ];
+        assert!(Args::try_parse_from(common).is_ok());
+        assert!(
+            Args::try_parse_from(common.into_iter().chain(["--wait-timeout-seconds", "59"]))
+                .is_err()
+        );
+        assert!(
+            Args::try_parse_from(common.into_iter().chain(["--wait-timeout-seconds", "3601"]))
+                .is_err()
         );
     }
 

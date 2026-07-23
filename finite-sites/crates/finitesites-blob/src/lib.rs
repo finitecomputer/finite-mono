@@ -32,6 +32,7 @@ pub enum BlobError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Clone)]
 pub struct BlobStore {
     root: PathBuf,
 }

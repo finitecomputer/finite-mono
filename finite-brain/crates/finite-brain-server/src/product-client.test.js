@@ -2545,6 +2545,202 @@ assert.equal(
   "Page navigation uses the source Page's Folder to disambiguate local links"
 );
 
+const mentionContextPages = [
+  {
+    folderId: "concepts",
+    key: "concepts/antifragility",
+    objectId: "antifragility",
+    path: "antifragility.md",
+    status: "ready",
+    text: "# Antifragility\n\nBenefits from disorder.",
+    title: "Antifragility",
+  },
+  {
+    folderId: "notes",
+    key: "notes/plain",
+    objectId: "plain",
+    path: "plain.md",
+    status: "ready",
+    text: "# Plain\n\nAntifragility matters. Another ANTIFRAGILITY example.",
+    title: "Plain",
+  },
+  {
+    folderId: "notes",
+    key: "notes/mixed",
+    objectId: "mixed",
+    path: "mixed.md",
+    status: "ready",
+    text: [
+      "# Mixed",
+      "",
+      "See [[Antifragility]] and then discuss antifragility plainly.",
+      "",
+      "`Antifragility`",
+      "",
+      "```md",
+      "Antifragility",
+      "```",
+      "",
+      "[Antifragility](antifragility.md)",
+      "[concept-ref]: antifragility.md \"Antifragility\"",
+      "",
+      "AntifragilityIndex is a different term.",
+    ].join("\n"),
+    title: "Mixed",
+  },
+  {
+    folderId: "restricted",
+    key: "restricted/locked-mention",
+    objectId: "locked-mention",
+    path: "locked-mention.md",
+    status: "locked",
+    text: "# Locked\n\nAntifragility",
+    title: "Locked",
+  },
+];
+const mentionContext = client.pageLinkContext(mentionContextPages[0], mentionContextPages);
+assert.equal(
+  JSON.stringify(
+    mentionContext.unlinkedMentions.map((row) => [
+      row.label,
+      row.key,
+      row.mentionCount,
+      row.term,
+    ])
+  ),
+  JSON.stringify([
+    ["Mixed", "notes/mixed", 1, "Antifragility"],
+    ["Plain", "notes/plain", 2, "Antifragility"],
+  ]),
+  "Unlinked mentions are whole-title, case-insensitive, readable Page occurrences outside links and code"
+);
+assert.equal(
+  mentionContext.unlinkedMentions[0].snippet,
+  "See [[Antifragility]] and then discuss antifragility plainly.",
+  "Unlinked mentions include navigable source context"
+);
+assert.equal(
+  JSON.stringify(
+    mentionContext.backlinks.map((row) => [row.label, row.mentionCount, row.snippet])
+  ),
+  JSON.stringify([
+    ["Mixed", 2, "See [[Antifragility]] and then discuss antifragility plainly."],
+  ]),
+  "Every resolved source link contributes linked-mention context while the source Page remains one backlink row"
+);
+const canonicallyEquivalentMentionPages = [
+  {
+    folderId: "concepts",
+    objectId: "resume",
+    path: "resume.md",
+    status: "ready",
+    text: "# R\u00e9sum\u00e9",
+    title: "R\u00e9sum\u00e9",
+  },
+  {
+    folderId: "notes",
+    objectId: "decomposed",
+    path: "decomposed.md",
+    status: "ready",
+    text: "# Note\n\nA Re\u0301sume\u0301 records experience.",
+    title: "Note",
+  },
+];
+const canonicallyEquivalentMention = client.pageLinkContext(
+  canonicallyEquivalentMentionPages[0],
+  canonicallyEquivalentMentionPages
+).unlinkedMentions[0];
+assert.equal(
+  canonicallyEquivalentMention.snippet,
+  "A Re\u0301sume\u0301 records experience.",
+  "Unlinked mention matching preserves source offsets across canonical Unicode normalization"
+);
+assert.equal(
+  canonicallyEquivalentMention.searchTerm,
+  "Re\u0301sume\u0301",
+  "Unlinked mention navigation carries the source spelling that the reader can highlight"
+);
+const hangulBeforeMentionPages = [
+  mentionContextPages[0],
+  {
+    folderId: "notes",
+    objectId: "hangul-before-mention",
+    path: "hangul-before-mention.md",
+    status: "ready",
+    text: "# Note\n\n\u1100\u1161 before Antifragility after.",
+    title: "Hangul before mention",
+  },
+];
+assert.equal(
+  client.pageLinkContext(hangulBeforeMentionPages[0], hangulBeforeMentionPages)
+    .unlinkedMentions[0].searchTerm,
+  "Antifragility",
+  "NFC offset mapping remains correct after decomposed Hangul Jamo"
+);
+const contextIntl = vm.runInNewContext("Intl", context);
+context.Intl = {};
+const fallbackHangulMention = client.pageLinkContext(
+  hangulBeforeMentionPages[0],
+  hangulBeforeMentionPages
+).unlinkedMentions[0];
+context.Intl = contextIntl;
+assert.equal(
+  fallbackHangulMention.searchTerm,
+  "Antifragility",
+  "The normalization fallback maps offsets correctly after decomposed Hangul Jamo"
+);
+assert.equal(
+  fallbackHangulMention.snippet,
+  "\u1100\u1161 before Antifragility after.",
+  "The normalization fallback preserves the original Hangul source line"
+);
+const boundedOccurrenceContext = client.pageLinkContext(mentionContextPages[0], [
+  mentionContextPages[0],
+  {
+    folderId: "notes",
+    objectId: "dense-title-mentions",
+    path: "dense-title-mentions.md",
+    status: "ready",
+    text: `${"Antifragility ".repeat(1001)}done.`,
+    title: "Dense title mentions",
+  },
+]);
+assert.equal(
+  boundedOccurrenceContext.unlinkedMentions[0].mentionCount,
+  1000,
+  "Unlinked occurrence collection has an explicit per-Page work bound"
+);
+assert.equal(
+  boundedOccurrenceContext.unlinkedMentions[0].mentionCountLimited,
+  true,
+  "Bounded unlinked occurrence counts remain visibly partial rather than pretending to be exact"
+);
+const excludedOccurrencesBeforeMention = [
+  mentionContextPages[0],
+  {
+    folderId: "notes",
+    objectId: "links-before-plain-mention",
+    path: "links-before-plain-mention.md",
+    status: "ready",
+    text: `${"[[Antifragility]] ".repeat(1000)}\nAntifragility remains plain.`,
+    title: "Links before plain mention",
+  },
+];
+assert.equal(
+  client.pageLinkContext(excludedOccurrencesBeforeMention[0], excludedOccurrencesBeforeMention)
+    .unlinkedMentions[0].mentionCount,
+  1,
+  "Excluded links cannot consume the bounded unlinked-mention work budget"
+);
+
+for (const id of ["pageLinkContextPanel", "outgoingLinkList", "backlinkList", "unlinkedMentionList"]) {
+  assert.match(
+    htmlSource,
+    new RegExp(`id="${id}"`),
+    `Product Client must expose ${id} in the active Page workspace`
+  );
+}
+
 const normalizedReferencePages = [
   {
     folderId: "notes",
@@ -4843,15 +5039,39 @@ assert.equal(
     }),
     "folder key"
   );
-  assert.equal(
-    client.readerSearchHighlightForPage("crypto/page-b", {
+assert.equal(
+  client.readerSearchHighlightForPage("crypto/page-b", {
       pageKey: "crypto/page-a",
       query: "folder key",
     }),
-    ""
-  );
+  ""
+);
+assert.equal(
+  client.readerSearchTextNodeAllowed(
+    { parentElement: { closest: () => ({ className: "internal-link" }) } },
+    { unlinkedOnly: true }
+  ),
+  false,
+  "Unlinked mention highlighting skips linked and code descendants"
+);
+assert.equal(
+  client.readerSearchTextNodeAllowed(
+    { parentElement: { closest: () => null } },
+    { unlinkedOnly: true }
+  ),
+  true,
+  "Unlinked mention highlighting keeps ordinary Page text"
+);
   assert.match(source, /selectReaderPage\(row\.key, \{ searchQuery: query \}\)/);
-  assert.match(source, /highlightReaderSearchMatches\(content, searchQuery\)/);
+  assert.match(
+    source,
+    /highlightReaderSearchMatches\(content, searchQuery, \{[\s\S]*unlinkedOnly:/
+  );
+  assert.match(
+    source,
+    /\.internal-link, \.external-link, \.markdown-reference-definition, code, pre/,
+    "Unlinked mention navigation must not highlight a preceding link, reference definition, or code occurrence"
+  );
   assert.match(source, /scrollIntoView\?\.\(\{ behavior, block: "center", inline: "nearest" \}\)/);
   assert.match(cssSource, /\.reader-search-match\s*\{[\s\S]*?scroll-margin-block: 28px;/);
   const paletteRows = client.commandPaletteRows("folder", [

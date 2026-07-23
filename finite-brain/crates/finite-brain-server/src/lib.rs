@@ -880,6 +880,7 @@ fn record_resolved_identity(
 async fn resolve_managed_agent_email(
     state: &ServerState,
     email: &str,
+    expected_owner_npub: &UserId,
 ) -> Result<ResolvedIdentity, ApiError> {
     let managed_agent_email = canonical_email(email)?;
     let resolved = resolve_identity_input(state, &managed_agent_email).await?;
@@ -926,6 +927,25 @@ async fn resolve_managed_agent_email(
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "Finite Core returned an inactive or mismatched Managed Agent",
+        ));
+    }
+    let owner: IdentityUserResolutionResponse = post_authority_json(
+        &format!(
+            "{}/api/v1/operator/brain/user-resolution",
+            authorities.identity_base_url
+        ),
+        "X-Finite-Operator-Token",
+        &authorities.identity_token,
+        &serde_json::json!({ "workosUserId": account.workos_user_id }),
+        "Finite Identity Managed Agent owner resolution",
+    )
+    .await?;
+    if owner.workos_user_id != account.workos_user_id
+        || UserId::new(owner.user_npub)? != *expected_owner_npub
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Managed Agent does not belong to the Personal Brain owner's account",
         ));
     }
     Ok(resolved)
@@ -4407,12 +4427,21 @@ mod tests {
             "managedAgentEmail": "replacement@finite.vip",
             "status": "active",
         });
+        let owner_resolution = serde_json::json!({
+            "workosUserId": "user_workos_replacement_owner",
+            "userNpub": owner_npub,
+        });
         let (identity_url, identity_server) = spawn_json_authority(vec![
             (
                 "/api/v1/operator/brain/agent-resolution",
                 agent_resolution.clone(),
             ),
+            (
+                "/api/v1/operator/brain/user-resolution",
+                owner_resolution.clone(),
+            ),
             ("/api/v1/operator/brain/agent-resolution", agent_resolution),
+            ("/api/v1/operator/brain/user-resolution", owner_resolution),
         ]);
         let (core_url, core_server) = spawn_json_authority(vec![
             (
@@ -4667,6 +4696,66 @@ mod tests {
                 .as_ref()
                 .map(|relationship| relationship.agent_npub.as_str()),
             Some(replacement_npub.as_str())
+        );
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_agent_replacement_requires_the_brain_owners_core_account() {
+        let brain_owner = Keys::generate();
+        let different_owner = Keys::generate();
+        let replacement = Keys::generate();
+        let replacement_key = NostrPublicKey::from_protocol(replacement.public_key());
+        let replacement_npub = replacement_key.to_npub().unwrap();
+        let identifier = Nip05Identifier::parse("replacement@finite.vip").unwrap();
+        let document =
+            serde_json::json!({ "names": { "replacement": replacement_key.to_hex() } }).to_string();
+        let (identity_url, identity_server) = spawn_json_authority(vec![
+            (
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": replacement_npub,
+                    "managedAgentEmail": "replacement@finite.vip",
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_different_owner",
+                    "userNpub": npub(&different_owner),
+                }),
+            ),
+        ]);
+        let (core_url, core_server) = spawn_json_authority(vec![(
+            "/api/core/v1/brain/agent-account",
+            serde_json::json!({
+                "workosUserId": "user_workos_different_owner",
+                "managedAgentEmail": "replacement@finite.vip",
+                "status": "active",
+            }),
+        )]);
+        let state = personal_test_state(&brain_owner, &Keys::generate())
+            .with_nip05_fixture(identifier.well_known_request().url, document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+
+        let error = resolve_managed_agent_email(
+            &state,
+            "replacement@finite.vip",
+            &UserId::new(npub(&brain_owner)).unwrap(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message,
+            "Managed Agent does not belong to the Personal Brain owner's account"
         );
         identity_server.join().unwrap();
         core_server.join().unwrap();

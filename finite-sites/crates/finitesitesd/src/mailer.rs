@@ -82,12 +82,15 @@ fn viewer_invite_subject(site_name: &str) -> String {
 
 fn viewer_invite_text(invite: &ViewerInvite<'_>) -> String {
     format!(
-        "You and your agent have been invited to view {site_name}.\n\n\
-         Open this link to sign in:\n\n{login_url}\n\n\
-         After signing in, view the site here:\n\n{site_url}\n\n\
-         Agents should inspect these instructions first:\n\n{llms_url}\n\n\
+        "{site_name} has been shared with you.\n\n\
+         To view it, open this sign-in link:\n\n{login_url}\n\n\
+         After signing in, you can view the site here:\n\n{site_url}\n\n\
          The sign-in link can be reused and expires in 15 minutes. If it expires, \
-         open the site URL and request a fresh link for {email}.\n",
+         open the site URL and request a fresh link for {email}.\n\n\
+         For your agent\n\n\
+         If you use an agent with this site, ask it to read this email. The canonical \
+         site URL is:\n\n{site_url}\n\n\
+         Agent instructions:\n\n{llms_url}\n",
         site_name = invite.site_name,
         login_url = invite.login_url,
         site_url = invite.site_url,
@@ -103,8 +106,10 @@ fn project_collaborator_invite_subject(project_slug: &str) -> String {
 fn project_collaborator_invite_text(invite: &ProjectCollaboratorInvite<'_>) -> String {
     let api_prefix = api_prefix(invite.api_url);
     let mut text = format!(
-        "You and your agent have been invited to collaborate on {project_slug} as {role}.\n\n\
-         Agents can inspect the current edit workflow with:\n\n\
+        "You have been invited to collaborate on {project_slug} as {role}.\n\n\
+         If you use an agent, ask it to read the \"For your agent\" section below.\n\n\
+         For your agent\n\n\
+         Inspect the current edit workflow with:\n\n\
          {api_prefix}fsite describe workflow edit-shared-project --output json\n\n\
          Preferred native auth path. This links {email} to the local npub, so future email grants can resolve without email-only git auth:\n\n\
          {api_prefix}fsite auth register --output json\n\
@@ -463,15 +468,33 @@ mod tests {
     }
 
     #[test]
-    fn invite_texts_are_agent_actionable() {
+    fn viewer_invite_leads_with_human_action_then_agent_handoff() {
         let viewer = viewer_invite_text(&ViewerInvite {
             email: "friend@example.com",
             site_name: "hello",
             site_url: "https://hello.finite.chat/",
             login_url: "https://hello.finite.chat/_finite/auth?token=abc",
         });
-        assert!(viewer.contains("You and your agent have been invited to view hello"));
-        assert!(viewer.contains("_finite/auth?token=abc"));
+        assert_eq!(
+            viewer,
+            "hello has been shared with you.\n\n\
+To view it, open this sign-in link:\n\n\
+https://hello.finite.chat/_finite/auth?token=abc\n\n\
+After signing in, you can view the site here:\n\n\
+https://hello.finite.chat/\n\n\
+The sign-in link can be reused and expires in 15 minutes. If it expires, \
+open the site URL and request a fresh link for friend@example.com.\n\n\
+For your agent\n\n\
+If you use an agent with this site, ask it to read this email. The canonical \
+site URL is:\n\n\
+https://hello.finite.chat/\n\n\
+Agent instructions:\n\n\
+https://hello.finite.chat/llms.txt\n"
+        );
+
+        let agent_section = viewer.find("For your agent").unwrap();
+        assert!(viewer.find("To view it, open this sign-in link:").unwrap() < agent_section);
+        assert!(viewer.contains("ask it to read this email"));
         assert!(viewer.contains("https://hello.finite.chat/llms.txt"));
 
         let outputs = vec![ProjectOutputSummary {
@@ -503,6 +526,11 @@ mod tests {
             email_login_token: "token123",
             outputs: &outputs,
         });
+        assert!(project.starts_with(
+            "You have been invited to collaborate on finitechat-native as editor.\n\n\
+If you use an agent, ask it to read the \"For your agent\" section below.\n\n\
+For your agent\n\n"
+        ));
         assert!(project.contains("fsite auth register --output json"));
         assert!(
             project.contains(

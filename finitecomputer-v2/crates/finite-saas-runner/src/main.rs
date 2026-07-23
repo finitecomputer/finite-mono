@@ -17,6 +17,13 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhalaWorkspaceIdentityOutput {
+    workspace_id: String,
+    workspace_slug: String,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "finite-saas-runner")]
 struct Args {
@@ -35,6 +42,9 @@ enum Command {
     /// Run authenticated, read-only Phala contract and inventory checks.
     #[command(name = "phala-preflight")]
     PhalaPreflight,
+    /// Print only the non-secret Phala workspace id and slug needed to fence preflight.
+    #[command(name = "phala-workspace-identity")]
+    PhalaWorkspaceIdentity,
 }
 
 fn main() -> Result<()> {
@@ -43,7 +53,21 @@ fn main() -> Result<()> {
         Command::RunOnce => run_once(),
         Command::Serve => serve(),
         Command::PhalaPreflight => phala_preflight(),
+        Command::PhalaWorkspaceIdentity => phala_workspace_identity(),
     }
+}
+
+fn phala_workspace_identity() -> Result<()> {
+    let api_key = required_env_any(&["FC_RUNNER_PHALA_API_KEY", "PHALA_CLOUD_API_KEY"])?;
+    let current = PhalaApiClient::new(api_key)?.current_user()?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&PhalaWorkspaceIdentityOutput {
+            workspace_id: current.workspace.id,
+            workspace_slug: current.workspace.slug,
+        })?
+    );
+    Ok(())
 }
 
 fn phala_preflight() -> Result<()> {
@@ -315,7 +339,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     DEFAULT_FINITE_AGENT_PICTURE_URL,
                 ),
                 max_cvm_count: optional_u32_value("FC_RUNNER_MAX_SANDBOXES")?.or(Some(1)),
-                drain_new_leases: optional_bool("FC_RUNNER_DRAIN", false)?,
+                drain_new_leases: optional_bool("FC_RUNNER_DRAIN", true)?,
                 available_memory_bytes: host_available_memory_bytes(),
                 readiness_timeout: runtime_ready_timeout,
                 readiness_interval: runtime_ready_interval,
@@ -704,6 +728,12 @@ mod tests {
     fn phala_preflight_is_an_explicit_subcommand() {
         let args = Args::try_parse_from(["finite-saas-runner", "phala-preflight"]).unwrap();
         assert!(matches!(args.command, Some(Command::PhalaPreflight)));
+        let args =
+            Args::try_parse_from(["finite-saas-runner", "phala-workspace-identity"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::PhalaWorkspaceIdentity)
+        ));
     }
 
     #[test]

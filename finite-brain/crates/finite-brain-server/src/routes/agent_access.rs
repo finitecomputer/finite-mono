@@ -36,7 +36,7 @@ pub(crate) async fn replace_personal_agent_handler(
         }
     }
     let replacement_identity = match request.agent_email.as_deref() {
-        Some(email) => Some(resolve_managed_agent_email(&state, email).await?),
+        Some(email) => Some(resolve_managed_agent_email(&state, email, &actor_id).await?),
         None => None,
     };
     let replacement = match replacement_identity.as_ref() {

@@ -7,7 +7,7 @@
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#212121" />
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f7f6f3" />
     <title>FiniteBrain</title>
-    <link rel="stylesheet" href="/client/app.css?v=20260723-brain-health" />
+    <link rel="stylesheet" href="/client/app.css?v=20260723-brain-health-backlinks" />
   </head>
   <body>
     <div class="obsidian-shell" data-workspace-view="page">
@@ -572,6 +572,46 @@ Start writing here.</textarea>
               </div>
             </details>
           </article>
+          <aside
+            id="pageLinkContextPanel"
+            class="page-link-context"
+            aria-label="Page links and backlinks"
+          >
+            <header class="page-link-context-header">
+              <span class="page-link-context-title">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M10 13a5 5 0 0 0 7.07 0l1.43-1.43a5 5 0 0 0-7.07-7.07L10.4 5.53" />
+                  <path d="M14 11a5 5 0 0 0-7.07 0L5.5 12.43a5 5 0 0 0 7.07 7.07l1.03-1.03" />
+                </svg>
+                <strong>Backlinks</strong>
+              </span>
+              <span id="pageLinkContextCount" class="pill muted" aria-live="polite">0</span>
+            </header>
+
+            <details class="page-link-section" open>
+              <summary>
+                <span>Linked mentions</span>
+                <span id="backlinkCount" class="page-link-section-count">0</span>
+              </summary>
+              <ol id="backlinkList" class="page-link-list" aria-label="Linked mentions"></ol>
+            </details>
+
+            <details class="page-link-section" open>
+              <summary>
+                <span>Unlinked mentions</span>
+                <span id="unlinkedMentionCount" class="page-link-section-count">0</span>
+              </summary>
+              <ol id="unlinkedMentionList" class="page-link-list" aria-label="Unlinked mentions"></ol>
+            </details>
+
+            <details class="page-link-section" open>
+              <summary>
+                <span>Outgoing links</span>
+                <span id="outgoingLinkCount" class="page-link-section-count">0</span>
+              </summary>
+              <ol id="outgoingLinkList" class="page-link-list" aria-label="Outgoing links"></ol>
+            </details>
+          </aside>
         </section>
 
         <section
@@ -925,6 +965,6 @@ Start writing here.</textarea>
       </div>
     </div>
 
-    <script src="/client/app.js?v=20260723-brain-health"></script>
+    <script src="/client/app.js?v=20260723-brain-health-backlinks"></script>
   </body>
 </html>

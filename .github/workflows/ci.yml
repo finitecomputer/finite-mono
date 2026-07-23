@@ -88,6 +88,46 @@ jobs:
       - name: Build dashboard
         run: npm run build
 
+  electron-alpha:
+    name: Electron production-dashboard alpha
+    needs:
+      - rust
+      - dashboard
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Device parity and Electron boundary gates
+        run: nix develop --command just chat-device-parity
+
+      - name: Build ad-hoc-signed internal alpha
+        run: nix develop --command just chat-electron-package
+
+      - name: Inspect packaged daemon and production-dashboard boundary
+        run: |
+          app="finitechat/apps/electron-chat/release/Finite Chat.app"
+          test -x "$app/Contents/Resources/finitechatd"
+          test -f "$app/Contents/Resources/app/electron/main.cjs"
+          test -f "$app/Contents/Resources/app/electron/preload.cjs"
+          grep -n 'https://finite\.computer' "$app/Contents/Resources/app/electron/main.cjs"
+          ! grep -R -n -E 'spawn\("cargo"|cargo run' "$app/Contents/Resources/app/electron"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Archive internal alpha
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            "finitechat/apps/electron-chat/release/Finite Chat.app" \
+            finitechat/apps/electron-chat/release/finite-chat-electron-alpha.zip
+
+      - name: Publish internal alpha
+        uses: actions/upload-artifact@v4
+        with:
+          name: finite-chat-electron-alpha-macos-${{ runner.arch }}
+          path: finitechat/apps/electron-chat/release/finite-chat-electron-alpha.zip
+          if-no-files-found: error
+
   hermes-bridge:
     name: finitechat Hermes bridge
     runs-on: ubuntu-latest

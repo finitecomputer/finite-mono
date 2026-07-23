@@ -12,6 +12,7 @@ import {
   pendingTurnIsComplete,
   pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
+  reconcilePendingChatTurns,
   selectedChat,
   transcriptItems,
   type AppState,
@@ -78,6 +79,49 @@ test("pending working state survives tools and same-account Device traffic until
   assert.equal(
     pendingTurnIsComplete(turn, [...state.messages, sameAccountFinal, tool, final], state.identity.account_id),
     true
+  );
+});
+
+test("one final delivery clears only one same-chat pending turn", () => {
+  const state = appState();
+  const selection = selectedChat(state);
+  const visible = messagesForChat(state, selection);
+  const first = beginPendingChatTurn(selection, visible, 10_000);
+  const second = beginPendingChatTurn(selection, visible, 10_001);
+  assert(first);
+  assert(second);
+  const firstFinal = message({
+    messageId: "agent-final-1",
+    seq: 3,
+    finalDelivery: true,
+  });
+  const secondFinal = message({
+    messageId: "agent-final-2",
+    seq: 4,
+    finalDelivery: true,
+  });
+
+  const afterFirstFinal = reconcilePendingChatTurns(
+    [first, second],
+    [...state.messages, firstFinal],
+    state.identity.account_id
+  );
+  assert.deepEqual(afterFirstFinal, [{ ...second, after_seq: firstFinal.seq }]);
+  assert.deepEqual(
+    reconcilePendingChatTurns(
+      afterFirstFinal,
+      [...state.messages, firstFinal],
+      state.identity.account_id
+    ),
+    afterFirstFinal
+  );
+  assert.deepEqual(
+    reconcilePendingChatTurns(
+      afterFirstFinal,
+      [...state.messages, firstFinal, secondFinal],
+      state.identity.account_id
+    ),
+    []
   );
 });
 

@@ -67,9 +67,9 @@ import {
   attachmentSendError,
   liveActivityLabel as sharedLiveActivityLabel,
   messageContent,
-  pendingTurnIsComplete,
   pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
+  reconcilePendingChatTurns,
   transcriptItems,
   type ChatSelection,
   type PendingChatTurn,
@@ -103,20 +103,22 @@ export function HostedWebChat({
   machineLabel: string;
 }) {
   const {
-    apiBase,
     state,
     transportError,
     claimError,
     bindingRecoveryRequired,
+    localDeviceRecoveryRequired,
     selectionPending,
     streamConnected,
     ownerClaimed,
     load,
     claimOwner,
     recoverBinding,
+    recoverLocalDevice,
     dispatch,
     dispatchQuiet,
     uploadAttachments,
+    attachmentUrl,
   } = useHostedChat();
   const [actionError, setActionError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -275,10 +277,14 @@ export function HostedWebChat({
   useEffect(() => {
     if (!state) return;
     setPendingAgentTurns((turns) => {
-      const pending = turns.filter(
+      const fresh = turns.filter(
         (turn) =>
           pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
-          && !pendingTurnIsComplete(turn, state.messages, state.identity.account_id)
+      );
+      const pending = reconcilePendingChatTurns(
+        fresh,
+        state.messages,
+        state.identity.account_id
       );
       return pending.length === turns.length ? turns : pending;
     });
@@ -406,7 +412,7 @@ export function HostedWebChat({
     if (pendingTurn) {
       setLeaseNowMs(pendingTurnStartedAtMs);
       setPendingAgentTurns((turns) => [
-        ...turns.filter((turn) => !pendingTurnMatchesSelection(turn, selectedChatSelection)),
+        ...turns,
         pendingTurn,
       ]);
     }
@@ -610,7 +616,7 @@ export function HostedWebChat({
                       item.type === "message" ? (
                         <MessageRow
                           key={item.message.message_id}
-                          apiBase={apiBase}
+                          attachmentUrl={attachmentUrl}
                           message={item.message}
                           ownAccountId={state?.identity.account_id ?? ""}
                         />
@@ -652,7 +658,11 @@ export function HostedWebChat({
                     size="sm"
                     onClick={() => {
                       if (transportError) {
-                        void (bindingRecoveryRequired ? recoverBinding() : load(true));
+                        void (localDeviceRecoveryRequired
+                          ? recoverLocalDevice()
+                          : bindingRecoveryRequired
+                            ? recoverBinding()
+                            : load(true));
                       } else if (claimError) {
                         void claimOwner();
                       } else {
@@ -662,9 +672,11 @@ export function HostedWebChat({
                   >
                     {transportError || claimError ? <RotateCcwIcon /> : null}
                     {transportError
-                      ? bindingRecoveryRequired
-                        ? "Finish chat setup"
-                        : "Retry load"
+                      ? localDeviceRecoveryRequired
+                        ? "Relink this Mac"
+                        : bindingRecoveryRequired
+                          ? "Finish chat setup"
+                          : "Retry load"
                       : claimError
                         ? "Retry claim"
                         : "Dismiss"}
@@ -870,11 +882,11 @@ function ToolRollup({
 }
 
 function MessageRow({
-  apiBase,
+  attachmentUrl,
   message,
   ownAccountId,
 }: {
-  apiBase: string;
+  attachmentUrl: AttachmentUrl;
   message: HostedChatMessage;
   ownAccountId: string;
 }) {
@@ -883,7 +895,7 @@ function MessageRow({
     return (
       <article className="finite-chat__message finite-chat__message--user">
         <div>
-          <MessageAttachments apiBase={apiBase} message={message} compact />
+          <MessageAttachments attachmentUrl={attachmentUrl} message={message} compact />
           {content ? <p>{content}</p> : null}
           <time className="finite-chat__message-time">{deliveryText(message) || message.display_timestamp}</time>
         </div>
@@ -892,27 +904,37 @@ function MessageRow({
   }
   return (
     <article className="finite-chat__message finite-chat__message--agent">
-      <MessageAttachments apiBase={apiBase} message={message} />
+      <MessageAttachments attachmentUrl={attachmentUrl} message={message} />
       {content ? <MarkdownMessage text={content} /> : null}
       <time className="finite-chat__message-time">{message.display_timestamp}</time>
     </article>
   );
 }
 
-function MessageAttachments({ apiBase, compact = false, message }: { apiBase: string; compact?: boolean; message: HostedChatMessage }) {
+type AttachmentUrl = (address: {
+  room_id: string;
+  message_id: string;
+  attachment_id: string;
+}) => string;
+
+function MessageAttachments({ attachmentUrl, compact = false, message }: { attachmentUrl: AttachmentUrl; compact?: boolean; message: HostedChatMessage }) {
   const media = message.media ?? [];
   if (media.length === 0) return null;
   return (
     <div className={compact ? "finite-chat__media-grid is-compact" : "finite-chat__media-grid"}>
       {media.map((attachment) => (
-        <AttachmentCard key={attachment.attachment_id} apiBase={apiBase} attachment={attachment} message={message} compact={compact} />
+        <AttachmentCard key={attachment.attachment_id} attachmentUrl={attachmentUrl} attachment={attachment} message={message} compact={compact} />
       ))}
     </div>
   );
 }
 
-function AttachmentCard({ apiBase, attachment, compact, message }: { apiBase: string; attachment: HostedChatMediaAttachment; compact: boolean; message: HostedChatMessage }) {
-  const href = `${apiBase}/attachments/${encodeURIComponent(message.room_id)}/${encodeURIComponent(message.message_id)}/${encodeURIComponent(attachment.attachment_id)}`;
+function AttachmentCard({ attachmentUrl, attachment, compact, message }: { attachmentUrl: AttachmentUrl; attachment: HostedChatMediaAttachment; compact: boolean; message: HostedChatMessage }) {
+  const href = attachmentUrl({
+    room_id: message.room_id,
+    message_id: message.message_id,
+    attachment_id: attachment.attachment_id,
+  });
   const cardClassName = compact
     ? "finite-chat__image-card is-compact"
     : "finite-chat__image-card";

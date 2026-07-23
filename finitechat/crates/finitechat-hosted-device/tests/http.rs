@@ -129,7 +129,11 @@ async fn state_requires_internal_authorization_and_verified_user() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    for path in ["/v1/device-links/approve", "/v1/device-links/status"] {
+    for path in [
+        "/v1/device-links/approve",
+        "/v1/device-links/status",
+        "/v1/device-links/reconcile",
+    ] {
         let response = test_app(&root)
             .oneshot(
                 Request::post(path)
@@ -177,6 +181,241 @@ async fn state_requires_internal_authorization_and_verified_user() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn device_reconciliation_authenticates_before_strict_bounded_json_parsing() {
+    let root = TempDir::new().unwrap();
+    let hosted = test_app(&root);
+
+    let unauthorized = hosted
+        .clone()
+        .oneshot(
+            Request::post("/v1/device-links/reconcile")
+                .header("content-type", "application/json")
+                .body(Body::from("not-json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    for body in [
+        Body::from("not-json"),
+        Body::from(
+            r#"{"project_id":"project-one","target_device_id":"electron-one","room_id":"untrusted"}"#,
+        ),
+        Body::from(r#"{"project_id":"project-one"}"#),
+    ] {
+        let response = hosted
+            .clone()
+            .oneshot(
+                Request::post("/v1/device-links/reconcile")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .header(WORKOS_USER_HEADER, "reconcile-user")
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    for target_device_id in ["hosted-web".to_owned(), "x".repeat(129)] {
+        let response = reconcile_device_for(
+            hosted.clone(),
+            "reconcile-user",
+            "project-one",
+            &target_device_id,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let oversized = hosted
+        .oneshot(
+            Request::post("/v1/device-links/reconcile")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header(WORKOS_USER_HEADER, "reconcile-user")
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; 4 * 1024 + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_reconciliation_requires_the_sealed_project_binding_and_resumes_fanout() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("reconcile-server.sqlite3"), None).await;
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root.path().join("reconcile-agent").display().to_string(),
+        server_url: server_url.clone(),
+        device_id: "agent".to_owned(),
+        account_secret_hex: None,
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let agent_npub = npub_from_account_id(
+        agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .unwrap()
+            .identity
+            .account_id,
+    )
+    .unwrap();
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("reconcile-hosted"),
+        server_url: server_url.clone(),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app(config.clone());
+    action_for(
+        hosted.clone(),
+        "reconcile-user",
+        serde_json::json!({ "StartRuntime": null }),
+    )
+    .await;
+
+    let missing = reconcile_device_for(
+        hosted.clone(),
+        "reconcile-user",
+        "missing-project",
+        "electron-reconcile",
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    binding_for(
+        hosted.clone(),
+        "reconcile-user",
+        "/v1/app/agent-bindings/authorize-bootstrap",
+        serde_json::json!({
+            "project_id": "project-reconcile",
+            "creation_request_id": "create-project-reconcile"
+        }),
+    )
+    .await;
+    let ensured = binding_for(
+        hosted.clone(),
+        "reconcile-user",
+        "/v1/app/agent-bindings/ensure",
+        serde_json::json!({
+            "project_id": "project-reconcile",
+            "agent_npub": agent_npub,
+            "display_name": "Reconcile Agent"
+        }),
+    )
+    .await;
+    assert_eq!(ensured["rooms"].as_array().unwrap().len(), 1);
+    action_for(
+        hosted.clone(),
+        "reconcile-user",
+        serde_json::json!({ "CreateRoom": { "display_name": "Created before reconciliation" } }),
+    )
+    .await;
+
+    let binding_root = config
+        .data_root
+        .join("users")
+        .join(hex::encode(sha2::Sha256::digest(b"reconcile-user")))
+        .join("agent-bindings");
+    let valid_binding_path = binding_root.join(format!(
+        "{}.json",
+        hex::encode(sha2::Sha256::digest(b"project-reconcile"))
+    ));
+    let wrong_binding_path = binding_root.join(format!(
+        "{}.json",
+        hex::encode(sha2::Sha256::digest(b"wrong-project"))
+    ));
+    fs::copy(&valid_binding_path, &wrong_binding_path).unwrap();
+    let wrong = reconcile_device_for(
+        hosted.clone(),
+        "reconcile-user",
+        "wrong-project",
+        "electron-reconcile",
+    )
+    .await;
+    assert_eq!(wrong.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let user_storage_id = hex::encode(sha2::Sha256::digest(b"reconcile-user"));
+    let hosted_identity = FiniteIdentity::load(&IdentityPaths::with_finite_home(
+        config
+            .data_root
+            .join("users")
+            .join(user_storage_id)
+            .join("finite-home"),
+    ))
+    .unwrap();
+    let target = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root.path().join("reconcile-target").display().to_string(),
+        server_url,
+        device_id: "electron-reconcile".to_owned(),
+        account_secret_hex: Some(hex::encode(hosted_identity.expose_secret_bytes())),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+
+    let awaiting = reconcile_device_json(
+        hosted.clone(),
+        "reconcile-user",
+        "project-reconcile",
+        "electron-reconcile",
+    )
+    .await;
+    assert_eq!(awaiting["status"], "awaiting_key_package");
+    assert_eq!(awaiting["project_id"], "project-reconcile");
+    assert_eq!(awaiting["target_device_id"], "electron-reconcile");
+    assert_eq!(awaiting.as_object().unwrap().len(), 5);
+    let awaiting_text = serde_json::to_string(&awaiting).unwrap();
+    for forbidden in ["account_id", "room_id", "session", "secret"] {
+        assert!(!awaiting_text.contains(forbidden));
+    }
+
+    target
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .expect("target Device publishes KeyPackages");
+    let joining = reconcile_device_json(
+        hosted.clone(),
+        "reconcile-user",
+        "project-reconcile",
+        "electron-reconcile",
+    )
+    .await;
+    assert_eq!(joining["status"], "joining_rooms");
+    assert_eq!(joining["room_count"], 2);
+    assert_eq!(joining["active_room_count"], 0);
+
+    target
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .expect("target Device activates its Welcomes");
+    let ready = reconcile_device_json(
+        hosted.clone(),
+        "reconcile-user",
+        "project-reconcile",
+        "electron-reconcile",
+    )
+    .await;
+    assert_eq!(ready["status"], "ready");
+    assert_eq!(ready["room_count"], 2);
+    assert_eq!(ready["active_room_count"], 2);
+    assert_eq!(
+        reconcile_device_json(
+            hosted,
+            "reconcile-user",
+            "project-reconcile",
+            "electron-reconcile",
+        )
+        .await,
+        ready
+    );
+
+    server_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2665,6 +2904,43 @@ async fn device_link_json(
     target_device_id: &str,
 ) -> Value {
     let response = device_link_for(app, user_id, path, link_session_id, target_device_id).await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn reconcile_device_for(
+    app: axum::Router,
+    user_id: &str,
+    project_id: &str,
+    target_device_id: &str,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::post("/v1/device-links/reconcile")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header(WORKOS_USER_HEADER, user_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "project_id": project_id,
+                    "target_device_id": target_device_id,
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn reconcile_device_json(
+    app: axum::Router,
+    user_id: &str,
+    project_id: &str,
+    target_device_id: &str,
+) -> Value {
+    let response = reconcile_device_for(app, user_id, project_id, target_device_id).await;
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));

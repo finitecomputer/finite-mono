@@ -26,15 +26,21 @@ local default.
   publish grant gate; Cloudflare rate-limiting rules on `/_finite/*` as
   belt-and-braces when the zone goes live.
 
-## 3. One mutex around the engine; blocking IO in async handlers
+## 3. RESOLVED for serving — one control-plane writer remains
 
-- **Source**: rusqlite connections are not Sync; v1 traffic is tiny.
-- **Risk**: a slow blob write head-of-line blocks every request.
-- **Proof**: `AppState.engine: Mutex<Engine>` in
-  `crates/finitesitesd/src/server.rs`.
-- **Delete condition**: read/write split or connection pool plus
-  `spawn_blocking` around blob IO, when p95 serve latency on the target
-  box exceeds ~50ms under expected load.
+- **Resolution**: site traffic uses a bounded pool of independent query-only
+  SQLite connections. Registry reads, verified blob reads, and document
+  rendering run on Tokio's blocking pool. Static and document requests do not
+  take `AppState.engine`.
+- **Atomicity boundary**: the control-plane writer still serializes mutations.
+  Publication writes and verifies immutable blobs before atomically activating
+  the new version; readers retain the resolved version id.
+- **Proof**: `ServingEnginePool` plus
+  `serving_pool_does_not_head_of_line_block_independent_reads`; the Store
+  regression proves readers observe committed writes and reject mutation.
+- **Remaining debt**: low-volume API and auth mutations still use the one writer
+  Engine. Revisit only if measured control-plane p95 exceeds 50 ms; do not add
+  writable serving connections.
 
 ## 4. Filesystem blob store and unreplicated registry
 

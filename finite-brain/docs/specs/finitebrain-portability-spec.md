@@ -2116,6 +2116,18 @@ backlink or graph edge. Link-looking examples inside inline or fenced code MUST
 NOT create Page references; inline and reference-style CommonMark Page links
 MUST resolve consistently across trusted clients.
 
+The Product Client MUST expose backlinks for the active readable Page. Linked
+mentions are readable Pages containing a resolved Page reference to the active
+Page. Unlinked mentions are whole-title occurrences of the active Page's exact
+display title, compared case-insensitively after NFC normalization, in readable
+Pages that are not the active Page. Occurrences inside inline or fenced code,
+Markdown reference definitions, wiki links, or Markdown links are not unlinked
+mentions. A readable Page MAY appear in both sections when it contains both a
+resolved link and a separate unlinked title occurrence. Each mention row MUST
+navigate to its source Page; unlinked mention navigation MUST identify the
+matched title in the source Page. Outgoing Page references MUST remain visible
+beside backlink context, including missing and ambiguous diagnostics.
+
 Privacy rules:
 
 - The server MUST NOT build plaintext search over secure Folder Objects.

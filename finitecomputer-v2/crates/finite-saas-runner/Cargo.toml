@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 finite-saas-core = { path = "../finite-saas-core" }
@@ -11,13 +12,17 @@ fs4.workspace = true
 hex = "0.4"
 httpdate = "1.0"
 rand = "0.8"
+secp256k1 = { workspace = true, features = ["recovery"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2.workspace = true
+sha3 = "0.10"
 thiserror = "2.0"
 time.workspace = true
 ureq = { version = "2.12", features = ["json"] }
 walkdir.workspace = true
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = "1"
 zip.workspace = true
 
 [dev-dependencies]
