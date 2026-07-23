@@ -86,6 +86,15 @@ def all_text(value: Any) -> str:
     return ""
 
 
+def latest_user_text(payload: dict[str, Any]) -> str:
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            if isinstance(message, dict) and message.get("role") == "user":
+                return all_text(message.get("content"))
+    return all_text(payload.get("input") or payload)
+
+
 class FakeModelState:
     def __init__(self) -> None:
         self.condition = threading.Condition()
@@ -102,6 +111,8 @@ class FakeModelState:
                 {
                     "stream": payload.get("stream"),
                     "stall": stall,
+                    "text": text,
+                    "latest_user_text": latest_user_text(payload),
                 }
             )
             return stall
@@ -288,6 +299,65 @@ def wait_reply(
     raise SmokeFailure(f"fresh reply {expected!r} did not arrive")
 
 
+def wait_existing_reply(
+    *,
+    image: str,
+    volume: str,
+    server_url: str,
+    room_id: str,
+    prompt_message_id: str,
+    expected: str,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        state = user_app(
+            image=image,
+            volume=volume,
+            server_url=server_url,
+            args=["state", "--start-runtime", "--wait-update-ms", "2000", "--room-id", room_id],
+            env=env,
+        )
+        for message in state.get("messages") or []:
+            if not message.get("is_mine") and expected in str(message.get("text") or ""):
+                return {
+                    "prompt_message_id": prompt_message_id,
+                    "reply_message_id": message.get("message_id"),
+                    "reply_text": message.get("text"),
+                }
+    raise SmokeFailure(f"queued reply {expected!r} did not arrive")
+
+
+def wait_durable_inbox_event(container: str, message_id: str, *, timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = smoke.run(
+            [
+                "docker",
+                "exec",
+                container,
+                "/bin/sh",
+                "-c",
+                'test -f "$FINITECHAT_HOME/hermes-inbox.json" '
+                '&& cat "$FINITECHAT_HOME/hermes-inbox.json" || printf \'{"events":[]}\'',
+            ],
+            timeout=30,
+        )
+        try:
+            inbox = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            inbox = {}
+        if any(
+            str(event.get("message_id") or event.get("event", {}).get("message_id") or "")
+            == message_id
+            for event in inbox.get("events") or []
+            if isinstance(event, dict)
+        ):
+            return
+        time.sleep(0.1)
+    raise SmokeFailure(f"queued message {message_id} was not retained in the durable Hermes inbox")
+
+
 def volume_archive(*, image: str, source_volume: str, snapshot_volume: str) -> str:
     smoke.run(["docker", "volume", "create", snapshot_volume])
     smoke.run(
@@ -439,11 +509,34 @@ def main() -> int:
             env=env,
         )
         model_state.wait_seen(case_name)
+        queued_expected = f"{case_name} queued follow-up ok"
+        queued_prompt = f"Reply with exactly: {queued_expected}"
+        queued_sent = user_app(
+            image=image,
+            volume=user_volume,
+            server_url=server_url,
+            args=["send", "--room-id", room_id, "--text", queued_prompt],
+            env=env,
+        )
+        queued_message_id = smoke.first_matching_mine_message_id(queued_sent, queued_prompt)
+        wait_durable_inbox_event(name, queued_message_id)
+        if any(
+            queued_expected in str(request.get("latest_user_text") or "")
+            for request in model_state.requests
+        ):
+            raise SmokeFailure(
+                f"{case_name} follow-up reached Hermes before the active turn released"
+            )
         case: dict[str, Any] = {
             "name": case_name,
             "signal": "SIGKILL" if kill else "SIGTERM",
             "empty_target_restore": restore,
             "provider_stream_in_flight": True,
+            "queued_before_restart": {
+                "prompt_message_id": queued_message_id,
+                "durable_unacked": True,
+                "handed_to_model": False,
+            },
         }
         if kill:
             smoke.run(["docker", "kill", "--signal", "KILL", name], timeout=30)
@@ -476,6 +569,28 @@ def main() -> int:
         status = smoke.wait_agent_room_connected(name, room_id, server_url)
         if health.get("npub") != agent_npub or status.get("room_id") != room_id:
             raise SmokeFailure(f"{case_name} changed the Agent identity or room")
+        queued_reply = wait_existing_reply(
+            image=image,
+            volume=user_volume,
+            server_url=server_url,
+            room_id=room_id,
+            prompt_message_id=queued_message_id,
+            expected=queued_expected,
+            env=env,
+        )
+        queued_handoffs = sum(
+            queued_expected in str(request.get("latest_user_text") or "")
+            for request in model_state.requests
+        )
+        if queued_handoffs != 1:
+            raise SmokeFailure(
+                f"{case_name} queued follow-up reached the model {queued_handoffs} times"
+            )
+        case["queued_after_restart"] = {
+            **queued_reply,
+            "first_next_ordinary_turn": True,
+            "model_handoffs": queued_handoffs,
+        }
         case["fresh_turns"] = [
             wait_reply(
                 image=image,

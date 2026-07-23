@@ -52,6 +52,9 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
         self.assertIn(
             '"interruption_boundary": "SSE headers flushed before first data frame"', source
         )
+        self.assertIn("wait_durable_inbox_event(name, queued_message_id)", source)
+        self.assertIn('"first_next_ordinary_turn": True', source)
+        self.assertIn('"model_handoffs": queued_handoffs', source)
         self.assertIn("expected SIGKILL exit 137", source)
         self.assertIn("escalated to SIGKILL instead of stopping gracefully", source)
         self.assertIn('"production_kata_task_and_stable_manifest_gate": False', source)

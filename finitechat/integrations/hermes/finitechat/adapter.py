@@ -26,7 +26,13 @@ from pathlib import Path
 from typing import Any
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.platforms.base import (
+    BasePlatformAdapter,
+    MessageEvent,
+    MessageType,
+    SendResult,
+    build_session_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +53,7 @@ STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
 SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
+ADMISSION_RECHECK_SECS = 0.05
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -55,6 +62,29 @@ REQUESTER_CONTEXT_TTL_SECS = 15 * 60
 REQUESTER_CONTEXT_VERSION = 1
 _AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "finitechat_authenticated_turn_user", default=None
+)
+APPROVAL_CONTROL_TEXT = frozenset(
+    {
+        "approve",
+        "yes",
+        "ok",
+        "okay",
+        "confirm",
+        "y",
+        "👍",
+        "deny",
+        "no",
+        "reject",
+        "cancel",
+        "n",
+        "👎",
+        "always",
+        "approve always",
+        "always approve",
+        "session",
+        "approve session",
+        "session approve",
+    }
 )
 
 # Hermes 0.18.2 does not pass a semantic progress flag to platform adapters.
@@ -432,6 +462,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
         self._inbound_chat_routes: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+        # The Rust inbox is the durable queue. Keep at most its first blocked
+        # ordinary text event per Hermes session in memory while the current
+        # owner task finishes. Later events remain only in the inbox and are
+        # redelivered after this head event is ACKed.
+        self._deferred_admissions: dict[str, tuple[MessageEvent, str, Any, str, str]] = {}
+        self._admission_tasks: dict[str, asyncio.Task] = {}
 
     async def _process_message_background(
         self,
@@ -492,6 +528,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
             self._poll_task = None
+        await self._cancel_admission_tasks()
         await self._stop_service()
         await self.cancel_background_tasks()
         self._mark_disconnected()
@@ -929,6 +966,41 @@ class FiniteChatAdapter(BasePlatformAdapter):
             ),
             internal=bool(raw_event.get("internal") or False),
         )
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+        if self._should_defer_admission(event, session_key):
+            self._defer_admission(
+                session_key,
+                event,
+                room_id,
+                seq,
+                message_id,
+                event_key or "",
+            )
+            return
+
+        await self._admit_finitechat_event(
+            event,
+            room_id,
+            seq,
+            message_id,
+            event_key or "",
+        )
+
+    async def _admit_finitechat_event(
+        self,
+        event: MessageEvent,
+        room_id: str,
+        seq: Any,
+        message_id: str,
+        event_key: str,
+    ) -> None:
+        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
+        conversation_id = _string_or_none(raw_event.get("conversation_id"))
+        segment_id = _string_or_none(raw_event.get("segment_id"))
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = await self._set_processing_activity(room_id, activity_metadata)
         try:
@@ -940,6 +1012,118 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
             raise
+
+    def _should_defer_admission(self, event: MessageEvent, session_key: str) -> bool:
+        if event.message_type != MessageType.TEXT or event.internal:
+            return False
+        if (event.text or "").lstrip().startswith("/"):
+            return False
+        if self._is_immediate_text_control(event, session_key):
+            return False
+        return session_key in self._deferred_admissions or self._session_is_active(session_key)
+
+    @staticmethod
+    def _is_immediate_text_control(event: MessageEvent, session_key: str) -> bool:
+        try:
+            from tools import clarify_gateway
+
+            if (
+                clarify_gateway.get_pending_for_session(
+                    session_key,
+                    include_choice_prompts=True,
+                )
+                is not None
+            ):
+                return True
+        except Exception:
+            pass
+
+        if (event.text or "").strip().lower() not in APPROVAL_CONTROL_TEXT:
+            return False
+        try:
+            from tools.approval import has_blocking_approval
+
+            return bool(has_blocking_approval(session_key))
+        except Exception:
+            return False
+
+    def _session_is_active(self, session_key: str) -> bool:
+        if session_key not in self._active_sessions:
+            return False
+        self._heal_stale_session_lock(session_key)
+        return session_key in self._active_sessions
+
+    def _defer_admission(
+        self,
+        session_key: str,
+        event: MessageEvent,
+        room_id: str,
+        seq: Any,
+        message_id: str,
+        event_key: str,
+    ) -> None:
+        if session_key in self._deferred_admissions:
+            return
+        self._deferred_admissions[session_key] = (
+            event,
+            room_id,
+            seq,
+            message_id,
+            event_key,
+        )
+        task = asyncio.create_task(self._admit_when_session_idle(session_key))
+        self._admission_tasks[session_key] = task
+
+    async def _admit_when_session_idle(self, session_key: str) -> None:
+        try:
+            while self._session_is_active(session_key):
+                admission = self._deferred_admissions.get(session_key)
+                if admission is None:
+                    return
+                if self._is_immediate_text_control(admission[0], session_key):
+                    break
+                owner = self._session_tasks.get(session_key)
+                if owner is not None and not owner.done():
+                    await asyncio.wait({owner}, timeout=ADMISSION_RECHECK_SECS)
+                else:
+                    await asyncio.sleep(ADMISSION_RECHECK_SECS)
+
+            admission = self._deferred_admissions.get(session_key)
+            if admission is None:
+                return
+            event, room_id, seq, message_id, event_key = admission
+            await self._admit_finitechat_event(
+                event,
+                room_id,
+                seq,
+                message_id,
+                event_key,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The inbox still owns the unacknowledged event. Dropping only the
+            # ephemeral gate lets the next stream delivery retry it.
+            logger.error(
+                "[finitechat] deferred admission failed for session %s: %s",
+                session_key,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            current = asyncio.current_task()
+            if self._admission_tasks.get(session_key) is current:
+                self._admission_tasks.pop(session_key, None)
+                self._deferred_admissions.pop(session_key, None)
+
+    async def _cancel_admission_tasks(self) -> None:
+        tasks = list(self._admission_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._admission_tasks.clear()
+        self._deferred_admissions.clear()
 
     async def _set_processing_activity(
         self,
