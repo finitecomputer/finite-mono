@@ -239,23 +239,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Failed containerized matrix runs intentionally preserve root-owned
-          # diagnostics under ignored .local-state paths. Each run creates a
-          # fresh state directory, so checkout must not try to delete them.
-          clean: false
+          # Containerized failures preserve root-owned diagnostics. Use a fresh
+          # checkout per attempt so those artifacts cannot poison checkout.
+          path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }} -> target
       - name: Install Brain matrix browser
-        working-directory: finitecomputer-v2/apps/dashboard
+        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}/finitecomputer-v2/apps/dashboard
         run: |
           nix develop --command npm ci
           nix develop --command npx playwright install chromium
       - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
+        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
         run: nix develop --command just brain-product-matrix
       - name: Upload boundary report and failure logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: brain-product-matrix
-          path: target/brain-product-matrix
+          path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}/target/brain-product-matrix
           if-no-files-found: error
