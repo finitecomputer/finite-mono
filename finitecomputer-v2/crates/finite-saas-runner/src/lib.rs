@@ -1011,13 +1011,17 @@ where
             return Ok(options);
         }
         let source = self.launcher.planned_source(lease);
+        let source_host_id = source
+            .as_ref()
+            .map(|value| value.source_host_id.clone())
+            .or_else(|| self.launcher.source_host_id().map(str::to_string));
         let key = self.queue.provision_finite_private_runtime_key(
             &lease.request.id,
             ProvisionFinitePrivateRuntimeKeyInput {
                 request_id: lease.request.id.clone(),
                 runner_id: self.runner_id.clone(),
                 lease_token: lease_token.to_string(),
-                source_host_id: source.as_ref().map(|value| value.source_host_id.clone()),
+                source_host_id,
                 source_machine_id: source.as_ref().map(|value| value.source_machine_id.clone()),
                 now: None,
             },
@@ -4858,6 +4862,30 @@ mod tests {
     }
 
     #[test]
+    fn run_once_binds_key_to_launcher_host_when_provider_machine_is_not_known_yet() {
+        let lease = sample_lease("agent_request_123");
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(lease),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).without_planned_source(),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert_eq!(runner.queue.provisioned.len(), 1);
+        assert_eq!(
+            runner.queue.provisioned[0].source_host_id.as_deref(),
+            Some("oslo-host-1")
+        );
+        assert_eq!(runner.queue.provisioned[0].source_machine_id, None);
+    }
+
+    #[test]
     fn run_once_uses_operator_finite_private_override_without_core_provisioning() {
         let lease = sample_lease("agent_request_123");
         let mut runner = AgentCreationRunner::new(
@@ -6064,6 +6092,7 @@ mod tests {
         runner_capacity: RunnerLeaseCapacity,
         runner_class: RunnerClass,
         uses_core_heartbeat: bool,
+        planned_source: Option<RuntimeSourceIdentity>,
     }
 
     impl FakeLauncher {
@@ -6088,6 +6117,10 @@ mod tests {
                 },
                 runner_class: RunnerClass::LocalDocker,
                 uses_core_heartbeat: true,
+                planned_source: Some(RuntimeSourceIdentity {
+                    source_host_id: "oslo-host-1".to_string(),
+                    source_machine_id: "finite-agent_123".to_string(),
+                }),
             }
         }
 
@@ -6112,6 +6145,10 @@ mod tests {
                 },
                 runner_class: RunnerClass::LocalDocker,
                 uses_core_heartbeat: true,
+                planned_source: Some(RuntimeSourceIdentity {
+                    source_host_id: "oslo-host-1".to_string(),
+                    source_machine_id: "finite-agent_123".to_string(),
+                }),
             }
         }
 
@@ -6136,6 +6173,10 @@ mod tests {
                 },
                 runner_class: RunnerClass::LocalDocker,
                 uses_core_heartbeat: true,
+                planned_source: Some(RuntimeSourceIdentity {
+                    source_host_id: "oslo-host-1".to_string(),
+                    source_machine_id: "finite-agent_123".to_string(),
+                }),
             }
         }
 
@@ -6146,6 +6187,11 @@ mod tests {
 
         fn without_core_heartbeat(mut self) -> Self {
             self.uses_core_heartbeat = false;
+            self
+        }
+
+        fn without_planned_source(mut self) -> Self {
+            self.planned_source = None;
             self
         }
 
@@ -6197,10 +6243,7 @@ mod tests {
         }
 
         fn planned_source(&self, _lease: &AgentCreationLease) -> Option<RuntimeSourceIdentity> {
-            Some(RuntimeSourceIdentity {
-                source_host_id: "oslo-host-1".to_string(),
-                source_machine_id: "finite-agent_123".to_string(),
-            })
+            self.planned_source.clone()
         }
 
         fn restart_runtime(
