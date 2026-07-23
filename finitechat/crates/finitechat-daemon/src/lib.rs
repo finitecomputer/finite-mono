@@ -37,6 +37,7 @@ pub const MAX_STARTUP_SECRETS_BYTES: usize = 2 * 1024;
 pub const MAX_DAEMON_ATTACHMENTS_PER_MESSAGE: usize = 8;
 pub const MAX_DAEMON_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_DAEMON_ATTACHMENT_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_DAEMON_NEW_CHAT_REQUEST_BYTES: usize = 4 * 1024;
 const MAX_MULTIPART_OVERHEAD_BYTES: usize = 1024 * 1024;
 pub const MAX_DAEMON_MULTIPART_BODY_BYTES: usize =
     MAX_DAEMON_ATTACHMENT_TOTAL_BYTES + MAX_MULTIPART_OVERHEAD_BYTES;
@@ -61,6 +62,15 @@ struct DaemonAuthorization {
 #[derive(Debug, Deserialize)]
 struct UpdatesQuery {
     timeout_millis: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartNewChatRequest {
+    room_id: String,
+    topic_id: String,
+    reason: Option<String>,
+    intent_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,6 +183,10 @@ fn app_with_attachment_cache_root(
         .route("/v1/app/state", get(app_state))
         .route("/v1/app/actions", post(dispatch_action))
         .route(
+            "/v1/app/new-chat",
+            post(start_new_chat).layer(DefaultBodyLimit::max(MAX_DAEMON_NEW_CHAT_REQUEST_BYTES)),
+        )
+        .route(
             "/v1/app/attachments",
             post(upload_attachments).layer(DefaultBodyLimit::max(MAX_DAEMON_MULTIPART_BODY_BYTES)),
         )
@@ -264,6 +278,25 @@ async fn dispatch_action(
     Json(action): Json<AppAction>,
 ) -> Result<Json<AppState>, DaemonError> {
     dispatch_runtime_action(Arc::clone(&state.runtime), action).await
+}
+
+async fn start_new_chat(
+    State(state): State<DaemonState>,
+    Json(input): Json<StartNewChatRequest>,
+) -> Result<Json<AppState>, DaemonError> {
+    let runtime = Arc::clone(&state.runtime);
+    let mut app = tokio::task::spawn_blocking(move || {
+        runtime.start_topic_chat_intent_and_wait(
+            input.room_id,
+            input.topic_id,
+            input.reason,
+            input.intent_key,
+        )
+    })
+    .await
+    .map_err(|error| DaemonError::Task(error.to_string()))??;
+    redact_app_state(&mut app);
+    Ok(Json(app))
 }
 
 async fn dispatch_runtime_action(

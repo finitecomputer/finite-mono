@@ -10,6 +10,7 @@ import {
   hostedDeviceHeaders,
   hostedDeviceProfileImage,
   hostedDeviceLinkStatus,
+  hostedDeviceReconcileDevice,
   hostedDeviceRuntimeCommand,
   hostedDeviceSitesIdentityProvider,
 } from "@/lib/hosted-web-device";
@@ -357,4 +358,91 @@ test("device linking stays server-side and projects only public progress", async
   }
   assert.equal("account_secret_hex" in approved, false);
   assert.equal("encrypted_payload" in approved, false);
+});
+
+test("Device reconciliation is project-bound and projects only public progress", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedUrl = "";
+  let observedInit: RequestInit | undefined;
+  global.fetch = (async (input, init) => {
+    observedUrl = String(input);
+    observedInit = init;
+    return Response.json({
+      project_id: "project-alpha",
+      target_device_id: "electron-alpha",
+      status: "joining_rooms",
+      room_count: 4,
+      active_room_count: 2,
+      account_secret_hex: "must-never-cross-the-dashboard-boundary",
+      recovery_bundle: { ciphertext: "also-private" },
+    });
+  }) as typeof fetch;
+
+  const result = await hostedDeviceReconcileDevice(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    verifiedAccount,
+    {
+      project_id: "project-alpha",
+      target_device_id: "electron-alpha",
+    }
+  );
+
+  assert.equal(observedUrl, "https://device.internal/v1/device-links/reconcile");
+  assert.equal(observedInit?.method, "POST");
+  assert.equal(observedInit?.cache, "no-store");
+  const headers = new Headers(observedInit?.headers);
+  assert.equal(headers.get("authorization"), "Bearer internal-token");
+  assert.equal(headers.get("x-finite-workos-user-id"), "user_paul");
+  assert.deepEqual(JSON.parse(String(observedInit?.body)), {
+    project_id: "project-alpha",
+    target_device_id: "electron-alpha",
+  });
+  assert.deepEqual(result, {
+    project_id: "project-alpha",
+    target_device_id: "electron-alpha",
+    status: "joining_rooms",
+    room_count: 4,
+    active_room_count: 2,
+  });
+  assert.equal("account_secret_hex" in result, false);
+  assert.equal("recovery_bundle" in result, false);
+});
+
+test("Device reconciliation rejects mismatched or malformed service progress", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  const valid = {
+    project_id: "project-alpha",
+    target_device_id: "electron-alpha",
+    status: "ready",
+    room_count: 4,
+    active_room_count: 4,
+  };
+  const invalid = [
+    { ...valid, project_id: "project-other" },
+    { ...valid, target_device_id: "electron-other" },
+    { ...valid, status: "awaiting_claim" },
+    { ...valid, room_count: -1 },
+    { ...valid, active_room_count: 5 },
+  ];
+
+  for (const response of invalid) {
+    global.fetch = (async () => Response.json(response)) as typeof fetch;
+    await assert.rejects(
+      hostedDeviceReconcileDevice(
+        { baseUrl: "https://device.internal", apiToken: "internal-token" },
+        verifiedAccount,
+        {
+          project_id: "project-alpha",
+          target_device_id: "electron-alpha",
+        }
+      ),
+      /Device reconciliation service returned an invalid response/u
+    );
+  }
 });

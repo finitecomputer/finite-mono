@@ -21,6 +21,15 @@ web-design-reset:
 up *args:
     cd .. && cargo run -p devfinity -- up {{ args }}
 
+# Securely caches one of your existing Finite Private keys for local chat.
+inference-key:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf 'Paste an existing Finite Private key: ' >&2
+    IFS= read -r -s finite_private_key
+    printf '\n' >&2
+    printf '%s\n' "${finite_private_key}" | (cd .. && cargo run --quiet -p devfinity -- inference-key)
+
 # Starts an isolated, fresh services-only stack, runs its smoke test, and tears it down.
 # This portable profile is the Linux CI gate; it does not claim to launch an Agent Runtime.
 smoke:

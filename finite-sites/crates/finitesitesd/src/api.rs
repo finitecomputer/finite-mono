@@ -243,7 +243,7 @@ async fn create_verified_email_viewer_session(
         })?
         .ok_or_else(|| ApiError::forbidden("viewer access is unavailable"))?;
 
-    // Reuse the existing one-time magic-link token. `return_to` is a bounded,
+    // Reuse the existing reusable magic-link token. `return_to` is a bounded,
     // same-origin path and is validated again by the redeem handler.
     let redeem_url = format!(
         "{}&return_to={}",

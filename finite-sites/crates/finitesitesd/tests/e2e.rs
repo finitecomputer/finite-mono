@@ -1449,10 +1449,7 @@ async fn full_publish_share_and_view_flow() {
         let open = server
             .site_get("finitechat-native-mockup", "/", port)
             .unwrap();
-        assert_eq!(
-            open.header("cache-control"),
-            Some("public, max-age=0, must-revalidate")
-        );
+        assert_eq!(open.header("cache-control"), Some("no-store"));
         assert_eq!(open.into_string().unwrap(), "<h1>hello from finite</h1>");
 
         {
@@ -2133,7 +2130,10 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
 
         let bodies = outbox_bodies(&server.outbox);
         assert_eq!(bodies.len(), 1);
-        assert!(bodies[0].contains("You've been invited to view finitechat-native-mockup"));
+        assert!(bodies[0].contains("finitechat-native-mockup has been shared with you."));
+        assert!(bodies[0].contains("To view it, open this sign-in link:"));
+        assert!(bodies[0].contains("For your agent"));
+        assert!(bodies[0].contains("ask it to read this email"));
         assert!(bodies[0].contains("/llms.txt"));
         let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
         let link = outbox_link(&server.outbox);
@@ -2968,16 +2968,20 @@ async fn document_output_renders_markdown_and_agent_companion_paths() {
             "Publish site and document outputs",
         );
 
-        let site_summary = wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+        let site_summary = project_output_status(&server, "finitechat-native-mockup");
         assert_eq!(site_summary.kind, "site");
-        let doc_summary = wait_for_project_active_version(
-            &server,
-            &user_secret(),
-            "finitechat-native",
-            "finitechat-native-docs",
+        assert_eq!(
+            site_summary.active_version,
             Some(1),
+            "a successful git push must return after its version is active"
         );
+        let doc_summary = project_output_status(&server, "finitechat-native-docs");
         assert_eq!(doc_summary.kind, "document");
+        assert_eq!(
+            doc_summary.active_version,
+            Some(1),
+            "a successful git push must activate every matching output"
+        );
         assert_eq!(doc_summary.output_name, "finitechat-native-docs");
         assert_eq!(doc_summary.entry.as_deref(), Some("index.md"));
 
@@ -3013,10 +3017,8 @@ async fn document_output_renders_markdown_and_agent_companion_paths() {
             rendered.header("content-type").unwrap(),
             "text/html; charset=utf-8"
         );
-        assert_eq!(
-            rendered.header("cache-control"),
-            Some("public, max-age=0, must-revalidate")
-        );
+        assert_eq!(rendered.header("cache-control"), Some("no-store"));
+        let first_etag = rendered.header("etag").unwrap().to_string();
         let rendered = rendered.into_string().unwrap();
         assert!(rendered.contains("<h1>Hermes Notes</h1>"));
         assert!(rendered.contains("href=\"/guide\""));
@@ -3062,6 +3064,39 @@ async fn document_output_renders_markdown_and_agent_companion_paths() {
         assert!(full.contains("## /guide.md"));
         assert!(full.contains("# Hermes Notes"));
         assert!(full.contains("# Guide"));
+
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[(
+                "docs/guide.md",
+                "# Better Guide\n\nA second authored Markdown page.\n",
+            )],
+            "Rename sibling document page",
+        );
+        assert_eq!(
+            project_output_status(&server, "finitechat-native-docs").active_version,
+            Some(2),
+            "push completion must include activation of the new document version"
+        );
+
+        let revalidated = server
+            .agent
+            .get(&format!(
+                "http://finitechat-native-docs.{}:{port}/",
+                document_base_domain()
+            ))
+            .set("If-None-Match", &first_etag)
+            .call()
+            .unwrap();
+        assert_eq!(revalidated.status(), 200);
+        let second_etag = revalidated.header("etag").unwrap().to_string();
+        assert_ne!(second_etag, first_etag);
+        let revalidated = revalidated.into_string().unwrap();
+        assert!(revalidated.contains(">Better Guide</a>"));
+        assert!(!revalidated.contains(">Guide</a>"));
     });
     task.await.unwrap();
 }
@@ -3249,7 +3284,118 @@ async fn git_push_to_non_deploy_branch_does_not_publish() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn git_push_with_missing_output_path_does_not_publish() {
+async fn static_publish_revalidates_to_new_active_bytes_when_push_returns() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        let public_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("public".into()),
+            confirm_public: true,
+            add_emails: vec![],
+            remove_emails: vec![],
+            add_npubs: vec![],
+            remove_npubs: vec![],
+        })
+        .unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/outputs/mockup/sharing",
+                Some(&public_body),
+            )
+            .unwrap();
+
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[
+                ("index.html", "<h1>version one</h1>"),
+                ("app.js", "console.log('version one')"),
+            ],
+            "Publish version one",
+        );
+        assert_eq!(
+            project_output_status(&server, "finitechat-native-mockup").active_version,
+            Some(1)
+        );
+        let first = server
+            .site_get("finitechat-native-mockup", "/", port)
+            .unwrap();
+        let first_etag = first.header("etag").unwrap().to_string();
+        assert_eq!(first.header("cache-control"), Some("no-store"));
+        assert_eq!(first.into_string().unwrap(), "<h1>version one</h1>");
+        let first_asset = server
+            .site_get("finitechat-native-mockup", "/app.js", port)
+            .unwrap();
+        assert_eq!(first_asset.header("cache-control"), Some("no-store"));
+        let first_asset_etag = first_asset.header("etag").unwrap().to_string();
+        assert_eq!(
+            first_asset.into_string().unwrap(),
+            "console.log('version one')"
+        );
+
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[
+                ("index.html", "<h1>version two</h1>"),
+                ("app.js", "console.log('version two')"),
+            ],
+            "Publish version two",
+        );
+        assert_eq!(
+            project_output_status(&server, "finitechat-native-mockup").active_version,
+            Some(2)
+        );
+        let revalidated = server
+            .agent
+            .get(&format!(
+                "http://finitechat-native-mockup.{BASE_DOMAIN}:{port}/"
+            ))
+            .set("If-None-Match", &first_etag)
+            .call()
+            .unwrap();
+        assert_eq!(revalidated.status(), 200);
+        assert_ne!(revalidated.header("etag"), Some(first_etag.as_str()));
+        assert_eq!(revalidated.into_string().unwrap(), "<h1>version two</h1>");
+        let revalidated_asset = server
+            .agent
+            .get(&format!(
+                "http://finitechat-native-mockup.{BASE_DOMAIN}:{port}/app.js"
+            ))
+            .set("If-None-Match", &first_asset_etag)
+            .call()
+            .unwrap();
+        assert_eq!(revalidated_asset.status(), 200);
+        assert_eq!(revalidated_asset.header("cache-control"), Some("no-store"));
+        assert_ne!(
+            revalidated_asset.header("etag"),
+            Some(first_asset_etag.as_str())
+        );
+        assert_eq!(
+            revalidated_asset.into_string().unwrap(),
+            "console.log('version two')"
+        );
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_deploy_reports_failure_after_accepting_the_git_ref() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
 
@@ -3301,7 +3447,9 @@ async fn git_push_with_missing_output_path_does_not_publish() {
             ],
             Some(&repo),
         );
-        run_git(
+        let local_head =
+            String::from_utf8(run_git_capture(&["rev-parse", "HEAD"], Some(&repo)).stdout).unwrap();
+        run_git_expect_failure(
             &[
                 "-c",
                 &format!("http.extraHeader={host_header}"),
@@ -3310,6 +3458,24 @@ async fn git_push_with_missing_output_path_does_not_publish() {
                 "main",
             ],
             Some(&repo),
+        );
+        let remote_ref = String::from_utf8(
+            run_git_capture(
+                &[
+                    "-c",
+                    &format!("http.extraHeader={host_header}"),
+                    "ls-remote",
+                    "origin",
+                    "refs/heads/main",
+                ],
+                Some(&repo),
+            )
+            .stdout,
+        )
+        .unwrap();
+        assert!(
+            remote_ref.starts_with(local_head.trim()),
+            "post-receive deploy failure is reported after Git durably accepts the ref"
         );
 
         let summary = project_output_status(&server, "finitechat-native-mockup");

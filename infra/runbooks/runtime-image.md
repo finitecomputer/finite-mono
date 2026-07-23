@@ -144,22 +144,49 @@ Runtime `destroy` endpoint as an upgrade step: destroy intentionally offboards
 the Runtime, removes its relay credential, and revokes its Runtime-scoped Finite
 Private key.
 
-For a controlled production cohort, use the deploy wrapper with explicit
-projects. It prints Core's deterministic plan, preflights every canonical Kata
-container on lat1, and then submits and verifies the same operation serially:
+After a canary passes, prepare the broad production cohort. Preparation reads
+Core's deterministic scope, verifies the already-target canary, checks every
+eligible canonical Kata container directly on lat1, and writes a mode-0600
+reviewed plan under the ignored `.local-state/runtime-rollouts/` tree. It does
+not enqueue an upgrade:
 
 ```sh
 scripts/rollout-lat1-runtime-artifact \
+  --prepare \
   --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
   --roll-admin-email operator@example.com \
   --roll-admin-workos-user-id user_operator \
-  --roll-project-id project_canary
+  --roll-all \
+  --roll-canary-project-id project_canary
 ```
 
-The command stops before enqueueing if any planned Runtime has no canonical
-container. It stops before the next Runtime on an operation failure, timeout,
-wrong artifact, or non-online postcondition. Do not use this rollout path to
-reconstruct missing compute.
+Review the concise counts, exclusions, target digest/schema, and plan hash, then
+run the copy-paste command emitted by preparation. It has the same scope and
+adds only the approved hash:
+
+```sh
+scripts/rollout-lat1-runtime-artifact \
+  --execute-plan-hash <approved-64-hex-plan-hash> \
+  --roll-runtime-artifact finite-agent-runtime-YYYY-MM-DD.N \
+  --roll-admin-email operator@example.com \
+  --roll-admin-workos-user-id user_operator \
+  --roll-all \
+  --roll-canary-project-id project_canary
+```
+
+Execution recomputes the whole plan and provider snapshot before mutation. It
+then rechecks each exact Runtime immediately before enqueueing and verifies the
+target artifact, image, schema, writable `/data` bind, topology, and unchanged
+Agent Principal afterward. It stops before the next Runtime on plan drift,
+stopped or ambiguous compute, operation failure, timeout, wrong artifact, or a
+failed postcondition. The retained `events.jsonl` records success or failure.
+For `--roll-all`, a canonical container that is already stopped is retained in
+the hashed plan as `provider_not_running` and is never contacted, started, or
+enqueued; healthy eligible Runtimes may continue. An explicitly selected
+stopped Runtime fails instead of being silently excluded.
+Do not edit a prepared roster to make it pass; prepare a fresh plan after
+resolving the concrete drift. Do not use this rollout path to reconstruct
+missing compute.
 
 For the Finite Private quota-notice rollout, keep this first wave to exactly
 one explicitly named canary project. Before enqueueing, prove the new narrow

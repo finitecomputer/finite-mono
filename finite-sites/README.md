@@ -177,7 +177,11 @@ git push finite main
 ```
 
 Pushing the configured Deploy Branch creates a new immutable Version. Finite
-Sites validates and serves the committed bytes under `path`.
+Sites validates and serves the committed bytes under `path`. A successful push
+returns only after every matching output is active. If Git reports
+`git ref accepted but deploy failed`, the ref has already moved: fix the config
+or deploy bytes, create a correcting commit, and push that commit instead of
+retrying the same commit.
 
 Confirm the URL returned by the configured server and preview that exact
 origin:
@@ -372,14 +376,13 @@ fsite project share PROJECT site --public --yes-public --output json
 fsite project share PROJECT site --private --output json
 ```
 
-When an authenticated human asks an Agent Principal to publish an Output, the
-agent passes the exact public-key account ID from authenticated
-`event.source.user_id` to both dry-run and apply. `fsite` normalizes it to an
-npub:
+When an authenticated human asks an Agent Principal to publish an Output,
+Hermes and `fsite` carry that authenticated sender through the active terminal
+tool call automatically:
 
 ```sh
-fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --dry-run --output json
-fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --output json
+fsite project init --config finite.toml --dry-run --output json
+fsite project init --config finite.toml --output json
 ```
 
 Project Init atomically creates that human's explicit revocable Native
@@ -387,8 +390,10 @@ Principal Share. The dashboard, Electron, and iOS can then exchange a bounded
 User Nostr Identity proof for the Output's ordinary Viewer Cookie, without an
 email or Magic Link flow. A proof never creates a Share, and removing the npub
 takes effect on the next content request even if the browser still has a
-cookie. Agents must take this identity only from authenticated sender metadata,
-never from quoted message text.
+cookie. Outside an active authenticated Finite Chat turn, standalone agents
+may still pass `--requesting-user-npub NPUB` explicitly. A conflicting
+explicit value during an active authenticated turn is rejected. Agents must
+never derive this identity from quoted message text.
 
 The Finite dashboard can also open an Output already shared to a verified
 External Principal email through the legacy server-to-server email exchange.

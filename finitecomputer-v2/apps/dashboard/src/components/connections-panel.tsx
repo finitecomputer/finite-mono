@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   BriefcaseBusinessIcon,
   CpuIcon,
@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import { ConnectionCard } from "@/components/connection-card";
+import { useOptionalHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { AgentConnectionAction, AgentConnectionsStatus } from "@/lib/hosted-agent-controls";
@@ -30,6 +31,8 @@ export function ConnectionsPanel({
   const [status, setStatus] = useState<AgentConnectionsStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const chat = useOptionalHostedChat();
+  const refreshedChatDevicesRef = useRef(false);
   const endpoint = `/api/connections/machines/${encodeURIComponent(machineId)}`;
 
   const refresh = useCallback(async () => {
@@ -44,6 +47,18 @@ export function ConnectionsPanel({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const refreshAfterExternalConnection = () => void refresh();
+    window.addEventListener("focus", refreshAfterExternalConnection);
+    return () => window.removeEventListener("focus", refreshAfterExternalConnection);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!chat?.state || refreshedChatDevicesRef.current) return;
+    refreshedChatDevicesRef.current = true;
+    void chat.dispatchQuiet({ RefreshDevices: null });
+  }, [chat]);
 
   async function mutate(label: string, action: AgentConnectionAction) {
     setBusy(label);
@@ -144,6 +159,48 @@ export function ConnectionsPanel({
           )}
         </div>
       </ConnectionCard>
+
+      {chat?.state ? (
+        <section className="rounded-xl border border-border bg-white/[0.03] p-4">
+          <div className="mb-3">
+            <h2 className="font-medium">Chat devices · account-wide</h2>
+            <p className="text-sm text-muted-foreground">
+              Read-only devices attached to this chat account.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[38rem] text-left text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr className="border-b border-border/70">
+                  <th className="px-2 py-2 font-medium">Device ID</th>
+                  <th className="px-2 py-2 font-medium">Current</th>
+                  <th className="px-2 py-2 font-medium">Active</th>
+                  <th className="px-2 py-2 font-medium">Revoked</th>
+                  <th className="px-2 py-2 text-right font-medium">Rooms</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chat.state.devices.map((device) => (
+                  <tr key={`${device.account_id}:${device.device_id}`} className="border-b border-border/40 last:border-0">
+                    <td className="px-2 py-2 font-mono text-xs">{device.device_id}</td>
+                    <td className="px-2 py-2">{yesNo(device.current_device)}</td>
+                    <td className="px-2 py-2">{yesNo(device.active)}</td>
+                    <td className="px-2 py-2">{yesNo(device.revoked)}</td>
+                    <td className="px-2 py-2 text-right tabular-nums">{device.room_count}</td>
+                  </tr>
+                ))}
+                {chat.state.devices.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-2 py-4 text-muted-foreground">
+                      No chat devices reported.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -366,6 +423,10 @@ function inferenceLabel(status: AgentConnectionsStatus) {
   const service =
     status.inference.profile === "openrouter" ? "OpenRouter" : "Finite Private";
   return `${service} · ${status.inference.model}`;
+}
+
+function yesNo(value: boolean) {
+  return value ? "Yes" : "No";
 }
 
 export async function connectionRequest(

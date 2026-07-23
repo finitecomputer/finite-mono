@@ -19,6 +19,7 @@ use axum::http::header::HOST;
 use axum::response::Response;
 use tower::util::ServiceExt as _;
 
+use finitesites_blob::BlobStore;
 use finitesites_engine::Engine;
 
 use crate::apps::Supervisor;
@@ -27,11 +28,20 @@ use crate::limiter::{RateLimiter, WINDOW_SECONDS};
 use crate::mailer::Mailer;
 use crate::{ServeOptions, api, git, sites};
 
+const SERVING_ENGINE_POOL_SIZE: usize = 8;
+
 pub struct AppState {
-    /// The engine owns the registry connection, which is not Sync; one
-    /// mutex serializes control-plane work. Fine for v1 scale (see the
-    /// technical debt ledger for the pooling plan).
+    /// The Engine owns the sole writable registry connection. This mutex
+    /// serializes control-plane mutations; serving uses `serving_engines`.
     pub engine: Mutex<Engine>,
+    /// Independent read-only SQLite connections for site traffic. The small
+    /// mutex protects only idle-handle checkout; request work runs on Tokio's
+    /// blocking pool and never holds the control-plane Engine mutex.
+    pub serving_engines: ServingEnginePool,
+    /// Immutable blob handle used outside the registry mutex. Content files
+    /// are address-verified on every read, so concurrent serving cannot mix
+    /// bytes across active versions.
+    pub blobs: BlobStore,
     pub mailer: Box<dyn Mailer>,
     /// Owns app isolation (the runner) plus the density policy: wake on
     /// request, stop when idle.
@@ -46,6 +56,77 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub git_hook_helper_path: PathBuf,
     pub git_auto_reconcile: bool,
+}
+
+pub struct ServingEnginePool {
+    available: Arc<Mutex<Vec<Engine>>>,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl ServingEnginePool {
+    fn new(engine: &Engine, size: usize) -> Result<Self, finitesites_engine::EngineError> {
+        assert!(size > 0);
+        let mut available = Vec::with_capacity(size);
+        for _ in 0..size {
+            available.push(engine.serving_reader()?);
+        }
+        Ok(Self {
+            available: Arc::new(Mutex::new(available)),
+            permits: Arc::new(tokio::sync::Semaphore::new(size)),
+        })
+    }
+
+    pub async fn run<F, R>(&self, work: F) -> Result<R, String>
+    where
+        F: FnOnce(&Engine) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "serving engine pool closed".to_string())?;
+        let engine = self
+            .available
+            .lock()
+            .expect("serving engine pool mutex never poisoned")
+            .pop()
+            .expect("permit guarantees an available serving engine");
+        let available = Arc::clone(&self.available);
+        tokio::task::spawn_blocking(move || {
+            let lease = ServingEngineLease {
+                engine: Some(engine),
+                available,
+                _permit: permit,
+            };
+            work(
+                lease
+                    .engine
+                    .as_ref()
+                    .expect("serving engine lease owns engine"),
+            )
+        })
+        .await
+        .map_err(|error| format!("serving engine task failed: {error}"))
+    }
+}
+
+struct ServingEngineLease {
+    engine: Option<Engine>,
+    available: Arc<Mutex<Vec<Engine>>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for ServingEngineLease {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            self.available
+                .lock()
+                .expect("serving engine pool mutex never poisoned")
+                .push(engine);
+        }
+    }
 }
 
 pub fn now_unix() -> u64 {
@@ -225,8 +306,13 @@ pub async fn serve_on(
             "Git dependency preflight failed: {error}. Install Git and make it available on PATH"
         )
     })?;
+    let blobs = engine.blob_store();
+    let serving_engines = ServingEnginePool::new(&engine, SERVING_ENGINE_POOL_SIZE)
+        .map_err(|error| format!("cannot open serving registry readers: {error}"))?;
     let state = Arc::new(AppState {
         engine: Mutex::new(engine),
+        serving_engines,
+        blobs,
         mailer,
         apps,
         login_limiter: RateLimiter::new(WINDOW_SECONDS),
@@ -342,7 +428,106 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_of_url, site_label, strip_port};
+    use std::sync::Arc;
+
+    use super::{ServingEnginePool, host_of_url, site_label, strip_port};
+
+    #[tokio::test]
+    async fn serving_pool_does_not_head_of_line_block_independent_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = finitesites_store::Store::open(&directory.path().join("registry.db")).unwrap();
+        let blobs = finitesites_blob::BlobStore::open(&directory.path().join("blobs")).unwrap();
+        let engine = finitesites_engine::Engine::new(
+            store,
+            blobs,
+            [7; 32],
+            finitesites_engine::EngineConfig {
+                base_domain: "sites.test".to_string(),
+                document_base_domain: "docs.sites.test".to_string(),
+                site_url_scheme: "https".to_string(),
+                site_url_port: None,
+            },
+        );
+        let pool = Arc::new(ServingEnginePool::new(&engine, 2).unwrap());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slow_pool = Arc::clone(&pool);
+        let slow = tokio::spawn(async move {
+            slow_pool
+                .run(move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .await
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            pool.run(|_| "independent"),
+        )
+        .await
+        .expect("second serving reader must not wait for the first");
+        assert_eq!(result.unwrap(), "independent");
+
+        release_tx.send(()).unwrap();
+        slow.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serving_pool_keeps_permit_until_cancelled_blocking_work_returns() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = finitesites_store::Store::open(&directory.path().join("registry.db")).unwrap();
+        let blobs = finitesites_blob::BlobStore::open(&directory.path().join("blobs")).unwrap();
+        let engine = finitesites_engine::Engine::new(
+            store,
+            blobs,
+            [7; 32],
+            finitesites_engine::EngineConfig {
+                base_domain: "sites.test".to_string(),
+                document_base_domain: "docs.sites.test".to_string(),
+                site_url_scheme: "https".to_string(),
+                site_url_port: None,
+            },
+        );
+        let pool = Arc::new(ServingEnginePool::new(&engine, 1).unwrap());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slow_pool = Arc::clone(&pool);
+        let slow = tokio::spawn(async move {
+            slow_pool
+                .run(move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .await
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+
+        slow.abort();
+        assert!(slow.await.unwrap_err().is_cancelled());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                pool.run(|_| "must wait"),
+            )
+            .await
+            .is_err(),
+            "cancelling the async caller must not release the blocking worker's permit"
+        );
+
+        release_tx.send(()).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            pool.run(|_| "available again"),
+        )
+        .await
+        .expect("serving engine returns after cancelled blocking work finishes")
+        .unwrap();
+        assert_eq!(result, "available again");
+    }
 
     #[test]
     fn host_of_url_extraction() {

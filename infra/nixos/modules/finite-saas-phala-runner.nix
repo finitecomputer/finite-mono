@@ -1,7 +1,7 @@
-# Dark Phala worker definition. This is deliberately a second one-class
-# worker, not a provider switch in the Kata service. It has no wantedBy/timer
-# and remains drained until a later, separately authorized generation enables
-# Confidential placement after the API adapter and recovery gates pass.
+# Single-canary Phala worker definition. This is deliberately a second
+# one-class worker, not a provider switch in the Kata service. Core's durable
+# provider-operation journal plus the exact one-resource reservation fence are
+# the only creation path.
 {
   config,
   finitePackages,
@@ -14,13 +14,11 @@ let
 in
 {
   systemd.services.${serviceName} = {
-    description = "Finite Phala confidential runtime worker (dark)";
+    description = "Finite Phala confidential runtime worker (single canary)";
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
 
-    # Intentionally no wantedBy and no timer. Merely deploying this module
-    # cannot contact Phala, advertise capacity, or claim a Core lease.
-    wantedBy = [ ];
+    wantedBy = [ "multi-user.target" ];
     path = [ ];
     startLimitIntervalSec = 300;
     startLimitBurst = 3;
@@ -34,10 +32,22 @@ in
       FC_RUNNER_SOURCE_HOST_ID = "finite-lat-1-phala-control-1";
       FC_RUNNER_CLASS = "phala";
 
-      # Dark means no new creation leases. Existing-runtime controls remain a
-      # separate contract; changing this value requires a reviewed Nix deploy.
-      FC_RUNNER_DRAIN = "true";
+      # The ACTIVE readiness run authorizes exactly one internal Confidential
+      # launch. Provider inventory plus Core in-flight reservations enforce
+      # this cap across worker restarts and ambiguous provider responses.
+      FC_RUNNER_DRAIN = "false";
       FC_RUNNER_MAX_SANDBOXES = "1";
+      FC_RUNNER_PHALA_EXPECTED_WORKSPACE_ID = "wks_YKRQqRea";
+      FC_RUNNER_PHALA_EXPECTED_WORKSPACE_SLUG = "finite";
+      FC_RUNNER_RUNTIME_ARTIFACT_ID = "finite-agent-runtime-2026-07-22.1";
+      FC_RUNNER_RUNTIME_ENV_JSON = builtins.toJSON {
+        FINITE_SITES_API = "https://api.finite.chat";
+        FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
+        FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
+      };
+      # systemd expands %d to the private credential directory. The worker
+      # receives a read-only copy without gaining access to /etc/finite.
+      FC_RUNNER_RUNTIME_SECRET_ENV_FILE = "%d/runtime-secrets.env";
 
       # The HTTPS adapter pins the API origin/version, exact Medium/40 GB
       # shape, Cloud KMS, and private-log policy in code. None is a deploy-time
@@ -50,8 +60,9 @@ in
       ExecStart = "${finitePackages.finite-saas-runner}/bin/finite-saas-runner serve";
 
       # Operator-created root:root 0600. It contains only this worker's
-      # route-scoped Core token, Phala API key, and promoted artifact id.
+      # route-scoped Core token, Phala API key, and specialization credential.
       EnvironmentFile = "/etc/finite/phala-runner.env";
+      LoadCredential = "runtime-secrets.env:/etc/finite/runtime-secrets.env";
 
       DynamicUser = true;
       User = serviceName;
@@ -114,13 +125,12 @@ in
     };
   };
 
-  # Evaluation-time guardrails keep later refactors from accidentally turning
-  # the dark API worker into a privileged or automatically started provider
-  # shell. The root CI Nix eval exercises these assertions.
+  # Evaluation-time guardrails keep later refactors from widening the
+  # authorized one-canary API worker into a privileged provider shell.
   assertions = [
     {
-      assertion = service.wantedBy == [ ];
-      message = "the dark Phala worker must not be wanted by any target";
+      assertion = service.wantedBy == [ "multi-user.target" ];
+      message = "the authorized Phala canary worker must start at multi-user.target";
     }
     {
       assertion = !(builtins.hasAttr serviceName config.systemd.timers);
@@ -131,8 +141,8 @@ in
       message = "the Phala worker must advertise only the phala class";
     }
     {
-      assertion = service.environment.FC_RUNNER_DRAIN == "true";
-      message = "the dark Phala worker must reject new creation leases";
+      assertion = service.environment.FC_RUNNER_DRAIN == "false";
+      message = "the authorized Phala canary worker must admit its single creation lease";
     }
     {
       assertion = service.environment.FC_RUNNER_MAX_SANDBOXES == "1";

@@ -21,6 +21,12 @@ REQUIRED_REGRESSIONS: dict[str, list[str]] = {
     "ack retry without duplicate dispatch": [
         "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_ack_failure_retries_without_dispatching_duplicate",
     ],
+    "durable busy-text admission": [
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_busy_text_waits_unacked_then_admits_in_inbox_order",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_deferred_text_survives_adapter_restart_until_admission",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_controls_bypass_busy_text_admission_gate",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_active_session_does_not_block_another_session",
+    ],
     "transient poll recovery": [
         "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_poll_loop_continues_after_transient_poll_error",
     ],

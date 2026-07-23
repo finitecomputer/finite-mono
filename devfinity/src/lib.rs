@@ -1,4 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -117,14 +117,24 @@ enum InferenceMode {
 }
 
 impl InferenceMode {
-    fn from_environment() -> Self {
-        if nonempty_env("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY") {
+    fn from_sources(has_upstream_env: bool, has_direct_env: bool, has_cached_key: bool) -> Self {
+        if has_upstream_env {
             Self::ChainedLimiter
-        } else if nonempty_env("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE") {
+        } else if has_direct_env {
             Self::DirectKeyOverride
+        } else if has_cached_key {
+            Self::ChainedLimiter
         } else {
             Self::Missing
         }
+    }
+
+    fn from_environment(cached_key_file: &Path) -> Self {
+        Self::from_sources(
+            nonempty_env("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY"),
+            nonempty_env("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE"),
+            cached_key_file.is_file(),
+        )
     }
 }
 
@@ -155,6 +165,78 @@ const DEVFINITY_RUNNER_TOKEN_ENV: &str = "FC_CORE_RUNNER_CREDENTIAL_TOKEN_DEVFIN
 const DEVFINITY_RUNNER_TOKEN: &str = "devfinity-runner-route-token";
 const DEVFINITY_USAGE_TOKEN: &str = "devfinity-finite-private-usage-token";
 const MACOS_UNIX_SOCKET_PATH_MAX: usize = 103;
+const CACHED_INFERENCE_KEY_FILE: &str = "finite-private-upstream.key";
+const WORKOS_STAGING_API_KEY_ENV: &str = "WORKOS_STAGING_API_KEY";
+const WORKOS_STAGING_CLIENT_ID_ENV: &str = "WORKOS_STAGING_CLIENT_ID";
+const WORKOS_STAGING_OPERATOR_ORG_ID_ENV: &str = "WORKOS_STAGING_OPERATOR_ORG_ID";
+
+#[derive(Clone)]
+struct WorkosStagingConfig {
+    api_key: String,
+    client_id: String,
+    operator_org_id: String,
+}
+
+#[derive(Clone)]
+enum WorkosMode {
+    Fixture,
+    Staging(WorkosStagingConfig),
+}
+
+impl std::fmt::Debug for WorkosMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fixture => f.write_str("Fixture"),
+            Self::Staging(config) => f
+                .debug_struct("Staging")
+                .field("api_key", &"[redacted]")
+                .field("client_id", &config.client_id)
+                .field("operator_org_id", &config.operator_org_id)
+                .finish(),
+        }
+    }
+}
+
+impl WorkosMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fixture => "fixture",
+            Self::Staging(_) => "staging",
+        }
+    }
+
+    fn is_fixture(&self) -> bool {
+        matches!(self, Self::Fixture)
+    }
+
+    fn client_id(&self) -> &str {
+        match self {
+            Self::Fixture => WORKOS_FIXTURE_CLIENT_ID,
+            Self::Staging(config) => &config.client_id,
+        }
+    }
+
+    fn operator_org_id(&self) -> &str {
+        match self {
+            Self::Fixture => WORKOS_FIXTURE_OPERATOR_ORG_ID,
+            Self::Staging(config) => &config.operator_org_id,
+        }
+    }
+}
+
+pub fn store_inference_key(state_dir: PathBuf, input: &str) -> Result<PathBuf> {
+    let repo_root = std::env::current_dir().context("failed to read current directory")?;
+    let state_dir = absolute_path(&repo_root, &state_dir);
+    fs::create_dir_all(&state_dir)
+        .with_context(|| format!("failed to create {}", state_dir.display()))?;
+    let credentials_dir = state_dir.join("credentials");
+    ensure_private_dir(&credentials_dir)?;
+
+    let key = validate_finite_private_api_key(input)?;
+    let path = cached_inference_key_path(&state_dir);
+    write_mode_600(&path, key.as_bytes())?;
+    Ok(path)
+}
 
 fn devfinity_runner_credentials_json() -> String {
     serde_json::json!([{
@@ -191,6 +273,7 @@ pub struct Stack {
     profile: StackProfile,
     fresh_services_state: bool,
     inference_mode: InferenceMode,
+    workos_mode: WorkosMode,
     apple_host_access: AppleHostAccess,
     apple_container_name_prefix: String,
 }
@@ -214,6 +297,8 @@ impl Stack {
     pub fn new(state_dir: PathBuf) -> Result<Self> {
         let repo_root = std::env::current_dir().context("failed to read current directory")?;
         let state_dir = absolute_path(&repo_root, &state_dir);
+        let inference_mode =
+            InferenceMode::from_environment(&cached_inference_key_path(&state_dir));
         let run_dir = state_dir.join("runs").join("default");
         let logs_dir = run_dir.join("logs");
         let pids_dir = run_dir.join("pids");
@@ -251,7 +336,8 @@ impl Stack {
                 "dededededededededededededededededededededededededededededededede".to_string(),
             profile: StackProfile::AppleSaas,
             fresh_services_state: false,
-            inference_mode: InferenceMode::from_environment(),
+            inference_mode,
+            workos_mode: WorkosMode::Fixture,
             apple_host_access: AppleHostAccess::default(),
             apple_container_name_prefix,
         })
@@ -265,6 +351,11 @@ impl Stack {
     pub fn with_fresh_services_state(mut self, fresh: bool) -> Self {
         self.fresh_services_state = fresh;
         self
+    }
+
+    pub fn with_workos_staging(mut self) -> Result<Self> {
+        self.workos_mode = WorkosMode::Staging(load_workos_staging_config(&self.repo_root)?);
+        Ok(self)
     }
 
     /// Prepare the host-only prerequisites needed to generate an accurate
@@ -311,7 +402,7 @@ impl Stack {
         if !dry_run {
             if self.inference_mode == InferenceMode::Missing {
                 bail!(
-                    "chat-capable local SaaS requires inference credentials. Set FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY (preferred: real local admission and per-runtime keys), or explicitly set FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE. Secrets are inherited by the relevant process and are never written to devfinity config or logs"
+                    "chat-capable local SaaS requires a Finite Private key. Run `just dev inference-key` once, or set FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY (preferred) or FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE"
                 );
             }
             // Apple Container 1.1 reports `builder is not running` with exit 0,
@@ -374,10 +465,17 @@ impl Stack {
         #[cfg(unix)]
         fs::set_permissions(self.secrets_dir(), fs::Permissions::from_mode(0o700))?;
 
-        let fixture = FixturePaths::new(self.workos_fixture_dir());
-        prepare_workos_fixture(&fixture, &self.workos_fixture_url())?;
-        let workos_api_key = fs::read_to_string(&fixture.api_key)?;
-        let customer_token = fs::read_to_string(&fixture.customer_token)?;
+        let (workos_api_key, fixture_customer_token) = match &self.workos_mode {
+            WorkosMode::Fixture => {
+                let fixture = FixturePaths::new(self.workos_fixture_dir());
+                prepare_workos_fixture(&fixture, &self.workos_fixture_url())?;
+                (
+                    fs::read_to_string(&fixture.api_key)?,
+                    Some(fs::read_to_string(&fixture.customer_token)?),
+                )
+            }
+            WorkosMode::Staging(config) => (config.api_key.clone(), None),
+        };
         let runner_credentials_json = devfinity_runner_credentials_json();
         let identity_operator_token = random_local_secret()?;
         write_mode_600(
@@ -416,14 +514,22 @@ impl Stack {
             )
             .as_bytes(),
         )?;
-        write_mode_600(
-            &self.dashboard_auth_secret_file(),
+        let dashboard_auth = if let Some(customer_token) = fixture_customer_token {
             format!(
                 "export FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN={}\nexport FC_CORE_API_TOKEN={}\n",
                 shell_quote(customer_token.trim()),
                 shell_quote(&self.core_token)
             )
-            .as_bytes(),
+        } else {
+            format!(
+                "export WORKOS_API_KEY={}\nexport FC_CORE_API_TOKEN={}\n",
+                shell_quote(workos_api_key.trim()),
+                shell_quote(&self.core_token)
+            )
+        };
+        write_mode_600(
+            &self.dashboard_auth_secret_file(),
+            dashboard_auth.as_bytes(),
         )?;
         write_mode_600(
             &self.brain_auth_secret_file(),
@@ -440,7 +546,7 @@ impl Stack {
 
         match self.inference_mode {
             InferenceMode::ChainedLimiter => {
-                let value = required_secret_env("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY")?;
+                let value = self.upstream_inference_key()?;
                 write_mode_600(
                     &self.limiter_secret_file(),
                     format!(
@@ -464,6 +570,21 @@ impl Stack {
             InferenceMode::Missing => {}
         }
         Ok(())
+    }
+
+    fn upstream_inference_key(&self) -> Result<String> {
+        if let Some(value) = nonempty_env_value("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY") {
+            return Ok(value);
+        }
+
+        let path = self.cached_inference_key_file();
+        let value = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to read cached Finite Private key {}; rerun `just dev inference-key`",
+                path.display()
+            )
+        })?;
+        Ok(validate_finite_private_api_key(&value)?.to_string())
     }
 
     fn remove_secret_files(&self) {
@@ -501,6 +622,7 @@ impl Stack {
         println!("  logs:       {}", self.logs_dir.display());
         println!("  config:     {}", self.process_compose_file.display());
         println!("  socket:     {}", self.process_compose_socket.display());
+        println!("  workos:     {}", self.workos_mode.as_str());
         println!("  dashboard:  {}", self.dashboard_url());
         println!("  core:       {}", self.core_url());
         println!("  chat:       {}", self.finitechat_url());
@@ -744,7 +866,9 @@ impl Stack {
         let _ = writeln!(yaml, "log_level: info");
         let _ = writeln!(yaml, "processes:");
         self.write_rust_build(&mut yaml);
-        self.write_workos_fixture(&mut yaml);
+        if self.workos_mode.is_fixture() {
+            self.write_workos_fixture(&mut yaml);
+        }
         self.write_postgres(&mut yaml);
         self.write_core(&mut yaml);
         self.write_finitechat(&mut yaml);
@@ -930,14 +1054,39 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Postgres);
         let _ = writeln!(yaml, "        condition: process_healthy");
-        let _ = writeln!(yaml, "      {}:", ManagedProcess::WorkosFixture);
-        let _ = writeln!(yaml, "        condition: process_healthy");
-        self.write_environment(
-            yaml,
-            &[
-                ("FC_CORE_DATABASE_URL", self.database_url()),
-                ("FC_CORE_BIND", format!("127.0.0.1:{}", self.ports.core)),
-                ("WORKOS_CLIENT_ID", WORKOS_FIXTURE_CLIENT_ID.to_string()),
+        if self.workos_mode.is_fixture() {
+            let _ = writeln!(yaml, "      {}:", ManagedProcess::WorkosFixture);
+            let _ = writeln!(yaml, "        condition: process_healthy");
+        }
+        let mut core_environment = vec![
+            ("FC_CORE_DATABASE_URL", self.database_url()),
+            ("FC_CORE_BIND", format!("127.0.0.1:{}", self.ports.core)),
+            ("WORKOS_CLIENT_ID", self.workos_mode.client_id().to_string()),
+            (
+                "FC_WORKOS_OPERATOR_ORG_ID",
+                self.workos_mode.operator_org_id().to_string(),
+            ),
+            (
+                "FC_CORE_RUNTIME_ENV_JSON",
+                serde_json::json!({
+                    "FINITE_SITES_API": self.finitesites_api_url(),
+                    "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
+                    "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
+                    "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
+                })
+                .to_string(),
+            ),
+            (
+                "FC_CORE_AGENT_CREATION_PLACEMENT_JSON",
+                serde_json::json!({
+                    "runnerClass": RUNNER_CLASS,
+                    "runtimeResourceClass": "vcpu4_memory8_gib",
+                })
+                .to_string(),
+            ),
+        ];
+        if self.workos_mode.is_fixture() {
+            core_environment.extend([
                 ("WORKOS_API_BASE_URL", self.workos_fixture_url()),
                 (
                     "WORKOS_JWKS_URL",
@@ -948,30 +1097,17 @@ wait "$postgres_pid"
                     ),
                 ),
                 ("WORKOS_ISSUER", self.workos_fixture_url()),
-                (
-                    "FC_WORKOS_OPERATOR_ORG_ID",
-                    WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
+            ]);
+        } else if let WorkosMode::Staging(config) = &self.workos_mode {
+            core_environment.push((
+                "WORKOS_ISSUER",
+                format!(
+                    "https://api.workos.com/user_management/{}",
+                    config.client_id
                 ),
-                (
-                    "FC_CORE_RUNTIME_ENV_JSON",
-                    serde_json::json!({
-                        "FINITE_SITES_API": self.finitesites_api_url(),
-                        "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
-                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
-                        "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
-                    })
-                    .to_string(),
-                ),
-                (
-                    "FC_CORE_AGENT_CREATION_PLACEMENT_JSON",
-                    serde_json::json!({
-                        "runnerClass": RUNNER_CLASS,
-                        "runtimeResourceClass": "vcpu4_memory8_gib",
-                    })
-                    .to_string(),
-                ),
-            ],
-        );
+            ));
+        }
+        self.write_environment(yaml, &core_environment);
         self.write_http_probe(yaml, "/healthz", self.ports.core, 2, 2, 3, 45);
     }
 
@@ -1054,6 +1190,7 @@ wait "$postgres_pid"
                 ),
                 ("FINITECHAT_SERVER_URL", self.finitechat_url()),
                 ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
+                ("FINITECHAT_PUBLIC_URL", self.finitechat_url()),
             ],
         );
         self.write_http_probe(yaml, "/healthz", self.ports.hosted_web_device, 1, 2, 3, 45);
@@ -1552,20 +1689,6 @@ wait "$postgres_pid"
             let _ = writeln!(yaml, "        condition: process_started");
         }
         let mut dashboard_environment = vec![
-            ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
-            ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
-            (
-                "FC_WORKOS_OPERATOR_ORG_ID",
-                WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
-            ),
-            (
-                "FC_DASHBOARD_DEV_EMAIL",
-                WORKOS_FIXTURE_CUSTOMER_EMAIL.to_string(),
-            ),
-            (
-                "FC_DASHBOARD_DEV_WORKOS_USER_ID",
-                WORKOS_FIXTURE_CUSTOMER_SUBJECT.to_string(),
-            ),
             ("FC_CORE_BASE_URL", self.core_url()),
             ("FC_HOSTED_WEB_DEVICE_URL", self.hosted_web_device_url()),
             ("FC_BRAIN_UPSTREAM_URL", self.finite_brain_url()),
@@ -1596,6 +1719,30 @@ wait "$postgres_pid"
                 "devfinity-local-cookie-password-2026".to_string(),
             ),
         ];
+        match &self.workos_mode {
+            WorkosMode::Fixture => dashboard_environment.extend([
+                ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
+                ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
+                (
+                    "FC_WORKOS_OPERATOR_ORG_ID",
+                    WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
+                ),
+                (
+                    "FC_DASHBOARD_DEV_EMAIL",
+                    WORKOS_FIXTURE_CUSTOMER_EMAIL.to_string(),
+                ),
+                (
+                    "FC_DASHBOARD_DEV_WORKOS_USER_ID",
+                    WORKOS_FIXTURE_CUSTOMER_SUBJECT.to_string(),
+                ),
+            ]),
+            WorkosMode::Staging(config) => dashboard_environment.extend([
+                ("FC_WORKOS_AUTH_ENABLED", "1".to_string()),
+                ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "0".to_string()),
+                ("WORKOS_CLIENT_ID", config.client_id.clone()),
+                ("FC_WORKOS_OPERATOR_ORG_ID", config.operator_org_id.clone()),
+            ]),
+        }
         for name in [
             "GOOGLE_WORKSPACE_CLIENT_ID",
             "GOOGLE_WORKSPACE_CLIENT_SECRET",
@@ -1607,7 +1754,7 @@ wait "$postgres_pid"
             }
         }
         self.write_environment(yaml, &dashboard_environment);
-        self.write_http_probe(yaml, "/dashboard", self.ports.dashboard, 5, 5, 5, 120);
+        self.write_http_probe(yaml, "/healthz", self.ports.dashboard, 5, 5, 5, 120);
     }
 
     fn write_dashboard_deps(&self, yaml: &mut String) {
@@ -1803,14 +1950,14 @@ wait "$postgres_pid"
             .arg("--config")
             .arg(&self.process_compose_file)
             .args(self.process_compose_control_args());
-        scrub_inference_secrets(&mut command);
+        scrub_devfinity_secrets(&mut command);
         command
     }
 
     fn process_compose_control_command(&self) -> Command {
         let mut command = Command::new("process-compose");
         command.args(self.process_compose_control_args());
-        scrub_inference_secrets(&mut command);
+        scrub_devfinity_secrets(&mut command);
         command
     }
 
@@ -1942,7 +2089,7 @@ wait "$postgres_pid"
             .args(args)
             .current_dir(&self.repo_root)
             .envs(self.env_values());
-        scrub_inference_secrets(&mut child_command);
+        scrub_devfinity_secrets(&mut child_command);
         let status = child_command.status().with_context(|| {
             format!("failed to run devfinity command `{}`", shell_words(command))
         })?;
@@ -2152,6 +2299,9 @@ wait "$postgres_pid"
                     return self.profile.includes_runtime()
                         && self.inference_mode == InferenceMode::ChainedLimiter;
                 }
+                if *process == ManagedProcess::WorkosFixture {
+                    return self.workos_mode.is_fixture();
+                }
                 true
             })
             .collect()
@@ -2200,7 +2350,7 @@ wait "$postgres_pid"
                 ManagedProcess::Dashboard,
                 "127.0.0.1",
                 self.ports.dashboard,
-                "/dashboard",
+                "/healthz",
             ),
         ];
         if self.profile.includes_runtime() && self.inference_mode == InferenceMode::ChainedLimiter {
@@ -2218,6 +2368,7 @@ wait "$postgres_pid"
         let mut urls = format!(
             concat!(
                 "profile={}\n",
+                "workos={}\n",
                 "dashboard={}\n",
                 "core={}\n",
                 "finitechat={}\n",
@@ -2228,6 +2379,7 @@ wait "$postgres_pid"
                 "finite_brain={}\n"
             ),
             self.profile.as_str(),
+            self.workos_mode.as_str(),
             self.dashboard_url(),
             self.core_url(),
             self.finitechat_url(),
@@ -2398,6 +2550,10 @@ wait "$postgres_pid"
         self.run_dir.join("secrets")
     }
 
+    fn cached_inference_key_file(&self) -> PathBuf {
+        cached_inference_key_path(&self.state_dir)
+    }
+
     fn limiter_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("finite-private-limiter.sh")
     }
@@ -2447,19 +2603,9 @@ wait "$postgres_pid"
             ("DEVFINITY_LOGS_DIR", self.logs_dir.display().to_string()),
             ("DEVFINITY_PIDS_DIR", self.pids_dir.display().to_string()),
             ("DEVFINITY_POSTGRES_PORT", self.ports.postgres.to_string()),
-            ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
-            ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
             (
-                "FC_WORKOS_OPERATOR_ORG_ID",
-                WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
-            ),
-            (
-                "FC_DASHBOARD_DEV_EMAIL",
-                WORKOS_FIXTURE_CUSTOMER_EMAIL.to_string(),
-            ),
-            (
-                "FC_DASHBOARD_DEV_WORKOS_USER_ID",
-                WORKOS_FIXTURE_CUSTOMER_SUBJECT.to_string(),
+                "DEVFINITY_WORKOS_MODE",
+                self.workos_mode.as_str().to_string(),
             ),
             ("FC_CORE_URL", self.core_url()),
             ("FC_CORE_BASE_URL", self.core_url()),
@@ -2501,6 +2647,30 @@ wait "$postgres_pid"
             ("FINITE_HOME", self.finite_home_dir().display().to_string()),
             ("DEVFINITY_PROFILE", self.profile.as_str().to_string()),
         ];
+        match &self.workos_mode {
+            WorkosMode::Fixture => values.extend([
+                ("FC_WORKOS_AUTH_ENABLED", "0".to_string()),
+                ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "1".to_string()),
+                (
+                    "FC_WORKOS_OPERATOR_ORG_ID",
+                    WORKOS_FIXTURE_OPERATOR_ORG_ID.to_string(),
+                ),
+                (
+                    "FC_DASHBOARD_DEV_EMAIL",
+                    WORKOS_FIXTURE_CUSTOMER_EMAIL.to_string(),
+                ),
+                (
+                    "FC_DASHBOARD_DEV_WORKOS_USER_ID",
+                    WORKOS_FIXTURE_CUSTOMER_SUBJECT.to_string(),
+                ),
+            ]),
+            WorkosMode::Staging(config) => values.extend([
+                ("FC_WORKOS_AUTH_ENABLED", "1".to_string()),
+                ("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH", "0".to_string()),
+                ("WORKOS_CLIENT_ID", config.client_id.clone()),
+                ("FC_WORKOS_OPERATOR_ORG_ID", config.operator_org_id.clone()),
+            ]),
+        }
         if self.profile.includes_runtime() {
             values.push((
                 "DEVFINITY_RUNTIME_URL",
@@ -2994,9 +3164,105 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn nonempty_env(name: &str) -> bool {
+    nonempty_env_value(name).is_some()
+}
+
+fn nonempty_env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
-        .is_some_and(|value| !value.trim().is_empty())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn load_workos_staging_config(repo_root: &Path) -> Result<WorkosStagingConfig> {
+    let env_file = repo_root.join(".env");
+    let file_values = read_local_workos_env(&env_file)?;
+    let resolve = |name: &str| {
+        nonempty_env_value(name).or_else(|| {
+            file_values
+                .get(name)
+                .filter(|value| !value.trim().is_empty())
+                .cloned()
+        })
+    };
+    let required = |name: &str| {
+        resolve(name).with_context(|| {
+            format!(
+                "{name} is required for --workos-staging; copy .env.example to .env and ask Paul for the staging credentials"
+            )
+        })
+    };
+
+    let api_key = required(WORKOS_STAGING_API_KEY_ENV)?;
+    let client_id = required(WORKOS_STAGING_CLIENT_ID_ENV)?;
+    let operator_org_id = required(WORKOS_STAGING_OPERATOR_ORG_ID_ENV)?;
+    if !api_key.starts_with("sk_") {
+        bail!("{WORKOS_STAGING_API_KEY_ENV} must begin with sk_");
+    }
+    if !client_id.starts_with("client_") {
+        bail!("{WORKOS_STAGING_CLIENT_ID_ENV} must begin with client_");
+    }
+    if !operator_org_id.starts_with("org_") {
+        bail!("{WORKOS_STAGING_OPERATOR_ORG_ID_ENV} must begin with org_");
+    }
+
+    Ok(WorkosStagingConfig {
+        api_key,
+        client_id,
+        operator_org_id,
+    })
+}
+
+fn read_local_workos_env(path: &Path) -> Result<BTreeMap<String, String>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    let accepted = [
+        WORKOS_STAGING_API_KEY_ENV,
+        WORKOS_STAGING_CLIENT_ID_ENV,
+        WORKOS_STAGING_OPERATOR_ORG_ID_ENV,
+    ];
+    let mut values = BTreeMap::new();
+    for (index, original) in contents.lines().enumerate() {
+        let line = original.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((name, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !accepted.contains(&name) {
+            continue;
+        }
+        let value = parse_local_env_value(raw_value).with_context(|| {
+            format!(
+                "invalid {name} entry on line {} of {}",
+                index + 1,
+                path.display()
+            )
+        })?;
+        values.insert(name.to_string(), value);
+    }
+    Ok(values)
+}
+
+fn parse_local_env_value(raw: &str) -> Result<String> {
+    let value = raw.trim();
+    let Some(first) = value.chars().next() else {
+        return Ok(String::new());
+    };
+    if first == '\'' || first == '"' {
+        if value.len() < 2 || !value.ends_with(first) {
+            bail!("quoted value is not terminated");
+        }
+        return Ok(value[1..value.len() - 1].to_string());
+    }
+    Ok(value.to_string())
 }
 
 fn optional_env_u16(name: &str, default: u16) -> Result<u16> {
@@ -3016,15 +3282,34 @@ fn optional_env_u16(name: &str, default: u16) -> Result<u16> {
 }
 
 fn required_secret_env(name: &str) -> Result<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    nonempty_env_value(name)
         .with_context(|| format!("{name} is required for the selected inference mode"))
 }
 
-fn scrub_inference_secrets(command: &mut Command) {
+fn cached_inference_key_path(state_dir: &Path) -> PathBuf {
+    state_dir
+        .join("credentials")
+        .join(CACHED_INFERENCE_KEY_FILE)
+}
+
+fn validate_finite_private_api_key(input: &str) -> Result<&str> {
+    let key = input.trim();
+    let Some(secret) = key.strip_prefix("fpk_live_") else {
+        bail!("expected a Finite Private key beginning with fpk_live_");
+    };
+    if secret.len() != 64 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("expected a complete Finite Private key");
+    }
+    Ok(key)
+}
+
+fn scrub_devfinity_secrets(command: &mut Command) {
     command.env_remove("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY");
     command.env_remove("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE");
+    command.env_remove("WORKOS_API_KEY");
+    command.env_remove(WORKOS_STAGING_API_KEY_ENV);
+    command.env_remove(WORKOS_STAGING_CLIENT_ID_ENV);
+    command.env_remove(WORKOS_STAGING_OPERATOR_ORG_ID_ENV);
 }
 
 fn write_mode_600(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -3221,8 +3506,156 @@ mod tests {
     }
 
     #[test]
+    fn inference_source_priority_is_upstream_then_direct_then_cache() {
+        assert_eq!(
+            InferenceMode::from_sources(true, true, true),
+            InferenceMode::ChainedLimiter
+        );
+        assert_eq!(
+            InferenceMode::from_sources(false, true, true),
+            InferenceMode::DirectKeyOverride
+        );
+        assert_eq!(
+            InferenceMode::from_sources(false, false, true),
+            InferenceMode::ChainedLimiter
+        );
+        assert_eq!(
+            InferenceMode::from_sources(false, false, false),
+            InferenceMode::Missing
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stored_inference_key_is_private_and_reusable() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "devfinity-test-inference-key-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state_dir);
+        let key = format!("fpk_live_{}", "a".repeat(64));
+
+        let path = store_inference_key(state_dir.clone(), &format!(" {key}\n")).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), key);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            Stack::new(state_dir.clone()).unwrap().inference_mode,
+            InferenceMode::ChainedLimiter
+        );
+
+        let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn invalid_inference_key_is_not_stored() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "devfinity-test-invalid-inference-key-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state_dir);
+
+        let error = store_inference_key(state_dir.clone(), "not-a-private-key").unwrap_err();
+
+        assert!(error.to_string().contains("beginning with fpk_live_"));
+        assert!(!cached_inference_key_path(&state_dir).exists());
+        let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
     fn managed_process_display_respects_format_width() {
         assert_eq!(format!("{:<16}", ManagedProcess::Core), "core            ");
+    }
+
+    #[test]
+    fn local_workos_env_reads_only_supported_names() {
+        let dir =
+            std::env::temp_dir().join(format!("devfinity-test-workos-env-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        fs::write(
+            &path,
+            concat!(
+                "# local credentials\n",
+                "WORKOS_STAGING_API_KEY='sk_test_not_real'\n",
+                "WORKOS_STAGING_CLIENT_ID=client_test_not_real\n",
+                "WORKOS_STAGING_OPERATOR_ORG_ID=org_test_not_real\n",
+                "UNRELATED_SECRET=must-not-be-read\n",
+            ),
+        )
+        .unwrap();
+
+        let values = read_local_workos_env(&path).unwrap();
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(
+            values.get(WORKOS_STAGING_API_KEY_ENV).map(String::as_str),
+            Some("sk_test_not_real")
+        );
+        assert!(!values.contains_key("UNRELATED_SECRET"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn staging_workos_uses_remote_defaults_and_protected_secret_files() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "devfinity-test-workos-staging-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state_dir);
+        let mut stack = Stack::new(state_dir.clone())
+            .unwrap()
+            .with_profile(StackProfile::ServicesOnly);
+        stack.workos_mode = WorkosMode::Staging(WorkosStagingConfig {
+            api_key: "sk_test_not_real".to_string(),
+            client_id: "client_test_not_real".to_string(),
+            operator_org_id: "org_test_not_real".to_string(),
+        });
+
+        let yaml = stack.process_compose_yaml();
+        assert!(!yaml.contains("\n  workos-fixture:\n"));
+        assert!(!yaml.contains("WORKOS_API_BASE_URL="));
+        assert!(!yaml.contains("WORKOS_JWKS_URL="));
+        assert!(
+            yaml.contains(
+                "WORKOS_ISSUER=https://api.workos.com/user_management/client_test_not_real"
+            )
+        );
+        assert!(!yaml.contains("sk_test_not_real"));
+        assert!(yaml.contains("WORKOS_CLIENT_ID=client_test_not_real"));
+        assert!(yaml.contains("FC_WORKOS_AUTH_ENABLED=1"));
+        assert!(yaml.contains("FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH=0"));
+        assert!(!yaml.contains("FC_DASHBOARD_DEV_WORKOS_USER_ID="));
+
+        stack.ensure_dirs().unwrap();
+        stack.write_secret_files().unwrap();
+        let core_secret = fs::read_to_string(stack.core_secret_file()).unwrap();
+        let dashboard_secret = fs::read_to_string(stack.dashboard_auth_secret_file()).unwrap();
+        assert!(core_secret.contains("WORKOS_API_KEY='sk_test_not_real'"));
+        assert!(dashboard_secret.contains("WORKOS_API_KEY='sk_test_not_real'"));
+        assert!(!dashboard_secret.contains("FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN"));
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(stack.dashboard_auth_secret_file())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let _ = fs::remove_dir_all(state_dir);
     }
 
     #[test]
@@ -3318,6 +3751,7 @@ mod tests {
         assert!(yaml.contains("FINITECHAT_HOSTED_DATA_ROOT="));
         assert!(yaml.contains("FC_HOSTED_WEB_DEVICE_URL="));
         assert!(yaml.contains("FINITECHAT_HOSTED_API_TOKEN="));
+        assert!(yaml.contains("FINITECHAT_PUBLIC_URL=http://127.0.0.1:18787"));
         assert!(yaml.contains("hosted-web-device:\n        condition: process_healthy"));
         assert!(yaml.contains("finitesites:\n        condition: process_healthy"));
         assert!(!yaml.contains("postgres:16-alpine"));
@@ -3470,19 +3904,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn supervisor_environment_scrubs_inference_secrets() {
+    fn supervisor_environment_scrubs_devfinity_secrets() {
         let mut command = Command::new("sh");
         command
             .args([
                 "-c",
-                "test -z \"${FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY:-}\" && test -z \"${FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE:-}\"",
+                "test -z \"${FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY:-}\" && test -z \"${FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE:-}\" && test -z \"${WORKOS_STAGING_API_KEY:-}\"",
             ])
             .env("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY", "must-not-leak")
             .env(
                 "FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE",
                 "must-not-leak",
-            );
-        scrub_inference_secrets(&mut command);
+            )
+            .env(WORKOS_STAGING_API_KEY_ENV, "must-not-leak");
+        scrub_devfinity_secrets(&mut command);
         assert!(command.status().unwrap().success());
     }
 

@@ -19,6 +19,7 @@ import {
   hostedDeviceConfig,
   hostedDeviceEnsureAgentBinding,
   hostedDeviceOpenAgentBinding,
+  hostedDeviceReconcileDevice,
   hostedDeviceNewChat,
   hostedDeviceRuntimeCommand,
   hostedDeviceState,
@@ -35,6 +36,9 @@ const AGENT_BINDING_AUTHORIZATION_REQUIRED =
   "first-time binding bootstrap was not authorized by Project creation";
 const AGENT_BINDING_RECOVERY_REQUIRED =
   `canonical Agent conversation requires recovery: ${AGENT_BINDING_AUTHORIZATION_REQUIRED}`;
+const MAX_DEVICE_ID_BYTES = 128;
+
+export const MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES = 4 * 1024;
 
 export class HostedWebChatError extends Error {
   constructor(
@@ -150,6 +154,82 @@ export async function claimHostedWebChatOwner(machineId: string) {
   }
   await claimAgentOwner(context, state, binding.agent_account_id, binding.canonical_room_id);
   return { claimed: true as const };
+}
+
+export async function reconcileHostedWebChatDevice(
+  machineId: string,
+  targetDeviceId: string
+) {
+  const context = await hostedWebChatContext(machineId);
+  return hostedDeviceReconcileDevice(context.config, context.account, {
+    project_id: context.projectId,
+    target_device_id: targetDeviceId,
+  });
+}
+
+export function parseHostedDeviceReconcileRequest(payload: unknown) {
+  const record = objectRecord(payload, "Device reconciliation request");
+  const keys = Object.keys(record);
+  if (keys.length !== 1 || keys[0] !== "target_device_id") {
+    throw new HostedWebChatError("Invalid Device reconciliation request.", 400);
+  }
+  const targetDeviceId = boundedDeviceId(record.target_device_id);
+  if (targetDeviceId === "hosted-web") {
+    throw new HostedWebChatError("Invalid target_device_id.", 400);
+  }
+  return { target_device_id: targetDeviceId };
+}
+
+export async function parseHostedDeviceReconcileJsonRequest(request: Request) {
+  const mediaType = (request.headers.get("content-type") ?? "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (mediaType !== "application/json") {
+    throw new HostedWebChatError("Device reconciliation requests must use JSON.", 415);
+  }
+
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength);
+    if (!Number.isSafeInteger(declaredLength) || declaredLength < 0) {
+      throw new HostedWebChatError("Invalid Device reconciliation request.", 400);
+    }
+    if (declaredLength > MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES) {
+      throw new HostedWebChatError("Device reconciliation request is too large.", 413);
+    }
+  }
+  if (!request.body) {
+    throw new HostedWebChatError("Invalid Device reconciliation request.", 400);
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    totalBytes += value.byteLength;
+    if (totalBytes > MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new HostedWebChatError("Device reconciliation request is too large.", 413);
+    }
+    chunks.push(value);
+  }
+
+  const encoded = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(encoded));
+  } catch {
+    throw new HostedWebChatError("Invalid Device reconciliation request.", 400);
+  }
+  return parseHostedDeviceReconcileRequest(payload);
 }
 
 export async function dispatchHostedWebChatAction(machineId: string, payload: unknown) {
@@ -450,6 +530,19 @@ function objectRecord(value: unknown, label: string): Record<string, unknown> {
 function boundedString(value: unknown, label: string, maxBytes = 512) {
   if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value) > maxBytes) {
     throw new HostedWebChatError(`Invalid ${label}.`, 400);
+  }
+  return value;
+}
+
+function boundedDeviceId(value: unknown) {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.trim() !== value ||
+    new TextEncoder().encode(value).byteLength > MAX_DEVICE_ID_BYTES ||
+    /[\p{Cc}\p{Cf}]/u.test(value)
+  ) {
+    throw new HostedWebChatError("Invalid target_device_id.", 400);
   }
   return value;
 }

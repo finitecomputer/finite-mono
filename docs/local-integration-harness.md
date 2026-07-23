@@ -27,7 +27,7 @@ On an Apple silicon Mac running macOS 26 or newer:
 
 ```sh
 container system start
-export FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY=<operator-held-finite-private-key>
+just dev inference-key
 just dev saas-smoke
 just dev up
 ```
@@ -45,11 +45,37 @@ and Stripe only at their external boundaries. The bootstrap still uses the real
 Core entitlement, Project, creation request, promoted Runtime artifact, Runner
 lease, Apple container, Agent Principal, and Hosted Web Device chat.
 
-The preferred inference setup is
-`FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY`. Devfinity then runs the in-tree chained
-Finite Private limiter: local Core provisions a separate runtime key, local
-admission and metering happen normally, and only the limiter owns the upstream
-operator key. For an explicit direct-key fallback:
+### Optional WorkOS staging authentication
+
+To exercise real WorkOS staging authentication locally, copy the repository-root
+`.env.example` to the repository-root `.env`, ask Paul for the staging API key and client ID, and set
+`WORKOS_STAGING_API_KEY` and `WORKOS_STAGING_CLIENT_ID`. The template supplies
+the non-secret `WORKOS_STAGING_OPERATOR_ORG_ID` value. Configure the staging
+application with these local URLs:
+
+```sh
+cp .env.example .env
+chmod 600 .env
+# Fill in the two blank values, then:
+just dev up --workos-staging
+```
+
+- Redirect URI: <http://127.0.0.1:13002/callback>
+- Sign-in endpoint: <http://127.0.0.1:13002/login>
+- Logout URI: <http://127.0.0.1:13002/>
+
+`.env` is ignored and must never be committed.
+These staging values are used only by local Devfinity; packaged Electron builds
+load the production dashboard and authenticate with production WorkOS.
+
+`just dev inference-key` prompts without echoing and stores an existing
+`fpk_live_...` key in the ignored local state directory with mode `0600`.
+Devfinity reuses it on later runs and runs the in-tree chained Finite Private
+limiter: local Core provisions a separate runtime key, local admission and
+metering happen normally, and only the limiter owns the upstream key.
+
+`FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY` remains an explicit one-run override. For
+an explicit direct-key fallback:
 
 ```sh
 export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=<finite-private-key>

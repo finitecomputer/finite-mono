@@ -52,9 +52,10 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   plane; blob bytes and site serving are data plane.
 - Treat cache invalidation as a protocol decision. Any derived cache must
   name its source of truth, invalidation trigger, and stale-read behavior.
-  (Today: ETags derive from blob hashes, which cannot go stale; viewer
-  cookies are deliberately NOT a cache of the share table — the table is
-  re-checked per request.)
+  (Today: mutable output URLs use `no-store`; static ETags derive from blob
+  hashes and rendered Document ETags derive from the complete representation.
+  Viewer cookies are deliberately NOT a cache of the share table — the table
+  is re-checked per request.)
 - Audit every dependency addition before adding it. Prefer the standard
   library, existing workspace dependencies, or a small Rust crate over
   shell/Python tooling. New scripts should be Rust binaries or tests unless

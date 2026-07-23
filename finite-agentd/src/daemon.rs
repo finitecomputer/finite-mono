@@ -656,10 +656,10 @@ impl CommandExecutor {
             }
             "agent.inference.apply" => {
                 let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
-                let offer = self
+                let plan = self
                     .connection_manager
-                    .inference_offer(&request.request_id, body)?;
-                self.apply_config_offer(offer).await
+                    .inference_plan(&request.request_id, body)?;
+                self.apply_inference_plan(plan).await
             }
             "agent.specialization.aeon.reconcile" => {
                 let desired = parse_body::<AeonSpecializationDesiredStateV1>(
@@ -795,6 +795,78 @@ impl CommandExecutor {
         .map_err(|error| AgentdError::Config(error.to_string()))??;
         if result.restart_required {
             self.supervisor.restart_hermes().await?;
+        }
+        Ok(serde_json::to_value(result)?)
+    }
+
+    async fn apply_inference_plan(
+        &self,
+        plan: crate::connections::InferenceApplyPlan,
+    ) -> Result<Value, AgentdError> {
+        let credential_snapshot = self.connection_manager.stage_inference_credential(&plan)?;
+        let proposal_id = plan.offer.proposal_id.clone();
+        let manager = self.config_manager.clone();
+        let hermes_home = self.hermes_home.clone();
+        let apply = tokio::task::spawn_blocking(move || {
+            manager.apply(&plan.offer, || validate_hermes_config(&hermes_home))
+        })
+        .await;
+        let apply = match apply {
+            Ok(apply) => apply,
+            Err(error) => {
+                self.connection_manager
+                    .restore_inference_credential(credential_snapshot)
+                    .map_err(|restore_error| {
+                        AgentdError::Config(format!(
+                            "inference apply task failed ({error}); previous credential could not be restored ({restore_error})"
+                        ))
+                    })?;
+                return Err(AgentdError::Config(error.to_string()));
+            }
+        };
+        let result = match apply {
+            Ok(result) => result,
+            Err(error) => {
+                self.connection_manager
+                    .restore_inference_credential(credential_snapshot)?;
+                return Err(error);
+            }
+        };
+        if !result.restart_required {
+            return Ok(serde_json::to_value(result)?);
+        }
+        if let Err(restart_error) = self.supervisor.restart_hermes().await {
+            let rollback = HermesConfigRollbackV1 { proposal_id };
+            let manager = self.config_manager.clone();
+            let hermes_home = self.hermes_home.clone();
+            let rollback_result = tokio::task::spawn_blocking(move || {
+                manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
+            })
+            .await;
+            let credential_restore = self
+                .connection_manager
+                .restore_inference_credential(credential_snapshot);
+            let rollback_result = rollback_result.map_err(|rollback_error| {
+                AgentdError::Supervisor(format!(
+                    "Hermes inference activation failed ({restart_error}); configuration rollback task failed ({rollback_error})"
+                ))
+            })?;
+            rollback_result.map_err(|rollback_error| {
+                AgentdError::Supervisor(format!(
+                    "Hermes inference activation failed ({restart_error}); previous configuration could not be restored ({rollback_error})"
+                ))
+            })?;
+            credential_restore.map_err(|restore_error| {
+                AgentdError::Supervisor(format!(
+                    "Hermes inference activation failed ({restart_error}); previous credential could not be restored ({restore_error})"
+                ))
+            })?;
+            self.supervisor.restart_hermes().await.map_err(|restore_error| {
+                AgentdError::Supervisor(format!(
+                    "Hermes inference activation failed ({restart_error}); previous configuration was restored but Hermes could not be reactivated ({restore_error})"
+                ))
+            })?;
+            return Err(restart_error);
         }
         Ok(serde_json::to_value(result)?)
     }

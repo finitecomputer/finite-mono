@@ -47,14 +47,20 @@ checkpoint and future regression gates are recorded in
 [`docs/runs/production-baseline-2026-07-15.md`](../docs/runs/production-baseline-2026-07-15.md).
 
 `scripts/deploy-lat1 REV` switches infrastructure only. An Agent Runtime image
-rollout is a separate opt-in argument set: it must name an exact promoted
-artifact and either explicit Project ids or `--roll-all` plus a canary. Never
-infer a bot rollout from the word “deploy.”
+rollout is a separate two-command prepare/execute operation: it names an exact
+promoted artifact and either explicit Project ids or `--roll-all` plus an
+already-target canary, then requires the prepared plan hash before mutation.
+Never infer a bot rollout from the word “deploy.”
+
+Merged work not yet known to be released or deployed is tracked by surface in
+[`deployment-queue.md`](deployment-queue.md). The queue is a handoff, not
+production-mutation authority.
 
 ## Layout
 
 ```
 infra/
+  deployment-queue.md  # merged work awaiting a release/deploy/rollout
   nixos/       # finite-lat-1 AS CODE — the live definition of the app server
   hosts/
     lat1/      # finite-lat-1 (64.34.82.77) — PRE-CUTOVER k3s reference only (superseded by infra/nixos/)

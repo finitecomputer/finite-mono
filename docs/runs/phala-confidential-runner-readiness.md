@@ -1,6 +1,14 @@
 # Phala Confidential Runner Readiness
 
-Status: PROPOSED
+Status: ACTIVE (2026-07-23 — Paul explicitly authorized one paid
+`tdx.medium` canary for `paul@finite.vip`, the activation path, and bounded
+create/start/restart/stop authority under the hard cap of one)
+
+Sequence note: On 2026-07-23, Paul moved work here from
+[`Stripe Production Activation`](stripe-production-activation.md). That run is
+PAUSED with its queue preserved. This activation is limited to the internal
+canary and does not authorize a Stripe Price, another paid resource, or
+customer admission.
 
 Owner: Paul
 
@@ -57,12 +65,13 @@ framework, or TEE product architecture.
 
 ## Authority and boundaries
 
-PROPOSED status grants no work authority. If Paul marks this run ACTIVE, it
-authorizes repository code, tests, docs, Nix definitions, and local disposable
-test infrastructure needed by this queue. Live Phala CVMs, Phala API keys,
-Stripe Products or Prices, public endpoints, production deployment, recovery
-key custody, and customer admission remain external mutations requiring
-separate explicit authorization.
+ACTIVE status plus Paul's 2026-07-23 instruction authorizes repository work,
+production deployment, credential installation, and one paid internal
+`tdx.medium` launch-code canary owned by `paul@finite.vip`. The worker may
+create/start/restart/stop that one resource through Core under the hard cap of
+one. It does not authorize a second paid resource, provider-console mutation,
+provider delete, Stripe Product or Price activation, customer admission,
+recovery-key custody changes, or a higher cap.
 
 Do not activate this run while [Stripe Checkout
 Readiness](stripe-checkout-readiness.md) remains ACTIVE; its accepted closure

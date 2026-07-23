@@ -1,6 +1,15 @@
 # Stripe Production Activation
 
-Status: ACTIVE
+Status: PAUSED (2026-07-23 — Paul explicitly authorized the bounded Phala
+canary and moved implementation to Phala Confidential Runner Readiness)
+
+Sequence note: On 2026-07-23, Paul explicitly authorized one paid Phala
+`tdx.medium` canary for `paul@finite.vip`, including the activation path and
+bounded create/start/restart/stop authority under the hard cap of one. Work
+therefore moved to
+[`Phala Confidential Runner Readiness`](phala-confidential-runner-readiness.md).
+This run's remaining queue and production evidence are preserved; the sequence
+change does not authorize another Stripe charge, Price, or customer admission.
 
 > **Disposition 2026-07-20:** the July 13 first-cohort/customer-mode authority
 > remains historical evidence; it does not authorize additional paid or Launch
