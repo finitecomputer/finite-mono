@@ -108,6 +108,7 @@
               rustPlatform.rustLibSrc
               rustc
               rustfmt
+              xxd
             ])
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
