@@ -11,6 +11,7 @@ use crate::AGENT_STATE_VERSION;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentState {
     pub(crate) version: String,
+    #[serde(rename = "vaultId", alias = "brainId")]
     pub(crate) brain_id: String,
     pub(crate) server_url: Option<String>,
     pub(crate) auth_npub: Option<String>,

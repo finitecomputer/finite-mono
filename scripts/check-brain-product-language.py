@@ -33,6 +33,9 @@ FORBIDDEN = re.compile(
 )
 PRODUCT_TEXT_SUFFIXES = {".html", ".js", ".md", ".ts", ".tsx"}
 RETIRED_PRODUCT_WORD = re.compile(r"\bvaults?\b", re.IGNORECASE)
+LEGACY_AGENT_STATE_ALIAS = re.compile(
+    r'^\s*#\[serde\(rename = "vaultId", alias = "brainId"\)\]\s*$'
+)
 
 
 def files_under(path: Path):
@@ -50,6 +53,8 @@ for surface in SURFACES:
         if path in DOCUMENTED_EXCEPTIONS:
             continue
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if LEGACY_AGENT_STATE_ALIAS.fullmatch(line):
+                continue
             if FORBIDDEN.search(line) or (
                 path.suffix in PRODUCT_TEXT_SUFFIXES and RETIRED_PRODUCT_WORD.search(line)
             ):

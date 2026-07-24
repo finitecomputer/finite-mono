@@ -4635,6 +4635,33 @@ mod tests {
     }
 
     #[test]
+    fn v2_agent_state_accepts_brain_id_and_remains_rollback_readable() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
+        let state_path = tree.join(".finitebrain/agent-state.json");
+        let legacy_brain_id_field = concat!("vault", "Id");
+        let mut current: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(current[legacy_brain_id_field], "brain");
+        current["brainId"] = current[legacy_brain_id_field].take();
+        current
+            .as_object_mut()
+            .unwrap()
+            .remove(legacy_brain_id_field);
+        write_json_file(&state_path, &current).unwrap();
+
+        let state = read_agent_state(&tree).unwrap();
+        assert_eq!(state.brain_id, "brain");
+
+        write_agent_state(&tree, &state).unwrap();
+        let rewritten: Value =
+            serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+        assert_eq!(rewritten[legacy_brain_id_field], "brain");
+        assert!(rewritten.get("brainId").is_none());
+    }
+
+    #[test]
     fn legacy_agent_state_is_scrubbed_and_restored_legacy_state_is_scrubbed_again() {
         let tmp = TempDir::new().unwrap();
         let tree = tmp.path().join("brain");
