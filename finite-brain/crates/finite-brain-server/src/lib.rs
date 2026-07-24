@@ -619,7 +619,8 @@ pub fn router_with_state(state: ServerState) -> Router {
         .route("/_admin/brains/{brain_id}/admins", post(add_admin_handler))
         .route(
             "/_admin/brains/{brain_id}/collaborators/ensure-admin",
-            post(ensure_organization_admin_handler),
+            post(ensure_organization_admin_handler)
+                .layer(DefaultBodyLimit::max(MAX_COLLABORATION_REQUEST_BODY_BYTES)),
         )
         .route(
             "/_admin/brains/{brain_id}/admins/{target_npub}",
@@ -7112,6 +7113,10 @@ mod tests {
         let first_status = first.status();
         let first_text = read_text(first).await;
         assert_eq!(first_status, StatusCode::OK, "{first_text}");
+        assert!(!first_text.contains("encrypted grant placeholder"));
+        assert!(!first_text.contains("wrappedEventJson"));
+        assert!(!first_text.contains("folderKey"));
+        assert!(!first_text.contains("secretKey"));
         let first: EnsureOrganizationAdminResponse = serde_json::from_str(&first_text).unwrap();
         assert_eq!(first.state, CollaborationReceiptState::Complete);
         assert_eq!(first.ready_count, 2);
@@ -7164,6 +7169,284 @@ mod tests {
                 .iter()
                 .any(|folder| folder.reason.as_deref() == Some("sourceKeyUnavailable"))
         );
+
+        let repair_body = serde_json::json!({
+            "targetNpub": partial_target,
+            "folders": folders,
+            "grants": [
+                {"folderId":"getting-started", "id":"collab-repair-getting-started", "keyVersion":1,
+                 "recipientNpub":partial_target, "wrappedEventJson":gift_wrap_event_json(&partial_target),
+                 "createdAt":"2026-06-23T00:00:00.000Z", "accessChangeEvent":admin_event(&admin_keys,"acme","collab-repair-getting-started",AdminAccessAction::GrantFolderAccess,Some("getting-started"),Some(&partial_target),Some(1))},
+                {"folderId":"restricted", "id":"collab-repair-restricted", "keyVersion":1,
+                 "recipientNpub":partial_target, "wrappedEventJson":gift_wrap_event_json(&partial_target),
+                 "createdAt":"2026-06-23T00:00:00.000Z", "accessChangeEvent":admin_event(&admin_keys,"acme","collab-repair-restricted",AdminAccessAction::GrantFolderAccess,Some("restricted"),Some(&partial_target),Some(1))}
+            ],
+            "accessChangeEvent":admin_event(&admin_keys,"acme","collab-repair-admin",AdminAccessAction::AddAdmin,None,Some(&partial_target),None)
+        }).to_string();
+        let repair = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(repair_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(repair.status(), StatusCode::OK);
+        let repair: EnsureOrganizationAdminResponse = read_json(repair).await;
+        assert_eq!(repair.state, CollaborationReceiptState::Complete);
+        assert_eq!(repair.brain_role, "admin");
+        assert_eq!(repair.ready_count, 2);
+    }
+
+    #[tokio::test]
+    async fn collaboration_retry_guidance_names_current_grant_recipients_not_issuers() {
+        let admin_keys = Keys::generate();
+        let holder_keys = Keys::generate();
+        let holder = npub(&holder_keys);
+        let target = npub(&Keys::generate());
+        let router = router_with_test_org_folders(&admin_keys).await;
+
+        let add_holder = serde_json::json!({
+            "targetNpub": holder,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-holder-member",
+                AdminAccessAction::AddMember,
+                None,
+                Some(&holder),
+                None,
+            ),
+        })
+        .to_string();
+        let response = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/members",
+            Some(add_holder),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let add_existing_member = serde_json::json!({
+            "targetNpub": target,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-existing-member",
+                AdminAccessAction::AddMember,
+                None,
+                Some(&target),
+                None,
+            ),
+        })
+        .to_string();
+        let response = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/members",
+            Some(add_existing_member),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let holder_grant = serde_json::json!({
+            "targetNpub": holder,
+            "grant": folder_key_grant_value("collab-holder-grant", 1, &holder),
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-holder-access",
+                AdminAccessAction::GrantFolderAccess,
+                Some("restricted"),
+                Some(&holder),
+                Some(1),
+            ),
+        })
+        .to_string();
+        let response = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/folders/restricted/access",
+            Some(holder_grant),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let partial = serde_json::json!({
+            "targetNpub": target,
+            "folders": [
+                {"folderId":"getting-started","keyVersion":1,"path":"getting-started"},
+                {"folderId":"restricted","keyVersion":1,"path":"restricted"}
+            ],
+            "grants": [],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-holder-guidance",
+                AdminAccessAction::AddAdmin,
+                None,
+                Some(&target),
+                None,
+            ),
+        })
+        .to_string();
+        let response = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(partial),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt: EnsureOrganizationAdminResponse = read_json(response).await;
+        assert_eq!(receipt.brain_role, "admin");
+        let restricted = receipt
+            .folders
+            .iter()
+            .find(|folder| folder.folder_id == "restricted")
+            .unwrap();
+        assert!(
+            restricted
+                .key_holders
+                .iter()
+                .any(|candidate| candidate.npub == holder),
+            "the recipient who can actually unwrap the current grant must be named"
+        );
+    }
+
+    #[tokio::test]
+    async fn collaboration_receipt_detects_stale_added_and_removed_snapshot_drift() {
+        let admin_keys = Keys::generate();
+        let target = npub(&Keys::generate());
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let body = serde_json::json!({
+            "targetNpub": target,
+            "folders": [
+                {"folderId":"getting-started","keyVersion":2,"path":"getting-started"},
+                {"folderId":"removed-before-commit","keyVersion":1,"path":"removed-before-commit"}
+            ],
+            "grants": [],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-drift-admin",
+                AdminAccessAction::AddAdmin,
+                None,
+                Some(&target),
+                None,
+            ),
+        })
+        .to_string();
+        let response = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt: EnsureOrganizationAdminResponse = read_json(response).await;
+        assert_eq!(receipt.state, CollaborationReceiptState::Partial);
+        assert!(receipt.folders.iter().any(|folder| {
+            folder.folder_id == "getting-started"
+                && folder.outcome == CollaborationFolderOutcome::StaleVersion
+                && folder.reason.as_deref() == Some("currentKeyVersionChanged")
+        }));
+        assert!(receipt.folders.iter().any(|folder| {
+            folder.folder_id == "restricted"
+                && folder.reason.as_deref() == Some("folderAddedSinceSnapshot")
+        }));
+        assert!(receipt.folders.iter().any(|folder| {
+            folder.folder_id == "removed-before-commit"
+                && folder.reason.as_deref() == Some("folderRemovedSinceSnapshot")
+        }));
+    }
+
+    #[tokio::test]
+    async fn collaboration_route_accepts_the_largest_valid_grant_batch() {
+        let admin_keys = Keys::generate();
+        let target = npub(&Keys::generate());
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let folder_ids = std::iter::once("getting-started".to_owned())
+            .chain(std::iter::once("restricted".to_owned()))
+            .chain((2..MAX_COLLABORATION_FOLDERS).map(|index| format!("folder-{index}")))
+            .collect::<Vec<_>>();
+        let folders = folder_ids
+            .iter()
+            .map(|folder_id| {
+                serde_json::json!({
+                    "folderId": folder_id,
+                    "keyVersion": 1,
+                    "path": folder_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let grants = folder_ids
+            .iter()
+            .enumerate()
+            .map(|(index, folder_id)| {
+                let mut grant =
+                    folder_key_grant_value(&format!("collab-max-grant-{index}"), 1, &target);
+                grant["folderId"] = serde_json::json!(folder_id);
+                grant["accessChangeEvent"] = serde_json::json!(admin_event(
+                    &admin_keys,
+                    "acme",
+                    &format!("collab-max-evidence-{index}"),
+                    AdminAccessAction::GrantFolderAccess,
+                    Some(folder_id),
+                    Some(&target),
+                    Some(1),
+                ));
+                grant
+            })
+            .collect::<Vec<_>>();
+        let body = serde_json::json!({
+            "targetNpub": target,
+            "folders": folders,
+            "grants": grants,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-max-admin",
+                AdminAccessAction::AddAdmin,
+                None,
+                Some(&target),
+                None,
+            ),
+        })
+        .to_string();
+        assert!(
+            body.len() > MAX_REQUEST_BODY_BYTES,
+            "the acceptance fixture must prove the collaboration-specific body limit"
+        );
+        assert!(body.len() <= MAX_COLLABORATION_REQUEST_BODY_BYTES);
+
+        let response = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(body),
+            TEST_NOW,
+        )
+        .await;
+        let status = response.status();
+        let text = read_text_with_limit(response, MAX_COLLABORATION_REQUEST_BODY_BYTES).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let receipt: EnsureOrganizationAdminResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!(receipt.total_count, MAX_COLLABORATION_FOLDERS);
     }
 
     #[tokio::test]
@@ -7199,7 +7482,7 @@ mod tests {
         })
         .to_string();
         let malformed = authed_request(
-            router,
+            router.clone(),
             &admin_keys,
             "POST",
             "/_admin/brains/acme/collaborators/ensure-admin",
@@ -7208,6 +7491,136 @@ mod tests {
         )
         .await;
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+        let rollback_target = npub(&Keys::generate());
+        let malformed_folder_evidence = serde_json::json!({
+            "targetNpub": rollback_target,
+            "folders": [
+                {"folderId":"getting-started","keyVersion":1,"path":"getting-started"},
+                {"folderId":"restricted","keyVersion":1,"path":"restricted"}
+            ],
+            "grants": [
+                {"folderId":"getting-started", "id":"collab-rollback-valid", "keyVersion":1,
+                 "recipientNpub":rollback_target, "wrappedEventJson":gift_wrap_event_json(&rollback_target),
+                 "createdAt":"2026-06-23T00:00:00.000Z", "accessChangeEvent":admin_event(&admin_keys,"acme","collab-rollback-valid",AdminAccessAction::GrantFolderAccess,Some("getting-started"),Some(&rollback_target),Some(1))},
+                {"folderId":"restricted", "id":"collab-rollback-malformed", "keyVersion":1,
+                 "recipientNpub":rollback_target, "wrappedEventJson":gift_wrap_event_json(&rollback_target),
+                 "createdAt":"2026-06-23T00:00:00.000Z", "accessChangeEvent":{}}
+            ],
+            "accessChangeEvent":admin_event(&admin_keys,"acme","collab-rollback-admin",AdminAccessAction::AddAdmin,None,Some(&rollback_target),None)
+        }).to_string();
+        let malformed = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(malformed_folder_evidence),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let metadata = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/_admin/brains/acme/metadata",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        let status = metadata.status();
+        let text = read_text(metadata).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let metadata: BrainMetadataResponse = serde_json::from_str(&text).unwrap();
+        assert!(!metadata.members.contains(&rollback_target));
+        assert!(!metadata.admins.contains(&rollback_target));
+        assert!(!metadata.folders.iter().any(|folder| {
+            folder.id == "getting-started" && folder.access_user_ids.contains(&rollback_target)
+        }));
+
+        let wrapper_target = npub(&Keys::generate());
+        let malformed_wrapper = serde_json::json!({
+            "targetNpub": wrapper_target,
+            "folders": [
+                {"folderId":"getting-started","keyVersion":1,"path":"getting-started"}
+            ],
+            "grants": [{
+                "folderId":"getting-started",
+                "id":"collab-malformed-wrapper",
+                "keyVersion":1,
+                "recipientNpub":wrapper_target,
+                "wrappedEventJson":"not-a-nostr-event",
+                "createdAt":"2026-06-23T00:00:00.000Z",
+                "accessChangeEvent":admin_event(&admin_keys,"acme","collab-malformed-wrapper-evidence",AdminAccessAction::GrantFolderAccess,Some("getting-started"),Some(&wrapper_target),Some(1))
+            }],
+            "accessChangeEvent":admin_event(&admin_keys,"acme","collab-malformed-wrapper-admin",AdminAccessAction::AddAdmin,None,Some(&wrapper_target),None)
+        }).to_string();
+        let malformed = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(malformed_wrapper),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let metadata = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/_admin/brains/acme/metadata",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        let metadata: BrainMetadataResponse = read_json(metadata).await;
+        assert!(!metadata.members.contains(&wrapper_target));
+        assert!(!metadata.admins.contains(&wrapper_target));
+
+        let limit_target = npub(&Keys::generate());
+        let grant = serde_json::json!({
+            "folderId":"getting-started",
+            "id":"collab-limit",
+            "keyVersion":1,
+            "recipientNpub":limit_target,
+            "wrappedEventJson":gift_wrap_event_json(&limit_target),
+            "createdAt":"2026-06-23T00:00:00.000Z",
+            "accessChangeEvent":admin_event(&admin_keys,"acme","collab-limit-evidence",AdminAccessAction::GrantFolderAccess,Some("getting-started"),Some(&limit_target),Some(1))
+        });
+        let grant_limit = serde_json::json!({
+            "targetNpub": limit_target,
+            "folders": [{"folderId":"getting-started","keyVersion":1,"path":"getting-started"}],
+            "grants": vec![grant; MAX_COLLABORATION_GRANTS + 1],
+            "accessChangeEvent": admin_event(&admin_keys,"acme","collab-limit-admin",AdminAccessAction::AddAdmin,None,Some(&limit_target),None)
+        }).to_string();
+        let rejected = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/collaborators/ensure-admin",
+            Some(grant_limit),
+            TEST_NOW,
+        )
+        .await;
+        assert_error(
+            rejected,
+            StatusCode::BAD_REQUEST,
+            "collaboration grants exceed 1000 entries",
+        )
+        .await;
+        let metadata = authed_request(
+            router,
+            &admin_keys,
+            "GET",
+            "/_admin/brains/acme/metadata",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        let metadata: BrainMetadataResponse = read_json(metadata).await;
+        assert!(!metadata.members.contains(&limit_target));
+        assert!(!metadata.admins.contains(&limit_target));
     }
 
     #[tokio::test]

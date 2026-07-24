@@ -4,6 +4,10 @@ use crate::*;
 /// control-record batches bounded by the Brain capacity envelope.
 pub(crate) const MAX_COLLABORATION_FOLDERS: usize = 1_000;
 pub(crate) const MAX_COLLABORATION_GRANTS: usize = 1_000;
+/// A full 1,000-Folder collaboration carries one signed access-change event
+/// and one opaque NIP-59 envelope per grant. Keep this route's wire limit
+/// aligned with its semantic cardinality without widening unrelated routes.
+pub(crate) const MAX_COLLABORATION_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 fn current_key_holders(
     state: &ServerState,
@@ -15,7 +19,7 @@ fn current_key_holders(
         .grants
         .iter()
         .filter(|grant| grant.folder_id == *folder_id && grant.key_version == key_version)
-        .map(|grant| grant.issuer_npub.clone())
+        .map(|grant| grant.recipient_npub.clone())
         .collect::<Vec<_>>();
     npubs.sort();
     npubs.dedup();

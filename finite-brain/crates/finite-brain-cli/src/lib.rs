@@ -2194,33 +2194,30 @@ fn collaborators<W: Write>(
                                 .get("reason")
                                 .and_then(serde_json::Value::as_str)
                                 .unwrap_or("unknown");
-                            let holders = folder
+                            let holder_emails = folder
                                 .get("keyHolders")
                                 .and_then(serde_json::Value::as_array)
                                 .map(|holders| {
                                     holders
                                         .iter()
                                         .filter_map(|holder| {
-                                            holder
-                                                .get("email")
-                                                .and_then(serde_json::Value::as_str)
-                                                .or_else(|| {
-                                                    holder
-                                                        .get("npub")
-                                                        .and_then(serde_json::Value::as_str)
-                                                })
+                                            holder.get("email").and_then(serde_json::Value::as_str)
                                         })
                                         .collect::<Vec<_>>()
                                         .join(", ")
                                 })
-                                .filter(|holders| !holders.is_empty())
-                                .unwrap_or_else(|| {
-                                    "no readable current holder identity".to_owned()
-                                });
-                            writeln!(
-                                output,
-                                "- {path}: {outcome} ({reason}); current key holder(s): {holders}; one of these holders can retry"
-                            )?;
+                                .filter(|holders| !holders.is_empty());
+                            if let Some(holder_emails) = holder_emails {
+                                writeln!(
+                                    output,
+                                    "- {path}: {outcome} ({reason}); current key holder(s): {holder_emails}; one of these holders can retry"
+                                )?;
+                            } else {
+                                writeln!(
+                                    output,
+                                    "- {path}: {outcome} ({reason}); current key holder identity unavailable; ask another current Folder reader to retry"
+                                )?;
+                            }
                         }
                     }
                 }
@@ -2232,7 +2229,7 @@ fn collaborators<W: Write>(
                 } else if state == "indeterminate" {
                     writeln!(
                         output,
-                        "Transport was uncertain. Retry the same ensure-admin command; the server operation is convergent and will not duplicate current access."
+                        "The final result was uncertain. Retry the same ensure-admin command; the server operation is convergent and will not duplicate current access."
                     )?;
                 }
                 Ok(())
@@ -2879,6 +2876,167 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("collaborators ensure-admin --brain <brain-id>"));
         assert!(!text.contains("admin-ensure"));
+    }
+
+    fn start_malformed_collaboration_success_server(
+        expected_requests: usize,
+        collaboration_response: String,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                let response_body = if request_line.contains("/metadata") {
+                    serde_json::json!({
+                        "brainId": "acme",
+                        "kind": "organization",
+                        "name": "Acme",
+                        "ownerUserId": null,
+                        "members": [],
+                        "admins": [],
+                        "folders": [],
+                    })
+                    .to_string()
+                } else if request_line.contains("/export") {
+                    serde_json::json!({
+                        "brain": {
+                            "id": "acme",
+                            "kind": "organization",
+                            "name": "Acme",
+                            "ownerUserId": null,
+                        },
+                        "folders": [],
+                        "keyGrants": [],
+                        "accessState": {"members": [], "admins": []},
+                    })
+                    .to_string()
+                } else {
+                    collaboration_response.clone()
+                };
+                requests.push(request_line);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn public_collaboration_command_maps_malformed_success_to_safe_indeterminate_output() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let target = NostrPublicKey::from_protocol(Keys::generate().public_key())
+            .to_npub()
+            .unwrap();
+
+        for json in [false, true] {
+            let (server, requests) = start_malformed_collaboration_success_server(
+                3,
+                "{provider-internal-secret-raw".to_owned(),
+            );
+            let mut args = vec![
+                "collaborators".to_owned(),
+                "ensure-admin".to_owned(),
+                "--brain".to_owned(),
+                "acme".to_owned(),
+                "--target".to_owned(),
+                target.clone(),
+                "--server".to_owned(),
+                server,
+            ];
+            if json {
+                args.push("--json".to_owned());
+            }
+            let mut output = Vec::new();
+            run_with_env(args, env_for(&tmp), &mut output).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            let captured = requests.join().unwrap();
+            assert_eq!(captured.len(), 3);
+            assert!(captured[2].contains("/collaborators/ensure-admin"));
+            assert!(!output.contains("provider-internal-secret-raw"));
+            if json {
+                let receipt: Value = serde_json::from_str(&output).unwrap();
+                assert_eq!(receipt["state"], "indeterminate");
+                assert_eq!(receipt["retryable"], true);
+            } else {
+                assert!(!output.contains(&target));
+                assert!(output.contains("Organization Brain collaboration: indeterminate"));
+                assert!(output.contains("Retry the same ensure-admin command"));
+                assert!(output.contains("will not duplicate current access"));
+            }
+        }
+    }
+
+    #[test]
+    fn public_partial_collaboration_human_output_never_falls_back_to_raw_npub() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let target = NostrPublicKey::from_protocol(Keys::generate().public_key())
+            .to_npub()
+            .unwrap();
+        let holder = NostrPublicKey::from_protocol(Keys::generate().public_key())
+            .to_npub()
+            .unwrap();
+        let response = serde_json::json!({
+            "brainId": "acme",
+            "targetNpub": target,
+            "state": "partial",
+            "brainRole": "admin",
+            "folders": [{
+                "folderId": "restricted",
+                "path": "Restricted",
+                "expectedKeyVersion": 1,
+                "outcome": "missingSourceKey",
+                "reason": "sourceKeyUnavailable",
+                "retryable": true,
+                "keyHolders": [{"npub": holder}],
+            }],
+            "readyCount": 0,
+            "totalCount": 1,
+            "retryable": true,
+        })
+        .to_string();
+        let (server, requests) = start_malformed_collaboration_success_server(3, response);
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "collaborators",
+                "ensure-admin",
+                "--brain",
+                "acme",
+                "--target",
+                &target,
+                "--server",
+                &server,
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(requests.join().unwrap().len(), 3);
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains(&holder));
+        assert!(output.contains(
+            "current key holder identity unavailable; ask another current Folder reader to retry"
+        ));
     }
 
     #[test]
