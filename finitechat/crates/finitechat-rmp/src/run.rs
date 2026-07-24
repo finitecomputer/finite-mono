@@ -118,8 +118,10 @@ fn run_ios(
     // historical behavior of provisioning/booting a default simulator.
     if let Some(requested) = args.udid.clone() {
         let dev_dir = discover_xcode_dev_dir()?;
-        let simulator_udids = collect_simulator_udids(&dev_dir).unwrap_or_default();
-        if classify_ios_udid(&requested, &simulator_udids) == IosTargetKind::PhysicalDevice {
+        let simulator_udids = collect_simulator_udids(&dev_dir);
+        if classify_ios_udid(&requested, simulator_udids.as_ref().ok())
+            == IosTargetKind::PhysicalDevice
+        {
             human_log(
                 verbose,
                 format!("routing --udid {requested} to physical iOS device install"),
@@ -206,18 +208,23 @@ pub(crate) enum IosTargetKind {
 /// Classify an explicitly requested iOS `--udid`.
 ///
 /// `simulator_udids` should be the set of UDIDs reported by `simctl list
-/// devices`. When that query succeeds the set is authoritative for simulators.
-/// When it is empty (query failed) we fall back to a shape heuristic: simulator
-/// UDIDs are standard 8-4-4-4-12 UUIDs (four dashes) while modern hardware UDIDs
-/// look like `XXXXXXXX-XXXXXXXXXXXXXXXX` (a single dash), so anything that is not
-/// simulator-shaped is treated as a physical device.
+/// devices`. When that query succeeds the set is authoritative for simulators:
+/// CoreDevice identifiers for physical devices are UUID-shaped too. Only when
+/// that query fails do we fall back to a shape heuristic. Simulator UDIDs are
+/// standard 8-4-4-4-12 UUIDs (four dashes), while hardware UDIDs look like
+/// `XXXXXXXX-XXXXXXXXXXXXXXXX` (a single dash).
 pub(crate) fn classify_ios_udid(
     udid: &str,
-    simulator_udids: &std::collections::HashSet<String>,
+    simulator_udids: Option<&std::collections::HashSet<String>>,
 ) -> IosTargetKind {
-    if simulator_udids.contains(udid) {
-        return IosTargetKind::Simulator;
+    if let Some(simulator_udids) = simulator_udids {
+        return if simulator_udids.contains(udid) {
+            IosTargetKind::Simulator
+        } else {
+            IosTargetKind::PhysicalDevice
+        };
     }
+
     if is_simulator_shaped_udid(udid) {
         IosTargetKind::Simulator
     } else {
@@ -2188,25 +2195,29 @@ mod tests {
 
         // A UDID present in the queried simulator set is a simulator.
         assert_eq!(
-            classify_ios_udid("8C10824B-840E-5717-BC9C-55B537D33060", &sims),
+            classify_ios_udid("8C10824B-840E-5717-BC9C-55B537D33060", Some(&sims)),
             IosTargetKind::Simulator
         );
-        // Paulphone Air's hardware UDID (single dash, not in the set) is a device.
+        // A CoreDevice UUID and a hardware UDID not present in the authoritative
+        // simulator set both identify physical devices.
         assert_eq!(
-            classify_ios_udid("00008150-0010149A26F0401C", &sims),
+            classify_ios_udid("BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF", Some(&sims)),
+            IosTargetKind::PhysicalDevice
+        );
+        assert_eq!(
+            classify_ios_udid("00008150-0010149A26F0401C", Some(&sims)),
             IosTargetKind::PhysicalDevice
         );
 
-        // Fallback heuristic when the simctl query failed (empty set): a
+        // Fallback heuristic when the simctl query failed: a
         // UUID-shaped id is still treated as a simulator, a hardware-shaped id as
         // a device.
-        let empty = HashSet::new();
         assert_eq!(
-            classify_ios_udid("8C10824B-840E-5717-BC9C-55B537D33060", &empty),
+            classify_ios_udid("8C10824B-840E-5717-BC9C-55B537D33060", None),
             IosTargetKind::Simulator
         );
         assert_eq!(
-            classify_ios_udid("00008150-0010149A26F0401C", &empty),
+            classify_ios_udid("00008150-0010149A26F0401C", None),
             IosTargetKind::PhysicalDevice
         );
     }
