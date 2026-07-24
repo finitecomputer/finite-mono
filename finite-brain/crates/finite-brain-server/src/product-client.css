@@ -3959,6 +3959,9 @@ button.command-palette-row.active {
 .page-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(244px, 292px);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   padding: 0;
 }
 
@@ -3966,7 +3969,9 @@ button.command-palette-row.active {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-width: 0;
+  min-height: 0;
   height: 100%;
+  overflow: hidden;
 }
 
 .page-link-context {
@@ -4164,6 +4169,7 @@ button.command-palette-row.active {
   height: 100%;
   margin: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 0;
   border-radius: 0;
   background: var(--bg);

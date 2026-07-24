@@ -2074,6 +2074,21 @@ assert.match(
   /\.page-surface\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\) auto;/s,
   "The Page header needs its own grid row so the explicit Save action is visible"
 );
+assert.match(
+  cssSource,
+  /\.page-workspace\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s,
+  "The Page workspace must constrain its reader row to the embedded viewport",
+);
+assert.match(
+  cssSource,
+  /\.page-surface\s*\{[^}]*min-height:\s*0;[^}]*height:\s*100%;[^}]*overflow:\s*hidden;/s,
+  "The Page surface must allow its note row to shrink and scroll",
+);
+assert.match(
+  cssSource,
+  /\.note-content\s*\{[^}]*min-height:\s*0;[^}]*height:\s*100%;[^}]*overflow:\s*auto;[^}]*overscroll-behavior:\s*contain;/s,
+  "Long notes must scroll inside the embedded reader",
+);
 assert.doesNotMatch(
   cssSource,
   /\.page-header\s*\{[^}]*display:\s*none;/s,
