@@ -305,6 +305,21 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         0,
         "Profile must not submit agent creation before the customer chooses Access"
       );
+      await page.getByRole("button", { name: "Back" }).click();
+      await page.getByRole("radio", { name: /Confidential/u }).check();
+      await page.getByRole("button", { name: "Continue" }).click();
+      await expectVisibleText(
+        page,
+        "Enter a Confidential Launch Code. Standard subscriptions do not unlock this option yet."
+      );
+      assert.equal(
+        await page.getByRole("button", { name: "Continue to secure payment" }).count(),
+        0,
+        "Confidential early access must not send a Standard customer to checkout"
+      );
+      await page
+        .getByRole("textbox", { name: "Confidential Launch Code" })
+        .waitFor({ state: "visible" });
     });
 
     core.reset();
@@ -330,7 +345,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         0,
         "payment must stay hidden when the webhook/return path is not fully configured"
       );
-      await page.getByLabel("Launch Code").fill("fixture-launch-code");
+      await page
+        .getByRole("textbox", { name: "Launch Code", exact: true })
+        .fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).click();
       await waitFor(
         () => core.state.creationPosts.length === 1,
@@ -340,6 +357,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       const post = core.state.creationPosts[0] as Record<string, unknown>;
       assert.equal(post.displayName, "Oslo Bot");
       assert.equal(post.launchCode, "fixture-launch-code");
+      assert.equal(post.hostingTier, "standard");
       assert.equal("runnerClass" in post, false);
       assert.equal(post.profilePictureUrl, AGENT_PICTURE_URL);
       assert.match(String(post.idempotencyKey), /.+/);
@@ -360,7 +378,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
       await page.getByLabel("Agent name").fill("Double Submit Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Launch Code").fill("fixture-launch-code");
+      await page
+        .getByRole("textbox", { name: "Launch Code", exact: true })
+        .fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).dblclick();
       await waitFor(() => core.state.creationPosts.length === 1);
       await new Promise((resolve) => setTimeout(resolve, 700));
@@ -373,7 +393,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
       await page.getByLabel("Agent name").fill("Authorization Retry Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Launch Code").fill("fixture-launch-code");
+      await page
+        .getByRole("textbox", { name: "Launch Code", exact: true })
+        .fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).click();
       await page.waitForURL((url) => url.searchParams.has("agentCreationError"));
       assert.equal(
@@ -395,7 +417,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await expectVisibleText(page, "binding authorization is temporarily unavailable");
       await retryName.fill("Authorization Retry Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Launch Code").fill("fixture-launch-code");
+      await page
+        .getByRole("textbox", { name: "Launch Code", exact: true })
+        .fill("fixture-launch-code");
       await page.getByRole("button", { name: "Apply" }).click();
       await page.waitForURL(/\/dashboard\?new=1&creation=agent_request_1$/u);
 
@@ -425,7 +449,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
       await page.getByLabel("Agent name").fill("Fresh Code Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Launch Code").fill("fresh-top-up-code");
+      await page
+        .getByRole("textbox", { name: "Launch Code", exact: true })
+        .fill("fresh-top-up-code");
       await page.getByRole("button", { name: "Apply" }).click();
       await expectVisibleText(page, "Choose payment or enter a Launch Code to continue.");
       await new Promise((resolve) => setTimeout(resolve, 750));
@@ -642,7 +668,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByLabel("Agent name").waitFor({ state: "visible" });
       await page.getByLabel("Agent name").fill("Second Oslo Bot");
       await page.getByRole("button", { name: "Continue" }).click();
-      await page.getByLabel("Launch Code").waitFor({ state: "visible" });
+      await page
+        .getByRole("textbox", { name: "Launch Code", exact: true })
+        .waitFor({ state: "visible" });
       await page.getByRole("button", { name: "Apply", exact: true }).click();
       await page.waitForURL((url) => {
         const params = url.searchParams;

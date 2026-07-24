@@ -386,31 +386,41 @@ approval.
 
 ### Outcome
 
-One internal Agent runs on Phala through the existing provider-neutral Runner
-contract, survives restart, and can be recovered onto a replacement target.
-Pricing and onboarding follow only after the infrastructure proof.
+One internal Agent runs on the Confidential hosting tier through the existing
+provider-neutral Runner contract, survives restart, and can be recovered onto a
+replacement target. The creation UI may expose Standard and Confidential as
+product choices during early access, while Core keeps provider placement
+authoritative and Confidential remains Launch-Code-only until the
+infrastructure proof supports a separate pricing decision.
 
 ### Existing leverage
 
 - Typed Phala API/inventory code, a drained hard-cap-one Nix worker, read-only
   preflight, and a runbook already exist.
 - Runtime retirement and empty-target recovery close an important prerequisite.
-- Two technical blockers remain: reviewed environment
-  encryption/signature/test vectors and a typed Core in-flight reservation
-  count/ack that can be combined with provider inventory.
+- The environment encryption/signature vectors and typed Core in-flight
+  reservation fence have landed. The first live attempts then exposed and
+  closed a source-host binding bug. The reconciled Brain, shared Identity
+  Authority, cross-product identity conformance, and complete Recovery Set are
+  one ordered merge/rollout prerequisite for every managed Agent Email.
 
 ### Bounded implementation
 
 1. Run the existing read-only preflight without provider spend.
 2. Close only the two named blockers; do not generalize provider orchestration.
-3. Activate one internal launch-code canary with hard cap one and the canonical
-   Agent Runtime image.
-4. Prove create, Chat, Sites, restart, stuck/failed detection, and recovery to a
+3. Expose Standard and Confidential (early access) in normal agent creation.
+   Carry only the selected product tier to Core; reject a mismatch with the
+   billing account or Launch Code before code redemption, project creation,
+   runner lease, or provider spend. Confidential has no Stripe checkout yet.
+4. Activate one internal Confidential Launch Code with hard cap one and the
+   canonical Agent Runtime image.
+5. Prove create, Chat, Sites, restart, stuck/failed detection, and recovery to a
    replacement CVM.
-5. Use the same canonical image with a recovery boot intent or previous
+6. Use the same canonical image with a recovery boot intent or previous
    known-good digest. Add a distinct rescue image only if this proof shows a
    concrete capability the canonical image cannot provide.
-6. After acceptance, separately plan Stripe tier, price, copy, and onboarding.
+7. After acceptance, separately plan the Confidential Stripe price and included
+   capacity.
 
 ### Acceptance
 
@@ -422,9 +432,11 @@ Pricing and onboarding follow only after the infrastructure proof.
 
 ### Must not
 
-- No Stripe/onboarding work before the one-CVM canary.
-- No second rescue artifact by default, provider selector UI, arbitrary remote
-  shell, or rewrite of the Runner contract.
+- No Confidential Stripe checkout or price before the one-CVM canary.
+- No provider selector UI: the customer chooses a hosting promise and Core owns
+  its placement.
+- No second rescue artifact by default, arbitrary remote shell, or rewrite of
+  the Runner contract.
 
 ### Paul gate before a subagent builds
 
@@ -435,10 +447,27 @@ The code/preflight task may proceed without choosing pricing. Before a live
 CVM is created, Paul must name the canary Agent and approve provider spend,
 create/restart/destroy authority, and the hard cap.
 
+**Resolved 2026-07-23:** Paul chose a normal Standard / Confidential
+(early-access) hosting selector rather than a canary-only UI special case.
+Confidential is Launch-Code-only; a Standard subscription or Standard Launch
+Code must fail closed before creation. The UI does not expose Phala by name.
+
+**Activation gate, 2026-07-24:** merge and deploy the Personal Brain,
+Identity Authority, cross-product identity proof, and v2 hosted Recovery Set as
+one revision before enabling this selector. Complete the isolated empty-target
+restore drill before Paul creates the Confidential Launch Code. The standing
+new-capacity gate still requires a non-disruptive recovery point no more than
+15 minutes old; if that mechanism has not landed, Paul must explicitly record
+a narrow one-Agent internal-canary exception before launching. The canary also
+must not be treated as ready for durable user data until the external Agent
+Runtime Recovery Set in #228 and nonce-bound attestation verifier in #229 have
+their prelaunch mechanisms ready; their live replacement/measurement proofs
+complete during the canary.
+
 ### Later product gate
 
-After the canary, Paul chooses the customer-facing tier name, included capacity,
-price, and whether Phala is visible or simply the implementation of that tier.
+After the canary, Paul chooses included Confidential capacity and price. Phala
+remains the implementation of the customer-visible Confidential tier.
 
 ---
 

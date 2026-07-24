@@ -17,18 +17,18 @@ Opened: 2026-07-11
 Expires: 2026-09-05
 
 Acceptance: After the unchanged promoted Runtime image passes local Docker and
-Kata, an internal test account completes the real $300/month Stripe test-mode
-Confidential Hosting Tier flow and Core launches exactly one live Phala
-`tdx.medium` CVM, verified as 2 vCPU and 4096 MB. A forced Runner crash at each
-create boundary never produces a second CVM. Paul completes multiple real
-chat turns from the Hosted Web Device and a second independent Device after
-invite/status reports the expected Agent Principal, saves and recalls memory,
-publishes a Site, and makes a real Finite Private request with the
-Core-provisioned runtime key. Paul then exercises restart, recover-known-good,
-Runtime Upgrade, and rollback without re-pairing or changing the Agent
-Principal, workspace, or installed skills. A provider-independent Recovery
-Snapshot of the declared Agent Runtime Recovery Set restores onto an empty
-replacement Phala CVM, and fresh
+Kata, `paul@finite.vip` redeems one Confidential Launch Code through the
+normal product UI and Core launches exactly one live Phala `tdx.medium` CVM,
+verified as 2 vCPU and 4096 MB. No Confidential Stripe Product or Price is
+activated by this run. A forced Runner crash at each create boundary never
+produces a second CVM. Paul completes multiple real chat turns from the Hosted
+Web Device and a second independent Device after invite/status reports the
+expected Agent Principal, saves and recalls memory, publishes a Site, and
+makes a real Finite Private request with the Core-provisioned runtime key. Paul
+then exercises restart, recover-known-good, Runtime Upgrade, and rollback
+without re-pairing or changing the Agent Principal, workspace, or installed
+skills. A provider-independent Recovery Snapshot of the declared Agent Runtime
+Recovery Set restores onto an empty replacement Phala CVM, and fresh
 nonce-bound attestation binds that CVM to the accepted compose and image
 digest. The repository-wide paid-cohort restore gate for Core, Finite Chat and
 the Hosted Web Device, Sites, Brain, and identity/recovery authorities is also
@@ -80,6 +80,20 @@ delta. This run's acceptance is necessary but does not by itself authorize a
 paid cohort: the repository-wide recovery, untrusted owner-claim, and
 stuck-launch escape/reaper gates must all pass independently. An internal
 canary cannot stand in for any of them.
+
+Issue #227 tracks the standing non-disruptive, at-most-15-minute hosted
+Recovery Set cadence gate. Until it lands, the v2 empty-target restore proof
+does not silently satisfy that separate gate. Paul must record a narrow
+one-Agent internal-canary exception before launch; the existing ACTIVE
+provider-spend authorization does not generalize that exception to customer
+capacity.
+
+Issues #228 and #229 track the distinct Agent Runtime external Recovery Set
+and nonce-bound TDX verifier already required below. Their code paths and
+offline fixtures are prelaunch gates; the one authorized live canary supplies
+the provider replacement and fresh measurement evidence needed to complete
+their production acceptance. Until then, do not use the canary for durable
+user data or claim the Confidential run accepted.
 
 The accepted Runner, runtime-control, recovery, and agent-boundary documents
 govern without being reopened here. This run adds three Phala-specific scope

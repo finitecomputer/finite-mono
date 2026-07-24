@@ -111,6 +111,7 @@ JS
     -o "$response_body" \
     -X POST \
     --data-urlencode "displayName=$display_name" \
+    --data-urlencode "hostingTier=standard" \
     --data-urlencode "access=launch-code" \
     --data-urlencode "launchCode@$launch_code_file" \
     --data-urlencode "idempotencyKey=$idempotency_key" \

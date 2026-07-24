@@ -9,6 +9,7 @@ import {
   ImagePlusIcon,
   Loader2Icon,
   RocketIcon,
+  ShieldCheckIcon,
 } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -21,6 +22,7 @@ export function CoreAgentCreationForm({
   idempotencyKey,
   initialName,
   initialPictureUrl,
+  initialHostingTier,
   returnMachineId,
   requiresAccess,
   stripeConfigured,
@@ -29,6 +31,7 @@ export function CoreAgentCreationForm({
   idempotencyKey: string;
   initialName?: string | null;
   initialPictureUrl?: string | null;
+  initialHostingTier?: "standard" | "confidential" | null;
   returnMachineId?: string | null;
   requiresAccess: boolean;
   stripeConfigured: boolean;
@@ -36,8 +39,12 @@ export function CoreAgentCreationForm({
   const [step, setStep] = useState<"profile" | "access">("profile");
   const [displayName, setDisplayName] = useState(initialName ?? "");
   const [picturePreview, setPicturePreview] = useState(initialPictureUrl ?? "");
+  const [hostingTier, setHostingTier] = useState<"standard" | "confidential">(
+    initialHostingTier ?? "standard"
+  );
   const [submitting, setSubmitting] = useState<"launch" | "stripe" | "launch-code" | null>(null);
   const submittedRef = useRef(false);
+  const selectionRequiresAccess = requiresAccess || hostingTier === "confidential";
 
   useEffect(() => {
     return () => {
@@ -143,17 +150,63 @@ export function CoreAgentCreationForm({
           />
         </div>
 
-        <div className="flex items-center justify-between gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-3">
-          <div>
-            <div className="text-sm font-medium text-foreground">Hosted by Finite</div>
-            <div className="text-xs text-muted-foreground">Always available, with its own private state.</div>
-          </div>
-          <span className="inline-flex size-6 items-center justify-center rounded-full bg-primary text-primary-foreground">
-            <CheckIcon className="size-3.5" />
-          </span>
-        </div>
+        <fieldset className="grid gap-2">
+          <legend className="mb-1 text-sm font-medium text-foreground">Hosting</legend>
+          <label
+            className={`flex cursor-pointer items-start gap-3 rounded-[var(--radius-card-inner)] border p-3 ${
+              hostingTier === "standard"
+                ? "border-primary bg-primary/5"
+                : "border-border bg-white/[0.03]"
+            }`}
+          >
+            <input
+              type="radio"
+              name="hostingTier"
+              value="standard"
+              checked={hostingTier === "standard"}
+              onChange={() => setHostingTier("standard")}
+              className="mt-1"
+              tabIndex={step === "profile" ? 0 : -1}
+            />
+            <span className="grid gap-0.5">
+              <span className="text-sm font-medium text-foreground">Standard</span>
+              <span className="text-xs text-muted-foreground">
+                Finite-hosted private state · $200 USD / month
+              </span>
+            </span>
+          </label>
+          <label
+            className={`flex cursor-pointer items-start gap-3 rounded-[var(--radius-card-inner)] border p-3 ${
+              hostingTier === "confidential"
+                ? "border-primary bg-primary/5"
+                : "border-border bg-white/[0.03]"
+            }`}
+          >
+            <input
+              type="radio"
+              name="hostingTier"
+              value="confidential"
+              checked={hostingTier === "confidential"}
+              onChange={() => setHostingTier("confidential")}
+              className="mt-1"
+              tabIndex={step === "profile" ? 0 : -1}
+            />
+            <span className="grid gap-0.5">
+              <span className="inline-flex items-center gap-1.5 text-sm font-medium text-foreground">
+                <ShieldCheckIcon className="size-4" />
+                Confidential
+                <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-normal text-muted-foreground">
+                  Early access
+                </span>
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Runs in confidential compute. Pardon our dust while access is limited to Confidential Launch Codes.
+              </span>
+            </span>
+          </label>
+        </fieldset>
 
-        {requiresAccess ? (
+        {selectionRequiresAccess ? (
           <Button
             type="button"
             className="w-fit"
@@ -175,11 +228,15 @@ export function CoreAgentCreationForm({
         <div>
           <h2 className="font-semibold text-foreground">Start {displayName.trim() || "your agent"}</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            {stripeConfigured ? "Pay securely or use a Launch Code." : "Enter your Launch Code."}
+            {hostingTier === "confidential"
+              ? "Enter a Confidential Launch Code. Standard subscriptions do not unlock this option yet."
+              : stripeConfigured
+                ? "Pay securely or use a Launch Code."
+                : "Enter your Launch Code."}
           </p>
         </div>
 
-        {stripeConfigured ? (
+        {stripeConfigured && hostingTier === "standard" ? (
           <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4">
             <div>
               <div className="font-medium text-foreground">Finite Computer Hosted Agent</div>
@@ -218,7 +275,9 @@ export function CoreAgentCreationForm({
         ) : null}
 
         <div className="grid max-w-sm gap-2">
-          <Label htmlFor="coreAgentLaunchCode">Launch Code</Label>
+          <Label htmlFor="coreAgentLaunchCode">
+            {hostingTier === "confidential" ? "Confidential Launch Code" : "Launch Code"}
+          </Label>
           <div className="flex gap-2">
             <Input
               id="coreAgentLaunchCode"

@@ -566,6 +566,7 @@ export type CoreAgentCreationInput = {
   displayName: string;
   launchCode: string;
   idempotencyKey: string;
+  hostingTier: "standard" | "confidential";
   profilePictureUrl?: string | null;
 };
 
@@ -575,6 +576,7 @@ export function coreAgentCreationRequestBody(input: CoreAgentCreationInput) {
     displayName: input.displayName,
     launchCode: input.launchCode,
     idempotencyKey: input.idempotencyKey,
+    hostingTier: input.hostingTier,
     ...(profilePictureUrl ? { profilePictureUrl } : {}),
   };
 }

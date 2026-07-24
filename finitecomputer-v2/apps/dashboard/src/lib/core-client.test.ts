@@ -85,6 +85,7 @@ test("agent creation payload cannot submit provider placement", () => {
     displayName: "Moss",
     launchCode: "launch-fixture",
     idempotencyKey: "request-fixture",
+    hostingTier: "confidential" as const,
     profilePictureUrl: "https://chat.example/profile.png",
     runnerClass: "phala",
   };
@@ -93,6 +94,7 @@ test("agent creation payload cannot submit provider placement", () => {
     displayName: "Moss",
     launchCode: "launch-fixture",
     idempotencyKey: "request-fixture",
+    hostingTier: "confidential",
     profilePictureUrl: "https://chat.example/profile.png",
   });
   assert.equal("runnerClass" in body, false);
@@ -101,11 +103,13 @@ test("agent creation payload cannot submit provider placement", () => {
       displayName: "Moss",
       launchCode: "",
       idempotencyKey: "request-without-picture",
+      hostingTier: "standard",
     }),
     {
       displayName: "Moss",
       launchCode: "",
       idempotencyKey: "request-without-picture",
+      hostingTier: "standard",
     }
   );
 });

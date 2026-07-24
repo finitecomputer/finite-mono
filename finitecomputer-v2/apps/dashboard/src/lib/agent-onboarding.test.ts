@@ -7,6 +7,7 @@ import {
   agentCreationRequiresAccess,
   draftStartedStripeCheckout,
   normalizeAgentDisplayName,
+  normalizeAgentHostingTier,
   normalizeAgentReturnMachineId,
   resolveAgentCreationAccessPath,
   sealAgentOnboardingDraft,
@@ -61,6 +62,12 @@ test("billing rejection carries machine-readable Access recovery after friendly 
     agentCreationErrorRecovery("Choose payment or enter a Launch Code to continue."),
     "access"
   );
+  assert.equal(
+    agentCreationErrorRecovery(
+      "selected hosting tier is not authorized by this account or Launch Code"
+    ),
+    "access"
+  );
   assert.equal(agentCreationErrorRecovery("Chat initialization is unavailable."), null);
 });
 
@@ -70,6 +77,7 @@ test("only a signed draft that initiated Stripe is eligible for checkout complet
     workosUserId: "user-a",
     displayName: "Moss",
     profilePictureUrl: null,
+    hostingTier: "standard" as const,
     idempotencyKey: "idem-checkout",
     issuedAtMs: 1_000,
   };
@@ -100,6 +108,12 @@ test("other agent creation errors remain useful", () => {
     agentCreationErrorMessage(new Error("billing is required before creating an agent")),
     "Choose payment or enter a Launch Code to continue."
   );
+  assert.equal(
+    agentCreationErrorMessage(
+      new Error("selected hosting tier is not authorized by this account or Launch Code")
+    ),
+    "This account or Launch Code does not match the selected hosting option. Choose the matching option or use a different Launch Code."
+  );
   assert.equal(agentCreationErrorMessage(null), "Could not create agent.");
 });
 
@@ -111,6 +125,12 @@ const env = {
 test("agent names are compact user-facing values", () => {
   assert.equal(normalizeAgentDisplayName("  Moss   Agent  "), "Moss Agent");
   assert.throws(() => normalizeAgentDisplayName(""), /between 1 and 80/u);
+});
+
+test("hosting selection accepts only product tiers", () => {
+  assert.equal(normalizeAgentHostingTier("standard"), "standard");
+  assert.equal(normalizeAgentHostingTier("confidential"), "confidential");
+  assert.throws(() => normalizeAgentHostingTier("phala"), /Standard or Confidential/u);
 });
 
 test("agent return machine ids are bounded navigation hints", () => {
@@ -130,6 +150,7 @@ test("onboarding draft is sealed, user-bound, and expiring", async () => {
       workosUserId: "user-a",
       displayName: "Moss",
       profilePictureUrl: "https://chat.example/profile.png",
+      hostingTier: "confidential",
       idempotencyKey: "request-a",
       issuedAtMs,
       returnMachineId: "runtime_existing-agent",
@@ -143,6 +164,7 @@ test("onboarding draft is sealed, user-bound, and expiring", async () => {
     issuedAtMs + 1000
   );
   assert.equal(unsealed?.displayName, "Moss");
+  assert.equal(unsealed?.hostingTier, "confidential");
   assert.equal(unsealed?.returnMachineId, "runtime_existing-agent");
   assert.equal(await unsealAgentOnboardingDraft(sealed, "user-b", env), null);
   assert.equal(
@@ -158,6 +180,7 @@ test("onboarding draft strips stale provider placement state", async () => {
     workosUserId: "user-a",
     displayName: "Moss",
     profilePictureUrl: null,
+    hostingTier: "standard" as const,
     idempotencyKey: "request-stale-provider",
     issuedAtMs,
     runnerClass: "phala",

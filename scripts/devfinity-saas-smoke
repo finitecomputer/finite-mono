@@ -1149,6 +1149,7 @@ JS
       -o /dev/null \
       -X POST \
       --data-urlencode "displayName=Devfinity Apple Agent $run_id" \
+      --data-urlencode "hostingTier=standard" \
       --data-urlencode "access=launch-code" \
       --data-urlencode "launchCode@$launch_code_file" \
       --data-urlencode "idempotencyKey=devfinity-apple-$run_id" \

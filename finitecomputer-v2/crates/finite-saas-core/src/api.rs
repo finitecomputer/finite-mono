@@ -113,6 +113,8 @@ pub struct CreateAgentRequest {
     pub launch_code: String,
     pub idempotency_key: String,
     #[serde(default)]
+    pub hosting_tier: Option<crate::HostingTier>,
+    #[serde(default)]
     pub profile_picture_url: Option<String>,
 }
 
@@ -1942,6 +1944,9 @@ async fn create_agent_request(
                 },
                 AgentCreationConfiguration {
                     placement: state.agent_creation_placement,
+                    requested_hosting_tier: Some(
+                        input.hosting_tier.unwrap_or(crate::HostingTier::Standard),
+                    ),
                     profile_picture_url: input.profile_picture_url,
                 },
             )
@@ -3369,6 +3374,7 @@ impl From<CoreError> for ApiError {
                 Self::unauthorized(error.to_string())
             }
             CoreError::BillingRequired => Self::payment_required(error.to_string()),
+            CoreError::HostingTierNotAuthorized => Self::forbidden(error.to_string()),
             CoreError::AgentCreationEntitlementExhausted
             | CoreError::AgentCreationRequestUnavailable
             | CoreError::AgentCreationRequestLeaseConflict
@@ -4766,6 +4772,7 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
+            hosting_tier: None,
             profile_picture_url: Some("https://chat.finite.computer/v1/blobs/profile".to_string()),
         })
         .unwrap();
@@ -4918,6 +4925,7 @@ mod tests {
             display_name: "Second Agent".to_string(),
             launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-2".to_string(),
+            hosting_tier: None,
             profile_picture_url: None,
         })
         .unwrap();
@@ -4945,6 +4953,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn core_api_rejects_tier_mismatch_without_consuming_launch_code() {
+        let store = CoreStore::memory();
+        let launch_code = issue_test_launch_code(&store).await;
+        let app = router(store, test_auth());
+        let user = identity_headers("tier-check@finite.vip", "true");
+        let mut request = serde_json::json!({
+            "displayName": "Tier Check",
+            "launchCode": launch_code,
+            "idempotencyKey": "tier-check-submit",
+            "hostingTier": "confidential"
+        });
+
+        let (status, _) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/me/agent-creation-requests",
+            &user,
+            Some(request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        request["hostingTier"] = serde_json::json!("standard");
+        let (status, body) = send_json(
+            &app,
+            "POST",
+            "/api/core/v1/me/agent-creation-requests",
+            &user,
+            Some(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["request"]["runner_class"], "kata");
     }
 
     #[tokio::test]
@@ -5036,6 +5080,7 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
+            hosting_tier: None,
             profile_picture_url: None,
         })
         .unwrap();
@@ -5544,6 +5589,7 @@ mod tests {
             display_name: "Oslo Agent".to_string(),
             launch_code: launch_code.clone(),
             idempotency_key: "browser-submit-1".to_string(),
+            hosting_tier: None,
             profile_picture_url: None,
         })
         .unwrap();
