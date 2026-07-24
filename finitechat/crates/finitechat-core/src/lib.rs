@@ -3060,11 +3060,6 @@ impl AppRuntimeState {
             "chat-archive",
         )?;
         self.apply_projection_events(vec![event])?;
-        self.app.selected_room_id = Some(room_id);
-        self.app.selected_topic_id = Some(topic_id);
-        self.app.selected_chat_id = Some(chat_id);
-        self.persist_app_state()?;
-        self.sync_selected_room_messages();
         self.app.status = if archived {
             "chat archived".to_owned()
         } else {
@@ -12578,6 +12573,33 @@ mod tests {
                 .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
                 .is_some_and(|chat| chat.archived),
             "archiving the current chat must preserve selection and expose shared metadata"
+        );
+
+        let elsewhere = alice
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Elsewhere".to_owned(),
+            })
+            .unwrap();
+        let elsewhere_topic_id = elsewhere.selected_topic_id.unwrap();
+        let elsewhere_chat_id = elsewhere.selected_chat_id.unwrap();
+        let background_archived = alice
+            .dispatch_and_wait(AppAction::SetChatArchived {
+                room_id: room_id.clone(),
+                topic_id: topic_id.clone(),
+                chat_id: chat_id.clone(),
+                archived: true,
+            })
+            .unwrap();
+        assert_eq!(
+            background_archived.selected_topic_id.as_deref(),
+            Some(elsewhere_topic_id.as_str()),
+            "archiving a background chat must not change the active topic"
+        );
+        assert_eq!(
+            background_archived.selected_chat_id.as_deref(),
+            Some(elsewhere_chat_id.as_str()),
+            "archiving a background chat must not change the active chat"
         );
 
         let bob_synced = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();

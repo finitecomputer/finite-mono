@@ -742,17 +742,18 @@ final class AppModel: ObservableObject, AppReconciler {
     }
 
     func selectedChat(in topic: AppTopicSummary) -> AppChatSummary? {
+        let visibleChats = topic.chats.filter { !$0.archived }
         if let selectedChatID = state?.selectedChatId,
-           let chat = topic.chats.first(where: { $0.chatId == selectedChatID })
+           let chat = visibleChats.first(where: { $0.chatId == selectedChatID })
         {
             return chat
         }
         if let activeChatID = topic.activeChatId,
-           let chat = topic.chats.first(where: { $0.chatId == activeChatID })
+           let chat = visibleChats.first(where: { $0.chatId == activeChatID })
         {
             return chat
         }
-        return topic.chats.first
+        return visibleChats.first
     }
 
     func selectedChatRoute(for roomID: String) -> (topicID: String, chatID: String)? {
@@ -1312,6 +1313,26 @@ final class AppModel: ObservableObject, AppReconciler {
                 title: title
             ),
             onSuccess: onRenamed,
+            onFailure: { _ in onFailure?() }
+        )
+    }
+
+    @discardableResult
+    func archiveChat(
+        roomID: String,
+        topicID: String,
+        chatID: String,
+        onArchived: (@MainActor () -> Void)? = nil,
+        onFailure: (@MainActor () -> Void)? = nil
+    ) -> Bool {
+        dispatchInBackground(
+            .setChatArchived(
+                roomId: roomID,
+                topicId: topicID,
+                chatId: chatID,
+                archived: true
+            ),
+            onSuccess: onArchived,
             onFailure: { _ in onFailure?() }
         )
     }
@@ -2351,6 +2372,12 @@ final class AppModel: ObservableObject, AppReconciler {
             return DiagnosticActionSummary(
                 category: "transport",
                 name: "rename_chat",
+                details: ["room": roomId, "topic": topicId, "chat": chatId]
+            )
+        case .setChatArchived(let roomId, let topicId, let chatId, let archived):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: archived ? "archive_chat" : "restore_chat",
                 details: ["room": roomId, "topic": topicId, "chat": chatId]
             )
         case .createTopic(let roomId, _):

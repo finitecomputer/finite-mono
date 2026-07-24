@@ -70,6 +70,17 @@ final class RuntimeConfigTests: XCTestCase {
                             archived: false
                         ),
                         AppChatSummary(
+                            chatId: "empty-archived-newest",
+                            title: "Archived draft",
+                            lastMessagePreview: "",
+                            unreadCount: 0,
+                            messageCount: 0,
+                            startedSeq: 20,
+                            updatedSeq: 20,
+                            active: false,
+                            archived: true
+                        ),
+                        AppChatSummary(
                             chatId: "empty-newer",
                             title: "New chat",
                             lastMessagePreview: "",
@@ -2322,6 +2333,11 @@ final class AppModelPersistenceTests: XCTestCase {
             chatID: "home-chat",
             title: "  Shipping plan  "
         ))
+        XCTAssertTrue(model.archiveChat(
+            roomID: "room-main",
+            topicID: "home",
+            chatID: "home-chat"
+        ))
         XCTAssertTrue(model.createTopic(
             roomID: "room-main",
             title: "  Design  "
@@ -2340,6 +2356,12 @@ final class AppModelPersistenceTests: XCTestCase {
                     topicId: "home",
                     chatId: "home-chat",
                     title: "Shipping plan"
+                ),
+                .setChatArchived(
+                    roomId: "room-main",
+                    topicId: "home",
+                    chatId: "home-chat",
+                    archived: true
                 ),
                 .createTopic(roomId: "room-main", title: "Design"),
                 .startTopicChat(roomId: "room-main", topicId: "home", reason: nil),

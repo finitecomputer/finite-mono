@@ -48,7 +48,7 @@ func findReusableEmptyChatDestination(
         return nil
     }
     guard let chat = topic.chats
-        .filter({ $0.messageCount == 0 })
+        .filter({ !$0.archived && $0.messageCount == 0 })
         .max(by: { left, right in
             if left.updatedSeq != right.updatedSeq {
                 return left.updatedSeq < right.updatedSeq
@@ -187,6 +187,7 @@ struct ContentView: View {
                 createTopic: createTopicFromDrawer,
                 startTopicChat: startTopicChatFromDrawer,
                 renameChat: renameChatFromDrawer,
+                archiveChat: archiveChatFromDrawer,
                 openSettings: openSettingsFromDrawer,
                 openChat: openFromDrawer
             )
@@ -244,7 +245,7 @@ struct ContentView: View {
         guard let roomID = model.pairedAgent?.roomId else { return [] }
         return model.topics(for: roomID)
             .flatMap { topic in
-                topic.chats.map { chat in
+                topic.chats.filter { !$0.archived }.map { chat in
                     ChatDestination(
                         roomID: roomID,
                         topicID: topic.topicId,
@@ -271,7 +272,7 @@ struct ContentView: View {
                     roomID: roomID,
                     id: topic.topicId,
                     title: topic.title,
-                    chats: topic.chats.map { chat in
+                    chats: topic.chats.filter { !$0.archived }.map { chat in
                         ChatDestination(
                             roomID: roomID,
                             topicID: topic.topicId,
@@ -549,6 +550,19 @@ struct ContentView: View {
         }
     }
 
+    private func archiveChatFromDrawer(_ chat: ChatDestination) {
+        _ = model.archiveChat(
+            roomID: chat.roomID,
+            topicID: chat.topicID,
+            chatID: chat.chatID,
+            onArchived: {
+                if path.last?.chatID == chat.chatID {
+                    path.removeAll()
+                }
+            }
+        )
+    }
+
     private func openSettingsFromDrawer() {
         dismissDrawer()
         Task { @MainActor in
@@ -745,6 +759,7 @@ struct ChatDrawerOverlay: View {
     let createTopic: (String, @escaping (Bool) -> Void) -> Void
     let startTopicChat: (ChatTopicGroup, @escaping (Bool) -> Void) -> Void
     let renameChat: (ChatDestination, String, @escaping (Bool) -> Void) -> Void
+    let archiveChat: (ChatDestination) -> Void
     let openSettings: () -> Void
     let openChat: (ChatDestination) -> Void
     @State private var dismissOffset: CGFloat = 0
@@ -818,6 +833,7 @@ struct ChatDrawerOverlay: View {
                                 renameChat: {
                                     nameEditor = .renameChat($0)
                                 },
+                                archiveChat: archiveChat,
                                 openChat: openChat
                             )
                         }
@@ -948,6 +964,7 @@ private struct DrawerTopicRows: View {
     let selectedChatID: String?
     let startNewChat: (ChatTopicGroup, @escaping (Bool) -> Void) -> Void
     let renameChat: (ChatDestination) -> Void
+    let archiveChat: (ChatDestination) -> Void
     let openChat: (ChatDestination) -> Void
     @State private var isExpanded = true
     @State private var isStartingChat = false
@@ -1049,6 +1066,11 @@ private struct DrawerTopicRows: View {
                 renameChat(chat)
             } label: {
                 Label("Rename", systemImage: "pencil")
+            }
+            Button {
+                archiveChat(chat)
+            } label: {
+                Label("Archive", systemImage: "archivebox")
             }
         }
         .accessibilityElement(children: .contain)
@@ -1394,6 +1416,7 @@ private enum FocusedPreviewFixtures {
         createTopic: { _, completion in completion(true) },
         startTopicChat: { _, completion in completion(true) },
         renameChat: { _, _, completion in completion(true) },
+        archiveChat: { _ in },
         openSettings: {},
         openChat: { _ in }
     )
