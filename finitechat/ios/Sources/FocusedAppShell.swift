@@ -24,7 +24,7 @@ struct FiniteDesignTokens {
     var sectionSpacing: CGFloat = 24
     var controlSpacing: CGFloat = 12
     var panelRadius: CGFloat = 30
-    var drawerWidth: CGFloat = 340
+    var drawerWidth: CGFloat = 320
     var homeHeroMarkSize: CGFloat = 104
     var homeHeroTopSpacing: CGFloat = 92
     var recentBadgeSpacing: CGFloat = 8
@@ -48,6 +48,7 @@ struct ContentView: View {
     @State private var showsDrawer = false
     @State private var showsSettings = false
     @State private var showsAgentPicker = false
+    @State private var homeComposerFocusRequest = 0
     @State private var pendingHomeSubmission: (text: String, intentKey: String)?
 
     var body: some View {
@@ -79,6 +80,7 @@ struct ContentView: View {
             FocusedHomeView(
                 agentName: model.pairedAgent?.displayName,
                 recentChats: recentChats,
+                focusRequest: homeComposerFocusRequest,
                 startChat: startHomeChat,
                 openChat: open,
                 chooseAgent: {
@@ -107,22 +109,19 @@ struct ContentView: View {
             }
         }
         .overlay {
-            if showsDrawer {
-                ChatDrawerOverlay(
-                    agentName: model.pairedAgent?.displayName ?? "Agent",
-                    groups: chatGroups,
-                    selectedChatID: path.last?.chatID,
-                    dismiss: {
-                        withAnimation(.snappy(duration: 0.24)) {
-                            showsDrawer = false
-                        }
-                    },
-                    openHome: openHomeFromDrawer,
-                    openChat: openFromDrawer
-                )
-                .transition(.opacity)
-                .zIndex(20)
-            }
+            ChatDrawerOverlay(
+                isPresented: showsDrawer,
+                agentName: model.pairedAgent?.displayName ?? "Agent",
+                groups: chatGroups,
+                selectedChatID: path.last?.chatID,
+                dismiss: dismissDrawer,
+                openHome: openHomeFromDrawer,
+                startNewChat: startNewChatFromDrawer,
+                openSettings: openSettingsFromDrawer,
+                openChat: openFromDrawer
+            )
+            .allowsHitTesting(showsDrawer)
+            .zIndex(20)
         }
         .sheet(isPresented: $showsSettings) {
             FocusedSettingsView(
@@ -265,10 +264,29 @@ struct ContentView: View {
         }
     }
 
-    private func openHomeFromDrawer() {
-        path.removeAll()
+    private func dismissDrawer() {
         withAnimation(.snappy(duration: 0.24)) {
             showsDrawer = false
+        }
+    }
+
+    private func openHomeFromDrawer() {
+        path.removeAll()
+        dismissDrawer()
+    }
+
+    private func startNewChatFromDrawer() {
+        path.removeAll()
+        dismissDrawer()
+        Task { @MainActor in
+            homeComposerFocusRequest += 1
+        }
+    }
+
+    private func openSettingsFromDrawer() {
+        dismissDrawer()
+        Task { @MainActor in
+            showsSettings = true
         }
     }
 
@@ -299,6 +317,7 @@ struct FocusedHomeView: View {
     @Environment(\.finiteTokens) private var tokens
     let agentName: String?
     let recentChats: [ChatDestination]
+    var focusRequest = 0
     let startChat: (String, @escaping (Bool) -> Void) -> Void
     let openChat: (ChatDestination) -> Void
     let chooseAgent: () -> Void
@@ -369,6 +388,10 @@ struct FocusedHomeView: View {
         .background(Color(.systemBackground))
         .navigationTitle("Home")
         .navigationBarTitleDisplayMode(.inline)
+        .task(id: focusRequest) {
+            guard focusRequest > 0 else { return }
+            isComposerFocused = true
+        }
     }
 
     private var canSend: Bool {
@@ -418,102 +441,242 @@ private struct RecentChatBadges: View {
 
 struct ChatDrawerOverlay: View {
     @Environment(\.finiteTokens) private var tokens
+    let isPresented: Bool
     let agentName: String
     let groups: [ChatTopicGroup]
     let selectedChatID: String?
     let dismiss: () -> Void
     let openHome: () -> Void
+    let startNewChat: () -> Void
+    let openSettings: () -> Void
     let openChat: (ChatDestination) -> Void
 
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Color.black.opacity(0.24)
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: dismiss)
+                if isPresented {
+                    Color.black.opacity(0.34)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: dismiss)
+                        .transition(.opacity)
 
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(agentName)
-                                .font(.headline)
-                            Text("Chats")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button(action: dismiss) {
-                            Image(systemName: "xmark")
-                        }
-                        .buttonStyle(.glass)
-                        .accessibilityLabel("Close chats")
-                    }
-                    .padding()
-
-                    Divider()
-
-                    List {
-                        Section {
-                            Button(action: openHome) {
-                                HStack {
-                                    Label("Home", systemImage: "house")
-                                    Spacer()
-                                    if selectedChatID == nil {
-                                        Image(systemName: "checkmark")
-                                            .foregroundStyle(.tint)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("DrawerHomeButton")
-                        }
-
-                        if groups.isEmpty {
-                            ContentUnavailableView("No chats yet", systemImage: "bubble.left")
-                        } else {
-                            ForEach(groups) { group in
-                                Section(group.title) {
-                                    ForEach(group.chats) { chat in
-                                        Button {
-                                            openChat(chat)
-                                        } label: {
-                                            HStack {
-                                                VStack(alignment: .leading, spacing: 3) {
-                                                    Text(chat.title)
-                                                        .lineLimit(1)
-                                                    if !chat.preview.isEmpty {
-                                                        Text(chat.preview)
-                                                            .font(.caption)
-                                                            .foregroundStyle(.secondary)
-                                                            .lineLimit(1)
-                                                    }
-                                                }
-                                                Spacer()
-                                                if selectedChatID == chat.chatID {
-                                                    Image(systemName: "checkmark")
-                                                        .foregroundStyle(.tint)
-                                                }
-                                            }
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .listStyle(.sidebar)
-                    .scrollContentBackground(.hidden)
+                    drawerPanel
+                        .frame(width: min(tokens.drawerWidth, proxy.size.width * 0.88))
+                        .frame(maxHeight: .infinity)
+                        .transition(.move(edge: .leading))
                 }
-                .frame(width: min(tokens.drawerWidth, proxy.size.width - 32))
-                .frame(maxHeight: .infinity)
-                .glassEffect(.regular, in: .rect(cornerRadius: tokens.panelRadius))
-                .padding(.vertical, 8)
-                .padding(.leading, 8)
-                .shadow(color: .black.opacity(0.16), radius: 24, x: 8)
             }
         }
-        .accessibilityIdentifier("ChatDrawer")
+        .accessibilityHidden(!isPresented)
+    }
+
+    private var drawerPanel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            drawerHeader
+
+            Divider()
+
+            List {
+                Section {
+                    DrawerNavigationRow(
+                        title: "Home",
+                        systemImage: "house",
+                        isSelected: selectedChatID == nil,
+                        action: openHome
+                    )
+                    .accessibilityIdentifier("DrawerHomeButton")
+                }
+
+                Section("Topics") {
+                    if groups.isEmpty {
+                        Label("No chats yet", systemImage: "bubble.left")
+                            .foregroundStyle(.secondary)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    } else {
+                        ForEach(groups) { group in
+                            DrawerTopicRows(
+                                group: group,
+                                selectedChatID: selectedChatID,
+                                openChat: openChat
+                            )
+                        }
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .contentMargins(.vertical, 8)
+
+            Button(action: startNewChat) {
+                Label("New chat", systemImage: "plus")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glassProminent)
+            .controlSize(.large)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+            .accessibilityIdentifier("DrawerNewChatButton")
+
+            Divider()
+
+            Button(action: openSettings) {
+                HStack(spacing: 12) {
+                    Image(systemName: "gearshape")
+                        .frame(width: 24)
+                    Text("Settings")
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 52)
+            .accessibilityIdentifier("DrawerSettingsButton")
+        }
+        .background {
+            Rectangle()
+                .fill(.regularMaterial)
+                .ignoresSafeArea()
+        }
+        .shadow(color: .black.opacity(0.2), radius: 28, x: 12)
+    }
+
+    private var drawerHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                FiniteLogoMark()
+                    .fill(.tint)
+                    .frame(width: 24, height: 24)
+                    .accessibilityHidden(true)
+
+                Text("Finite")
+                    .font(.headline)
+
+                Spacer()
+
+                Button(action: dismiss) {
+                    Image(systemName: "sidebar.left")
+                }
+                .buttonStyle(.glass)
+                .accessibilityLabel("Close navigation")
+                .accessibilityIdentifier("DrawerCloseButton")
+            }
+
+            Button(action: openSettings) {
+                HStack(spacing: 12) {
+                    Image(systemName: "sparkles")
+                        .foregroundStyle(.tint)
+                        .frame(width: 30, height: 30)
+                        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(agentName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text("Paired agent")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Paired agent: \(agentName)")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 14)
+    }
+}
+
+private struct DrawerNavigationRow: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(selectionBackground)
+        .listRowSeparator(.hidden)
+    }
+
+    private var selectionBackground: some View {
+        RoundedRectangle(cornerRadius: 10)
+            .fill(isSelected ? Color.accentColor.opacity(0.13) : .clear)
+    }
+}
+
+private struct DrawerTopicRows: View {
+    let group: ChatTopicGroup
+    let selectedChatID: String?
+    let openChat: (ChatDestination) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label {
+                Text(group.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+            } icon: {
+                Image(systemName: "number")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: 24, height: 24)
+                    .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+            }
+            .padding(.horizontal, 8)
+            .frame(minHeight: 36)
+
+            ForEach(group.chats) { chat in
+                Button {
+                    openChat(chat)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bubble.left")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 14)
+
+                        Text(chat.title.isEmpty ? "New chat" : chat.title)
+                            .font(.subheadline)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 8)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .frame(minHeight: 34)
+                .background(
+                    selectedChatID == chat.chatID
+                        ? Color.accentColor.opacity(0.13)
+                        : .clear,
+                    in: RoundedRectangle(cornerRadius: 9)
+                )
+                .padding(.leading, 24)
+                .accessibilityIdentifier("DrawerChat-\(chat.chatID)")
+            }
+        }
+        .padding(.vertical, 2)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
     }
 }
 
@@ -731,6 +894,7 @@ private enum FocusedPreviewFixtures {
 
 #Preview("Chat drawer") {
     ChatDrawerOverlay(
+        isPresented: true,
         agentName: "Ada",
         groups: [
             ChatTopicGroup(
@@ -747,6 +911,8 @@ private enum FocusedPreviewFixtures {
         selectedChatID: "ship-ios",
         dismiss: {},
         openHome: {},
+        startNewChat: {},
+        openSettings: {},
         openChat: { _ in }
     )
 }
