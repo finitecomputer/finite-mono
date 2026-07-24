@@ -11044,36 +11044,86 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
-  function collaborationReceiptMatchesIntent(receipt, brainId, targetNpub) {
+  function collaborationReceiptMatchesIntent(receipt, brainId, request) {
     if (
       !receipt ||
       typeof receipt !== "object" ||
       !["complete", "partial", "indeterminate"].includes(receipt.state) ||
       receipt.brainId !== brainId ||
-      receipt.targetNpub !== targetNpub ||
+      receipt.targetNpub !== request.targetNpub ||
       receipt.brainRole !== "admin" ||
-      !Array.isArray(receipt.folders)
-    ) {
-      return false;
-    }
-    if (receipt.state === "indeterminate") return true;
-    if (
+      !Array.isArray(receipt.folders) ||
       !Number.isInteger(receipt.readyCount) ||
       !Number.isInteger(receipt.totalCount) ||
       receipt.readyCount < 0 ||
       receipt.totalCount < 0 ||
       receipt.readyCount > receipt.totalCount ||
-      receipt.totalCount !== receipt.folders.length
+      typeof receipt.retryable !== "boolean"
     ) {
       return false;
     }
-    const readyCount = receipt.folders.filter((folder) =>
-      ["granted", "alreadyReady"].includes(folder?.outcome)
-    ).length;
+    const requestedFolders = new Map();
+    for (const folder of request.folders) {
+      if (
+        !folder ||
+        typeof folder.folderId !== "string" ||
+        !folder.folderId ||
+        !Number.isInteger(folder.keyVersion) ||
+        folder.keyVersion < 1 ||
+        typeof folder.path !== "string" ||
+        requestedFolders.has(folder.folderId)
+      ) {
+        return false;
+      }
+      requestedFolders.set(folder.folderId, folder);
+    }
+    if (
+      receipt.totalCount !== requestedFolders.size ||
+      receipt.folders.length !== requestedFolders.size
+    ) {
+      return false;
+    }
+    const receivedFolderIds = new Set();
+    let readyCount = 0;
+    const readyOutcomes = new Set(["granted", "alreadyReady"]);
+    const incompleteOutcomes = new Set(["missingSourceKey", "staleVersion", "failed"]);
+    for (const folder of receipt.folders) {
+      const requested = requestedFolders.get(folder?.folderId);
+      if (
+        !requested ||
+        receivedFolderIds.has(folder.folderId) ||
+        folder.expectedKeyVersion !== requested.keyVersion ||
+        folder.path !== requested.path ||
+        typeof folder.retryable !== "boolean"
+      ) {
+        return false;
+      }
+      receivedFolderIds.add(folder.folderId);
+      if (readyOutcomes.has(folder.outcome)) {
+        if (folder.retryable || (folder.reason !== null && folder.reason !== undefined)) {
+          return false;
+        }
+        readyCount += 1;
+      } else if (incompleteOutcomes.has(folder.outcome)) {
+        if (
+          !folder.retryable ||
+          typeof folder.reason !== "string" ||
+          !folder.reason.trim()
+        ) {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    }
     if (readyCount !== receipt.readyCount) return false;
-    return receipt.state === "complete"
-      ? receipt.readyCount === receipt.totalCount
-      : receipt.readyCount < receipt.totalCount;
+    if (receipt.state === "complete") {
+      return readyCount === receipt.totalCount && !receipt.retryable;
+    }
+    if (receipt.state === "partial") {
+      return readyCount < receipt.totalCount && receipt.retryable;
+    }
+    return receipt.retryable;
   }
 
   async function submitOrganizationAdminCollaboration(input) {
@@ -11098,7 +11148,7 @@ const FiniteBrainProductClient = (() => {
       !collaborationReceiptMatchesIntent(
         receipt,
         brainId,
-        request.targetNpub
+        request
       )
     ) {
       return indeterminateCollaborationReceipt(request.folders.length);
@@ -11106,8 +11156,16 @@ const FiniteBrainProductClient = (() => {
     return receipt;
   }
 
-  async function ensureOrganizationAdminCollaboration(targetNpub, targetEmail) {
-    const sessionEpoch = captureSessionOperationEpoch();
+  async function ensureOrganizationAdminCollaboration(
+    targetNpub,
+    targetEmail,
+    operationSessionEpoch = null
+  ) {
+    const sessionEpoch =
+      operationSessionEpoch === null
+        ? captureSessionOperationEpoch()
+        : operationSessionEpoch;
+    requireCurrentSessionEpoch(sessionEpoch);
     const brainId = state.activeBrainId;
     beginAccessOperation(sessionEpoch);
     try {
@@ -11185,13 +11243,20 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function addBrainAdminFromPanel() {
-    const targetEmail = canonicalInviteEmail($("brainAdminEmailInput").value);
-    const targetNpub = await normalizedEmailNpubValue(
-      targetEmail,
-      "Enter a valid admin email first"
-    );
+    const sessionEpoch = captureSessionOperationEpoch();
     try {
-      const receipt = await ensureOrganizationAdminCollaboration(targetNpub, targetEmail);
+      const targetEmail = canonicalInviteEmail($("brainAdminEmailInput").value);
+      const targetNpub = await normalizedEmailNpubValue(
+        targetEmail,
+        "Enter a valid admin email first"
+      );
+      requireCurrentSessionEpoch(sessionEpoch);
+      const receipt = await ensureOrganizationAdminCollaboration(
+        targetNpub,
+        targetEmail,
+        sessionEpoch
+      );
+      requireCurrentSessionEpoch(sessionEpoch);
       $("brainAdminEmailInput").value = "";
       log("Updated Organization Brain collaborator.", {
         target: targetEmail,
@@ -11199,7 +11264,6 @@ const FiniteBrainProductClient = (() => {
       });
       return receipt;
     } catch (error) {
-      const sessionEpoch = state.sessionEpoch;
       failAccessOperation(
         sessionEpoch,
         "Admin access could not be updated",

@@ -4,9 +4,10 @@
 
 - Issue: https://github.com/finitecomputer/finite-mono/issues/218
 - Fixed point before session: `cc9dfa4`
-- Worker session: `/root/ticket_218_worker`
+- Worker sessions: `/root/ticket_218_worker`,
+  `/root/ticket_218_fixes_round2`
 - Commit: pending
-- Status: implementation complete; final independent review pending
+- Status: final review findings resolved; repeat independent review pending
 
 ## Inputs
 
@@ -34,6 +35,12 @@
     desired-state intent.
   - Complete, partial, and indeterminate results use distinct, accessible,
     secret-free presentation.
+  - A successful collaboration receipt is accepted as authoritative only when
+    it binds exactly once to every submitted Folder ID, key version, and path
+    and has coherent outcomes, retryability, counts, and top-level state.
+  - The Add Admin interaction retains its original session epoch from email
+    resolution through submission and failure presentation, so stale work
+    cannot render into a replacement Brain.
 - `tdd` used: yes; Product Client role/readiness and receipt assertions failed
   before implementation, then passed. The server projection test was extended
   through missing-grant, repaired, rotated-version, and non-admin cases.
@@ -42,6 +49,7 @@
   - `scripts/with-dev-env cargo check -p finite-brain-server --locked`
   - `scripts/with-dev-env cargo test -p finite-brain-server --locked signed_organization_collaboration_is_complete_idempotent_and_partial_safe -- --nocapture --test-threads=1`
   - `scripts/with-dev-env cargo fmt --all --check`
+  - `scripts/with-dev-env cargo clippy -p finite-brain-server --locked -- -D warnings`
 - Full suite command:
   `scripts/with-dev-env cargo test -p finite-brain-server --locked`
 
@@ -57,7 +65,10 @@
   with one capacity-bounded summary per collaborator; derived member totals
   from policy entitlement; allowed human-safe repair with the internally
   canonical identity; added rendered unresolved-admin and Personal regression
-  coverage.
+  coverage; bound every 2xx receipt to the exact submitted Folder snapshot;
+  retained the initiating session epoch across the whole Add Admin interaction;
+  and replaced source-shape assertions with behavior coverage through the
+  actual signed handler and rendered Repair action.
 - Findings ignored with reasons: none
 
 ## Risks

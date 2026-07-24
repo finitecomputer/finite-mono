@@ -408,6 +408,46 @@ function brainPeopleTestSeams() {
   return { context: testContext, elements: testElements, seams };
 }
 
+function organizationCollaborationPanelTestSeams() {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      createElement() {
+        return interactiveElement(this);
+      },
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, interactiveElement(this));
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_COLLABORATION_PANEL_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_COLLABORATION_PANEL_TEST_SEAMS__?.({ state, addBrainAdminFromPanel, renderBrainPeopleList });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(
+    seamSource,
+    source,
+    "The collaboration test must capture the Product Client's real panel seams"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-organization-collaboration-panel.test.js",
+  });
+  assert.ok(seams, "The Product Client must expose the captured collaboration panel seams");
+  return { context: testContext, elements: testElements, seams };
+}
+
 function clipboardInvitationFeedbackTestSeams(navigatorValue, options = {}) {
   const testElements = new Map();
   const testContext = {
@@ -857,32 +897,6 @@ const revokeBrainInvitationFromPanelSource = source.slice(
 const revokeBrainInvitationByIdSource = source.slice(
   source.indexOf("async function revokeBrainInvitationById(invitationId)"),
   source.indexOf("async function revokeShareLinkById(shareLinkId)")
-);
-const addBrainAdminFromPanelSource = source.slice(
-  source.indexOf("async function addBrainAdminFromPanel()"),
-  source.indexOf("async function removeBrainMemberFromPanel(")
-);
-const renderBrainPeopleListSource = source.slice(
-  source.indexOf("function renderBrainPeopleList(metadata)"),
-  source.indexOf("function renderBrainPeopleControls(metadata)")
-);
-assert.match(
-  addBrainAdminFromPanelSource,
-  /ensureOrganizationAdminCollaboration\(targetNpub, targetEmail\)/,
-  "Adding an administrator must use the desired-state collaboration operation",
-);
-assert.doesNotMatch(
-  addBrainAdminFromPanelSource,
-  /\/admins/,
-  "The normal Product Client admin flow must not use the role-only endpoint",
-);
-assert.match(renderBrainPeopleListSource, /Brain role: \$\{person\.brainRoleLabel\}/);
-assert.match(renderBrainPeopleListSource, /Folder access: \$\{person\.folderReadinessLabel\}/);
-assert.match(renderBrainPeopleListSource, /Repair Folder access/);
-assert.match(
-  renderBrainPeopleListSource,
-  /ensureOrganizationAdminCollaboration\(person\.id, person\.name\)/,
-  "Repair must repeat the same desired-state operation",
 );
 const protectedRequestSource = source.slice(
   source.indexOf("async function protectedRequest(path, options = {})"),
@@ -3880,8 +3894,22 @@ assert.equal(
       brainRole: "admin",
       targetNpub: peerNpub,
       folders: [
-        { path: "General", outcome: "granted", retryable: false },
-        { path: "Private", outcome: "missingSourceKey", retryable: true },
+        {
+          folderId: "general",
+          path: "General",
+          expectedKeyVersion: 1,
+          outcome: "granted",
+          reason: null,
+          retryable: false,
+        },
+        {
+          folderId: "private",
+          path: "Private",
+          expectedKeyVersion: 3,
+          outcome: "missingSourceKey",
+          reason: "sourceKeyUnavailable",
+          retryable: true,
+        },
       ],
       readyCount: 1,
       totalCount: 2,
@@ -3893,8 +3921,22 @@ assert.equal(
       brainRole: "admin",
       targetNpub: peerNpub,
       folders: [
-        { path: "General", outcome: "alreadyReady", retryable: false },
-        { path: "Private", outcome: "granted", retryable: false },
+        {
+          folderId: "general",
+          path: "General",
+          expectedKeyVersion: 1,
+          outcome: "alreadyReady",
+          reason: null,
+          retryable: false,
+        },
+        {
+          folderId: "private",
+          path: "Private",
+          expectedKeyVersion: 3,
+          outcome: "granted",
+          reason: null,
+          retryable: false,
+        },
       ],
       readyCount: 2,
       totalCount: 2,
@@ -3953,6 +3995,153 @@ assert.equal(
   });
   assert.equal(malformedCollaboration.state, "indeterminate");
   assert.equal(malformedCollaboration.totalCount, 2);
+  const validPartialReceipt = collaborationResponses[0] || {
+    brainId: "smoke",
+    state: "partial",
+    brainRole: "admin",
+    targetNpub: peerNpub,
+    folders: [
+      {
+        folderId: "general",
+        path: "General",
+        expectedKeyVersion: 1,
+        outcome: "alreadyReady",
+        reason: null,
+        retryable: false,
+      },
+      {
+        folderId: "private",
+        path: "Private",
+        expectedKeyVersion: 3,
+        outcome: "missingSourceKey",
+        reason: "sourceKeyUnavailable",
+        retryable: true,
+      },
+    ],
+    readyCount: 1,
+    totalCount: 2,
+    retryable: true,
+  };
+  const mismatchedReceiptCases = [
+    [
+      "wrong Folder identity",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 0 ? { ...folder, folderId: "wrong-folder" } : folder
+        ),
+      },
+    ],
+    [
+      "wrong Folder key version",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 0 ? { ...folder, expectedKeyVersion: 99 } : folder
+        ),
+      },
+    ],
+    [
+      "duplicate Folder identity",
+      {
+        ...validPartialReceipt,
+        folders: [
+          validPartialReceipt.folders[0],
+          { ...validPartialReceipt.folders[0] },
+        ],
+      },
+    ],
+    [
+      "missing Folder",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.slice(0, 1),
+        totalCount: 1,
+      },
+    ],
+    [
+      "extra Folder",
+      {
+        ...validPartialReceipt,
+        folders: [
+          ...validPartialReceipt.folders,
+          {
+            folderId: "extra",
+            path: "Extra",
+            expectedKeyVersion: 1,
+            outcome: "failed",
+            reason: "unexpected",
+            retryable: true,
+          },
+        ],
+        totalCount: 3,
+      },
+    ],
+    [
+      "invalid outcome",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 1 ? { ...folder, outcome: "looksReady" } : folder
+        ),
+      },
+    ],
+    [
+      "ready outcome marked retryable",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 0 ? { ...folder, retryable: true } : folder
+        ),
+      },
+    ],
+    [
+      "incomplete outcome marked non-retryable",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 1 ? { ...folder, retryable: false } : folder
+        ),
+      },
+    ],
+    [
+      "complete state with incomplete Folder",
+      {
+        ...validPartialReceipt,
+        state: "complete",
+        retryable: false,
+      },
+    ],
+    [
+      "partial state marked non-retryable",
+      {
+        ...validPartialReceipt,
+        retryable: false,
+      },
+    ],
+    [
+      "Folder path mismatch",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 0 ? { ...folder, path: "Misleading path" } : folder
+        ),
+      },
+    ],
+  ];
+  for (const [label, response] of mismatchedReceiptCases) {
+    const result = await client.submitOrganizationAdminCollaboration({
+      brainId: "smoke",
+      request: collaborationRequest,
+      send: async () => response,
+    });
+    assert.equal(
+      result.state,
+      "indeterminate",
+      `A 2xx receipt with ${label} must never be presented as authoritative`,
+    );
+    assert.equal(result.totalCount, collaborationRequest.folders.length);
+  }
   const transportCollaboration = await client.submitOrganizationAdminCollaboration({
     brainId: "smoke",
     request: collaborationRequest,
@@ -3976,6 +4165,354 @@ assert.equal(
     /forbidden raw provider detail/,
     "Authoritative HTTP rejection remains a rejection for the caller to present safely",
   );
+
+  const collaborationPanel = organizationCollaborationPanelTestSeams();
+  const collaborationPanelClient =
+    collaborationPanel.context.window.FiniteBrainProductClient;
+  const collaborationActorHex = "00".repeat(32);
+  const collaborationActorNpub =
+    collaborationPanelClient.npubFromHex(collaborationActorHex);
+  collaborationPanel.context.window.nostr = {
+    getPublicKey: async () => collaborationActorHex,
+    signEvent: async (template) => ({
+      ...template,
+      id: `panel-signed-${template.kind}-${template.created_at}`,
+      pubkey: collaborationActorHex,
+      sig: "panel-signature",
+    }),
+  };
+  collaborationPanelClient.configureBrainIdentityProvider(
+    collaborationPanelClient.createNip07BrainIdentityProvider(
+      collaborationPanel.context.window.nostr
+    )
+  );
+  const collaborationPanelState = collaborationPanel.seams.state;
+  collaborationPanelState.activeBrainId = "acme";
+  collaborationPanelState.config = {
+    authScheme: "Nostr",
+    publicBaseUrl: "http://finite.test",
+  };
+  collaborationPanelState.keyring = collaborationPanelClient.createSessionKeyring();
+  collaborationPanelState.metadata = {
+    brainId: "acme",
+    kind: "organization",
+    name: "Acme",
+    admins: [collaborationActorNpub],
+    members: [collaborationActorNpub],
+    folders: [
+      {
+        id: "private",
+        path: "Private",
+        access: "restricted",
+        currentKeyVersion: 4,
+      },
+    ],
+  };
+  collaborationPanelState.pubkeyHex = collaborationActorHex;
+  collaborationPanelState.sessionEpoch = 20;
+  collaborationPanelState.sessionStatus = "unlocked";
+  collaborationPanelState.signerStatus = "connected";
+  collaborationPanel.context.document.getElementById("brainAdminEmailInput").value =
+    "  BETA@FINITE.VIP  ";
+  const collaborationPanelPosts = [];
+  let collaborationPanelRound = 0;
+  const collaborationPanelMetadata = (readyCount) => ({
+    ...collaborationPanelState.metadata,
+    admins: [collaborationActorNpub, peerNpub],
+    members: [collaborationActorNpub, peerNpub],
+    collaboratorReadiness: [
+      {
+        targetNpub: collaborationActorNpub,
+        readyCount: 1,
+        totalCount: 1,
+        unreadyFolders: [],
+      },
+      {
+        targetNpub: peerNpub,
+        readyCount,
+        totalCount: 1,
+        unreadyFolders:
+          readyCount === 1
+            ? []
+            : [
+                {
+                  folderId: "private",
+                  path: "Private",
+                  expectedKeyVersion: 4,
+                  reason: "sourceKeyUnavailable",
+                },
+              ],
+      },
+    ],
+  });
+  const collaborationPanelReceipt = (stateValue) => ({
+    brainId: "acme",
+    targetNpub: peerNpub,
+    state: stateValue,
+    brainRole: "admin",
+    folders: [
+      {
+        folderId: "private",
+        path: "Private",
+        expectedKeyVersion: 4,
+        outcome: stateValue === "complete" ? "alreadyReady" : "missingSourceKey",
+        reason: stateValue === "complete" ? null : "sourceKeyUnavailable",
+        retryable: stateValue !== "complete",
+      },
+    ],
+    readyCount: stateValue === "complete" ? 1 : 0,
+    totalCount: 1,
+    retryable: stateValue !== "complete",
+  });
+  collaborationPanel.context.fetch = async (requestPath, options = {}) => {
+    if (requestPath === "/_admin/identities/resolve") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            npub: peerNpub,
+            preferredNip05: "beta@finite.vip",
+          }),
+      };
+    }
+    if (
+      requestPath ===
+      "/_admin/brains/acme/collaborators/ensure-admin"
+    ) {
+      collaborationPanelPosts.push({
+        path: requestPath,
+        body: JSON.parse(options.body),
+        authorization: options.headers?.Authorization,
+      });
+      collaborationPanelRound += 1;
+      const response =
+        collaborationPanelRound === 1
+          ? collaborationPanelReceipt("partial")
+          : collaborationPanelRound === 2
+            ? collaborationPanelReceipt("complete")
+            : {
+                ...collaborationPanelReceipt("complete"),
+                folders: [
+                  {
+                    ...collaborationPanelReceipt("complete").folders[0],
+                    folderId: "wrong-folder",
+                  },
+                ],
+              };
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(response),
+      };
+    }
+    if (requestPath === "/_admin/brains/acme/metadata") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify(
+            collaborationPanelMetadata(collaborationPanelRound >= 2 ? 1 : 0)
+          ),
+      };
+    }
+    throw new Error(`Unexpected collaboration panel request: ${requestPath}`);
+  };
+
+  const addedCollaboration =
+    await collaborationPanel.seams.addBrainAdminFromPanel();
+  assert.equal(addedCollaboration.state, "partial");
+  assert.equal(collaborationPanelPosts.length, 1);
+  assert.equal(
+    collaborationPanelPosts[0].path,
+    "/_admin/brains/acme/collaborators/ensure-admin",
+    "The actual Add Admin handler posts to the desired-state endpoint",
+  );
+  assert.equal(collaborationPanelPosts[0].body.targetNpub, peerNpub);
+  assert.match(
+    collaborationPanelPosts[0].authorization,
+    /^Nostr /,
+    "The Add Admin handler submits the request through the signed HTTP boundary",
+  );
+  assert.equal(
+    JSON.stringify(collaborationPanelPosts[0].body.folders),
+    JSON.stringify([{ folderId: "private", keyVersion: 4, path: "Private" }]),
+  );
+  assert.equal(
+    collaborationPanelPosts[0].body.accessChangeEvent.tags[2][1],
+    "add-admin",
+  );
+  assert.equal(collaborationPanelState.accessResult.title, "Admin access needs repair");
+  assert.match(collaborationPanelState.accessResult.detail, /Folder access: 0\/1/);
+  assert.match(collaborationPanelState.accessResult.detail, /Private/);
+  assert.equal(
+    collaborationPanel.elements.get("accessResultPanel").children[0].textContent,
+    "Admin access needs repair",
+    "Partial collaboration output is rendered in the accessible result panel",
+  );
+
+  collaborationPanel.seams.renderBrainPeopleList(
+    collaborationPanelMetadata(0)
+  );
+  const renderedRepairButton = collaborationPanel.elements
+    .get("brainPeopleList")
+    .children.flatMap((item) => item.children)
+    .find((child) =>
+      String(child.className).includes("access-repair-person")
+    );
+  assert.ok(
+    renderedRepairButton,
+    "The incomplete collaborator renders a repair action",
+  );
+  renderedRepairButton.click();
+  for (let attempt = 0; attempt < 20 && collaborationPanelPosts.length < 2; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(
+    collaborationPanelPosts.length,
+    2,
+    "Clicking the rendered Repair action submits the desired state again",
+  );
+  assert.equal(
+    collaborationPanelPosts[1].path,
+    collaborationPanelPosts[0].path,
+  );
+  assert.equal(
+    JSON.stringify(collaborationPanelPosts[1].body.folders),
+    JSON.stringify(collaborationPanelPosts[0].body.folders),
+  );
+  assert.equal(
+    collaborationPanelPosts[1].body.accessChangeEvent.tags[2][1],
+    "add-admin",
+  );
+  for (
+    let attempt = 0;
+    attempt < 20 &&
+    collaborationPanelState.accessResult?.title !== "Admin access ready";
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(collaborationPanelState.accessResult.title, "Admin access ready");
+  assert.match(collaborationPanelState.accessResult.detail, /Folder access: 1\/1/);
+  assert.equal(
+    collaborationPanel.elements.get("accessResultPanel").children[0].textContent,
+    "Admin access ready",
+    "Complete collaboration output is rendered in the accessible result panel",
+  );
+
+  collaborationPanel.context.document.getElementById("brainAdminEmailInput").value =
+    "beta@finite.vip";
+  const uncertainCollaboration =
+    await collaborationPanel.seams.addBrainAdminFromPanel();
+  assert.equal(uncertainCollaboration.state, "indeterminate");
+  assert.equal(
+    collaborationPanelState.accessResult.title,
+    "Admin access needs checking",
+  );
+  assert.match(
+    collaborationPanelState.accessResult.detail,
+    /could not be confirmed/,
+  );
+  assert.equal(
+    collaborationPanel.elements.get("accessResultPanel").children[0].textContent,
+    "Admin access needs checking",
+    "Indeterminate collaboration output is rendered in the accessible result panel",
+  );
+
+  const staleCollaborationPanel = organizationCollaborationPanelTestSeams();
+  const staleCollaborationClient =
+    staleCollaborationPanel.context.window.FiniteBrainProductClient;
+  staleCollaborationPanel.context.window.nostr = collaborationPanel.context.window.nostr;
+  staleCollaborationClient.configureBrainIdentityProvider(
+    staleCollaborationClient.createNip07BrainIdentityProvider(
+      staleCollaborationPanel.context.window.nostr
+    )
+  );
+  const staleCollaborationState = staleCollaborationPanel.seams.state;
+  staleCollaborationState.activeBrainId = "old-brain";
+  staleCollaborationState.config = {
+    authScheme: "Nostr",
+    publicBaseUrl: "http://finite.test",
+  };
+  staleCollaborationState.keyring = staleCollaborationClient.createSessionKeyring();
+  staleCollaborationState.metadata = {
+    brainId: "old-brain",
+    kind: "organization",
+    admins: [collaborationActorNpub],
+    members: [collaborationActorNpub],
+    folders: [],
+  };
+  staleCollaborationState.pubkeyHex = collaborationActorHex;
+  staleCollaborationState.sessionEpoch = 70;
+  staleCollaborationState.sessionStatus = "unlocked";
+  staleCollaborationState.signerStatus = "connected";
+  staleCollaborationPanel.context.document.getElementById("brainAdminEmailInput").value =
+    "beta@finite.vip";
+  let releaseStaleSubmission;
+  let staleSubmissionStarted = false;
+  const staleSubmissionText = new Promise((resolve) => {
+    releaseStaleSubmission = resolve;
+  });
+  staleCollaborationPanel.context.fetch = async (requestPath) => {
+    if (requestPath === "/_admin/identities/resolve") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            npub: peerNpub,
+            preferredNip05: "beta@finite.vip",
+          }),
+      };
+    }
+    assert.equal(
+      requestPath,
+      "/_admin/brains/old-brain/collaborators/ensure-admin",
+    );
+    staleSubmissionStarted = true;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => staleSubmissionText,
+    };
+  };
+  const staleAdd = staleCollaborationPanel.seams.addBrainAdminFromPanel();
+  for (
+    let attempt = 0;
+    attempt < 20 && !staleSubmissionStarted;
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(staleSubmissionStarted, true);
+  staleCollaborationState.activeBrainId = "replacement-brain";
+  staleCollaborationState.sessionEpoch = 71;
+  staleCollaborationState.accessResult = {
+    tone: "ready",
+    title: "Replacement Brain state",
+    detail: "Must remain untouched",
+  };
+  releaseStaleSubmission(
+    JSON.stringify({
+      brainId: "old-brain",
+      targetNpub: peerNpub,
+      state: "complete",
+      brainRole: "admin",
+      folders: [],
+      readyCount: 0,
+      totalCount: 0,
+      retryable: false,
+    })
+  );
+  await assert.rejects(staleAdd, /Session changed/);
+  assert.equal(staleCollaborationState.activeBrainId, "replacement-brain");
+  assert.equal(
+    staleCollaborationState.accessResult.title,
+    "Replacement Brain state",
+    "An old Add Admin failure must not render into the replacement Brain",
+  );
+
   const accessEvent = await client.buildAdminAccessChangeEvent({
     ...accessPayload,
     createdAtUnix: Date.parse(accessPayload.createdAt) / 1000,
