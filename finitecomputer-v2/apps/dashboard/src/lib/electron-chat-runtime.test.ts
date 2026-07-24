@@ -5,6 +5,7 @@ import {
   ElectronChatStateError,
   electronAttachmentUpload,
   electronChatRuntime,
+  electronRuntimeSupportsChatArchive,
   reconcileElectronChatState,
   mergeElectronChatState,
   type ElectronLocalDevice,
@@ -19,7 +20,7 @@ const DEVICE: ElectronLocalDevice = {
   device_id: "electron-device",
 };
 
-test("dashboard accepts both released and recovery-capable Electron bridges", (context) => {
+test("dashboard accepts released Electron bridges and gates archive on v3", (context) => {
   const previousWindow = globalThis.window;
   context.after(() => {
     Object.defineProperty(globalThis, "window", {
@@ -53,6 +54,7 @@ test("dashboard accepts both released and recovery-capable Electron bridges", (c
     capabilities: ["local-chat-v1", "automatic-device-link-v1"],
   });
   assert.equal(electronChatRuntime()?.version, 1);
+  assert.equal(electronRuntimeSupportsChatArchive(electronChatRuntime()), false);
 
   setBridge({
     ...common,
@@ -65,6 +67,21 @@ test("dashboard accepts both released and recovery-capable Electron bridges", (c
     recoverLocalDevice: async () => DEVICE,
   });
   assert.equal(electronChatRuntime()?.version, 2);
+  assert.equal(electronRuntimeSupportsChatArchive(electronChatRuntime()), false);
+
+  setBridge({
+    ...common,
+    version: 3,
+    capabilities: [
+      "local-chat-v1",
+      "automatic-device-link-v1",
+      "revoked-device-recovery-v1",
+      "durable-chat-archive-v1",
+    ],
+    recoverLocalDevice: async () => DEVICE,
+  });
+  assert.equal(electronChatRuntime()?.version, 3);
+  assert.equal(electronRuntimeSupportsChatArchive(electronChatRuntime()), true);
 
   setBridge({
     ...common,
@@ -72,6 +89,10 @@ test("dashboard accepts both released and recovery-capable Electron bridges", (c
     capabilities: ["local-chat-v1", "automatic-device-link-v1"],
   });
   assert.equal(electronChatRuntime(), null);
+});
+
+test("hosted web supports durable chat archive without an Electron bridge", () => {
+  assert.equal(electronRuntimeSupportsChatArchive(null), true);
 });
 
 test("local state accepts only the authoritative account and canonical room", () => {

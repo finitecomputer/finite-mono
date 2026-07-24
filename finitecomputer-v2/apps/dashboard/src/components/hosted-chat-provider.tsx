@@ -375,7 +375,7 @@ export function HostedChatProvider({
   }, [apiBase, requestElectronMutationSnapshot, requestMutationSnapshot, runtime]);
 
   const recoverLocalDevice = useCallback(async (): Promise<HostedChatRetryAttempt> => {
-    if (!runtime || runtime.version !== 2) {
+    if (!runtime || !("recoverLocalDevice" in runtime)) {
       setTransportError(CHAT_UNAVAILABLE_MESSAGE);
       return "stop";
     }

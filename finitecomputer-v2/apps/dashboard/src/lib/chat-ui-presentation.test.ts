@@ -291,6 +291,7 @@ function appState(): AppState {
             started_seq: 0,
             updated_seq: 1,
             active: true,
+            archived: false,
           },
         ],
       },

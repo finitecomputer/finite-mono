@@ -185,6 +185,25 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
 
   assert.deepEqual(
     parseHostedChatAction({
+      SetChatArchived: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        chat_id: "chat-1",
+        archived: true,
+      },
+    }),
+    {
+      SetChatArchived: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        chat_id: "chat-1",
+        archived: true,
+      },
+    }
+  );
+
+  assert.deepEqual(
+    parseHostedChatAction({
       SetTyping: { room_id: "room-1", is_typing: true },
     }),
     { SetTyping: { room_id: "room-1", is_typing: true } }
@@ -233,6 +252,21 @@ test("parseHostedChatAction keeps pairing and unsupported operations off the bro
   assert.throws(
     () => parseHostedChatAction({ DeleteEverything: null }),
     /Unsupported chat action/
+  );
+});
+
+test("parseHostedChatAction requires explicit archive state", () => {
+  assert.throws(
+    () =>
+      parseHostedChatAction({
+        SetChatArchived: {
+          room_id: "room-1",
+          topic_id: "topic-1",
+          chat_id: "chat-1",
+          archived: "yes",
+        },
+      }),
+    /archived must be a boolean/
   );
 });
 

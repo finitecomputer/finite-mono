@@ -445,6 +445,20 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         },
       };
     }
+    case "SetChatArchived": {
+      const value = objectRecord(input, operation);
+      if (typeof value.archived !== "boolean") {
+        throw new HostedWebChatError("archived must be a boolean.", 400);
+      }
+      return {
+        SetChatArchived: {
+          room_id: boundedString(value.room_id, "room_id"),
+          topic_id: boundedString(value.topic_id, "topic_id"),
+          chat_id: boundedString(value.chat_id, "chat_id"),
+          archived: value.archived,
+        },
+      };
+    }
     case "SendMessage": {
       const value = objectRecord(input, operation);
       return {

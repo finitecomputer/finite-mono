@@ -35,5 +35,6 @@ axum.workspace = true
 finite-identity.workspace = true
 finitechat-server = { path = "../finitechat-server" }
 hex.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

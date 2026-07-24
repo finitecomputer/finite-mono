@@ -109,7 +109,7 @@ const MAX_APP_ROOM_STATUS_BYTES: u32 = 512;
 const MAX_APP_ROOM_METADATA_PLAINTEXT_BYTES: u32 = 8192;
 const MAX_APP_ROOM_METADATA_CIPHERTEXT_BYTES: u32 =
     MAX_APP_ROOM_METADATA_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
-const MAX_APP_STATE_METADATA_PLAINTEXT_BYTES: u32 = 32 * 1024;
+const MAX_APP_STATE_METADATA_PLAINTEXT_BYTES: u32 = 8 * 1024 * 1024;
 const MAX_APP_STATE_METADATA_CIPHERTEXT_BYTES: u32 =
     MAX_APP_STATE_METADATA_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
 const MAX_APP_PROFILE_NAME_BYTES: u32 = 128;
@@ -122,6 +122,7 @@ const MAX_STORED_APP_MESSAGES: u32 = 5_000;
 const MAX_STORED_APP_OUTBOX_MESSAGES: u32 = 512;
 const MAX_STORED_APP_PROFILES: u32 = 4_096;
 const MAX_STORED_APP_REVOKED_DEVICES: u32 = 64;
+const MAX_STORED_APP_CHAT_ARCHIVES: u32 = 5_000;
 const U16_BYTES: usize = 2;
 const U32_BYTES: usize = 4;
 const U64_BYTES: usize = 8;
@@ -519,6 +520,35 @@ pub struct StoredAppState {
     pub selected_topic_id: Option<String>,
     pub selected_chat_id: Option<String>,
     pub revoked_devices: BTreeSet<DeviceRef>,
+    pub chat_archives: Vec<StoredChatArchiveState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredChatArchiveState {
+    pub room_id: RoomId,
+    pub topic_id: String,
+    pub chat_id: String,
+    pub accepted_seq: u64,
+    pub archived: bool,
+}
+
+impl StoredChatArchiveState {
+    fn validate_limits(&self) -> Result<(), ClientError> {
+        validate_room_id(&self.room_id)?;
+        validate_bytes_non_empty("app_state.chat_archive.topic_id", self.topic_id.len())?;
+        validate_string_bytes(
+            "app_state.chat_archive.topic_id",
+            &self.topic_id,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        validate_bytes_non_empty("app_state.chat_archive.chat_id", self.chat_id.len())?;
+        validate_string_bytes(
+            "app_state.chat_archive.chat_id",
+            &self.chat_id,
+            MAX_OBJECT_ID_BYTES,
+        )?;
+        Ok(())
+    }
 }
 
 impl StoredAppState {
@@ -542,6 +572,14 @@ impl StoredAppState {
         for device in &self.revoked_devices {
             device.validate_limits()?;
         }
+        validate_item_count(
+            "app_state.chat_archives",
+            self.chat_archives.len(),
+            MAX_STORED_APP_CHAT_ARCHIVES,
+        )?;
+        for archive in &self.chat_archives {
+            archive.validate_limits()?;
+        }
         Ok(())
     }
 }
@@ -555,6 +593,8 @@ struct StoredAppStateMetadataV1 {
     #[serde(default)]
     selected_chat_id: Option<String>,
     revoked_devices: BTreeSet<DeviceRef>,
+    #[serde(default)]
+    chat_archives: Vec<StoredChatArchiveState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3426,6 +3466,7 @@ impl SqliteClientStore {
             selected_topic_id: metadata.selected_topic_id,
             selected_chat_id: metadata.selected_chat_id,
             revoked_devices: metadata.revoked_devices,
+            chat_archives: metadata.chat_archives,
         };
         state.validate_limits()?;
         Ok(state)
@@ -7159,6 +7200,7 @@ fn encrypt_app_state_metadata(
         selected_topic_id: state.selected_topic_id.clone(),
         selected_chat_id: state.selected_chat_id.clone(),
         revoked_devices: state.revoked_devices.clone(),
+        chat_archives: state.chat_archives.clone(),
     };
     let plaintext =
         serde_json::to_vec(&metadata).map_err(|_| ClientStoreError::EncodeAppStateMetadata)?;
@@ -7536,6 +7578,15 @@ fn decrypt_app_state_metadata(
     .map_err(ClientError::from)?;
     for device in &metadata.revoked_devices {
         device.validate_limits().map_err(ClientError::from)?;
+    }
+    validate_item_count(
+        "app_state.chat_archives",
+        metadata.chat_archives.len(),
+        MAX_STORED_APP_CHAT_ARCHIVES,
+    )
+    .map_err(ClientError::from)?;
+    for archive in &metadata.chat_archives {
+        archive.validate_limits().map_err(ClientError::from)?;
     }
     Ok(metadata)
 }
@@ -9954,6 +10005,13 @@ mod tests {
             }]
             .into_iter()
             .collect(),
+            chat_archives: vec![StoredChatArchiveState {
+                room_id: "room-main".to_owned(),
+                topic_id: "home".to_owned(),
+                chat_id: "segment-archived".to_owned(),
+                accepted_seq: 42,
+                archived: true,
+            }],
         };
         store.save_app_state(&owner, &selected).unwrap();
         assert_eq!(store.load_app_state(&owner).unwrap(), selected);
@@ -9967,6 +10025,7 @@ mod tests {
             selected_topic_id: None,
             selected_chat_id: None,
             revoked_devices: BTreeSet::new(),
+            chat_archives: Vec::new(),
         };
         reopened.save_app_state(&owner, &cleared).unwrap();
         assert_eq!(reopened.load_app_state(&owner).unwrap(), cleared);
@@ -10002,6 +10061,7 @@ mod tests {
                 }]
                 .into_iter()
                 .collect(),
+                chat_archives: Vec::new(),
             })
             .unwrap();
             let metadata_object = metadata.as_object_mut().unwrap();

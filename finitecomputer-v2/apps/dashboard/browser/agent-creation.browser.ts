@@ -99,6 +99,7 @@ type FakeHostedChatState = {
       chat_id: string;
       title: string;
       active: boolean;
+      archived: boolean;
     }>;
   }>;
   selected_topic_id: string | null;
@@ -896,13 +897,48 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await chatSidebar
         .getByRole("button", { name: "Sidebar QA", exact: true })
         .waitFor({ state: "visible" });
-      assert.equal(
-        await chatSidebar
-          .getByRole("button", { name: /^(?:Archive|Unarchive) /u })
-          .count(),
-        0,
-        "the sidebar must not present browser-local archive as durable chat state"
+      await chatSidebar
+        .getByRole("button", { name: "Archive Sidebar QA", exact: true })
+        .click();
+      await waitFor(() =>
+        hostedDevice.state.actions.some((action) => {
+          const payload = action.SetChatArchived as
+            | { archived?: unknown }
+            | undefined;
+          return actionName(action) === "SetChatArchived" && payload?.archived === true;
+        })
       );
+      await chatSidebar
+        .getByRole("button", { name: "Restore Sidebar QA", exact: true })
+        .waitFor({ state: "visible" });
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Sidebar QA", { exact: true })
+        .waitFor({ state: "visible" });
+
+      await page.reload();
+      const restoredChatRow = chatSidebar
+        .locator(".finite-chat__thread-row")
+        .filter({ hasText: "Sidebar QA" });
+      await restoredChatRow.hover();
+      const restoreChatButton = restoredChatRow.getByRole("button", {
+        name: "Restore Sidebar QA",
+        exact: true,
+      });
+      await restoreChatButton.waitFor({ state: "visible" });
+      const archiveActionCount = hostedDevice.state.actions.filter(
+        (action) => actionName(action) === "SetChatArchived"
+      ).length;
+      await restoreChatButton.click();
+      await waitFor(
+        () =>
+          hostedDevice.state.actions.filter(
+            (action) => actionName(action) === "SetChatArchived"
+          ).length === archiveActionCount + 1
+      );
+      await chatSidebar
+        .getByRole("button", { name: "Archive Sidebar QA", exact: true })
+        .waitFor({ state: "visible" });
 
       await page.getByRole("button", { name: "Rename chat" }).click();
       const renameDialog = page.getByRole("dialog", { name: "Rename chat" });
@@ -1202,6 +1238,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           chat_id: "chat_browser_legacy",
           title: "Old chat",
           active: true,
+          archived: false,
         }],
       });
       hostedDevice.state.app.messages.push({
@@ -2216,11 +2253,13 @@ function applyHostedAction(
               chat_id: "chat_browser_agent",
               title: "General",
               active: true,
+              archived: false,
             },
             {
               chat_id: "chat_browser_remembered",
               title: "Remembered work",
               active: false,
+              archived: false,
             },
           ],
         },
@@ -2297,7 +2336,7 @@ function applyHostedAction(
       topic_id: topicId,
       title,
       active_chat_id: chatId,
-      chats: [{ chat_id: chatId, title: "New chat", active: true }],
+      chats: [{ chat_id: chatId, title: "New chat", active: true, archived: false }],
     });
     state.selected_room_id = roomId;
     state.selected_topic_id = topicId;
@@ -2314,7 +2353,7 @@ function applyHostedAction(
     const chatId = `chat_browser_new_${topic.chats.filter((chat) =>
       chat.chat_id.startsWith("chat_browser_new_")
     ).length + 1}`;
-    topic.chats.push({ chat_id: chatId, title: "New chat", active: true });
+    topic.chats.push({ chat_id: chatId, title: "New chat", active: true, archived: false });
     topic.active_chat_id = chatId;
     state.selected_room_id = roomId;
     state.selected_topic_id = topicId;
@@ -2332,6 +2371,17 @@ function applyHostedAction(
     const title = String(payload.title ?? "");
     assert(title);
     state.topics[0]!.chats[0]!.title = title;
+  } else if (operation === "SetChatArchived") {
+    const payload = action.SetChatArchived as Record<string, unknown> | undefined;
+    assert(payload && typeof payload.archived === "boolean");
+    const topic = state.topics.find(
+      (candidate) =>
+        candidate.room_id === payload.room_id
+        && candidate.topic_id === payload.topic_id
+    );
+    const chat = topic?.chats.find((candidate) => candidate.chat_id === payload.chat_id);
+    assert(chat);
+    chat.archived = payload.archived;
   } else if (operation === "RevokeDevice") {
     const payload = action.RevokeDevice as Record<string, unknown> | undefined;
     const device = state.devices.find(

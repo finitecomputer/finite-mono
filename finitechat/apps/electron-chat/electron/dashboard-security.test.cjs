@@ -177,6 +177,7 @@ test("desktop chat bridge exposes an exact action allowlist", () => {
     "OpenRoom",
     "CreateTopic",
     "StartTopicChatIntent",
+    "SetChatArchived",
     "SendChatMessage",
     "RefreshDevices",
   ]) {
