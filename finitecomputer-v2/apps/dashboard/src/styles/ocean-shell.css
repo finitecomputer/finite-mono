@@ -4275,7 +4275,7 @@ button.finite-chat__site-switcher:hover {
   min-width: 0;
   flex: 0 0 auto;
   align-items: center;
-  background: linear-gradient(90deg, transparent, var(--bg-hover) 10px);
+  background: color-mix(in srgb, var(--bg-sidebar) 94.5%, var(--text-primary) 5.5%);
   padding-left: 10px;
   opacity: 0;
   pointer-events: none;
