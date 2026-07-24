@@ -129,6 +129,15 @@ in
     serviceConfig.EnvironmentFile = lib.mkAfter [ operatorEnvironmentFile ];
   };
 
+  # Sites resolves readable email grants through the shared public-resolution
+  # contract. It does not receive the operator credential and it still owns
+  # every Project grant, role, revocation, and Viewer Session.
+  systemd.services.finite-saas-sites = {
+    requires = [ "${serviceName}.service" ];
+    after = [ "${serviceName}.service" ];
+    environment.FINITE_IDENTITY_AUTHORITY = loopbackAuthority;
+  };
+
   assertions = [
     {
       assertion =
@@ -147,6 +156,21 @@ in
         builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner.serviceConfig.EnvironmentFile
         && builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-runner-phala.serviceConfig.EnvironmentFile;
       message = "both managed-agent workers must load the shared Identity Authority operator credential";
+    }
+    {
+      assertion =
+        config.systemd.services.finite-brain-app.environment.FINITE_IDENTITY_AUTHORITY
+        == loopbackAuthority
+        && config.systemd.services.finitechat-hosted-device.environment.FINITE_IDENTITY_AUTHORITY
+        == loopbackAuthority
+        && config.systemd.services.finite-saas-sites.environment.FINITE_IDENTITY_AUTHORITY
+        == loopbackAuthority;
+      message = "Brain, Hosted Device, and Sites must use the same loopback Identity Authority";
+    }
+    {
+      assertion =
+        !(builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-sites.serviceConfig.EnvironmentFile);
+      message = "Sites must not receive the Identity Authority operator credential";
     }
   ];
 }

@@ -1229,14 +1229,19 @@ wait "$postgres_pid"
         self.write_managed_command(yaml, process, &[format!("exec {command}")], &[]);
         self.write_environment(
             yaml,
-            &[(
-                "FINITE_SITES_VIEWER_SESSION_TOKEN",
-                self.sites_viewer_session_token.clone(),
-            )],
+            &[
+                (
+                    "FINITE_SITES_VIEWER_SESSION_TOKEN",
+                    self.sites_viewer_session_token.clone(),
+                ),
+                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
+            ],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
+        let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_http_probe(yaml, "/api/v1/healthz", self.ports.finitesites, 1, 2, 3, 45);
     }
 
@@ -3705,6 +3710,15 @@ mod tests {
         assert!(yaml.contains("--listen 0.0.0.0:18789"));
         assert!(yaml.contains("--api-url 'http://host.container.internal:18789'"));
         assert!(yaml.contains("--git-url 'http://host.container.internal:18789'"));
+        let sites = yaml
+            .split("  finitesites:\n")
+            .nth(1)
+            .and_then(|tail| tail.split("\n  finite-identity:\n").next())
+            .unwrap();
+        assert!(sites.contains("FINITE_IDENTITY_AUTHORITY=http://127.0.0.1:18788"));
+        assert!(sites.contains("finite-identity:\n        condition: process_healthy"));
+        assert!(!sites.contains("identity-authority.sh"));
+        assert!(!sites.contains("FINITE_IDENTITY_OPERATOR_TOKEN"));
         assert!(yaml.contains("dashboard-deps:"));
         assert!(yaml.contains("dashboard:"));
         assert!(yaml.contains("runtime-image:"));

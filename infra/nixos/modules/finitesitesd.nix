@@ -73,7 +73,8 @@
       # starting the service under the finite-sites account.
       # Variable NAMES only (values from lat2's /etc/finite-saas/sites.env):
       #   RESEND_API_KEY
-      #   FINITE_IDENTITY_AUTHORITY  (optional; not set live on lat2)
+      # FINITE_IDENTITY_AUTHORITY is non-secret and supplied declaratively by
+      # finite-identity.nix on the consolidated production host.
       # FINITE_SITES_VIEWER_SESSION_TOKEN in the second file must be exactly
       # 64 lowercase hex characters (`openssl rand -hex 32`).
       EnvironmentFile = [
