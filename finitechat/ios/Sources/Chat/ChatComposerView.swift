@@ -8,6 +8,7 @@ struct Composer: View {
     @Binding var text: String
     let replyTarget: ChatMessage?
     let canSubmit: Bool
+    var isSending = false
     @Binding var stagedAttachments: [StagedComposerAttachment]
     @Binding var isPhotoPickerPresented: Bool
     @Binding var selectedPhotoItems: [PhotosPickerItem]
@@ -19,7 +20,10 @@ struct Composer: View {
     var messageFieldAccessibilityIdentifier = ComposerAccessibility.messageField
     var sendAccessibilityLabel = "Send"
     var sendAccessibilityIdentifier = "SendButton"
+    var outerHorizontalPadding: CGFloat = 16
+    var surfaceRadius: CGFloat = 28
     var onStartVoiceRecording: (() -> Void)?
+    var onSelectPhotos: (() -> Void)?
     var onAttach: (() -> Void)?
     var onCreatePoll: (() -> Void)?
 
@@ -72,6 +76,7 @@ struct Composer: View {
                 HStack(spacing: 12) {
                     if showsAttachmentMenu {
                         attachmentMenu
+                            .disabled(isSending)
                     }
 
                     Spacer()
@@ -85,6 +90,7 @@ struct Composer: View {
                                 .frame(width: 34, height: 34)
                                 .contentShape(Circle())
                         }
+                        .disabled(isSending)
                         .accessibilityLabel("Record voice message")
                         .accessibilityIdentifier("VoiceRecordButton")
                     }
@@ -93,11 +99,18 @@ struct Composer: View {
                         Button {
                             onSend()
                         } label: {
-                            Image(systemName: "arrow.up")
-                                .font(.body.weight(.bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 34, height: 34)
-                                .background(Circle().fill(Color.accentColor))
+                            if isSending {
+                                ProgressView()
+                                    .tint(.white)
+                                    .frame(width: 34, height: 34)
+                                    .background(Circle().fill(Color.accentColor))
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(.body.weight(.bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 34, height: 34)
+                                    .background(Circle().fill(Color.accentColor))
+                            }
                         }
                         .disabled(sendDisabled)
                         .accessibilityLabel(sendAccessibilityLabel)
@@ -110,9 +123,9 @@ struct Composer: View {
                 .padding(.bottom, 10)
             }
             .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-            .modifier(ChatComposerSurface())
+            .modifier(ChatComposerSurface(radius: surfaceRadius))
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, outerHorizontalPadding)
         .padding(.top, 8)
         .safeAreaPadding(.bottom, 8)
         .background(Color.clear)
@@ -125,7 +138,11 @@ struct Composer: View {
         Menu {
             if allowsPhotoAttachments {
                 Button {
-                    isPhotoPickerPresented = true
+                    if let onSelectPhotos {
+                        onSelectPhotos()
+                    } else {
+                        isPhotoPickerPresented = true
+                    }
                 } label: {
                     Label("Photos & Videos", systemImage: "photo.on.rectangle")
                 }
@@ -163,7 +180,7 @@ struct Composer: View {
     }
 
     private var sendDisabled: Bool {
-        stagedAttachments.isEmpty && !canSubmit
+        isSending || (stagedAttachments.isEmpty && !canSubmit)
     }
 
     private var showsSendButton: Bool {
@@ -175,36 +192,71 @@ struct Composer: View {
     }
 }
 
-struct TextOnlyComposer: View {
+enum ComposerLaunchAction: Hashable {
+    case photos
+    case files
+    case voice
+}
+
+struct NewChatComposer: View {
     @Binding var text: String
     var isInputFocused: FocusState<Bool>.Binding
-    let canSubmit: Bool
     let placeholder: String
-    let sendAccessibilityLabel: String
-    let messageFieldAccessibilityIdentifier: String
-    let sendAccessibilityIdentifier: String
-    let onSend: () -> Void
+    let onStartChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
+    var outerHorizontalPadding: CGFloat = 16
+    var surfaceRadius: CGFloat = 28
     @State private var stagedAttachments: [StagedComposerAttachment] = []
     @State private var isPhotoPickerPresented = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    @State private var isStartingChat = false
 
     var body: some View {
         Composer(
             text: $text,
             replyTarget: nil,
             canSubmit: canSubmit,
+            isSending: isStartingChat,
             stagedAttachments: $stagedAttachments,
             isPhotoPickerPresented: $isPhotoPickerPresented,
             selectedPhotoItems: $selectedPhotoItems,
             isInputFocused: isInputFocused,
             onCancelReply: {},
-            onSend: onSend,
+            onSend: {
+                beginChat(launchAction: nil)
+            },
             placeholder: placeholder,
-            allowsPhotoAttachments: false,
-            messageFieldAccessibilityIdentifier: messageFieldAccessibilityIdentifier,
-            sendAccessibilityLabel: sendAccessibilityLabel,
-            sendAccessibilityIdentifier: sendAccessibilityIdentifier
+            messageFieldAccessibilityIdentifier: "HomeComposerField",
+            sendAccessibilityLabel: "Start new chat",
+            sendAccessibilityIdentifier: "HomeComposerSend",
+            outerHorizontalPadding: outerHorizontalPadding,
+            surfaceRadius: surfaceRadius,
+            onStartVoiceRecording: {
+                beginChat(launchAction: .voice)
+            },
+            onSelectPhotos: {
+                beginChat(launchAction: .photos)
+            },
+            onAttach: {
+                beginChat(launchAction: .files)
+            }
         )
+    }
+
+    private var canSubmit: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isStartingChat
+    }
+
+    private func beginChat(launchAction: ComposerLaunchAction?) {
+        guard !isStartingChat else { return }
+        let draft = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !draft.isEmpty || launchAction != nil else { return }
+
+        isStartingChat = true
+        onStartChat(draft, launchAction) { success in
+            isStartingChat = false
+            guard success else { return }
+            text = ""
+        }
     }
 }
 
@@ -213,20 +265,31 @@ enum ComposerAccessibility {
 }
 
 private struct ChatComposerSurface: ViewModifier {
+    let radius: CGFloat
+
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
             GlassEffectContainer(spacing: 0) {
                 content
-                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 28))
+                    .glassEffect(
+                        .regular.interactive(),
+                        in: .rect(cornerRadius: radius)
+                    )
             }
         } else {
             content
                 .background(
                     .ultraThinMaterial,
-                    in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    in: RoundedRectangle(
+                        cornerRadius: radius,
+                        style: .continuous
+                    )
                 )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    RoundedRectangle(
+                        cornerRadius: radius,
+                        style: .continuous
+                    )
                         .strokeBorder(Color(.separator).opacity(0.18), lineWidth: 0.5)
                 }
                 .shadow(color: .black.opacity(0.08), radius: 18, x: 0, y: 8)

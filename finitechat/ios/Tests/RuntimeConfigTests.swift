@@ -2104,6 +2104,55 @@ final class AppModelPersistenceTests: XCTestCase {
         XCTAssertEqual(replyToMessageID, "message-1")
     }
 
+    func testCreateHomeChatDispatchesCreateOnlyAfterApplyingReturnedState() async throws {
+        let config = RuntimeConfig(
+            serverURL: "http://127.0.0.1:1",
+            deviceID: "qt433"
+        )
+        var state = savedChatStateWithSelectedHomeTopicChat()
+        state.rooms[0].isAgentChat = true
+        state.pairedAgent = AppPairedAgent(
+            agentAccountId: "agent-account",
+            canonicalRoomId: "room-main"
+        )
+        let runtime = FakeFiniteChatRuntime(
+            initialState: state,
+            startRuntimeState: state
+        ) { action, currentState in
+            guard case .startHomeChat = action else { return currentState }
+            var createdState = currentState
+            createdState.rev += 1
+            createdState.status = "chat created"
+            return createdState
+        }
+        let model = AppModel(
+            config: config,
+            applicationSupportURL: try temporarySupportURL(),
+            args: ["FiniteChat"],
+            startsUpdateLoop: false
+        ) { _ in
+            runtime
+        }
+        let completion = expectation(description: "create-only completion")
+
+        model.start()
+        XCTAssertFalse(model.startHomeChat(text: " ", intentKey: "blank"))
+        XCTAssertTrue(model.createHomeChat(
+            intentKey: "ios-home-photo",
+            onCreated: {
+                XCTAssertEqual(model.state?.status, "chat created")
+                completion.fulfill()
+            }
+        ))
+
+        await fulfillment(of: [completion], timeout: 2)
+        guard case .startHomeChat(let text, let intentKey) = runtime.dispatchedActions.last else {
+            return XCTFail("expected create-only startHomeChat action")
+        }
+        XCTAssertNil(text)
+        XCTAssertEqual(intentKey, "ios-home-photo")
+    }
+
     func testAttachmentsUseSelectedTopicChatWhenAvailable() async throws {
         let config = RuntimeConfig(
             serverURL: "http://127.0.0.1:1",

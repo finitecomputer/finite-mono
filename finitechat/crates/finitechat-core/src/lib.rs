@@ -655,7 +655,7 @@ pub enum AppAction {
         room_id: String,
     },
     StartHomeChat {
-        text: String,
+        text: Option<String>,
         intent_key: String,
     },
     RenameChat {
@@ -3229,7 +3229,7 @@ impl AppRuntimeState {
 
     fn start_home_chat(
         &mut self,
-        text: String,
+        text: Option<String>,
         intent_key: String,
     ) -> Result<(), FiniteChatCoreError> {
         let paired = self
@@ -3240,8 +3240,8 @@ impl AppRuntimeState {
                 reason: "choose an agent before starting a chat".to_owned(),
             })?;
         let room_id = paired.canonical_room_id;
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
+        let trimmed = text.as_deref().map(str::trim);
+        if trimmed.is_some_and(str::is_empty) {
             return Err(FiniteChatCoreError::Client {
                 reason: "message must not be empty".to_owned(),
             });
@@ -3271,6 +3271,10 @@ impl AppRuntimeState {
                 .ok_or_else(|| FiniteChatCoreError::Client {
                     reason: "new home chat did not select a chat".to_owned(),
                 })?;
+        let Some(trimmed) = trimmed else {
+            self.app.status = "chat created".to_owned();
+            return Ok(());
+        };
         if self.app.messages.iter().any(|message| {
             message.room_id == room_id
                 && message.conversation_id.as_deref() == Some(HOME_TOPIC_ID)
@@ -15703,7 +15707,7 @@ mod tests {
     }
 
     #[test]
-    fn app_pairs_one_agent_and_starts_a_new_home_chat_with_the_first_message() {
+    fn app_pairs_one_agent_and_starts_home_chats_with_or_without_a_first_message() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
         let user_options = with_test_secret(OpenOptions {
@@ -15766,9 +15770,82 @@ mod tests {
             .expect("pairing the same direct agent is idempotent");
         assert_eq!(paired_again.paired_agent, paired.paired_agent);
 
+        let empty_message_error = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: Some("   ".to_owned()),
+                intent_key: "ios-home-empty-message".to_owned(),
+            })
+            .expect_err("an explicit first message must not be blank");
+        assert!(
+            empty_message_error
+                .to_string()
+                .contains("message must not be empty")
+        );
+
+        let created = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: None,
+                intent_key: "ios-home-attachment-1".to_owned(),
+            })
+            .expect("home can create an empty chat before sending an attachment");
+        let empty_chat_id = created
+            .selected_chat_id
+            .as_deref()
+            .expect("empty chat selected");
+        let created_home = created
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .expect("home topic remains available");
+        assert_eq!(created_home.chats.len(), before + 1);
+        assert!(!created.messages.iter().any(|message| {
+            message.room_id == room_id && message.chat_id.as_deref() == Some(empty_chat_id)
+        }));
+        let created_again = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: None,
+                intent_key: "ios-home-attachment-1".to_owned(),
+            })
+            .expect("retry reuses the empty chat");
+        let created_again_home = created_again
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .unwrap();
+        assert_eq!(created_again_home.chats.len(), before + 1);
+        assert_eq!(
+            created_again.selected_chat_id.as_deref(),
+            Some(empty_chat_id)
+        );
+        let attachment_bytes = b"home attachment".to_vec();
+        let with_attachment = user
+            .dispatch_and_wait(AppAction::SendChatAttachments {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: empty_chat_id.to_owned(),
+                attachments: vec![OutboundAttachment {
+                    filename: "home.txt".to_owned(),
+                    mime_type: "text/plain".to_owned(),
+                    kind: ChatMediaKind::File,
+                    bytes: attachment_bytes,
+                }],
+                caption: "from Home".to_owned(),
+                reply_to_message_id: None,
+            })
+            .expect("the retained encrypted attachment path sends into the created chat");
+        assert!(with_attachment.messages.iter().any(|message| {
+            message.room_id == room_id
+                && message.chat_id.as_deref() == Some(empty_chat_id)
+                && message.text == "from Home"
+                && message
+                    .media
+                    .iter()
+                    .any(|media| media.filename == "home.txt")
+        }));
+
         let started = user
             .dispatch_and_wait(AppAction::StartHomeChat {
-                text: "  Help me ship this.  ".to_owned(),
+                text: Some("  Help me ship this.  ".to_owned()),
                 intent_key: "ios-home-submit-1".to_owned(),
             })
             .expect("home starts a new chat and sends its first message");
@@ -15781,7 +15858,7 @@ mod tests {
             .iter()
             .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
             .expect("home topic remains available");
-        assert_eq!(home.chats.len(), before + 1);
+        assert_eq!(home.chats.len(), before + 2);
         assert!(
             home.chats
                 .iter()
@@ -15794,7 +15871,7 @@ mod tests {
         }));
         let retried = user
             .dispatch_and_wait(AppAction::StartHomeChat {
-                text: "Help me ship this.".to_owned(),
+                text: Some("Help me ship this.".to_owned()),
                 intent_key: "ios-home-submit-1".to_owned(),
             })
             .expect("retry reuses the chat and first message");
@@ -15803,7 +15880,7 @@ mod tests {
             .iter()
             .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
             .unwrap();
-        assert_eq!(retried_home.chats.len(), before + 1);
+        assert_eq!(retried_home.chats.len(), before + 2);
         assert_eq!(
             retried
                 .messages

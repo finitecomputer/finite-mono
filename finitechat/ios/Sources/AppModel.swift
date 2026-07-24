@@ -1256,6 +1256,23 @@ final class AppModel: ObservableObject, AppReconciler {
         )
     }
 
+    @discardableResult
+    func createHomeChat(
+        intentKey: String,
+        onCreated: (@MainActor () -> Void)? = nil,
+        onFailure: (@MainActor () -> Void)? = nil
+    ) -> Bool {
+        guard pairedAgent != nil else { return false }
+        return dispatchInBackground(
+            .startHomeChat(
+                text: nil,
+                intentKey: intentKey
+            ),
+            onSuccess: onCreated,
+            onFailure: { _ in onFailure?() }
+        )
+    }
+
     func projection(for roomID: String) -> ChatRoomProjection {
         chatProjections[roomID] ?? .empty(roomID: roomID)
     }

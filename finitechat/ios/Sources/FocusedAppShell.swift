@@ -19,10 +19,23 @@ struct ChatDestination: Hashable, Identifiable {
     let title: String
     let preview: String
     let updatedSequence: UInt64
+    var composerLaunch: ComposerLaunch? = nil
 
     var id: String {
         "\(roomID)|\(topicID)|\(chatID)"
     }
+}
+
+struct ComposerLaunch: Hashable {
+    let id: UUID
+    let action: ComposerLaunchAction
+    let draft: String
+}
+
+private struct PendingHomeSubmission {
+    let text: String
+    let launchAction: ComposerLaunchAction?
+    let intentKey: String
 }
 
 struct ChatTopicGroup: Identifiable {
@@ -40,6 +53,8 @@ struct FiniteDesignTokens {
     var homeHeroMarkSize: CGFloat = 104
     var homeHeroTopSpacing: CGFloat = 92
     var recentBadgeSpacing: CGFloat = 8
+    var composerHorizontalPadding: CGFloat = 20
+    var composerRadius: CGFloat = 28
 }
 
 private struct FiniteDesignTokensKey: EnvironmentKey {
@@ -61,7 +76,7 @@ struct ContentView: View {
     @State private var showsSettings = false
     @State private var showsAgentPicker = false
     @State private var homeComposerFocusRequest = 0
-    @State private var pendingHomeSubmission: (text: String, intentKey: String)?
+    @State private var pendingHomeSubmission: PendingHomeSubmission?
 
     var body: some View {
         Group {
@@ -108,6 +123,7 @@ struct ContentView: View {
                 RoomThreadView(
                     model: model,
                     roomID: destination.roomID,
+                    composerLaunch: destination.composerLaunch,
                     openDrawer: presentDrawer
                 )
             }
@@ -220,26 +236,66 @@ struct ContentView: View {
             .filter { !$0.chats.isEmpty }
     }
 
-    private func startHomeChat(_ text: String, completion: @escaping (Bool) -> Void) {
-        let pending = pendingHomeSubmission.flatMap { $0.text == text ? $0 : nil }
-            ?? (text: text, intentKey: "ios-home-\(UUID().uuidString.lowercased())")
-        pendingHomeSubmission = pending
-        let started = model.startHomeChat(
+    private func startHomeChat(
+        _ text: String,
+        launchAction: ComposerLaunchAction?,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let pending = pendingHomeSubmission.flatMap {
+            $0.text == text && $0.launchAction == launchAction ? $0 : nil
+        } ?? PendingHomeSubmission(
             text: text,
-            intentKey: pending.intentKey,
-            onStarted: {
-                pendingHomeSubmission = nil
-                guard let destination = selectedDestination else {
-                    completion(false)
-                    return
-                }
-                path.append(destination)
-                completion(true)
-            },
-            onFailure: {
-                completion(false)
-            }
+            launchAction: launchAction,
+            intentKey: "ios-home-\(UUID().uuidString.lowercased())"
         )
+        pendingHomeSubmission = pending
+        let onCreated: @MainActor () -> Void = {
+            guard let destination = selectedDestination else {
+                completion(false)
+                return
+            }
+
+            let routedDestination: ChatDestination
+            if let launchAction {
+                routedDestination = ChatDestination(
+                    roomID: destination.roomID,
+                    topicID: destination.topicID,
+                    chatID: destination.chatID,
+                    title: destination.title,
+                    preview: destination.preview,
+                    updatedSequence: destination.updatedSequence,
+                    composerLaunch: ComposerLaunch(
+                        id: UUID(),
+                        action: launchAction,
+                        draft: text
+                    )
+                )
+            } else {
+                routedDestination = destination
+            }
+
+            pendingHomeSubmission = nil
+            path.append(routedDestination)
+            completion(true)
+        }
+        let onFailure: @MainActor () -> Void = {
+            completion(false)
+        }
+        let started: Bool
+        if launchAction == nil {
+            started = model.startHomeChat(
+                text: text,
+                intentKey: pending.intentKey,
+                onStarted: onCreated,
+                onFailure: onFailure
+            )
+        } else {
+            started = model.createHomeChat(
+                intentKey: pending.intentKey,
+                onCreated: onCreated,
+                onFailure: onFailure
+            )
+        }
         if !started {
             completion(false)
         }
@@ -328,11 +384,10 @@ struct FocusedHomeView: View {
     let agentName: String?
     let recentChats: [ChatDestination]
     var focusRequest = 0
-    let startChat: (String, @escaping (Bool) -> Void) -> Void
+    let startChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
     let openChat: (ChatDestination) -> Void
     let chooseAgent: () -> Void
     @State private var draft = ""
-    @State private var isStartingChat = false
     @FocusState private var isComposerFocused: Bool
 
     var body: some View {
@@ -383,15 +438,13 @@ struct FocusedHomeView: View {
             .scrollDismissesKeyboard(.interactively)
 
             if agentName != nil {
-                TextOnlyComposer(
+                NewChatComposer(
                     text: $draft,
                     isInputFocused: $isComposerFocused,
-                    canSubmit: canSend,
                     placeholder: "What do you want to work on?",
-                    sendAccessibilityLabel: "Start new chat",
-                    messageFieldAccessibilityIdentifier: "HomeComposerField",
-                    sendAccessibilityIdentifier: "HomeComposerSend",
-                    onSend: submitDraft
+                    onStartChat: startChat,
+                    outerHorizontalPadding: tokens.composerHorizontalPadding,
+                    surfaceRadius: tokens.composerRadius
                 )
             }
         }
@@ -401,22 +454,6 @@ struct FocusedHomeView: View {
         .task(id: focusRequest) {
             guard focusRequest > 0 else { return }
             isComposerFocused = true
-        }
-    }
-
-    private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isStartingChat
-    }
-
-    private func submitDraft() {
-        guard canSend else { return }
-        let message = draft
-        isStartingChat = true
-        startChat(message) { success in
-            isStartingChat = false
-            if success {
-                draft = ""
-            }
         }
     }
 }
@@ -871,7 +908,7 @@ private enum FocusedPreviewFixtures {
         FocusedHomeView(
             agentName: "Ada",
             recentChats: FocusedPreviewFixtures.recent,
-            startChat: { _, completion in completion(true) },
+            startChat: { _, _, completion in completion(true) },
             openChat: { _ in },
             chooseAgent: {}
         )
@@ -883,7 +920,7 @@ private enum FocusedPreviewFixtures {
         FocusedHomeView(
             agentName: nil,
             recentChats: [],
-            startChat: { _, completion in completion(true) },
+            startChat: { _, _, completion in completion(true) },
             openChat: { _ in },
             chooseAgent: {}
         )
@@ -895,7 +932,7 @@ private enum FocusedPreviewFixtures {
         FocusedHomeView(
             agentName: "Ada",
             recentChats: [],
-            startChat: { _, completion in completion(true) },
+            startChat: { _, _, completion in completion(true) },
             openChat: { _ in },
             chooseAgent: {}
         )

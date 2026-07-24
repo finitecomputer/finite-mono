@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct RoomThreadView: View {
     @ObservedObject var model: AppModel
     let roomID: String
+    let composerLaunch: ComposerLaunch?
     let openDrawer: () -> Void
     @State private var followsBottom = true
     @State private var importingAttachment = false
@@ -20,7 +21,7 @@ struct RoomThreadView: View {
     @State private var imagePreviewSelection: ChatImagePreviewSelection?
     @State private var videoPreviewItem: ChatAttachmentPreviewItem?
     @State private var documentPreviewItem: ChatAttachmentPreviewItem?
-    @State private var composerText = ""
+    @State private var composerText: String
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var stagedAttachments: [StagedComposerAttachment] = []
     @State private var showPhotoPicker = false
@@ -28,6 +29,20 @@ struct RoomThreadView: View {
     @State private var siteBrowserItem: FiniteSiteBrowserItem?
     @StateObject private var voiceRecorder = VoiceRecorder()
     @State private var voiceSendInFlight = false
+    @State private var didConsumeComposerLaunch = false
+
+    init(
+        model: AppModel,
+        roomID: String,
+        composerLaunch: ComposerLaunch? = nil,
+        openDrawer: @escaping () -> Void
+    ) {
+        self.model = model
+        self.roomID = roomID
+        self.composerLaunch = composerLaunch
+        self.openDrawer = openDrawer
+        _composerText = State(initialValue: composerLaunch?.draft ?? "")
+    }
 
     private var room: AppRoomSummary? {
         model.state?.rooms.first(where: { $0.roomId == roomID })
@@ -190,6 +205,9 @@ struct RoomThreadView: View {
         }
         .onChange(of: composerText) { _, text in
             updateTypingIntent(text)
+        }
+        .task(id: composerLaunch?.id) {
+            await consumeComposerLaunch()
         }
     }
 
@@ -406,6 +424,20 @@ struct RoomThreadView: View {
     private func markRoomReadIfNeeded() {
         guard let room, room.unreadCount > 0 else { return }
         model.markRoomRead(room)
+    }
+
+    private func consumeComposerLaunch() async {
+        guard !didConsumeComposerLaunch, let composerLaunch else { return }
+        didConsumeComposerLaunch = true
+        await Task.yield()
+        switch composerLaunch.action {
+        case .photos:
+            showPhotoPicker = true
+        case .files:
+            importingAttachment = true
+        case .voice:
+            startVoiceRecording()
+        }
     }
 
     private func sendComposerDraft() {
