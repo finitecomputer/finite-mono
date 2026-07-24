@@ -259,7 +259,39 @@ fbrain permissions remove-member --brain <brain-id> --target <npub>
 fbrain permissions add-admin --brain <brain-id> --target <npub>
 fbrain permissions remove-admin --brain <brain-id> --target <npub>
 fbrain permissions grant-folder --brain <brain-id> --folder <folder-id> --target <npub>
+
+# Normal, convergent Organization Brain collaboration
+TARGET_EMAIL="agent@example.finite.vip"
+fbrain collaborators ensure-admin \
+  --brain <brain-id> \
+  --target "$TARGET_EMAIL" \
+  --server "$SERVER" \
+  --json
 ```
+
+`collaborators ensure-admin` is the normal email-first Organization Brain
+sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The
+command resolves the Managed Agent Email natively and returns one typed receipt:
+
+- `complete` proves Admin Brain Role plus current Folder readiness across the
+  authoritative Folder snapshot.
+- `partial` preserves useful progress but names every known incomplete Folder.
+  Retry this exact idempotent command from a named current key holder when the
+  receipt supplies a holder email. Otherwise ask another current Folder reader
+  who can open the listed Folder to retry; never invent or expose a holder
+  identity, and do not report the collaboration as complete.
+- `indeterminate` means the mutation may have committed but its postcondition
+  was not proved. Retry the exact command and inspect its next receipt; do not
+  claim either success or a clean failure.
+
+Human reports should use the target email, safe Folder paths, counts, reason
+codes, and holder emails. Do not paste the raw receipt or expose Member Identity
+keys, wrapped events, auth material, Folder Keys, or grant plaintext.
+
+Low-level permission commands are advanced primitives. `add-member` and
+`add-admin` change Brain Role, and `grant-folder` targets one Folder version;
+they do not prove complete Organization Brain Collaboration and are not the
+normal sharing workflow.
 
 ## Invitations And Sharing
 

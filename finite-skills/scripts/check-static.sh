@@ -180,9 +180,63 @@ else:
         "different actor means another principal changed the Brain",
         "otherwise report",
         "the cause as unknown",
+        "fbrain collaborators ensure-admin",
+        '--brain "$BRAIN"',
+        "--target \"$TARGET_EMAIL\"",
+        "complete",
+        "partial",
+        "indeterminate",
+        "current key holder",
+        "another current Folder reader",
+        "Low-level permission commands are advanced primitives",
+        "do not prove complete Organization Brain Collaboration",
     ):
         if marker not in brain_text:
             errors.append(f"{brain_path}: missing runtime routing marker {marker!r}")
+
+    if re.search(
+        r"curl\b[^\n]*(?:\.well-known/nostr\.json|nip-?05)",
+        brain_text,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            f"{brain_path}: normal collaboration must use native identity "
+            "resolution rather than an ad hoc NIP-05 curl probe"
+        )
+
+    collaboration_contracts = (
+        (
+            r"normal request.*canonical Managed Agent Email.*"
+            r"fbrain collaborators ensure-admin.*--target \"\$TARGET_EMAIL\"",
+            "email-first convergent Organization Brain collaboration",
+        ),
+        (
+            r"`complete`.*authoritative postcondition.*Admin Brain\s+Role.*"
+            r"current\s+Folder Key Grant",
+            "complete-state proof",
+        ),
+        (
+            r"`partial`.*not complete.*retry the exact same command.*"
+            r"current key holder.*another current Folder reader.*"
+            r"never\s+invent or expose a holder identity",
+            "partial-state holder retry",
+        ),
+        (
+            r"`indeterminate`.*may have committed.*Do not claim success or "
+            r"clean failure\.\s+Retry the\s+exact same idempotent command",
+            "indeterminate-state retry",
+        ),
+        (
+            r"Low-level permission commands are advanced primitives.*"
+            r"do not prove complete Organization Brain Collaboration",
+            "advanced low-level warning",
+        ),
+    )
+    for pattern, behavior in collaboration_contracts:
+        if not re.search(pattern, brain_text, re.IGNORECASE | re.DOTALL):
+            errors.append(
+                f"{brain_path}: missing managed collaboration behavior for {behavior}"
+            )
 
     behavior_contracts = (
         (r"clearly\s+says\s+Personal Brain\s+or\s+Organization/Org Brain", "explicit Brain types proceed"),

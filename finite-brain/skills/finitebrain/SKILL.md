@@ -291,6 +291,52 @@ the underlying Member Identity `npub` for `fbrain` and signed operations. Keep
 fails, report that failure; show the `npub` only when the user asks for advanced
 identity details.
 
+## Organization Brain Collaboration
+
+For a normal request to share an Organization Brain with another managed
+Agent, use the recipient's canonical Managed Agent Email and one convergent
+operation:
+
+```sh
+TARGET_EMAIL="agent@example.finite.vip"
+fbrain collaborators ensure-admin \
+  --brain "$BRAIN" \
+  --target "$TARGET_EMAIL" \
+  --server "$SERVER" \
+  --json
+```
+
+Do not resolve the email yourself and do not probe a public NIP-05 endpoint
+with `curl`. `fbrain` performs native identity resolution once, prepares every
+Folder grant whose current key this Finite Home can open, and returns a typed
+receipt. Inspect `state` before reporting the result:
+
+- `complete`: authoritative postcondition inspection proved the Admin Brain
+  Role and a current Folder Key Grant for every Folder in this operation's
+  snapshot. Report the ready Folder count. Do not promise automatic access to
+  Folders created or rotated later.
+- `partial`: useful role and grant progress was preserved, but collaboration
+  is not complete. Name each safe Folder path and reason from `folders`; tell
+  the user to retry the exact same command from a named current key holder's
+  Finite Home when the receipt supplies a holder email. If it does not, ask
+  another current Folder reader who can open the listed Folder to retry; never
+  invent or expose a holder identity. Never describe Admin role alone as
+  successful sharing.
+- `indeterminate`: the mutation may have committed, but the client could not
+  prove its postcondition. Do not claim success or clean failure. Retry the
+  exact same idempotent command, then inspect the new typed receipt.
+
+Reports may include the canonical Agent Email, Folder paths, readiness counts,
+safe reason codes, and named holder emails supplied by the receipt. Never paste
+raw response payloads, Member Identity keys, wrapped grant events, auth
+material, Folder Keys, or grant plaintext.
+
+Low-level permission commands are advanced primitives. `permissions
+add-member` and `permissions add-admin` change Brain Role, while `permissions
+grant-folder` grants one specific Folder version. Separately or together they
+do not prove complete Organization Brain Collaboration; do not compose them
+for a normal "share this Org Brain with Agent B" request.
+
 ## Security Rules
 
 - Never print or expose private Nostr secrets, Folder Keys, grant plaintext,

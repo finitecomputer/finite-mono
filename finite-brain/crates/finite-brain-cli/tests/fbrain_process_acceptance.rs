@@ -17,6 +17,79 @@ use tempfile::TempDir;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+struct CollaborationSmokeReport {
+    path: Option<PathBuf>,
+    current_boundary: &'static str,
+    passed_boundaries: Vec<&'static str>,
+    completed: bool,
+}
+
+impl CollaborationSmokeReport {
+    fn from_environment() -> Self {
+        Self {
+            path: std::env::var_os("FINITE_BRAIN_COLLABORATION_SMOKE_REPORT").map(PathBuf::from),
+            current_boundary: "fixtureSetup",
+            passed_boundaries: Vec::new(),
+            completed: false,
+        }
+    }
+
+    fn enter(&mut self, boundary: &'static str) {
+        self.current_boundary = boundary;
+    }
+
+    fn pass(&mut self) {
+        self.passed_boundaries.push(self.current_boundary);
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for CollaborationSmokeReport {
+    fn drop(&mut self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let report = json!({
+            "format": "finite.brain.organization-collaboration-smoke.v1",
+            "status": if self.completed { "passed" } else { "failed" },
+            "failedBoundary": if self.completed {
+                Value::Null
+            } else {
+                Value::String(self.current_boundary.to_owned())
+            },
+            "passedBoundaries": self.passed_boundaries,
+            "facts": {
+                "collaborationState": if self
+                    .passed_boundaries
+                    .contains(&"nativeEmailCollaboration")
+                {
+                    Value::String("complete".to_owned())
+                } else {
+                    Value::Null
+                },
+                "independentFiniteHomes": self.passed_boundaries.contains(&"fixtureSetup"),
+                "targetForm": "canonicalManagedAgentEmail",
+                "existingRestrictedKnowledge": self
+                    .passed_boundaries
+                    .contains(&"restrictedKnowledgeBeforeCollaboration"),
+                "recipientRead": self.passed_boundaries.contains(&"betaOpenAndRead"),
+                "recipientEditAndSync": self.passed_boundaries.contains(&"betaEditAndSync"),
+                "inviterObservedRecipientEdit": self
+                    .passed_boundaries
+                    .contains(&"alphaSyncAndObserve"),
+                "recordsCredentialsKeysGrantPlaintextCommandsOrToolOutput": false
+            }
+        });
+        let _ = fs::write(path, serde_json::to_vec_pretty(&report).unwrap());
+    }
+}
+
 fn spawn_real_brain_server(
     target_npub: &str,
 ) -> (
@@ -32,7 +105,7 @@ fn spawn_real_brain_server(
         if let Ok((mut stream, _)) = nip05_listener.accept() {
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request);
-            let body = format!(r#"{{"names":{{"collaborator":"{target_hex}"}}}}"#);
+            let body = format!(r#"{{"names":{{"beta":"{target_hex}"}}}}"#);
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -241,6 +314,7 @@ fn setup_access_loss_tree(scratch: &TempDir) -> PathBuf {
 
 #[test]
 fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
+    let mut smoke = CollaborationSmokeReport::from_environment();
     let scratch = TempDir::new().unwrap();
     let home_a = scratch.path().join("home-a");
     let home_b = scratch.path().join("home-b");
@@ -288,7 +362,9 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         .status
         .success()
     );
+    smoke.pass();
 
+    smoke.enter("signedBrainHttp");
     let signer_b = run(&home_b, &home_b, &["signer", "public-key", "--json"]);
     assert!(
         signer_b.status.success(),
@@ -320,6 +396,9 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         "{}",
         String::from_utf8_lossy(&create.stderr)
     );
+    smoke.pass();
+
+    smoke.enter("restrictedKnowledgeBeforeCollaboration");
     let tree_a = home_a.join("tree-a");
     let opened_a = run(
         &home_a,
@@ -378,8 +457,10 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         "{}",
         String::from_utf8_lossy(&synced_a.stderr)
     );
+    smoke.pass();
 
-    let target = "collaborator@finite.vip";
+    smoke.enter("nativeEmailCollaboration");
+    let target = "beta@finite.vip";
     let ensure = run(
         &home_a,
         &tree_a,
@@ -402,7 +483,9 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     let receipt: Value = serde_json::from_slice(&ensure.stdout).unwrap();
     assert_eq!(receipt["state"], "complete", "{receipt}");
+    smoke.pass();
 
+    smoke.enter("betaOpenAndRead");
     let tree_b = home_b.join("tree-b");
     let opened_b = run(
         &home_b,
@@ -435,8 +518,45 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         fs::read_to_string(tree_b.join("Restricted/secret.md")).unwrap(),
         "# Restricted\n\nRecipient-readable proof.\n"
     );
+    smoke.pass();
+
+    smoke.enter("betaEditAndSync");
+    fs::write(
+        tree_b.join("Restricted/beta-edit.md"),
+        "# Beta edit\n\nBeta collaboration write proof.\n",
+    )
+    .unwrap();
+    let beta_push = run(
+        &home_b,
+        &tree_b,
+        &["sync", "now", "--server", &server_url, "--json"],
+    );
+    assert!(
+        beta_push.status.success(),
+        "{}",
+        String::from_utf8_lossy(&beta_push.stderr)
+    );
+    smoke.pass();
+
+    smoke.enter("alphaSyncAndObserve");
+    let alpha_pull = run(
+        &home_a,
+        &tree_a,
+        &["sync", "now", "--server", &server_url, "--json"],
+    );
+    assert!(
+        alpha_pull.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alpha_pull.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(tree_a.join("Restricted/beta-edit.md")).unwrap(),
+        "# Beta edit\n\nBeta collaboration write proof.\n"
+    );
+    smoke.pass();
     shutdown.send(()).unwrap();
     server_thread.join().unwrap();
+    smoke.complete();
 }
 
 fn spawn_provider(expected_requests: usize) -> (String, thread::JoinHandle<Vec<Value>>) {

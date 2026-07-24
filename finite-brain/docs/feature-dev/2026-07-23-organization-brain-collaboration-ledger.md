@@ -9,8 +9,9 @@
 - Feature branch: `codex/hybrid-wiki-search-slices-1-3`
 - Human owner: Austin Kelsay
 - Started: 2026-07-23
-- Current status: tickets 217 and 218 independently approved; ticket 219 is
-  next
+- Current status: tickets 217 and 218 independently approved; ticket 219
+  implementation and standards review are complete, with final integration
+  and repeat spec review pending
 - Skill setup status: configured for GitHub, canonical triage labels, and
   multi-context domain documentation
 
@@ -39,7 +40,8 @@ and Agents how to inspect and repair access.
 - Prototype source branch, if any: none
 - Spec issue: https://github.com/finitecomputer/finite-mono/issues/216
 - Tickets: #217, #218, #219
-- Ticket sessions: pending
+- Ticket sessions: `2026-07-23-issue-217-session.md`,
+  `2026-07-23-issue-218-session.md`, `2026-07-23-issue-219-session.md`
 - Agent briefs: pending
 - Review packets: pending
 - Local CodeRabbit report: pending
@@ -59,7 +61,7 @@ and Agents how to inspect and repair access.
 | --- | --- | --- | --- | --- | --- |
 | #217 | server + CLI tracer | approved | round 4 approved | none | store/server/CLI suites + clippy + two-Finite-Home acceptance green |
 | #218 | Product Client tracer | approved | repeat independent standards + spec review approved | none | Product Client + server suites + check/clippy/fmt green |
-| #219 | managed skill + smoke tracer | ready | pending | pending | no |
+| #219 | managed skill + smoke tracer | integration pending | standards pass; spec rerun pending | full product matrix + PR checks pending | focused static + Alpha/Beta built-process smoke + artifact verifier green |
 
 ## Parked HITL slices
 
@@ -73,6 +75,7 @@ and Agents how to inspect and repair access.
 | --- | --- | --- | --- | --- | --- |
 | #217 | `894d1ba` | `2026-07-23-issue-217-session.md` | `d13914f` | standards + spec approved in round 4 | store/server/CLI + clippy + built-process acceptance green |
 | #218 | `cc9dfa4` | `2026-07-23-issue-218-session.md` | `e21515e`, `0c71bec` | standards + spec approved after correction | Product Client + server suites + check/clippy/fmt |
+| #219 | `b5f8ba9` | `2026-07-23-issue-219-session.md` | pending | standards pass; integration-backed spec rerun pending | skill static + Alpha/Beta built-process smoke + artifact verifier green; services/full-product/PR gates pending |
 
 ## Open questions
 
