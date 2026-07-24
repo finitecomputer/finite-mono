@@ -114,6 +114,8 @@ jobs:
           test ! -e "$app/Contents/Resources/app/dist"
           grep -n 'https://finite\.computer' "$app/Contents/Resources/app/electron/main.cjs"
           ! grep -R -n -E 'spawn\("cargo"|cargo run' "$app/Contents/Resources/app/electron"
+          ! otool -L "$app/Contents/Resources/finitechatd" | grep -F '/nix/store/'
+          "$app/Contents/Resources/finitechatd" --help >/dev/null
           codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Archive internal alpha
