@@ -10,6 +10,9 @@ therefore moved to
 [`Phala Confidential Runner Readiness`](phala-confidential-runner-readiness.md).
 This run's remaining queue and production evidence are preserved; the sequence
 change does not authorize another Stripe charge, Price, or customer admission.
+On 2026-07-24 Paul paused the Phala run as too work-in-progress; both queues
+remain preserved and neither run currently authorizes further rollout or
+provider mutation.
 
 > **Disposition 2026-07-20:** the July 13 first-cohort/customer-mode authority
 > remains historical evidence; it does not authorize additional paid or Launch
