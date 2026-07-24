@@ -5,9 +5,9 @@
 - Issue: https://github.com/finitecomputer/finite-mono/issues/219
 - Fixed point before session: `b5f8ba9`
 - Worker session: `/root/ticket_219_worker`
-- Commit: pending
-- Status: implementation and standards review complete; final integration and
-  repeat spec review pending
+- Commit: `53953b6`
+- Status: implementation and repository integration complete; repeat
+  independent standards/spec review and pushed-commit checks pending
 
 ## Inputs
 
@@ -60,9 +60,17 @@
 - Final repository integration gate: `just brain-product-matrix` now runs the
   Alpha/Beta collaboration proof and report verifier before the existing
   disposable real-Hermes product matrix.
-- Pending orchestrator verification after this commit: `just dev smoke`, the
-  complete `just brain-product-matrix`, and pull-request checks on the pushed
-  commit. This issue must not be approved or closed before those pass.
+- Orchestrator verification:
+  - `DEVFINITY_READY_TIMEOUT_SECS=1800 just dev smoke` passed. The longer
+    readiness bound was required only for the cold sequential Rust build; the
+    resulting stack and prescribed smoke completed cleanly.
+  - `just brain-product-matrix` passed after correcting its browser helper to
+    prefer an installed Playwright browser over a stale package-manager PATH
+    shim. The successful run covered the Alpha/Beta collaboration proof,
+    hosted Hermes/managed-skill setup and reconciliation, Product Client
+    browser paths, recovery, and a fresh Agent turn.
+  - Pull-request checks on the pushed commit remain pending. This issue must
+    not be approved or closed before those pass.
 
 ## Review
 
@@ -73,7 +81,9 @@
 - Worthy fixes applied: every artifact fact that represents completed work is
   now derived from passed boundaries; partial guidance uses a supplied holder
   email when available and otherwise asks another current Folder reader,
-  without inventing or exposing identity.
+  without inventing or exposing identity. The matrix browser launcher now
+  selects a real Playwright executable before PATH shims that may outlive their
+  removed application bundle.
 - Findings ignored with reasons: none
 
 ## Risks
