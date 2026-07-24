@@ -132,7 +132,8 @@ exhaustion all fail closed.
 
 Automated gates:
 
-- Electron Node boundary tests, TypeScript check, and package build.
+- Electron Node boundary tests and a signed package build. Electron has no
+  separate TypeScript/Vite renderer build.
 - Dashboard unit suite and lint, including browser fallback, account mismatch,
   canonical-Room enforcement, later-Room reconciliation, strict machine route,
   and structured-clone attachment transport.

@@ -25,8 +25,17 @@ ditto -x -k finitechat-electron-macos-aarch64.zip .
 open "Finite Chat.app"
 ```
 
-The app is Developer ID-signed and Apple-notarized. It links a distinct,
-revocable Device to the signed-in user's existing Finite Chat account.
+The app is Developer ID-signed and Apple-notarized. Electron is a
+remote-dashboard shell: it loads only the configured trusted dashboard origin
+and packages no local web renderer. A sandboxed, versioned preload connects that
+dashboard to the bundled local daemon, which keeps encrypted chat state and
+account material on the Mac.
+
+After dashboard sign-in, Electron links a distinct, revocable Device
+automatically through `/api/device-links/account-binding`,
+`/api/device-links/approve`, and `/api/device-links/status`. The account secret
+is claimed over the encrypted device-link channel and committed to macOS secure
+storage before the local daemon starts; there is no separate approval page.
 
 ## Install `finitechat`
 

@@ -123,6 +123,7 @@ jobs:
       - name: Verify Developer ID signature
         run: |
           test -x "$ELECTRON_APP_PATH/Contents/Resources/finitechatd"
+          test ! -e "$ELECTRON_APP_PATH/Contents/Resources/app/dist"
           codesign --verify --deep --strict --verbose=2 "$ELECTRON_APP_PATH"
           signature="$(codesign -dvv "$ELECTRON_APP_PATH" 2>&1)"
           grep -F 'Authority=Developer ID Application: Paul Miller (JBLHZ83X6T)' <<<"$signature"
