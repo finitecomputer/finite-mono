@@ -120,16 +120,24 @@ Notes:
 - 2026-07-10: The observed Sites preview failure does not justify putting the User Nostr Identity signer held by the Hosted Web Device service in browser JavaScript. Sites can become seamless through an explicit Share followed by its existing viewer-session exchange. Brain cannot: a usable web surface still needs explicit Brain Member enrollment, Folder Key delivery/regrant/recovery, and a trusted narrowly scoped signing/decryption bridge. Electron remains the natural local-custody implementation; whether a server-held Brain client/controller using the User Principal served by the Hosted Web Device should receive explicit Brain Member and Folder Key Grants is still open.
 - 2026-07-10: Paul proposed satisfying the first-party Brain Product Client by providing `window.nostr` inside its iframe. This is technically plausible because the dashboard serves the Brain iframe from the same-origin `/client` proxy. The open option is an iframe-local provider, injected or bootstrapped only for that trusted route, whose requests cross a narrow parent/server bridge while the Principal secret remains server-side. It must fail closed for every other page and must never be injected into arbitrary Finite Sites or other user-controlled iframe content. This provider would solve client composition only; it still requires the chosen Member Identity, Brain grants, Folder Key delivery/recovery, revocation, and session-lock behavior above.
 
-## One chat product across Hosted and Electron Devices (opened 2026-07-10)
+## One chat product across Hosted and Electron Devices (resolved 2026-07-24)
 
-Wrong: Dashboard chat is implemented in `hosted-web-chat.tsx` while Electron has a separate Vite renderer in `finitechat/apps/electron-chat/src/App.tsx`. They share Finite Chat concepts but can drift in interaction, copy, features, and bug fixes, contradicting the promise that Electron is another Device rather than another chat product.
+Resolved: the dashboard is the canonical product UI, and Electron is a
+remote-dashboard shell with a local encrypted daemon. The obsolete bundled
+renderer was deleted, so interaction, copy, features, and bug fixes no longer
+drift between two chat products.
 
 Rejected so far: Making Electron depend on Hosted Web Device uptime, treating its renderer as an unrelated legacy UI, or indefinitely duplicating product behavior between two implementations.
 
-A real solution must: preserve Electron's local Device key and durable store; keep dashboard chat usable without Electron; share one canonical product interaction and `AppState`/`AppAction` behavior; and define which UI components, presentation model, and platform adapters are actually shared without moving local secrets into the browser.
+The resolution preserves Electron's local Device key and durable store, keeps
+dashboard chat usable without Electron, and exposes a narrow versioned preload
+for local chat actions without moving local secrets into browser JavaScript.
 
 Notes:
 
 - 2026-07-10: The internal production canary remains dashboard-only. This question repairs the run's previous dangling reference to Electron/device-unification architecture; it is not added to the active queue.
 - 2026-07-10: The current hosted UI lives in `finitecomputer-v2/apps/dashboard/src/components/hosted-web-chat.tsx`; Electron's renderer lives in `finitechat/apps/electron-chat/src/App.tsx`.
 - 2026-07-11: Electron is parked with no active implementation work. The attempted shared-surface rollout changed the production web UI and was rolled back. The production Hosted Web UI is now the canonical, protected surface; any future Electron run must extract or reuse that surface without changing its web behavior or appearance.
+- 2026-07-24: Electron now loads that canonical dashboard directly. Its local
+  daemon and automatic Device link remain native capabilities behind trusted
+  frame checks; no bundled renderer or manual pairing UI remains.

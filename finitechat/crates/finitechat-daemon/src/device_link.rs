@@ -22,7 +22,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug)]
 pub struct DeviceLinkBootstrapOptions {
     pub server_url: String,
-    pub dashboard_url: String,
     pub target_device_id: String,
     pub timeout: Duration,
     pub poll_interval: Duration,
@@ -31,12 +30,10 @@ pub struct DeviceLinkBootstrapOptions {
 impl DeviceLinkBootstrapOptions {
     pub fn internal_alpha(
         server_url: impl Into<String>,
-        dashboard_url: impl Into<String>,
         target_device_id: impl Into<String>,
     ) -> Self {
         Self {
             server_url: server_url.into(),
-            dashboard_url: dashboard_url.into(),
             target_device_id: target_device_id.into(),
             timeout: Duration::from_secs(DEVICE_LINK_MAX_TTL_SECONDS),
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -49,7 +46,6 @@ pub struct DeviceLinkReady {
     pub event: &'static str,
     pub link_session_id: String,
     pub target_device_id: String,
-    pub approval_url: String,
 }
 
 /// A created one-use rendezvous. The pairing secret deliberately has no
@@ -102,7 +98,6 @@ pub async fn create_device_link_session(
     mut options: DeviceLinkBootstrapOptions,
 ) -> Result<PendingDeviceLinkSession, DeviceLinkBootstrapError> {
     let server_url = normalize_base_url(&options.server_url)?;
-    let dashboard_url = normalize_base_url(&options.dashboard_url)?;
     validate_device_id(&options.target_device_id)?;
     if options.timeout.is_zero()
         || options.timeout > Duration::from_secs(DEVICE_LINK_MAX_TTL_SECONDS)
@@ -130,14 +125,6 @@ pub async fn create_device_link_session(
     )
     .await?;
 
-    let mut approval =
-        Url::parse(&dashboard_url).map_err(|_| DeviceLinkBootstrapError::InvalidConfiguration)?;
-    approval.set_path("/dashboard/device-link");
-    approval.set_query(None);
-    approval
-        .query_pairs_mut()
-        .append_pair("link_session_id", &link_session_id)
-        .append_pair("target_device_id", &options.target_device_id);
     let deadline_unix_seconds = now_unix_seconds()?
         .checked_add(options.timeout.as_secs())
         .ok_or(DeviceLinkBootstrapError::InvalidConfiguration)?;
@@ -145,7 +132,6 @@ pub async fn create_device_link_session(
         event: "link_ready",
         link_session_id: link_session_id.clone(),
         target_device_id: options.target_device_id.clone(),
-        approval_url: approval.to_string(),
     };
 
     Ok(PendingDeviceLinkSession {
@@ -444,17 +430,17 @@ mod tests {
             event: "link_ready",
             link_session_id: "link-public-test".to_owned(),
             target_device_id: "electron-public-test".to_owned(),
-            approval_url: "https://finite.test/dashboard/device-link?link_session_id=link-public-test&target_device_id=electron-public-test".to_owned(),
         };
         let encoded = serde_json::to_value(ready).unwrap();
         assert_eq!(encoded["event"], "link_ready");
+        assert_eq!(encoded.as_object().unwrap().len(), 3);
         assert!(encoded.get("account_secret").is_none());
         assert!(encoded.get("pairing_secret").is_none());
         assert!(encoded.get("pairing_public_key").is_none());
     }
 
     #[tokio::test]
-    async fn claim_poll_waits_for_delayed_human_approval() {
+    async fn claim_poll_waits_for_delayed_automatic_approval() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test link server");
@@ -468,7 +454,6 @@ mod tests {
 
         let mut options = DeviceLinkBootstrapOptions::internal_alpha(
             server_url.clone(),
-            "https://finite.test",
             "electron-delayed-approval",
         );
         options.timeout = Duration::from_secs(5);
@@ -482,7 +467,7 @@ mod tests {
         let waiter = tokio::spawn(pending.wait_for_claim());
 
         // Let more than one normal Created -> not-ready poll happen before the
-        // human-side approval uploads its encrypted payload.
+        // automatic dashboard approval uploads its encrypted payload.
         tokio::time::sleep(Duration::from_millis(75)).await;
         let account_secret_hex = "11".repeat(32);
         let encrypted_payload = encrypt_device_link_payload(DeviceLinkEncryptInput {

@@ -36,8 +36,6 @@ enum Command {
     Link {
         #[arg(long, default_value = DEFAULT_SERVER_URL)]
         server_url: String,
-        #[arg(long, default_value = "https://finite.computer")]
-        dashboard_url: String,
         #[arg(long)]
         device_id: String,
         #[arg(long, default_value_t = 3)]
@@ -61,7 +59,6 @@ async fn run() -> Result<(), DaemonError> {
     let args = Args::parse();
     if let Some(Command::Link {
         server_url,
-        dashboard_url,
         device_id,
         result_fd,
         confirm_fd,
@@ -70,7 +67,6 @@ async fn run() -> Result<(), DaemonError> {
     {
         return run_device_link(
             server_url,
-            dashboard_url,
             device_id,
             result_fd,
             confirm_fd,
@@ -128,15 +124,13 @@ async fn run() -> Result<(), DaemonError> {
 
 async fn run_device_link(
     server_url: String,
-    dashboard_url: String,
     device_id: String,
     result_fd: i32,
     confirm_fd: i32,
     timeout_seconds: u64,
 ) -> Result<(), DaemonError> {
     let (mut result_pipe, confirmation_pipe) = supervisor_pipes(result_fd, confirm_fd)?;
-    let mut options =
-        DeviceLinkBootstrapOptions::internal_alpha(server_url, dashboard_url, device_id);
+    let mut options = DeviceLinkBootstrapOptions::internal_alpha(server_url, device_id);
     options.timeout = Duration::from_secs(timeout_seconds);
     let session = create_device_link_session(options).await?;
     println!("{}", serde_json::to_string(session.ready())?);

@@ -146,43 +146,20 @@ Acceptance:
 - Daemon can scan a `finite://join?...` URL and converge through Rust-owned room
   admission.
 
-## Phase 3: Electron Shell With Imported Legacy UI
+## Phase 3: Electron Remote-Dashboard Shell
 
-Create an Electron app that vendors/adapts the proven legacy chat frontend code
-instead of rewriting the interface from scratch.
+This phase's original local-renderer plan has been superseded. Electron loads
+the configured trusted dashboard origin; the dashboard owns Rooms, Topics,
+transcripts, composer, attachments, and activity UI. The packaged app contains
+the Electron main/preload scripts and `finitechatd`, not a second web build.
 
-Scope:
-
-- Import the legacy `FiniteChat` component family and related CSS/patterns as a
-  starting point.
-- Replace data hooks with `AppState`/`AppAction` daemon bindings.
-- Reuse existing shadcn/ui primitives already used by the legacy dashboard.
-- When new chat-specific UI primitives are needed, evaluate current shadcn chat
-  components and add only primitives that fit the domain.
-- Keep the first viewport as the usable app, not a landing page.
-
-Acceptance:
-
-- Electron renders Rooms, Topics, selected Chat transcript, composer,
-  attachments, activity, and runtime state from daemon `AppState`.
-- Topics render as sidebar headers, with Chats shown as rows beneath them.
-- Creating "New chat" dispatches `StartTopicChat` in the current Topic, falling
-  back to the Room's `Home` Topic.
-- Creating "New topic" dispatches `CreateTopic` inside the selected room and
-  selects the first Chat under that Topic.
-- Hovering a Topic header reveals a compact new-chat icon.
-- Adding another participant uses one AppState path:
-  - invite-code paste dispatches `ScanTarget`;
-  - npub paste dispatches `ScanTarget`, then `StartProfileChat` or
-    `AddRoomMembers` with the resolved `AppProfileSummary`;
-  - room invite generation dispatches `CreateInvite`.
-- `/new` or reset creates a Chat in the selected Topic.
-- UI updates arrive from daemon SSE and reconcile with local draft/layout state.
-- `finite://join?...` links open the app and dispatch `ScanTarget`.
-- For renderer iteration, run `npm run dev:renderer` and launch Electron with
-  `npm run dev:electron`; the Electron main process loads
-  `FINITECHAT_RENDERER_URL` in development and falls back to the built
-  `dist/` app for packaged/static runs.
+The sandboxed preload exposes only the versioned `local-chat-v1`,
+`automatic-device-link-v1`, and `revoked-device-recovery-v1` capabilities.
+Electron main validates the trusted frame, brokers bounded chat actions to the
+local encrypted daemon, and automatically links the local Device after the
+dashboard session is authenticated. Development uses `npm run dev:electron`
+against the local dashboard; `npm run dev:electron:fixture` opens the dedicated
+web-design route without exposing the local chat bridge.
 
 ## Phase 4: Cross-Device And Hosted Runtime Proof
 

@@ -1027,7 +1027,6 @@ async function createAndApproveDeviceLink(generation) {
     spawnProcess: spawn,
     binaryPath,
     serverUrl: defaultServerUrl,
-    dashboardUrl: defaultDashboardUrl,
     deviceId: daemonDeviceId(),
     cwd: app.isPackaged ? path.dirname(binaryPath) : repoRoot(),
     storeAccountSecret: async (accountSecret) => writeProvisionalAccountSecret(accountSecret),

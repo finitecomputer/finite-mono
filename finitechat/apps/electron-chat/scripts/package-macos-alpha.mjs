@@ -20,7 +20,6 @@ const packagedApp = path.join(resources, "app");
 const packageJson = JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8"));
 
 requireDirectory(electronApp, "Electron runtime");
-requireDirectory(path.join(appRoot, "dist"), "built renderer");
 requireExecutable(daemonBinary, "finitechatd release binary");
 
 fs.mkdirSync(outputRoot, { recursive: true });
@@ -40,9 +39,6 @@ const executable = path.join(contents, "MacOS", "Finite Chat");
 fs.renameSync(oldExecutable, executable);
 
 fs.mkdirSync(packagedApp, { recursive: true });
-fs.cpSync(path.join(appRoot, "dist"), path.join(packagedApp, "dist"), {
-  recursive: true,
-});
 fs.cpSync(path.join(appRoot, "electron"), path.join(packagedApp, "electron"), {
   recursive: true,
   filter(source) {
