@@ -6,6 +6,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct RoomThreadView: View {
+    @Environment(\.finiteTokens) private var tokens
     @ObservedObject var model: AppModel
     let roomID: String
     let composerLaunch: ComposerLaunch?
@@ -337,6 +338,8 @@ struct RoomThreadView: View {
                 onSend: {
                     sendComposerDraft()
                 },
+                outerHorizontalPadding: tokens.composerHorizontalPadding,
+                surfaceRadius: tokens.composerRadius,
                 onStartVoiceRecording: {
                     startVoiceRecording()
                 }
