@@ -175,7 +175,7 @@ pub(crate) fn insert_sync_record(
             brain_id.as_str(),
             sequence,
             input.record_event_id(),
-            input.record_type().as_str(),
+            input.record_type().as_storage_str(),
             input.folder_id().map(FolderId::as_str),
             input.object_id().map(ObjectId::as_str),
             input.revision(),
