@@ -184,6 +184,7 @@ type HostedAuthRequest = {
 
 type HostedDeviceState = {
   unavailable: boolean;
+  updatesUnavailable: boolean;
   ownerClaimGate: Promise<void> | null;
   releaseOwnerClaimGate: (() => void) | null;
   navigationActionGate: Promise<void> | null;
@@ -928,6 +929,31 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         true
       );
 
+      hostedDevice.setUpdatesAvailable(false);
+      await page.waitForTimeout(500);
+      assert.equal(
+        await page.getByText("Chat needs attention", { exact: true }).count(),
+        0,
+        "a transient update-stream reconnect rendered an action-required alert"
+      );
+      assert.equal(
+        await page.getByText("Reconnecting", { exact: true }).count(),
+        0,
+        "the reconnect notice flashed before the grace period elapsed"
+      );
+      await page
+        .getByText("Reconnecting", { exact: true })
+        .waitFor({ state: "visible", timeout: 5_000 });
+      assert.equal(
+        await page.getByText("Chat needs attention", { exact: true }).count(),
+        0,
+        "a prolonged update-stream reconnect rendered an action-required alert"
+      );
+      hostedDevice.setUpdatesAvailable(true);
+      await page
+        .getByText("Reconnecting", { exact: true })
+        .waitFor({ state: "hidden", timeout: 5_000 });
+
       hostedDevice.setAvailable(false);
       await page.reload();
       await page
@@ -1659,6 +1685,7 @@ async function startFakeHostedDevice() {
   const app = initialHostedChatState();
   const state: HostedDeviceState = {
     unavailable: false,
+    updatesUnavailable: false,
     ownerClaimGate: null,
     releaseOwnerClaimGate: null,
     navigationActionGate: null,
@@ -1744,6 +1771,13 @@ async function startFakeHostedDevice() {
     },
     setAvailable(available: boolean) {
       state.unavailable = !available;
+      if (!available) {
+        for (const stream of streams) stream.end();
+        streams.clear();
+      }
+    },
+    setUpdatesAvailable(available: boolean) {
+      state.updatesUnavailable = !available;
       if (!available) {
         for (const stream of streams) stream.end();
         streams.clear();
@@ -1989,6 +2023,10 @@ async function handleHostedDeviceRequest(
   }
 
   if (request.method === "GET" && path === "/v1/app/updates") {
+    if (state.updatesUnavailable) {
+      writeJson(response, 503, { error: "hosted chat updates are temporarily unavailable" });
+      return;
+    }
     response.writeHead(200, {
       "cache-control": "no-cache",
       connection: "keep-alive",
