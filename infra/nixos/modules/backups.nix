@@ -58,6 +58,7 @@ in
         core_was_active=0
         brain_was_active=0
         identity_was_active=0
+        sites_was_active=0
         kata_was_active=0
         kata_timer_was_active=0
         phala_was_active=0
@@ -67,6 +68,7 @@ in
           rm -rf "$staging" || cleanup_status=1
           if [ "$chat_was_active" = 1 ]; then systemctl start finitechat-server.service || cleanup_status=1; fi
           if [ "$identity_was_active" = 1 ]; then systemctl start finite-identity.service || cleanup_status=1; fi
+          if [ "$sites_was_active" = 1 ]; then systemctl start finite-saas-sites.service || cleanup_status=1; fi
           if [ "$core_was_active" = 1 ]; then systemctl start finite-saas-core.service || cleanup_status=1; fi
           if [ "$brain_was_active" = 1 ]; then systemctl start finite-brain-app.service || cleanup_status=1; fi
           if [ "$hosted_was_active" = 1 ]; then systemctl start finitechat-hosted-device.service || cleanup_status=1; fi
@@ -89,6 +91,7 @@ in
         systemctl is-active --quiet finite-saas-core.service && core_was_active=1 || true
         systemctl is-active --quiet finite-brain-app.service && brain_was_active=1 || true
         systemctl is-active --quiet finite-identity.service && identity_was_active=1 || true
+        systemctl is-active --quiet finite-saas-sites.service && sites_was_active=1 || true
         systemctl is-active --quiet finite-saas-runner.service && kata_was_active=1 || true
         systemctl is-active --quiet finite-saas-runner.timer && kata_timer_was_active=1 || true
         systemctl is-active --quiet finite-saas-runner-phala.service && phala_was_active=1 || true
@@ -99,6 +102,7 @@ in
         if [ "$core_was_active" = 1 ]; then systemctl stop finite-saas-core.service; fi
         if [ "$brain_was_active" = 1 ]; then systemctl stop finite-brain-app.service; fi
         if [ "$hosted_was_active" = 1 ]; then systemctl stop finitechat-hosted-device.service; fi
+        if [ "$sites_was_active" = 1 ]; then systemctl stop finite-saas-sites.service; fi
         if [ "$identity_was_active" = 1 ]; then systemctl stop finite-identity.service; fi
         if [ "$chat_was_active" = 1 ]; then systemctl stop finitechat-server.service; fi
 
