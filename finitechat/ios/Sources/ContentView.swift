@@ -129,6 +129,7 @@ struct RoomThreadView: View {
         .background(Color(.systemGroupedBackground).ignoresSafeArea())
         .navigationTitle(chatNavigationTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden()
         .chatNavigationBarChrome()
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {

@@ -117,6 +117,7 @@ struct ContentView: View {
                             showsDrawer = false
                         }
                     },
+                    openHome: openHomeFromDrawer,
                     openChat: openFromDrawer
                 )
                 .transition(.opacity)
@@ -261,6 +262,13 @@ struct ContentView: View {
             withAnimation(.snappy(duration: 0.24)) {
                 showsDrawer = false
             }
+        }
+    }
+
+    private func openHomeFromDrawer() {
+        path.removeAll()
+        withAnimation(.snappy(duration: 0.24)) {
+            showsDrawer = false
         }
     }
 
@@ -414,6 +422,7 @@ struct ChatDrawerOverlay: View {
     let groups: [ChatTopicGroup]
     let selectedChatID: String?
     let dismiss: () -> Void
+    let openHome: () -> Void
     let openChat: (ChatDestination) -> Void
 
     var body: some View {
@@ -444,11 +453,25 @@ struct ChatDrawerOverlay: View {
 
                     Divider()
 
-                    if groups.isEmpty {
-                        ContentUnavailableView("No chats yet", systemImage: "bubble.left")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        List {
+                    List {
+                        Section {
+                            Button(action: openHome) {
+                                HStack {
+                                    Label("Home", systemImage: "house")
+                                    Spacer()
+                                    if selectedChatID == nil {
+                                        Image(systemName: "checkmark")
+                                            .foregroundStyle(.tint)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("DrawerHomeButton")
+                        }
+
+                        if groups.isEmpty {
+                            ContentUnavailableView("No chats yet", systemImage: "bubble.left")
+                        } else {
                             ForEach(groups) { group in
                                 Section(group.title) {
                                     ForEach(group.chats) { chat in
@@ -478,9 +501,9 @@ struct ChatDrawerOverlay: View {
                                 }
                             }
                         }
-                        .listStyle(.sidebar)
-                        .scrollContentBackground(.hidden)
                     }
+                    .listStyle(.sidebar)
+                    .scrollContentBackground(.hidden)
                 }
                 .frame(width: min(tokens.drawerWidth, proxy.size.width - 32))
                 .frame(maxHeight: .infinity)
@@ -723,6 +746,7 @@ private enum FocusedPreviewFixtures {
         ],
         selectedChatID: "ship-ios",
         dismiss: {},
+        openHome: {},
         openChat: { _ in }
     )
 }
