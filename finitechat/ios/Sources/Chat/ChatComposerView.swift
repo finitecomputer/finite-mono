@@ -15,9 +15,15 @@ struct Composer: View {
     let reportError: (String) -> Void
     let onCancelReply: () -> Void
     let onSend: () -> Void
-    let onStartVoiceRecording: () -> Void
-    let onAttach: () -> Void
-    let onCreatePoll: () -> Void
+    var placeholder = "Message"
+    var allowsPhotoAttachments = true
+    var allowsPastedAttachments = true
+    var messageFieldAccessibilityIdentifier = "ComposerMessageField"
+    var sendAccessibilityLabel = "Send"
+    var sendAccessibilityIdentifier = "SendButton"
+    var onStartVoiceRecording: (() -> Void)?
+    var onAttach: (() -> Void)?
+    var onCreatePoll: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 8) {
@@ -48,7 +54,7 @@ struct Composer: View {
             VStack(alignment: .leading, spacing: 10) {
                 ZStack(alignment: .topLeading) {
                     if text.isEmpty {
-                        Text("Message")
+                        Text(placeholder)
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 5)
@@ -62,52 +68,23 @@ struct Composer: View {
                         isFocused: $isInputFocused,
                         maxHeight: 150,
                         onSend: onSend,
-                        onImagePaste: stagePastedAttachment
+                        onImagePaste: allowsPastedAttachments ? stagePastedAttachment : nil
                     )
                     .frame(minHeight: 52)
-                    .accessibilityLabel("Message")
-                    .accessibilityIdentifier("ComposerMessageField")
+                    .accessibilityLabel(placeholder)
+                    .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
                 }
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
 
                 HStack(spacing: 12) {
-                    Menu {
-                        Button {
-                            isPhotoPickerPresented = true
-                        } label: {
-                            Label("Photos & Videos", systemImage: "photo.on.rectangle")
-                        }
-
-                        Button {
-                            onAttach()
-                        } label: {
-                            Label("Files", systemImage: "doc")
-                        }
-
-                        Button {
-                            onCreatePoll()
-                        } label: {
-                            Label("Poll", systemImage: "chart.bar.doc.horizontal")
-                        }
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.title3.weight(.regular))
-                            .frame(width: 34, height: 34)
-                            .contentShape(Circle())
+                    if showsAttachmentMenu {
+                        attachmentMenu
                     }
-                    .accessibilityLabel("Attach")
-                    .accessibilityIdentifier("AttachButton")
-                    .photosPicker(
-                        isPresented: $isPhotoPickerPresented,
-                        selection: $selectedPhotoItems,
-                        maxSelectionCount: remainingPhotoSelectionCount,
-                        matching: .any(of: [.images, .videos])
-                    )
 
                     Spacer()
 
-                    if stagedAttachments.isEmpty {
+                    if stagedAttachments.isEmpty, let onStartVoiceRecording {
                         Button {
                             onStartVoiceRecording()
                         } label: {
@@ -131,8 +108,8 @@ struct Composer: View {
                                 .background(Circle().fill(Color.accentColor))
                         }
                         .disabled(sendDisabled)
-                        .accessibilityLabel("Send")
-                        .accessibilityIdentifier("SendButton")
+                        .accessibilityLabel(sendAccessibilityLabel)
+                        .accessibilityIdentifier(sendAccessibilityIdentifier)
                         .transition(.scale.combined(with: .opacity))
                     }
                 }
@@ -149,6 +126,48 @@ struct Composer: View {
         .background(Color.clear)
         .animation(.easeInOut(duration: 0.16), value: stagedAttachments.isEmpty)
         .animation(.snappy(duration: 0.18), value: showsSendButton)
+    }
+
+    @ViewBuilder
+    private var attachmentMenu: some View {
+        Menu {
+            if allowsPhotoAttachments {
+                Button {
+                    isPhotoPickerPresented = true
+                } label: {
+                    Label("Photos & Videos", systemImage: "photo.on.rectangle")
+                }
+            }
+
+            if let onAttach {
+                Button(action: onAttach) {
+                    Label("Files", systemImage: "doc")
+                }
+            }
+
+            if let onCreatePoll {
+                Button(action: onCreatePoll) {
+                    Label("Poll", systemImage: "chart.bar.doc.horizontal")
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.title3.weight(.regular))
+                .frame(width: 34, height: 34)
+                .contentShape(Circle())
+        }
+        .accessibilityLabel("Attach")
+        .accessibilityIdentifier("AttachButton")
+        .photosPicker(
+            isPresented: $isPhotoPickerPresented,
+            selection: $selectedPhotoItems,
+            maxSelectionCount: remainingPhotoSelectionCount,
+            matching: .any(of: [.images, .videos])
+        )
+    }
+
+    private var showsAttachmentMenu: Bool {
+        allowsPhotoAttachments || onAttach != nil || onCreatePoll != nil
     }
 
     private var sendDisabled: Bool {
@@ -180,6 +199,41 @@ struct Composer: View {
         } catch {
             reportError(String(describing: error))
         }
+    }
+}
+
+struct TextOnlyComposer: View {
+    @Binding var text: String
+    @Binding var isInputFocused: Bool
+    let canSubmit: Bool
+    let placeholder: String
+    let sendAccessibilityLabel: String
+    let messageFieldAccessibilityIdentifier: String
+    let sendAccessibilityIdentifier: String
+    let onSend: () -> Void
+    @State private var stagedAttachments: [StagedComposerAttachment] = []
+    @State private var isPhotoPickerPresented = false
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+
+    var body: some View {
+        Composer(
+            text: $text,
+            replyTarget: nil,
+            canSubmit: canSubmit,
+            stagedAttachments: $stagedAttachments,
+            isPhotoPickerPresented: $isPhotoPickerPresented,
+            selectedPhotoItems: $selectedPhotoItems,
+            isInputFocused: $isInputFocused,
+            reportError: { _ in },
+            onCancelReply: {},
+            onSend: onSend,
+            placeholder: placeholder,
+            allowsPhotoAttachments: false,
+            allowsPastedAttachments: false,
+            messageFieldAccessibilityIdentifier: messageFieldAccessibilityIdentifier,
+            sendAccessibilityLabel: sendAccessibilityLabel,
+            sendAccessibilityIdentifier: sendAccessibilityIdentifier
+        )
     }
 }
 

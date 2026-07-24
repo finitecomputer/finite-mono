@@ -23,13 +23,11 @@ struct FiniteDesignTokens {
     var pagePadding: CGFloat = 20
     var sectionSpacing: CGFloat = 24
     var controlSpacing: CGFloat = 12
-    var composerRadius: CGFloat = 28
     var panelRadius: CGFloat = 30
     var drawerWidth: CGFloat = 340
     var homeHeroMarkSize: CGFloat = 104
     var homeHeroTopSpacing: CGFloat = 92
     var recentBadgeSpacing: CGFloat = 8
-    var homeDockBottomSpacing: CGFloat = 10
 }
 
 private struct FiniteDesignTokensKey: EnvironmentKey {
@@ -298,6 +296,7 @@ struct FocusedHomeView: View {
     let chooseAgent: () -> Void
     @State private var draft = ""
     @State private var isStartingChat = false
+    @State private var isComposerFocused = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -347,13 +346,16 @@ struct FocusedHomeView: View {
             .scrollDismissesKeyboard(.interactively)
 
             if agentName != nil {
-                HomeComposer(
+                TextOnlyComposer(
                     text: $draft,
-                    isSending: isStartingChat,
-                    send: submitDraft
+                    isInputFocused: $isComposerFocused,
+                    canSubmit: canSend,
+                    placeholder: "What do you want to work on?",
+                    sendAccessibilityLabel: "Start new chat",
+                    messageFieldAccessibilityIdentifier: "HomeComposerField",
+                    sendAccessibilityIdentifier: "HomeComposerSend",
+                    onSend: submitDraft
                 )
-                .padding(.horizontal, tokens.pagePadding)
-                .padding(.bottom, tokens.homeDockBottomSpacing)
             }
         }
         .background(Color(.systemBackground))
@@ -361,7 +363,12 @@ struct FocusedHomeView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isStartingChat
+    }
+
     private func submitDraft() {
+        guard canSend else { return }
         let message = draft
         isStartingChat = true
         startChat(message) { success in
@@ -373,80 +380,29 @@ struct FocusedHomeView: View {
     }
 }
 
-private struct HomeComposer: View {
-    @Environment(\.finiteTokens) private var tokens
-    @Binding var text: String
-    let isSending: Bool
-    let send: () -> Void
-
-    private var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSending
-    }
-
-    var body: some View {
-        GlassEffectContainer(spacing: 10) {
-            HStack(alignment: .bottom, spacing: 10) {
-                TextField("What do you want to work on?", text: $text, axis: .vertical)
-                    .lineLimit(1 ... 6)
-                    .textFieldStyle(.plain)
-                    .padding(.leading, 6)
-                    .accessibilityIdentifier("HomeComposerField")
-
-                Button(action: send) {
-                    Image(systemName: isSending ? "ellipsis" : "arrow.up")
-                        .font(.headline)
-                        .frame(width: 38, height: 38)
-                }
-                .buttonStyle(.glassProminent)
-                .disabled(!canSend)
-                .accessibilityLabel("Start new chat")
-                .accessibilityIdentifier("HomeComposerSend")
-            }
-            .padding(12)
-            .glassEffect(
-                .regular.interactive(),
-                in: .rect(cornerRadius: tokens.composerRadius)
-            )
-        }
-    }
-}
-
 private struct RecentChatBadges: View {
     let chats: [ChatDestination]
     let spacing: CGFloat
     let openChat: (ChatDestination) -> Void
 
     var body: some View {
-        VStack(spacing: 10) {
-            Text("Recent")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-                .tracking(0.7)
-
-            ScrollView(.horizontal) {
-                GlassEffectContainer(spacing: spacing) {
-                    HStack(spacing: spacing) {
-                        ForEach(chats) { chat in
-                            Button {
-                                openChat(chat)
-                            } label: {
-                                Label(chat.title, systemImage: "bubble.left")
-                                    .font(.subheadline.weight(.medium))
-                                    .lineLimit(1)
-                                    .frame(width: 82, alignment: .leading)
-                            }
-                            .buttonStyle(.glass)
-                            .controlSize(.small)
-                            .accessibilityLabel("Recent chat: \(chat.title)")
-                            .accessibilityIdentifier("RecentChat-\(chat.chatID)")
-                        }
+        GlassEffectContainer(spacing: spacing) {
+            VStack(spacing: spacing) {
+                ForEach(chats) { chat in
+                    Button {
+                        openChat(chat)
+                    } label: {
+                        Label(chat.title, systemImage: "bubble.left")
+                            .font(.subheadline.weight(.medium))
+                            .lineLimit(1)
                     }
-                    .padding(.horizontal, 2)
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+                    .accessibilityLabel("Recent chat: \(chat.title)")
+                    .accessibilityIdentifier("RecentChat-\(chat.chatID)")
                 }
             }
-            .scrollIndicators(.hidden)
-            .contentMargins(.horizontal, 1, for: .scrollContent)
+            .padding(12)
         }
         .frame(maxWidth: .infinity)
     }
