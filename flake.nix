@@ -107,6 +107,7 @@
             rustPlatform.rustLibSrc
             rustc
             rustfmt
+            xxd
           ];
 
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
