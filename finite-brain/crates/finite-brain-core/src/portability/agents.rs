@@ -1,6 +1,6 @@
 use super::*;
 
-/// Candidate `AGENTS.md` files from nearest page directory to Vault root.
+/// Candidate `AGENTS.md` files from nearest page directory to Brain root.
 pub fn agent_discovery_paths(
     page_path: &SafeRelativePath,
 ) -> Result<Vec<SafeRelativePath>, CoreError> {

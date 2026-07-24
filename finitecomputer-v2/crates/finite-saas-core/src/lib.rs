@@ -743,6 +743,15 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAgentAccount {
+    pub workos_user_id: String,
+    pub managed_agent_email: String,
+    pub verified_email: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntime {
     pub id: String,
     pub project_id: String,

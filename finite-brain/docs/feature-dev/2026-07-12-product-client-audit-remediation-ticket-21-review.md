@@ -11,7 +11,7 @@
 ## Implementation Summary
 
 The invitation panel now derives one explicit control state from signer,
-Session, input, and Vault state. Protected actions guard before epoch capture.
+Session, input, and Brain state. Protected actions guard before epoch capture.
 The top-level administrator revoke resolves only known admin-side IDs, avoiding
 the recipient-bound inspection route.
 

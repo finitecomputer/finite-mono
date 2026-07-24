@@ -8,7 +8,7 @@ pub(crate) fn sync_record_response(record: StoredSyncRecord) -> SyncRecordRespon
             SyncRecordType::FolderObjectRevision => "folder_object_revision",
             SyncRecordType::FolderObjectTombstone => "folder_object_tombstone",
             SyncRecordType::FolderKeyGrant => "folder_key_grant",
-            SyncRecordType::VaultAdminAccessChange => "vault_admin_access_change",
+            SyncRecordType::BrainAdminAccessChange => "brain_admin_access_change",
         }
         .to_owned(),
         folder_id: record.folder_id.map(|folder_id| folder_id.to_string()),
@@ -23,38 +23,42 @@ pub(crate) fn sync_record_response(record: StoredSyncRecord) -> SyncRecordRespon
     }
 }
 
-pub(crate) fn metadata_response(stored: StoredVault) -> VaultMetadataResponse {
+pub(crate) fn metadata_response(stored: StoredBrain) -> BrainMetadataResponse {
     metadata_response_with_mounts(stored, Vec::new())
 }
 
 pub(crate) fn metadata_response_for_actor(
-    mut stored: StoredVault,
+    mut stored: StoredBrain,
     mounted_folders: Vec<MountedFolderProjection>,
     actor_npub: &str,
-) -> VaultMetadataResponse {
-    let is_limited_personal_member = stored.vault.kind == VaultKind::Personal
+) -> BrainMetadataResponse {
+    let is_limited_personal_member = stored.brain.kind == BrainKind::Personal
         && stored
-            .vault
+            .brain
             .owner_user_id
             .as_ref()
-            .is_none_or(|owner| owner.as_str() != actor_npub);
+            .is_none_or(|owner| owner.as_str() != actor_npub)
+        && stored
+            .personal_agent
+            .as_ref()
+            .is_none_or(|relationship| relationship.agent_npub.as_str() != actor_npub);
     if !is_limited_personal_member {
         return metadata_response_with_mounts(stored, mounted_folders);
     }
 
     let visible_folder_ids = stored
-        .vault
+        .brain
         .folders
         .iter()
         .filter(|folder| folder_visible(&stored, &folder.id, actor_npub))
         .map(|folder| folder.id.clone())
         .collect::<BTreeSet<_>>();
     stored
-        .vault
+        .brain
         .folders
         .retain(|folder| visible_folder_ids.contains(&folder.id));
     stored
-        .vault
+        .brain
         .members
         .retain(|member| member.user_id.as_str() == actor_npub);
     stored.grants.retain(|grant| {
@@ -74,31 +78,40 @@ pub(crate) fn metadata_response_for_actor(
 }
 
 pub(crate) fn metadata_response_with_mounts(
-    stored: StoredVault,
+    stored: StoredBrain,
     mounted_folders: Vec<MountedFolderProjection>,
-) -> VaultMetadataResponse {
+) -> BrainMetadataResponse {
     let folder_access = stored.folder_access;
     let setup_incomplete = stored.setup_incomplete_folder_ids;
-    VaultMetadataResponse {
-        vault_id: stored.vault.id.to_string(),
-        kind: stored.vault.kind,
-        name: stored.vault.name.to_string(),
-        owner_user_id: stored.vault.owner_user_id.map(|owner| owner.to_string()),
+    BrainMetadataResponse {
+        brain_id: stored.brain.id.to_string(),
+        kind: stored.brain.kind,
+        name: stored.brain.name.to_string(),
+        owner_user_id: stored.brain.owner_user_id.map(|owner| owner.to_string()),
+        personal_agent: stored
+            .personal_agent
+            .map(|relationship| PersonalAgentResponse {
+                owner_npub: relationship.owner_npub.to_string(),
+                agent_npub: relationship.agent_npub.to_string(),
+                created_by_npub: relationship.created_by_npub.to_string(),
+                created_at: relationship.created_at,
+                updated_at: relationship.updated_at,
+            }),
         members: stored
-            .vault
+            .brain
             .members
             .iter()
             .map(|member| member.user_id.to_string())
             .collect(),
         admins: stored
-            .vault
+            .brain
             .admins
             .iter()
             .map(ToString::to_string)
             .collect(),
         identities: Vec::new(),
         folders: stored
-            .vault
+            .brain
             .folders
             .iter()
             .map(|folder| FolderMetadataResponse {
@@ -122,33 +135,34 @@ pub(crate) fn metadata_response_with_mounts(
     }
 }
 
-pub(crate) fn visible_vaults_response(vaults: Vec<VisibleVault>) -> VisibleVaultsResponse {
-    VisibleVaultsResponse {
-        vaults: vaults
+pub(crate) fn visible_brains_response(brains: Vec<VisibleBrain>) -> VisibleBrainsResponse {
+    VisibleBrainsResponse {
+        brains: brains
             .into_iter()
-            .map(|vault| VisibleVaultResponse {
-                vault_id: vault.id.to_string(),
-                kind: vault.kind,
-                name: vault.name,
-                role: match vault.role {
-                    VisibleVaultRole::Owner => "owner",
-                    VisibleVaultRole::Admin => "admin",
-                    VisibleVaultRole::Member => "member",
-                    VisibleVaultRole::Invited => "invited",
+            .map(|brain| VisibleBrainResponse {
+                brain_id: brain.id.to_string(),
+                kind: brain.kind,
+                name: brain.name,
+                role: match brain.role {
+                    VisibleBrainRole::Owner => "owner",
+                    VisibleBrainRole::PersonalAgent => "personal_agent",
+                    VisibleBrainRole::Admin => "admin",
+                    VisibleBrainRole::Member => "member",
+                    VisibleBrainRole::Invited => "invited",
                 }
                 .to_owned(),
-                invite_code: vault.invite_code,
+                invite_code: brain.invite_code,
             })
             .collect(),
     }
 }
 
-pub(crate) fn vault_invitation_response(
-    invitation: StoredVaultInvitation,
-) -> VaultInvitationResponse {
-    VaultInvitationResponse {
+pub(crate) fn brain_invitation_response(
+    invitation: StoredBrainInvitation,
+) -> BrainInvitationResponse {
+    BrainInvitationResponse {
         id: invitation.id,
-        vault_id: invitation.vault_id.to_string(),
+        brain_id: invitation.brain_id.to_string(),
         target_kind: invitation.target_kind.as_str().to_owned(),
         user_id: invitation.user_id.map(|user_id| user_id.to_string()),
         invited_email: invitation.invited_email,
@@ -189,7 +203,7 @@ pub(crate) fn vault_invitation_response(
 pub(crate) fn share_link_response(share_link: StoredShareLink) -> ShareLinkResponse {
     ShareLinkResponse {
         id: share_link.id,
-        vault_id: share_link.vault_id.to_string(),
+        brain_id: share_link.brain_id.to_string(),
         folder_id: share_link.folder_id.to_string(),
         recipient_npub: share_link.recipient_npub.to_string(),
         created_by_npub: share_link.created_by_npub.to_string(),
@@ -212,9 +226,9 @@ pub(crate) fn shared_folder_invitation_response(
 ) -> SharedFolderInvitationResponse {
     SharedFolderInvitationResponse {
         id: invitation.id,
-        source_vault_id: invitation.source_vault_id.to_string(),
+        source_brain_id: invitation.source_brain_id.to_string(),
         source_folder_id: invitation.source_folder_id.to_string(),
-        destination_vault_id: invitation.destination_vault_id.to_string(),
+        destination_brain_id: invitation.destination_brain_id.to_string(),
         destination_admin_npub: invitation.destination_admin_npub.to_string(),
         created_by_npub: invitation.created_by_npub.to_string(),
         identities: Vec::new(),
@@ -234,9 +248,9 @@ pub(crate) fn shared_folder_connection_response(
 ) -> SharedFolderConnectionResponse {
     SharedFolderConnectionResponse {
         id: connection.id,
-        source_vault_id: connection.source_vault_id.to_string(),
+        source_brain_id: connection.source_brain_id.to_string(),
         source_folder_id: connection.source_folder_id.to_string(),
-        destination_vault_id: connection.destination_vault_id.to_string(),
+        destination_brain_id: connection.destination_brain_id.to_string(),
         destination_admin_npub: connection.destination_admin_npub.to_string(),
         identities: Vec::new(),
         status: match connection.status {
@@ -261,8 +275,8 @@ pub(crate) fn mounted_folder_responses(
         .into_iter()
         .map(|mount| MountedFolderResponse {
             mount_id: mount.mount_id,
-            organization_vault_id: mount.organization_vault_id.to_string(),
-            source_vault_id: mount.source_vault_id.to_string(),
+            organization_brain_id: mount.organization_brain_id.to_string(),
+            source_brain_id: mount.source_brain_id.to_string(),
             source_folder_id: mount.source_folder_id.to_string(),
             connection_id: mount.connection_id,
             display_name: mount.display_name,
@@ -277,16 +291,16 @@ pub(crate) fn mounted_folder_responses(
         .collect()
 }
 
-pub(crate) fn encrypted_vault_export_response(
-    export: EncryptedVaultExport,
-) -> EncryptedVaultExportResponse {
-    EncryptedVaultExportResponse {
+pub(crate) fn encrypted_brain_export_response(
+    export: EncryptedBrainExport,
+) -> EncryptedBrainExportResponse {
+    EncryptedBrainExportResponse {
         version: export.version,
-        vault: ExportVaultSummaryResponse {
-            id: export.vault.id.to_string(),
-            kind: export.vault.kind,
-            name: export.vault.name.to_string(),
-            owner_user_id: export.vault.owner_user_id.map(|owner| owner.to_string()),
+        brain: ExportBrainSummaryResponse {
+            id: export.brain.id.to_string(),
+            kind: export.brain.kind,
+            name: export.brain.name.to_string(),
+            owner_user_id: export.brain.owner_user_id.map(|owner| owner.to_string()),
         },
         folders: export
             .folders

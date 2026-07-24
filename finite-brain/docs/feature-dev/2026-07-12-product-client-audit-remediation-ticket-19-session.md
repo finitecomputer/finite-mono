@@ -11,7 +11,7 @@
 - Spec issue: #17
 - Ticket: #19
 - Relevant glossary terms: Product Client, Session Lock, Session Folder Key,
-  Ephemeral Client Plaintext, Vault invitation
+  Ephemeral Client Plaintext, Brain invitation
 - Relevant ADRs: 0004, 0009, 0010, 0013, 0014
 - Prototype answer and source branch, if any: none
 

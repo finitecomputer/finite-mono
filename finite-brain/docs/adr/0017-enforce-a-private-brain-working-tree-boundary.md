@@ -1,8 +1,8 @@
-# Enforce A Private Vault Working Tree Boundary
+# Enforce A Private Brain Working Tree Boundary
 
 Status: accepted
 
-`fbrain` creates and validates each explicit Vault Working Tree root and its
+`fbrain` creates and validates each explicit Brain Working Tree root and its
 FiniteBrain-owned control state as private to the controlling OS account,
 fails closed on insecure permissions or managed-path symlink escapes, and
 offers an explicit repair path for existing trees. This boundary is deliberately

@@ -1,4 +1,4 @@
-# Issue #44 Session: Vault Working Tree Sync
+# Issue #44 Session: Brain Working Tree Sync
 
 ## Issue
 
@@ -12,7 +12,7 @@
 
 - PRD issue: `finitecomputer/finite-brain#43`
 - Slice issue: `finitecomputer/finite-brain#44`
-- Relevant glossary terms: Vault Working Tree, Agent CLI, Agent Sync Daemon, Local Agent Signer, Blocked Sync State
+- Relevant glossary terms: Brain Working Tree, Agent CLI, Agent Sync Daemon, Local Agent Signer, Blocked Sync State
 - Relevant ADRs/specs: `CONTEXT.md`, `docs/specs/finitebrain-portability-spec.md`, `docs/adr/0002-use-sqlite-from-day-one.md`, `docs/adr/0003-keep-folder-object-crypto-in-finite-brain-core.md`
 - Prototype answer, if any: none
 
@@ -22,11 +22,11 @@
 - Behaviors covered:
   - Sync fetches encrypted export and sync bootstrap, then persists evidence under `.finitebrain/encrypted-sync`.
   - Sync opens NIP-59 Folder Key Grants addressed to the local signer and records local Folder Keys in agent state.
-  - Accessible objects are decrypted and materialized through `materialize_vault_working_tree`.
+  - Accessible objects are decrypted and materialized through `materialize_brain_working_tree`.
   - Empty readable folders remain materialized with agent/wiki convention files.
   - Local markdown creates, updates, and deletes are planned through `plan_working_tree_change_intents`, encrypted with Folder Keys, signed as Nostr `30078` records, and submitted through secure object routes.
   - Server `409` write conflicts become open `ConflictEntry` records instead of silent overwrites.
-  - `vault create` now sends client-generated bootstrap Folder Key Grants so newly created personal vaults open as readable for the creating signer.
+  - `brain create` now sends client-generated bootstrap Folder Key Grants so newly created personal brains open as readable for the creating signer.
 - `tdd` used: focused sync-engine tests for scan/materialization/revision validation plus a public command test that drives `fbrain sync now --server ...` against a local fake server and verifies conflict recording.
 - Commands run during implementation:
   - `cargo test -p finite-brain-cli`

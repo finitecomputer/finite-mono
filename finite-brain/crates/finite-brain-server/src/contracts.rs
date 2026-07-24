@@ -1,47 +1,69 @@
-use finite_brain_core::{FolderAccessMode, FolderRole, VaultKind};
+use finite_brain_core::{BrainKind, FolderAccessMode, FolderRole};
 use serde::{Deserialize, Serialize};
 
-/// Create Vault request.
+/// Create Brain request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateVaultRequest {
-    pub vault_id: String,
-    pub kind: CreateVaultKind,
+pub struct CreateBrainRequest {
+    pub brain_id: String,
+    pub kind: CreateBrainKind,
     pub name: String,
     #[serde(default)]
-    pub bootstrap_grants: Vec<CreateVaultFolderKeyGrantRequest>,
+    pub bootstrap_grants: Vec<CreateBrainFolderKeyGrantRequest>,
+    #[serde(default)]
+    pub personal_agent_email: Option<String>,
+    #[serde(default)]
+    pub personal_agent_npub: Option<String>,
+    #[serde(default)]
+    pub initial_agent_email: Option<String>,
+    #[serde(default)]
+    pub initial_agent_npub: Option<String>,
+    #[serde(default)]
+    pub requesting_user_npub: Option<String>,
 }
 
-/// Supported Vault creation kinds.
+/// Supported Brain creation kinds.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CreateVaultKind {
+pub enum CreateBrainKind {
     Personal,
     Organization,
 }
 
-/// Client-generated current Folder Key Grant for initial Vault bootstrap.
+/// Client-generated current Folder Key Grant for initial Brain bootstrap.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateVaultFolderKeyGrantRequest {
+pub struct CreateBrainFolderKeyGrantRequest {
     pub folder_id: String,
     pub grant: FolderKeyGrantRequest,
 }
 
-/// Vault metadata response without plaintext Page content.
+/// Brain metadata response without plaintext Page content.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultMetadataResponse {
-    pub vault_id: String,
-    pub kind: VaultKind,
+pub struct BrainMetadataResponse {
+    pub brain_id: String,
+    pub kind: BrainKind,
     pub name: String,
     pub owner_user_id: Option<String>,
+    pub personal_agent: Option<PersonalAgentResponse>,
     pub members: Vec<String>,
     pub admins: Vec<String>,
     pub identities: Vec<IdentityResponse>,
     pub folders: Vec<FolderMetadataResponse>,
     pub mounted_folders: Vec<MountedFolderResponse>,
     pub grant_count: usize,
+}
+
+/// The one active Personal Agent relationship for a Personal Brain.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalAgentResponse {
+    pub owner_npub: String,
+    pub agent_npub: String,
+    pub created_by_npub: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Display metadata for one canonical Nostr identity.
@@ -63,19 +85,19 @@ pub struct ResolveIdentityRequest {
     pub input: String,
 }
 
-/// Authenticated Vault switcher response.
+/// Authenticated Brain switcher response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VisibleVaultsResponse {
-    pub vaults: Vec<VisibleVaultResponse>,
+pub struct VisibleBrainsResponse {
+    pub brains: Vec<VisibleBrainResponse>,
 }
 
-/// Client-visible Vault summary.
+/// Client-visible Brain summary.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VisibleVaultResponse {
-    pub vault_id: String,
-    pub kind: VaultKind,
+pub struct VisibleBrainResponse {
+    pub brain_id: String,
+    pub kind: BrainKind,
     pub name: String,
     pub role: String,
     pub invite_code: Option<String>,
@@ -102,8 +124,8 @@ pub struct FolderMetadataResponse {
 #[serde(rename_all = "camelCase")]
 pub struct MountedFolderResponse {
     pub mount_id: String,
-    pub organization_vault_id: String,
-    pub source_vault_id: String,
+    pub organization_brain_id: String,
+    pub source_brain_id: String,
     pub source_folder_id: String,
     pub connection_id: String,
     pub display_name: String,
@@ -130,6 +152,23 @@ pub struct ObjectDeleteRequest {
     pub tombstone_event: serde_json::Value,
 }
 
+/// Signed permanent deletion of one complete Folder subtree.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderDeleteRequest {
+    pub deletion_event: serde_json::Value,
+}
+
+/// Counts and sync cursor returned after permanent Folder deletion.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderDeleteResponse {
+    pub sequence: u64,
+    pub duplicate: bool,
+    pub folder_count: usize,
+    pub object_count: usize,
+}
+
 /// Object write response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,7 +182,7 @@ pub struct ObjectWriteResponse {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectResponse {
-    pub vault_id: String,
+    pub brain_id: String,
     pub folder_id: String,
     pub object_id: String,
     pub revision: u64,
@@ -151,24 +190,24 @@ pub struct ObjectResponse {
     pub deleted: bool,
 }
 
-/// Encrypted Vault Export response.
+/// Encrypted Brain Export response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EncryptedVaultExportResponse {
+pub struct EncryptedBrainExportResponse {
     pub version: String,
-    pub vault: ExportVaultSummaryResponse,
+    pub brain: ExportBrainSummaryResponse,
     pub folders: Vec<EncryptedExportFolderResponse>,
     pub objects: Vec<EncryptedExportObjectResponse>,
     pub key_grants: Vec<FolderKeyGrantResponse>,
     pub access_state: EncryptedExportAccessStateResponse,
 }
 
-/// Vault summary in an encrypted export.
+/// Brain summary in an encrypted export.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExportVaultSummaryResponse {
+pub struct ExportBrainSummaryResponse {
     pub id: String,
-    pub kind: VaultKind,
+    pub kind: BrainKind,
     pub name: String,
     pub owner_user_id: Option<String>,
 }
@@ -234,7 +273,7 @@ pub struct EncryptedExportFolderAccessResponse {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncBootstrapResponse {
-    pub vault_id: String,
+    pub brain_id: String,
     pub latest_sequence: u64,
     pub objects: Vec<ObjectResponse>,
     pub object_count: usize,
@@ -262,7 +301,7 @@ pub struct SyncRecordResponse {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncPullResponse {
-    pub vault_id: String,
+    pub brain_id: String,
     pub after_sequence: u64,
     pub latest_sequence: u64,
     pub records: Vec<SyncRecordResponse>,
@@ -289,98 +328,22 @@ pub struct FolderKeyGrantRequest {
     pub created_at: Option<String>,
 }
 
-/// Owner-authorized creation or retry of one initial Agent Workspace pairing.
+/// Agent-first request. All authority and identity facts are derived server-side.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapPersonalBrainForAgentRequest {}
+
+/// The converged user-owned Personal Brain and its Personal Agent relationship.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EnsureAgentWorkspacePairingRequest {
-    pub agent_npub: String,
-    pub folder_id: String,
-    pub name: String,
-    pub path: String,
-    pub grants: Vec<FolderKeyGrantRequest>,
-    pub access_change_event: serde_json::Value,
+pub struct BootstrapPersonalBrainForAgentResponse {
+    pub brain: BrainMetadataResponse,
 }
 
-/// Durable Brain Email Access Delegation exposed to its Personal Vault owner.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentWorkspacePairingResponse {
-    pub delegation_id: String,
-    pub vault_id: String,
-    pub owner_npub: String,
-    pub agent_npub: String,
-    pub workspace_folder_id: String,
-    pub scope: AgentWorkspaceScopeResponse,
-    pub status: String,
-    pub created_by_npub: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub audit: Vec<AgentWorkspacePairingAuditResponse>,
-    pub duplicate: bool,
-}
-
-/// Initial and current Folder scope for an Agent Workspace delegation.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentWorkspaceScopeResponse {
-    pub folder_ids: Vec<String>,
-    pub permission: String,
-}
-
-/// Durable explanation of one delegation lifecycle action.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentWorkspacePairingAuditResponse {
-    pub id: String,
-    pub action: String,
-    pub actor_npub: String,
-    pub subject_npub: String,
-    pub folder_ids: Vec<String>,
-    pub occurred_at: String,
-}
-
-/// Owner-visible current Agent Workspace pairings.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentWorkspacePairingListResponse {
-    pub pairings: Vec<AgentWorkspacePairingResponse>,
-}
-
-/// Agent-first request backed by one owner-signed Personal Vault bootstrap authorization.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapPersonalVaultForAgentRequest {
-    pub vault_id: String,
-    pub name: String,
-    pub folder_id: String,
-    pub folder_name: String,
-    pub folder_path: String,
-    pub bootstrap_grants: Vec<CreateVaultFolderKeyGrantRequest>,
-    pub workspace_grants: Vec<FolderKeyGrantRequest>,
-    pub bootstrap_authorization: serde_json::Value,
-    pub access_change_event: serde_json::Value,
-}
-
-/// The converged user-owned Personal Vault and its initial Agent Workspace pairing.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapPersonalVaultForAgentResponse {
-    pub vault: VaultMetadataResponse,
-    pub pairing: AgentWorkspacePairingResponse,
-}
-
-/// Owner-authorized grant of one additional restricted Folder to a paired Agent Principal.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExpandAgentWorkspaceRequest {
-    pub grant: FolderKeyGrantRequest,
-    pub access_change_event: serde_json::Value,
-}
-
-/// One delegated Folder rotation supplied during Agent Workspace revocation.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevokeAgentWorkspaceFolderRequest {
+pub struct PersonalAgentFolderRotationRequest {
     pub folder_id: String,
     pub new_key_version: u32,
     pub grants: Vec<FolderKeyGrantRequest>,
@@ -388,11 +351,11 @@ pub struct RevokeAgentWorkspaceFolderRequest {
     pub access_change_event: serde_json::Value,
 }
 
-/// Revoke an Agent Principal's complete current Personal Vault Folder scope.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RevokeAgentWorkspaceRequest {
-    pub folders: Vec<RevokeAgentWorkspaceFolderRequest>,
+pub struct ReplacePersonalAgentRequest {
+    pub agent_email: Option<String>,
+    pub rotations: Vec<PersonalAgentFolderRotationRequest>,
 }
 
 /// Add/remove member/admin request.
@@ -443,6 +406,23 @@ pub struct GrantFolderAccessRequest {
     pub access_change_event: serde_json::Value,
 }
 
+/// Result of granting one identity the current Folder Key.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantFolderAccessResponse {
+    #[serde(flatten)]
+    pub metadata: BrainMetadataResponse,
+    pub outcome: GrantFolderAccessResponseOutcome,
+}
+
+/// Stable machine-readable outcome for a Folder access grant.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GrantFolderAccessResponseOutcome {
+    Granted,
+    AlreadyHasAccess,
+}
+
 /// Re-encrypted object supplied during Folder Key rotation.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -465,10 +445,10 @@ pub struct RemoveFolderAccessRequest {
     pub access_change_event: serde_json::Value,
 }
 
-/// Create Vault Invitation request.
+/// Create Brain Invitation request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateVaultInvitationRequest {
+pub struct CreateBrainInvitationRequest {
     #[serde(default)]
     pub target_npub: Option<String>,
     #[serde(default)]
@@ -497,12 +477,12 @@ pub struct EmailInviteBootstrapScopeResponse {
     pub key_version: u32,
 }
 
-/// Vault Invitation response.
+/// Brain Invitation response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultInvitationResponse {
+pub struct BrainInvitationResponse {
     pub id: String,
-    pub vault_id: String,
+    pub brain_id: String,
     pub target_kind: String,
     pub user_id: Option<String>,
     pub invited_email: Option<String>,
@@ -527,16 +507,16 @@ pub struct VaultInvitationResponse {
     pub duplicate_accept: bool,
 }
 
-/// Claim an Email Invite Bootstrap into npub-bound Vault access.
+/// Claim an Email Invite Bootstrap into npub-bound Brain access.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ClaimEmailVaultInvitationRequest {
+pub struct ClaimEmailBrainInvitationRequest {
     pub email: String,
     pub email_proof_created_at: String,
     #[serde(default)]
     pub invite_unwrap_proof_event_json: Option<String>,
     #[serde(default)]
-    pub grants: Vec<CreateVaultFolderKeyGrantRequest>,
+    pub grants: Vec<CreateBrainFolderKeyGrantRequest>,
 }
 
 /// Request authenticated, post-proof Invite Instructions for an Email Invite Bootstrap.
@@ -547,11 +527,11 @@ pub struct PostProofInviteInstructionsRequest {
     pub email_proof_created_at: String,
 }
 
-/// Vault Invitation list response.
+/// Brain Invitation list response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultInvitationListResponse {
-    pub invitations: Vec<VaultInvitationResponse>,
+pub struct BrainInvitationListResponse {
+    pub invitations: Vec<BrainInvitationResponse>,
 }
 
 /// Create Share Link request.
@@ -570,7 +550,7 @@ pub struct CreateShareLinkRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ShareLinkResponse {
     pub id: String,
-    pub vault_id: String,
+    pub brain_id: String,
     pub folder_id: String,
     pub recipient_npub: String,
     pub created_by_npub: String,
@@ -605,7 +585,7 @@ pub struct MarkSharedFolderSourceRequest {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSharedFolderInvitationRequest {
-    pub destination_vault_id: String,
+    pub destination_brain_id: String,
     pub destination_admin_npub: String,
     pub grant: FolderKeyGrantRequest,
     pub access_change_event: serde_json::Value,
@@ -616,9 +596,9 @@ pub struct CreateSharedFolderInvitationRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SharedFolderInvitationResponse {
     pub id: String,
-    pub source_vault_id: String,
+    pub source_brain_id: String,
     pub source_folder_id: String,
-    pub destination_vault_id: String,
+    pub destination_brain_id: String,
     pub destination_admin_npub: String,
     pub created_by_npub: String,
     pub identities: Vec<IdentityResponse>,
@@ -637,9 +617,9 @@ pub struct SharedFolderInvitationResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SharedFolderConnectionResponse {
     pub id: String,
-    pub source_vault_id: String,
+    pub source_brain_id: String,
     pub source_folder_id: String,
-    pub destination_vault_id: String,
+    pub destination_brain_id: String,
     pub destination_admin_npub: String,
     pub identities: Vec<IdentityResponse>,
     pub status: String,
@@ -648,7 +628,7 @@ pub struct SharedFolderConnectionResponse {
     pub member_npubs: Vec<String>,
 }
 
-/// Shared Folder Invitation list response for one Vault, split by direction.
+/// Shared Folder Invitation list response for one Brain, split by direction.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedFolderInvitationListResponse {
@@ -656,7 +636,7 @@ pub struct SharedFolderInvitationListResponse {
     pub incoming: Vec<SharedFolderInvitationResponse>,
 }
 
-/// Shared Folder Connection list response for one Vault, split by direction.
+/// Shared Folder Connection list response for one Brain, split by direction.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedFolderConnectionListResponse {

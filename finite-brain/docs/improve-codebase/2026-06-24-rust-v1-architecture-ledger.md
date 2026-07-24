@@ -35,7 +35,7 @@
 | Deepen Protected Route Handling | Strong | Concentrates Nostr auth, replay resistance, rate limiting, CORS, and request/error handling behind one server module without changing product behavior. |
 | Deepen Store Sharing And Mounts | Worth exploring | Concentrates Share Link, Shared Folder Invitation, connection member, key rotation, and mount projection lifecycle rules. Higher risk than the server guard slice. |
 | Deepen Sync Projection | Worth exploring | Concentrates append-log, duplicate event, baseRevision conflict, pagination, retention, and current-state projection behavior. Medium behavior risk. |
-| Split Portable Readable Surfaces | Speculative | Separates OKF and Vault Working Tree readable portability surfaces if future changes keep increasing churn in `portability.rs`. |
+| Split Portable Readable Surfaces | Speculative | Separates OKF and Brain Working Tree readable portability surfaces if future changes keep increasing churn in `portability.rs`. |
 
 ## Top Recommendation
 
@@ -65,7 +65,7 @@ allowlist response handling out of the route catalog in
 
 Handlers now receive the normalized actor npub from `validate_request_auth`
 instead of handling `NostrPublicKey` conversion and auth-error mapping inline.
-That keeps route code focused on product operations like vault membership,
+That keeps route code focused on product operations like brain membership,
 folder grants, sharing, mounted folders, object writes, and sync records.
 
 ## Verification So Far

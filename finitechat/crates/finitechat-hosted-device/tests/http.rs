@@ -1,25 +1,19 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use finite_brain_core::{
-    BRAIN_IDENTITY_PROVIDER_VERSION, FolderId, FolderKey, VaultId,
-    validate_personal_vault_bootstrap_authorization_event,
-};
-use finite_brain_server::{ServerState as BrainServerState, router_with_state as brain_router};
-use finite_brain_store::BrainStore;
+use finite_brain_core::{BRAIN_IDENTITY_PROVIDER_VERSION, FolderKey};
 use finite_identity::{FiniteIdentity, IdentityPaths};
-use finite_nostr::{
-    HttpAuthEventRequest, encode_http_auth_header, sign_http_auth_event, verify_event_integrity,
-};
+use finite_nostr::verify_event_integrity;
 use finitechat_core::device_link::{
     DEVICE_LINK_MAX_TTL_SECONDS, DeviceLinkDecryptInput, create_device_link_pairing_key,
     decrypt_device_link_payload,
 };
 use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions, npub_from_account_id};
 use finitechat_hosted_device::{
-    HostedDeviceConfig, MAX_HOSTED_ATTACHMENT_BYTES, MAX_HOSTED_ATTACHMENTS_PER_MESSAGE,
-    MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_USER_HEADER, app,
+    HostedDeviceConfig, HostedIdentityAuthorityConfig, MAX_HOSTED_ATTACHMENT_BYTES,
+    MAX_HOSTED_ATTACHMENTS_PER_MESSAGE, MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_USER_HEADER, app,
     app_with_final_agent_binding_persist_failures, app_with_fixed_device_link_now,
-    app_with_profile_bootstrap_room_create_failures, app_with_profile_bootstrap_submit_failures,
+    app_with_identity_authority, app_with_profile_bootstrap_room_create_failures,
+    app_with_profile_bootstrap_submit_failures,
 };
 use finitechat_http::{
     AckLinkPayloadRequest, AckLinkPayloadResponse, ClaimLinkPayloadRequest,
@@ -34,7 +28,7 @@ use finitechat_proto::{
 use finitechat_server::{HttpServerState, http_router};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
-use nostr::{Event, Keys};
+use nostr::Event;
 use openmls::prelude::{AeadType, OpenMlsCrypto, OpenMlsProvider, OpenMlsRand};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use serde::de::DeserializeOwned;
@@ -53,6 +47,64 @@ const TOKEN: &str = "hosted-device-test-token";
 const PUBLIC_SERVER_URL: &str = "https://chat.finite.computer";
 const TEST_AGENT_BINDING_KEY_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding-key.v1";
 const TEST_AGENT_BINDING_AAD_DOMAIN: &[u8] = b"finitechat.hosted-agent-binding.v1";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_hosted_chat_setup_registers_the_users_public_identity() {
+    let root = TempDir::new().unwrap();
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let observed_request = std::sync::Arc::clone(&observed);
+    let identity_authority = axum::Router::new().route(
+        "/api/v1/operator/account-principal-bindings",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let observed_request = std::sync::Arc::clone(&observed_request);
+                async move {
+                    assert_eq!(
+                        headers
+                            .get("x-finite-operator-token")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("identity-test-token")
+                    );
+                    *observed_request.lock().unwrap() = Some(body);
+                    axum::Json(serde_json::json!({ "created": true }))
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let authority_task =
+        tokio::spawn(async move { axum::serve(listener, identity_authority).await.unwrap() });
+    let hosted = app_with_identity_authority(
+        HostedDeviceConfig {
+            data_root: root.path().to_path_buf(),
+            server_url: "http://127.0.0.1:9".to_owned(),
+            public_url: PUBLIC_SERVER_URL.to_owned(),
+            api_token: TOKEN.to_owned(),
+        },
+        HostedIdentityAuthorityConfig {
+            base_url: format!("http://{address}"),
+            operator_token: "identity-test-token".to_owned(),
+        },
+    );
+
+    let user_state = state_for(hosted, "user_paul").await;
+    let expected_npub = npub_from_account_id(
+        user_state["identity"]["account_id"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    )
+    .unwrap();
+    assert_eq!(
+        observed.lock().unwrap().as_ref(),
+        Some(&serde_json::json!({
+            "workosUserId": "user_paul",
+            "userNpub": expected_npub,
+        }))
+    );
+    authority_task.abort();
+}
 
 #[tokio::test]
 async fn state_requires_internal_authorization_and_verified_user() {
@@ -749,63 +801,6 @@ async fn users_get_isolated_devices_and_restart_reopens_the_same_identity() {
 }
 
 #[tokio::test]
-async fn explicit_chat_request_issues_a_bounded_personal_vault_bootstrap_authorization() {
-    let root = TempDir::new().unwrap();
-    let hosted = test_app(&root);
-    let user_state = state_for(hosted.clone(), "user_paul").await;
-    let agent_state = state_for(hosted.clone(), "agent_paul").await;
-    let owner_npub = npub_from_account_id(
-        user_state["identity"]["account_id"]
-            .as_str()
-            .unwrap()
-            .to_owned(),
-    )
-    .unwrap();
-    let agent_npub = npub_from_account_id(
-        agent_state["identity"]["account_id"]
-            .as_str()
-            .unwrap()
-            .to_owned(),
-    )
-    .unwrap();
-    let before = test_now_unix_seconds();
-    let response = hosted
-        .oneshot(
-            Request::post("/v1/brain/personal-vault-bootstrap-authorizations")
-                .header("authorization", format!("Bearer {TOKEN}"))
-                .header(WORKOS_USER_HEADER, "user_paul")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "agentNpub": agent_npub,
-                        "vaultId": "personal",
-                        "workspaceFolderId": "agent-workspace",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let response: Value = serde_json::from_slice(&bytes).unwrap();
-    let event = Event::from_json(response["bootstrapAuthorization"].to_string()).unwrap();
-    let payload = validate_personal_vault_bootstrap_authorization_event(
-        &event,
-        &agent_npub,
-        &VaultId::new("personal").unwrap(),
-        &FolderId::new("agent-workspace").unwrap(),
-        before,
-    )
-    .unwrap();
-    assert_eq!(payload.owner_npub, owner_npub);
-    assert_eq!(payload.agent_npub, agent_npub);
-    assert!(payload.expires_at > before);
-    assert!(payload.expires_at <= before + 5 * 60 + 1);
-}
-
-#[tokio::test]
 async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_brain_intents() {
     let root = TempDir::new().unwrap();
     let hosted = test_app(&root);
@@ -848,7 +843,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
     assert!(identify["npub"].as_str().unwrap().starts_with("npub1"));
 
     let now = test_now_unix_seconds();
-    let protected_url = "https://finite.computer/_admin/vaults";
+    let protected_url = "https://finite.computer/_admin/brains";
     let authorized = hosted
         .clone()
         .oneshot(provider_request(
@@ -880,16 +875,16 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
 
     let member_npub = identify["npub"].as_str().unwrap().to_owned();
     let access_change_content = format!(
-        "{{\"version\":\"finite-vault-admin-access-change-v1\",\"vaultId\":\"personal\",\"changeId\":\"provider-access-change\",\"action\":\"add-member\",\"adminNpub\":\"{member_npub}\",\"targetNpub\":\"{member_npub}\",\"createdAt\":\"2026-07-13T12:00:00Z\"}}"
+        "{{\"version\":\"finite-brain-admin-access-change-v1\",\"brainId\":\"personal\",\"changeId\":\"provider-access-change\",\"action\":\"add-member\",\"adminNpub\":\"{member_npub}\",\"targetNpub\":\"{member_npub}\",\"createdAt\":\"2026-07-13T12:00:00Z\"}}"
     );
     let access_change_input = serde_json::json!({
-        "intent": "vault-access-change",
+        "intent": "brain-access-change",
         "eventTemplate": {
             "kind": 30_078,
             "created_at": now,
             "tags": [
-                ["d", "finite-vault-admin-access-change:personal:provider-access-change"],
-                ["vault", "personal"],
+                ["d", "finite-brain-admin-access-change:personal:provider-access-change"],
+                ["brain", "personal"],
                 ["action", "add-member"],
                 ["p", public_key_hex],
             ],
@@ -927,7 +922,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "wrapGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "vaultId": "personal",
+                "brainId": "personal",
                 "folderId": "restricted",
                 "keyVersion": 1,
                 "recipientNpub": member_npub.clone(),
@@ -948,7 +943,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "openGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "vaultId": "personal",
+                "brainId": "personal",
                 "folderId": "restricted",
                 "keyVersion": 1,
                 "recipientNpub": member_npub.clone(),
@@ -960,7 +955,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
     assert_eq!(opened.status(), StatusCode::OK);
     let opened: Value =
         serde_json::from_slice(&opened.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(opened["plaintext"]["vaultId"], "personal");
+    assert_eq!(opened["plaintext"]["brainId"], "personal");
     assert_eq!(opened["plaintext"]["folderId"], "restricted");
     assert_eq!(opened["plaintext"]["keyVersion"], 1);
     assert_eq!(opened["plaintext"]["recipientNpub"], member_npub);
@@ -971,7 +966,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "openGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "vaultId": "personal",
+                "brainId": "personal",
                 "folderId": "getting-started",
                 "keyVersion": 1,
                 "recipientNpub": member_npub.clone(),
@@ -1000,7 +995,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
             "openGrantPayload",
             serde_json::json!({
                 "purpose": "folder-key-grant",
-                "vaultId": "personal",
+                "brainId": "personal",
                 "folderId": "restricted",
                 "keyVersion": 1,
                 "recipientNpub": member_npub.clone(),
@@ -1116,73 +1111,6 @@ async fn hosted_sites_identity_provider_is_setup_gated_and_origin_bounded() {
         .await
         .unwrap();
     assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn chat_authorization_bootstraps_brain_for_the_separate_agent_principal() {
-    let root = TempDir::new().unwrap();
-    let hosted = test_app(&root);
-    let agent_keys = Keys::generate();
-    let agent_npub = finite_nostr::NostrPublicKey::from_protocol(agent_keys.public_key())
-        .to_npub()
-        .unwrap();
-    let issued = hosted
-        .oneshot(
-            Request::post("/v1/brain/personal-vault-bootstrap-authorizations")
-                .header("authorization", format!("Bearer {TOKEN}"))
-                .header(WORKOS_USER_HEADER, "user_paul")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "agentNpub": agent_npub,
-                        "vaultId": "personal",
-                        "workspaceFolderId": "agent-workspace",
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(issued.status(), StatusCode::OK);
-    let issued = issued.into_body().collect().await.unwrap().to_bytes();
-
-    let now = test_now_unix_seconds();
-    let brain = brain_router(
-        BrainServerState::new(
-            BrainStore::open_in_memory().unwrap(),
-            "http://127.0.0.1:3015",
-        )
-        .with_auth_clock(now, 60),
-    );
-    let path = "/_admin/personal-vault-bootstrap";
-    let auth_event = sign_http_auth_event(
-        &agent_keys,
-        &HttpAuthEventRequest::new("POST", format!("http://127.0.0.1:3015{path}"), now)
-            .with_body(issued.to_vec()),
-    )
-    .unwrap();
-    let bootstrapped = brain
-        .oneshot(
-            Request::post(path)
-                .header("authorization", encode_http_auth_header(&auth_event))
-                .header("content-type", "application/json")
-                .body(Body::from(issued))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = bootstrapped.status();
-    let body = bootstrapped.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    let response: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        response["vault"]["ownerUserId"],
-        response["pairing"]["ownerNpub"]
-    );
-    assert_eq!(response["pairing"]["agentNpub"], agent_npub);
-    assert_eq!(response["vault"]["folders"].as_array().unwrap().len(), 1);
-    assert_eq!(response["vault"]["folders"][0]["id"], "agent-workspace");
 }
 
 #[tokio::test]

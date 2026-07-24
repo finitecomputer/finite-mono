@@ -9,8 +9,12 @@
     after = [
       "network-online.target"
       "finitechat-server.service"
+      "finite-identity.service"
     ];
-    requires = [ "finitechat-server.service" ];
+    requires = [
+      "finitechat-server.service"
+      "finite-identity.service"
+    ];
     wantedBy = [ "multi-user.target" ];
 
     environment = {
@@ -20,6 +24,7 @@
       # bind the canonical URL that the joining Device is configured to trust.
       FINITECHAT_SERVER_URL = "http://127.0.0.1:8788";
       FINITECHAT_PUBLIC_URL = "https://chat.finite.computer";
+      FINITE_IDENTITY_AUTHORITY = "http://127.0.0.1:8790";
     };
 
     serviceConfig = {
@@ -30,7 +35,10 @@
       # Operator-created, root:root 0600. It is shared with the dashboard
       # container and contains the same random value under both names:
       #   FINITECHAT_HOSTED_API_TOKEN
-      EnvironmentFile = "/etc/finite/hosted-web-device.env";
+      EnvironmentFile = [
+        "/etc/finite/hosted-web-device.env"
+        "/etc/finite/identity-operator.env"
+      ];
       Restart = "always";
       RestartSec = 2;
       NoNewPrivileges = true;

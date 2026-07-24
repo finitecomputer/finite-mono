@@ -7,7 +7,15 @@
   systemd.services.finite-brain-app = {
     description = "FiniteBrain Rust application server";
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" ];
+    after = [
+      "network-online.target"
+      "finite-identity.service"
+      "finite-saas-core.service"
+    ];
+    requires = [
+      "finite-identity.service"
+      "finite-saas-core.service"
+    ];
     wantedBy = [ "multi-user.target" ];
 
     environment = {
@@ -16,10 +24,16 @@
       FINITE_BRAIN_DB = "/var/lib/finitebrain/finite-brain.sqlite3";
       FINITE_BRAIN_PUBLIC_BASE_URL = "https://brain.finite.computer";
       FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
+      FINITE_IDENTITY_AUTHORITY = "http://127.0.0.1:8790";
+      FC_CORE_API_BASE_URL = "http://127.0.0.1:4200";
     };
 
     serviceConfig = {
       ExecStart = "${finitePackages.finite-brain}/bin/finite-brain";
+      EnvironmentFile = [
+        "/etc/finite/identity-operator.env"
+        "/etc/finite/brain-authority.env"
+      ];
       DynamicUser = true;
       # SQLite restored from smoke at cutover; real path under DynamicUser:
       # /var/lib/private/finitebrain/finite-brain.sqlite3.

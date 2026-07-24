@@ -80,7 +80,7 @@ impl IdentityAuthorityClient {
                 principal_kind: "email_only".to_owned(),
                 nip05: None,
                 limitation: Some(
-                    "FiniteBrain direct permission grants still require an npub recipient; email-targeted Vault Invitations can be claimed after email proof."
+                    "FiniteBrain direct permission grants still require an npub recipient; email-targeted Brain Invitations can be claimed after email proof."
                         .to_owned(),
                 ),
             })

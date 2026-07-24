@@ -26,7 +26,7 @@ verification note says otherwise.
 | Native encrypted chat protocol/server | `finitechat` | `cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3` | Local server and simulator are explicit dev overrides. Production default is `https://chat.finite.computer`. |
 | iOS app build or simulator work | `finitechat` | `ios/ci_scripts/ci_post_clone.sh`, `cargo run -p finitechat-rmp -- run ios` | Requires Xcode. Physical phone work also needs a paired phone and signing team. |
 | Hermes chat bridge canary | `finitechat` | `cp .env.example .env`, set provider key, run `scripts/hermes-phone-canary.py ...` | Real-Hermes proof is stricter than echo/adapter smokes. |
-| FiniteBrain vault, Product Client, or `fbrain` CLI work | `finite-brain` | `cargo test --workspace`, local `finite-brain-app`, Product Client at `/client` | Trusted-client knowledge surface. Keeps Vault/Folder policy in `finite-brain`; generic Nostr primitives stay in `finite-nostr`. |
+| FiniteBrain brain, Product Client, or `fbrain` CLI work | `finite-brain` | `cargo test --workspace`, local `finite-brain-app`, Product Client at `/client` | Trusted-client knowledge surface. Keeps Brain/Folder policy in `finite-brain`; generic Nostr primitives stay in `finite-nostr`. |
 | Search/extract service work | `finite-search` | `scripts/check-static.sh`, SSH tunnel to `lat2`, service smoke scripts | Current proof is remote-host oriented. A no-SSH local stack is not yet the primary path. |
 | Managed skill edits | `finite-skills` | `just skills check`, then follow `finite-skills/docs/runtime-delivery-contract.md` for promotion proof | A basic static checker exists. It does not yet prove artifact integrity, compatibility, activation, rollback, or real Hermes behavior; those climb the v2 runtime matrix. |
 | Reusable Nostr primitives | `finite-nostr` | `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings` | Small Rust crate. No repo-local toolchain pin. |
@@ -294,8 +294,8 @@ Friction:
 
 ### `finite-brain`
 
-Owns the encrypted Vault/Folder knowledge system, Product Client, Smoke UI,
-`fbrain` CLI, Vault Working Tree sync, and FiniteBrain-specific access, sync,
+Owns the encrypted Brain/Folder knowledge system, Product Client, Smoke UI,
+`fbrain` CLI, Brain Working Tree sync, and FiniteBrain-specific access, sync,
 asset, source-note, and OKF policy.
 
 Documented tools:
@@ -304,7 +304,7 @@ Documented tools:
   and CLI.
 - Static Product Client under `crates/finite-brain-server/src/product-client.*`.
 - Development Smoke UI under `crates/finite-brain-server/src/smoke-ui.*`.
-- `fbrain` CLI for trusted agent Vault Working Trees.
+- `fbrain` CLI for trusted agent Brain Working Trees.
 - Canonical production service at `https://brain.finite.computer`; the older
   smoke service remains an explicit rollback target, not a replica.
 

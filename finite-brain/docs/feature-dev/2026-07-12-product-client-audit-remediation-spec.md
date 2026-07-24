@@ -20,7 +20,7 @@ Repair those workflows while preserving the Product Client's existing trusted
 client, NIP-07, Session Lock, Folder Key Grant, and encrypted-object interfaces.
 Every user-visible failure should have safe, actionable feedback; operations
 that need an unlocked session should be gated before they run; and labels should
-match the actual Vault, Folder, Page, and Graph behavior.
+match the actual Brain, Folder, Page, and Graph behavior.
 
 ## User Stories
 
@@ -30,17 +30,17 @@ match the actual Vault, Folder, Page, and Graph behavior.
    that deletion preserves the encrypted-object history model.
 3. As a user, I want a clear in-product error when an action fails so that I
    know what happened and what to do next without opening developer tools.
-4. As a user whose Vault access was revoked, I want the client to fail closed
+4. As a user whose Brain access was revoked, I want the client to fail closed
    and show a locked Session rather than claim that encrypted content remains
    open.
 5. As a locked user, I want Invitations to direct me to Unlock before inspect
    or accept actions are available so that the interface matches Session Lock
    semantics.
-6. As a Vault administrator, I want to revoke an invitation I created without
+6. As a Brain administrator, I want to revoke an invitation I created without
    trying to inspect a recipient-only invitation code.
 7. As a user, I want a pasted invitation code to update the available actions
    immediately and remain present until I deliberately change it.
-8. As a Vault administrator, I want New Folder Inside to create a real Child
+8. As a Brain administrator, I want New Folder Inside to create a real Child
    Folder with the chosen parent while retaining its own Folder Key and access
    boundary.
 9. As a Graph View user, I want controls to be visible and honestly labelled,
@@ -54,7 +54,7 @@ match the actual Vault, Folder, Page, and Graph behavior.
 - Surface safe generic client failures through one visible, accessible status
   region. It must not reveal Invite Secrets, Folder Keys, or decrypted content
   outside the existing Session boundary.
-- Treat a confirmed authorization failure for the active Vault's protected
+- Treat a confirmed authorization failure for the active Brain's protected
   metadata/content workflow as a Session Lock event. Preserve a safe notice
   after clearing Session Folder Keys and Ephemeral Client Plaintext. Do not
   relock for an ordinary unavailable-network failure or an unrelated
@@ -77,14 +77,14 @@ match the actual Vault, Folder, Page, and Graph behavior.
 
 - The public behavior seams are the existing deterministic Product Client
   contract suite and the real Rust-served `/client` flow on an isolated local
-  Vault with disposable Member Identities. These are the previously accepted
+  Brain with disposable Member Identities. These are the previously accepted
   Product Client seams, and the human explicitly requested end-to-end repair.
 - Contract coverage should prove signed Page write/tombstone preparation,
   parent-aware Folder creation inputs, invitation action availability, safe
-  error/status rendering, and Session Lock behavior after Vault authorization
+  error/status rendering, and Session Lock behavior after Brain authorization
   loss without depending on private rendering details.
 - Browser verification should prove Save, Delete Page, locked invitation
-  guidance, admin revoke, nested Folder creation, active-Vault authorization
+  guidance, admin revoke, nested Folder creation, active-Brain authorization
   loss handling, and the corrected Graph header at realistic desktop and
   narrow widths.
 

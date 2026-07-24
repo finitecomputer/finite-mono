@@ -3,7 +3,7 @@
 ## Metadata
 
 - Scope: uncommitted local delta
-- Branch: `feature/guided-smoke-vault-reader`
+- Branch: `feature/guided-smoke-brain-reader`
 - Base: `staging`
 - Command: `coderabbit review --agent --type uncommitted`
 - Result: completed through the free CLI allowance.

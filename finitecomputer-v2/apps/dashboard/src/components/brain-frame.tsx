@@ -4,8 +4,11 @@ import { useEffect, useRef } from "react";
 import { PanelLeftIcon } from "lucide-react";
 
 import {
+  BRAIN_FRAME_SANDBOX,
+  BRAIN_PERSONAL_AGENT_CONFIRMATION_RESPONSE,
   brainClientPath,
   BRAIN_SESSION_PROOF_RESPONSE,
+  parseBrainPersonalAgentConfirmationRequest,
   parseBrainSessionProofRequest,
 } from "@/lib/brain-session-bridge";
 
@@ -30,19 +33,49 @@ export function BrainFrame({
   agentEmail,
   agentName,
   agentNpub,
+  brainId,
 }: {
   title: string;
   agentEmail?: string | null;
   agentName?: string | null;
   agentNpub?: string | null;
+  brainId?: string | null;
 }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const confirmationResultsRef = useRef(new Map<string, boolean>());
 
   useEffect(() => {
     let active = true;
     async function handleMessage(event: MessageEvent) {
       const frameWindow = frameRef.current?.contentWindow;
       if (!frameWindow || event.source !== frameWindow || event.origin !== "null") return;
+      const confirmationRequest = parseBrainPersonalAgentConfirmationRequest(
+        event.data,
+        agentEmail || agentNpub,
+      );
+      if (confirmationRequest) {
+        const agentLabel = agentEmail?.trim().toLowerCase() || agentNpub?.trim();
+        let confirmed = confirmationResultsRef.current.get(confirmationRequest.requestId);
+        if (confirmed === undefined) {
+          confirmed = Boolean(
+            agentLabel &&
+              window.confirm(
+                `Create your Personal Brain and pair ${agentLabel} as your Personal Agent?`,
+              ),
+          );
+          if (confirmationResultsRef.current.size >= 32) confirmationResultsRef.current.clear();
+          confirmationResultsRef.current.set(confirmationRequest.requestId, confirmed);
+        }
+        frameWindow.postMessage(
+          {
+            type: BRAIN_PERSONAL_AGENT_CONFIRMATION_RESPONSE,
+            requestId: confirmationRequest.requestId,
+            confirmed,
+          },
+          "*",
+        );
+        return;
+      }
       const proofRequest = parseBrainSessionProofRequest(event.data);
       if (!proofRequest) return;
       let proof: string | null = null;
@@ -74,17 +107,17 @@ export function BrainFrame({
       active = false;
       window.removeEventListener("message", handleMessage);
     };
-  }, []);
+  }, [agentEmail, agentNpub]);
 
   return (
     <div className="finite-brain-page__frame">
       <iframe
         ref={frameRef}
         className="size-full border-0"
-        src={brainClientPath({ email: agentEmail, name: agentName, npub: agentNpub })}
+        sandbox={BRAIN_FRAME_SANDBOX}
+        src={brainClientPath({ email: agentEmail, name: agentName, npub: agentNpub, brainId })}
         title={title}
         allow="clipboard-read; clipboard-write"
-        sandbox="allow-downloads allow-forms allow-scripts"
         data-finite-brain-frame
       />
     </div>

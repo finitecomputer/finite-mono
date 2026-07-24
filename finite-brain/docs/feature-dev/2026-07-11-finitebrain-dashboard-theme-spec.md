@@ -8,7 +8,7 @@ identity. The contrast in typography, color, surfaces, controls, status
 language, and light-mode behavior makes Brain feel like a separate application
 inside the dashboard rather than a first-party Finite product surface.
 
-The Product Client already contains important, dense workflows for Vaults,
+The Product Client already contains important, dense workflows for Brains,
 Folders, Pages, local search, Graph View, access management, invitations,
 sharing, OKF operations, and Session Lock. Those workflows, their structure,
 and their security behavior must not be redesigned or weakened in order to
@@ -36,8 +36,8 @@ the dashboard's Brain route or opened directly from the Brain origin.
 3. As a user who prefers dark mode, I want Brain to use the dashboard's restrained dark appearance, so that it remains comfortable without reverting to a separate purple theme.
 4. As a user moving between Agent, Connections, Brain, and Chat, I want typography and control styling to remain consistent, so that I can recognize one product system.
 5. As a user, I want the existing ribbon navigation to remain in the same place and expose the same actions, so that the reskin does not disrupt muscle memory.
-6. As a user, I want the Vault controls, signer controls, and Session Lock controls to retain their existing behavior, so that visual changes do not affect security.
-7. As a user, I want the file explorer to retain its hierarchy, expansion behavior, context menus, and density, so that navigating large Vaults remains efficient.
+6. As a user, I want the Brain controls, signer controls, and Session Lock controls to retain their existing behavior, so that visual changes do not affect security.
+7. As a user, I want the file explorer to retain its hierarchy, expansion behavior, context menus, and density, so that navigating large Brains remains efficient.
 8. As a user, I want Files, Search, Access, Page, and Graph surfaces to share the Finite color and surface language, so that no part of Brain feels unfinished.
 9. As a user, I want buttons, fields, selects, checkboxes, menus, dialogs, and disclosure panels to use coherent hover, focus, active, disabled, and busy states, so that interactions feel polished and predictable.
 10. As a keyboard user, I want visible focus treatments with sufficient contrast in both themes, so that the reskin remains navigable.
@@ -45,7 +45,7 @@ the dashboard's Brain route or opened directly from the Brain origin.
 12. As a user with an unlocked content session, I want ready, warning, error, muted, and success states to remain distinguishable, so that operational state is clear without relying on text alone.
 13. As a user editing a Page, I want the editor, reading view, slash menu, save state, and code content to retain their layout and behavior, so that theme work does not alter authoring.
 14. As a user viewing the local graph, I want nodes, links, controls, filters, empty states, and replay overlays to be legible in light and dark modes, so that graph exploration remains useful.
-15. As a Vault administrator, I want access-management panels, people lists, invitation flows, share-link controls, and destructive actions to retain their hierarchy and behavior, so that visual polish does not increase permission risk.
+15. As a Brain administrator, I want access-management panels, people lists, invitation flows, share-link controls, and destructive actions to retain their hierarchy and behavior, so that visual polish does not increase permission risk.
 16. As a mobile user, I want the existing compact ribbon/sidebar/workspace behavior to remain intact and visually coherent, so that Brain remains usable at narrow widths.
 17. As a standalone Brain user, I want the same theme and fonts as the dashboard-embedded client without depending on dashboard assets, so that direct access remains first-party and reliable.
 18. As a privacy-conscious user, I want fonts to load locally from the Brain origin, so that the visual upgrade introduces no third-party network requests.
@@ -68,7 +68,7 @@ the dashboard's Brain route or opened directly from the Brain origin.
 - Self-host Funnel Sans, Funnel Display, and JetBrains Mono from the Product Client origin. Use the same vendored font sources and SIL Open Font License provenance as the dashboard.
 - Serve font assets through explicit Rust public routes with correct font content types and the Product Client's static-asset cache policy.
 - Use Funnel Sans for interface copy, Funnel Display selectively for brand/display headings, and JetBrains Mono for code, identifiers, paths, and technical values.
-- Retheme every current surface, including base shell, ribbon, Vault controls, Session Lock, toolbars, file tree, search, access views, Page reader/editor, Graph View, menus, command palette, context menus, disclosures, lists, badges, pills, empty states, busy states, and responsive layouts.
+- Retheme every current surface, including base shell, ribbon, Brain controls, Session Lock, toolbars, file tree, search, access views, Page reader/editor, Graph View, menus, command palette, context menus, disclosures, lists, badges, pills, empty states, busy states, and responsive layouts.
 - Preserve semantic status distinctions and destructive-action prominence in both appearances.
 - Preserve or improve keyboard focus visibility, readable contrast, reduced-motion compatibility, and existing accessibility semantics.
 - Keep standalone `/client` and dashboard-embedded `/client` visually and functionally equivalent.
@@ -79,7 +79,7 @@ the dashboard's Brain route or opened directly from the Brain origin.
 - The highest test interface is the real Rust-served `/client` running against the existing seeded Product Client fixture and NIP-07 smoke signer.
 - Browser verification will exercise representative locked and resumed states at desktop and mobile widths in both light and dark modes.
 - Visual evidence will cover Files, Search, Page reading/editing, Graph View, Access management, menus/dialogs, fields, status states, and responsive behavior rather than only the initial empty shell.
-- Browser checks will confirm that navigation, Session Lock, Vault loading, Page selection/editing, Graph switching, and Access switching still behave through the same controls.
+- Browser checks will confirm that navigation, Session Lock, Brain loading, Page selection/editing, Graph switching, and Access switching still behave through the same controls.
 - Existing Product Client tests and the static verifier will be extended only where needed to prove the theme/font contract and preservation of required DOM hooks, storage prohibitions, security lifecycle hooks, and critical JavaScript behavior.
 - Rust public-route tests will verify that every font asset returns the expected local bytes, content type, and cache policy alongside the existing HTML, CSS, JavaScript, config, and smoke-signer routes.
 - Tests should assert externally visible behavior or asset contracts, not individual decorative CSS declarations.

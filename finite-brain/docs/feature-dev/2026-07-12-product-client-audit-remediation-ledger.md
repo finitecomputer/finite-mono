@@ -6,7 +6,7 @@
 - Loop: Feature Dev continuation
 - Target repo: finitecomputer/finite-mono
 - Base branch: `main` (`origin/main`)
-- Feature branch: `feature/finitebrain-settings-vault-ui`
+- Feature branch: `feature/finitebrain-settings-brain-ui`
 - Human owner: Austin
 - Started: 2026-07-12
 - Current status: all remediation tickets implemented; final browser acceptance and independent review passed; bounded CodeRabbit follow-up timed out without findings
@@ -36,7 +36,7 @@ undefined or ambiguous.
 - Typecheck: `scripts/with-dev-env node --check finite-brain/crates/finite-brain-server/src/product-client.js`
 - Test: `scripts/with-dev-env node --test finite-brain/crates/finite-brain-server/src/product-client.test.js`; focused Rust Product Client/server tests
 - Build: `scripts/with-dev-env cargo build -p finite-brain-server`
-- Visual verification: isolated Rust-served `/client` with disposable local Vault and Member Identities
+- Visual verification: isolated Rust-served `/client` with disposable local Brain and Member Identities
 
 ## Ticket Ledger
 

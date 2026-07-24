@@ -21,7 +21,7 @@ This verifies:
   raw Folder Keys or decrypted content.
 - Secure server routes enforce Nostr auth, replay rejection, rate limits, CORS
   allowlist behavior, request body limits, and encrypted-object boundaries.
-- OKF import/export, graph/replay, and Vault Working Tree logic stay
+- OKF import/export, graph/replay, and Brain Working Tree logic stay
   client/local-agent owned.
 
 This does not verify:
@@ -99,7 +99,7 @@ The verifier checks that:
 
 - the static HTML/CSS/JS still expose the Obsidian shell, file sidebar,
   search panel, context menu, graph pane, and Access inspector surfaces;
-- the seeded smoke Vault has populated Folders and at least 50 encrypted Pages;
+- the seeded smoke Brain has populated Folders and at least 50 encrypted Pages;
 - the Product Client opens all seeded Pages through Folder Key Grants;
 - Page navigation rows, Graph View projection, workspace state, and
   access/share panel projection work against the fixture.
@@ -116,7 +116,7 @@ Expected Product Client behavior:
 
 - Shows NIP-07 availability and signer state.
 - Starts locked and shows explicit **Resume session** feedback.
-- Can load Vault metadata with a valid NIP-07 signer.
+- Can load Brain metadata with a valid NIP-07 signer.
 - Can open accessible Folder Key Grants into the in-memory session keyring.
 - Can decrypt accessible Pages locally.
 - Can prepare encrypted signed Page writes through secure object routes.
@@ -134,10 +134,10 @@ Expected Product Client behavior:
   event whose `pubkey` differs from the connected Member Identity also hard
   locks before any protected request is sent.
 - A locked session does not reopen grants until **Resume session** runs the
-  normal encrypted-grant flow. Switching Vaults applies the same clearing rule.
+  normal encrypted-grant flow. Switching Brains applies the same clearing rule.
 - An invitation fragment is removed from browser history immediately, held only
   as a one-shot in-memory pre-session capability, and imported after explicit
-  **Resume session**. Lock, Vault switching, and failed Resume discard it.
+  **Resume session**. Lock, Brain switching, and failed Resume discard it.
 
 Locked or inaccessible Folders must remain locked in the client. The server must
 not return plaintext search results or accept plaintext OKF imports.

@@ -38,7 +38,7 @@ same HTTPS server URL:
 ```sh
 fbrain doctor --server https://brain.smoke.finite.computer
 fbrain auth status
-fbrain open <vault-id> ./finitebrain-vault --server https://brain.smoke.finite.computer
+fbrain open <brain-id> ./finitebrain-brain --server https://brain.smoke.finite.computer
 ```
 
 ## Current Legacy Route Evidence
@@ -119,21 +119,21 @@ post-cutover smoke checks pass.
 ## Reset Smoke Defaults
 
 When default Getting Started or Smoke documentation changes, prefer a
-non-destructive reset over deleting Vault data. Back up first, then reseed only
+non-destructive reset over deleting Brain data. Back up first, then reseed only
 the deterministic Smoke fixture Pages:
 
 ```sh
 set -euo pipefail
 
 export FINITE_BRAIN_DB=/var/lib/finitebrain/finite-brain.sqlite3
-export FINITE_BRAIN_SMOKE_KEYS=/var/lib/finitebrain/finite-brain-smoke-vault-keys.json
-export FINITE_BRAIN_SMOKE_VAULT=smoke
+export FINITE_BRAIN_SMOKE_KEYS=/var/lib/finitebrain/finite-brain-smoke-brain-keys.json
+export FINITE_BRAIN_SMOKE_BRAIN=smoke
 
 node scripts/seed-smoke-doc-pages.mjs
 ```
 
 The seed script replaces only the known Smoke fixture object ids and preserves
-unrelated Vault records. It should be run from the same release checkout that
+unrelated Brain records. It should be run from the same release checkout that
 the Smoke service is serving so seeded Pages match the deployed Product Client
 and agent conventions.
 
@@ -170,12 +170,12 @@ curl -fsS https://brain.smoke.finite.computer/client/config.json
 fbrain doctor --server https://brain.smoke.finite.computer
 ```
 
-Then verify at least one real personal Vault and one organization Vault invite
+Then verify at least one real Personal Brain and one Organization Brain invite
 flow:
 
 ```sh
-fbrain vault metadata --vault <personal-vault-id> --server https://brain.smoke.finite.computer
-fbrain open <personal-vault-id> ./restore-check --server https://brain.smoke.finite.computer
+fbrain brain metadata --brain <personal-brain-id> --server https://brain.smoke.finite.computer
+fbrain open <personal-brain-id> ./restore-check --server https://brain.smoke.finite.computer
 (cd ./restore-check && fbrain daemon watch --once --json)
 ```
 
@@ -200,7 +200,7 @@ Post-cutover checks:
 ```sh
 curl -fsS https://brain.smoke.finite.computer/health
 curl -fsS https://brain.smoke.finite.computer/client | rg 'obsidian-shell|FiniteBrain'
-curl -fsS https://brain.smoke.finite.computer/client/app.js | rg 'vaultInvitationPanel|openFolderKeyGrants'
+curl -fsS https://brain.smoke.finite.computer/client/app.js | rg 'brainInvitationPanel|openFolderKeyGrants'
 fbrain doctor --server https://brain.smoke.finite.computer
 fbrain status --json
 ```
@@ -209,14 +209,14 @@ Browser checks:
 
 - Open `/client`.
 - Connect a Nostr/NIP-07 signer.
-- Create or open a personal Vault.
+- Create or open a Personal Brain.
 - Open Folder Keys from encrypted grants.
-- Create an organization Vault invitation by npub.
-- Inspect and accept an organization Vault invitation as the invited signer.
+- Create an Organization Brain invitation by npub.
+- Inspect and accept an Organization Brain invitation as the invited signer.
 
 Agent checks:
 
-- `fbrain open` materializes a Vault Working Tree.
+- `fbrain open` materializes a Brain Working Tree.
 - Ordinary file create/edit/delete operations are visible in the working tree.
 - `fbrain daemon watch --once --json` completes one sync attempt.
 - `fbrain sync now --json` reports conflicts clearly or completes cleanly.
@@ -232,7 +232,7 @@ Use this order:
    immediate access to the old prototype.
 3. If Rust state must roll back, stop the Rust service and restore the
    pre-cutover SQLite backup using the restore section above.
-4. Re-run `/health`, `/client/config.json`, `fbrain doctor`, and one real Vault
+4. Re-run `/health`, `/client/config.json`, `fbrain doctor`, and one real Brain
    metadata check before reopening access.
 
 Any writes made after cutover may be absent after restoring the pre-cutover

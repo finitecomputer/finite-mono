@@ -142,6 +142,10 @@ _Avoid_: email service, notification service
 - Each newly provisioned hosted agent has one **Managed Agent Email**. The
   trusted runner registers the runtime's public Agent Principal Key; it never
   receives authority to issue product grants.
+- Core remains the source of truth for which WorkOS account owns a hosted
+  agent. Finite Identity binds that agent's Managed Agent Email to its Agent
+  Principal Key, while each product owns any access role granted because of the
+  account-agent association.
 - A human's Finite Chat identity lives separately from every agent **Finite
   Home** and may be generated or imported by the human.
 - **Account Auth** is outside Finite Identity; proving a dashboard session does

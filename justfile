@@ -29,6 +29,10 @@ test:
 web-check:
     cd finitecomputer-v2/apps/dashboard && npm ci && npm test && npm run lint && npm run build
 
+# Static contract: first-party Brain surfaces use only the Greenfield Brain vocabulary.
+brain-language-check:
+    python3 scripts/check-brain-product-language.py
+
 # Evaluate and build immutable system + disko outputs on finite-lat-2. The
 # helper prints the exact, GC-rooted system path used for the deploy handoff.
 nixos-build-lat1 rev:

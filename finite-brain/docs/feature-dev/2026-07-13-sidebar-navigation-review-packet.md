@@ -6,7 +6,7 @@
 - Slice type: tiny isolated Product Client UI continuation
 - Acceptance criteria:
   - Remove the separate far-left activity rail.
-  - Put Files, Graph View, Search, Quick switcher, and Vault access in the
+  - Put Files, Graph View, Search, Quick switcher, and Brain access in the
     top File-sidebar section without changing their behavior.
   - Preserve semantic labels, active state, keyboard behavior, and responsive
     usability.
@@ -31,7 +31,7 @@ product workflow was rewritten.
   Client suite, formatting, diff check, full finite-brain-server suite,
   clippy, build, and browser smoke pass.
 - Browser evidence: all five controls are 40x40px header targets; Search,
-  Graph View, Files, Quick switcher Escape focus restoration, and Vault access
+  Graph View, Files, Quick switcher Escape focus restoration, and Brain access
   routes work. Desktop, 1000px, 390px, and 320px layouts have no horizontal
   overflow.
 

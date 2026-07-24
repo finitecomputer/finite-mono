@@ -6,11 +6,11 @@ The Rust FiniteBrain stack is now on `main`, but the first internal smoke alpha
 still needs the remaining product and deployment-readiness gaps closed before it
 matches the desired state: smoke members can use the Product Client, every smoke
 machine can use `fbrain`, and a User or their Agent can harden and maintain a
-Vault Working Tree with a Nostr keypair.
+Brain Working Tree with a Nostr keypair.
 
 The live smoke route still points at the old SilverBullet prototype, Product
 Client Folder Key Grant handling is still partly development-shaped, `fbrain`
-sync is command-driven rather than resident, organization Vault invitation
+sync is command-driven rather than resident, Organization Brain invitation
 controls are not productized in the browser, and backup/restore/cutover
 expectations need an operator runbook.
 
@@ -23,9 +23,9 @@ Ship the remaining smoke-alpha hardening in one feature branch:
 - Harden Product Client Folder Key Grant wrapping/opening around NIP-07 NIP-44
   encryption/decryption rather than plaintext development grant parsing.
 - Add a real foreground daemon watch loop for `fbrain` so an Agent Runtime can
-  keep a Vault Working Tree synced without manually invoking `sync now` after
+  keep a Brain Working Tree synced without manually invoking `sync now` after
   every edit.
-- Add Product Client organization Vault invitation controls for creating,
+- Add Product Client Organization Brain invitation controls for creating,
   accepting, and revoking organization member invitations.
 - Add a SQLite backup/restore and smoke cutover runbook plus an executable local
   verifier where practical.
@@ -38,12 +38,12 @@ Ship the remaining smoke-alpha hardening in one feature branch:
 4. As a Product Client User, I want Folder Key Grants opened through my NIP-07 signer, so that plaintext grants are not treated as the production trust path.
 5. As a Product Client User, I want bad or wrong-recipient grant envelopes rejected clearly, so that I can trust what keys are opened locally.
 6. As a Product Client User, I want grant creation for access/share flows to use browser NIP-44 encryption when available, so that grants created in the browser are hardened for smoke.
-7. As an Agent, I want `fbrain daemon watch` to keep syncing my Vault Working Tree, so that normal file edits are encrypted, signed, pushed, and refreshed without manual polling.
+7. As an Agent, I want `fbrain daemon watch` to keep syncing my Brain Working Tree, so that normal file edits are encrypted, signed, pushed, and refreshed without manual polling.
 8. As an Agent, I want daemon watch failures recorded in local state, so that blocked sync conditions are visible through `status`, `daemon logs`, and `conflicts`.
 9. As an Agent, I want bounded daemon options, so that tests and smoke commands can run the watcher safely.
-10. As an organization Vault admin, I want browser controls to invite a smoke member by npub, so that the internal org Vault can be bootstrapped without dropping to the Smoke UI.
-11. As an invited smoke member, I want browser controls to inspect and accept an organization Vault invitation, so that joining the org Vault is possible from the Product Client.
-12. As an organization Vault admin, I want browser controls to revoke pending invitations, so that stale invites can be cleaned up.
+10. As an Organization Brain admin, I want browser controls to invite a smoke member by npub, so that the internal Org Brain can be bootstrapped without dropping to the Smoke UI.
+11. As an invited smoke member, I want browser controls to inspect and accept an Organization Brain invitation, so that joining the Org Brain is possible from the Product Client.
+12. As an Organization Brain admin, I want browser controls to revoke pending invitations, so that stale invites can be cleaned up.
 13. As a smoke operator, I want a SQLite backup command that uses a database-consistent snapshot, so that smoke state can be preserved before and after cutover.
 14. As a smoke operator, I want a restore verification checklist, so that a restored server proves health, metadata, grants, sync, invitations, and readable client behavior.
 15. As a future deployment agent, I want the deployment handoff to distinguish Feature Dev work from live smoke promotion, so that live route changes happen in the right loop.

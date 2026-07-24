@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn managed_control_traversal_rejects_excessive_depth() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path().join("vault");
+        let root = temp.path().join("brain");
         initialize_private_working_tree(&root).unwrap();
         let mut directory = root.join(CONTROL_DIR_NAME);
         for index in 0..=MAX_MANAGED_DEPTH {
@@ -554,7 +554,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ownership_validation_rejects_a_different_effective_account() {
-        let error = validate_owner_ids(Path::new("/vault/.finitebrain"), 1000, 1001).unwrap_err();
+        let error = validate_owner_ids(Path::new("/brain/.finitebrain"), 1000, 1001).unwrap_err();
 
         assert!(matches!(
             error,

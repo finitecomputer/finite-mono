@@ -11,7 +11,7 @@ and which limits remain material.
 ## Executive readout
 
 FiniteBrain is Finite Computer's encrypted knowledge system for humans and
-agents. A **Vault** is a namespace of **Folders**; each Folder is both the
+agents. A **Brain** is a namespace of **Folders**; each Folder is both the
 authorization boundary and the default LLM-wiki scope. Trusted clients or agent
 runtimes open Folder Key Grants locally, decrypt accessible objects, and send
 only encrypted object revisions and access-control records to the service.
@@ -20,18 +20,18 @@ supported when paired with Markdown Source Notes. [README, lines 3–10](../../R
 [Portable v1 product boundary, lines 17–36](../specs/finitebrain-portability-spec.md#L17-L36)
 
 The important qualification is that "encrypted" does not mean every component
-is blind to every fact. The server persists Vault/Folder/access metadata,
+is blind to every fact. The server persists Brain/Folder/access metadata,
 encrypted object envelopes, encrypted Folder Key Grant wrappers, and sync
 records. It is intentionally plaintext-blind for readable page content and
 local search/graph projections, but a trusted endpoint that opens a Folder Key
 can read that Folder. [SQLite schema, lines 68–141](../../crates/finite-brain-store/src/schema.rs#L68-L141)
-[server-side search boundary, lines 111–128](../../crates/finite-brain-server/src/routes/vaults.rs#L111-L128)
+[server-side search boundary, lines 111–128](../../crates/finite-brain-server/src/routes/brains.rs#L111-L128)
 
 ```mermaid
 flowchart LR
   A["Bounded Brain Identity Provider or local fbrain signer"] --> B["Open NIP-59 Folder Key Grant locally"]
   B --> C["Session Folder Key + decrypted accessible objects"]
-  C --> D["Product Client / Vault Working Tree\nlocal search, graph, editing"]
+  C --> D["Product Client / Brain Working Tree\nlocal search, graph, editing"]
   D --> E["AES-GCM envelope + signed revision"]
   E --> F["FiniteBrain server\nSQLite append log + encrypted projection"]
   F --> G["Authorized bootstrap / sync pull"]
@@ -72,38 +72,41 @@ client or supplied production secrets. [development guide, lines 20–29](../../
 
 ## Domain and persistence model
 
+> Current-state note (2026-07-18): ADR-0021 superseded the bootstrap shape
+> recorded in this research snapshot. New Personal and Organization Brains now
+> start without Folders, Folder Objects, or Folder Key Grants.
+
 ### Authoritative domain objects
 
-- **Vault.** A stable id, personal-or-organization kind, display name, optional
-  personal owner, Folders, members, and admins. Personal and organization
-  bootstrap shapes both begin with an accessible getting-started Folder and a
-  restricted Folder. [core model, lines 737–853](../../crates/finite-brain-core/src/lib.rs#L737-L853)
-  [bootstrap functions, lines 931–1031](../../crates/finite-brain-core/src/lib.rs#L931-L1031)
+- **Brain.** A stable id, personal-or-organization kind, display name, optional
+  personal owner, Folders, members, and admins. The original research snapshot
+  observed seeded bootstrap Folders; ADR-0021 now requires both Personal and
+  Organization Brains to start empty. [core `Brain` and bootstrap symbols](../../crates/finite-brain-core/src/lib.rs)
 - **Folder.** Its id, display/path hierarchy, role, current key version,
   shared-source flag, and one of four access modes: `owner`, `admin_only`,
   `all_members`, or `restricted`. Folder—not a directory beneath a page—is the
-  enforceable read boundary. [core model, lines 747–803](../../crates/finite-brain-core/src/lib.rs#L747-L803)
+  enforceable read boundary. [core `Folder` model](../../crates/finite-brain-core/src/lib.rs)
 - **Folder Object.** A stable object id scoped to a Folder. Its current
   encrypted state is addressed by object id and revision; a trusted client
   decrypts it into a Page or Asset. Paths are validated as NFC, safe relative
   paths, which rejects absolute paths, backslashes, control characters, and
-  `.`/`..` segments. [path validation, lines 691–729](../../crates/finite-brain-core/src/lib.rs#L691-L729)
+  `.`/`..` segments. [core `SafeRelativePath` validation](../../crates/finite-brain-core/src/lib.rs)
   [opened Page/Asset shape, lines 80–124](../../crates/finite-brain-core/src/portability.rs#L80-L124)
 - **Folder Key Grant.** Server-visible metadata names issuer, recipient, Folder,
   key version, creation time, and a NIP-59 wrapped-event JSON field; the
   encrypted key remains opaque to the server. [grant metadata, lines 120–154](../../crates/finite-brain-store/src/lib.rs#L120-L154)
-- **Links and mounts.** The persistence model includes Vault invitations,
+- **Links and mounts.** The persistence model includes Brain invitations,
   restricted-Folder share links, personal mounts, Shared Folder connections,
   and organization mounts. They are not a separate plaintext-sharing system;
   access is backed by Folder Key Grant semantics. [schema, lines 195–325](../../crates/finite-brain-store/src/schema.rs#L195-L325)
 
 SQLite makes those relationships executable: foreign keys, unique grants per
-`(vault, folder, key version, recipient)`, and folder-access membership tables
+`(brain, folder, key version, recipient)`, and folder-access membership tables
 enforce consistency near the authoritative state. [schema, lines 81–141](../../crates/finite-brain-store/src/schema.rs#L81-L141)
 
 ### Sync record model
 
-Each Vault has a monotonic append log (`vault_record_index`) plus a current
+Each Brain has a monotonic append log (`brain_record_index`) plus a current
 encrypted-object projection. Record types include object revisions, tombstones,
 Folder Key Grants, and admin access changes. The projection can be rebuilt from
 the accepted log, which matters for restore and rebootstrap. [record schema,
@@ -127,19 +130,16 @@ incremental replay is complete. [pull implementation, lines 311–355](../../cra
 
 Each Folder Key is a random 32-byte AES-256 key. Object encryption uses a fresh
 12-byte nonce with AES-256-GCM. Its canonical additional authenticated data
-(AAD) binds the protocol version, Vault id, Folder id, Object id, and Folder Key
+(AAD) binds the protocol version, Brain id, Folder id, Object id, and Folder Key
 version, so an envelope cannot be replayed into a different object or key
-context without failing authentication. [Folder Key and AAD types, lines
-1133–1207](../../crates/finite-brain-core/src/lib.rs#L1133-L1207)
-[encryption/decryption implementation, lines 1209–1321](../../crates/finite-brain-core/src/lib.rs#L1209-L1321)
+context without failing authentication. [core Folder Key, AAD, and encryption symbols](../../crates/finite-brain-core/src/lib.rs)
 
 The uploaded envelope contains its version, cipher name, key version, base64
 nonce, and base64 ciphertext+tag. A create/update/move request additionally
 carries a canonical signed Nostr payload including object identifiers,
 operation, revisions, key version, ciphertext hash, author `npub`, and time.
 The core verifies event integrity, canonical serialization, all expected fields,
-the signer, tags, and ciphertext hash. [revision payload and validation, lines
-1371–1504](../../crates/finite-brain-core/src/lib.rs#L1371-L1504)
+the signer, tags, and ciphertext hash. [core revision payload and validation symbols](../../crates/finite-brain-core/src/lib.rs)
 
 ### Identity and grants
 
@@ -157,7 +157,7 @@ to the rest of the Product Client. A client decrypts a NIP-59-style grant only
 after binding it to the connected recipient and grant metadata; the server
 stores its wrapper rather than a raw Folder Key. [Portable v1 signer contract,
 lines 97–106](../specs/finitebrain-portability-spec.md#L97-L106)
-[browser grant opening, lines 2594–2712](../../crates/finite-brain-server/src/product-client.js#L2594-L2712)
+[browser grant-opening symbols](../../crates/finite-brain-server/src/product-client.js)
 
 Every protected HTTP request is a Nostr HTTP-auth event bound to method, full
 public URL, time window, and (when present) request bytes. The server accepts
@@ -170,17 +170,15 @@ limits by signer + method + path. [request authorization, lines
 
 The browser starts locked. Locking clears its keyring, opened-grant metadata,
 decrypted projection, drafts, conflicts, prepared writes, import state, and
-invitation state; it also locks on page hide, back/forward-cache return, Vault
-switch, and signer mismatch. [session reset and lock, lines
-842–929](../../crates/finite-brain-server/src/product-client.js#L842-L929)
-[memory clearing, lines 1911–1919](../../crates/finite-brain-server/src/product-client.js#L1911-L1919)
+invitation state; it also locks on page hide, back/forward-cache return, Brain
+switch, and signer mismatch. [Product Client session reset, lock, and
+memory-clearing symbols](../../crates/finite-brain-server/src/product-client.js)
 
-That does **not** erase an explicit Vault Working Tree. `fbrain open` creates a
+That does **not** erase an explicit Brain Working Tree. `fbrain open` creates a
 private, persistent plaintext projection for the controlling OS account and
 reports that its member-authored files remain until explicit removal. Its
 managed root/control directory rejects symlinks and enforces owner-only 0700
-directories and 0600 files on Unix. [open workflow, lines
-926–1027](../../crates/finite-brain-cli/src/lib.rs#L926-L1027)
+directories and 0600 files on Unix. [CLI open workflow symbols](../../crates/finite-brain-cli/src/lib.rs)
 [working-tree enforcement, lines 25–87](../../crates/finite-brain-cli/src/working_tree_security.rs#L25-L87)
 [permission checks, lines 305–345](../../crates/finite-brain-cli/src/working_tree_security.rs#L305-L345)
 
@@ -198,10 +196,10 @@ index. [router, lines 431–642](../../crates/finite-brain-server/src/lib.rs#L43
 
 Practical API families are:
 
-- **Vault and metadata:** list/create Vaults, metadata, encrypted export, and
+- **Brain and metadata:** list/create Brains, metadata, encrypted export, and
   identity resolution. The nominal `/search` route deliberately returns `400`:
-  plaintext search stays local. [vault routes, lines 487–504](../../crates/finite-brain-server/src/lib.rs#L487-L504)
-  [search rejection, lines 111–128](../../crates/finite-brain-server/src/routes/vaults.rs#L111-L128)
+  plaintext search stays local. [brain routes, lines 487–504](../../crates/finite-brain-server/src/lib.rs#L487-L504)
+  [search rejection, lines 111–128](../../crates/finite-brain-server/src/routes/brains.rs#L111-L128)
 - **Membership and access:** members/admins, Folder creation/setup, access
   grants/removal, and required key rotation/re-encryption when access is
   removed. [Folder mutation handlers, lines 3–55 and
@@ -210,7 +208,7 @@ Practical API families are:
   bootstrap, and cursor-based records. Secure reads filter by Folder visibility
   before returning an envelope. [object and sync handlers, lines
   3–228](../../crates/finite-brain-server/src/routes/objects_sync.rs#L3-L228)
-- **Sharing:** Vault invitations, email-bootstrap claim/instructions, restricted
+- **Sharing:** Brain invitations, email-bootstrap claim/instructions, restricted
   Folder share links, Shared Folder invitations/connections, and mounts.
   [sharing route declarations, lines 518–618](../../crates/finite-brain-server/src/lib.rs#L518-L618)
 
@@ -222,18 +220,17 @@ conventions. [CORS middleware, lines 23–65](../../crates/finite-brain-server/s
 ## `fbrain` CLI and agent workflow
 
 `fbrain` is the agent-facing operational surface. It supports JSON output and
-provides identity, signer, daemon, sync, working-tree, conflict, access, Vault,
+provides identity, signer, daemon, sync, working-tree, conflict, access, Brain,
 Folder, mount, invitation, and share command families. The in-binary help is the
-authoritative compact command inventory. [dispatcher and help, lines
-90–128](../../crates/finite-brain-cli/src/lib.rs#L90-L128)
+authoritative compact command inventory. [CLI dispatcher and help](../../crates/finite-brain-cli/src/lib.rs)
 
 A normal agent loop is:
 
 1. `fbrain doctor --server …` and `fbrain auth status --json` establish the
    local/server/identity state.
-2. `fbrain open <vault-id> <path>` creates an explicit private Working Tree and
+2. `fbrain open <brain-id> <path>` creates an explicit private Working Tree and
    attempts an initial signed sync.
-3. Read the materialized Vault/Folder instructions, sync before editing,
+3. Read the materialized Brain/Folder instructions, sync before editing,
    modify only readable materialized Folder contents, then run
    `fbrain sync now --summary` and inspect `fbrain conflicts --json`.
 4. Use `fbrain status`, `activity`, and access/invitation commands to explain
@@ -246,8 +243,8 @@ Folder. [agent workflow, lines 95–132](../../development.md#L95-L132)
 
 There is intentionally no durable `fbrain unlock` workflow: each key-using
 operation reopens the encrypted grant into process-local Session Folder Keys,
-and the removed command returns guidance to run `sync now` instead. [CLI hard
-cut, lines 1057–1072](../../crates/finite-brain-cli/src/lib.rs#L1057-L1072)
+and the removed command returns guidance to run `sync now` instead. [CLI
+hard-cut validation](../../crates/finite-brain-cli/src/lib.rs)
 [ADR, lines 5–10](../adr/0019-hard-cut-durable-cli-unlock-state.md#L5-L10)
 
 ## Deployment and configuration

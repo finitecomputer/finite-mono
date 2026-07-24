@@ -4,26 +4,29 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use finite_brain_core::{
-    BootstrapOutput, CoreError, DisplayName, Folder, FolderAccessMode, FolderId, FolderRole,
-    ObjectId, RequiredFolderKeyGrant, SafeRelativePath, UserId, Vault, VaultId, VaultKind,
-    VaultMember,
+    BootstrapOutput, Brain, BrainId, BrainKind, BrainMember, CoreError, DisplayName, Folder,
+    FolderAccessMode, FolderId, FolderKeyRecipientPolicy, FolderRole, FolderRotationFanout,
+    FolderRotationOperation, ObjectId, RequiredFolderKeyGrant, SafeRelativePath, UserId,
+    required_folder_key_recipients, validate_folder_rotation_fanout,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-mod agent_access;
+mod brains;
 mod folder_access;
+mod folder_deletion;
 mod links;
 mod loading;
+mod personal_agents;
 mod schema;
 mod shared_folders;
 mod sync_records;
-mod vaults;
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
 const MAX_PULL_LIMIT: u64 = 1_000;
@@ -46,15 +49,15 @@ pub enum StoreError {
     Core(CoreError),
     /// SQLite returned an error.
     Database { message: String },
-    /// A requested Vault does not exist.
-    MissingVault { vault_id: String },
+    /// A requested Brain does not exist.
+    MissingBrain { brain_id: String },
     /// A requested Folder does not exist.
     MissingFolder { folder_id: String },
     /// A stable id already exists in the scoped table.
     DuplicateId { field: &'static str, value: String },
     /// Grant metadata did not include a required current recipient.
     MissingRequiredGrant { recipient_user_id: String },
-    /// Stored state would violate Vault, member, admin, access, or grant rules.
+    /// Stored state would violate Brain, member, admin, access, or grant rules.
     BrokenInvariant { reason: String },
     /// A sync record is malformed or violates request semantics.
     InvalidRecord { reason: String },
@@ -74,7 +77,7 @@ impl fmt::Display for StoreError {
         match self {
             Self::Core(error) => write!(f, "{error}"),
             Self::Database { message } => write!(f, "database error: {message}"),
-            Self::MissingVault { vault_id } => write!(f, "missing vault: {vault_id}"),
+            Self::MissingBrain { brain_id } => write!(f, "missing brain: {brain_id}"),
             Self::MissingFolder { folder_id } => write!(f, "missing folder: {folder_id}"),
             Self::DuplicateId { field, value } => {
                 write!(f, "duplicate id for {field}: {value}")
@@ -141,11 +144,13 @@ pub struct FolderKeyGrantMetadata {
     pub created_at: String,
 }
 
-/// Reloaded Vault state with store-only metadata attached.
+/// Reloaded Brain state with store-only metadata attached.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct StoredVault {
-    /// Core Vault metadata.
-    pub vault: Vault,
+pub struct StoredBrain {
+    /// Core Brain metadata.
+    pub brain: Brain,
+    /// The one active Personal Agent relationship, when occupied.
+    pub personal_agent: Option<PersonalAgent>,
     /// Explicit restricted Folder access by Folder id.
     pub folder_access: BTreeMap<FolderId, BTreeSet<UserId>>,
     /// Stored Folder Key Grant metadata.
@@ -154,101 +159,15 @@ pub struct StoredVault {
     pub setup_incomplete_folder_ids: BTreeSet<FolderId>,
 }
 
-/// Durable product-scoped delegation between a Personal Vault owner and one Agent Principal.
+/// One active Personal Agent relationship owned by a Personal Brain.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BrainEmailAccessDelegation {
-    pub id: String,
-    pub vault_id: VaultId,
+pub struct PersonalAgent {
+    pub brain_id: BrainId,
     pub owner_npub: UserId,
     pub agent_npub: UserId,
-    pub workspace_folder_id: FolderId,
-    pub folder_ids: Vec<FolderId>,
-    pub status: String,
     pub created_by_npub: UserId,
     pub created_at: String,
     pub updated_at: String,
-    pub audit: Vec<BrainEmailAccessDelegationAudit>,
-}
-
-/// One durable explanation of a delegation lifecycle change.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BrainEmailAccessDelegationAudit {
-    pub id: String,
-    pub action: String,
-    pub actor_npub: UserId,
-    pub subject_npub: UserId,
-    pub folder_ids: Vec<FolderId>,
-    pub occurred_at: String,
-}
-
-/// Validated store input for the initial user-first Agent Workspace pairing.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct EnsurePersonalAgentWorkspaceInput {
-    pub delegation_id: String,
-    pub vault_id: VaultId,
-    pub owner_npub: UserId,
-    pub agent_npub: UserId,
-    pub folder: Folder,
-    pub grants: Vec<FolderKeyGrantMetadata>,
-    pub sync_records: Vec<SyncRecordInput>,
-    pub created_at: String,
-}
-
-/// Result of creating or safely retrying one initial Agent Workspace pairing.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct EnsurePersonalAgentWorkspaceOutcome {
-    pub delegation: BrainEmailAccessDelegation,
-    pub duplicate: bool,
-}
-
-/// Validated all-or-nothing input for the agent-first Personal Vault path.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BootstrapPersonalAgentWorkspaceInput {
-    pub authorization_id: String,
-    pub authorization_event_id: String,
-    pub authorization_expires_at: u64,
-    pub vault: BootstrapOutput,
-    pub bootstrap_grants: Vec<FolderKeyGrantMetadata>,
-    pub pairing: EnsurePersonalAgentWorkspaceInput,
-    pub consumed_at: String,
-}
-
-/// Result of consuming one agent-first bootstrap authorization.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BootstrapPersonalAgentWorkspaceOutcome {
-    pub delegation: BrainEmailAccessDelegation,
-}
-
-/// Owner-authorized expansion of an active Agent Workspace delegation.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ExpandPersonalAgentWorkspaceInput {
-    pub vault_id: VaultId,
-    pub owner_npub: UserId,
-    pub agent_npub: UserId,
-    pub folder_id: FolderId,
-    pub grant: FolderKeyGrantMetadata,
-    pub sync_records: Vec<SyncRecordInput>,
-    pub changed_at: String,
-}
-
-/// One Folder Key rotation inside an all-or-nothing agent-delegation revocation.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct RevokePersonalAgentFolderInput {
-    pub folder_id: FolderId,
-    pub new_key_version: u32,
-    pub grants: Vec<FolderKeyGrantMetadata>,
-    pub reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
-    pub sync_records: Vec<SyncRecordInput>,
-}
-
-/// Owner-authorized removal and key rotation for every Folder in an agent delegation.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct RevokePersonalAgentWorkspaceInput {
-    pub vault_id: VaultId,
-    pub owner_npub: UserId,
-    pub agent_npub: UserId,
-    pub folders: Vec<RevokePersonalAgentFolderInput>,
-    pub changed_at: String,
 }
 
 /// Verified display metadata for one canonical Nostr identity.
@@ -268,31 +187,33 @@ pub struct IdentityAlias {
     pub updated_at: String,
 }
 
-/// Vault summary visible to an authenticated actor.
+/// Brain summary visible to an authenticated actor.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct VisibleVault {
-    /// Stable Vault id.
-    pub id: VaultId,
-    /// Vault kind.
-    pub kind: VaultKind,
+pub struct VisibleBrain {
+    /// Stable Brain id.
+    pub id: BrainId,
+    /// Brain kind.
+    pub kind: BrainKind,
     /// Display name.
     pub name: String,
-    /// Actor's relationship to this Vault.
-    pub role: VisibleVaultRole,
+    /// Actor's relationship to this Brain.
+    pub role: VisibleBrainRole,
     /// Pending invitation code when the actor has not accepted yet.
     pub invite_code: Option<String>,
 }
 
-/// Actor relationship used by client Vault switchers.
+/// Actor relationship used by client Brain switchers.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum VisibleVaultRole {
-    /// Personal Vault owner.
+pub enum VisibleBrainRole {
+    /// Personal Brain owner.
     Owner,
-    /// Organization Vault admin.
+    /// Personal Brain's one fully trusted agent.
+    PersonalAgent,
+    /// Organization Brain admin.
     Admin,
-    /// Organization Vault member.
+    /// Organization Brain member.
     Member,
-    /// Pending Organization Vault invitation.
+    /// Pending Organization Brain invitation.
     Invited,
 }
 
@@ -305,8 +226,8 @@ pub enum SyncRecordType {
     FolderObjectTombstone,
     /// Folder Key Grant control record.
     FolderKeyGrant,
-    /// Vault admin access-change control record.
-    VaultAdminAccessChange,
+    /// Brain admin access-change control record.
+    BrainAdminAccessChange,
 }
 
 /// Folder Object revision sync submission after crypto/signature validation.
@@ -388,16 +309,53 @@ pub enum SyncRecordInput {
 /// Result of accepting or retrying a sync record.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SubmitRecordOutcome {
-    /// Vault-scoped sequence.
+    /// Brain-scoped sequence.
     pub sequence: u64,
     /// True when this event id was already accepted.
     pub duplicate: bool,
 }
 
+/// Result of granting one identity the current Folder Key.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum GrantFolderAccessOutcome {
+    /// Access and its current-version key grant were added.
+    Granted,
+    /// The identity already had effective access and the current-version grant.
+    AlreadyHasAccess,
+}
+
+/// Result of atomically deleting one Folder subtree.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderSubtreeDeletion {
+    pub sequence: u64,
+    pub duplicate: bool,
+    pub folder_count: usize,
+    pub object_count: usize,
+}
+
+/// Retained facts needed to validate an exact retry after a Folder is gone.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderDeletionReplay {
+    pub deletion_event_id: String,
+    pub actor_npub: UserId,
+    pub root_key_version: u32,
+    pub folder_count: usize,
+    pub object_count: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PersonalAgentFolderRotation {
+    pub folder_id: FolderId,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantMetadata>,
+    pub reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
+    pub control_records: Vec<ControlSyncRecord>,
+}
+
 /// Stored accepted sync record.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct StoredSyncRecord {
-    /// Vault-scoped sequence.
+    /// Brain-scoped sequence.
     pub sequence: u64,
     /// Signed event id.
     pub record_event_id: String,
@@ -438,13 +396,13 @@ pub struct CurrentEncryptedObject {
     pub deleted: bool,
 }
 
-/// Encrypted Vault Export with actor-filtered visibility.
+/// Encrypted Brain Export with actor-filtered visibility.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct EncryptedVaultExport {
+pub struct EncryptedBrainExport {
     /// Export version.
     pub version: String,
-    /// Vault summary.
-    pub vault: ExportVaultSummary,
+    /// Brain summary.
+    pub brain: ExportBrainSummary,
     /// Folder metadata with actor accessibility.
     pub folders: Vec<EncryptedExportFolder>,
     /// Current encrypted object projection.
@@ -455,16 +413,16 @@ pub struct EncryptedVaultExport {
     pub access_state: EncryptedExportAccessState,
 }
 
-/// Vault summary in Encrypted Vault Export.
+/// Brain summary in Encrypted Brain Export.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ExportVaultSummary {
-    /// Vault id.
-    pub id: VaultId,
-    /// Vault kind.
-    pub kind: VaultKind,
-    /// Vault name.
+pub struct ExportBrainSummary {
+    /// Brain id.
+    pub id: BrainId,
+    /// Brain kind.
+    pub kind: BrainKind,
+    /// Brain name.
     pub name: DisplayName,
-    /// Personal Vault owner, if any.
+    /// Personal Brain owner, if any.
     pub owner_user_id: Option<UserId>,
 }
 
@@ -524,7 +482,7 @@ pub struct EncryptedExportFolderAccess {
     pub user_ids: Vec<UserId>,
 }
 
-/// Current lifecycle state for Vault Invitations and Share Links.
+/// Current lifecycle state for Brain Invitations and Share Links.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LinkStatus {
     /// Link can still be accepted.
@@ -535,16 +493,16 @@ pub enum LinkStatus {
     Revoked,
 }
 
-/// Vault Invitation target routing mode.
+/// Brain Invitation target routing mode.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum VaultInvitationTargetKind {
+pub enum BrainInvitationTargetKind {
     /// Existing concrete npub/hex/NIP-05 user target.
     Npub,
     /// Email-targeted bootstrap awaiting client-side claim into an npub.
     EmailBootstrap,
 }
 
-impl VaultInvitationTargetKind {
+impl BrainInvitationTargetKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Npub => "npub",
@@ -553,7 +511,7 @@ impl VaultInvitationTargetKind {
     }
 }
 
-impl TryFrom<&str> for VaultInvitationTargetKind {
+impl TryFrom<&str> for BrainInvitationTargetKind {
     type Error = StoreError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -561,7 +519,7 @@ impl TryFrom<&str> for VaultInvitationTargetKind {
             "npub" => Ok(Self::Npub),
             "email_bootstrap" => Ok(Self::EmailBootstrap),
             _ => Err(StoreError::BrokenInvariant {
-                reason: format!("unknown vault invitation target kind {value}"),
+                reason: format!("unknown brain invitation target kind {value}"),
             }),
         }
     }
@@ -578,15 +536,15 @@ pub struct EmailInviteBootstrapScopeFolder {
     pub key_version: u32,
 }
 
-/// Stored singleton Vault Invitation.
+/// Stored singleton Brain Invitation.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct StoredVaultInvitation {
+pub struct StoredBrainInvitation {
     /// Stable invitation id.
     pub id: String,
-    /// Vault id.
-    pub vault_id: VaultId,
+    /// Brain id.
+    pub brain_id: BrainId,
     /// Target routing mode.
-    pub target_kind: VaultInvitationTargetKind,
+    pub target_kind: BrainInvitationTargetKind,
     /// Target user npub for npub-bound invitations, or claimed npub after email bootstrap claim.
     pub user_id: Option<UserId>,
     /// Invited email for email bootstrap invitations.
@@ -630,8 +588,8 @@ pub struct StoredVaultInvitation {
 pub struct StoredShareLink {
     /// Stable share link id.
     pub id: String,
-    /// Source Vault id.
-    pub vault_id: VaultId,
+    /// Source Brain id.
+    pub brain_id: BrainId,
     /// Source Folder id.
     pub folder_id: FolderId,
     /// Target user npub.
@@ -669,17 +627,17 @@ pub enum SharedFolderConnectionStatus {
     Revoked,
 }
 
-/// Stored Shared Folder Invitation from a source Folder to a destination Organization Vault.
+/// Stored Shared Folder Invitation from a source Folder to a destination Organization Brain.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct StoredSharedFolderInvitation {
     /// Stable invitation id.
     pub id: String,
-    /// Source Vault id.
-    pub source_vault_id: VaultId,
+    /// Source Brain id.
+    pub source_brain_id: BrainId,
     /// Source Folder id.
     pub source_folder_id: FolderId,
-    /// Destination Organization Vault id.
-    pub destination_vault_id: VaultId,
+    /// Destination Organization Brain id.
+    pub destination_brain_id: BrainId,
     /// Destination admin npub.
     pub destination_admin_npub: UserId,
     /// Source admin who created the invitation.
@@ -707,12 +665,12 @@ pub struct StoredSharedFolderInvitation {
 pub struct StoredSharedFolderConnection {
     /// Stable deterministic connection id.
     pub id: String,
-    /// Source Vault id.
-    pub source_vault_id: VaultId,
+    /// Source Brain id.
+    pub source_brain_id: BrainId,
     /// Source Folder id.
     pub source_folder_id: FolderId,
-    /// Destination Organization Vault id.
-    pub destination_vault_id: VaultId,
+    /// Destination Organization Brain id.
+    pub destination_brain_id: BrainId,
     /// Destination admin npub.
     pub destination_admin_npub: UserId,
     /// Lifecycle state.
@@ -730,10 +688,10 @@ pub struct StoredSharedFolderConnection {
 pub struct StoredOrganizationFolderMount {
     /// Stable deterministic mount id.
     pub id: String,
-    /// Destination Organization Vault id.
-    pub organization_vault_id: VaultId,
-    /// Source Vault id.
-    pub source_vault_id: VaultId,
+    /// Destination Organization Brain id.
+    pub organization_brain_id: BrainId,
+    /// Source Brain id.
+    pub source_brain_id: BrainId,
     /// Source Folder id.
     pub source_folder_id: FolderId,
     /// Connection id.
@@ -750,12 +708,12 @@ pub struct StoredOrganizationFolderMount {
     pub updated_at: String,
 }
 
-/// Direction of a shared-folder relationship relative to one Vault.
+/// Direction of a shared-folder relationship relative to one Brain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SharedFolderDirection {
-    /// The Vault is the source that shares one of its Folders.
+    /// The Brain is the source that shares one of its Folders.
     Source,
-    /// The Vault is the destination that mounts a shared Folder.
+    /// The Brain is the destination that mounts a shared Folder.
     Destination,
 }
 
@@ -775,10 +733,10 @@ pub enum MountedFolderState {
 pub struct MountedFolderProjection {
     /// Organization mount id.
     pub mount_id: String,
-    /// Destination Organization Vault id.
-    pub organization_vault_id: VaultId,
-    /// Source Vault id.
-    pub source_vault_id: VaultId,
+    /// Destination Organization Brain id.
+    pub organization_brain_id: BrainId,
+    /// Source Brain id.
+    pub source_brain_id: BrainId,
     /// Source Folder id.
     pub source_folder_id: FolderId,
     /// Connection id.
@@ -802,8 +760,8 @@ struct SharedFolderAccessRemoval<'a> {
 /// Bootstrap response data for rebuilding current encrypted state.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SyncBootstrap {
-    /// Vault id.
-    pub vault_id: VaultId,
+    /// Brain id.
+    pub brain_id: BrainId,
     /// Latest accepted sequence.
     pub latest_sequence: u64,
     /// Current encrypted objects.
@@ -819,8 +777,8 @@ pub struct SyncBootstrap {
 /// Incremental sync pull result.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SyncPull {
-    /// Vault id.
-    pub vault_id: VaultId,
+    /// Brain id.
+    pub brain_id: BrainId,
     /// Requested cursor.
     pub after_sequence: u64,
     /// Latest sequence at read time.
@@ -855,15 +813,16 @@ impl BrainStore {
 
     fn from_connection(conn: Connection) -> Result<Self, StoreError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         let mut store = Self { conn };
         store.apply_migrations()?;
         Ok(store)
     }
 
-    pub fn load_vault(&self, vault_id: &VaultId) -> Result<StoredVault, StoreError> {
-        let mut vault = self.load_core_vault(vault_id)?;
-        let folder_access = self.load_folder_access(vault_id)?;
-        for member in &mut vault.members {
+    pub fn load_brain(&self, brain_id: &BrainId) -> Result<StoredBrain, StoreError> {
+        let mut brain = self.load_core_brain(brain_id)?;
+        let folder_access = self.load_folder_access(brain_id)?;
+        for member in &mut brain.members {
             member.folder_access = folder_access
                 .iter()
                 .filter_map(|(folder_id, users)| {
@@ -872,68 +831,19 @@ impl BrainStore {
                 .collect();
         }
 
-        Ok(StoredVault {
-            vault,
+        Ok(StoredBrain {
+            brain,
+            personal_agent: self.load_personal_agent(brain_id)?,
             folder_access,
-            grants: self.load_grants(vault_id)?,
-            setup_incomplete_folder_ids: self.load_setup_incomplete_folder_ids(vault_id)?,
+            grants: self.load_grants(brain_id)?,
+            setup_incomplete_folder_ids: self.load_setup_incomplete_folder_ids(brain_id)?,
         })
     }
 
     /// Upsert verified display metadata for a canonical Nostr identity.
     pub fn record_identity_alias(&mut self, alias: &IdentityAlias) -> Result<(), StoreError> {
-        let relays_json = serde_json::to_string(&alias.nip05_relays).map_err(|error| {
-            StoreError::InvalidRecord {
-                reason: format!("identity alias relays did not serialize: {error}"),
-            }
-        })?;
         let tx = self.conn.transaction()?;
-        if let Some(nip05) = &alias.preferred_nip05 {
-            tx.execute(
-                "DELETE FROM identity_aliases WHERE preferred_nip05 = ?1 AND npub <> ?2",
-                params![nip05, alias.npub.as_str()],
-            )?;
-            tx.execute(
-                r#"
-                INSERT INTO identity_aliases (
-                    npub, hex_public_key, preferred_nip05, nip05_verified_at,
-                    nip05_relays_json, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                ON CONFLICT(npub) DO UPDATE SET
-                    hex_public_key = excluded.hex_public_key,
-                    preferred_nip05 = excluded.preferred_nip05,
-                    nip05_verified_at = excluded.nip05_verified_at,
-                    nip05_relays_json = excluded.nip05_relays_json,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    alias.npub.as_str(),
-                    alias.hex_public_key,
-                    nip05,
-                    alias.nip05_verified_at,
-                    relays_json,
-                    alias.updated_at,
-                ],
-            )?;
-        } else {
-            tx.execute(
-                r#"
-                INSERT INTO identity_aliases (
-                    npub, hex_public_key, preferred_nip05, nip05_verified_at,
-                    nip05_relays_json, updated_at
-                ) VALUES (?1, ?2, NULL, NULL, ?3, ?4)
-                ON CONFLICT(npub) DO UPDATE SET
-                    hex_public_key = excluded.hex_public_key,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    alias.npub.as_str(),
-                    alias.hex_public_key,
-                    relays_json,
-                    alias.updated_at,
-                ],
-            )?;
-        }
+        upsert_identity_alias(&tx, alias)?;
         tx.commit()?;
         Ok(())
     }
@@ -966,12 +876,12 @@ impl BrainStore {
     /// Test/support helper for checking rollback behavior without exposing SQL.
     pub fn folder_exists(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         folder_id: &FolderId,
     ) -> Result<bool, StoreError> {
         let exists = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM folders WHERE vault_id = ?1 AND id = ?2)",
-            params![vault_id.as_str(), folder_id.as_str()],
+            "SELECT EXISTS(SELECT 1 FROM folders WHERE brain_id = ?1 AND id = ?2)",
+            params![brain_id.as_str(), folder_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         Ok(exists)
@@ -987,18 +897,18 @@ impl BrainStore {
         Ok(exists)
     }
 
-    /// Accept a validated sync record, assign a Vault-scoped sequence, and update projections.
+    /// Accept a validated sync record, assign a Brain-scoped sequence, and update projections.
     pub fn submit_sync_record(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         input: &SyncRecordInput,
     ) -> Result<SubmitRecordOutcome, StoreError> {
-        self.load_core_vault(vault_id)?;
+        self.load_core_brain(brain_id)?;
         sync_records::validate_sync_input(input)?;
 
         let tx = self.conn.transaction()?;
         if let Some(sequence) =
-            sync_records::existing_sequence(&tx, vault_id, input.record_event_id())?
+            sync_records::existing_sequence(&tx, brain_id, input.record_event_id())?
         {
             tx.commit()?;
             return Ok(SubmitRecordOutcome {
@@ -1007,10 +917,10 @@ impl BrainStore {
             });
         }
 
-        sync_records::validate_sync_conflict(&tx, vault_id, input)?;
-        let sequence = sync_records::next_sequence(&tx, vault_id)?;
-        sync_records::insert_sync_record(&tx, vault_id, sequence, input)?;
-        sync_records::project_sync_record(&tx, vault_id, input)?;
+        sync_records::validate_sync_conflict(&tx, brain_id, input)?;
+        let sequence = sync_records::next_sequence(&tx, brain_id)?;
+        sync_records::insert_sync_record(&tx, brain_id, sequence, input)?;
+        sync_records::project_sync_record(&tx, brain_id, input)?;
         tx.commit()?;
 
         Ok(SubmitRecordOutcome {
@@ -1020,51 +930,59 @@ impl BrainStore {
     }
 
     /// Return the current encrypted state for rebootstrap.
-    pub fn sync_bootstrap(&self, vault_id: &VaultId) -> Result<SyncBootstrap, StoreError> {
-        self.require_vault_exists(vault_id)?;
-        let objects = self.load_current_objects(vault_id)?;
-        let control_records = sync_records::load_sync_records(&self.conn, vault_id)?
+    pub fn sync_bootstrap(&self, brain_id: &BrainId) -> Result<SyncBootstrap, StoreError> {
+        self.require_brain_exists(brain_id)?;
+        let objects = self.load_current_objects(brain_id)?;
+        let control_records = sync_records::load_sync_records(&self.conn, brain_id)?
             .into_iter()
             .filter(|record| {
                 matches!(
                     record.record_type,
-                    SyncRecordType::FolderKeyGrant | SyncRecordType::VaultAdminAccessChange
+                    SyncRecordType::FolderKeyGrant | SyncRecordType::BrainAdminAccessChange
                 )
             })
             .collect::<Vec<_>>();
         Ok(SyncBootstrap {
-            vault_id: vault_id.clone(),
-            latest_sequence: self.latest_sequence(vault_id)?,
+            brain_id: brain_id.clone(),
+            latest_sequence: self.latest_sequence(brain_id)?,
             object_count: objects.len(),
             objects,
             control_records,
-            current_state_kind: "current_encrypted_vault_state",
+            current_state_kind: "current_encrypted_brain_state",
         })
     }
 
-    /// Build an actor-filtered Encrypted Vault Export without decrypting content.
-    pub fn encrypted_vault_export(
+    /// Build an actor-filtered Encrypted Brain Export without decrypting content.
+    pub fn encrypted_brain_export(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         actor_npub: &UserId,
-    ) -> Result<EncryptedVaultExport, StoreError> {
-        let stored = self.load_vault(vault_id)?;
-        let has_personal_folder_scope = stored.vault.kind != VaultKind::Personal
-            || stored.vault.owner_user_id.as_ref() == Some(actor_npub)
+    ) -> Result<EncryptedBrainExport, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        let is_personal_agent = stored
+            .personal_agent
+            .as_ref()
+            .is_some_and(|relationship| relationship.agent_npub == *actor_npub);
+        let has_personal_folder_scope = stored.brain.kind != BrainKind::Personal
+            || stored.brain.owner_user_id.as_ref() == Some(actor_npub)
+            || is_personal_agent
             || stored
                 .folder_access
                 .values()
                 .any(|users| users.contains(actor_npub));
-        if !vault_visible_to_actor(&stored.vault, actor_npub) || !has_personal_folder_scope {
+        if (!brain_visible_to_actor(&stored.brain, actor_npub) && !is_personal_agent)
+            || !has_personal_folder_scope
+        {
             return Err(StoreError::BrokenInvariant {
-                reason: "vault access required for encrypted export".to_owned(),
+                reason: "brain access required for encrypted export".to_owned(),
             });
         }
-        let is_admin = stored.vault.admins.contains(actor_npub);
-        let is_limited_personal_member = stored.vault.kind == VaultKind::Personal
-            && stored.vault.owner_user_id.as_ref() != Some(actor_npub);
+        let is_admin = stored.brain.admins.contains(actor_npub);
+        let is_limited_personal_member = stored.brain.kind == BrainKind::Personal
+            && stored.brain.owner_user_id.as_ref() != Some(actor_npub)
+            && !is_personal_agent;
         let folders = stored
-            .vault
+            .brain
             .folders
             .iter()
             .filter_map(|folder| {
@@ -1080,7 +998,7 @@ impl BrainStore {
             })
             .collect::<Vec<_>>();
         let objects = self
-            .load_current_objects(vault_id)?
+            .load_current_objects(brain_id)?
             .into_iter()
             .filter_map(|object| {
                 let accessible = folder_visible_to_actor(&stored, &object.folder_id, actor_npub);
@@ -1103,13 +1021,13 @@ impl BrainStore {
             .collect::<Vec<_>>();
         let access_state = export_access_state(&stored, actor_npub, is_admin);
 
-        Ok(EncryptedVaultExport {
-            version: "finite-vault-export-v1".to_owned(),
-            vault: ExportVaultSummary {
-                id: stored.vault.id,
-                kind: stored.vault.kind,
-                name: stored.vault.name,
-                owner_user_id: stored.vault.owner_user_id,
+        Ok(EncryptedBrainExport {
+            version: "finite-brain-export-v1".to_owned(),
+            brain: ExportBrainSummary {
+                id: stored.brain.id,
+                kind: stored.brain.kind,
+                name: stored.brain.name,
+                owner_user_id: stored.brain.owner_user_id,
             },
             folders,
             objects,
@@ -1121,89 +1039,89 @@ impl BrainStore {
     /// Pull accepted records after a cursor with bounded pagination.
     pub fn pull_sync_records(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         after_sequence: u64,
         limit: u64,
     ) -> Result<SyncPull, StoreError> {
-        self.require_vault_exists(vault_id)?;
-        let retention_floor = self.retention_floor(vault_id)?;
+        self.require_brain_exists(brain_id)?;
+        let retention_floor = self.retention_floor(brain_id)?;
         if after_sequence < retention_floor {
             return Err(StoreError::RebootstrapRequired { retention_floor });
         }
 
-        let latest_sequence = self.latest_sequence(vault_id)?;
+        let latest_sequence = self.latest_sequence(brain_id)?;
         sync_records::pull_sync_records(
             &self.conn,
-            vault_id,
+            brain_id,
             after_sequence,
             limit,
             latest_sequence,
         )
     }
 
-    /// Set the retained cursor floor for a Vault.
+    /// Set the retained cursor floor for a Brain.
     pub fn set_retention_floor(
         &mut self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         retention_floor: u64,
     ) -> Result<(), StoreError> {
-        self.require_vault_exists(vault_id)?;
+        self.require_brain_exists(brain_id)?;
         self.conn.execute(
             r#"
-            INSERT INTO vault_sync_retention (vault_id, retention_floor)
+            INSERT INTO brain_sync_retention (brain_id, retention_floor)
             VALUES (?1, ?2)
-            ON CONFLICT(vault_id) DO UPDATE SET retention_floor = excluded.retention_floor
+            ON CONFLICT(brain_id) DO UPDATE SET retention_floor = excluded.retention_floor
             "#,
-            params![vault_id.as_str(), retention_floor],
+            params![brain_id.as_str(), retention_floor],
         )?;
         Ok(())
     }
 
     /// Rebuild current encrypted object projection from the accepted append log.
-    pub fn rebuild_current_projection(&mut self, vault_id: &VaultId) -> Result<(), StoreError> {
-        self.require_vault_exists(vault_id)?;
+    pub fn rebuild_current_projection(&mut self, brain_id: &BrainId) -> Result<(), StoreError> {
+        self.require_brain_exists(brain_id)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "DELETE FROM current_encrypted_vault_objects WHERE vault_id = ?1",
-            params![vault_id.as_str()],
+            "DELETE FROM current_encrypted_brain_objects WHERE brain_id = ?1",
+            params![brain_id.as_str()],
         )?;
 
-        let records = sync_records::load_sync_records_tx(&tx, vault_id)?;
+        let records = sync_records::load_sync_records_tx(&tx, brain_id)?;
         for record in &records {
-            sync_records::project_stored_record(&tx, vault_id, record)?;
+            sync_records::project_stored_record(&tx, brain_id, record)?;
         }
 
         tx.commit()?;
         Ok(())
     }
 
-    fn require_vault_exists(&self, vault_id: &VaultId) -> Result<(), StoreError> {
+    fn require_brain_exists(&self, brain_id: &BrainId) -> Result<(), StoreError> {
         self.conn
             .query_row(
-                "SELECT 1 FROM vaults WHERE id = ?1",
-                params![vault_id.as_str()],
+                "SELECT 1 FROM brains WHERE id = ?1",
+                params![brain_id.as_str()],
                 |_| Ok(()),
             )
             .optional()?
-            .ok_or_else(|| StoreError::MissingVault {
-                vault_id: vault_id.to_string(),
+            .ok_or_else(|| StoreError::MissingBrain {
+                brain_id: brain_id.to_string(),
             })
     }
 
-    fn require_organization_vault(&self, vault_id: &VaultId) -> Result<(), StoreError> {
-        let vault = self.load_core_vault(vault_id)?;
-        if vault.kind != VaultKind::Organization {
+    fn require_organization_brain(&self, brain_id: &BrainId) -> Result<(), StoreError> {
+        let brain = self.load_core_brain(brain_id)?;
+        if brain.kind != BrainKind::Organization {
             return Err(StoreError::BrokenInvariant {
-                reason: "member/admin mutation requires an organization vault".to_owned(),
+                reason: "member/admin mutation requires an organization brain".to_owned(),
             });
         }
         Ok(())
     }
 
-    fn member_exists(&self, vault_id: &VaultId, user_id: &UserId) -> Result<bool, StoreError> {
+    fn member_exists(&self, brain_id: &BrainId, user_id: &UserId) -> Result<bool, StoreError> {
         let exists = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM vault_members WHERE vault_id = ?1 AND user_id = ?2)",
-            params![vault_id.as_str(), user_id.as_str()],
+            "SELECT EXISTS(SELECT 1 FROM brain_members WHERE brain_id = ?1 AND user_id = ?2)",
+            params![brain_id.as_str(), user_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         Ok(exists)
@@ -1211,12 +1129,12 @@ impl BrainStore {
 
     fn member_has_restricted_access(
         &self,
-        vault_id: &VaultId,
+        brain_id: &BrainId,
         user_id: &UserId,
     ) -> Result<bool, StoreError> {
         let exists = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM folder_access WHERE vault_id = ?1 AND user_id = ?2)",
-            params![vault_id.as_str(), user_id.as_str()],
+            "SELECT EXISTS(SELECT 1 FROM folder_access WHERE brain_id = ?1 AND user_id = ?2)",
+            params![brain_id.as_str(), user_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         Ok(exists)
@@ -1224,44 +1142,48 @@ impl BrainStore {
 
     fn validate_folder_request(
         &self,
-        vault: &Vault,
+        brain: &Brain,
         folder: &Folder,
         access_user_ids: &BTreeSet<UserId>,
         grants: &[FolderKeyGrantMetadata],
     ) -> Result<(), StoreError> {
-        if vault.kind == VaultKind::Personal
+        if brain.kind == BrainKind::Personal
             && !matches!(
                 folder.access,
                 FolderAccessMode::Owner | FolderAccessMode::Restricted
             )
         {
             return Err(StoreError::BrokenInvariant {
-                reason: "Personal Vault shared access requires a restricted Folder".to_owned(),
+                reason: "Personal Brain shared access requires a restricted Folder".to_owned(),
             });
         }
-        validate_hierarchy(&self.conn, &vault.id, folder)?;
+        validate_hierarchy(&self.conn, &brain.id, folder)?;
         validate_access_list_shape(folder, access_user_ids)?;
-        validate_access_membership(vault, access_user_ids)?;
-        let required = required_recipients(vault, folder, access_user_ids)?;
-        validate_folder_grants(vault, folder, &required, grants)
+        validate_access_membership(brain, access_user_ids)?;
+        let personal_agent = self
+            .load_personal_agent(&brain.id)?
+            .map(|relationship| relationship.agent_npub);
+        let required =
+            required_recipients(brain, folder, access_user_ids, personal_agent.as_ref())?;
+        validate_folder_grants(brain, folder, &required, grants, personal_agent.as_ref())
     }
 
     fn actor_has_current_source_access_and_grant(
         &self,
-        source_vault_id: &VaultId,
+        source_brain_id: &BrainId,
         source_folder_id: &FolderId,
         actor_npub: &UserId,
     ) -> Result<bool, StoreError> {
-        let stored = self.load_vault(source_vault_id)?;
+        let stored = self.load_brain(source_brain_id)?;
         let Some(folder) = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == *source_folder_id)
         else {
             return Ok(false);
         };
-        let has_access = stored.vault.admins.contains(actor_npub)
+        let has_access = stored.brain.admins.contains(actor_npub)
             || stored
                 .folder_access
                 .get(source_folder_id)
@@ -1284,10 +1206,10 @@ impl BrainStore {
                 kind: "shared folder connection",
             });
         }
-        let destination = self.load_core_vault(&connection.destination_vault_id)?;
-        if destination.kind != VaultKind::Organization || !destination.admins.contains(actor_npub) {
+        let destination = self.load_core_brain(&connection.destination_brain_id)?;
+        if destination.kind != BrainKind::Organization || !destination.admins.contains(actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "connection member management requires a destination vault admin"
+                reason: "connection member management requires a destination brain admin"
                     .to_owned(),
             });
         }
@@ -1296,10 +1218,10 @@ impl BrainStore {
 
     fn validate_destination_member(
         &self,
-        destination_vault_id: &VaultId,
+        destination_brain_id: &BrainId,
         target_npub: &UserId,
     ) -> Result<(), StoreError> {
-        let destination = self.load_core_vault(destination_vault_id)?;
+        let destination = self.load_core_brain(destination_brain_id)?;
         if destination
             .members
             .iter()
@@ -1308,7 +1230,7 @@ impl BrainStore {
             Ok(())
         } else {
             Err(StoreError::BrokenInvariant {
-                reason: "connection target must be a destination vault member".to_owned(),
+                reason: "connection target must be a destination brain member".to_owned(),
             })
         }
     }
@@ -1328,9 +1250,9 @@ impl BrainStore {
                 reason: "shared folder access removal requires at least one target".to_owned(),
             });
         }
-        let stored = self.load_vault(&connection.source_vault_id)?;
+        let stored = self.load_brain(&connection.source_brain_id)?;
         let folder = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == connection.source_folder_id)
@@ -1358,7 +1280,15 @@ impl BrainStore {
         }
         let mut rotated_folder = folder.clone();
         rotated_folder.current_key_version = rotation.new_key_version;
-        let required = required_recipients(&stored.vault, &rotated_folder, &remaining_access)?;
+        let required = required_recipients(
+            &stored.brain,
+            &rotated_folder,
+            &remaining_access,
+            stored
+                .personal_agent
+                .as_ref()
+                .map(|relationship| &relationship.agent_npub),
+        )?;
         validate_connection_rotation_grants(
             &rotated_folder,
             &required,
@@ -1366,7 +1296,7 @@ impl BrainStore {
             actor_npub,
         )?;
         let live_objects = self
-            .load_current_objects(&connection.source_vault_id)?
+            .load_current_objects(&connection.source_brain_id)?
             .into_iter()
             .filter(|object| object.folder_id == connection.source_folder_id && !object.deleted)
             .collect::<Vec<_>>();
@@ -1375,43 +1305,97 @@ impl BrainStore {
         let tx = self.conn.transaction()?;
         for removed in rotation.removed_user_ids {
             tx.execute(
-                "DELETE FROM folder_access WHERE vault_id = ?1 AND folder_id = ?2 AND user_id = ?3",
+                "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
                 params![
-                    connection.source_vault_id.as_str(),
+                    connection.source_brain_id.as_str(),
                     connection.source_folder_id.as_str(),
                     removed.as_str()
                 ],
             )?;
         }
         tx.execute(
-            "UPDATE folders SET current_key_version = ?3 WHERE vault_id = ?1 AND id = ?2",
+            "UPDATE folders SET current_key_version = ?3 WHERE brain_id = ?1 AND id = ?2",
             params![
-                connection.source_vault_id.as_str(),
+                connection.source_brain_id.as_str(),
                 connection.source_folder_id.as_str(),
                 rotation.new_key_version
             ],
         )?;
         invalidate_pending_email_bootstraps_for_rotated_folder(
             &tx,
-            &connection.source_vault_id,
+            &connection.source_brain_id,
             &connection.source_folder_id,
             rotation.updated_at,
         )?;
         for grant in rotation.grants {
-            insert_grant(&tx, &connection.source_vault_id, grant)?;
+            insert_grant(&tx, &connection.source_brain_id, grant)?;
         }
         for record in rotation.reencrypted_records {
             let input = SyncRecordInput::FolderObjectRevision(record.clone());
             sync_records::validate_sync_input(&input)?;
-            sync_records::validate_sync_conflict(&tx, &connection.source_vault_id, &input)?;
-            let sequence = sync_records::next_sequence(&tx, &connection.source_vault_id)?;
-            sync_records::insert_sync_record(&tx, &connection.source_vault_id, sequence, &input)?;
-            sync_records::project_sync_record(&tx, &connection.source_vault_id, &input)?;
+            sync_records::validate_sync_conflict(&tx, &connection.source_brain_id, &input)?;
+            let sequence = sync_records::next_sequence(&tx, &connection.source_brain_id)?;
+            sync_records::insert_sync_record(&tx, &connection.source_brain_id, sequence, &input)?;
+            sync_records::project_sync_record(&tx, &connection.source_brain_id, &input)?;
         }
         after_rotation(&tx)?;
         tx.commit()?;
         Ok(())
     }
+}
+
+fn upsert_identity_alias(tx: &Transaction<'_>, alias: &IdentityAlias) -> Result<(), StoreError> {
+    let relays_json =
+        serde_json::to_string(&alias.nip05_relays).map_err(|error| StoreError::InvalidRecord {
+            reason: format!("identity alias relays did not serialize: {error}"),
+        })?;
+    if let Some(nip05) = &alias.preferred_nip05 {
+        tx.execute(
+            "DELETE FROM identity_aliases WHERE preferred_nip05 = ?1 AND npub <> ?2",
+            params![nip05, alias.npub.as_str()],
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO identity_aliases (
+                npub, hex_public_key, preferred_nip05, nip05_verified_at,
+                nip05_relays_json, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(npub) DO UPDATE SET
+                hex_public_key = excluded.hex_public_key,
+                preferred_nip05 = excluded.preferred_nip05,
+                nip05_verified_at = excluded.nip05_verified_at,
+                nip05_relays_json = excluded.nip05_relays_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                alias.npub.as_str(),
+                alias.hex_public_key,
+                nip05,
+                alias.nip05_verified_at,
+                relays_json,
+                alias.updated_at,
+            ],
+        )?;
+    } else {
+        tx.execute(
+            r#"
+            INSERT INTO identity_aliases (
+                npub, hex_public_key, preferred_nip05, nip05_verified_at,
+                nip05_relays_json, updated_at
+            ) VALUES (?1, ?2, NULL, NULL, ?3, ?4)
+            ON CONFLICT(npub) DO UPDATE SET
+                hex_public_key = excluded.hex_public_key,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                alias.npub.as_str(),
+                alias.hex_public_key,
+                relays_json,
+                alias.updated_at,
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 impl SyncRecordType {
@@ -1420,7 +1404,7 @@ impl SyncRecordType {
             Self::FolderObjectRevision => "folder_object_revision",
             Self::FolderObjectTombstone => "folder_object_tombstone",
             Self::FolderKeyGrant => "folder_key_grant",
-            Self::VaultAdminAccessChange => "vault_admin_access_change",
+            Self::BrainAdminAccessChange => "brain_admin_access_change",
         }
     }
 }
@@ -1462,7 +1446,7 @@ impl TryFrom<&str> for SyncRecordType {
             "folder_object_revision" => Ok(Self::FolderObjectRevision),
             "folder_object_tombstone" => Ok(Self::FolderObjectTombstone),
             "folder_key_grant" => Ok(Self::FolderKeyGrant),
-            "vault_admin_access_change" => Ok(Self::VaultAdminAccessChange),
+            "brain_admin_access_change" => Ok(Self::BrainAdminAccessChange),
             _ => Err(StoreError::BrokenInvariant {
                 reason: format!("unknown sync record type: {value}"),
             }),
@@ -1639,21 +1623,21 @@ fn identity_alias_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Identity
     })
 }
 
-fn vault_invitation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredVaultInvitation> {
+fn brain_invitation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredBrainInvitation> {
     let status = row.get::<_, String>(3)?;
     let initial_folder_access_json = row.get::<_, String>(6)?;
     let target_kind = row.get::<_, String>(12)?;
     let bootstrap_scope_json = row.get::<_, String>(19)?;
-    Ok(StoredVaultInvitation {
+    Ok(StoredBrainInvitation {
         id: row.get(0)?,
-        vault_id: VaultId::new(row.get::<_, String>(1)?)
+        brain_id: BrainId::new(row.get::<_, String>(1)?)
             .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
         user_id: row
             .get::<_, Option<String>>(2)?
             .map(UserId::new)
             .transpose()
             .map_err(to_from_sql_error(2, rusqlite::types::Type::Text))?,
-        target_kind: VaultInvitationTargetKind::try_from(target_kind.as_str())
+        target_kind: BrainInvitationTargetKind::try_from(target_kind.as_str())
             .map_err(to_store_from_sql_error(12, rusqlite::types::Type::Text))?,
         invited_email: row.get(13)?,
         invite_unwrap_npub: row
@@ -1694,7 +1678,7 @@ fn vault_invitation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored
 
 fn share_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredShareLink> {
     let status = row.get::<_, String>(5)?;
-    let vault_id = VaultId::new(row.get::<_, String>(1)?)
+    let brain_id = BrainId::new(row.get::<_, String>(1)?)
         .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?;
     let folder_id = FolderId::new(row.get::<_, String>(2)?)
         .map_err(to_from_sql_error(2, rusqlite::types::Type::Text))?;
@@ -1704,7 +1688,7 @@ fn share_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredShareL
         .map_err(to_from_sql_error(4, rusqlite::types::Type::Text))?;
     Ok(StoredShareLink {
         id: row.get(0)?,
-        vault_id: vault_id.clone(),
+        brain_id: brain_id.clone(),
         folder_id: folder_id.clone(),
         recipient_npub: recipient_npub.clone(),
         created_by_npub: created_by_npub.clone(),
@@ -1736,7 +1720,7 @@ fn shared_folder_invitation_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<StoredSharedFolderInvitation> {
     let status = row.get::<_, String>(6)?;
-    let source_vault_id = VaultId::new(row.get::<_, String>(1)?)
+    let source_brain_id = BrainId::new(row.get::<_, String>(1)?)
         .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?;
     let source_folder_id = FolderId::new(row.get::<_, String>(2)?)
         .map_err(to_from_sql_error(2, rusqlite::types::Type::Text))?;
@@ -1747,9 +1731,9 @@ fn shared_folder_invitation_from_row(
     let current_key_version = row.get(7)?;
     Ok(StoredSharedFolderInvitation {
         id: row.get(0)?,
-        source_vault_id: source_vault_id.clone(),
+        source_brain_id: source_brain_id.clone(),
         source_folder_id: source_folder_id.clone(),
-        destination_vault_id: VaultId::new(row.get::<_, String>(3)?)
+        destination_brain_id: BrainId::new(row.get::<_, String>(3)?)
             .map_err(to_from_sql_error(3, rusqlite::types::Type::Text))?,
         destination_admin_npub: destination_admin_npub.clone(),
         created_by_npub: created_by_npub.clone(),
@@ -1782,11 +1766,11 @@ fn shared_folder_connection_from_row(
     let status = row.get::<_, String>(5)?;
     Ok(StoredSharedFolderConnection {
         id: row.get(0)?,
-        source_vault_id: VaultId::new(row.get::<_, String>(1)?)
+        source_brain_id: BrainId::new(row.get::<_, String>(1)?)
             .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
         source_folder_id: FolderId::new(row.get::<_, String>(2)?)
             .map_err(to_from_sql_error(2, rusqlite::types::Type::Text))?,
-        destination_vault_id: VaultId::new(row.get::<_, String>(3)?)
+        destination_brain_id: BrainId::new(row.get::<_, String>(3)?)
             .map_err(to_from_sql_error(3, rusqlite::types::Type::Text))?,
         destination_admin_npub: UserId::new(row.get::<_, String>(4)?)
             .map_err(to_from_sql_error(4, rusqlite::types::Type::Text))?,
@@ -1804,9 +1788,9 @@ fn organization_mount_from_row(
     let display_parent_folder_id = row.get::<_, Option<String>>(6)?;
     Ok(StoredOrganizationFolderMount {
         id: row.get(0)?,
-        organization_vault_id: VaultId::new(row.get::<_, String>(1)?)
+        organization_brain_id: BrainId::new(row.get::<_, String>(1)?)
             .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
-        source_vault_id: VaultId::new(row.get::<_, String>(2)?)
+        source_brain_id: BrainId::new(row.get::<_, String>(2)?)
             .map_err(to_from_sql_error(2, rusqlite::types::Type::Text))?,
         source_folder_id: FolderId::new(row.get::<_, String>(3)?)
             .map_err(to_from_sql_error(3, rusqlite::types::Type::Text))?,
@@ -1824,17 +1808,17 @@ fn organization_mount_from_row(
 }
 
 fn ensure_invitation_available(
-    invitation: &StoredVaultInvitation,
+    invitation: &StoredBrainInvitation,
     user_id: &UserId,
     now: &str,
 ) -> Result<(), StoreError> {
-    if invitation.target_kind != VaultInvitationTargetKind::Npub
+    if invitation.target_kind != BrainInvitationTargetKind::Npub
         || invitation.user_id.as_ref() != Some(user_id)
         || invitation.status != LinkStatus::Pending
         || timestamp_expired(&invitation.expires_at, now)
     {
         return Err(StoreError::UnavailableLink {
-            kind: "vault invitation",
+            kind: "brain invitation",
         });
     }
     Ok(())
@@ -1908,12 +1892,12 @@ fn folder_id_vec_from_json(value: &str) -> Result<Vec<FolderId>, CoreError> {
 
 fn ensure_folder_exists(
     conn: &Connection,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
 ) -> Result<(), StoreError> {
     let exists = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM folders WHERE vault_id = ?1 AND id = ?2)",
-        params![vault_id.as_str(), folder_id.as_str()],
+        "SELECT EXISTS(SELECT 1 FROM folders WHERE brain_id = ?1 AND id = ?2)",
+        params![brain_id.as_str(), folder_id.as_str()],
         |row| row.get::<_, bool>(0),
     )?;
     if exists {
@@ -1927,45 +1911,45 @@ fn ensure_folder_exists(
 
 fn insert_member_if_missing(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     user_id: &UserId,
 ) -> Result<(), StoreError> {
     tx.execute(
-        "INSERT OR IGNORE INTO vault_members (vault_id, user_id) VALUES (?1, ?2)",
-        params![vault_id.as_str(), user_id.as_str()],
+        "INSERT OR IGNORE INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
+        params![brain_id.as_str(), user_id.as_str()],
     )?;
     Ok(())
 }
 
 fn insert_folder_access_if_missing(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
     user_id: &UserId,
 ) -> Result<(), StoreError> {
     tx.execute(
-        "INSERT OR IGNORE INTO folder_access (vault_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
-        params![vault_id.as_str(), folder_id.as_str(), user_id.as_str()],
+        "INSERT OR IGNORE INTO folder_access (brain_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
+        params![brain_id.as_str(), folder_id.as_str(), user_id.as_str()],
     )?;
     Ok(())
 }
 
 fn insert_grant_or_ignore(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     grant: &FolderKeyGrantMetadata,
 ) -> Result<(), StoreError> {
     tx.execute(
         r#"
         INSERT OR IGNORE INTO folder_key_grants (
-            id, vault_id, folder_id, key_version, issuer_npub, recipient_npub, format,
+            id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
             wrapped_event_json, access_change_event_json, created_at
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         "#,
         params![
             grant.id,
-            vault_id.as_str(),
+            brain_id.as_str(),
             grant.folder_id.as_str(),
             grant.key_version,
             grant.issuer_npub.as_str(),
@@ -1981,13 +1965,13 @@ fn insert_grant_or_ignore(
 
 fn personal_mount_id(
     owner_npub: &UserId,
-    source_vault_id: &VaultId,
+    source_brain_id: &BrainId,
     source_folder_id: &FolderId,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(owner_npub.as_str());
     hasher.update(b"\n");
-    hasher.update(source_vault_id.as_str());
+    hasher.update(source_brain_id.as_str());
     hasher.update(b"\n");
     hasher.update(source_folder_id.as_str());
     let hash = hasher.finalize();
@@ -2017,46 +2001,40 @@ fn to_store_from_sql_error(
 }
 
 fn validate_bootstrap_output(output: &BootstrapOutput) -> Result<(), StoreError> {
-    validate_loaded_vault(&output.vault)?;
-    if output.vault.folders.is_empty() {
-        return Err(StoreError::BrokenInvariant {
-            reason: "bootstrap must create at least one folder".to_owned(),
-        });
-    }
-    Ok(())
+    validate_loaded_brain(&output.brain)
 }
 
-fn validate_loaded_vault(vault: &Vault) -> Result<(), StoreError> {
-    match vault.kind {
-        VaultKind::Personal => {
-            let Some(owner) = vault.owner_user_id.as_ref() else {
+fn validate_loaded_brain(brain: &Brain) -> Result<(), StoreError> {
+    match brain.kind {
+        BrainKind::Personal => {
+            let Some(owner) = brain.owner_user_id.as_ref() else {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "personal vault must have an owner".to_owned(),
+                    reason: "personal brain must have an owner".to_owned(),
                 });
             };
-            if !vault.admins.is_empty()
-                || vault.members.iter().any(|member| member.user_id == *owner)
+            if !brain.admins.is_empty()
+                || brain.members.iter().any(|member| member.user_id == *owner)
             {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "personal vault owner is sole admin authority and cannot be an ordinary member"
+                    reason: "personal brain owner is sole admin authority and cannot be an ordinary member"
                         .to_owned(),
                 });
             }
         }
-        VaultKind::Organization => {
-            if vault.owner_user_id.is_some() || vault.admins.is_empty() {
+        BrainKind::Organization => {
+            if brain.owner_user_id.is_some() || brain.admins.is_empty() {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "organization vault must have admins and no owner".to_owned(),
+                    reason: "organization brain must have admins and no owner".to_owned(),
                 });
             }
-            let members = vault
+            let members = brain
                 .members
                 .iter()
                 .map(|member| member.user_id.clone())
                 .collect::<BTreeSet<_>>();
-            if vault.admins.iter().any(|admin| !members.contains(admin)) {
+            if brain.admins.iter().any(|admin| !members.contains(admin)) {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "every vault admin must also be a member".to_owned(),
+                    reason: "every brain admin must also be a member".to_owned(),
                 });
             }
         }
@@ -2065,7 +2043,7 @@ fn validate_loaded_vault(vault: &Vault) -> Result<(), StoreError> {
 }
 
 fn validate_required_grants(
-    vault: &Vault,
+    brain: &Brain,
     required: &[RequiredFolderKeyGrant],
     grants: &[FolderKeyGrantMetadata],
 ) -> Result<(), StoreError> {
@@ -2101,21 +2079,22 @@ fn validate_required_grants(
 
     for grant in grants {
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(vault, grant)?;
+        validate_grant_issuer(brain, grant, None)?;
     }
     Ok(())
 }
 
 fn validate_folder_grants(
-    vault: &Vault,
+    brain: &Brain,
     folder: &Folder,
     required_recipients: &BTreeSet<UserId>,
     grants: &[FolderKeyGrantMetadata],
+    personal_agent: Option<&UserId>,
 ) -> Result<(), StoreError> {
     let mut provided = BTreeSet::new();
     for grant in grants {
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(vault, grant)?;
+        validate_grant_issuer(brain, grant, personal_agent)?;
         if grant.folder_id != folder.id {
             return Err(StoreError::BrokenInvariant {
                 reason: "grant folder id must match folder metadata".to_owned(),
@@ -2145,19 +2124,26 @@ fn validate_folder_grants(
     Ok(())
 }
 
-fn validate_grant_issuer(vault: &Vault, grant: &FolderKeyGrantMetadata) -> Result<(), StoreError> {
-    match vault.kind {
-        VaultKind::Personal => {
-            if vault.owner_user_id.as_ref() != Some(&grant.issuer_npub) {
+fn validate_grant_issuer(
+    brain: &Brain,
+    grant: &FolderKeyGrantMetadata,
+    personal_agent: Option<&UserId>,
+) -> Result<(), StoreError> {
+    match brain.kind {
+        BrainKind::Personal => {
+            if brain.owner_user_id.as_ref() != Some(&grant.issuer_npub)
+                && personal_agent != Some(&grant.issuer_npub)
+            {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "personal vault grants must be issued by the owner".to_owned(),
+                    reason: "personal brain grants must be issued by the owner or Personal Agent"
+                        .to_owned(),
                 });
             }
         }
-        VaultKind::Organization => {
-            if !vault.admins.contains(&grant.issuer_npub) {
+        BrainKind::Organization => {
+            if !brain.admins.contains(&grant.issuer_npub) {
                 return Err(StoreError::BrokenInvariant {
-                    reason: "organization folder grants must be issued by a vault admin".to_owned(),
+                    reason: "organization folder grants must be issued by a brain admin".to_owned(),
                 });
             }
         }
@@ -2213,7 +2199,7 @@ fn validate_required_text(field: &'static str, value: &str) -> Result<(), StoreE
 }
 
 fn email_bootstrap_scope(
-    vault: &Vault,
+    brain: &Brain,
     selected_restricted_folder_access: &[FolderId],
 ) -> Result<Vec<EmailInviteBootstrapScopeFolder>, StoreError> {
     let selected = selected_restricted_folder_access
@@ -2224,7 +2210,7 @@ fn email_bootstrap_scope(
     let mut included = BTreeSet::new();
     let mut scope = Vec::new();
 
-    for folder in &vault.folders {
+    for folder in &brain.folders {
         let selected_folder = selected.contains(&folder.id);
         if selected_folder {
             seen_selected.insert(folder.id.clone());
@@ -2265,7 +2251,7 @@ fn email_bootstrap_scope(
 }
 
 fn validate_email_claim_grants(
-    vault: &Vault,
+    brain: &Brain,
     scope: &[EmailInviteBootstrapScopeFolder],
     claimant: &UserId,
     grants: &[FolderKeyGrantMetadata],
@@ -2285,7 +2271,7 @@ fn validate_email_claim_grants(
     }
 
     for item in scope {
-        let folder = vault
+        let folder = brain
             .folders
             .iter()
             .find(|folder| folder.id == item.folder_id)
@@ -2312,11 +2298,11 @@ fn validate_email_claim_grants(
 }
 
 fn email_bootstrap_scope_stale(
-    vault: &Vault,
+    brain: &Brain,
     scope: &[EmailInviteBootstrapScopeFolder],
 ) -> Result<bool, StoreError> {
     for item in scope {
-        let folder = vault
+        let folder = brain
             .folders
             .iter()
             .find(|folder| folder.id == item.folder_id)
@@ -2332,22 +2318,22 @@ fn email_bootstrap_scope_stale(
 
 fn invalidate_pending_email_bootstraps_for_rotated_folder(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
     updated_at: &str,
 ) -> Result<(), StoreError> {
     let mut statement = tx.prepare(
         r#"
         SELECT id, bootstrap_scope_json
-        FROM vault_invitations
-        WHERE vault_id = ?1
+        FROM brain_invitations
+        WHERE brain_id = ?1
           AND target_kind = 'email_bootstrap'
           AND status = 'pending'
           AND bootstrap_wrapped_event_json IS NOT NULL
         "#,
     )?;
     let invitations = statement
-        .query_map(params![vault_id.as_str()], |row| {
+        .query_map(params![brain_id.as_str()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2361,7 +2347,7 @@ fn invalidate_pending_email_bootstraps_for_rotated_folder(
         if scope.iter().any(|item| item.folder_id == *folder_id) {
             tx.execute(
                 r#"
-                UPDATE vault_invitations
+                UPDATE brain_invitations
                 SET status = 'revoked',
                     bootstrap_wrapped_event_json = NULL,
                     updated_at = ?2
@@ -2438,12 +2424,12 @@ fn validate_access_list_shape(
 
 fn validate_hierarchy(
     conn: &Connection,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder: &Folder,
 ) -> Result<(), StoreError> {
     let exists = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM folders WHERE vault_id = ?1 AND id = ?2)",
-        params![vault_id.as_str(), folder.id.as_str()],
+        "SELECT EXISTS(SELECT 1 FROM folders WHERE brain_id = ?1 AND id = ?2)",
+        params![brain_id.as_str(), folder.id.as_str()],
         |row| row.get::<_, bool>(0),
     )?;
     if exists {
@@ -2455,8 +2441,8 @@ fn validate_hierarchy(
 
     if let Some(parent_id) = &folder.parent_folder_id {
         let parent_exists = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM folders WHERE vault_id = ?1 AND id = ?2)",
-            params![vault_id.as_str(), parent_id.as_str()],
+            "SELECT EXISTS(SELECT 1 FROM folders WHERE brain_id = ?1 AND id = ?2)",
+            params![brain_id.as_str(), parent_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         if !parent_exists {
@@ -2470,10 +2456,10 @@ fn validate_hierarchy(
 }
 
 fn validate_access_membership(
-    vault: &Vault,
+    brain: &Brain,
     access_user_ids: &BTreeSet<UserId>,
 ) -> Result<(), StoreError> {
-    let members = vault
+    let members = brain
         .members
         .iter()
         .map(|member| member.user_id.clone())
@@ -2481,7 +2467,7 @@ fn validate_access_membership(
     for user_id in access_user_ids {
         if !members.contains(user_id) {
             return Err(StoreError::BrokenInvariant {
-                reason: format!("folder access user is not a vault member: {user_id}"),
+                reason: format!("folder access user is not a brain member: {user_id}"),
             });
         }
     }
@@ -2489,71 +2475,67 @@ fn validate_access_membership(
 }
 
 fn required_recipients(
-    vault: &Vault,
+    brain: &Brain,
     folder: &Folder,
     access_user_ids: &BTreeSet<UserId>,
+    personal_agent: Option<&UserId>,
 ) -> Result<BTreeSet<UserId>, StoreError> {
-    let mut recipients = BTreeSet::new();
-    match folder.access {
-        FolderAccessMode::Owner => {
-            let owner = vault
-                .owner_user_id
-                .clone()
-                .ok_or_else(|| StoreError::BrokenInvariant {
-                    reason: "owner access requires a personal vault owner".to_owned(),
-                })?;
-            recipients.insert(owner);
-        }
-        FolderAccessMode::AdminOnly => {
-            recipients.extend(vault.admins.iter().cloned());
-        }
-        FolderAccessMode::AllMembers => {
-            recipients.extend(vault.admins.iter().cloned());
-            recipients.extend(vault.members.iter().map(|member| member.user_id.clone()));
-        }
-        FolderAccessMode::Restricted => {
-            if let Some(owner) = vault.owner_user_id.clone() {
-                recipients.insert(owner);
-            }
-            recipients.extend(vault.admins.iter().cloned());
-            recipients.extend(access_user_ids.iter().cloned());
-        }
-    }
-
-    if recipients.is_empty() {
-        return Err(StoreError::BrokenInvariant {
-            reason: "current folder key must have at least one recipient".to_owned(),
-        });
-    }
-    Ok(recipients)
+    let members = brain
+        .members
+        .iter()
+        .map(|member| member.user_id.clone())
+        .collect::<Vec<_>>();
+    required_folder_key_recipients(FolderKeyRecipientPolicy {
+        brain_kind: brain.kind,
+        folder_access: folder.access,
+        owner_user_id: brain.owner_user_id.as_ref(),
+        admins: &brain.admins,
+        members: &members,
+        explicit_access_user_ids: access_user_ids,
+        personal_agent_npub: personal_agent,
+    })
+    .map_err(StoreError::from)
 }
 
-fn vault_visible_to_actor(vault: &Vault, actor_npub: &UserId) -> bool {
-    match vault.kind {
-        VaultKind::Personal => {
-            vault
+fn brain_visible_to_actor(brain: &Brain, actor_npub: &UserId) -> bool {
+    match brain.kind {
+        BrainKind::Personal => {
+            brain
                 .owner_user_id
                 .as_ref()
                 .is_some_and(|owner| owner == actor_npub)
-                || vault
+                || brain
                     .members
                     .iter()
                     .any(|member| member.user_id == *actor_npub)
         }
-        VaultKind::Organization => vault
+        BrainKind::Organization => brain
             .members
             .iter()
             .any(|member| member.user_id == *actor_npub),
     }
 }
 
+pub(crate) fn has_brain_operational_authority(stored: &StoredBrain, actor_npub: &UserId) -> bool {
+    match stored.brain.kind {
+        BrainKind::Personal => {
+            stored.brain.owner_user_id.as_ref() == Some(actor_npub)
+                || stored
+                    .personal_agent
+                    .as_ref()
+                    .is_some_and(|relationship| relationship.agent_npub == *actor_npub)
+        }
+        BrainKind::Organization => stored.brain.admins.contains(actor_npub),
+    }
+}
+
 fn folder_visible_to_actor(
-    stored: &StoredVault,
+    stored: &StoredBrain,
     folder_id: &FolderId,
     actor_npub: &UserId,
 ) -> bool {
     let Some(folder) = stored
-        .vault
+        .brain
         .folders
         .iter()
         .find(|folder| folder.id == *folder_id)
@@ -2561,22 +2543,30 @@ fn folder_visible_to_actor(
         return false;
     };
     let is_owner = stored
-        .vault
+        .brain
         .owner_user_id
         .as_ref()
         .is_some_and(|owner| owner == actor_npub);
-    let is_admin = stored.vault.admins.contains(actor_npub);
+    let is_admin = stored.brain.admins.contains(actor_npub);
+    let is_personal_agent = stored
+        .personal_agent
+        .as_ref()
+        .is_some_and(|relationship| relationship.agent_npub == *actor_npub);
     let is_member = stored
-        .vault
+        .brain
         .members
         .iter()
         .any(|member| member.user_id == *actor_npub);
+
+    if is_personal_agent {
+        return true;
+    }
 
     match folder.access {
         FolderAccessMode::Owner => is_owner,
         FolderAccessMode::AdminOnly => is_owner || is_admin,
         FolderAccessMode::AllMembers => {
-            is_owner || is_admin || (stored.vault.kind == VaultKind::Organization && is_member)
+            is_owner || is_admin || (stored.brain.kind == BrainKind::Organization && is_member)
         }
         FolderAccessMode::Restricted => {
             is_owner
@@ -2590,19 +2580,19 @@ fn folder_visible_to_actor(
 }
 
 fn export_access_state(
-    stored: &StoredVault,
+    stored: &StoredBrain,
     actor_npub: &UserId,
     is_admin: bool,
 ) -> EncryptedExportAccessState {
     if is_admin {
         return EncryptedExportAccessState {
             members: stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .map(|member| member.user_id.clone())
                 .collect(),
-            admins: stored.vault.admins.clone(),
+            admins: stored.brain.admins.clone(),
             folders: stored
                 .folder_access
                 .iter()
@@ -2616,7 +2606,7 @@ fn export_access_state(
 
     EncryptedExportAccessState {
         members: stored
-            .vault
+            .brain
             .members
             .iter()
             .filter(|member| member.user_id == *actor_npub)
@@ -2676,35 +2666,60 @@ fn validate_rotation_records(
     Ok(())
 }
 
-fn insert_vault(tx: &Transaction<'_>, vault: &Vault) -> Result<(), StoreError> {
+fn insert_brain(tx: &Transaction<'_>, brain: &Brain) -> Result<(), StoreError> {
     tx.execute(
         r#"
-        INSERT INTO vaults (id, kind, name, owner_user_id, created_at)
+        INSERT INTO brains (id, kind, name, owner_user_id, created_at)
         VALUES (?1, ?2, ?3, ?4, ?5)
         "#,
         params![
-            vault.id.as_str(),
-            vault_kind_str(vault.kind),
-            vault.name.as_str(),
-            vault.owner_user_id.as_ref().map(UserId::as_str),
+            brain.id.as_str(),
+            brain_kind_str(brain.kind),
+            brain.name.as_str(),
+            brain.owner_user_id.as_ref().map(UserId::as_str),
             current_timestamp()
         ],
     )
-    .map_err(map_insert_error("vault_id", vault.id.as_str()))?;
+    .map_err(map_brain_insert_error(brain))?;
     Ok(())
 }
 
-fn insert_members_and_admins(tx: &Transaction<'_>, vault: &Vault) -> Result<(), StoreError> {
-    for member in &vault.members {
+fn map_brain_insert_error(brain: &Brain) -> impl FnOnce(rusqlite::Error) -> StoreError + '_ {
+    move |error| match error {
+        rusqlite::Error::SqliteFailure(inner, message)
+            if matches!(inner.code, rusqlite::ErrorCode::ConstraintViolation)
+                && brain.kind == BrainKind::Personal
+                && message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("brains.owner_user_id")) =>
+        {
+            StoreError::BrokenInvariant {
+                reason: "user already has a personal brain".to_owned(),
+            }
+        }
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(inner.code, rusqlite::ErrorCode::ConstraintViolation) =>
+        {
+            StoreError::DuplicateId {
+                field: "brain_id",
+                value: brain.id.to_string(),
+            }
+        }
+        other => StoreError::from(other),
+    }
+}
+
+fn insert_members_and_admins(tx: &Transaction<'_>, brain: &Brain) -> Result<(), StoreError> {
+    for member in &brain.members {
         tx.execute(
-            "INSERT INTO vault_members (vault_id, user_id) VALUES (?1, ?2)",
-            params![vault.id.as_str(), member.user_id.as_str()],
+            "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
+            params![brain.id.as_str(), member.user_id.as_str()],
         )?;
     }
-    for admin in &vault.admins {
+    for admin in &brain.admins {
         tx.execute(
-            "INSERT INTO vault_admins (vault_id, user_id) VALUES (?1, ?2)",
-            params![vault.id.as_str(), admin.as_str()],
+            "INSERT INTO brain_admins (brain_id, user_id) VALUES (?1, ?2)",
+            params![brain.id.as_str(), admin.as_str()],
         )?;
     }
     Ok(())
@@ -2712,20 +2727,20 @@ fn insert_members_and_admins(tx: &Transaction<'_>, vault: &Vault) -> Result<(), 
 
 fn insert_folder(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder: &Folder,
     setup_incomplete: bool,
 ) -> Result<(), StoreError> {
     tx.execute(
         r#"
         INSERT INTO folders (
-            vault_id, id, name, role, access, parent_folder_id, parent_folder_key, path,
+            brain_id, id, name, role, access, parent_folder_id, parent_folder_key, path,
             current_key_version, shared_folder_source, setup_incomplete, created_at
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         "#,
         params![
-            vault_id.as_str(),
+            brain_id.as_str(),
             folder.id.as_str(),
             folder.name.as_str(),
             folder_role_str(folder.role),
@@ -2748,14 +2763,14 @@ fn insert_folder(
 
 fn insert_folder_access(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
     access_user_ids: &BTreeSet<UserId>,
 ) -> Result<(), StoreError> {
     for user_id in access_user_ids {
         tx.execute(
-            "INSERT INTO folder_access (vault_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
-            params![vault_id.as_str(), folder_id.as_str(), user_id.as_str()],
+            "INSERT INTO folder_access (brain_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
+            params![brain_id.as_str(), folder_id.as_str(), user_id.as_str()],
         )?;
     }
     Ok(())
@@ -2763,20 +2778,20 @@ fn insert_folder_access(
 
 fn insert_grant(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     grant: &FolderKeyGrantMetadata,
 ) -> Result<(), StoreError> {
     tx.execute(
         r#"
         INSERT INTO folder_key_grants (
-            id, vault_id, folder_id, key_version, issuer_npub, recipient_npub, format,
+            id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format,
             wrapped_event_json, access_change_event_json, created_at
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         "#,
         params![
             grant.id,
-            vault_id.as_str(),
+            brain_id.as_str(),
             grant.folder_id.as_str(),
             grant.key_version,
             grant.issuer_npub.as_str(),
@@ -2806,19 +2821,19 @@ fn map_insert_error(
     }
 }
 
-fn vault_kind_str(kind: VaultKind) -> &'static str {
+fn brain_kind_str(kind: BrainKind) -> &'static str {
     match kind {
-        VaultKind::Personal => "personal",
-        VaultKind::Organization => "organization",
+        BrainKind::Personal => "personal",
+        BrainKind::Organization => "organization",
     }
 }
 
-fn parse_vault_kind(value: &str) -> Result<VaultKind, StoreError> {
+fn parse_brain_kind(value: &str) -> Result<BrainKind, StoreError> {
     match value {
-        "personal" => Ok(VaultKind::Personal),
-        "organization" => Ok(VaultKind::Organization),
+        "personal" => Ok(BrainKind::Personal),
+        "organization" => Ok(BrainKind::Organization),
         _ => Err(StoreError::BrokenInvariant {
-            reason: format!("unknown vault kind: {value}"),
+            reason: format!("unknown brain kind: {value}"),
         }),
     }
 }
@@ -2826,7 +2841,7 @@ fn parse_vault_kind(value: &str) -> Result<VaultKind, StoreError> {
 fn folder_role_str(role: FolderRole) -> &'static str {
     match role {
         FolderRole::PersonalHome => "personal_home",
-        FolderRole::VaultOps => "vault_ops",
+        FolderRole::BrainOps => "brain_ops",
         FolderRole::General => "general",
         FolderRole::Folder => "folder",
     }
@@ -2835,7 +2850,7 @@ fn folder_role_str(role: FolderRole) -> &'static str {
 fn parse_folder_role(value: &str) -> Result<FolderRole, StoreError> {
     match value {
         "personal_home" => Ok(FolderRole::PersonalHome),
-        "vault_ops" => Ok(FolderRole::VaultOps),
+        "brain_ops" => Ok(FolderRole::BrainOps),
         "general" => Ok(FolderRole::General),
         "folder" => Ok(FolderRole::Folder),
         _ => Err(StoreError::BrokenInvariant {
@@ -2868,7 +2883,11 @@ fn parse_folder_access(value: &str) -> Result<FolderAccessMode, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use finite_brain_core::{bootstrap_organization_vault, bootstrap_personal_vault};
+    use finite_brain_core::{
+        MAX_FOLDER_ACCESS_REMOVAL_GRANTS, MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
+        bootstrap_organization_brain, bootstrap_personal_brain,
+    };
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     #[test]
@@ -2879,109 +2898,384 @@ mod tests {
     #[test]
     fn persists_and_reloads_personal_bootstrap() {
         let temp = TempDir::new().unwrap();
-        let db = temp.path().join("vault-sync.sqlite3");
-        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let db = temp.path().join("brain-sync.sqlite3");
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-owner");
+        let aliases = [
+            IdentityAlias {
+                npub: UserId::new("npub-owner").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("owner@finite.computer".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+            IdentityAlias {
+                npub: UserId::new("npub-agent").unwrap(),
+                hex_public_key: "hex-agent".to_owned(),
+                preferred_nip05: Some("agent@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+        ];
 
         {
             let mut store = BrainStore::open(&db).unwrap();
-            store.create_vault_bootstrap(&output, &grants).unwrap();
+            store
+                .create_personal_brain_bootstrap_with_identities(
+                    &output,
+                    &grants,
+                    &UserId::new("npub-agent").unwrap(),
+                    &UserId::new("npub-owner").unwrap(),
+                    "2026-06-23T00:00:00Z",
+                    &aliases,
+                )
+                .unwrap();
         }
 
         let store = BrainStore::open(&db).unwrap();
         let stored = store
-            .load_vault(&VaultId::new("personal").unwrap())
+            .load_brain(&BrainId::new("personal").unwrap())
             .unwrap();
 
-        assert_eq!(stored.vault.kind, VaultKind::Personal);
+        assert_eq!(stored.brain.kind, BrainKind::Personal);
         assert_eq!(
-            stored.vault.owner_user_id,
+            stored.brain.owner_user_id,
             Some(UserId::new("npub-owner").unwrap())
         );
+        assert!(stored.brain.folders.is_empty());
         assert_eq!(
-            stored
-                .vault
-                .folders
-                .iter()
-                .map(|folder| folder.id.to_string())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["getting-started".to_owned(), "restricted".to_owned()])
+            stored.personal_agent.unwrap().agent_npub,
+            UserId::new("npub-agent").unwrap()
         );
-        let restricted = FolderId::new("restricted").unwrap();
-        assert_eq!(
-            stored
-                .vault
-                .folders
-                .iter()
-                .find(|folder| folder.id == restricted)
-                .map(|folder| folder.access),
-            Some(FolderAccessMode::Restricted)
-        );
-        assert!(!stored.folder_access.contains_key(&restricted));
-        assert!(stored.grants.iter().any(|grant| {
-            grant.folder_id == restricted
-                && grant.recipient_npub == UserId::new("npub-owner").unwrap()
-        }));
+        assert!(stored.folder_access.is_empty());
+        assert!(stored.grants.is_empty());
         assert_same_grants(&stored.grants, &grants);
         assert!(stored.setup_incomplete_folder_ids.is_empty());
+        assert_eq!(
+            store
+                .load_identity_aliases(&[
+                    UserId::new("npub-owner").unwrap(),
+                    UserId::new("npub-agent").unwrap(),
+                ])
+                .unwrap(),
+            aliases
+        );
+    }
+
+    #[test]
+    fn database_allows_only_one_personal_brain_per_owner_across_connections() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("one-personal-brain.sqlite3");
+        let first = BrainStore::open(&db).unwrap();
+        let second = BrainStore::open(&db).unwrap();
+
+        first
+            .conn
+            .execute(
+                "INSERT INTO brains (id, kind, name, owner_user_id, created_at) VALUES (?1, 'personal', ?2, ?3, ?4)",
+                params!["personal-first", "First", "npub-owner", "2026-07-19T00:00:00Z"],
+            )
+            .unwrap();
+
+        let error = second
+            .conn
+            .execute(
+                "INSERT INTO brains (id, kind, name, owner_user_id, created_at) VALUES (?1, 'personal', ?2, ?3, ?4)",
+                params!["personal-second", "Second", "npub-owner", "2026-07-19T00:00:01Z"],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                rusqlite::Error::SqliteFailure(inner, _)
+                    if inner.code == rusqlite::ErrorCode::ConstraintViolation
+            ),
+            "the database must enforce one Personal Brain per owner: {error}"
+        );
+    }
+
+    #[test]
+    fn competing_personal_bootstraps_leave_one_brain_and_one_truthful_loser() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("competing-personal-brain.sqlite3");
+        let first_store = BrainStore::open(&db).unwrap();
+        let second_store = BrainStore::open(&db).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let results = std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let first = scope.spawn(move || {
+                let mut store = first_store;
+                let output =
+                    bootstrap_personal_brain("personal-first", "First", "npub-owner").unwrap();
+                first_barrier.wait();
+                store.create_personal_brain_bootstrap(
+                    &output,
+                    &[],
+                    &UserId::new("npub-agent-first").unwrap(),
+                    &UserId::new("npub-owner").unwrap(),
+                    "2026-07-19T00:00:00Z",
+                )
+            });
+            let second_barrier = Arc::clone(&barrier);
+            let second = scope.spawn(move || {
+                let mut store = second_store;
+                let output =
+                    bootstrap_personal_brain("personal-second", "Second", "npub-owner").unwrap();
+                second_barrier.wait();
+                store.create_personal_brain_bootstrap(
+                    &output,
+                    &[],
+                    &UserId::new("npub-agent-second").unwrap(),
+                    &UserId::new("npub-owner").unwrap(),
+                    "2026-07-19T00:00:01Z",
+                )
+            });
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results.iter().any(|result| {
+            matches!(
+                result,
+                Err(StoreError::BrokenInvariant { reason })
+                    if reason == "user already has a personal brain"
+            )
+        }));
+
+        let store = BrainStore::open(&db).unwrap();
+        let count = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM brains WHERE kind = 'personal' AND owner_user_id = ?1",
+                params!["npub-owner"],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        for table in ["personal_agents", "personal_agent_audit"] {
+            let count = store
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "the losing bootstrap must leave no partial {table} row"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_brain_bootstrap_cannot_create_a_vacant_personal_agent_role() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
+
+        assert_eq!(
+            store.create_brain_bootstrap(&output, &[]).unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "Personal Brain bootstrap requires a Personal Agent".to_owned(),
+            }
+        );
+        assert!(
+            matches!(
+                store.load_brain(&output.brain.id),
+                Err(StoreError::MissingBrain { .. })
+            ),
+            "a rejected vacant bootstrap must not create a Brain"
+        );
+    }
+
+    #[test]
+    fn personal_bootstrap_rolls_back_brain_and_agent_when_identity_alias_insert_fails() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        store
+            .record_identity_alias(&IdentityAlias {
+                npub: UserId::new("npub-existing").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("existing@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
+        let aliases = [
+            IdentityAlias {
+                npub: UserId::new("npub-owner").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("owner@finite.computer".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+            IdentityAlias {
+                npub: UserId::new("npub-agent").unwrap(),
+                hex_public_key: "hex-agent".to_owned(),
+                preferred_nip05: Some("agent@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+        ];
+
+        assert!(
+            store
+                .create_personal_brain_bootstrap_with_identities(
+                    &output,
+                    &[],
+                    &UserId::new("npub-agent").unwrap(),
+                    &UserId::new("npub-owner").unwrap(),
+                    "2026-06-23T00:00:00Z",
+                    &aliases,
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            store.load_brain(&output.brain.id),
+            Err(StoreError::MissingBrain { .. })
+        ));
+        assert!(
+            store
+                .load_personal_agent(&output.brain.id)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn organization_bootstrap_rolls_back_brain_when_identity_alias_insert_fails() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        store
+            .record_identity_alias(&IdentityAlias {
+                npub: UserId::new("npub-existing").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("existing@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+        let output = finite_brain_core::bootstrap_organization_brain_with_requester(
+            "acme",
+            "Acme Brain",
+            "npub-owner",
+            "npub-agent",
+        )
+        .unwrap();
+        let aliases = [
+            IdentityAlias {
+                npub: UserId::new("npub-owner").unwrap(),
+                hex_public_key: "hex-owner".to_owned(),
+                preferred_nip05: Some("owner@finite.computer".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+            IdentityAlias {
+                npub: UserId::new("npub-agent").unwrap(),
+                hex_public_key: "hex-agent".to_owned(),
+                preferred_nip05: Some("agent@finite.vip".to_owned()),
+                nip05_verified_at: Some("2026-06-23T00:00:00Z".to_owned()),
+                nip05_relays: Vec::new(),
+                updated_at: "2026-06-23T00:00:00Z".to_owned(),
+            },
+        ];
+
+        assert!(
+            store
+                .create_brain_bootstrap_with_identities(&output, &[], &aliases)
+                .is_err()
+        );
+        assert!(matches!(
+            store.load_brain(&output.brain.id),
+            Err(StoreError::MissingBrain { .. })
+        ));
+    }
+
+    #[test]
+    fn exact_organization_bootstrap_retry_returns_the_existing_brain() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = finite_brain_core::bootstrap_organization_brain_with_requester(
+            "acme",
+            "Acme Brain",
+            "npub-owner",
+            "npub-agent",
+        )
+        .unwrap();
+
+        store.create_brain_bootstrap(&output, &[]).unwrap();
+        store.create_brain_bootstrap(&output, &[]).unwrap();
+
+        let stored = store.load_brain(&output.brain.id).unwrap();
+        assert_eq!(stored.brain.id, output.brain.id);
+        assert_eq!(stored.brain.name, output.brain.name);
+        assert_eq!(stored.brain.members.len(), 2);
+        assert_eq!(stored.brain.admins.len(), 2);
+        assert!(stored.grants.is_empty());
+    }
+
+    #[test]
+    fn reused_organization_brain_id_cannot_claim_a_different_bootstrap() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let first = bootstrap_organization_brain("acme", "Acme Brain", "npub-first").unwrap();
+        let conflicting =
+            bootstrap_organization_brain("acme", "Different Brain", "npub-second").unwrap();
+
+        store.create_brain_bootstrap(&first, &[]).unwrap();
+        let error = store.create_brain_bootstrap(&conflicting, &[]).unwrap_err();
+
+        assert_eq!(
+            error,
+            StoreError::DuplicateId {
+                field: "brain_id",
+                value: "acme".to_owned(),
+            }
+        );
+        assert_eq!(
+            store.load_brain(&first.brain.id).unwrap().brain,
+            first.brain
+        );
     }
 
     #[test]
     fn persists_and_reloads_organization_bootstrap() {
         let temp = TempDir::new().unwrap();
-        let db = temp.path().join("vault-sync.sqlite3");
-        let output = bootstrap_organization_vault("acme", "Acme", "npub-admin").unwrap();
+        let db = temp.path().join("brain-sync.sqlite3");
+        let output = bootstrap_organization_brain("acme", "Acme", "npub-admin").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-admin");
 
         {
             let mut store = BrainStore::open(&db).unwrap();
-            store.create_vault_bootstrap(&output, &grants).unwrap();
+            store.create_brain_bootstrap(&output, &grants).unwrap();
         }
 
         let store = BrainStore::open(&db).unwrap();
-        let stored = store.load_vault(&VaultId::new("acme").unwrap()).unwrap();
+        let stored = store.load_brain(&BrainId::new("acme").unwrap()).unwrap();
 
-        assert_eq!(stored.vault.kind, VaultKind::Organization);
-        assert_eq!(stored.vault.members.len(), 1);
+        assert_eq!(stored.brain.kind, BrainKind::Organization);
+        assert_eq!(stored.brain.members.len(), 1);
         assert_eq!(
-            stored.vault.admins,
+            stored.brain.admins,
             vec![UserId::new("npub-admin").unwrap()]
         );
-        assert_eq!(
-            stored
-                .vault
-                .folders
-                .iter()
-                .map(|folder| folder.id.to_string())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["getting-started".to_owned(), "restricted".to_owned()])
-        );
-        let restricted = FolderId::new("restricted").unwrap();
-        assert_eq!(
-            stored
-                .vault
-                .folders
-                .iter()
-                .find(|folder| folder.id == restricted)
-                .map(|folder| folder.access),
-            Some(FolderAccessMode::Restricted)
-        );
-        assert!(!stored.folder_access.contains_key(&restricted));
-        assert!(stored.grants.iter().any(|grant| {
-            grant.folder_id == restricted
-                && grant.recipient_npub == UserId::new("npub-admin").unwrap()
-        }));
+        assert!(stored.brain.folders.is_empty());
+        assert!(stored.folder_access.is_empty());
+        assert!(stored.grants.is_empty());
         assert_same_grants(&stored.grants, &grants);
     }
 
     #[test]
     fn bootstrap_rejects_oversized_batches_before_deep_validation() {
-        let mut output = bootstrap_organization_vault("acme", "Acme", "npub-admin").unwrap();
-        output.vault.folders = vec![strategy_folder(); MAX_BOOTSTRAP_FOLDERS + 1];
+        let mut output = bootstrap_organization_brain("acme", "Acme", "npub-admin").unwrap();
+        output.brain.folders = vec![strategy_folder(); MAX_BOOTSTRAP_FOLDERS + 1];
         let mut store = BrainStore::open_in_memory().unwrap();
 
         assert_eq!(
-            store.create_vault_bootstrap(&output, &[]).unwrap_err(),
+            store.create_brain_bootstrap(&output, &[]).unwrap_err(),
             StoreError::BrokenInvariant {
                 reason: format!("bootstrap folder count exceeds limit {MAX_BOOTSTRAP_FOLDERS}")
             }
@@ -2990,10 +3284,10 @@ mod tests {
 
     #[test]
     fn creates_restricted_folder_with_required_grants_transactionally() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
 
         let folder = strategy_folder();
         let access_user_ids = BTreeSet::from([member.clone()]);
@@ -3015,11 +3309,11 @@ mod tests {
         ];
 
         store
-            .create_folder(&vault_id, &folder, &access_user_ids, &grants)
+            .create_folder(&brain_id, &folder, &access_user_ids, &grants)
             .unwrap();
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
 
-        assert!(stored.vault.folders.iter().any(|stored| stored == &folder));
+        assert!(stored.brain.folders.iter().any(|stored| stored == &folder));
         assert_eq!(
             stored.folder_access.get(&folder.id),
             Some(&BTreeSet::from([member]))
@@ -3032,55 +3326,62 @@ mod tests {
     #[test]
     fn grants_restricted_folder_access_with_current_recipient_grant() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        let before_sequence = store.latest_sequence(&brain_id).unwrap();
+        let new_grant = grant(
+            "grant-strategy-member",
+            "strategy",
+            1,
+            "npub-admin",
+            member.as_str(),
+        );
 
         store
-            .grant_folder_access(
-                &vault_id,
-                &FolderId::new("strategy").unwrap(),
-                &member,
-                &grant(
-                    "grant-strategy-member",
-                    "strategy",
-                    1,
-                    "npub-admin",
-                    member.as_str(),
-                ),
-            )
+            .grant_folder_access(&brain_id, &folder_id, &member, &new_grant)
             .unwrap();
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert_eq!(
-            stored
-                .folder_access
-                .get(&FolderId::new("strategy").unwrap()),
+            stored.folder_access.get(&folder_id),
             Some(&BTreeSet::from([member.clone()]))
         );
         assert!(stored.grants.iter().any(|grant| {
-            grant.folder_id == FolderId::new("strategy").unwrap()
-                && grant.key_version == 1
-                && grant.recipient_npub == member
+            grant.folder_id == folder_id && grant.key_version == 1 && grant.recipient_npub == member
+        }));
+        assert_eq!(
+            store.latest_sequence(&brain_id).unwrap(),
+            before_sequence + 2
+        );
+        let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
+        assert!(bootstrap.control_records.iter().any(|record| {
+            record.record_event_id == "grant-strategy-member-key-record"
+                && record.record_type == SyncRecordType::FolderKeyGrant
+        }));
+        assert!(bootstrap.control_records.iter().any(|record| {
+            record.record_event_id == "grant-strategy-member-access-record"
+                && record.record_type == SyncRecordType::BrainAdminAccessChange
         }));
     }
 
     #[test]
     fn grants_restricted_folder_key_after_invitation_access_metadata() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let folder_id = FolderId::new("strategy").unwrap();
         let member = UserId::new("npub-invited-member").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let now = "2026-06-23T00:00:00.000Z";
 
         store
-            .create_vault_invitation(
-                &vault_id,
+            .create_brain_invitation(
+                &brain_id,
                 "invitation-initial-strategy",
                 &member,
                 "invite-initial-strategy0123456789ab",
-                "/_admin/vault-invitation-links/invite-initial-strategy0123456789ab/accept",
+                "/_admin/brain-invitation-links/invite-initial-strategy0123456789ab/accept",
                 std::slice::from_ref(&folder_id),
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -3088,10 +3389,10 @@ mod tests {
             )
             .unwrap();
         store
-            .accept_vault_invitation_by_code("invite-initial-strategy0123456789ab", &member, now)
+            .accept_brain_invitation_by_code("invite-initial-strategy0123456789ab", &member, now)
             .unwrap();
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert_eq!(
             stored.folder_access.get(&folder_id),
             Some(&BTreeSet::from([member.clone()]))
@@ -3102,7 +3403,7 @@ mod tests {
 
         store
             .grant_folder_access(
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 &member,
                 &grant(
@@ -3115,7 +3416,7 @@ mod tests {
             )
             .unwrap();
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(stored.grants.iter().any(|grant| {
             grant.folder_id == folder_id && grant.key_version == 1 && grant.recipient_npub == member
         }));
@@ -3123,19 +3424,19 @@ mod tests {
 
     #[test]
     fn grants_all_members_folder_key_without_restricted_access_row() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
 
         store
             .grant_folder_access(
-                &vault_id,
-                &FolderId::new("getting-started").unwrap(),
+                &brain_id,
+                &FolderId::new("team-notes").unwrap(),
                 &member,
                 &grant(
-                    "grant-getting-started-member",
-                    "getting-started",
+                    "grant-team-notes-member",
+                    "team-notes",
                     1,
                     "npub-admin",
                     member.as_str(),
@@ -3143,14 +3444,14 @@ mod tests {
             )
             .unwrap();
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             !stored
                 .folder_access
-                .contains_key(&FolderId::new("getting-started").unwrap())
+                .contains_key(&FolderId::new("team-notes").unwrap())
         );
         assert!(stored.grants.iter().any(|grant| {
-            grant.folder_id == FolderId::new("getting-started").unwrap()
+            grant.folder_id == FolderId::new("team-notes").unwrap()
                 && grant.key_version == 1
                 && grant.recipient_npub == member
         }));
@@ -3158,12 +3459,12 @@ mod tests {
 
     #[test]
     fn grants_admin_only_folder_key_to_existing_admin_without_access_row() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+        let mut store = empty_org_store();
+        let brain_id = BrainId::new("acme").unwrap();
         let admin_only = admin_only_folder();
         store
             .create_folder(
-                &vault_id,
+                &brain_id,
                 &admin_only,
                 &BTreeSet::new(),
                 &[grant(
@@ -3176,12 +3477,12 @@ mod tests {
             )
             .unwrap();
         let admin = UserId::new("npub-second-admin").unwrap();
-        store.add_member(&vault_id, &admin).unwrap();
-        store.add_admin(&vault_id, &admin).unwrap();
+        store.add_member(&brain_id, &admin).unwrap();
+        store.add_admin(&brain_id, &admin).unwrap();
 
         store
             .grant_folder_access(
-                &vault_id,
+                &brain_id,
                 &FolderId::new("admin-only").unwrap(),
                 &admin,
                 &grant(
@@ -3194,7 +3495,7 @@ mod tests {
             )
             .unwrap();
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             !stored
                 .folder_access
@@ -3208,13 +3509,141 @@ mod tests {
     }
 
     #[test]
+    fn redundant_current_folder_key_grant_is_an_idempotent_no_op() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("team-notes").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let before = store.load_brain(&brain_id).unwrap();
+        let before_sequence = store.latest_sequence(&brain_id).unwrap();
+
+        let outcome = store
+            .grant_folder_access(
+                &brain_id,
+                &folder_id,
+                &admin,
+                &grant(
+                    "grant-team-notes-admin-retry",
+                    "team-notes",
+                    1,
+                    "npub-admin",
+                    admin.as_str(),
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(outcome, GrantFolderAccessOutcome::AlreadyHasAccess);
+        let after = store.load_brain(&brain_id).unwrap();
+        assert_eq!(after.folder_access, before.folder_access);
+        assert_eq!(after.grants, before.grants);
+        assert_eq!(store.latest_sequence(&brain_id).unwrap(), before_sequence);
+    }
+
+    #[test]
+    fn folder_grant_rolls_back_authority_when_a_control_record_conflicts() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
+        let brain_id = output.brain.id.clone();
+        store
+            .create_personal_brain_bootstrap(
+                &output,
+                &[],
+                &UserId::new("npub-agent").unwrap(),
+                &UserId::new("npub-owner").unwrap(),
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+        let folder = Folder {
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &brain_id,
+                &folder,
+                &BTreeSet::new(),
+                &[
+                    grant(
+                        "grant-personal-owner",
+                        "strategy",
+                        1,
+                        "npub-owner",
+                        "npub-owner",
+                    ),
+                    grant(
+                        "grant-personal-agent",
+                        "strategy",
+                        1,
+                        "npub-owner",
+                        "npub-agent",
+                    ),
+                ],
+            )
+            .unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let before = store.load_brain(&brain_id).unwrap();
+        let before_sequence = store.latest_sequence(&brain_id).unwrap();
+        let colliding = folder_access_control_record(
+            "event-colliding-access-change",
+            SyncRecordType::BrainAdminAccessChange,
+            "strategy",
+            "npub-owner",
+        );
+        store.submit_sync_record(&brain_id, &colliding).unwrap();
+        let sequence_with_collision = store.latest_sequence(&brain_id).unwrap();
+        assert_eq!(sequence_with_collision, before_sequence + 1);
+
+        let new_grant = grant(
+            "grant-strategy-member-atomic",
+            "strategy",
+            1,
+            "npub-owner",
+            member.as_str(),
+        );
+        let records = [
+            folder_access_control_record(
+                "event-new-folder-key-grant",
+                SyncRecordType::FolderKeyGrant,
+                "strategy",
+                "npub-owner",
+            ),
+            colliding,
+        ];
+
+        store
+            .grant_folder_access_with_control_records(
+                &brain_id, &folder_id, &member, &new_grant, &records,
+            )
+            .unwrap_err();
+
+        let after = store.load_brain(&brain_id).unwrap();
+        assert_eq!(after.brain.members, before.brain.members);
+        assert_eq!(after.folder_access, before.folder_access);
+        assert_eq!(after.grants, before.grants);
+        assert_eq!(
+            store.latest_sequence(&brain_id).unwrap(),
+            sequence_with_collision
+        );
+        assert!(
+            store
+                .sync_bootstrap(&brain_id)
+                .unwrap()
+                .control_records
+                .iter()
+                .all(|record| record.record_event_id != "event-new-folder-key-grant")
+        );
+    }
+
+    #[test]
     fn rejects_admin_only_folder_key_grant_to_non_admin() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+        let mut store = empty_org_store();
+        let brain_id = BrainId::new("acme").unwrap();
         let admin_only = admin_only_folder();
         store
             .create_folder(
-                &vault_id,
+                &brain_id,
                 &admin_only,
                 &BTreeSet::new(),
                 &[grant(
@@ -3227,12 +3656,12 @@ mod tests {
             )
             .unwrap();
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
 
         assert_eq!(
             store
                 .grant_folder_access(
-                    &vault_id,
+                    &brain_id,
                     &FolderId::new("admin-only").unwrap(),
                     &member,
                     &grant(
@@ -3245,28 +3674,28 @@ mod tests {
                 )
                 .unwrap_err(),
             StoreError::BrokenInvariant {
-                reason: "admin-only folder grants require a vault admin target".to_owned()
+                reason: "admin-only folder grants require a brain admin target".to_owned()
             }
         );
     }
 
     #[test]
-    fn vault_invitation_is_single_user_single_use_and_retry_safe() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
-        let restricted = FolderId::new("restricted").unwrap();
+    fn brain_invitation_is_single_user_single_use_and_retry_safe() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
         let target = UserId::new("npub-target").unwrap();
         let wrong_user = UserId::new("npub-wrong").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let now = "2026-06-23T00:00:00.000Z";
 
         let invitation = store
-            .create_vault_invitation(
-                &vault_id,
+            .create_brain_invitation(
+                &brain_id,
                 "invitation-target",
                 &target,
                 "invite-0123456789abcdef0123456789abcdef",
-                "/_admin/vault-invitation-links/invite-0123456789abcdef0123456789abcdef/accept",
+                "/_admin/brain-invitation-links/invite-0123456789abcdef0123456789abcdef/accept",
                 std::slice::from_ref(&restricted),
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -3278,31 +3707,31 @@ mod tests {
 
         assert_eq!(
             store
-                .load_available_vault_invitation_by_code(
+                .load_available_brain_invitation_by_code(
                     "invite-0123456789abcdef0123456789abcdef",
                     &wrong_user,
                     now,
                 )
                 .unwrap_err(),
             StoreError::UnavailableLink {
-                kind: "vault invitation"
+                kind: "brain invitation"
             }
         );
         assert_eq!(
             store
-                .load_available_vault_invitation_by_code(
+                .load_available_brain_invitation_by_code(
                     "invite-0123456789abcdef0123456789abcdef",
                     &target,
                     "2026-07-01T00:00:00.000Z",
                 )
                 .unwrap_err(),
             StoreError::UnavailableLink {
-                kind: "vault invitation"
+                kind: "brain invitation"
             }
         );
 
         let accepted = store
-            .accept_vault_invitation_by_code(
+            .accept_brain_invitation_by_code(
                 "invite-0123456789abcdef0123456789abcdef",
                 &target,
                 now,
@@ -3311,10 +3740,10 @@ mod tests {
         assert_eq!(accepted.status, LinkStatus::Accepted);
         assert_eq!(accepted.accepted_at.as_deref(), Some(now));
         assert!(!accepted.duplicate_accept);
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .any(|member| member.user_id == target)
@@ -3325,7 +3754,7 @@ mod tests {
         );
 
         let retry = store
-            .accept_vault_invitation_by_code(
+            .accept_brain_invitation_by_code(
                 "invite-0123456789abcdef0123456789abcdef",
                 &target,
                 now,
@@ -3335,13 +3764,13 @@ mod tests {
         assert!(retry.duplicate_accept);
 
         let revoked = store
-            .revoke_vault_invitation(&vault_id, "invitation-target", &admin, now)
+            .revoke_brain_invitation(&brain_id, "invitation-target", &admin, now)
             .unwrap();
         assert_eq!(revoked.status, LinkStatus::Revoked);
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .any(|member| member.user_id == target)
@@ -3349,19 +3778,19 @@ mod tests {
     }
 
     #[test]
-    fn email_vault_invitation_claims_membership_access_and_grants_atomically() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
-        let restricted = FolderId::new("restricted").unwrap();
-        let getting_started = FolderId::new("getting-started").unwrap();
+    fn email_brain_invitation_claims_membership_access_and_grants_atomically() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let team_notes = FolderId::new("team-notes").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let unwrap_npub = UserId::new("npub-unwrap").unwrap();
         let claimant = UserId::new("npub-claimant").unwrap();
         let now = "2026-06-23T00:00:00.000Z";
 
         let invitation = store
-            .create_email_vault_invitation(
-                &vault_id,
+            .create_email_brain_invitation(
+                &brain_id,
                 "invitation-email",
                 " Friend@Example.COM ",
                 &unwrap_npub,
@@ -3369,7 +3798,7 @@ mod tests {
                 "{\"kind\":1059}",
                 "{\"kind\":30078}",
                 "invite-email0123456789abcdef012345",
-                "/_admin/vault-invitation-links/invite-email0123456789abcdef012345/accept",
+                "/_admin/brain-invitation-links/invite-email0123456789abcdef012345/accept",
                 std::slice::from_ref(&restricted),
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -3379,7 +3808,7 @@ mod tests {
 
         assert_eq!(
             invitation.target_kind,
-            VaultInvitationTargetKind::EmailBootstrap
+            BrainInvitationTargetKind::EmailBootstrap
         );
         assert_eq!(invitation.user_id, None);
         assert_eq!(
@@ -3389,19 +3818,19 @@ mod tests {
         assert_eq!(invitation.invite_unwrap_npub, Some(unwrap_npub.clone()));
         assert_eq!(
             invitation.initial_folder_access,
-            vec![getting_started.clone(), restricted.clone()]
+            vec![restricted.clone(), team_notes.clone()]
         );
         assert_eq!(
             invitation.bootstrap_scope,
             vec![
                 EmailInviteBootstrapScopeFolder {
-                    folder_id: getting_started.clone(),
-                    access: FolderAccessMode::AllMembers,
+                    folder_id: restricted.clone(),
+                    access: FolderAccessMode::Restricted,
                     key_version: 1,
                 },
                 EmailInviteBootstrapScopeFolder {
-                    folder_id: restricted.clone(),
-                    access: FolderAccessMode::Restricted,
+                    folder_id: team_notes.clone(),
+                    access: FolderAccessMode::AllMembers,
                     key_version: 1,
                 },
             ]
@@ -3409,13 +3838,13 @@ mod tests {
 
         assert_eq!(
             store
-                .claim_email_vault_invitation_by_code(
+                .claim_email_brain_invitation_by_code(
                     "invite-email0123456789abcdef012345",
                     "friend@example.com",
                     &claimant,
                     &[grant(
-                        "claim-grant-getting-started",
-                        "getting-started",
+                        "claim-grant-team-notes",
+                        "team-notes",
                         1,
                         "npub-claimant",
                         "npub-claimant",
@@ -3427,10 +3856,10 @@ mod tests {
                 reason: "claim grants must exactly match the email bootstrap scope".to_owned()
             }
         );
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             !stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .any(|member| member.user_id == claimant)
@@ -3438,22 +3867,22 @@ mod tests {
 
         let claim_grants = vec![
             grant(
-                "claim-grant-getting-started",
-                "getting-started",
+                "claim-grant-team-notes",
+                "team-notes",
                 1,
                 "npub-claimant",
                 "npub-claimant",
             ),
             grant(
-                "claim-grant-restricted",
-                "restricted",
+                "claim-grant-private-project",
+                "private-project",
                 1,
                 "npub-claimant",
                 "npub-claimant",
             ),
         ];
         let claimed = store
-            .claim_email_vault_invitation_by_code(
+            .claim_email_brain_invitation_by_code(
                 "invite-email0123456789abcdef012345",
                 "friend@example.com",
                 &claimant,
@@ -3467,10 +3896,10 @@ mod tests {
         assert_eq!(claimed.bootstrap_wrapped_event_json, None);
         assert!(!claimed.duplicate_accept);
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .any(|member| member.user_id == claimant)
@@ -3484,7 +3913,7 @@ mod tests {
         }
 
         let retry = store
-            .claim_email_vault_invitation_by_code(
+            .claim_email_brain_invitation_by_code(
                 "invite-email0123456789abcdef012345",
                 "friend@example.com",
                 &claimant,
@@ -3495,7 +3924,7 @@ mod tests {
         assert!(retry.duplicate_accept);
         assert_eq!(
             store
-                .claim_email_vault_invitation_by_code(
+                .claim_email_brain_invitation_by_code(
                     "invite-email0123456789abcdef012345",
                     "friend@example.com",
                     &UserId::new("npub-other-claimant").unwrap(),
@@ -3504,16 +3933,16 @@ mod tests {
                 )
                 .unwrap_err(),
             StoreError::UnavailableLink {
-                kind: "vault invitation"
+                kind: "brain invitation"
             }
         );
     }
 
     #[test]
-    fn email_vault_invitation_terminal_states_tombstone_bootstrap_ciphertext() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
-        let restricted = FolderId::new("restricted").unwrap();
+    fn email_brain_invitation_terminal_states_tombstone_bootstrap_ciphertext() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let unwrap_npub = UserId::new("npub-unwrap").unwrap();
         let claimant = UserId::new("npub-claimant").unwrap();
@@ -3522,8 +3951,8 @@ mod tests {
         let create_invite =
             |store: &mut BrainStore, id: &str, code: &str, email: &str, expires_at: &str| {
                 store
-                    .create_email_vault_invitation(
-                        &vault_id,
+                    .create_email_brain_invitation(
+                        &brain_id,
                         id,
                         email,
                         &unwrap_npub,
@@ -3531,7 +3960,7 @@ mod tests {
                         "{\"kind\":1059}",
                         "{\"kind\":30078}",
                         code,
-                        &format!("/_admin/vault-invitation-links/{code}/claim"),
+                        &format!("/_admin/brain-invitation-links/{code}/claim"),
                         std::slice::from_ref(&restricted),
                         &admin,
                         expires_at,
@@ -3548,11 +3977,11 @@ mod tests {
             "2026-06-30T00:00:00.000Z",
         );
         store
-            .revoke_vault_invitation(&vault_id, &revoked.id, &admin, "2026-06-24T00:00:00.000Z")
+            .revoke_brain_invitation(&brain_id, &revoked.id, &admin, "2026-06-24T00:00:00.000Z")
             .unwrap();
         assert_eq!(
             store
-                .load_vault_invitation(&revoked.id)
+                .load_brain_invitation(&revoked.id)
                 .unwrap()
                 .bootstrap_wrapped_event_json,
             None
@@ -3572,7 +4001,7 @@ mod tests {
             "superseded@example.com",
             "2026-06-30T00:00:00.000Z",
         );
-        let superseded_old = store.load_vault_invitation(&superseded_old.id).unwrap();
+        let superseded_old = store.load_brain_invitation(&superseded_old.id).unwrap();
         assert_eq!(superseded_old.status, LinkStatus::Revoked);
         assert_eq!(superseded_old.bootstrap_wrapped_event_json, None);
         assert_eq!(superseded_new.status, LinkStatus::Pending);
@@ -3586,7 +4015,7 @@ mod tests {
             "2026-06-22T00:00:00.000Z",
         );
         assert!(matches!(
-            store.claim_email_vault_invitation_by_code(
+            store.claim_email_brain_invitation_by_code(
                 "invite-email-expired012345678901",
                 "expired@example.com",
                 &claimant,
@@ -3597,7 +4026,7 @@ mod tests {
         ));
         assert_eq!(
             store
-                .load_vault_invitation(&expired.id)
+                .load_brain_invitation(&expired.id)
                 .unwrap()
                 .bootstrap_wrapped_event_json,
             None
@@ -3613,27 +4042,27 @@ mod tests {
         store
             .conn
             .execute(
-                "UPDATE folders SET current_key_version = 2 WHERE vault_id = ?1 AND id = ?2",
-                params![vault_id.as_str(), restricted.as_str()],
+                "UPDATE folders SET current_key_version = 2 WHERE brain_id = ?1 AND id = ?2",
+                params![brain_id.as_str(), restricted.as_str()],
             )
             .unwrap();
         assert_eq!(
             store
-                .claim_email_vault_invitation_by_code(
+                .claim_email_brain_invitation_by_code(
                     "invite-email-stale01234567890123",
                     "stale@example.com",
                     &claimant,
                     &[
                         grant(
-                            "claim-grant-getting-started-stale",
-                            "getting-started",
+                            "claim-grant-team-notes-stale",
+                            "team-notes",
                             1,
                             "npub-claimant",
                             "npub-claimant",
                         ),
                         grant(
-                            "claim-grant-restricted-stale",
-                            "restricted",
+                            "claim-grant-private-project-stale",
+                            "private-project",
                             1,
                             "npub-claimant",
                             "npub-claimant",
@@ -3648,7 +4077,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .load_vault_invitation(&stale.id)
+                .load_brain_invitation(&stale.id)
                 .unwrap()
                 .bootstrap_wrapped_event_json,
             None
@@ -3657,22 +4086,22 @@ mod tests {
 
     #[test]
     fn folder_key_rotation_invalidates_pending_email_bootstrap() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
-        let restricted = FolderId::new("restricted").unwrap();
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let member = UserId::new("npub-member").unwrap();
         let unwrap_npub = UserId::new("npub-unwrap").unwrap();
         let now = "2026-06-23T00:00:00.000Z";
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
         store
             .grant_folder_access(
-                &vault_id,
+                &brain_id,
                 &restricted,
                 &member,
                 &grant(
-                    "grant-restricted-member-rotation",
-                    "restricted",
+                    "grant-private-project-member-rotation",
+                    "private-project",
                     1,
                     "npub-admin",
                     member.as_str(),
@@ -3680,8 +4109,8 @@ mod tests {
             )
             .unwrap();
         let invitation = store
-            .create_email_vault_invitation(
-                &vault_id,
+            .create_email_brain_invitation(
+                &brain_id,
                 "invitation-email-rotation",
                 "rotation@example.com",
                 &unwrap_npub,
@@ -3689,7 +4118,7 @@ mod tests {
                 "{\"kind\":1059}",
                 "{\"kind\":30078}",
                 "invite-email-rotation0123456789",
-                "/_admin/vault-invitation-links/invite-email-rotation0123456789/claim",
+                "/_admin/brain-invitation-links/invite-email-rotation0123456789/claim",
                 std::slice::from_ref(&restricted),
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -3699,7 +4128,7 @@ mod tests {
         assert_eq!(invitation.status, LinkStatus::Pending);
         assert!(invitation.bootstrap_wrapped_event_json.is_some());
         let reencrypted_records = store
-            .load_current_objects(&vault_id)
+            .load_current_objects(&brain_id)
             .unwrap()
             .into_iter()
             .filter(|object| object.folder_id == restricted && !object.deleted)
@@ -3719,13 +4148,13 @@ mod tests {
 
         store
             .rotate_folder_key_for_access_removal(
-                &vault_id,
+                &brain_id,
                 &restricted,
                 &member,
                 2,
                 &[grant(
-                    "grant-restricted-admin-v2",
-                    "restricted",
+                    "grant-private-project-admin-v2",
+                    "private-project",
                     2,
                     "npub-admin",
                     "npub-admin",
@@ -3735,30 +4164,30 @@ mod tests {
             )
             .unwrap();
 
-        let invalidated = store.load_vault_invitation(&invitation.id).unwrap();
+        let invalidated = store.load_brain_invitation(&invitation.id).unwrap();
         assert_eq!(invalidated.status, LinkStatus::Revoked);
         assert_eq!(invalidated.bootstrap_wrapped_event_json, None);
         assert_eq!(invalidated.updated_at, "2026-06-24T00:00:00.000Z");
     }
 
     #[test]
-    fn vault_invitation_handles_existing_members_without_stale_invites() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+    fn brain_invitation_handles_existing_members_without_stale_invites() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let existing_member = UserId::new("npub-existing-member").unwrap();
         let stale_target = UserId::new("npub-stale-target").unwrap();
         let now = "2026-06-23T00:00:00.000Z";
 
-        store.add_member(&vault_id, &existing_member).unwrap();
+        store.add_member(&brain_id, &existing_member).unwrap();
         assert_eq!(
             store
-                .create_vault_invitation(
-                    &vault_id,
+                .create_brain_invitation(
+                    &brain_id,
                     "invitation-existing-member",
                     &existing_member,
                     "invite-existing-member0123456789abcdef",
-                    "/_admin/vault-invitation-links/invite-existing-member0123456789abcdef/accept",
+                    "/_admin/brain-invitation-links/invite-existing-member0123456789abcdef/accept",
                     &[],
                     &admin,
                     "2026-06-30T00:00:00.000Z",
@@ -3766,35 +4195,35 @@ mod tests {
                 )
                 .unwrap_err(),
             StoreError::BrokenInvariant {
-                reason: "target is already a vault member".to_owned()
+                reason: "target is already a brain member".to_owned()
             }
         );
 
         store
-            .create_vault_invitation(
-                &vault_id,
+            .create_brain_invitation(
+                &brain_id,
                 "invitation-stale-member",
                 &stale_target,
                 "invite-stale-member0123456789abcdef",
-                "/_admin/vault-invitation-links/invite-stale-member0123456789abcdef/accept",
+                "/_admin/brain-invitation-links/invite-stale-member0123456789abcdef/accept",
                 &[],
                 &admin,
                 "2026-06-30T00:00:00.000Z",
                 now,
             )
             .unwrap();
-        store.add_member(&vault_id, &stale_target).unwrap();
+        store.add_member(&brain_id, &stale_target).unwrap();
 
-        let visible = store.list_visible_vaults(&stale_target).unwrap();
-        assert!(visible.iter().any(|vault| vault.id == vault_id));
-        assert!(!visible.iter().any(|vault| {
-            vault.id == vault_id
-                && vault.role == VisibleVaultRole::Invited
-                && vault.invite_code.is_some()
+        let visible = store.list_visible_brains(&stale_target).unwrap();
+        assert!(visible.iter().any(|brain| brain.id == brain_id));
+        assert!(!visible.iter().any(|brain| {
+            brain.id == brain_id
+                && brain.role == VisibleBrainRole::Invited
+                && brain.invite_code.is_some()
         }));
 
         let accepted = store
-            .accept_vault_invitation_by_code(
+            .accept_brain_invitation_by_code(
                 "invite-stale-member0123456789abcdef",
                 &stale_target,
                 now,
@@ -3808,7 +4237,7 @@ mod tests {
     #[test]
     fn share_link_accept_creates_member_access_grant_and_optional_mount_once() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let folder_id = FolderId::new("strategy").unwrap();
         let recipient = UserId::new("npub-recipient").unwrap();
         let wrong_user = UserId::new("npub-wrong").unwrap();
@@ -3824,7 +4253,7 @@ mod tests {
 
         let share_link = store
             .create_share_link(
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 "share-link-recipient",
                 &recipient,
@@ -3854,10 +4283,10 @@ mod tests {
         assert!(accepted.personal_mount_id.is_some());
         assert!(!accepted.duplicate_accept);
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .any(|member| member.user_id == recipient)
@@ -3880,7 +4309,7 @@ mod tests {
             .revoke_share_link("share-link-recipient", &admin, now)
             .unwrap();
         assert_eq!(revoked.status, LinkStatus::Revoked);
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert_eq!(
             stored.folder_access.get(&folder_id),
             Some(&BTreeSet::from([recipient]))
@@ -3888,15 +4317,593 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_vault_export_filters_payloads_grants_and_access_state() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
-        let admin = UserId::new("npub-admin").unwrap();
-        let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+    fn personal_agent_can_share_a_restricted_personal_brain_folder() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
+        let owner = UserId::new("npub-owner").unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
+        let recipient = UserId::new("npub-recipient").unwrap();
+        let brain_id = output.brain.id.clone();
+        store
+            .create_personal_brain_bootstrap(&output, &[], &agent, &owner, "2026-06-23T00:00:00Z")
+            .unwrap();
+        let folder = Folder {
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
+            ..strategy_folder()
+        };
         store
             .create_folder(
-                &vault_id,
+                &brain_id,
+                &folder,
+                &BTreeSet::new(),
+                &[
+                    grant(
+                        "grant-personal-owner",
+                        "strategy",
+                        1,
+                        agent.as_str(),
+                        owner.as_str(),
+                    ),
+                    grant(
+                        "grant-personal-agent",
+                        "strategy",
+                        1,
+                        agent.as_str(),
+                        agent.as_str(),
+                    ),
+                ],
+            )
+            .unwrap();
+        let recipient_grant = grant(
+            "grant-personal-recipient",
+            "strategy",
+            1,
+            agent.as_str(),
+            recipient.as_str(),
+        );
+
+        let share = store
+            .create_share_link(
+                &brain_id,
+                &folder.id,
+                "share-link-personal-agent",
+                &recipient,
+                &agent,
+                "2026-06-30T00:00:00Z",
+                "/_admin/share-links/share-link-personal-agent/accept",
+                &recipient_grant,
+                true,
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+
+        assert_eq!(share.created_by_npub, agent);
+        assert_eq!(share.status, LinkStatus::Pending);
+    }
+
+    #[test]
+    fn vacant_personal_agent_role_requires_only_the_owner_folder_grant() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
+        let owner = UserId::new("npub-owner").unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
+        let brain_id = output.brain.id.clone();
+        store
+            .create_personal_brain_bootstrap(&output, &[], &agent, &owner, "2026-06-23T00:00:00Z")
+            .unwrap();
+        store
+            .replace_personal_agent(&brain_id, &owner, None, &[], "2026-06-23T00:01:00Z")
+            .unwrap();
+        let folder = Folder {
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Private").unwrap(),
+            access: FolderAccessMode::Owner,
+            ..strategy_folder()
+        };
+        let owner_grant = grant(
+            "grant-personal-owner",
+            "strategy",
+            1,
+            owner.as_str(),
+            owner.as_str(),
+        );
+
+        store
+            .create_folder(&brain_id, &folder, &BTreeSet::new(), &[owner_grant])
+            .unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(stored.personal_agent.is_none());
+        assert_eq!(stored.grants.len(), 1);
+        assert_eq!(stored.grants[0].recipient_npub, owner);
+    }
+
+    #[test]
+    fn folder_subtree_deletion_is_atomic_and_folder_identities_stay_dead() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let child = Folder {
+            id: FolderId::new("strategy-child").unwrap(),
+            name: DisplayName::new("folder_name", "Child").unwrap(),
+            parent_folder_id: Some(FolderId::new("strategy").unwrap()),
+            path: SafeRelativePath::new("folder_path", "Strategy/Child").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &brain_id,
+                &child,
+                &BTreeSet::new(),
+                &[grant(
+                    "grant-strategy-child-admin",
+                    "strategy-child",
+                    1,
+                    admin.as_str(),
+                    admin.as_str(),
+                )],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &brain_id,
+                    &FolderId::new("strategy").unwrap(),
+                    &admin,
+                    2,
+                    "event-delete-strategy",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                )
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "Folder Key version changed before deletion".to_owned(),
+                current_revision: Some(1),
+            }
+        );
+        assert!(store.folder_exists(&brain_id, &child.id).unwrap());
+
+        let deleted = store
+            .delete_folder_subtree(
+                &brain_id,
+                &FolderId::new("strategy").unwrap(),
+                &admin,
+                1,
+                "event-delete-strategy",
+                r#"{"recordType":"folder_subtree_tombstone"}"#,
+                "2026-06-23T00:00:00Z",
+                APP_SPECIFIC_KIND,
+            )
+            .unwrap();
+        assert_eq!(deleted.folder_count, 2);
+        let retry = store
+            .delete_folder_subtree(
+                &brain_id,
+                &FolderId::new("strategy").unwrap(),
+                &admin,
+                1,
+                "event-delete-strategy",
+                r#"{"recordType":"folder_subtree_tombstone"}"#,
+                "2026-06-23T00:00:00Z",
+                APP_SPECIFIC_KIND,
+            )
+            .unwrap();
+        assert!(retry.duplicate);
+        assert_eq!(retry.folder_count, deleted.folder_count);
+        assert_eq!(retry.object_count, deleted.object_count);
+        assert!(!store.folder_exists(&brain_id, &child.id).unwrap());
+        assert_eq!(
+            store
+                .create_folder(
+                    &brain_id,
+                    &strategy_folder(),
+                    &BTreeSet::new(),
+                    &[grant(
+                        "grant-recreated-strategy",
+                        "strategy",
+                        1,
+                        admin.as_str(),
+                        admin.as_str(),
+                    )],
+                )
+                .unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "deleted Folder identities cannot be reused".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn folder_subtree_deletion_fails_closed_on_corrupt_invitation_scope() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let invitee = UserId::new("npub-invitee").unwrap();
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "invite-corrupt-scope",
+                &invitee,
+                "invite-code-corrupt-scope",
+                "/invite/corrupt-scope",
+                &[FolderId::new("strategy").unwrap()],
+                &admin,
+                "2026-07-01T00:00:00Z",
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE brain_invitations SET initial_folder_access_json = '{' WHERE id = ?1",
+                params!["invite-corrupt-scope"],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &brain_id,
+                    &FolderId::new("strategy").unwrap(),
+                    &admin,
+                    1,
+                    "event-delete-corrupt-scope",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                )
+                .unwrap_err(),
+            StoreError::InvalidRecord {
+                reason: "stored Brain Invitation Folder scope is invalid".to_owned(),
+            }
+        );
+        assert!(
+            store
+                .folder_exists(&brain_id, &FolderId::new("strategy").unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM brain_invitations WHERE id = ?1",
+                    params!["invite-corrupt-scope"],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .folder_deletion_replay(&brain_id, &FolderId::new("strategy").unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_personal_brain_agent_replacement_is_owner_only_and_atomic() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
+        let owner = UserId::new("npub-owner").unwrap();
+        let old_agent = UserId::new("npub-old-agent").unwrap();
+        let new_agent = UserId::new("npub-new-agent").unwrap();
+        store
+            .create_personal_brain_bootstrap(
+                &output,
+                &[],
+                &old_agent,
+                &owner,
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+
+        store
+            .replace_personal_agent(
+                &output.brain.id,
+                &owner,
+                Some(&new_agent),
+                &[],
+                "2026-06-23T00:01:00Z",
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_personal_agent(&output.brain.id)
+                .unwrap()
+                .unwrap()
+                .agent_npub,
+            new_agent
+        );
+        assert!(
+            store
+                .replace_personal_agent(
+                    &output.brain.id,
+                    &old_agent,
+                    None,
+                    &[],
+                    "2026-06-23T00:02:00Z",
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn personal_agent_replacement_preserves_every_required_folder_recipient() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
+        let brain_id = output.brain.id.clone();
+        let owner = UserId::new("npub-owner").unwrap();
+        let old_agent = UserId::new("npub-old-agent").unwrap();
+        let new_agent = UserId::new("npub-new-agent").unwrap();
+        let collaborator = UserId::new("npub-collaborator").unwrap();
+        store
+            .create_personal_brain_bootstrap(
+                &output,
+                &[],
+                &old_agent,
+                &owner,
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        let folder = Folder {
+            access: FolderAccessMode::Restricted,
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &brain_id,
+                &folder,
+                &BTreeSet::new(),
+                &[
+                    grant(
+                        "grant-owner-v1",
+                        "strategy",
+                        1,
+                        owner.as_str(),
+                        owner.as_str(),
+                    ),
+                    grant(
+                        "grant-agent-v1",
+                        "strategy",
+                        1,
+                        owner.as_str(),
+                        old_agent.as_str(),
+                    ),
+                ],
+            )
+            .unwrap();
+        store
+            .grant_folder_access(
+                &brain_id,
+                &folder.id,
+                &collaborator,
+                &grant(
+                    "grant-collaborator-v1",
+                    "strategy",
+                    1,
+                    owner.as_str(),
+                    collaborator.as_str(),
+                ),
+            )
+            .unwrap();
+
+        let grants = vec![
+            grant(
+                "grant-owner-v2",
+                "strategy",
+                2,
+                owner.as_str(),
+                owner.as_str(),
+            ),
+            grant(
+                "grant-agent-v2",
+                "strategy",
+                2,
+                owner.as_str(),
+                new_agent.as_str(),
+            ),
+            grant(
+                "grant-collaborator-v2",
+                "strategy",
+                2,
+                owner.as_str(),
+                collaborator.as_str(),
+            ),
+        ];
+        let rotation_for = |grants: Vec<FolderKeyGrantMetadata>| {
+            let mut control_records = grants
+                .iter()
+                .map(|grant| {
+                    let SyncRecordInput::Control(record) = folder_access_control_record(
+                        &format!("{}-control", grant.id),
+                        SyncRecordType::FolderKeyGrant,
+                        "strategy",
+                        owner.as_str(),
+                    ) else {
+                        unreachable!()
+                    };
+                    record
+                })
+                .collect::<Vec<_>>();
+            let SyncRecordInput::Control(access_record) = folder_access_control_record(
+                &format!("event-replace-agent-{}", grants.len()),
+                SyncRecordType::BrainAdminAccessChange,
+                "strategy",
+                owner.as_str(),
+            ) else {
+                unreachable!()
+            };
+            control_records.push(access_record);
+            PersonalAgentFolderRotation {
+                folder_id: folder.id.clone(),
+                new_key_version: 2,
+                grants,
+                reencrypted_records: vec![],
+                control_records,
+            }
+        };
+
+        let before = store.load_brain(&brain_id).unwrap();
+        let incomplete = vec![grants[0].clone(), grants[1].clone()];
+        assert_eq!(
+            store
+                .replace_personal_agent(
+                    &brain_id,
+                    &owner,
+                    Some(&new_agent),
+                    &[rotation_for(incomplete)],
+                    "2026-06-23T00:01:00Z",
+                )
+                .unwrap_err(),
+            StoreError::MissingRequiredGrant {
+                recipient_user_id: collaborator.to_string(),
+            }
+        );
+        assert_eq!(store.load_brain(&brain_id).unwrap(), before);
+
+        let mut excessive = grants.clone();
+        excessive.push(grant(
+            "grant-unrequired-v2",
+            "strategy",
+            2,
+            owner.as_str(),
+            "npub-unrequired",
+        ));
+        assert_eq!(
+            store
+                .replace_personal_agent(
+                    &brain_id,
+                    &owner,
+                    Some(&new_agent),
+                    &[rotation_for(excessive)],
+                    "2026-06-23T00:01:00Z",
+                )
+                .unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "grant recipients must exactly match required recipients".to_owned(),
+            }
+        );
+        assert_eq!(store.load_brain(&brain_id).unwrap(), before);
+
+        store
+            .replace_personal_agent(
+                &brain_id,
+                &owner,
+                Some(&new_agent),
+                &[rotation_for(grants)],
+                "2026-06-23T00:01:00Z",
+            )
+            .unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        let current_recipients = stored
+            .grants
+            .iter()
+            .filter(|grant| grant.folder_id.as_str() == "strategy" && grant.key_version == 2)
+            .map(|grant| grant.recipient_npub.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            current_recipients,
+            BTreeSet::from([owner, new_agent, collaborator])
+        );
+        assert!(!current_recipients.contains(&old_agent));
+    }
+
+    #[test]
+    fn rotation_fanout_limits_reject_before_store_mutation() {
+        let mut personal_store = BrainStore::open_in_memory().unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
+        let owner = UserId::new("npub-owner").unwrap();
+        let old_agent = UserId::new("npub-old-agent").unwrap();
+        personal_store
+            .create_personal_brain_bootstrap(
+                &output,
+                &[],
+                &old_agent,
+                &owner,
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        let before = personal_store.load_brain(&output.brain.id).unwrap();
+        let excessive_rotations = (0..=MAX_PERSONAL_AGENT_ROTATION_FOLDERS)
+            .map(|index| PersonalAgentFolderRotation {
+                folder_id: FolderId::new(format!("folder-{index}")).unwrap(),
+                new_key_version: 2,
+                grants: vec![],
+                reencrypted_records: vec![],
+                control_records: vec![],
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            personal_store.replace_personal_agent(
+                &output.brain.id,
+                &owner,
+                None,
+                &excessive_rotations,
+                "2026-06-23T00:01:00Z",
+            ),
+            Err(StoreError::Core(CoreError::RotationFanoutLimitExceeded {
+                resource: "Folder rotations",
+                ..
+            }))
+        ));
+        assert_eq!(personal_store.load_brain(&output.brain.id).unwrap(), before);
+
+        let mut access_store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let before = access_store.load_brain(&brain_id).unwrap();
+        let before_sequence = access_store.latest_sequence(&brain_id).unwrap();
+        let excessive_grants = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
+            .map(|index| {
+                grant(
+                    &format!("grant-limit-{index}"),
+                    "strategy",
+                    2,
+                    "npub-admin",
+                    "npub-admin",
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            access_store.rotate_folder_key_for_access_removal(
+                &brain_id,
+                &folder_id,
+                &member,
+                2,
+                &excessive_grants,
+                &[],
+                "2026-06-23T00:01:00Z",
+            ),
+            Err(StoreError::Core(CoreError::RotationFanoutLimitExceeded {
+                resource: "grants per Folder rotation",
+                ..
+            }))
+        ));
+        assert_eq!(access_store.load_brain(&brain_id).unwrap(), before);
+        assert_eq!(
+            access_store.latest_sequence(&brain_id).unwrap(),
+            before_sequence
+        );
+    }
+
+    #[test]
+    fn encrypted_brain_export_filters_payloads_grants_and_access_state() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        store
+            .create_folder(
+                &brain_id,
                 &strategy_folder(),
                 &BTreeSet::new(),
                 &[grant(
@@ -3910,20 +4917,20 @@ mod tests {
             .unwrap();
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record_for(
-                    "getting-started",
-                    "event-getting-started-create",
+                    "team-notes",
+                    "event-team-notes-create",
                     "obj_000000000101",
                     1,
                     None,
-                    "getting-started payload",
+                    "team-notes payload",
                 ),
             )
             .unwrap();
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record_for(
                     "strategy",
                     "event-strategy-create",
@@ -3935,23 +4942,23 @@ mod tests {
             )
             .unwrap();
 
-        let member_export = store.encrypted_vault_export(&vault_id, &member).unwrap();
-        assert_eq!(member_export.version, "finite-vault-export-v1");
+        let member_export = store.encrypted_brain_export(&brain_id, &member).unwrap();
+        assert_eq!(member_export.version, "finite-brain-export-v1");
         assert!(member_export.key_grants.is_empty());
         assert_eq!(member_export.access_state.members, vec![member.clone()]);
         assert!(member_export.access_state.admins.is_empty());
-        let getting_started = member_export
+        let team_notes_export = member_export
             .objects
             .iter()
-            .find(|object| object.folder_id == FolderId::new("getting-started").unwrap())
+            .find(|object| object.folder_id == FolderId::new("team-notes").unwrap())
             .unwrap();
-        assert!(!getting_started.opaque);
+        assert!(!team_notes_export.opaque);
         assert!(
-            getting_started
+            team_notes_export
                 .payload_json
                 .as_ref()
                 .unwrap()
-                .contains("getting-started")
+                .contains("team-notes")
         );
         let strategy = member_export
             .objects
@@ -3969,7 +4976,7 @@ mod tests {
                 .accessible
         );
 
-        let admin_export = store.encrypted_vault_export(&vault_id, &admin).unwrap();
+        let admin_export = store.encrypted_brain_export(&brain_id, &admin).unwrap();
         assert!(admin_export.key_grants.len() >= 3);
         assert!(admin_export.access_state.admins.contains(&admin));
         assert!(
@@ -3988,18 +4995,18 @@ mod tests {
     #[test]
     fn link_timestamps_must_be_rfc3339() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let target = UserId::new("npub-target").unwrap();
 
         assert_eq!(
             store
-                .create_vault_invitation(
-                    &vault_id,
+                .create_brain_invitation(
+                    &brain_id,
                     "invitation-bad-time",
                     &target,
                     "invite-bad-time",
-                    "/_admin/vault-invitation-links/invite-bad-time/accept",
+                    "/_admin/brain-invitation-links/invite-bad-time/accept",
                     &[],
                     &admin,
                     "not-a-timestamp",
@@ -4015,18 +5022,18 @@ mod tests {
     #[test]
     fn pending_revoked_and_expired_links_cannot_be_accepted() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let folder_id = FolderId::new("strategy").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         let now = "2026-06-23T00:00:00.000Z";
         let invite_target = UserId::new("npub-invite-target").unwrap();
         store
-            .create_vault_invitation(
-                &vault_id,
+            .create_brain_invitation(
+                &brain_id,
                 "invitation-revoked",
                 &invite_target,
                 "invite-revoked0123456789abcdef012345",
-                "/_admin/vault-invitation-links/invite-revoked0123456789abcdef012345/accept",
+                "/_admin/brain-invitation-links/invite-revoked0123456789abcdef012345/accept",
                 &[],
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -4034,29 +5041,29 @@ mod tests {
             )
             .unwrap();
         store
-            .revoke_vault_invitation(&vault_id, "invitation-revoked", &admin, now)
+            .revoke_brain_invitation(&brain_id, "invitation-revoked", &admin, now)
             .unwrap();
         assert_eq!(
             store
-                .accept_vault_invitation_by_code(
+                .accept_brain_invitation_by_code(
                     "invite-revoked0123456789abcdef012345",
                     &invite_target,
                     now,
                 )
                 .unwrap_err(),
             StoreError::UnavailableLink {
-                kind: "vault invitation"
+                kind: "brain invitation"
             }
         );
 
         let expired_target = UserId::new("npub-expired-target").unwrap();
         store
-            .create_vault_invitation(
-                &vault_id,
+            .create_brain_invitation(
+                &brain_id,
                 "invitation-expired",
                 &expired_target,
                 "invite-expired0123456789abcdef012345",
-                "/_admin/vault-invitation-links/invite-expired0123456789abcdef012345/accept",
+                "/_admin/brain-invitation-links/invite-expired0123456789abcdef012345/accept",
                 &[],
                 &admin,
                 "2026-01-01T00:00:00.000Z",
@@ -4065,21 +5072,21 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .accept_vault_invitation_by_code(
+                .accept_brain_invitation_by_code(
                     "invite-expired0123456789abcdef012345",
                     &expired_target,
                     now,
                 )
                 .unwrap_err(),
             StoreError::UnavailableLink {
-                kind: "vault invitation"
+                kind: "brain invitation"
             }
         );
 
         let share_recipient = UserId::new("npub-share-revoked").unwrap();
         store
             .create_share_link(
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 "share-link-revoked",
                 &share_recipient,
@@ -4112,21 +5119,21 @@ mod tests {
     fn shared_folder_connection_mount_projection_and_delegated_member_rotation() {
         let mut store = store_with_strategy_folder();
         bootstrap_org_named(&mut store, "dest", "Dest", "npub-dest-admin");
-        let source_vault_id = VaultId::new("acme").unwrap();
+        let source_brain_id = BrainId::new("acme").unwrap();
         let source_folder_id = FolderId::new("strategy").unwrap();
-        let destination_vault_id = VaultId::new("dest").unwrap();
+        let destination_brain_id = BrainId::new("dest").unwrap();
         let source_admin = UserId::new("npub-admin").unwrap();
         let destination_admin = UserId::new("npub-dest-admin").unwrap();
         let destination_member = UserId::new("npub-dest-member").unwrap();
         let now = "2026-06-23T00:00:00.000Z";
 
         store
-            .mark_shared_folder_source(&source_vault_id, &source_folder_id)
+            .mark_shared_folder_source(&source_brain_id, &source_folder_id)
             .unwrap();
-        let source = store.load_vault(&source_vault_id).unwrap();
+        let source = store.load_brain(&source_brain_id).unwrap();
         assert!(
             source
-                .vault
+                .brain
                 .folders
                 .iter()
                 .find(|folder| folder.id == source_folder_id)
@@ -4136,9 +5143,9 @@ mod tests {
 
         let invitation = store
             .create_shared_folder_invitation(
-                &source_vault_id,
+                &source_brain_id,
                 &source_folder_id,
-                &destination_vault_id,
+                &destination_brain_id,
                 "shared-folder-invitation-dest",
                 &destination_admin,
                 &source_admin,
@@ -4185,21 +5192,21 @@ mod tests {
             connection.member_npubs,
             BTreeSet::from([destination_admin.clone()])
         );
-        let source = store.load_vault(&source_vault_id).unwrap();
+        let source = store.load_brain(&source_brain_id).unwrap();
         assert_eq!(
             source.folder_access.get(&source_folder_id),
             Some(&BTreeSet::from([destination_admin.clone()]))
         );
         assert_eq!(
             store
-                .mounted_folder_projection(&destination_vault_id, &destination_admin)
+                .mounted_folder_projection(&destination_brain_id, &destination_admin)
                 .unwrap()[0]
                 .state,
             MountedFolderState::Available
         );
 
         store
-            .add_member(&destination_vault_id, &destination_member)
+            .add_member(&destination_brain_id, &destination_member)
             .unwrap();
         let connection = store
             .add_shared_folder_connection_member(
@@ -4219,7 +5226,7 @@ mod tests {
         assert!(connection.member_npubs.contains(&destination_member));
         assert_eq!(
             store
-                .mounted_folder_projection(&destination_vault_id, &destination_member)
+                .mounted_folder_projection(&destination_brain_id, &destination_member)
                 .unwrap()[0]
                 .state,
             MountedFolderState::Available
@@ -4254,7 +5261,7 @@ mod tests {
         assert!(!connection.member_npubs.contains(&destination_member));
         assert_eq!(
             store
-                .mounted_folder_projection(&destination_vault_id, &destination_member)
+                .mounted_folder_projection(&destination_brain_id, &destination_member)
                 .unwrap()[0]
                 .state,
             MountedFolderState::Locked
@@ -4279,7 +5286,7 @@ mod tests {
         assert_eq!(connection.status, SharedFolderConnectionStatus::Revoked);
         assert_eq!(
             store
-                .mounted_folder_projection(&destination_vault_id, &destination_admin)
+                .mounted_folder_projection(&destination_brain_id, &destination_admin)
                 .unwrap()[0]
                 .state,
             MountedFolderState::Revoked
@@ -4290,9 +5297,9 @@ mod tests {
     fn sqlite_full_lifecycle_invite_share_sync_revoke_and_filter_visibility() {
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("finite-brain.sqlite3");
-        let source_vault_id = VaultId::new("acme").unwrap();
+        let source_brain_id = BrainId::new("acme").unwrap();
         let source_folder_id = FolderId::new("strategy").unwrap();
-        let destination_vault_id = VaultId::new("dest").unwrap();
+        let destination_brain_id = BrainId::new("dest").unwrap();
         let source_admin = UserId::new("npub-admin").unwrap();
         let destination_admin = UserId::new("npub-dest-admin").unwrap();
         let destination_member = UserId::new("npub-dest-member").unwrap();
@@ -4304,8 +5311,8 @@ mod tests {
             bootstrap_org_named(&mut store, "dest", "Dest", "npub-dest-admin");
 
             store
-                .create_vault_invitation(
-                    &destination_vault_id,
+                .create_brain_invitation(
+                    &destination_brain_id,
                     "invitation-dest-member",
                     &destination_member,
                     "invite-dest-member",
@@ -4317,15 +5324,15 @@ mod tests {
                 )
                 .unwrap();
             store
-                .accept_vault_invitation_by_code("invite-dest-member", &destination_member, now)
+                .accept_brain_invitation_by_code("invite-dest-member", &destination_member, now)
                 .unwrap();
 
             store
-                .mark_shared_folder_source(&source_vault_id, &source_folder_id)
+                .mark_shared_folder_source(&source_brain_id, &source_folder_id)
                 .unwrap();
             store
                 .submit_sync_record(
-                    &source_vault_id,
+                    &source_brain_id,
                     &revision_record(
                         "event-lifecycle-create",
                         "obj_000000000101",
@@ -4338,9 +5345,9 @@ mod tests {
 
             store
                 .create_shared_folder_invitation(
-                    &source_vault_id,
+                    &source_brain_id,
                     &source_folder_id,
-                    &destination_vault_id,
+                    &destination_brain_id,
                     "shared-folder-invitation-lifecycle",
                     &destination_admin,
                     &source_admin,
@@ -4384,12 +5391,12 @@ mod tests {
         {
             let mut store = BrainStore::open(&db).unwrap();
             let member_projection = store
-                .mounted_folder_projection(&destination_vault_id, &destination_member)
+                .mounted_folder_projection(&destination_brain_id, &destination_member)
                 .unwrap();
             assert_eq!(member_projection[0].state, MountedFolderState::Available);
 
             let member_export = store
-                .encrypted_vault_export(&source_vault_id, &destination_member)
+                .encrypted_brain_export(&source_brain_id, &destination_member)
                 .unwrap();
             let shared_object = member_export
                 .objects
@@ -4402,7 +5409,7 @@ mod tests {
             );
             assert_eq!(
                 store
-                    .sync_bootstrap(&source_vault_id)
+                    .sync_bootstrap(&source_brain_id)
                     .unwrap()
                     .latest_sequence,
                 1
@@ -4442,12 +5449,12 @@ mod tests {
                 )
                 .unwrap();
             let locked_projection = store
-                .mounted_folder_projection(&destination_vault_id, &destination_member)
+                .mounted_folder_projection(&destination_brain_id, &destination_member)
                 .unwrap();
             assert_eq!(locked_projection[0].state, MountedFolderState::Locked);
 
             let filtered_export = store
-                .encrypted_vault_export(&source_vault_id, &destination_member)
+                .encrypted_brain_export(&source_brain_id, &destination_member)
                 .unwrap();
             let filtered_object = filtered_export
                 .objects
@@ -4481,12 +5488,12 @@ mod tests {
                 )
                 .unwrap();
             let revoked_projection = store
-                .mounted_folder_projection(&destination_vault_id, &destination_admin)
+                .mounted_folder_projection(&destination_brain_id, &destination_admin)
                 .unwrap();
             assert_eq!(revoked_projection[0].state, MountedFolderState::Revoked);
             assert_eq!(
                 store
-                    .sync_bootstrap(&source_vault_id)
+                    .sync_bootstrap(&source_brain_id)
                     .unwrap()
                     .latest_sequence,
                 3
@@ -4497,13 +5504,13 @@ mod tests {
     #[test]
     fn removing_restricted_folder_access_requires_rotation_and_reencrypts_live_objects() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let folder_id = FolderId::new("strategy").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
         store
             .grant_folder_access(
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 &member,
                 &grant(
@@ -4517,14 +5524,14 @@ mod tests {
             .unwrap();
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record("event-create-1", "obj_000000000001", 1, None, "create"),
             )
             .unwrap();
 
         store
             .rotate_folder_key_for_access_removal(
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 &member,
                 2,
@@ -4547,9 +5554,9 @@ mod tests {
             )
             .unwrap();
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         let folder = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == folder_id)
@@ -4569,8 +5576,8 @@ mod tests {
                 && grant.recipient_npub.as_str() == "npub-admin"
         }));
 
-        let bootstrap = store.sync_bootstrap(&vault_id).unwrap();
-        assert_eq!(bootstrap.latest_sequence, 2);
+        let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
+        assert_eq!(bootstrap.latest_sequence, 4);
         assert_eq!(bootstrap.objects[0].revision, 2);
         assert_eq!(
             bootstrap.objects[0].payload_json,
@@ -4581,13 +5588,13 @@ mod tests {
     #[test]
     fn access_removal_rotation_rolls_back_when_reencryption_or_grants_are_incomplete() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let folder_id = FolderId::new("strategy").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
         store
             .grant_folder_access(
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 &member,
                 &grant(
@@ -4601,7 +5608,7 @@ mod tests {
             .unwrap();
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record("event-create-1", "obj_000000000001", 1, None, "create"),
             )
             .unwrap();
@@ -4609,7 +5616,7 @@ mod tests {
         assert_eq!(
             store
                 .rotate_folder_key_for_access_removal(
-                    &vault_id,
+                    &brain_id,
                     &folder_id,
                     &member,
                     2,
@@ -4633,7 +5640,7 @@ mod tests {
         assert_eq!(
             store
                 .rotate_folder_key_for_access_removal(
-                    &vault_id,
+                    &brain_id,
                     &folder_id,
                     &member,
                     2,
@@ -4661,9 +5668,9 @@ mod tests {
             }
         );
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         let folder = stored
-            .vault
+            .brain
             .folders
             .iter()
             .find(|folder| folder.id == folder_id)
@@ -4673,15 +5680,15 @@ mod tests {
             stored.folder_access.get(&folder_id),
             Some(&BTreeSet::from([member]))
         );
-        assert_eq!(store.sync_bootstrap(&vault_id).unwrap().latest_sequence, 1);
+        assert_eq!(store.sync_bootstrap(&brain_id).unwrap().latest_sequence, 3);
     }
 
     #[test]
     fn rejects_missing_required_grant_without_partial_folder() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
 
         let folder = strategy_folder();
         let access_user_ids = BTreeSet::from([member]);
@@ -4695,28 +5702,24 @@ mod tests {
 
         assert_eq!(
             store
-                .create_folder(&vault_id, &folder, &access_user_ids, &grants)
+                .create_folder(&brain_id, &folder, &access_user_ids, &grants)
                 .unwrap_err(),
             StoreError::MissingRequiredGrant {
                 recipient_user_id: "npub-member".to_owned()
             }
         );
-        assert!(!store.folder_exists(&vault_id, &folder.id).unwrap());
+        assert!(!store.folder_exists(&brain_id, &folder.id).unwrap());
     }
 
     #[test]
     fn rolls_back_folder_creation_when_grant_insert_fails() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
-        assert!(
-            store
-                .grant_exists("grant-getting-started-npub-admin")
-                .unwrap()
-        );
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        assert!(store.grant_exists("grant-team-notes-npub-admin").unwrap());
 
         let folder = strategy_folder();
         let grants = vec![grant(
-            "grant-getting-started-npub-admin",
+            "grant-team-notes-npub-admin",
             "strategy",
             1,
             "npub-admin",
@@ -4725,21 +5728,21 @@ mod tests {
 
         assert!(matches!(
             store
-                .create_folder(&vault_id, &folder, &BTreeSet::new(), &grants)
+                .create_folder(&brain_id, &folder, &BTreeSet::new(), &grants)
                 .unwrap_err(),
             StoreError::DuplicateId {
                 field: "folder_key_grant_id",
                 ..
             }
         ));
-        assert!(!store.folder_exists(&vault_id, &folder.id).unwrap());
+        assert!(!store.folder_exists(&brain_id, &folder.id).unwrap());
     }
 
     #[test]
     fn detects_and_repairs_setup_incomplete_folder_across_restart() {
         let temp = TempDir::new().unwrap();
-        let db = temp.path().join("vault-sync.sqlite3");
-        let vault_id = VaultId::new("acme").unwrap();
+        let db = temp.path().join("brain-sync.sqlite3");
+        let brain_id = BrainId::new("acme").unwrap();
         let folder = strategy_folder();
         let grants = vec![grant(
             "grant-strategy-admin",
@@ -4751,46 +5754,47 @@ mod tests {
 
         {
             let mut store = BrainStore::open(&db).unwrap();
-            let output = bootstrap_organization_vault("acme", "Acme", "npub-admin").unwrap();
+            let output = bootstrap_organization_brain("acme", "Acme", "npub-admin").unwrap();
             let bootstrap_grants = grants_for_required(&output.required_key_grants, "npub-admin");
             store
-                .create_vault_bootstrap(&output, &bootstrap_grants)
+                .create_brain_bootstrap(&output, &bootstrap_grants)
                 .unwrap();
+            add_access_test_folders(&mut store);
             store
-                .insert_setup_incomplete_folder_for_repair(&vault_id, &folder, &BTreeSet::new())
+                .insert_setup_incomplete_folder_for_repair(&brain_id, &folder, &BTreeSet::new())
                 .unwrap();
         }
 
         {
             let mut store = BrainStore::open(&db).unwrap();
-            let stored = store.load_vault(&vault_id).unwrap();
+            let stored = store.load_brain(&brain_id).unwrap();
             assert_eq!(
                 stored.setup_incomplete_folder_ids,
                 BTreeSet::from([folder.id.clone()])
             );
 
             store
-                .finish_folder_setup(&vault_id, &folder.id, &grants)
+                .finish_folder_setup(&brain_id, &folder.id, &grants)
                 .unwrap();
         }
 
         let store = BrainStore::open(&db).unwrap();
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(stored.setup_incomplete_folder_ids.is_empty());
         assert!(stored.grants.contains(&grants[0]));
     }
 
     #[test]
     fn finish_setup_rejects_non_empty_setup_incomplete_folder() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
         let folder = strategy_folder();
         store
-            .insert_setup_incomplete_folder_for_repair(&vault_id, &folder, &BTreeSet::new())
+            .insert_setup_incomplete_folder_for_repair(&brain_id, &folder, &BTreeSet::new())
             .unwrap();
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record("event-create-1", "obj_000000000001", 1, None, "create"),
             )
             .unwrap();
@@ -4798,7 +5802,7 @@ mod tests {
         assert_eq!(
             store
                 .finish_folder_setup(
-                    &vault_id,
+                    &brain_id,
                     &folder.id,
                     &[grant(
                         "grant-strategy-admin",
@@ -4817,8 +5821,8 @@ mod tests {
 
     #[test]
     fn rejects_invalid_hierarchy_duplicate_ids_and_admin_invariants() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
 
         let mut missing_parent = strategy_folder();
         missing_parent.parent_folder_id = Some(FolderId::new("missing").unwrap());
@@ -4826,7 +5830,7 @@ mod tests {
         assert_eq!(
             store
                 .create_folder(
-                    &vault_id,
+                    &brain_id,
                     &missing_parent,
                     &BTreeSet::new(),
                     &[grant(
@@ -4852,12 +5856,12 @@ mod tests {
             "npub-admin",
         )];
         store
-            .create_folder(&vault_id, &folder, &BTreeSet::new(), &grants)
+            .create_folder(&brain_id, &folder, &BTreeSet::new(), &grants)
             .unwrap();
         assert_eq!(
             store
                 .create_folder(
-                    &vault_id,
+                    &brain_id,
                     &folder,
                     &BTreeSet::new(),
                     &[grant(
@@ -4877,24 +5881,23 @@ mod tests {
 
         assert_eq!(
             store
-                .add_admin(&vault_id, &UserId::new("npub-non-member").unwrap())
+                .add_admin(&brain_id, &UserId::new("npub-non-member").unwrap())
                 .unwrap_err(),
             StoreError::BrokenInvariant {
-                reason: "vault admin must already be a vault member".to_owned()
+                reason: "brain admin must already be a brain member".to_owned()
             }
         );
 
         let bad_issuer_folder = Folder {
             id: FolderId::new("bad-issuer-strategy").unwrap(),
             name: DisplayName::new("folder_name", "Bad Issuer Strategy").unwrap(),
-            path: SafeRelativePath::new("folder_path", "getting-started/Bad Issuer Strategy")
-                .unwrap(),
+            path: SafeRelativePath::new("folder_path", "team-notes/Bad Issuer Strategy").unwrap(),
             ..strategy_folder()
         };
         assert_eq!(
             store
                 .create_folder(
-                    &vault_id,
+                    &brain_id,
                     &bad_issuer_folder,
                     &BTreeSet::new(),
                     &[grant(
@@ -4907,12 +5910,12 @@ mod tests {
                 )
                 .unwrap_err(),
             StoreError::BrokenInvariant {
-                reason: "organization folder grants must be issued by a vault admin".to_owned()
+                reason: "organization folder grants must be issued by a brain admin".to_owned()
             }
         );
         assert!(
             !store
-                .folder_exists(&vault_id, &bad_issuer_folder.id)
+                .folder_exists(&brain_id, &bad_issuer_folder.id)
                 .unwrap()
         );
     }
@@ -4920,16 +5923,24 @@ mod tests {
     #[test]
     fn rejects_unscoped_personal_member_mutation() {
         let mut store = BrainStore::open_in_memory().unwrap();
-        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-owner");
-        store.create_vault_bootstrap(&output, &grants).unwrap();
-        let vault_id = VaultId::new("personal").unwrap();
+        store
+            .create_personal_brain_bootstrap(
+                &output,
+                &grants,
+                &UserId::new("npub-agent").unwrap(),
+                &UserId::new("npub-owner").unwrap(),
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        let brain_id = BrainId::new("personal").unwrap();
         let member = UserId::new("npub-member").unwrap();
 
         assert_eq!(
-            store.add_member(&vault_id, &member).unwrap_err(),
+            store.add_member(&brain_id, &member).unwrap_err(),
             StoreError::BrokenInvariant {
-                reason: "member/admin mutation requires an organization vault".to_owned()
+                reason: "member/admin mutation requires an organization brain".to_owned()
             }
         );
     }
@@ -4937,15 +5948,27 @@ mod tests {
     #[test]
     fn personal_member_is_removed_when_their_last_folder_scope_is_removed() {
         let mut store = BrainStore::open_in_memory().unwrap();
-        let output = bootstrap_personal_vault("personal", "Austin", "npub-owner").unwrap();
+        let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-owner");
-        store.create_vault_bootstrap(&output, &grants).unwrap();
-        let vault_id = VaultId::new("personal").unwrap();
+        store
+            .create_personal_brain_bootstrap(
+                &output,
+                &grants,
+                &UserId::new("npub-agent").unwrap(),
+                &UserId::new("npub-owner").unwrap(),
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        let brain_id = BrainId::new("personal").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        let folder = strategy_folder();
+        let folder = Folder {
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Strategy").unwrap(),
+            ..strategy_folder()
+        };
         store
             .create_folder(
-                &vault_id,
+                &brain_id,
                 &folder,
                 &BTreeSet::from([member.clone()]),
                 &[
@@ -4963,62 +5986,78 @@ mod tests {
                         "npub-owner",
                         member.as_str(),
                     ),
+                    grant(
+                        "grant-personal-strategy-agent",
+                        "strategy",
+                        1,
+                        "npub-owner",
+                        "npub-agent",
+                    ),
                 ],
             )
             .unwrap();
 
         store
             .rotate_folder_key_for_access_removal(
-                &vault_id,
+                &brain_id,
                 &folder.id,
                 &member,
                 2,
-                &[grant(
-                    "grant-personal-strategy-owner-v2",
-                    "strategy",
-                    2,
-                    "npub-owner",
-                    "npub-owner",
-                )],
+                &[
+                    grant(
+                        "grant-personal-strategy-owner-v2",
+                        "strategy",
+                        2,
+                        "npub-owner",
+                        "npub-owner",
+                    ),
+                    grant(
+                        "grant-personal-strategy-agent-v2",
+                        "strategy",
+                        2,
+                        "npub-owner",
+                        "npub-agent",
+                    ),
+                ],
                 &[],
                 "2026-07-13T00:00:00.000Z",
             )
             .unwrap();
 
-        let stored = store.load_vault(&vault_id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             !stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .any(|stored_member| stored_member.user_id == member)
         );
-        assert!(store.list_visible_vaults(&member).unwrap().is_empty());
+        assert!(store.list_visible_brains(&member).unwrap().is_empty());
     }
 
     #[test]
     fn removes_members_and_admins_without_breaking_admin_invariant() {
-        let mut store = bootstrapped_org_store();
-        let vault_id = VaultId::new("acme").unwrap();
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
-        store.add_admin(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        store.add_admin(&brain_id, &member).unwrap();
 
-        store.remove_admin(&vault_id, &member).unwrap();
+        store.remove_admin(&brain_id, &member).unwrap();
         assert_eq!(
             store
-                .remove_admin(&vault_id, &UserId::new("npub-admin").unwrap())
+                .remove_admin(&brain_id, &UserId::new("npub-admin").unwrap())
                 .unwrap_err(),
             StoreError::BrokenInvariant {
-                reason: "organization vault must keep at least one admin".to_owned()
+                reason: "organization brain must keep at least one admin".to_owned()
             }
         );
 
-        store.remove_member(&vault_id, &member).unwrap();
-        let stored = store.load_vault(&vault_id).unwrap();
+        store.remove_member(&brain_id, &member).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             !stored
-                .vault
+                .brain
                 .members
                 .iter()
                 .any(|stored| stored.user_id == member)
@@ -5028,20 +6067,20 @@ mod tests {
     #[test]
     fn removing_member_requires_admin_and_restricted_access_cleanup_first() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let admin = UserId::new("npub-admin").unwrap();
         assert_eq!(
-            store.remove_member(&vault_id, &admin).unwrap_err(),
+            store.remove_member(&brain_id, &admin).unwrap_err(),
             StoreError::BrokenInvariant {
                 reason: "remove admin role before removing member".to_owned()
             }
         );
 
         let member = UserId::new("npub-member").unwrap();
-        store.add_member(&vault_id, &member).unwrap();
+        store.add_member(&brain_id, &member).unwrap();
         store
             .grant_folder_access(
-                &vault_id,
+                &brain_id,
                 &FolderId::new("strategy").unwrap(),
                 &member,
                 &grant(
@@ -5055,7 +6094,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.remove_member(&vault_id, &member).unwrap_err(),
+            store.remove_member(&brain_id, &member).unwrap_err(),
             StoreError::BrokenInvariant {
                 reason: "remove restricted folder access before removing member".to_owned()
             }
@@ -5065,13 +6104,13 @@ mod tests {
     #[test]
     fn sync_create_update_and_delete_updates_current_projection() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let object_id = "obj_000000000001";
 
         assert_eq!(
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record("event-create-1", object_id, 1, None, "create")
                 )
                 .unwrap(),
@@ -5083,7 +6122,7 @@ mod tests {
         assert_eq!(
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record("event-update-1", object_id, 2, Some(1), "update")
                 )
                 .unwrap()
@@ -5093,7 +6132,7 @@ mod tests {
         assert_eq!(
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &tombstone_record("event-delete-1", object_id, 3, 2)
                 )
                 .unwrap()
@@ -5101,7 +6140,7 @@ mod tests {
             3
         );
 
-        let bootstrap = store.sync_bootstrap(&vault_id).unwrap();
+        let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
         assert_eq!(bootstrap.latest_sequence, 3);
         assert_eq!(bootstrap.object_count, 1);
         assert_eq!(bootstrap.objects[0].revision, 3);
@@ -5112,25 +6151,25 @@ mod tests {
     #[test]
     fn sync_duplicate_event_returns_existing_sequence() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let record = revision_record("event-create-duplicate", "obj_000000000001", 1, None, "one");
 
         assert_eq!(
-            store.submit_sync_record(&vault_id, &record).unwrap(),
+            store.submit_sync_record(&brain_id, &record).unwrap(),
             SubmitRecordOutcome {
                 sequence: 1,
                 duplicate: false
             }
         );
         assert_eq!(
-            store.submit_sync_record(&vault_id, &record).unwrap(),
+            store.submit_sync_record(&brain_id, &record).unwrap(),
             SubmitRecordOutcome {
                 sequence: 1,
                 duplicate: true
             }
         );
 
-        let pull = store.pull_sync_records(&vault_id, 0, 10).unwrap();
+        let pull = store.pull_sync_records(&brain_id, 0, 10).unwrap();
         assert_eq!(pull.count, 1);
         assert_eq!(pull.latest_sequence, 1);
     }
@@ -5138,18 +6177,18 @@ mod tests {
     #[test]
     fn sync_rejects_stale_base_revision_and_existing_create() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let object_id = "obj_000000000001";
 
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record("event-create-1", object_id, 1, None, "create"),
             )
             .unwrap();
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record("event-update-wins", object_id, 2, Some(1), "winner"),
             )
             .unwrap();
@@ -5157,7 +6196,7 @@ mod tests {
         assert_eq!(
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record("event-update-loses", object_id, 2, Some(1), "loser"),
                 )
                 .unwrap_err(),
@@ -5169,7 +6208,7 @@ mod tests {
         assert_eq!(
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record("event-create-again", object_id, 1, None, "again"),
                 )
                 .unwrap_err(),
@@ -5178,18 +6217,18 @@ mod tests {
                 current_revision: Some(2)
             }
         );
-        assert_eq!(store.sync_bootstrap(&vault_id).unwrap().latest_sequence, 2);
+        assert_eq!(store.sync_bootstrap(&brain_id).unwrap().latest_sequence, 2);
     }
 
     #[test]
     fn sync_rejects_non_monotonic_revision() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let object_id = "obj_000000000001";
 
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record("event-create-1", object_id, 1, None, "create"),
             )
             .unwrap();
@@ -5197,7 +6236,7 @@ mod tests {
         assert_eq!(
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record("event-update-bad", object_id, 3, Some(1), "bad"),
                 )
                 .unwrap_err(),
@@ -5210,7 +6249,7 @@ mod tests {
     #[test]
     fn sync_pull_paginates_with_next_sequence() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
 
         for (index, object_id) in ["obj_000000000001", "obj_000000000002", "obj_000000000003"]
             .into_iter()
@@ -5218,7 +6257,7 @@ mod tests {
         {
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record(
                         &format!("event-create-page-{index}"),
                         object_id,
@@ -5230,14 +6269,14 @@ mod tests {
                 .unwrap();
         }
 
-        let first = store.pull_sync_records(&vault_id, 0, 2).unwrap();
+        let first = store.pull_sync_records(&brain_id, 0, 2).unwrap();
         assert_eq!(first.count, 2);
         assert!(first.has_more);
         assert_eq!(first.next_sequence, 2);
         assert_eq!(first.latest_sequence, 3);
 
         let second = store
-            .pull_sync_records(&vault_id, first.next_sequence, 2)
+            .pull_sync_records(&brain_id, first.next_sequence, 2)
             .unwrap();
         assert_eq!(second.count, 1);
         assert!(!second.has_more);
@@ -5248,13 +6287,13 @@ mod tests {
     #[test]
     fn sync_pull_caps_large_client_limits() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
 
         for index in 1..=(MAX_PULL_LIMIT + 2) {
             let object_id = format!("obj_{index:012}");
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record(
                         &format!("event-capped-page-{index}"),
                         &object_id,
@@ -5266,7 +6305,7 @@ mod tests {
                 .unwrap();
         }
 
-        let pull = store.pull_sync_records(&vault_id, 0, u64::MAX).unwrap();
+        let pull = store.pull_sync_records(&brain_id, 0, u64::MAX).unwrap();
         assert_eq!(pull.count, MAX_PULL_LIMIT as usize);
         assert!(pull.has_more);
         assert_eq!(pull.next_sequence, MAX_PULL_LIMIT);
@@ -5276,34 +6315,34 @@ mod tests {
     #[test]
     fn sync_cursor_expiry_requires_rebootstrap() {
         let mut store = store_with_strategy_folder();
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         store
             .submit_sync_record(
-                &vault_id,
+                &brain_id,
                 &revision_record("event-create-1", "obj_000000000001", 1, None, "create"),
             )
             .unwrap();
-        store.set_retention_floor(&vault_id, 1).unwrap();
+        store.set_retention_floor(&brain_id, 1).unwrap();
 
         assert_eq!(
-            store.pull_sync_records(&vault_id, 0, 10).unwrap_err(),
+            store.pull_sync_records(&brain_id, 0, 10).unwrap_err(),
             StoreError::RebootstrapRequired { retention_floor: 1 }
         );
-        assert_eq!(store.pull_sync_records(&vault_id, 1, 10).unwrap().count, 0);
+        assert_eq!(store.pull_sync_records(&brain_id, 1, 10).unwrap().count, 0);
     }
 
     #[test]
     fn sync_projection_survives_restart_and_can_rebuild() {
         let temp = TempDir::new().unwrap();
-        let db = temp.path().join("vault-sync.sqlite3");
-        let vault_id = VaultId::new("acme").unwrap();
+        let db = temp.path().join("brain-sync.sqlite3");
+        let brain_id = BrainId::new("acme").unwrap();
 
         {
             let mut store = BrainStore::open(&db).unwrap();
             bootstrap_org_and_strategy_folder(&mut store);
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record("event-create-1", "obj_000000000001", 1, None, "create"),
                 )
                 .unwrap();
@@ -5311,18 +6350,18 @@ mod tests {
 
         {
             let mut store = BrainStore::open(&db).unwrap();
-            assert_eq!(store.sync_bootstrap(&vault_id).unwrap().object_count, 1);
+            assert_eq!(store.sync_bootstrap(&brain_id).unwrap().object_count, 1);
             store
                 .conn
                 .execute(
-                    "DELETE FROM current_encrypted_vault_objects WHERE vault_id = ?1",
-                    params![vault_id.as_str()],
+                    "DELETE FROM current_encrypted_brain_objects WHERE brain_id = ?1",
+                    params![brain_id.as_str()],
                 )
                 .unwrap();
-            assert_eq!(store.sync_bootstrap(&vault_id).unwrap().object_count, 0);
+            assert_eq!(store.sync_bootstrap(&brain_id).unwrap().object_count, 0);
 
-            store.rebuild_current_projection(&vault_id).unwrap();
-            let bootstrap = store.sync_bootstrap(&vault_id).unwrap();
+            store.rebuild_current_projection(&brain_id).unwrap();
+            let bootstrap = store.sync_bootstrap(&brain_id).unwrap();
             assert_eq!(bootstrap.latest_sequence, 1);
             assert_eq!(bootstrap.object_count, 1);
             assert_eq!(bootstrap.objects[0].revision, 1);
@@ -5335,7 +6374,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let source_db = temp.path().join("source.sqlite3");
         let restored_db = temp.path().join("restored.sqlite3");
-        let vault_id = VaultId::new("acme").unwrap();
+        let brain_id = BrainId::new("acme").unwrap();
         let object_id = "obj_000000000001";
 
         {
@@ -5343,13 +6382,13 @@ mod tests {
             bootstrap_org_and_strategy_folder(&mut store);
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record("event-create-backup", object_id, 1, None, "create"),
                 )
                 .unwrap();
             store
                 .submit_sync_record(
-                    &vault_id,
+                    &brain_id,
                     &revision_record("event-update-backup", object_id, 2, Some(1), "update"),
                 )
                 .unwrap();
@@ -5358,7 +6397,7 @@ mod tests {
         std::fs::copy(&source_db, &restored_db).unwrap();
 
         let mut restored = BrainStore::open(&restored_db).unwrap();
-        let bootstrap = restored.sync_bootstrap(&vault_id).unwrap();
+        let bootstrap = restored.sync_bootstrap(&brain_id).unwrap();
         assert_eq!(bootstrap.latest_sequence, 2);
         assert_eq!(bootstrap.object_count, 1);
         assert_eq!(bootstrap.objects[0].revision, 2);
@@ -5366,22 +6405,28 @@ mod tests {
         restored
             .conn
             .execute(
-                "DELETE FROM current_encrypted_vault_objects WHERE vault_id = ?1",
-                params![vault_id.as_str()],
+                "DELETE FROM current_encrypted_brain_objects WHERE brain_id = ?1",
+                params![brain_id.as_str()],
             )
             .unwrap();
-        assert_eq!(restored.sync_bootstrap(&vault_id).unwrap().object_count, 0);
+        assert_eq!(restored.sync_bootstrap(&brain_id).unwrap().object_count, 0);
 
-        restored.rebuild_current_projection(&vault_id).unwrap();
-        let rebuilt = restored.sync_bootstrap(&vault_id).unwrap();
+        restored.rebuild_current_projection(&brain_id).unwrap();
+        let rebuilt = restored.sync_bootstrap(&brain_id).unwrap();
         assert_eq!(rebuilt.latest_sequence, 2);
         assert_eq!(rebuilt.object_count, 1);
         assert_eq!(rebuilt.objects[0].payload_json, "{\"body\":\"update\"}");
     }
 
-    fn bootstrapped_org_store() -> BrainStore {
+    fn empty_org_store() -> BrainStore {
         let mut store = BrainStore::open_in_memory().unwrap();
         bootstrap_org(&mut store);
+        store
+    }
+
+    fn org_store_with_access_test_folders() -> BrainStore {
+        let mut store = empty_org_store();
+        add_access_test_folders(&mut store);
         store
     }
 
@@ -5393,10 +6438,11 @@ mod tests {
 
     fn bootstrap_org_and_strategy_folder(store: &mut BrainStore) {
         bootstrap_org(store);
-        let vault_id = VaultId::new("acme").unwrap();
+        add_access_test_folders(store);
+        let brain_id = BrainId::new("acme").unwrap();
         store
             .create_folder(
-                &vault_id,
+                &brain_id,
                 &strategy_folder(),
                 &BTreeSet::new(),
                 &[grant(
@@ -5411,15 +6457,56 @@ mod tests {
     }
 
     fn bootstrap_org(store: &mut BrainStore) {
-        let output = bootstrap_organization_vault("acme", "Acme", "npub-admin").unwrap();
+        let output = bootstrap_organization_brain("acme", "Acme", "npub-admin").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-admin");
-        store.create_vault_bootstrap(&output, &grants).unwrap();
+        store.create_brain_bootstrap(&output, &grants).unwrap();
+    }
+
+    fn add_access_test_folders(store: &mut BrainStore) {
+        let brain_id = BrainId::new("acme").unwrap();
+        for folder in [
+            Folder {
+                id: FolderId::new("team-notes").unwrap(),
+                name: DisplayName::new("folder_name", "Team Notes").unwrap(),
+                role: FolderRole::General,
+                access: FolderAccessMode::AllMembers,
+                parent_folder_id: None,
+                path: SafeRelativePath::new("folder_path", "Team Notes").unwrap(),
+                current_key_version: 1,
+                shared_folder_source: false,
+            },
+            Folder {
+                id: FolderId::new("private-project").unwrap(),
+                name: DisplayName::new("folder_name", "Private Project").unwrap(),
+                role: FolderRole::Folder,
+                access: FolderAccessMode::Restricted,
+                parent_folder_id: None,
+                path: SafeRelativePath::new("folder_path", "Private Project").unwrap(),
+                current_key_version: 1,
+                shared_folder_source: false,
+            },
+        ] {
+            store
+                .create_folder(
+                    &brain_id,
+                    &folder,
+                    &BTreeSet::new(),
+                    &[grant(
+                        &format!("grant-{}-npub-admin", folder.id),
+                        folder.id.as_str(),
+                        1,
+                        "npub-admin",
+                        "npub-admin",
+                    )],
+                )
+                .unwrap();
+        }
     }
 
     fn bootstrap_org_named(store: &mut BrainStore, id: &str, name: &str, admin: &str) {
-        let output = bootstrap_organization_vault(id, name, admin).unwrap();
+        let output = bootstrap_organization_brain(id, name, admin).unwrap();
         let grants = grants_for_required(&output.required_key_grants, admin);
-        store.create_vault_bootstrap(&output, &grants).unwrap();
+        store.create_brain_bootstrap(&output, &grants).unwrap();
     }
 
     fn strategy_folder() -> Folder {
@@ -5428,8 +6515,8 @@ mod tests {
             name: DisplayName::new("folder_name", "Strategy").unwrap(),
             role: FolderRole::Folder,
             access: FolderAccessMode::Restricted,
-            parent_folder_id: Some(FolderId::new("getting-started").unwrap()),
-            path: SafeRelativePath::new("folder_path", "getting-started/Strategy").unwrap(),
+            parent_folder_id: Some(FolderId::new("team-notes").unwrap()),
+            path: SafeRelativePath::new("folder_path", "Team Notes/Strategy").unwrap(),
             current_key_version: 1,
             shared_folder_source: false,
         }
@@ -5497,6 +6584,44 @@ mod tests {
         }
     }
 
+    trait BrainStoreFolderGrantTestExt {
+        fn grant_folder_access(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            user_id: &UserId,
+            grant: &FolderKeyGrantMetadata,
+        ) -> Result<GrantFolderAccessOutcome, StoreError>;
+    }
+
+    impl BrainStoreFolderGrantTestExt for BrainStore {
+        fn grant_folder_access(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            user_id: &UserId,
+            grant: &FolderKeyGrantMetadata,
+        ) -> Result<GrantFolderAccessOutcome, StoreError> {
+            let records = [
+                folder_access_control_record(
+                    &format!("{}-key-record", grant.id),
+                    SyncRecordType::FolderKeyGrant,
+                    folder_id.as_str(),
+                    grant.issuer_npub.as_str(),
+                ),
+                folder_access_control_record(
+                    &format!("{}-access-record", grant.id),
+                    SyncRecordType::BrainAdminAccessChange,
+                    folder_id.as_str(),
+                    grant.issuer_npub.as_str(),
+                ),
+            ];
+            self.grant_folder_access_with_control_records(
+                brain_id, folder_id, user_id, grant, &records,
+            )
+        }
+    }
+
     fn revision_record(
         event_id: &str,
         object_id: &str,
@@ -5512,6 +6637,26 @@ mod tests {
             base_revision,
             body,
         ))
+    }
+
+    fn folder_access_control_record(
+        event_id: &str,
+        record_type: SyncRecordType,
+        folder_id: &str,
+        actor_npub: &str,
+    ) -> SyncRecordInput {
+        SyncRecordInput::Control(ControlSyncRecord {
+            record_event_id: event_id.to_owned(),
+            record_type,
+            folder_id: Some(FolderId::new(folder_id).unwrap()),
+            actor_npub: UserId::new(actor_npub).unwrap(),
+            client_created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            payload_json: "{\"control\":true}".to_owned(),
+            record_event_kind: match record_type {
+                SyncRecordType::FolderKeyGrant => NIP59_GIFT_WRAP_KIND,
+                _ => APP_SPECIFIC_KIND,
+            },
+        })
     }
 
     fn revision_record_struct(

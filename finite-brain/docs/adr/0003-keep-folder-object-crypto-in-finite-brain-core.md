@@ -16,7 +16,7 @@ FiniteBrain Portable v1 uses two different crypto categories:
   plaintext validation.
 
 Folder Object encryption is bound to FiniteBrain policy because its AAD
-includes `vaultId`, `folderId`, `objectId`, and `keyVersion`.
+includes `brainId`, `folderId`, `objectId`, and `keyVersion`.
 
 ## Decision
 
@@ -32,6 +32,6 @@ metadata, but does not decrypt Folder Objects.
 ## Consequences
 
 - Other Finite repos can reuse Nostr helpers without inheriting FiniteBrain
-  Vault or Folder concepts.
+  Brain or Folder concepts.
 - FiniteBrain's product crypto can validate its own domain-specific context.
 - Store and server code remain policy callers rather than crypto owners.

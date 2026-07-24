@@ -10,7 +10,7 @@
 
 - Spec issue: #17
 - Ticket: #22
-- Relevant glossary terms: Vault, Folder, Child Folder, Folder Key Grant,
+- Relevant glossary terms: Brain, Folder, Child Folder, Folder Key Grant,
   Session Folder Key, independent access boundary
 - Relevant ADRs: 0004, 0007, 0010, 0013, 0014, 0016
 - Product truth: a Child Folder's decorated path and immediate parent are
@@ -41,7 +41,7 @@
 - Standards review: pass; no actionable findings
 - Spec review: pass; hierarchy and independent scope match the portability
   contract and the remediation spec
-- Final browser proof: the isolated organization-Vault flow created a Child
+- Final browser proof: the isolated organization-Brain flow created a Child
   Folder through the context menu and confirmed the parent id, nested path,
   independent grants, and `all_members` default access in the real POST.
 

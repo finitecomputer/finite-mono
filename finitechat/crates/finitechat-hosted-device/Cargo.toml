@@ -33,6 +33,7 @@ sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 finite-brain-server.workspace = true

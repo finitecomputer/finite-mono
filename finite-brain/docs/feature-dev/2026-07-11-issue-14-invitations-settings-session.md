@@ -2,7 +2,7 @@
 
 ## Issue
 
-- Issue: #14 — Vault invitations in Settings
+- Issue: #14 — Brain invitations in Settings
 - Fixed point before session: `18d0b10`
 - Worker session: `/root/ticket_14_invitations_settings`
 - Commit: `9a80c17`
@@ -12,7 +12,7 @@
 
 - Spec issue: #10
 - Ticket: #14
-- Relevant glossary terms: Vault, Member Identity, Session Lock, Ephemeral Client Plaintext
+- Relevant glossary terms: Brain, Member Identity, Session Lock, Ephemeral Client Plaintext
 - Relevant ADRs: 0010, 0013, 0014, 0016
 
 ## Implementation

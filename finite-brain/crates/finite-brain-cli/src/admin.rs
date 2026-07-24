@@ -3,25 +3,26 @@ use std::fs;
 
 use finite_brain_core::portability::WorkingTreeFolderRoot;
 use finite_brain_core::{
-    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, FolderId, FolderKey,
-    SafeRelativePath, VaultId,
+    AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation, BrainId, BrainKind,
+    FolderAccessMode, FolderId, FolderKey, FolderKeyGrantPayload, FolderKeyRecipientPolicy,
+    SafeRelativePath, UserId, required_folder_key_recipients,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
 use nostr::{Kind, Tag};
 
 use crate::{
-    APP_SPECIFIC_KIND, CliEnvironment, CliError, LocalSigner, SessionFolderKeyring,
-    VaultMetadataView, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
+    APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
+    SessionFolderKeyring, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
     normalize_folder_access, read_working_tree_state, sign_event, signed_json_request, tag_vec,
     timestamp, unix_timestamp, write_json_file,
 };
 
-pub(crate) fn fetch_vault_metadata(
+pub(crate) fn fetch_brain_metadata(
     env: &CliEnvironment,
     args: &[String],
-    vault_id: &str,
-) -> Result<VaultMetadataView, CliError> {
-    let path = format!("/_admin/vaults/{vault_id}/metadata");
+    brain_id: &str,
+) -> Result<BrainMetadataView, CliError> {
+    let path = format!("/_admin/brains/{brain_id}/metadata");
     let response = signed_json_request(env, args, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
 }
@@ -59,47 +60,84 @@ pub(crate) fn resolve_identity_npub(
 }
 
 pub(crate) fn folder_required_recipients(
-    metadata: &VaultMetadataView,
+    metadata: &BrainMetadataView,
     access: &str,
     access_users: &[String],
 ) -> Result<Vec<String>, CliError> {
-    let mut recipients = BTreeSet::new();
-    match normalize_folder_access(access)? {
-        "owner" => {
-            let owner = metadata.owner_user_id.clone().ok_or_else(|| {
-                CliError::InvalidInput("owner access requires a personal vault".to_owned())
-            })?;
-            recipients.insert(owner);
+    let brain_kind = match metadata.kind.as_str() {
+        "personal" => BrainKind::Personal,
+        "organization" => BrainKind::Organization,
+        other => {
+            return Err(CliError::InvalidInput(format!(
+                "unknown brain kind {other}"
+            )));
         }
-        "admin_only" => {
-            recipients.extend(metadata.admins.iter().cloned());
-        }
-        "all_members" => {
-            recipients.extend(metadata.admins.iter().cloned());
-            recipients.extend(metadata.members.iter().cloned());
-        }
-        "restricted" => {
-            recipients.extend(metadata.owner_user_id.iter().cloned());
-            recipients.extend(metadata.admins.iter().cloned());
-            recipients.extend(access_users.iter().cloned());
-        }
+    };
+    let folder_access = match normalize_folder_access(access)? {
+        "owner" => FolderAccessMode::Owner,
+        "admin_only" => FolderAccessMode::AdminOnly,
+        "all_members" => FolderAccessMode::AllMembers,
+        "restricted" => FolderAccessMode::Restricted,
         other => {
             return Err(CliError::InvalidInput(format!(
                 "unknown folder access mode {other}"
             )));
         }
-    }
-    if recipients.is_empty() {
-        return Err(CliError::InvalidInput(
-            "folder key needs at least one recipient".to_owned(),
-        ));
-    }
-    Ok(recipients.into_iter().collect())
+    };
+    let owner = metadata
+        .owner_user_id
+        .as_deref()
+        .map(UserId::new)
+        .transpose()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let admins = metadata
+        .admins
+        .iter()
+        .cloned()
+        .map(UserId::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let members = metadata
+        .members
+        .iter()
+        .cloned()
+        .map(UserId::new)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let explicit_access_user_ids = access_users
+        .iter()
+        .cloned()
+        .map(UserId::new)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let personal_agent = metadata
+        .personal_agent
+        .as_ref()
+        .map(|agent| UserId::new(agent.agent_npub.clone()))
+        .transpose()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+
+    required_folder_key_recipients(FolderKeyRecipientPolicy {
+        brain_kind,
+        folder_access,
+        owner_user_id: owner.as_ref(),
+        admins: &admins,
+        members: &members,
+        explicit_access_user_ids: &explicit_access_user_ids,
+        personal_agent_npub: personal_agent.as_ref(),
+    })
+    .map(|recipients| {
+        recipients
+            .into_iter()
+            .map(|user| user.to_string())
+            .collect()
+    })
+    .map_err(|error| CliError::InvalidInput(error.to_string()))
 }
 
 pub(crate) fn folder_key_grant_request(
     auth: &LocalSigner,
-    vault_id: &str,
+    brain_id: &str,
     folder_id: &str,
     key_version: u32,
     recipient_npub: &str,
@@ -109,36 +147,37 @@ pub(crate) fn folder_key_grant_request(
     let keys = auth.keys.clone();
     let recipient = NostrPublicKey::parse(recipient_npub)
         .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
+    let created_at = timestamp(env);
     let grant_id = deterministic_id(
         "grant",
         &[
-            vault_id,
+            brain_id,
             folder_id,
             &key_version.to_string(),
             recipient_npub,
-            &timestamp(env),
+            &created_at,
         ],
     );
-    let content = serde_json::json!({
-        "version": "finite-folder-key-grant-v1",
-        "vaultId": vault_id,
-        "folderId": folder_id,
-        "keyVersion": key_version,
-        "folderKey": folder_key.to_base64(),
-        "issuerNpub": auth.npub,
-        "recipientNpub": recipient_npub,
-        "createdAt": timestamp(env)
-    })
-    .to_string();
+    let content = FolderKeyGrantPayload {
+        version: "finite-folder-key-grant-v1".to_owned(),
+        brain_id: brain_id.to_owned(),
+        folder_id: folder_id.to_owned(),
+        key_version,
+        folder_key: folder_key.to_base64(),
+        issuer_npub: auth.npub.clone(),
+        recipient_npub: recipient_npub.to_owned(),
+        created_at: created_at.clone(),
+    }
+    .canonical_json();
     let rumor = build_rumor(
         NostrPublicKey::from_protocol(keys.public_key()),
         Kind::Custom(APP_SPECIFIC_KIND),
         vec![
             tag_vec([
                 "d",
-                &format!("finite-folder-key-grant:{vault_id}:{folder_id}:{key_version}"),
+                &format!("finite-folder-key-grant:{brain_id}:{folder_id}:{key_version}"),
             ])?,
-            tag_vec(["vault", vault_id])?,
+            tag_vec(["brain", brain_id])?,
             tag_vec(["folder", folder_id])?,
             tag_vec(["keyVersion", &key_version.to_string()])?,
         ],
@@ -152,22 +191,22 @@ pub(crate) fn folder_key_grant_request(
         "keyVersion": key_version,
         "recipientNpub": recipient_npub,
         "wrappedEventJson": wrapped.as_json(),
-        "createdAt": timestamp(env)
+        "createdAt": created_at
     }))
 }
 
 pub(crate) fn opened_folder_key(
     keyring: &SessionFolderKeyring,
-    vault_id: &str,
+    brain_id: &str,
     folder_id: &str,
     key_version: u32,
 ) -> Result<FolderKey, CliError> {
     keyring
-        .get(vault_id, folder_id, key_version)
+        .get(brain_id, folder_id, key_version)
         .cloned()
         .ok_or_else(|| {
             CliError::GrantOpening {
-                vault_id: vault_id.to_owned(),
+                brain_id: brain_id.to_owned(),
                 folder_id: folder_id.to_owned(),
                 key_version,
                 reason: "no usable current grant was available for this operation; ensure the acting Member Identity has a valid encrypted grant"
@@ -178,7 +217,7 @@ pub(crate) fn opened_folder_key(
 
 pub(crate) fn admin_access_change_event(
     env: &CliEnvironment,
-    vault_id: &str,
+    brain_id: &str,
     action: AdminAccessAction,
     folder_id: Option<&str>,
     target_npub: Option<&str>,
@@ -189,7 +228,7 @@ pub(crate) fn admin_access_change_event(
     let change_id = deterministic_id(
         "access-change",
         &[
-            vault_id,
+            brain_id,
             action.as_str(),
             folder_id.unwrap_or("-"),
             target_npub.unwrap_or("-"),
@@ -197,7 +236,7 @@ pub(crate) fn admin_access_change_event(
         ],
     );
     let validation = AdminAccessChangeValidation {
-        vault_id: VaultId::new(vault_id.to_owned())
+        brain_id: BrainId::new(brain_id.to_owned())
             .map_err(|error| CliError::InvalidInput(error.to_string()))?,
         change_id,
         action,
@@ -230,11 +269,11 @@ pub(crate) fn admin_access_change_tags(
         tag_vec([
             "d",
             &format!(
-                "finite-vault-admin-access-change:{}:{}",
-                input.vault_id, input.change_id
+                "finite-brain-admin-access-change:{}:{}",
+                input.brain_id, input.change_id
             ),
         ])?,
-        tag_vec(["vault", &input.vault_id.to_string()])?,
+        tag_vec(["brain", &input.brain_id.to_string()])?,
         tag_vec(["action", input.action.as_str()])?,
     ];
     if let Some(folder_id) = &input.folder_id {
@@ -269,7 +308,7 @@ pub(crate) fn update_local_folder_after_create(
     {
         tree.folder_roots.push(WorkingTreeFolderRoot {
             folder_id: folder_id.to_owned(),
-            source_vault_id: None,
+            source_brain_id: None,
             path: path.to_owned(),
             can_read: true,
             metadata_only: false,

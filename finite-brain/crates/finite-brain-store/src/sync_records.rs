@@ -1,6 +1,6 @@
 //! Store-local sync append-log and current-projection helpers.
 
-use finite_brain_core::{FolderId, ObjectId, UserId, VaultId};
+use finite_brain_core::{BrainId, FolderId, ObjectId, UserId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::{
@@ -53,22 +53,22 @@ pub(crate) fn validate_sync_input(input: &SyncRecordInput) -> Result<(), StoreEr
 
 pub(crate) fn existing_sequence(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     event_id: &str,
 ) -> Result<Option<u64>, StoreError> {
     tx.query_row(
-        "SELECT sequence FROM vault_record_index WHERE vault_id = ?1 AND record_event_id = ?2",
-        params![vault_id.as_str(), event_id],
+        "SELECT sequence FROM brain_record_index WHERE brain_id = ?1 AND record_event_id = ?2",
+        params![brain_id.as_str(), event_id],
         |row| row.get::<_, u64>(0),
     )
     .optional()
     .map_err(StoreError::from)
 }
 
-pub(crate) fn next_sequence(tx: &Transaction<'_>, vault_id: &VaultId) -> Result<u64, StoreError> {
+pub(crate) fn next_sequence(tx: &Transaction<'_>, brain_id: &BrainId) -> Result<u64, StoreError> {
     let next = tx.query_row(
-        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM vault_record_index WHERE vault_id = ?1",
-        params![vault_id.as_str()],
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM brain_record_index WHERE brain_id = ?1",
+        params![brain_id.as_str()],
         |row| row.get::<_, u64>(0),
     )?;
     Ok(next)
@@ -76,16 +76,16 @@ pub(crate) fn next_sequence(tx: &Transaction<'_>, vault_id: &VaultId) -> Result<
 
 pub(crate) fn validate_sync_conflict(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     input: &SyncRecordInput,
 ) -> Result<(), StoreError> {
     if let Some(folder_id) = input.folder_id() {
-        ensure_folder_exists_tx(tx, vault_id, folder_id)?;
+        ensure_folder_exists_tx(tx, brain_id, folder_id)?;
     }
 
     match input {
         SyncRecordInput::FolderObjectRevision(record) => {
-            let current = current_object_tx(tx, vault_id, &record.folder_id, &record.object_id)?;
+            let current = current_object_tx(tx, brain_id, &record.folder_id, &record.object_id)?;
             if record.base_revision.is_none() {
                 if record.revision != 1 {
                     return Err(StoreError::InvalidRecord {
@@ -129,7 +129,7 @@ pub(crate) fn validate_sync_conflict(
             }
         }
         SyncRecordInput::FolderObjectTombstone(record) => {
-            let current = current_object_tx(tx, vault_id, &record.folder_id, &record.object_id)?
+            let current = current_object_tx(tx, brain_id, &record.folder_id, &record.object_id)?
                 .ok_or_else(|| StoreError::Conflict {
                     reason: "object does not exist".to_owned(),
                     current_revision: None,
@@ -159,20 +159,20 @@ pub(crate) fn validate_sync_conflict(
 
 pub(crate) fn insert_sync_record(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     sequence: u64,
     input: &SyncRecordInput,
 ) -> Result<(), StoreError> {
     tx.execute(
         r#"
-        INSERT INTO vault_record_index (
-            vault_id, sequence, record_event_id, record_type, folder_id, object_id, revision,
+        INSERT INTO brain_record_index (
+            brain_id, sequence, record_event_id, record_type, folder_id, object_id, revision,
             actor_npub, client_created_at, payload_json, accepted_at, record_event_kind
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         "#,
         params![
-            vault_id.as_str(),
+            brain_id.as_str(),
             sequence,
             input.record_event_id(),
             input.record_type().as_str(),
@@ -191,13 +191,13 @@ pub(crate) fn insert_sync_record(
 
 pub(crate) fn project_sync_record(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     input: &SyncRecordInput,
 ) -> Result<(), StoreError> {
     match input {
         SyncRecordInput::FolderObjectRevision(record) => upsert_current_object(
             tx,
-            vault_id,
+            brain_id,
             ProjectionUpdate {
                 folder_id: &record.folder_id,
                 object_id: &record.object_id,
@@ -209,7 +209,7 @@ pub(crate) fn project_sync_record(
         ),
         SyncRecordInput::FolderObjectTombstone(record) => upsert_current_object(
             tx,
-            vault_id,
+            brain_id,
             ProjectionUpdate {
                 folder_id: &record.folder_id,
                 object_id: &record.object_id,
@@ -225,7 +225,7 @@ pub(crate) fn project_sync_record(
 
 pub(super) fn project_stored_record(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     record: &StoredSyncRecord,
 ) -> Result<(), StoreError> {
     match record.record_type {
@@ -249,7 +249,7 @@ pub(super) fn project_stored_record(
             })?;
             upsert_current_object(
                 tx,
-                vault_id,
+                brain_id,
                 ProjectionUpdate {
                     folder_id,
                     object_id,
@@ -260,24 +260,24 @@ pub(super) fn project_stored_record(
                 },
             )
         }
-        SyncRecordType::FolderKeyGrant | SyncRecordType::VaultAdminAccessChange => Ok(()),
+        SyncRecordType::FolderKeyGrant | SyncRecordType::BrainAdminAccessChange => Ok(()),
     }
 }
 
 pub(super) fn load_sync_records_tx(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
 ) -> Result<Vec<StoredSyncRecord>, StoreError> {
     let mut stmt = tx.prepare(
         r#"
         SELECT sequence, record_event_id, record_type, folder_id, object_id, revision,
                actor_npub, client_created_at, payload_json, accepted_at, record_event_kind
-        FROM vault_record_index
-        WHERE vault_id = ?1
+        FROM brain_record_index
+        WHERE brain_id = ?1
         ORDER BY sequence
         "#,
     )?;
-    let rows = stmt.query_map(params![vault_id.as_str()], stored_sync_record_from_row)?;
+    let rows = stmt.query_map(params![brain_id.as_str()], stored_sync_record_from_row)?;
 
     let mut records = Vec::new();
     for row in rows {
@@ -288,18 +288,18 @@ pub(super) fn load_sync_records_tx(
 
 pub(super) fn load_sync_records(
     conn: &Connection,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
 ) -> Result<Vec<StoredSyncRecord>, StoreError> {
     let mut stmt = conn.prepare(
         r#"
         SELECT sequence, record_event_id, record_type, folder_id, object_id, revision,
                actor_npub, client_created_at, payload_json, accepted_at, record_event_kind
-        FROM vault_record_index
-        WHERE vault_id = ?1
+        FROM brain_record_index
+        WHERE brain_id = ?1
         ORDER BY sequence
         "#,
     )?;
-    let rows = stmt.query_map(params![vault_id.as_str()], stored_sync_record_from_row)?;
+    let rows = stmt.query_map(params![brain_id.as_str()], stored_sync_record_from_row)?;
 
     let mut records = Vec::new();
     for row in rows {
@@ -310,7 +310,7 @@ pub(super) fn load_sync_records(
 
 pub(super) fn pull_sync_records(
     conn: &Connection,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     after_sequence: u64,
     requested_limit: u64,
     latest_sequence: u64,
@@ -321,14 +321,14 @@ pub(super) fn pull_sync_records(
         r#"
         SELECT sequence, record_event_id, record_type, folder_id, object_id, revision,
                actor_npub, client_created_at, payload_json, accepted_at, record_event_kind
-        FROM vault_record_index
-        WHERE vault_id = ?1 AND sequence > ?2
+        FROM brain_record_index
+        WHERE brain_id = ?1 AND sequence > ?2
         ORDER BY sequence
         LIMIT ?3
         "#,
     )?;
     let rows = stmt.query_map(
-        params![vault_id.as_str(), after_sequence, fetch_limit],
+        params![brain_id.as_str(), after_sequence, fetch_limit],
         stored_sync_record_from_row,
     )?;
 
@@ -345,7 +345,7 @@ pub(super) fn pull_sync_records(
         .map_or(latest_sequence, |record| record.sequence);
 
     Ok(SyncPull {
-        vault_id: vault_id.clone(),
+        brain_id: brain_id.clone(),
         after_sequence,
         latest_sequence,
         count: records.len(),
@@ -357,12 +357,12 @@ pub(super) fn pull_sync_records(
 
 fn ensure_folder_exists_tx(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
 ) -> Result<(), StoreError> {
     let exists = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM folders WHERE vault_id = ?1 AND id = ?2)",
-        params![vault_id.as_str(), folder_id.as_str()],
+        "SELECT EXISTS(SELECT 1 FROM folders WHERE brain_id = ?1 AND id = ?2)",
+        params![brain_id.as_str(), folder_id.as_str()],
         |row| row.get::<_, bool>(0),
     )?;
     if exists {
@@ -376,17 +376,17 @@ fn ensure_folder_exists_tx(
 
 fn current_object_tx(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     folder_id: &FolderId,
     object_id: &ObjectId,
 ) -> Result<Option<CurrentEncryptedObject>, StoreError> {
     tx.query_row(
         r#"
         SELECT folder_id, object_id, payload_json, revision, updated_at, deleted
-        FROM current_encrypted_vault_objects
-        WHERE vault_id = ?1 AND folder_id = ?2 AND object_id = ?3
+        FROM current_encrypted_brain_objects
+        WHERE brain_id = ?1 AND folder_id = ?2 AND object_id = ?3
         "#,
-        params![vault_id.as_str(), folder_id.as_str(), object_id.as_str()],
+        params![brain_id.as_str(), folder_id.as_str(), object_id.as_str()],
         |row| {
             Ok(CurrentObjectRow {
                 folder_id: row.get(0)?,
@@ -414,23 +414,23 @@ struct ProjectionUpdate<'a> {
 
 fn upsert_current_object(
     tx: &Transaction<'_>,
-    vault_id: &VaultId,
+    brain_id: &BrainId,
     update: ProjectionUpdate<'_>,
 ) -> Result<(), StoreError> {
     tx.execute(
         r#"
-        INSERT INTO current_encrypted_vault_objects (
-            vault_id, folder_id, object_id, payload_json, revision, updated_at, deleted
+        INSERT INTO current_encrypted_brain_objects (
+            brain_id, folder_id, object_id, payload_json, revision, updated_at, deleted
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-        ON CONFLICT(vault_id, folder_id, object_id) DO UPDATE SET
+        ON CONFLICT(brain_id, folder_id, object_id) DO UPDATE SET
             payload_json = excluded.payload_json,
             revision = excluded.revision,
             updated_at = excluded.updated_at,
             deleted = excluded.deleted
         "#,
         params![
-            vault_id.as_str(),
+            brain_id.as_str(),
             update.folder_id.as_str(),
             update.object_id.as_str(),
             update.payload_json,

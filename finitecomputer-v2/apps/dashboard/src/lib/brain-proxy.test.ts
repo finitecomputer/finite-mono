@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BRAIN_CLIENT_CONTENT_SECURITY_POLICY,
   brainProxyRequestHeaders,
   brainUpstreamOrigin,
   readBoundedBrainRequestBody,
   responseStatusHasNoBody,
 } from "./brain-proxy";
+
+test("Brain client CSP permits its bounded confirmation dialogs", () => {
+  assert.match(BRAIN_CLIENT_CONTENT_SECURITY_POLICY, /sandbox[^;]*\ballow-modals\b/u);
+});
 
 test("Brain upstream accepts only a bare HTTP origin", () => {
   assert.equal(brainUpstreamOrigin("http://127.0.0.1:3015"), "http://127.0.0.1:3015");

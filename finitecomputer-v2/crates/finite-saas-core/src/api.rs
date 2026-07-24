@@ -8,22 +8,22 @@ use crate::{
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
     AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest,
-    AgentRuntime, BillingOverview, BillingSubscriptionStatus, CancelAgentCreationRequestInput,
-    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
-    CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
-    ExistingHostProjectImport, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
-    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
-    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateSettlementKind,
-    FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier, ImportCandidateStatus,
-    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
-    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
-    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
-    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    AgentRuntime, BillingOverview, BillingSubscriptionStatus, BrainAgentAccount,
+    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
+    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
+    CustomerBillingAccount, ExistingHostProjectImport, FailAgentCreationRequestInput,
+    FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
+    FinitePrivateApiKey, FinitePrivateDailyResetResult, FinitePrivateGrant,
+    FinitePrivateSettlementKind, FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
+    ImportCandidateStatus, IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput,
+    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput, Project,
+    ProjectImportCandidate, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderRuntimeHandleEnvelope, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
+    ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
+    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
+    RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
     RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
@@ -324,6 +324,12 @@ impl From<crate::RuntimeControlRequest> for RuntimeControlRequestView {
 #[serde(rename_all = "camelCase")]
 pub struct CancelAgentCreationRequest {
     pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAgentAccountRequest {
+    pub managed_agent_email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -827,6 +833,10 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     Router::new()
         .route("/healthz", get(healthz))
         .route(
+            "/api/core/v1/brain/agent-account",
+            post(brain_agent_account),
+        )
+        .route(
             "/api/core/v1/import-candidates/reconcile",
             post(reconcile_import_candidates),
         )
@@ -1113,6 +1123,22 @@ fn optional_env_value(name: &str) -> Option<String> {
 
 async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
+}
+
+async fn brain_agent_account(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(request): Json<BrainAgentAccountRequest>,
+) -> Result<Json<BrainAgentAccount>, ApiError> {
+    require_service_auth(&state, &headers)?;
+    let email = normalize_owner_email(Some(&request.managed_agent_email))
+        .ok_or_else(|| ApiError::bad_request("invalid Managed Agent Email"))?;
+    let binding = state
+        .store
+        .brain_agent_account(&email)
+        .await?
+        .ok_or_else(|| ApiError::not_found("active account-agent association not found"))?;
+    Ok(Json(binding))
 }
 
 async fn reconcile_import_candidates(
@@ -4781,6 +4807,31 @@ mod tests {
             .expect("new hosted agents receive a canonical email");
         assert!(agent_email.starts_with("oslo-agent-"));
         assert!(agent_email.ends_with("@finite.vip"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/core/v1/brain/agent-account")
+                    .header("authorization", "Bearer core-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "managedAgentEmail": agent_email }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let binding: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(binding["workosUserId"], "user_workos_new");
+        assert_eq!(binding["managedAgentEmail"], agent_email);
+        assert_eq!(binding["status"], "active");
+
         assert!(result.project.import_candidate_id.is_none());
         assert!(result.request.agent_runtime_id.is_none());
         assert_eq!(result.request.runner_class, RunnerClass::Kata);

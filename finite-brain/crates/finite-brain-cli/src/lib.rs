@@ -12,6 +12,7 @@ mod output;
 mod signer;
 mod state;
 mod sync_engine;
+mod wiki;
 mod working_tree_security;
 
 pub use environment::CliEnvironment;
@@ -28,31 +29,32 @@ pub(crate) use output::*;
 pub(crate) use signer::*;
 pub(crate) use state::*;
 pub(crate) use sync_engine::*;
+pub(crate) use wiki::*;
 pub(crate) use working_tree_security::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use finite_brain_core::portability::{
-    VaultDirectoryManifest, VaultDirectoryPath, VaultDirectoryPortability,
-    VaultDirectoryVaultSummary, VaultWorkingTreeStateManifest, WorkingTreeFolderRoot,
+    BrainDirectoryBrainSummary, BrainDirectoryManifest, BrainDirectoryPath,
+    BrainDirectoryPortability, BrainWorkingTreeStateManifest, WorkingTreeFolderRoot,
     WorkingTreeObjectManifestEntry, WorkingTreeSyncState,
 };
 use finite_brain_core::{
-    AdminAccessAction, FolderId, FolderKey, FolderObjectAad, FolderObjectOperation, ObjectId,
-    SafeRelativePath, VaultId, VaultKind, bootstrap_organization_vault, bootstrap_personal_vault,
-    default_vault_pages, encrypt_folder_object,
+    AdminAccessAction, BrainId, FolderKey, bootstrap_organization_brain,
+    bootstrap_organization_brain_with_requester, bootstrap_personal_brain,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, decrypt_nip44, encrypt_nip44, wrap_rumor};
 use nostr::{Keys, Kind};
 use sha2::{Digest, Sha256};
 
 pub(crate) const AGENT_STATE_VERSION: &str = "finitebrain-agent-state-v2";
-pub(crate) const VAULT_DIRECTORY_VERSION: &str = "finite-vault-directory-v1";
-pub(crate) const WORKING_TREE_STATE_VERSION: &str = "finite-vault-working-tree-state-v1";
+pub(crate) const BRAIN_DIRECTORY_VERSION: &str = "finite-brain-directory-v1";
+pub(crate) const WORKING_TREE_STATE_VERSION: &str = "finite-brain-working-tree-state-v1";
 pub(crate) const APP_SPECIFIC_KIND: u16 = 30_078;
+#[cfg(test)]
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
 
 /// Run `fbrain` using process args, stdin, and stdout.
@@ -103,14 +105,15 @@ where
         "signer" => signer(&args[1..], &env, json, output),
         "daemon" => daemon(&args[1..], &env, json, output),
         "sync" => sync(&args[1..], &env, json, output),
-        "open" => open_vault(&args[1..], &env, json, output),
+        "open" => open_brain(&args[1..], &env, json, output),
         "status" => status(&env, json, output),
         "unlock" => unlock(&args[1..], &env, json, output),
         "conflicts" => conflicts(&env, json, output),
         "resolve" => resolve(&args[1..], &env, json, output),
         "activity" => activity(&env, json, output),
+        "wiki" => wiki(&args[1..], &env, json, output),
         "access" => access(&args[1..], &env, json, output),
-        "vault" => vault(&args[1..], &env, json, output),
+        "brain" => brain(&args[1..], &env, json, output),
         "folder" => folder(&args[1..], &env, json, output),
         "mount" | "mounts" => mount(&args[1..], &env, json, output),
         "permissions" | "permission" | "perms" => permissions(&args[1..], &env, json, output),
@@ -123,7 +126,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <vault-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\naccess explain|list|grant|revoke\nvault list|create|metadata|export\nfolder create|list\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --vault <vault-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nactivity\nwiki check\naccess explain|list|grant|revoke\nbrain list|create [--requesting-user-npub <npub|hex>]|bootstrap-personal|metadata|export\nfolder create|list|delete\nmount list\npermissions add-member|remove-member|add-admin|remove-admin|grant-folder --target <NIP-05|npub|hex>\ninvites create --target <NIP-05|npub|hex>|show --code invite-...|accept --code invite-...|accept --brain <brain-id> --id invitation-...|revoke\nshare link --target <NIP-05|npub|hex>|accept|revoke|source|folder-invite --destination-admin <NIP-05|npub|hex>|folder-accept"
     )?;
     Ok(())
 }
@@ -131,6 +134,49 @@ fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
 fn version<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(output, "fbrain {}", env!("CARGO_PKG_VERSION"))?;
     Ok(())
+}
+
+fn wiki<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str).unwrap_or("check") {
+        "check" => {
+            let root = current_tree_root(env)?;
+            let report = check_wiki_links(&root)?;
+            if json {
+                write_json(output, &report)
+            } else {
+                writeln!(
+                    output,
+                    "wiki links {}: {} pages, {} resolved, {} missing, {} ambiguous",
+                    report.status,
+                    report.page_count,
+                    report.resolved_link_count,
+                    report.missing_link_count,
+                    report.ambiguous_link_count
+                )?;
+                for issue in report.issues {
+                    writeln!(
+                        output,
+                        "- {} -> {} ({}){}",
+                        issue.path,
+                        issue.reference,
+                        issue.status,
+                        if issue.matches.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", issue.matches.join(", "))
+                        }
+                    )?;
+                }
+                Ok(())
+            }
+        }
+        other => Err(CliError::InvalidCommand(format!("wiki {other}"))),
+    }
 }
 
 fn expand_cli_path(value: &str) -> PathBuf {
@@ -185,13 +231,13 @@ fn doctor<W: Write>(
             working_tree_discovery_error.as_deref(),
         ) {
             (Some(root), Some(Ok(())), _) => {
-                CheckState::ok(format!("Vault Working Tree at {}", root.display()))
+                CheckState::ok(format!("Brain Working Tree at {}", root.display()))
             }
             (Some(_), Some(Err(error)), _) => CheckState::warn(error.to_string()),
             (_, _, Some(error)) => CheckState::warn(format!(
-                "Vault Working Tree discovery failed: {error}; inspect the Working Tree boundary before continuing"
+                "Brain Working Tree discovery failed: {error}; inspect the Working Tree boundary before continuing"
             )),
-            _ => CheckState::warn("not inside a Vault Working Tree"),
+            _ => CheckState::warn("not inside a Brain Working Tree"),
         },
         daemon: match daemon_state {
             DaemonRunState::Running => CheckState::ok("daemon marked running"),
@@ -221,7 +267,7 @@ fn repair<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<
     } else {
         writeln!(
             output,
-            "repaired Vault Working Tree boundary at {} ({} directories, {} files)",
+            "repaired Brain Working Tree boundary at {} ({} directories, {} files)",
             report.working_tree_path, report.repaired_directories, report.repaired_files
         )?;
         Ok(())
@@ -678,7 +724,7 @@ fn daemon_watch<W: Write>(
                 state.add_activity(
                     now,
                     "daemon.watch.idle",
-                    "No local Vault Working Tree changes detected",
+                    "No local Brain Working Tree changes detected",
                 );
                 Ok(())
             })?;
@@ -698,7 +744,7 @@ fn daemon_watch<W: Write>(
                     now,
                     "daemon.watch.local_changes_detected",
                     format!(
-                        "Detected {count} pending Vault Working Tree change(s)",
+                        "Detected {count} pending Brain Working Tree change(s)",
                         count = local_change_count.unwrap_or_default()
                     ),
                 );
@@ -903,17 +949,22 @@ fn write_sync_change_group<W: Write>(
             .sequence
             .map(|sequence| format!(" seq={sequence}"))
             .unwrap_or_default();
+        let actor = change
+            .actor_npub
+            .as_deref()
+            .map(|actor| format!(" actor={actor}"))
+            .unwrap_or_default();
         if let Some(from_path) = change.from_path.as_deref() {
             writeln!(
                 output,
-                "- {} {} {} -> {}{}",
-                change.status, change.action, from_path, path, sequence
+                "- {} {} {} -> {}{}{}",
+                change.status, change.action, from_path, path, sequence, actor
             )?;
         } else {
             writeln!(
                 output,
-                "- {} {} {}{}",
-                change.status, change.action, path, sequence
+                "- {} {} {}{}{}",
+                change.status, change.action, path, sequence, actor
             )?;
         }
         if let Some(reason) = change.reason.as_deref() {
@@ -923,15 +974,15 @@ fn write_sync_change_group<W: Write>(
     Ok(())
 }
 
-fn open_vault<W: Write>(
+fn open_brain<W: Write>(
     args: &[String],
     env: &CliEnvironment,
     json: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let vault_id = VaultId::new(
+    let brain_id = BrainId::new(
         args.first()
-            .ok_or(CliError::MissingArgument("vault-id"))?
+            .ok_or(CliError::MissingArgument("brain-id"))?
             .to_owned(),
     )
     .map_err(|error| CliError::InvalidInput(error.to_string()))?;
@@ -942,7 +993,7 @@ fn open_vault<W: Write>(
             env.working_tree_root
                 .as_ref()
                 .unwrap_or(&env.cwd)
-                .join(vault_id.as_str())
+                .join(brain_id.as_str())
         });
     let server_url = configured_server_url_for_open(args);
     if let Some(server_url) = server_url.as_deref() {
@@ -951,7 +1002,7 @@ fn open_vault<W: Write>(
     let agent_state_path = path.join(".finitebrain/agent-state.json");
     let reopening = path_entry_exists(&agent_state_path)?;
     let portable_manifest_exists =
-        path_entry_exists(&path.join(".finitebrain/vault-directory.json"))?
+        path_entry_exists(&path.join(".finitebrain/brain-directory.json"))?
             || path_entry_exists(&path.join(".finitebrain/working-tree-state.json"))?;
     if !reopening && portable_manifest_exists {
         return Err(CliError::InvalidInput(
@@ -961,16 +1012,16 @@ fn open_vault<W: Write>(
     }
     initialize_private_working_tree(&path)?;
     let now = timestamp(env);
-    // Opening a Vault Working Tree needs the acting identity for signed sync.
-    // The server projection supplies the actual Personal Vault owner; the
+    // Opening a Brain Working Tree needs the acting identity for signed sync.
+    // The server projection supplies the actual Personal Brain owner; the
     // acting identity may instead be a limited Agent Principal.
     let auth = load_signer(env)?;
     let mut state = if reopening {
         let mut state = read_agent_state(&path)?;
-        if state.vault_id != vault_id.as_str() {
+        if state.brain_id != brain_id.as_str() {
             return Err(CliError::InvalidInput(format!(
-                "Working Tree is already bound to Vault {}",
-                state.vault_id
+                "Working Tree is already bound to Brain {}",
+                state.brain_id
             )));
         }
         if let Some(existing_npub) = state.auth_npub.as_deref()
@@ -985,39 +1036,39 @@ fn open_vault<W: Write>(
         }
         state
     } else {
-        let directory = VaultDirectoryManifest {
-            version: VAULT_DIRECTORY_VERSION.to_owned(),
-            vault: VaultDirectoryVaultSummary {
-                id: vault_id.to_string(),
+        let directory = BrainDirectoryManifest {
+            version: BRAIN_DIRECTORY_VERSION.to_owned(),
+            brain: BrainDirectoryBrainSummary {
+                id: brain_id.to_string(),
                 kind: "unknown".to_owned(),
-                name: vault_id.to_string(),
+                name: brain_id.to_string(),
                 owner_npub: None,
             },
-            working_tree: VaultDirectoryPath {
+            working_tree: BrainDirectoryPath {
                 path: ".".to_owned(),
             },
-            encrypted_sync: VaultDirectoryPath {
+            encrypted_sync: BrainDirectoryPath {
                 path: ".finitebrain/encrypted-sync".to_owned(),
             },
-            portability: VaultDirectoryPortability {
+            portability: BrainDirectoryPortability {
                 owned_by_agent_runtime: true,
                 owned_by_app_surface: false,
             },
             created_at: now.clone(),
             updated_at: now.clone(),
         };
-        let tree_state = VaultWorkingTreeStateManifest {
+        let tree_state = BrainWorkingTreeStateManifest {
             version: WORKING_TREE_STATE_VERSION.to_owned(),
             folder_roots: Vec::<WorkingTreeFolderRoot>::new(),
             objects: Vec::<WorkingTreeObjectManifestEntry>::new(),
             sync: WorkingTreeSyncState { latest_sequence: 0 },
         };
-        write_json_file(&path.join(".finitebrain/vault-directory.json"), &directory)?;
+        write_json_file(&path.join(".finitebrain/brain-directory.json"), &directory)?;
         write_json_file(
             &path.join(".finitebrain/working-tree-state.json"),
             &tree_state,
         )?;
-        let mut state = AgentState::new(vault_id.as_str(), &now);
+        let mut state = AgentState::new(brain_id.as_str(), &now);
         state.server_url = server_url.clone();
         state
     };
@@ -1032,9 +1083,9 @@ fn open_vault<W: Write>(
             "working_tree.opened"
         },
         if reopening {
-            "Existing Vault Working Tree reopened without resetting sync state"
+            "Existing Brain Working Tree reopened without resetting sync state"
         } else {
-            "Vault Working Tree opened for agent use"
+            "Brain Working Tree opened for agent use"
         },
     );
     write_agent_state(&path, &state)?;
@@ -1068,7 +1119,7 @@ fn open_vault<W: Write>(
         write_json(
             output,
             &serde_json::json!({
-                "vaultId": vault_id.as_str(),
+                "brainId": brain_id.as_str(),
                 "path": path,
                 "daemon": "running",
                 "syncMode": "automatic",
@@ -1077,7 +1128,7 @@ fn open_vault<W: Write>(
             }),
         )
     } else {
-        writeln!(output, "opened Vault Working Tree {}", path.display())?;
+        writeln!(output, "opened Brain Working Tree {}", path.display())?;
         writeln!(
             output,
             "member-authored plaintext persists until this Working Tree is explicitly removed"
@@ -1101,8 +1152,8 @@ fn status<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Result<
     } else {
         writeln!(
             output,
-            "Vault: {}",
-            report.vault_id.as_deref().unwrap_or("-")
+            "Brain: {}",
+            report.brain_id.as_deref().unwrap_or("-")
         )?;
         writeln!(
             output,
@@ -1201,135 +1252,60 @@ fn activity<W: Write>(env: &CliEnvironment, json: bool, output: &mut W) -> Resul
     }
 }
 
-struct VaultCreateBootstrapPlan {
-    bootstrap_grants: Vec<serde_json::Value>,
-    folder_keys: BTreeMap<(String, u32), FolderKey>,
-    vault_kind: VaultKind,
+struct BrainCreatePlan {
+    requesting_user_npub: Option<String>,
 }
 
-fn bootstrap_plan_for_vault_create(
+fn plan_brain_create(
     env: &CliEnvironment,
-    vault_id: &str,
+    brain_id: &str,
     kind: &str,
     name: &str,
-) -> Result<VaultCreateBootstrapPlan, CliError> {
+    requesting_user_input: Option<&str>,
+) -> Result<BrainCreatePlan, CliError> {
     let auth = load_signer(env)?;
-    let (vault_kind, output) = match kind {
-        "personal" => (
-            VaultKind::Personal,
-            bootstrap_personal_vault(vault_id, name, auth.npub.clone()),
-        ),
-        "organization" => (
-            VaultKind::Organization,
-            bootstrap_organization_vault(vault_id, name, auth.npub.clone()),
-        ),
+    let requesting_user_npub = requesting_user_input
+        .map(|input| {
+            NostrPublicKey::parse(input)
+                .and_then(|public_key| public_key.to_npub())
+                .map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "invalid Organization Brain requester identity: {error}"
+                    ))
+                })
+        })
+        .transpose()?;
+    let output = match kind {
+        "personal" if requesting_user_npub.is_some() => {
+            return Err(CliError::InvalidInput(
+                "Organization Brain requester identity is only valid for an Organization Brain"
+                    .to_owned(),
+            ));
+        }
+        "personal" => bootstrap_personal_brain(brain_id, name, auth.npub.clone()),
+        "organization" => {
+            if let Some(requester) = requesting_user_npub.as_ref() {
+                bootstrap_organization_brain_with_requester(
+                    brain_id,
+                    name,
+                    auth.npub.clone(),
+                    requester.clone(),
+                )
+            } else {
+                bootstrap_organization_brain(brain_id, name, auth.npub.clone())
+            }
+        }
         other => {
             return Err(CliError::InvalidInput(format!(
-                "unknown vault kind {other}"
+                "unknown brain kind {other}"
             )));
         }
     };
-    let output = output.map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    output.map_err(|error| CliError::InvalidInput(error.to_string()))?;
 
-    let mut folder_keys = BTreeMap::<(String, u32), FolderKey>::new();
-    let bootstrap_grants = output
-        .required_key_grants
-        .into_iter()
-        .map(|required| {
-            let folder_id = required.folder_id.to_string();
-            let folder_key = folder_keys
-                .entry((folder_id.clone(), required.key_version))
-                .or_insert_with(FolderKey::generate);
-            let recipient = required.recipient_user_id.to_string();
-            let grant = folder_key_grant_request(
-                &auth,
-                vault_id,
-                &folder_id,
-                required.key_version,
-                &recipient,
-                folder_key,
-                env,
-            )?;
-            Ok(serde_json::json!({
-                "folderId": folder_id,
-                "grant": grant
-            }))
-        })
-        .collect::<Result<Vec<_>, CliError>>()?;
-
-    Ok(VaultCreateBootstrapPlan {
-        bootstrap_grants,
-        folder_keys,
-        vault_kind,
+    Ok(BrainCreatePlan {
+        requesting_user_npub,
     })
-}
-
-fn write_default_vault_pages_for_create(
-    env: &CliEnvironment,
-    server_url: &str,
-    vault_id: &str,
-    plan: &VaultCreateBootstrapPlan,
-) -> Result<(), CliError> {
-    let auth = load_signer(env)?;
-    let keys = auth.keys.clone();
-    let key_version = 1;
-
-    for page in default_vault_pages(plan.vault_kind) {
-        let folder_id = FolderId::new(page.folder_id)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let folder_key = plan
-            .folder_keys
-            .get(&(page.folder_id.to_owned(), key_version))
-            .ok_or_else(|| {
-                CliError::InvalidInput(format!(
-                    "missing generated Folder Key for {}",
-                    page.folder_id
-                ))
-            })?;
-        let object_id = ObjectId::new(page.object_id)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let page_path = SafeRelativePath::new("page_path", page.path)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let aad = FolderObjectAad {
-            vault_id: VaultId::new(vault_id.to_owned())
-                .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-            folder_id: folder_id.clone(),
-            object_id: object_id.clone(),
-            key_version,
-        };
-        let plaintext = encode_folder_object_page_plaintext(&page_path, page.markdown)?;
-        let envelope = encrypt_folder_object(folder_key, &aad, plaintext)
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        let envelope_json = envelope.canonical_json();
-        let revision_event = signed_revision_event(
-            &keys,
-            RevisionEventInput {
-                actor_npub: &auth.npub,
-                vault_id,
-                folder_id: &folder_id,
-                object_id: &object_id,
-                operation: FolderObjectOperation::Create,
-                base_revision: None,
-                key_version,
-                envelope_json: envelope_json.clone(),
-            },
-        )?;
-        let body = serde_json::json!({
-            "baseRevision": null,
-            "keyVersion": key_version,
-            "cipher": CIPHER_AES_256_GCM,
-            "ciphertext": envelope_json,
-            "revisionEvent": revision_event
-        });
-        let route = format!(
-            "/_admin/vaults/{vault_id}/folders/{}/objects/{}",
-            folder_id.as_str(),
-            object_id.as_str()
-        );
-        signed_json_request_to_server(env, server_url, "PUT", &route, Some(body))?;
-    }
-
-    Ok(())
 }
 
 fn access<W: Write>(
@@ -1352,8 +1328,8 @@ fn access<W: Write>(
             }
         }
         Some("list") | Some("ls") => {
-            let metadata = fetch_vault_metadata_for_command(env, args)?;
-            let report = access_summary_report(metadata);
+            let metadata = fetch_brain_metadata_for_command(env, args)?;
+            let report = access_summary_report(metadata)?;
             if json {
                 write_json(output, &report)
             } else {
@@ -1380,15 +1356,15 @@ fn access_revoke<W: Write>(
     json: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let vault_id = command_vault_id(args, env)?;
+    let brain_id = command_brain_id(args, env)?;
     let folder_id = option_value(args, "--folder").ok_or(CliError::MissingArgument("--folder"))?;
     let target = required_option_or_positional(args, "--target", 1, "target-npub")?;
-    let route = format!("/_admin/vaults/{vault_id}/folders/{folder_id}/access/{target}");
+    let route = format!("/_admin/brains/{brain_id}/folders/{folder_id}/access/{target}");
     let Some(body) = access_rotation_body(args)? else {
         let report = AccessRemovalBlockedReport {
             state: "blocked".to_owned(),
             operation: "remove-folder-access".to_owned(),
-            vault_id,
+            brain_id,
             folder_id,
             target_npub: target,
             route,
@@ -1405,8 +1381,8 @@ fn access_revoke<W: Write>(
         }
         writeln!(
             output,
-            "blocked remove-folder-access vault={} folder={} target={}",
-            report.vault_id, report.folder_id, report.target_npub
+            "blocked remove-folder-access brain={} folder={} target={}",
+            report.brain_id, report.folder_id, report.target_npub
         )?;
         for requirement in &report.required {
             writeln!(output, "- requires {requirement}")?;
@@ -1471,23 +1447,46 @@ fn validate_access_rotation_body(body: &serde_json::Value) -> Result<(), CliErro
     Ok(())
 }
 
-fn fetch_vault_metadata_for_command(
+fn fetch_brain_metadata_for_command(
     env: &CliEnvironment,
     args: &[String],
-) -> Result<VaultMetadataView, CliError> {
-    let vault_id = command_vault_id(args, env)?;
-    fetch_vault_metadata(env, args, &vault_id)
+) -> Result<BrainMetadataView, CliError> {
+    let brain_id = command_brain_id(args, env)?;
+    fetch_brain_metadata(env, args, &brain_id)
 }
 
-fn access_summary_report(metadata: VaultMetadataView) -> AccessSummaryReport {
-    AccessSummaryReport {
-        vault_id: metadata.vault_id,
+fn access_summary_report(metadata: BrainMetadataView) -> Result<AccessSummaryReport, CliError> {
+    let folders = metadata
+        .folders
+        .iter()
+        .map(|folder| {
+            Ok(FolderAccessSummary {
+                id: folder.id.clone(),
+                name: folder.name.clone(),
+                role: folder.role.clone(),
+                access: folder.access.clone(),
+                parent_folder_id: folder.parent_folder_id.clone(),
+                path: folder.path.clone(),
+                shared_folder_source: folder.shared_folder_source,
+                current_key_version: folder.current_key_version,
+                setup_incomplete: folder.setup_incomplete,
+                explicit_access_user_ids: folder.access_user_ids.clone(),
+                effective_access_user_ids: folder_required_recipients(
+                    &metadata,
+                    &folder.access,
+                    &folder.access_user_ids,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    Ok(AccessSummaryReport {
+        brain_id: metadata.brain_id,
         members: metadata.members,
         admins: metadata.admins,
-        folders: metadata.folders,
+        folders,
         mounted_folders: metadata.mounted_folders,
         grant_count: metadata.grant_count,
-    }
+    })
 }
 
 fn write_access_summary_rows<W: Write>(
@@ -1496,17 +1495,48 @@ fn write_access_summary_rows<W: Write>(
 ) -> Result<(), CliError> {
     writeln!(
         output,
-        "vault {} admins={} members={} grants={}",
-        report.vault_id,
+        "brain {} admins={} members={} grants={}",
+        report.brain_id,
         report.admins.len(),
         report.members.len(),
         report.grant_count
     )?;
-    write_folder_rows(output, &report.folders)?;
+    if report.folders.is_empty() {
+        writeln!(output, "no folders")?;
+    } else {
+        for folder in &report.folders {
+            let access_details = format!(
+                " explicitAccessUserIds=[{}] effectiveAccessUserIds=[{}]",
+                folder.explicit_access_user_ids.join(","),
+                folder.effective_access_user_ids.join(",")
+            );
+            let setup = if folder.setup_incomplete {
+                "setup-incomplete"
+            } else {
+                "ready"
+            };
+            let source = if folder.shared_folder_source {
+                " shared-source"
+            } else {
+                ""
+            };
+            writeln!(
+                output,
+                "folder {} path={} access={} keyVersion={} state={}{}{}",
+                folder.id,
+                folder.path,
+                folder.access,
+                folder.current_key_version,
+                setup,
+                source,
+                access_details
+            )?;
+        }
+    }
     write_mount_rows(output, &report.mounted_folders)
 }
 
-fn vault<W: Write>(
+fn brain<W: Write>(
     args: &[String],
     env: &CliEnvironment,
     json: bool,
@@ -1514,59 +1544,77 @@ fn vault<W: Write>(
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str).unwrap_or("metadata") {
         "list" | "ls" => {
-            let response = signed_json_request(env, args, "GET", "/_admin/vaults", None)?;
+            let response = signed_json_request(env, args, "GET", "/_admin/brains", None)?;
+            write_command_response(output, json, &response)
+        }
+        "bootstrap-personal" => {
+            let response = signed_json_request(
+                env,
+                args,
+                "POST",
+                "/_admin/personal-brain-bootstrap",
+                Some(serde_json::json!({})),
+            )?;
             write_command_response(output, json, &response)
         }
         "create" => {
             let values = positional_values(args);
-            let vault_id = values.get(1).ok_or(CliError::MissingArgument("vault-id"))?;
+            let brain_id = values.get(1).ok_or(CliError::MissingArgument("brain-id"))?;
             let kind = option_value(args, "--kind").unwrap_or_else(|| "personal".to_owned());
-            let normalized_kind = normalize_vault_kind(&kind)?;
-            let name = option_value(args, "--name").unwrap_or_else(|| vault_id.clone());
-            let bootstrap_plan =
-                bootstrap_plan_for_vault_create(env, vault_id, normalized_kind, &name)?;
-            let body = serde_json::json!({
-                "vaultId": vault_id,
+            let normalized_kind = normalize_brain_kind(&kind)?;
+            let name = option_value(args, "--name").unwrap_or_else(|| brain_id.clone());
+            let requesting_user_input = unique_option_value(args, "--requesting-user-npub")?;
+            let create_plan = plan_brain_create(
+                env,
+                brain_id,
+                normalized_kind,
+                &name,
+                requesting_user_input.as_deref(),
+            )?;
+            let mut body = serde_json::json!({
+                "brainId": brain_id,
                 "kind": normalized_kind,
                 "name": name,
-                "bootstrapGrants": bootstrap_plan.bootstrap_grants
+                "bootstrapGrants": []
             });
+            if let Some(requester) = create_plan.requesting_user_npub.as_ref() {
+                body["requestingUserNpub"] = serde_json::Value::String(requester.clone());
+            }
             let server_url = server_url_for_command(env, args)?;
             let response = signed_json_request_to_server(
                 env,
                 &server_url,
                 "POST",
-                "/_admin/vaults",
+                "/_admin/brains",
                 Some(body),
             )?;
-            write_default_vault_pages_for_create(env, &server_url, vault_id, &bootstrap_plan)?;
             write_command_response(output, json, &response)
         }
         "metadata" | "status" => {
-            let explicit_vault_id =
-                option_value(args, "--vault").or_else(|| positional_values(args).get(1).cloned());
-            let vault_id = match explicit_vault_id {
-                Some(vault_id) => vault_id,
-                None => current_vault_id(env)?
-                    .ok_or(CliError::MissingArgument("vault-id or --vault"))?,
+            let explicit_brain_id =
+                option_value(args, "--brain").or_else(|| positional_values(args).get(1).cloned());
+            let brain_id = match explicit_brain_id {
+                Some(brain_id) => brain_id,
+                None => current_brain_id(env)?
+                    .ok_or(CliError::MissingArgument("brain-id or --brain"))?,
             };
-            let path = format!("/_admin/vaults/{vault_id}/metadata");
+            let path = format!("/_admin/brains/{brain_id}/metadata");
             let response = signed_json_request(env, args, "GET", &path, None)?;
             write_command_response(output, json, &response)
         }
         "export" => {
-            let explicit_vault_id =
-                option_value(args, "--vault").or_else(|| positional_values(args).get(1).cloned());
-            let vault_id = match explicit_vault_id {
-                Some(vault_id) => vault_id,
-                None => current_vault_id(env)?
-                    .ok_or(CliError::MissingArgument("vault-id or --vault"))?,
+            let explicit_brain_id =
+                option_value(args, "--brain").or_else(|| positional_values(args).get(1).cloned());
+            let brain_id = match explicit_brain_id {
+                Some(brain_id) => brain_id,
+                None => current_brain_id(env)?
+                    .ok_or(CliError::MissingArgument("brain-id or --brain"))?,
             };
-            let path = format!("/_admin/vaults/{vault_id}/export");
+            let path = format!("/_admin/brains/{brain_id}/export");
             let response = signed_json_request(env, args, "GET", &path, None)?;
             write_command_response(output, json, &response)
         }
-        other => Err(CliError::InvalidCommand(format!("vault {other}"))),
+        other => Err(CliError::InvalidCommand(format!("brain {other}"))),
     }
 }
 
@@ -1578,7 +1626,7 @@ fn folder<W: Write>(
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str).unwrap_or("create") {
         "list" | "ls" => {
-            let metadata = fetch_vault_metadata_for_command(env, args)?;
+            let metadata = fetch_brain_metadata_for_command(env, args)?;
             if json {
                 write_json(output, &metadata.folders)
             } else {
@@ -1590,11 +1638,11 @@ fn folder<W: Write>(
             let folder_id = values
                 .get(1)
                 .ok_or(CliError::MissingArgument("folder-id"))?;
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let name = option_value(args, "--name").unwrap_or_else(|| folder_id.clone());
             let path = option_value(args, "--path").unwrap_or_else(|| name.clone());
             let role = option_value(args, "--role").unwrap_or_else(|| "folder".to_owned());
-            let metadata = fetch_vault_metadata(env, args, &vault_id)?;
+            let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let access = option_value(args, "--access").unwrap_or_else(|| {
                 if metadata.kind == "personal" {
                     "owner".to_owned()
@@ -1611,7 +1659,7 @@ fn folder<W: Write>(
             let auth = load_signer(env)?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::SetFolderAccessMode,
                 Some(folder_id),
                 None,
@@ -1622,7 +1670,7 @@ fn folder<W: Write>(
                 .map(|recipient| {
                     folder_key_grant_request(
                         &auth,
-                        &vault_id,
+                        &brain_id,
                         folder_id,
                         1,
                         recipient,
@@ -1643,9 +1691,39 @@ fn folder<W: Write>(
                 "grants": grants,
                 "accessChangeEvent": event
             });
-            let route = format!("/_admin/vaults/{vault_id}/folders");
+            let route = format!("/_admin/brains/{brain_id}/folders");
             let response = signed_json_request(env, args, "POST", &route, Some(body))?;
             update_local_folder_after_create(env, folder_id, &path)?;
+            write_command_response(output, json, &response)
+        }
+        "delete" => {
+            let values = positional_values(args);
+            let folder_id = values
+                .get(1)
+                .ok_or(CliError::MissingArgument("folder-id"))?;
+            let brain_id = command_brain_id(args, env)?;
+            let metadata = fetch_brain_metadata(env, args, &brain_id)?;
+            let folder = metadata
+                .folders
+                .iter()
+                .find(|folder| folder.id == *folder_id)
+                .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
+            let deletion_event = admin_access_change_event(
+                env,
+                &brain_id,
+                AdminAccessAction::DeleteFolder,
+                Some(folder_id),
+                None,
+                Some(folder.current_key_version),
+            )?;
+            let route = format!("/_admin/brains/{brain_id}/folders/{folder_id}");
+            let response = signed_json_request(
+                env,
+                args,
+                "DELETE",
+                &route,
+                Some(serde_json::json!({ "deletionEvent": deletion_event })),
+            )?;
             write_command_response(output, json, &response)
         }
         other => Err(CliError::InvalidCommand(format!("folder {other}"))),
@@ -1660,7 +1738,7 @@ fn mount<W: Write>(
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str).unwrap_or("list") {
         "list" | "ls" => {
-            let metadata = fetch_vault_metadata_for_command(env, args)?;
+            let metadata = fetch_brain_metadata_for_command(env, args)?;
             if json {
                 write_json(output, &metadata.mounted_folders)
             } else {
@@ -1680,22 +1758,31 @@ fn write_folder_rows<W: Write>(
         return Ok(());
     }
     for folder in folders {
-        let setup = if folder.setup_incomplete {
-            "setup-incomplete"
-        } else {
-            "ready"
-        };
-        let source = if folder.shared_folder_source {
-            " shared-source"
-        } else {
-            ""
-        };
-        writeln!(
-            output,
-            "folder {} path={} access={} keyVersion={} state={}{}",
-            folder.id, folder.path, folder.access, folder.current_key_version, setup, source
-        )?;
+        write_folder_row(output, folder, "")?;
     }
+    Ok(())
+}
+
+fn write_folder_row<W: Write>(
+    output: &mut W,
+    folder: &FolderMetadataView,
+    details: &str,
+) -> Result<(), CliError> {
+    let setup = if folder.setup_incomplete {
+        "setup-incomplete"
+    } else {
+        "ready"
+    };
+    let source = if folder.shared_folder_source {
+        " shared-source"
+    } else {
+        ""
+    };
+    writeln!(
+        output,
+        "folder {} path={} access={} keyVersion={} state={}{}{}",
+        folder.id, folder.path, folder.access, folder.current_key_version, setup, source, details
+    )?;
     Ok(())
 }
 
@@ -1713,7 +1800,7 @@ fn write_mount_rows<W: Write>(
             "mount {} name={} source={}/{} state={}",
             mount.mount_id,
             mount.display_name,
-            mount.source_vault_id,
+            mount.source_brain_id,
             mount.source_folder_id,
             mount.state
         )?;
@@ -1729,12 +1816,12 @@ fn permissions<W: Write>(
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
         Some("add-member") | Some("member-add") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
             let target = resolve_identity_npub(env, args, &raw_target)?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::AddMember,
                 None,
                 Some(&target),
@@ -1744,23 +1831,23 @@ fn permissions<W: Write>(
                 "targetNpub": target,
                 "accessChangeEvent": event
             });
-            let route = format!("/_admin/vaults/{vault_id}/members");
+            let route = format!("/_admin/brains/{brain_id}/members");
             let response = signed_json_request(env, args, "POST", &route, Some(body))?;
             write_command_response(output, json, &response)
         }
         Some("remove-member") | Some("member-remove") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
             let target = resolve_identity_npub(env, args, &raw_target)?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::RemoveMember,
                 None,
                 Some(&target),
                 None,
             )?;
-            let route = format!("/_admin/vaults/{vault_id}/members/{target}");
+            let route = format!("/_admin/brains/{brain_id}/members/{target}");
             let response = signed_json_request(
                 env,
                 args,
@@ -1771,12 +1858,12 @@ fn permissions<W: Write>(
             write_command_response(output, json, &response)
         }
         Some("add-admin") | Some("admin-add") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
             let target = resolve_identity_npub(env, args, &raw_target)?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::AddAdmin,
                 None,
                 Some(&target),
@@ -1786,23 +1873,23 @@ fn permissions<W: Write>(
                 "targetNpub": target,
                 "accessChangeEvent": event
             });
-            let route = format!("/_admin/vaults/{vault_id}/admins");
+            let route = format!("/_admin/brains/{brain_id}/admins");
             let response = signed_json_request(env, args, "POST", &route, Some(body))?;
             write_command_response(output, json, &response)
         }
         Some("remove-admin") | Some("admin-remove") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
             let target = resolve_identity_npub(env, args, &raw_target)?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::RemoveAdmin,
                 None,
                 Some(&target),
                 None,
             )?;
-            let route = format!("/_admin/vaults/{vault_id}/admins/{target}");
+            let route = format!("/_admin/brains/{brain_id}/admins/{target}");
             let response = signed_json_request(
                 env,
                 args,
@@ -1813,24 +1900,24 @@ fn permissions<W: Write>(
             write_command_response(output, json, &response)
         }
         Some("grant-folder") | Some("folder-grant") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let folder_id =
                 option_value(args, "--folder").ok_or(CliError::MissingArgument("--folder"))?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
             let target = resolve_identity_npub(env, args, &raw_target)?;
-            let metadata = fetch_vault_metadata(env, args, &vault_id)?;
+            let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let key_version = metadata
                 .folders
                 .iter()
                 .find(|folder| folder.id == folder_id)
                 .map(|folder| folder.current_key_version)
                 .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
-            let session_keys = open_vault_session_folder_keys(env, args, &vault_id)?;
-            let folder_key = opened_folder_key(&session_keys, &vault_id, &folder_id, key_version)?;
+            let session_keys = open_brain_session_folder_keys(env, args, &brain_id)?;
+            let folder_key = opened_folder_key(&session_keys, &brain_id, &folder_id, key_version)?;
             let auth = load_signer(env)?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::GrantFolderAccess,
                 Some(&folder_id),
                 Some(&target),
@@ -1838,21 +1925,26 @@ fn permissions<W: Write>(
             )?;
             let grant = folder_key_grant_request(
                 &auth,
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 key_version,
                 &target,
                 &folder_key,
                 env,
             )?;
-            let route = format!("/_admin/vaults/{vault_id}/folders/{folder_id}/access");
+            let route = format!("/_admin/brains/{brain_id}/folders/{folder_id}/access");
             let body = serde_json::json!({
                 "targetNpub": target,
                 "grant": grant,
                 "accessChangeEvent": event
             });
             let response = signed_json_request(env, args, "POST", &route, Some(body))?;
-            write_command_response(output, json, &response)
+            if !json && response["outcome"] == "alreadyHasAccess" {
+                writeln!(output, "This person already has access.")?;
+                Ok(())
+            } else {
+                write_command_response(output, json, &response)
+            }
         }
         Some(other) => Err(CliError::InvalidCommand(format!("permissions {other}"))),
         None => Err(CliError::MissingArgument("permissions command")),
@@ -1867,12 +1959,12 @@ fn invites<W: Write>(
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
         Some("create") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
             let expires_at = option_value(args, "--expires")
                 .unwrap_or_else(|| "2099-01-01T00:00:00Z".to_owned());
             let folders = option_values(args, "--folder");
-            let route = format!("/_admin/vaults/{vault_id}/invitations");
+            let route = format!("/_admin/brains/{brain_id}/invitations");
             if let Ok(public_key) = NostrPublicKey::parse(&raw_target) {
                 let target = public_key
                     .to_npub()
@@ -1905,7 +1997,7 @@ fn invites<W: Write>(
                         env,
                         args,
                         &route,
-                        &vault_id,
+                        &brain_id,
                         &raw_target,
                         &folders,
                         &expires_at,
@@ -1918,7 +2010,7 @@ fn invites<W: Write>(
                     env,
                     args,
                     &route,
-                    &vault_id,
+                    &brain_id,
                     &raw_target,
                     &folders,
                     &expires_at,
@@ -1944,7 +2036,7 @@ fn invites<W: Write>(
                 1,
                 "invite-code",
             )?)?;
-            let route = format!("/_admin/vault-invitation-links/{code}");
+            let route = format!("/_admin/brain-invitation-links/{code}");
             let response = signed_json_request(env, args, "GET", &route, None)?;
             write_command_response(output, json, &response)
         }
@@ -1953,20 +2045,20 @@ fn invites<W: Write>(
                 option_value(args, "--code").or_else(|| positional_values(args).get(1).cloned())
             {
                 let code = require_invite_code(code)?;
-                format!("/_admin/vault-invitation-links/{code}/accept")
+                format!("/_admin/brain-invitation-links/{code}/accept")
             } else {
-                let vault_id = command_vault_id(args, env)?;
+                let brain_id = command_brain_id(args, env)?;
                 let id = option_value(args, "--id")
                     .ok_or(CliError::MissingArgument("--id or --code"))?;
-                format!("/_admin/vaults/{vault_id}/invitations/{id}/accept")
+                format!("/_admin/brains/{brain_id}/invitations/{id}/accept")
             };
             let response = signed_json_request(env, args, "POST", &route, None)?;
             write_command_response(output, json, &response)
         }
         Some("revoke") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
-            let route = format!("/_admin/vaults/{vault_id}/invitations/{id}");
+            let route = format!("/_admin/brains/{brain_id}/invitations/{id}");
             let response = signed_json_request(env, args, "DELETE", &route, None)?;
             write_command_response(output, json, &response)
         }
@@ -2002,13 +2094,13 @@ fn write_email_invite_create<W: Write>(
     env: &CliEnvironment,
     args: &[String],
     route: &str,
-    vault_id: &str,
+    brain_id: &str,
     raw_target: &str,
     folders: &[String],
     expires_at: &str,
 ) -> Result<(), CliError> {
     let (body, invite_secret) =
-        email_invite_create_body(env, args, vault_id, raw_target, folders, expires_at)?;
+        email_invite_create_body(env, args, brain_id, raw_target, folders, expires_at)?;
     let server_url = server_url_for_command(env, args)?;
     let mut response = signed_json_request_to_server(env, &server_url, "POST", route, Some(body))?;
     if let Some(object) = response.as_object_mut() {
@@ -2051,7 +2143,7 @@ fn require_invite_code(value: String) -> Result<String, CliError> {
     let value = value.trim().to_owned();
     if value.starts_with("invitation-") {
         return Err(CliError::InvalidInput(
-            "expected an invite code like invite-...; invitation-... is an invitation id. Use `fbrain invites accept --vault <vault-id> --id <invitation-id>` for by-id accept."
+            "expected an invite code like invite-...; invitation-... is an invitation id. Use `fbrain invites accept --brain <brain-id> --id <invitation-id>` for by-id accept."
                 .to_owned(),
         ));
     }
@@ -2099,7 +2191,7 @@ fn canonical_invite_email(value: &str) -> Result<String, CliError> {
 }
 
 fn email_invite_scope(
-    metadata: &VaultMetadataView,
+    metadata: &BrainMetadataView,
     selected_folders: &[String],
 ) -> Result<Vec<EmailInviteScopeItem>, CliError> {
     let selected = selected_folders.iter().cloned().collect::<BTreeSet<_>>();
@@ -2166,16 +2258,16 @@ fn email_invite_scope_json(scope: &[EmailInviteScopeItem]) -> Vec<serde_json::Va
 fn email_invite_create_body(
     env: &CliEnvironment,
     args: &[String],
-    vault_id: &str,
+    brain_id: &str,
     target_email: &str,
     selected_folders: &[String],
     expires_at: &str,
 ) -> Result<(serde_json::Value, String), CliError> {
     let invited_email = canonical_invite_email(target_email)?;
-    let metadata = fetch_vault_metadata(env, args, vault_id)?;
+    let metadata = fetch_brain_metadata(env, args, brain_id)?;
     let scope = email_invite_scope(&metadata, selected_folders)?;
     let auth = load_signer(env)?;
-    let session_keys = open_vault_session_folder_keys(env, args, vault_id)?;
+    let session_keys = open_brain_session_folder_keys(env, args, brain_id)?;
     let unwrap_keys = Keys::generate();
     let invite_unwrap_npub = NostrPublicKey::from_protocol(unwrap_keys.public_key())
         .to_npub()
@@ -2185,12 +2277,12 @@ fn email_invite_create_body(
     let mut bootstrap_grants = Vec::new();
     for item in &scope {
         let folder_key =
-            opened_folder_key(&session_keys, vault_id, &item.folder_id, item.key_version)?;
+            opened_folder_key(&session_keys, brain_id, &item.folder_id, item.key_version)?;
         bootstrap_grants.push(serde_json::json!({
             "folderId": item.folder_id,
             "grant": folder_key_grant_request(
                 &auth,
-                vault_id,
+                brain_id,
                 &item.folder_id,
                 item.key_version,
                 &invite_unwrap_npub,
@@ -2203,7 +2295,7 @@ fn email_invite_create_body(
     let scope_json = email_invite_scope_json(&scope);
     let bootstrap_payload = serde_json::json!({
         "version": "finite-email-invite-bootstrap-payload-v1",
-        "vaultId": vault_id,
+        "brainId": brain_id,
         "invitedEmail": invited_email,
         "inviteUnwrapNpub": invite_unwrap_npub,
         "folders": scope_json,
@@ -2216,13 +2308,13 @@ fn email_invite_create_body(
     );
     let bootstrap_wrapped_event_json = wrap_email_invite_bootstrap_payload(
         &auth,
-        vault_id,
+        brain_id,
         &invite_unwrap_npub,
         &bootstrap_payload_json,
     )?;
     let bootstrap_authorization_event_json = email_invite_authorization_event(
         &auth,
-        vault_id,
+        brain_id,
         &invited_email,
         &invite_unwrap_npub,
         &bootstrap_payload_hash,
@@ -2246,7 +2338,7 @@ fn email_invite_create_body(
 
 fn wrap_email_invite_bootstrap_payload(
     auth: &LocalSigner,
-    vault_id: &str,
+    brain_id: &str,
     invite_unwrap_npub: &str,
     bootstrap_payload_json: &str,
 ) -> Result<String, CliError> {
@@ -2256,8 +2348,8 @@ fn wrap_email_invite_bootstrap_payload(
         NostrPublicKey::from_protocol(auth.keys.public_key()),
         Kind::Custom(APP_SPECIFIC_KIND),
         vec![
-            tag_vec(["d", &format!("finite-email-invite-bootstrap:{vault_id}")])?,
-            tag_vec(["vault", vault_id])?,
+            tag_vec(["d", &format!("finite-email-invite-bootstrap:{brain_id}")])?,
+            tag_vec(["brain", brain_id])?,
         ],
         bootstrap_payload_json.to_owned(),
         unix_timestamp(),
@@ -2269,7 +2361,7 @@ fn wrap_email_invite_bootstrap_payload(
 
 fn email_invite_authorization_event(
     auth: &LocalSigner,
-    vault_id: &str,
+    brain_id: &str,
     invited_email: &str,
     invite_unwrap_npub: &str,
     bootstrap_payload_hash: &str,
@@ -2278,7 +2370,7 @@ fn email_invite_authorization_event(
 ) -> Result<String, CliError> {
     let content = serde_json::json!({
         "version": "finite-email-invite-bootstrap-authorization-v1",
-        "vaultId": vault_id,
+        "brainId": brain_id,
         "invitedEmail": invited_email,
         "inviteUnwrapNpub": invite_unwrap_npub,
         "bootstrapPayloadHash": bootstrap_payload_hash,
@@ -2293,9 +2385,9 @@ fn email_invite_authorization_event(
         vec![
             tag_vec([
                 "d",
-                &format!("finite-email-invite-bootstrap-authorization:{vault_id}:{invited_email}"),
+                &format!("finite-email-invite-bootstrap-authorization:{brain_id}:{invited_email}"),
             ])?,
-            tag_vec(["vault", vault_id])?,
+            tag_vec(["brain", brain_id])?,
             tag_vec(["email", invited_email])?,
         ],
         unix_timestamp(),
@@ -2321,26 +2413,26 @@ fn share<W: Write>(
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
         Some("link") | Some("create-link") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let folder_id =
                 option_value(args, "--folder").ok_or(CliError::MissingArgument("--folder"))?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
             let target = resolve_identity_npub(env, args, &raw_target)?;
             let expires_at = option_value(args, "--expires")
                 .unwrap_or_else(|| "2099-01-01T00:00:00Z".to_owned());
-            let metadata = fetch_vault_metadata(env, args, &vault_id)?;
+            let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let key_version = metadata
                 .folders
                 .iter()
                 .find(|folder| folder.id == folder_id)
                 .map(|folder| folder.current_key_version)
                 .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
-            let session_keys = open_vault_session_folder_keys(env, args, &vault_id)?;
-            let folder_key = opened_folder_key(&session_keys, &vault_id, &folder_id, key_version)?;
+            let session_keys = open_brain_session_folder_keys(env, args, &brain_id)?;
+            let folder_key = opened_folder_key(&session_keys, &brain_id, &folder_id, key_version)?;
             let auth = load_signer(env)?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::GrantFolderAccess,
                 Some(&folder_id),
                 Some(&target),
@@ -2348,7 +2440,7 @@ fn share<W: Write>(
             )?;
             let grant = folder_key_grant_request(
                 &auth,
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 key_version,
                 &target,
@@ -2362,7 +2454,7 @@ fn share<W: Write>(
                 "expiresAt": expires_at,
                 "createPersonalMount": args.iter().any(|arg| arg == "--personal-mount")
             });
-            let route = format!("/_admin/vaults/{vault_id}/folders/{folder_id}/share-links");
+            let route = format!("/_admin/brains/{brain_id}/folders/{folder_id}/share-links");
             let response = signed_json_request(env, args, "POST", &route, Some(body))?;
             write_command_response(output, json, &response)
         }
@@ -2379,10 +2471,10 @@ fn share<W: Write>(
             write_command_response(output, json, &response)
         }
         Some("source") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let folder_id =
                 option_value(args, "--folder").ok_or(CliError::MissingArgument("--folder"))?;
-            let metadata = fetch_vault_metadata(env, args, &vault_id)?;
+            let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let key_version = metadata
                 .folders
                 .iter()
@@ -2391,13 +2483,13 @@ fn share<W: Write>(
                 .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::SetFolderAccessMode,
                 Some(&folder_id),
                 None,
                 Some(key_version),
             )?;
-            let route = format!("/_admin/vaults/{vault_id}/folders/{folder_id}/share-source");
+            let route = format!("/_admin/brains/{brain_id}/folders/{folder_id}/share-source");
             let response = signed_json_request(
                 env,
                 args,
@@ -2408,27 +2500,27 @@ fn share<W: Write>(
             write_command_response(output, json, &response)
         }
         Some("folder-invite") => {
-            let vault_id = command_vault_id(args, env)?;
+            let brain_id = command_brain_id(args, env)?;
             let folder_id =
                 option_value(args, "--folder").ok_or(CliError::MissingArgument("--folder"))?;
-            let destination_vault_id = option_value(args, "--destination-vault")
-                .ok_or(CliError::MissingArgument("--destination-vault"))?;
+            let destination_brain_id = option_value(args, "--destination-brain")
+                .ok_or(CliError::MissingArgument("--destination-brain"))?;
             let raw_destination_admin = option_value(args, "--destination-admin")
                 .ok_or(CliError::MissingArgument("--destination-admin"))?;
             let destination_admin = resolve_identity_npub(env, args, &raw_destination_admin)?;
-            let metadata = fetch_vault_metadata(env, args, &vault_id)?;
+            let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let key_version = metadata
                 .folders
                 .iter()
                 .find(|folder| folder.id == folder_id)
                 .map(|folder| folder.current_key_version)
                 .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
-            let session_keys = open_vault_session_folder_keys(env, args, &vault_id)?;
-            let folder_key = opened_folder_key(&session_keys, &vault_id, &folder_id, key_version)?;
+            let session_keys = open_brain_session_folder_keys(env, args, &brain_id)?;
+            let folder_key = opened_folder_key(&session_keys, &brain_id, &folder_id, key_version)?;
             let auth = load_signer(env)?;
             let event = admin_access_change_event(
                 env,
-                &vault_id,
+                &brain_id,
                 AdminAccessAction::GrantFolderAccess,
                 Some(&folder_id),
                 Some(&destination_admin),
@@ -2436,7 +2528,7 @@ fn share<W: Write>(
             )?;
             let grant = folder_key_grant_request(
                 &auth,
-                &vault_id,
+                &brain_id,
                 &folder_id,
                 key_version,
                 &destination_admin,
@@ -2444,9 +2536,9 @@ fn share<W: Write>(
                 env,
             )?;
             let route =
-                format!("/_admin/vaults/{vault_id}/folders/{folder_id}/shared-folder-invitations");
+                format!("/_admin/brains/{brain_id}/folders/{folder_id}/shared-folder-invitations");
             let body = serde_json::json!({
-                "destinationVaultId": destination_vault_id,
+                "destinationBrainId": destination_brain_id,
                 "destinationAdminNpub": destination_admin,
                 "grant": grant,
                 "accessChangeEvent": event
@@ -2468,7 +2560,10 @@ fn share<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use finite_brain_core::{EncryptedFolderObjectEnvelope, FolderObjectAad, open_folder_object};
+    use finite_brain_core::{
+        BrainGrantIntent, FolderId, FolderObjectAad, ObjectId, SafeRelativePath,
+        encrypt_folder_object, open_folder_key_grant,
+    };
     use finite_nostr::{
         GiftWrapValidation, NostrPublicKey, decode_http_auth_header, open_gift_wrap,
     };
@@ -2551,10 +2646,10 @@ mod tests {
                     (
                         "200 OK",
                         serde_json::json!({
-                            "vault": {
-                                "id": "vault",
+                            "brain": {
+                                "id": "brain",
                                 "kind": "personal",
-                                "name": "Vault",
+                                "name": "Brain",
                                 "ownerUserId": null
                             },
                             "folders": [{
@@ -2620,7 +2715,7 @@ mod tests {
                     export_body(&[])
                 } else if request_line.contains("/sync/records") {
                     serde_json::json!({
-                        "vaultId": "vault",
+                        "brainId": "brain",
                         "afterSequence": 0,
                         "latestSequence": 0,
                         "records": [],
@@ -2649,10 +2744,10 @@ mod tests {
 
     fn export_body(key_grants: &[Value]) -> String {
         serde_json::json!({
-            "vault": {
-                "id": "vault",
+            "brain": {
+                "id": "brain",
                 "kind": "personal",
-                "name": "Vault",
+                "name": "Brain",
                 "ownerUserId": null
             },
             "folders": [{
@@ -2695,7 +2790,7 @@ mod tests {
                     (
                         "200 OK",
                         serde_json::json!({
-                            "vaultId": "vault",
+                            "brainId": "brain",
                             "afterSequence": 0,
                             "latestSequence": 7,
                             "records": [{
@@ -2792,7 +2887,7 @@ mod tests {
         (url, handle)
     }
 
-    fn start_two_agent_incremental_sync_server(
+    fn start_two_member_identity_incremental_sync_server(
         export_grants: Vec<Value>,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2801,7 +2896,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let started = Instant::now();
             let mut requests = Vec::new();
-            let mut accepted_object = None::<(String, String)>;
+            let mut accepted_object = None::<(String, String, String)>;
             while requests.len() < 5 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
@@ -2814,9 +2909,15 @@ mod tests {
                 } else if request_line.starts_with("PUT ") {
                     let path = request_line.split_whitespace().nth(1).unwrap_or_default();
                     let object_id = path.rsplit('/').next().unwrap_or_default().to_owned();
-                    let body: Value = serde_json::from_str(&body).unwrap();
-                    let ciphertext = body["ciphertext"].as_str().unwrap().to_owned();
-                    accepted_object = Some((object_id, ciphertext));
+                    let body_json: Value = serde_json::from_str(&body).unwrap();
+                    let revision_event =
+                        Event::from_json(body_json["revisionEvent"].to_string()).unwrap();
+                    revision_event.verify().unwrap();
+                    let writer_npub = NostrPublicKey::from_protocol(revision_event.pubkey)
+                        .to_npub()
+                        .unwrap();
+                    let ciphertext = body_json["ciphertext"].as_str().unwrap().to_owned();
+                    accepted_object = Some((object_id, ciphertext, writer_npub));
                     (
                         "200 OK",
                         serde_json::json!({
@@ -2829,7 +2930,7 @@ mod tests {
                 } else if request_line.contains("/sync/bootstrap") {
                     let objects = accepted_object
                         .as_ref()
-                        .map(|(object_id, ciphertext)| {
+                        .map(|(object_id, ciphertext, _)| {
                             vec![serde_json::json!({
                                 "folderId": "general",
                                 "objectId": object_id,
@@ -2850,7 +2951,7 @@ mod tests {
                 } else if request_line.contains("/sync/records") {
                     let records = accepted_object
                         .as_ref()
-                        .map(|(object_id, ciphertext)| {
+                        .map(|(object_id, ciphertext, writer_npub)| {
                             vec![serde_json::json!({
                                 "sequence": 1,
                                 "recordEventId": "evt-agent-b-1",
@@ -2858,7 +2959,7 @@ mod tests {
                                 "folderId": "general",
                                 "objectId": object_id,
                                 "revision": 1,
-                                "actorNpub": "npub-agent-b",
+                                "actorNpub": writer_npub,
                                 "clientCreatedAt": "2026-06-24T20:46:36Z",
                                 "payloadJson": remote_revision_payload_json_for_object(
                                     object_id,
@@ -2871,7 +2972,7 @@ mod tests {
                     (
                         "200 OK",
                         serde_json::json!({
-                            "vaultId": "vault",
+                            "brainId": "brain",
                             "afterSequence": 0,
                             "latestSequence": records.len() as u64,
                             "records": records,
@@ -2923,7 +3024,7 @@ mod tests {
         )
         .unwrap();
         let aad = FolderObjectAad {
-            vault_id: VaultId::new("vault").unwrap(),
+            brain_id: BrainId::new("brain").unwrap(),
             folder_id: FolderId::new("general").unwrap(),
             object_id: ObjectId::new("obj_remote000001").unwrap(),
             key_version: 1,
@@ -2934,7 +3035,7 @@ mod tests {
     }
 
     fn setup_incremental_tree(tmp: &TempDir, latest_sequence: u64) -> PathBuf {
-        setup_incremental_tree_named(tmp, "vault", latest_sequence)
+        setup_incremental_tree_named(tmp, "brain", latest_sequence)
     }
 
     fn setup_incremental_tree_named(tmp: &TempDir, name: &str, latest_sequence: u64) -> PathBuf {
@@ -2942,14 +3043,14 @@ mod tests {
         initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         let now = "2026-06-24T20:46:36Z";
-        write_agent_state(&tree, &AgentState::new("vault", now)).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", now)).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
-            &VaultWorkingTreeStateManifest {
+            &BrainWorkingTreeStateManifest {
                 version: WORKING_TREE_STATE_VERSION.to_owned(),
                 folder_roots: vec![WorkingTreeFolderRoot {
                     folder_id: "general".to_owned(),
-                    source_vault_id: None,
+                    source_brain_id: None,
                     path: "General".to_owned(),
                     can_read: true,
                     metadata_only: false,
@@ -2965,6 +3066,7 @@ mod tests {
     fn start_metadata_export_and_grant_server(
         admin_npub: String,
         export_grants: Vec<Value>,
+        grant_outcome: &'static str,
     ) -> (String, thread::JoinHandle<Vec<(String, String)>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -2980,7 +3082,7 @@ mod tests {
                 let (request_line, body) = read_http_request(&mut stream);
                 let response_body = if request_line.contains("/metadata") {
                     serde_json::json!({
-                        "vaultId": "acme",
+                        "brainId": "acme",
                         "kind": "organization",
                         "name": "Acme",
                         "ownerUserId": null,
@@ -3004,7 +3106,7 @@ mod tests {
                     .to_string()
                 } else if request_line.contains("/export") {
                     serde_json::json!({
-                        "vault": {
+                        "brain": {
                             "id": "acme",
                             "kind": "organization",
                             "name": "Acme",
@@ -3026,7 +3128,11 @@ mod tests {
                     })
                     .to_string()
                 } else {
-                    serde_json::json!({ "status": "ok" }).to_string()
+                    serde_json::json!({
+                        "brainId": "acme",
+                        "outcome": grant_outcome,
+                    })
+                    .to_string()
                 };
                 requests.push((request_line, body));
                 let response = format!(
@@ -3059,10 +3165,10 @@ mod tests {
                 let (request_line, _) = read_http_request(&mut stream);
                 let response_body = if request_line.contains("/export") {
                     serde_json::json!({
-                        "vault": {
-                            "id": "vault",
+                        "brain": {
+                            "id": "brain",
                             "kind": "personal",
-                            "name": "Vault",
+                            "name": "Brain",
                             "ownerUserId": null
                         },
                         "folders": [{
@@ -3107,7 +3213,7 @@ mod tests {
 
     fn export_grant_for_test(
         env: &CliEnvironment,
-        vault_id: &str,
+        brain_id: &str,
         folder_id: &str,
         key_version: u32,
         folder_key: &FolderKey,
@@ -3116,7 +3222,7 @@ mod tests {
         let auth = load_signer(env).unwrap();
         let grant = folder_key_grant_request(
             &auth,
-            vault_id,
+            brain_id,
             folder_id,
             key_version,
             recipient_npub,
@@ -3151,7 +3257,7 @@ mod tests {
                 let (request_line, body) = read_http_request(&mut stream);
                 let response_body = if request_line.contains("/metadata") {
                     serde_json::json!({
-                        "vaultId": "acme",
+                        "brainId": "acme",
                         "kind": "organization",
                         "name": "Acme",
                         "ownerUserId": null,
@@ -3189,7 +3295,7 @@ mod tests {
                     .to_string()
                 } else if request_line.contains("/export") {
                     serde_json::json!({
-                        "vault": {
+                        "brain": {
                             "id": "acme",
                             "kind": "organization",
                             "name": "Acme",
@@ -3223,7 +3329,7 @@ mod tests {
                 } else {
                     serde_json::json!({
                         "id": "invitation-email",
-                        "vaultId": "acme",
+                        "brainId": "acme",
                         "targetKind": "email_bootstrap",
                         "userId": null,
                         "invitedEmail": "friend@example.com",
@@ -3236,7 +3342,7 @@ mod tests {
                         "identities": [],
                         "status": "pending",
                         "inviteCode": "invite-email",
-                        "acceptPath": "/_admin/vault-invitation-links/invite-email/claim",
+                        "acceptPath": "/_admin/brain-invitation-links/invite-email/claim",
                         "initialFolderAccess": ["getting-started", "restricted"],
                         "expiresAt": "2026-06-30T00:00:00.000Z",
                         "createdAt": "2026-06-23T00:00:00.000Z",
@@ -3275,7 +3381,7 @@ mod tests {
                 let (request_line, _) = read_http_request(&mut stream);
                 requests.push(request_line);
                 let body = serde_json::json!({
-                    "vaultId": "acme",
+                    "brainId": "acme",
                     "kind": "organization",
                     "name": "Acme",
                     "ownerUserId": null,
@@ -3292,11 +3398,33 @@ mod tests {
                         "accessUserIds": [],
                         "currentKeyVersion": 2,
                         "setupIncomplete": false
+                    }, {
+                        "id": "leadership",
+                        "name": "Leadership",
+                        "role": "folder",
+                        "access": "admin_only",
+                        "parentFolderId": null,
+                        "path": "leadership",
+                        "sharedFolderSource": false,
+                        "accessUserIds": [],
+                        "currentKeyVersion": 1,
+                        "setupIncomplete": false
+                    }, {
+                        "id": "project",
+                        "name": "Project",
+                        "role": "folder",
+                        "access": "restricted",
+                        "parentFolderId": null,
+                        "path": "project",
+                        "sharedFolderSource": false,
+                        "accessUserIds": ["npub-member"],
+                        "currentKeyVersion": 1,
+                        "setupIncomplete": false
                     }],
                     "mountedFolders": [{
                         "mountId": "mount-1",
-                        "organizationVaultId": "acme",
-                        "sourceVaultId": "partner",
+                        "organizationBrainId": "acme",
+                        "sourceBrainId": "partner",
                         "sourceFolderId": "strategy",
                         "connectionId": "connection-1",
                         "displayName": "Partner Strategy",
@@ -3313,6 +3441,57 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
             requests
+        });
+        (url, handle)
+    }
+
+    fn start_personal_access_listing_server() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (request_line, _) = read_http_request(&mut stream);
+            let body = serde_json::json!({
+                "brainId": "personal-alice",
+                "kind": "personal",
+                "name": "Personal Brain",
+                "ownerUserId": "npub-owner",
+                "personalAgent": { "agentNpub": "npub-agent" },
+                "members": ["npub-owner", "npub-collaborator"],
+                "admins": [],
+                "folders": [{
+                    "id": "private",
+                    "name": "Private",
+                    "role": "folder",
+                    "access": "owner",
+                    "parentFolderId": null,
+                    "path": "private",
+                    "sharedFolderSource": false,
+                    "accessUserIds": [],
+                    "currentKeyVersion": 1,
+                    "setupIncomplete": false
+                }, {
+                    "id": "shared",
+                    "name": "Shared",
+                    "role": "folder",
+                    "access": "restricted",
+                    "parentFolderId": null,
+                    "path": "shared",
+                    "sharedFolderSource": false,
+                    "accessUserIds": ["npub-collaborator"],
+                    "currentKeyVersion": 1,
+                    "setupIncomplete": false
+                }],
+                "mountedFolders": [],
+                "grantCount": 5
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            request_line
         });
         (url, handle)
     }
@@ -3381,28 +3560,6 @@ mod tests {
         let opened = open_gift_wrap(&keys, &event, &GiftWrapValidation::new(recipient)).unwrap();
         let plaintext: Value = serde_json::from_str(&opened.rumor.content).unwrap();
         plaintext["folderKey"].as_str().unwrap().to_owned()
-    }
-
-    fn open_default_page_request(
-        body: &str,
-        vault_id: &str,
-        folder_id: &str,
-        object_id: &str,
-        folder_key: &str,
-    ) -> Value {
-        let body: Value = serde_json::from_str(body).unwrap();
-        let key_version = body["keyVersion"].as_u64().unwrap() as u32;
-        let key = FolderKey::from_base64(folder_key).unwrap();
-        let aad = FolderObjectAad {
-            vault_id: VaultId::new(vault_id).unwrap(),
-            folder_id: finite_brain_core::FolderId::new(folder_id).unwrap(),
-            object_id: ObjectId::new(object_id).unwrap(),
-            key_version,
-        };
-        let envelope =
-            EncryptedFolderObjectEnvelope::from_json(body["ciphertext"].as_str().unwrap()).unwrap();
-        let plaintext = open_folder_object(&key, &aad, &envelope).unwrap();
-        serde_json::from_slice(&plaintext).unwrap()
     }
 
     fn read_http_request(stream: &mut TcpStream) -> (String, String) {
@@ -3479,10 +3636,10 @@ mod tests {
                     (
                         "200 OK",
                         serde_json::json!({
-                            "vault": {
-                                "id": "vault",
+                            "brain": {
+                                "id": "brain",
                                 "kind": "personal",
-                                "name": "Vault",
+                                "name": "Brain",
                                 "ownerUserId": null
                             },
                             "folders": [{
@@ -3631,6 +3788,194 @@ mod tests {
             json["configDir"],
             env_for(&tmp).config_dir.display().to_string()
         );
+    }
+
+    #[test]
+    fn wiki_check_reports_missing_and_ambiguous_links_from_readable_folders_only() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        let now = "2026-06-24T20:46:36Z";
+        write_agent_state(&tree, &AgentState::new("brain", now)).unwrap();
+        for folder in ["Notes/compiled", "Alpha", "Beta", "Locked"] {
+            fs::create_dir_all(tree.join(folder)).unwrap();
+        }
+        fs::write(
+            tree.join("Notes/summary.md"),
+            "# Summary\n\nSee [[compiled/deep.md|Deep Dive]], [[Missing]], and [[Roadmap]].\n",
+        )
+        .unwrap();
+        fs::write(
+            tree.join("Notes/compiled/deep.md"),
+            "# Deep Dive\n\nBack to [Summary](summary.md).\n",
+        )
+        .unwrap();
+        fs::write(tree.join("Alpha/roadmap.md"), "# Roadmap\n").unwrap();
+        fs::write(tree.join("Beta/roadmap.md"), "# Roadmap\n").unwrap();
+        fs::write(tree.join("Locked/roadmap.md"), "# Roadmap\n").unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![
+                    WorkingTreeFolderRoot {
+                        folder_id: "notes".to_owned(),
+                        source_brain_id: None,
+                        path: "Notes".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "alpha".to_owned(),
+                        source_brain_id: None,
+                        path: "Alpha".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "beta".to_owned(),
+                        source_brain_id: None,
+                        path: "Beta".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "locked".to_owned(),
+                        source_brain_id: None,
+                        path: "Locked".to_owned(),
+                        can_read: false,
+                        metadata_only: true,
+                    },
+                ],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+        run_with_env(["wiki", "check", "--json"], env, &mut output).unwrap();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["status"], "issues");
+        assert_eq!(report["pageCount"], 4);
+        assert_eq!(report["resolvedLinkCount"], 2);
+        assert_eq!(report["missingLinkCount"], 1);
+        assert_eq!(report["ambiguousLinkCount"], 1);
+        assert_eq!(report["issues"][0]["path"], "Notes/summary.md");
+        assert_eq!(report["issues"][0]["reference"], "Missing");
+        assert_eq!(report["issues"][0]["status"], "missing");
+        assert_eq!(report["issues"][1]["reference"], "Roadmap");
+        assert_eq!(report["issues"][1]["status"], "ambiguous");
+        assert_eq!(
+            report["issues"][1]["matches"],
+            serde_json::json!(["Alpha/roadmap.md", "Beta/roadmap.md"])
+        );
+    }
+
+    #[test]
+    fn wiki_check_uses_folder_routes_and_normalized_reference_rules() {
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        fs::create_dir_all(tree.join("Local")).unwrap();
+        fs::create_dir_all(tree.join("Mounted")).unwrap();
+        fs::write(
+            tree.join("Local/source.md"),
+            "# Source\n\n[[Guide]] [[guide]] [[Re\u{301}sume\u{301}]] [Angle](<angle.md>) [Web](HTTPS://example.com) [Mail](mailto:person@example.com) ![Diagram](raw/assets/diagram.png) [PDF](raw/assets/source.pdf) [Manual](manual.md \"read\") [Version](guide(v2).md)\n\n`[Ghost](missing.md)`\n\n```md\n```not-a-close\n[Ghost](missing.md)\n[[Ghost]]\n```\n\n    [Ghost](missing.md)\n\nParagraph\n    [Paragraph Guide](paragraph.md)\n\n- item\n\n    [List Guide](list.md)\n\n[[Guide]] [Manual][manual-ref] [Duplicate][duplicate] [see [Manual]](upper.md) [escaped \\] label](manual.md) [Escaped Version](guide\\(v2\\).md)\n\n[Guide]: missing.md\n[manual-ref]: manual.md\n[duplicate]: upper.md\n[duplicate]: missing.md\n",
+        )
+        .unwrap();
+        fs::write(tree.join("Local/upper.md"), "# Guide\n").unwrap();
+        fs::write(tree.join("Local/lower.md"), "# guide\n").unwrap();
+        fs::write(tree.join("Local/resume.md"), "# R\u{e9}sum\u{e9}\n").unwrap();
+        fs::write(tree.join("Local/angle.md"), "# Angle\n").unwrap();
+        fs::write(tree.join("Local/manual.md"), "# Manual\n").unwrap();
+        fs::write(tree.join("Local/guide(v2).md"), "# Version Guide\n").unwrap();
+        fs::write(tree.join("Local/paragraph.md"), "# Paragraph Guide\n").unwrap();
+        fs::write(tree.join("Local/list.md"), "# List Guide\n").unwrap();
+        fs::write(tree.join("Mounted/guide.md"), "# Guide\n").unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![
+                    WorkingTreeFolderRoot {
+                        folder_id: "notes".to_owned(),
+                        source_brain_id: None,
+                        path: "Local".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                    WorkingTreeFolderRoot {
+                        folder_id: "notes".to_owned(),
+                        source_brain_id: Some("mounted-brain".to_owned()),
+                        path: "Mounted".to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    },
+                ],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+        run_with_env(["wiki", "check", "--json"], env, &mut output).unwrap();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["status"], "ok", "{report:#}");
+        assert_eq!(report["pageCount"], 10);
+        assert_eq!(report["resolvedLinkCount"], 9);
+        assert_eq!(report["missingLinkCount"], 0);
+        assert_eq!(report["ambiguousLinkCount"], 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wiki_check_rejects_folder_root_and_intermediate_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
+        let external = tmp.path().join("external");
+        fs::create_dir_all(external.join("Notes")).unwrap();
+        fs::write(external.join("Notes/secret.md"), "# External Secret\n").unwrap();
+
+        for (folder_path, link_path, target) in [
+            ("Notes", tree.join("Notes"), external.join("Notes")),
+            ("Mount/Notes", tree.join("Mount"), external.clone()),
+        ] {
+            symlink(target, &link_path).unwrap();
+            write_json_file(
+                &tree.join(".finitebrain/working-tree-state.json"),
+                &BrainWorkingTreeStateManifest {
+                    version: WORKING_TREE_STATE_VERSION.to_owned(),
+                    folder_roots: vec![WorkingTreeFolderRoot {
+                        folder_id: "notes".to_owned(),
+                        source_brain_id: None,
+                        path: folder_path.to_owned(),
+                        can_read: true,
+                        metadata_only: false,
+                    }],
+                    objects: Vec::new(),
+                    sync: WorkingTreeSyncState { latest_sequence: 0 },
+                },
+            )
+            .unwrap();
+            let mut env = env_for(&tmp);
+            env.cwd = tree.clone();
+            assert!(matches!(
+                run_with_env(["wiki", "check", "--json"], env, &mut Vec::new()),
+                Err(CliError::InsecureWorkingTree { .. })
+            ));
+            fs::remove_file(link_path).unwrap();
+        }
     }
 
     #[test]
@@ -3891,12 +4236,12 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("agent-vault");
+        let tree = tmp.path().join("agent-brain");
         let output = run(
             &tmp,
             &[
                 "open",
-                "agent-vault",
+                "agent-brain",
                 tree.to_str().unwrap(),
                 "--server",
                 "http://127.0.0.1:3015",
@@ -3904,9 +4249,9 @@ mod tests {
             ],
         );
         let json: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(json["vaultId"], "agent-vault");
+        assert_eq!(json["brainId"], "agent-brain");
         assert_eq!(json["daemon"], "running");
-        assert!(tree.join(".finitebrain/vault-directory.json").exists());
+        assert!(tree.join(".finitebrain/brain-directory.json").exists());
         assert!(tree.join(".finitebrain/working-tree-state.json").exists());
         assert!(tree.join(".finitebrain/agent-state.json").exists());
         #[cfg(unix)]
@@ -3915,7 +4260,7 @@ mod tests {
             assert_eq!(unix_mode(&tree.join(".finitebrain")), 0o700);
             assert_eq!(unix_mode(&tree.join(".finitebrain/encrypted-sync")), 0o700);
             assert_eq!(
-                unix_mode(&tree.join(".finitebrain/vault-directory.json")),
+                unix_mode(&tree.join(".finitebrain/brain-directory.json")),
                 0o600
             );
             assert_eq!(
@@ -3933,7 +4278,7 @@ mod tests {
         let mut output = Vec::new();
         run_with_env(["status", "--json"], env, &mut output).unwrap();
         let json: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(json["vaultId"], "agent-vault");
+        assert_eq!(json["brainId"], "agent-brain");
         assert_eq!(json["auth"]["state"], "authenticated");
         assert_eq!(json["daemon"]["state"], "running");
         assert_eq!(json["sync"]["mode"], "automatic");
@@ -3954,7 +4299,7 @@ mod tests {
         run_with_env(
             [
                 "open",
-                "paired-personal-vault",
+                "paired-personal-brain",
                 "--server",
                 "http://127.0.0.1:3015",
                 "--json",
@@ -3968,19 +4313,19 @@ mod tests {
         assert_eq!(
             json["path"],
             working_tree_root
-                .join("paired-personal-vault")
+                .join("paired-personal-brain")
                 .display()
                 .to_string()
         );
         assert!(
             working_tree_root
-                .join("paired-personal-vault/.finitebrain/agent-state.json")
+                .join("paired-personal-brain/.finitebrain/agent-state.json")
                 .exists()
         );
     }
 
     #[test]
-    fn open_rejects_vault_id_path_escape_before_creating_default_tree() {
+    fn open_rejects_brain_id_path_escape_before_creating_default_tree() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
             &tmp,
@@ -3998,20 +4343,20 @@ mod tests {
     }
 
     #[test]
-    fn reopening_same_vault_preserves_sync_state_and_does_not_claim_signer_ownership() {
+    fn reopening_same_brain_preserves_sync_state_and_does_not_claim_signer_ownership() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("paired-personal-vault");
+        let tree = tmp.path().join("paired-personal-brain");
         run(
             &tmp,
-            &["open", "paired-personal-vault", tree.to_str().unwrap()],
+            &["open", "paired-personal-brain", tree.to_str().unwrap()],
         );
-        let directory_path = tree.join(".finitebrain/vault-directory.json");
+        let directory_path = tree.join(".finitebrain/brain-directory.json");
         let directory: Value = serde_json::from_slice(&fs::read(&directory_path).unwrap()).unwrap();
-        assert_eq!(directory["vault"]["ownerNpub"], Value::Null);
+        assert_eq!(directory["brain"]["ownerNpub"], Value::Null);
 
         let state_path = tree.join(".finitebrain/working-tree-state.json");
         let preserved = serde_json::json!({
@@ -4030,12 +4375,12 @@ mod tests {
 
         run(
             &tmp,
-            &["open", "paired-personal-vault", tree.to_str().unwrap()],
+            &["open", "paired-personal-brain", tree.to_str().unwrap()],
         );
 
         assert_eq!(fs::read(&state_path).unwrap(), before);
         let agent_state = read_agent_state(&tree).unwrap();
-        assert_eq!(agent_state.vault_id, "paired-personal-vault");
+        assert_eq!(agent_state.brain_id, "paired-personal-brain");
         assert!(
             agent_state
                 .activity
@@ -4051,9 +4396,9 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("portable-vault");
+        let tree = tmp.path().join("portable-brain");
         initialize_private_working_tree(&tree).unwrap();
-        let directory_path = tree.join(".finitebrain/vault-directory.json");
+        let directory_path = tree.join(".finitebrain/brain-directory.json");
         let state_path = tree.join(".finitebrain/working-tree-state.json");
         write_json_file(&directory_path, &serde_json::json!({ "portable": true })).unwrap();
         write_json_file(&state_path, &serde_json::json!({ "latestSequence": 73 })).unwrap();
@@ -4061,7 +4406,7 @@ mod tests {
         let state_before = fs::read(&state_path).unwrap();
 
         let error = run_with_env(
-            ["open", "portable-vault", tree.to_str().unwrap()],
+            ["open", "portable-brain", tree.to_str().unwrap()],
             env_for(&tmp),
             &mut Vec::new(),
         )
@@ -4078,8 +4423,8 @@ mod tests {
     #[test]
     fn insecure_working_tree_fails_closed_and_repair_does_not_touch_member_content() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let member_file = tree.join("General/member-note.md");
         fs::create_dir_all(member_file.parent().unwrap()).unwrap();
         fs::write(&member_file, "member plaintext\n").unwrap();
@@ -4135,8 +4480,8 @@ mod tests {
     #[test]
     fn managed_symlink_is_rejected_before_external_state_is_read() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let external = tmp.path().join("external-agent-state.json");
         fs::write(&external, "external sentinel").unwrap();
         let agent_state = tree.join(".finitebrain/agent-state.json");
@@ -4168,8 +4513,8 @@ mod tests {
     #[test]
     fn broken_control_directory_symlink_is_discovered_without_following_it() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let control_dir = tree.join(".finitebrain");
         fs::rename(&control_dir, tree.join("finitebrain-backup")).unwrap();
         symlink(tmp.path().join("missing-external-control"), &control_dir).unwrap();
@@ -4198,8 +4543,8 @@ mod tests {
     #[test]
     fn repair_recovers_an_untraversable_control_directory() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let control_dir = tree.join(".finitebrain");
         fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o100)).unwrap();
         let mut env = env_for(&tmp);
@@ -4225,8 +4570,8 @@ mod tests {
     #[test]
     fn unreadable_managed_file_reports_typed_permissions_and_repair_recovers_it() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let state_path = tree.join(".finitebrain/agent-state.json");
         fs::set_permissions(&state_path, fs::Permissions::from_mode(0o000)).unwrap();
         let mut env = env_for(&tmp);
@@ -4258,8 +4603,8 @@ mod tests {
     #[test]
     fn finite_control_file_replacement_is_private_and_atomic() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let agent_state_path = tree.join(".finitebrain/agent-state.json");
         let old_body = fs::read_to_string(&agent_state_path).unwrap();
         let mut old_handle = fs::File::open(&agent_state_path).unwrap();
@@ -4292,15 +4637,15 @@ mod tests {
     #[test]
     fn legacy_agent_state_is_scrubbed_and_restored_legacy_state_is_scrubbed_again() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let state_path = tree.join(".finitebrain/agent-state.json");
         let raw_folder_key = FolderKey::from_bytes([99; 32]).to_base64();
         let mut legacy: Value =
             serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
         legacy["version"] = Value::String("finitebrain-agent-state-v1".to_owned());
         legacy["localFolderKeys"] = serde_json::json!([{
-            "vaultId": "vault",
+            "brainId": "brain",
             "folderId": "general",
             "keyVersion": 1,
             "keyBase64": raw_folder_key,
@@ -4308,7 +4653,7 @@ mod tests {
             "openedAt": "2026-06-24T20:46:36Z"
         }]);
         legacy["unlockedFolders"] = serde_json::json!([{
-            "vaultId": "vault",
+            "brainId": "brain",
             "folderId": "general",
             "keyVersion": 1,
             "source": "legacy-test",
@@ -4349,8 +4694,8 @@ mod tests {
     #[test]
     fn legacy_keys_are_scrubbed_before_insecure_permissions_block_the_command() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let state_path = tree.join(".finitebrain/agent-state.json");
         let raw_folder_key = FolderKey::from_bytes([101; 32]).to_base64();
         let mut legacy: Value =
@@ -4389,8 +4734,8 @@ mod tests {
     #[test]
     fn unknown_future_agent_state_is_rejected_without_rewrite() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let state_path = tree.join(".finitebrain/agent-state.json");
         let mut future: Value =
             serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
@@ -4410,8 +4755,8 @@ mod tests {
     #[test]
     fn removed_unlock_fails_with_sync_guidance_after_scrubbing_legacy_state() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let state_path = tree.join(".finitebrain/agent-state.json");
         let raw_folder_key = FolderKey::from_bytes([100; 32]).to_base64();
         let mut legacy: Value =
@@ -4456,14 +4801,17 @@ mod tests {
         env.cwd = tree.clone();
         let export_grant =
             export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
-        let (server_url, server) =
-            start_metadata_export_and_grant_server(admin_npub.clone(), vec![export_grant]);
+        let (server_url, server) = start_metadata_export_and_grant_server(
+            admin_npub.clone(),
+            vec![export_grant],
+            "granted",
+        );
         let mut output = Vec::new();
         run_with_env(
             [
                 "permissions",
                 "grant-folder",
-                "--vault",
+                "--brain",
                 "acme",
                 "--folder",
                 "general",
@@ -4493,6 +4841,64 @@ mod tests {
     }
 
     #[test]
+    fn redundant_folder_grant_reports_that_the_person_already_has_access() {
+        let output = run_redundant_folder_grant(false);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "This person already has access.\n"
+        );
+    }
+
+    #[test]
+    fn redundant_folder_grant_json_preserves_machine_readable_outcome() {
+        let output = run_redundant_folder_grant(true);
+        let response: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["brainId"], "acme");
+        assert_eq!(response["outcome"], "alreadyHasAccess");
+    }
+
+    fn run_redundant_folder_grant(json: bool) -> Vec<u8> {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let admin_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+        let folder_key = FolderKey::from_bytes([7; 32]);
+        let tree = tmp.path().join("org");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(&tree, &AgentState::new("acme", "2026-06-24T20:46:36Z")).unwrap();
+
+        let mut env = env_for(&tmp);
+        env.cwd = tree;
+        let export_grant =
+            export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
+        let (server_url, server) = start_metadata_export_and_grant_server(
+            admin_npub.clone(),
+            vec![export_grant],
+            "alreadyHasAccess",
+        );
+        let mut output = Vec::new();
+        let mut args = vec![
+            "permissions".to_owned(),
+            "grant-folder".to_owned(),
+            "--brain".to_owned(),
+            "acme".to_owned(),
+            "--folder".to_owned(),
+            "general".to_owned(),
+            "--target".to_owned(),
+            admin_npub,
+            "--server".to_owned(),
+            server_url,
+        ];
+        if json {
+            args.push("--json".to_owned());
+        }
+
+        run_with_env(args, env, &mut output).unwrap();
+
+        server.join().unwrap();
+        output
+    }
+
+    #[test]
     fn sync_now_uses_session_key_without_persisting_it() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
@@ -4501,9 +4907,9 @@ mod tests {
         );
         let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
         let folder_key = FolderKey::from_bytes([17; 32]);
-        let tree = tmp.path().join("vault");
+        let tree = tmp.path().join("brain");
         initialize_private_working_tree(&tree).unwrap();
-        write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
         let agent_state_path = tree.join(".finitebrain/agent-state.json");
         let mut durable_state: Value =
             serde_json::from_str(&fs::read_to_string(&agent_state_path).unwrap()).unwrap();
@@ -4518,7 +4924,7 @@ mod tests {
         write_json_file(&agent_state_path, &durable_state).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
-            &VaultWorkingTreeStateManifest {
+            &BrainWorkingTreeStateManifest {
                 version: WORKING_TREE_STATE_VERSION.to_owned(),
                 folder_roots: Vec::new(),
                 objects: Vec::new(),
@@ -4529,7 +4935,7 @@ mod tests {
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
         let export_grant =
-            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
         let ciphertext =
             remote_page_ciphertext(&folder_key, "compiled/session.md", "# Session only\n");
         let (server_url, server) = start_session_key_sync_server(export_grant, ciphertext, 2);
@@ -4570,9 +4976,9 @@ mod tests {
         );
         let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
         let folder_key = FolderKey::from_bytes([17; 32]);
-        let tree = tmp.path().join("vault");
+        let tree = tmp.path().join("brain");
         initialize_private_working_tree(&tree).unwrap();
-        write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
         let state_path = tree.join(".finitebrain/agent-state.json");
         let mut legacy: Value =
             serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
@@ -4588,7 +4994,7 @@ mod tests {
         write_json_file(&state_path, &legacy).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
-            &VaultWorkingTreeStateManifest {
+            &BrainWorkingTreeStateManifest {
                 version: WORKING_TREE_STATE_VERSION.to_owned(),
                 folder_roots: Vec::new(),
                 objects: Vec::new(),
@@ -4599,7 +5005,7 @@ mod tests {
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
         let mut export_grant =
-            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
         export_grant["wrappedEventJson"] = Value::String("not-a-nostr-event".to_owned());
         let (server_url, server) = start_session_key_sync_server(export_grant, String::new(), 1);
 
@@ -4629,8 +5035,8 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let state_path = tree.join(".finitebrain/agent-state.json");
         let raw_folder_key = FolderKey::from_bytes([103; 32]).to_base64();
         let mut legacy: Value =
@@ -4670,38 +5076,56 @@ mod tests {
     }
 
     #[test]
-    fn vault_create_writes_default_pages() {
+    fn brain_bootstrap_personal_uses_the_signed_agent_authority_route_without_owner_input() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let (server_url, server) = start_ok_capture_server(1);
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "brain",
+                "bootstrap-personal",
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .0
+                .starts_with("POST /_admin/personal-brain-bootstrap ")
+        );
+        assert_eq!(requests[0].1, "{}");
+    }
+
+    #[test]
+    fn brain_create_starts_personal_and_organization_brains_empty() {
         let cases = [
-            (
-                "personal",
-                VaultKind::Personal,
-                "personal-defaults",
-                "Personal defaults",
-                vec!["getting-started", "restricted"],
-            ),
-            (
-                "organization",
-                VaultKind::Organization,
-                "org-defaults",
-                "Org defaults",
-                vec!["getting-started", "restricted"],
-            ),
+            ("personal", "personal-empty", "Personal empty"),
+            ("organization", "org-empty", "Org empty"),
         ];
 
-        for (kind, vault_kind, vault_id, name, expected_grant_folders) in cases {
+        for (kind, brain_id, name) in cases {
             let tmp = TempDir::new().unwrap();
-            let secret = "0000000000000000000000000000000000000000000000000000000000000001";
-            import_identity_secret(&tmp, secret);
-            let actor_npub = run(&tmp, &["signer", "public-key"]).trim().to_owned();
-            let default_pages = finite_brain_core::default_vault_pages(vault_kind);
-            let (server_url, server) = start_ok_capture_server(1 + default_pages.len());
+            import_identity_secret(&tmp, TEST_SECRET_HEX);
+            let (server_url, server) = start_ok_capture_server(1);
 
             let mut output = Vec::new();
             run_with_env(
                 [
-                    "vault",
+                    "brain",
                     "create",
-                    vault_id,
+                    brain_id,
                     "--kind",
                     kind,
                     "--name",
@@ -4719,66 +5143,125 @@ mod tests {
             assert_eq!(response["status"], "ok");
 
             let requests = server.join().unwrap();
-            assert_eq!(requests.len(), 1 + default_pages.len());
+            assert_eq!(requests.len(), 1);
             let (_, post_body) = requests
                 .iter()
-                .find(|(request, _)| request.starts_with("POST /_admin/vaults "))
-                .expect("vault create request captured");
+                .find(|(request, _)| request.starts_with("POST /_admin/brains "))
+                .expect("brain create request captured");
             let post_body: Value = serde_json::from_str(post_body).unwrap();
-            assert_eq!(post_body["vaultId"], vault_id);
+            assert_eq!(post_body["brainId"], brain_id);
             assert_eq!(post_body["kind"], kind);
             assert_eq!(post_body["name"], name);
-            assert_eq!(
-                post_body["bootstrapGrants"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|grant| grant["folderId"].as_str().unwrap())
-                    .collect::<Vec<_>>(),
-                expected_grant_folders
-            );
-
-            let folder_keys = post_body["bootstrapGrants"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|grant| {
-                    let folder_id = grant["folderId"].as_str().unwrap().to_owned();
-                    let folder_key = grant_plaintext_folder_key(grant, secret, &actor_npub);
-                    (folder_id, folder_key)
-                })
-                .collect::<BTreeMap<_, _>>();
-
-            for page in default_pages {
-                let folder_key = folder_keys
-                    .get(page.folder_id)
-                    .expect("default Page Folder grant captured");
-                let (request, body) = requests
-                    .iter()
-                    .find(|(request, _)| {
-                        request.starts_with(&format!(
-                            "PUT /_admin/vaults/{vault_id}/folders/{}/objects/{} ",
-                            page.folder_id, page.object_id
-                        ))
-                    })
-                    .expect("default Page write captured");
-                assert!(request.contains(page.object_id));
-                let plaintext = open_default_page_request(
-                    body,
-                    vault_id,
-                    page.folder_id,
-                    page.object_id,
-                    folder_key,
-                );
-                assert_eq!(plaintext["version"], "finite-folder-object-page-v1");
-                assert_eq!(plaintext["path"], page.path);
-                assert!(plaintext["markdown"].as_str().unwrap().starts_with('#'));
-            }
+            assert!(post_body["bootstrapGrants"].as_array().unwrap().is_empty());
         }
     }
 
     #[test]
-    fn vault_list_discovers_an_explicitly_paired_personal_vault() {
+    fn brain_create_includes_authenticated_requester_without_bootstrap_grants() {
+        let tmp = TempDir::new().unwrap();
+        let requester_keys = Keys::generate();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let requester_npub = NostrPublicKey::from_protocol(requester_keys.public_key())
+            .to_npub()
+            .unwrap();
+        let (server_url, server) = start_ok_capture_server(1);
+
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "brain",
+                "create",
+                "org-requested",
+                "--kind",
+                "organization",
+                "--name",
+                "Requested Org",
+                "--requesting-user-npub",
+                &requester_npub,
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        let requests = server.join().unwrap();
+        let (_, post_body) = requests
+            .iter()
+            .find(|(request, _)| request.starts_with("POST /_admin/brains "))
+            .expect("brain create request captured");
+        let post_body: Value = serde_json::from_str(post_body).unwrap();
+        assert_eq!(post_body["requestingUserNpub"], requester_npub);
+        assert!(post_body["bootstrapGrants"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn brain_create_rejects_duplicate_requester_options() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let first_requester = NostrPublicKey::from_protocol(Keys::generate().public_key())
+            .to_npub()
+            .unwrap();
+        let second_requester = NostrPublicKey::from_protocol(Keys::generate().public_key())
+            .to_npub()
+            .unwrap();
+        let mut output = Vec::new();
+
+        let error = run_with_env(
+            [
+                "brain",
+                "create",
+                "org-requested",
+                "--kind",
+                "organization",
+                "--requesting-user-npub",
+                &first_requester,
+                "--requesting-user-npub",
+                &second_requester,
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid input: --requesting-user-npub may only be supplied once"
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn brain_create_rejects_a_requester_option_without_an_identity() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let mut output = Vec::new();
+
+        let error = run_with_env(
+            [
+                "brain",
+                "create",
+                "org-requested",
+                "--kind",
+                "organization",
+                "--requesting-user-npub",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "missing required argument: --requesting-user-npub"
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn brain_list_discovers_an_explicitly_paired_personal_brain() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
             &tmp,
@@ -4790,10 +5273,10 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let (request_line, _) = read_http_request(&mut stream);
             let body = serde_json::json!({
-                "vaults": [{
-                    "vaultId": "personal-user",
+                "brains": [{
+                    "brainId": "personal-user",
                     "kind": "personal",
-                    "name": "Personal Vault",
+                    "name": "Personal Brain",
                     "role": "member",
                     "inviteCode": null
                 }]
@@ -4811,17 +5294,17 @@ mod tests {
         let mut output = Vec::new();
 
         run_with_env(
-            ["vault", "list", "--server", &server_url, "--json"],
+            ["brain", "list", "--server", &server_url, "--json"],
             env_for(&tmp),
             &mut output,
         )
         .unwrap();
 
         let response: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(response["vaults"][0]["vaultId"], "personal-user");
-        assert_eq!(response["vaults"][0]["kind"], "personal");
-        assert_eq!(response["vaults"][0]["role"], "member");
-        assert_eq!(server.join().unwrap(), "GET /_admin/vaults HTTP/1.1");
+        assert_eq!(response["brains"][0]["brainId"], "personal-user");
+        assert_eq!(response["brains"][0]["kind"], "personal");
+        assert_eq!(response["brains"][0]["role"], "member");
+        assert_eq!(server.join().unwrap(), "GET /_admin/brains HTTP/1.1");
     }
 
     #[test]
@@ -4831,14 +5314,14 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let (server_url, server) = start_metadata_listing_server(3);
+        let (server_url, server) = start_metadata_listing_server(4);
 
         let mut output = Vec::new();
         run_with_env(
             [
                 "folder",
                 "list",
-                "--vault",
+                "--brain",
                 "acme",
                 "--server",
                 &server_url,
@@ -4857,7 +5340,7 @@ mod tests {
             [
                 "mount",
                 "list",
-                "--vault",
+                "--brain",
                 "acme",
                 "--server",
                 &server_url,
@@ -4876,7 +5359,7 @@ mod tests {
             [
                 "access",
                 "list",
-                "--vault",
+                "--brain",
                 "acme",
                 "--server",
                 &server_url,
@@ -4887,18 +5370,102 @@ mod tests {
         )
         .unwrap();
         let access: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(access["vaultId"], "acme");
+        assert_eq!(access["brainId"], "acme");
         assert_eq!(access["grantCount"], 3);
         assert_eq!(access["folders"][0]["currentKeyVersion"], 2);
-        assert_eq!(access["mountedFolders"][0]["sourceVaultId"], "partner");
+        assert!(access["folders"][0].get("accessUserIds").is_none());
+        assert_eq!(
+            access["folders"][0]["explicitAccessUserIds"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            access["folders"][0]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-admin", "npub-member"])
+        );
+        assert_eq!(
+            access["folders"][1]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-admin"])
+        );
+        assert_eq!(
+            access["folders"][2]["explicitAccessUserIds"],
+            serde_json::json!(["npub-member"])
+        );
+        assert_eq!(
+            access["folders"][2]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-admin", "npub-member"])
+        );
+        assert_eq!(access["mountedFolders"][0]["sourceBrainId"], "partner");
+
+        let mut output = Vec::new();
+        run_with_env(
+            ["access", "list", "--brain", "acme", "--server", &server_url],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+        let access_text = String::from_utf8(output).unwrap();
+        assert!(access_text.contains(
+            "folder general path=general access=all_members keyVersion=2 state=ready shared-source explicitAccessUserIds=[] effectiveAccessUserIds=[npub-admin,npub-member]"
+        ));
+        assert!(access_text.contains(
+            "folder leadership path=leadership access=admin_only keyVersion=1 state=ready explicitAccessUserIds=[] effectiveAccessUserIds=[npub-admin]"
+        ));
+        assert!(access_text.contains(
+            "folder project path=project access=restricted keyVersion=1 state=ready explicitAccessUserIds=[npub-member] effectiveAccessUserIds=[npub-admin,npub-member]"
+        ));
 
         let requests = server.join().unwrap();
         assert_eq!(
             requests
                 .iter()
-                .filter(|request| request.contains("/_admin/vaults/acme/metadata"))
+                .filter(|request| request.contains("/_admin/brains/acme/metadata"))
                 .count(),
-            3
+            4
+        );
+    }
+
+    #[test]
+    fn access_list_reports_personal_owner_and_personal_agent_as_effective() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let (server_url, server) = start_personal_access_listing_server();
+        let mut output = Vec::new();
+
+        run_with_env(
+            [
+                "access",
+                "list",
+                "--brain",
+                "personal-alice",
+                "--server",
+                &server_url,
+                "--json",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        let access: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            access["folders"][0]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-agent", "npub-owner"])
+        );
+        assert!(access["folders"][0].get("accessUserIds").is_none());
+        assert_eq!(
+            access["folders"][1]["explicitAccessUserIds"],
+            serde_json::json!(["npub-collaborator"])
+        );
+        assert_eq!(
+            access["folders"][1]["effectiveAccessUserIds"],
+            serde_json::json!(["npub-agent", "npub-collaborator", "npub-owner"])
+        );
+        assert_eq!(
+            server.join().unwrap(),
+            "GET /_admin/brains/personal-alice/metadata HTTP/1.1"
         );
     }
 
@@ -4910,7 +5477,7 @@ mod tests {
             [
                 "access",
                 "revoke",
-                "--vault",
+                "--brain",
                 "acme",
                 "--folder",
                 "general",
@@ -4968,7 +5535,7 @@ mod tests {
             [
                 "access",
                 "revoke",
-                "--vault",
+                "--brain",
                 "acme",
                 "--folder",
                 "general",
@@ -4990,7 +5557,7 @@ mod tests {
         let requests = server.join().unwrap();
         let (request, body) = requests.first().expect("delete request captured");
         assert!(
-            request.starts_with("DELETE /_admin/vaults/acme/folders/general/access/npub-target")
+            request.starts_with("DELETE /_admin/brains/acme/folders/general/access/npub-target")
         );
         let body: Value = serde_json::from_str(body).unwrap();
         assert_eq!(body["newKeyVersion"], 2);
@@ -5013,7 +5580,7 @@ mod tests {
             [
                 "invites",
                 "create",
-                "--vault",
+                "--brain",
                 "acme",
                 "--target",
                 &target,
@@ -5032,7 +5599,7 @@ mod tests {
 
         let requests = server.join().unwrap();
         let (request, body) = requests.first().expect("invite request captured");
-        assert!(request.starts_with("POST /_admin/vaults/acme/invitations"));
+        assert!(request.starts_with("POST /_admin/brains/acme/invitations"));
         let body: Value = serde_json::from_str(body).unwrap();
         assert_eq!(body["targetNpub"], target);
         assert_eq!(body["initialFolderAccess"][0], "general");
@@ -5069,7 +5636,7 @@ mod tests {
             [
                 "invites",
                 "create",
-                "--vault",
+                "--brain",
                 "acme",
                 "--target",
                 "friend@example.com",
@@ -5096,10 +5663,10 @@ mod tests {
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 3);
-        assert!(requests[0].0.contains("/_admin/vaults/acme/metadata"));
-        assert!(requests[1].0.contains("/_admin/vaults/acme/export"));
+        assert!(requests[0].0.contains("/_admin/brains/acme/metadata"));
+        assert!(requests[1].0.contains("/_admin/brains/acme/export"));
         let (request, body) = &requests[2];
-        assert!(request.starts_with("POST /_admin/vaults/acme/invitations"));
+        assert!(request.starts_with("POST /_admin/brains/acme/invitations"));
         assert!(
             !body.contains(invite_secret),
             "server-visible request body must not contain invite secret"
@@ -5229,7 +5796,7 @@ mod tests {
             [
                 "invites",
                 "accept",
-                "--vault",
+                "--brain",
                 "bavinck-org",
                 "--id",
                 "invitation-4f82a37c1b82bcdd54973c466cdde914",
@@ -5244,10 +5811,10 @@ mod tests {
 
         let requests = server.join().unwrap();
         assert!(requests[0].0.starts_with(
-            "POST /_admin/vault-invitation-links/invite-0fe6eda60e1bf6e662acb8e2b5c425d9/accept"
+            "POST /_admin/brain-invitation-links/invite-0fe6eda60e1bf6e662acb8e2b5c425d9/accept"
         ));
         assert!(requests[1].0.starts_with(
-            "POST /_admin/vaults/bavinck-org/invitations/invitation-4f82a37c1b82bcdd54973c466cdde914/accept"
+            "POST /_admin/brains/bavinck-org/invitations/invitation-4f82a37c1b82bcdd54973c466cdde914/accept"
         ));
     }
 
@@ -5272,13 +5839,13 @@ mod tests {
         let export_grant =
             export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
         let (server_url, server) =
-            start_metadata_export_and_grant_server(admin_npub, vec![export_grant]);
+            start_metadata_export_and_grant_server(admin_npub, vec![export_grant], "granted");
         let mut output = Vec::new();
         run_with_env(
             [
                 "share",
                 "link",
-                "--vault",
+                "--brain",
                 "acme",
                 "--folder",
                 "general",
@@ -5329,17 +5896,17 @@ mod tests {
         let export_grant =
             export_grant_for_test(&env, "acme", "general", 1, &folder_key, &admin_npub);
         let (server_url, server) =
-            start_metadata_export_and_grant_server(admin_npub, vec![export_grant]);
+            start_metadata_export_and_grant_server(admin_npub, vec![export_grant], "granted");
         let mut output = Vec::new();
         run_with_env(
             [
                 "share",
                 "folder-invite",
-                "--vault",
+                "--brain",
                 "acme",
                 "--folder",
                 "general",
-                "--destination-vault",
+                "--destination-brain",
                 "partner",
                 "--destination-admin",
                 &destination_admin_npub,
@@ -5369,21 +5936,21 @@ mod tests {
     #[test]
     fn daemon_conflicts_activity_and_access_commands_use_agent_state() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
-        let roots = VaultWorkingTreeStateManifest {
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
+        let roots = BrainWorkingTreeStateManifest {
             version: WORKING_TREE_STATE_VERSION.to_owned(),
             folder_roots: vec![
                 WorkingTreeFolderRoot {
                     folder_id: "general".to_owned(),
-                    source_vault_id: None,
+                    source_brain_id: None,
                     path: "General".to_owned(),
                     can_read: true,
                     metadata_only: false,
                 },
                 WorkingTreeFolderRoot {
                     folder_id: "locked".to_owned(),
-                    source_vault_id: None,
+                    source_brain_id: None,
                     path: "Locked".to_owned(),
                     can_read: false,
                     metadata_only: true,
@@ -5452,8 +6019,8 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let (server_url, server) = start_empty_sync_server();
 
         let mut env = env_for(&tmp);
@@ -5479,11 +6046,11 @@ mod tests {
         assert_eq!(json["lastStatus"], "caught-up");
 
         let requests = server.join().unwrap();
-        assert!(requests[0].contains("/_admin/vaults/vault/export"));
+        assert!(requests[0].contains("/_admin/brains/brain/export"));
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/records?after=0"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/records?after=0"))
         );
 
         let state = read_agent_state(&tree).unwrap();
@@ -5516,8 +6083,8 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let (server_url, server) = start_empty_sync_server();
 
         let mut env = env_for(&tmp);
@@ -5574,7 +6141,7 @@ mod tests {
         env.cwd = tree.clone();
         let actor_npub = load_signer(&env).unwrap().npub;
         let export_grant =
-            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
         let (server_url, server) =
             start_incremental_remote_sync_server(ciphertext, vec![export_grant]);
         let mut output = Vec::new();
@@ -5608,24 +6175,24 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/records?after=0"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/records?after=0"))
         );
     }
 
     #[test]
     fn pending_working_tree_change_count_detects_local_markdown() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
+        let tree = tmp.path().join("brain");
         initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
-        write_agent_state(&tree, &AgentState::new("vault", "2026-06-24T20:46:36Z")).unwrap();
+        write_agent_state(&tree, &AgentState::new("brain", "2026-06-24T20:46:36Z")).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
-            &VaultWorkingTreeStateManifest {
+            &BrainWorkingTreeStateManifest {
                 version: WORKING_TREE_STATE_VERSION.to_owned(),
                 folder_roots: vec![WorkingTreeFolderRoot {
                     folder_id: "general".to_owned(),
-                    source_vault_id: None,
+                    source_brain_id: None,
                     path: "General".to_owned(),
                     can_read: true,
                     metadata_only: false,
@@ -5647,8 +6214,8 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
 
         let mut env = env_for(&tmp);
         env.cwd = tree.clone();
@@ -5715,7 +6282,7 @@ mod tests {
         env.cwd = tree.clone();
         let actor_npub = load_signer(&env).unwrap().npub;
         let export_grant =
-            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
         let (server_url, server) =
             start_incremental_remote_sync_server(ciphertext, vec![export_grant]);
         let mut output = Vec::new();
@@ -5750,16 +6317,16 @@ mod tests {
         assert_eq!(tree_state.objects.len(), 1);
 
         let requests = server.join().unwrap();
-        assert!(requests[0].contains("/_admin/vaults/vault/export"));
+        assert!(requests[0].contains("/_admin/brains/brain/export"));
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/records?after=0"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/records?after=0"))
         );
         assert!(
             !requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/bootstrap"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/bootstrap"))
         );
     }
 
@@ -5778,7 +6345,7 @@ mod tests {
         env.cwd = tree;
         let actor_npub = load_signer(&env).unwrap().npub;
         let export_grant =
-            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
         let (server_url, server) =
             start_incremental_remote_sync_server(ciphertext, vec![export_grant]);
         let mut output = Vec::new();
@@ -5793,14 +6360,16 @@ mod tests {
         assert!(text.contains("applied-remote-records latestSequence=7"));
         assert!(text.contains("local changes: none"));
         assert!(text.contains("remote changes:"));
-        assert!(text.contains("- applied create General/compiled/summary.md seq=7"));
+        assert!(
+            text.contains("- applied create General/compiled/summary.md seq=7 actor=npub-remote")
+        );
         assert!(text.contains("conflicts: none"));
 
         let requests = server.join().unwrap();
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/records?after=0"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/records?after=0"))
         );
     }
 
@@ -5820,7 +6389,7 @@ mod tests {
         env.cwd = tree.clone();
         let actor_npub = load_signer(&env).unwrap().npub;
         let export_grant =
-            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
         let (server_url, server) = start_expired_cursor_sync_server(ciphertext, vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
@@ -5845,52 +6414,57 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/records?after=2"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/records?after=2"))
         );
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/bootstrap"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/bootstrap"))
         );
     }
 
     #[test]
-    fn two_agent_sync_uses_incremental_records_for_second_working_tree() {
+    fn two_member_identity_sync_reports_writer_identity_to_receiver() {
         let tmp = TempDir::new().unwrap();
-        let nsec = "0000000000000000000000000000000000000000000000000000000000000001";
+        let agent_a_nsec = "0000000000000000000000000000000000000000000000000000000000000001";
+        let agent_b_nsec = "0000000000000000000000000000000000000000000000000000000000000002";
         let agent_a_config = tmp.path().join("agent-a-config");
         let agent_b_config = tmp.path().join("agent-b-config");
-        let agent_a_auth_env = CliEnvironment {
-            cwd: tmp.path().to_path_buf(),
+        let agent_a_tree = setup_incremental_tree_named(&tmp, "agent-a", 0);
+        let agent_b_tree = setup_incremental_tree_named(&tmp, "agent-b", 0);
+        let env_a = CliEnvironment {
+            cwd: agent_a_tree.clone(),
             config_dir: agent_a_config.clone(),
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
-            finite_home: Some(tmp.path().join("finite-home")),
+            finite_home: Some(tmp.path().join("finite-home-a")),
         };
-        // Both agents share the one Finite identity: import once.
-        import_identity_for(&agent_a_auth_env, nsec);
-        let folder_key = FolderKey::from_bytes([6; 32]);
-        let agent_a_tree = setup_incremental_tree_named(&tmp, "agent-a", 0);
-        let agent_b_tree = setup_incremental_tree_named(&tmp, "agent-b", 0);
-        fs::write(agent_b_tree.join("General/shared.md"), "# Shared\n").unwrap();
-
         let env_b = CliEnvironment {
             cwd: agent_b_tree.clone(),
             config_dir: agent_b_config,
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
-            finite_home: Some(tmp.path().join("finite-home")),
+            finite_home: Some(tmp.path().join("finite-home-b")),
         };
-        let actor_npub = load_signer(&env_b).unwrap().npub;
-        let export_grant =
-            export_grant_for_test(&env_b, "vault", "general", 1, &folder_key, &actor_npub);
-        let (server_url, server) = start_two_agent_incremental_sync_server(vec![export_grant]);
+        import_identity_for(&env_a, agent_a_nsec);
+        import_identity_for(&env_b, agent_b_nsec);
+        fs::write(agent_b_tree.join("General/shared.md"), "# Shared\n").unwrap();
+
+        let agent_a_npub = load_signer(&env_a).unwrap().npub;
+        let agent_b_npub = load_signer(&env_b).unwrap().npub;
+        assert_ne!(agent_a_npub, agent_b_npub);
+        let folder_key = FolderKey::from_bytes([6; 32]);
+        let export_grants = vec![
+            export_grant_for_test(&env_b, "brain", "general", 1, &folder_key, &agent_a_npub),
+            export_grant_for_test(&env_b, "brain", "general", 1, &folder_key, &agent_b_npub),
+        ];
+        let (server_url, server) = start_two_member_identity_incremental_sync_server(export_grants);
         let mut output_b = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
-            env_b,
+            env_b.clone(),
             &mut output_b,
         )
         .unwrap();
@@ -5898,14 +6472,6 @@ mod tests {
         assert_eq!(json_b["status"], "pushed-local-changes");
         assert_eq!(json_b["localChanges"].as_array().unwrap().len(), 1);
 
-        let env_a = CliEnvironment {
-            cwd: agent_a_tree.clone(),
-            config_dir: agent_a_config,
-            working_tree_root: None,
-            now: Some("2026-06-24T20:46:36Z".to_owned()),
-            identity_authority_url: None,
-            finite_home: Some(tmp.path().join("finite-home")),
-        };
         let mut output_a = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
@@ -5921,6 +6487,7 @@ mod tests {
         assert_eq!(json_a["remoteChanges"][0]["status"], "applied");
         assert_eq!(json_a["remoteChanges"][0]["sequence"], 1);
         assert_eq!(json_a["remoteChanges"][0]["path"], "General/shared.md");
+        assert_eq!(json_a["remoteChanges"][0]["actorNpub"], agent_b_npub);
         assert_eq!(
             fs::read_to_string(agent_a_tree.join("General/shared.md")).unwrap(),
             "# Shared\n"
@@ -5939,12 +6506,12 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/bootstrap"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/bootstrap"))
         );
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/records?after=0"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/records?after=0"))
         );
     }
 
@@ -5955,24 +6522,24 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("vault");
+        let tree = tmp.path().join("brain");
         initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         fs::write(tree.join("General/new.md"), "# New\n").unwrap();
         let folder_key = FolderKey::from_bytes([9; 32]);
 
         let now = "2026-06-24T20:46:36Z";
-        let mut state = AgentState::new("vault", now);
+        let mut state = AgentState::new("brain", now);
         state.server_url = Some("http://127.0.0.1:9".to_owned());
         state.daemon.state = DaemonRunState::Running;
         write_agent_state(&tree, &state).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
-            &VaultWorkingTreeStateManifest {
+            &BrainWorkingTreeStateManifest {
                 version: WORKING_TREE_STATE_VERSION.to_owned(),
                 folder_roots: vec![WorkingTreeFolderRoot {
                     folder_id: "general".to_owned(),
-                    source_vault_id: None,
+                    source_brain_id: None,
                     path: "General".to_owned(),
                     can_read: true,
                     metadata_only: false,
@@ -5987,7 +6554,7 @@ mod tests {
         env.cwd = tree.clone();
         let actor_npub = load_signer(&env).unwrap().npub;
         let export_grant =
-            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
         let (server_url, server) = start_conflict_sync_server(vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
@@ -6008,14 +6575,14 @@ mod tests {
         assert_eq!(json["remoteChanges"].as_array().unwrap().len(), 0);
 
         let requests = server.join().unwrap();
-        assert!(requests[0].contains("/_admin/vaults/vault/export"));
+        assert!(requests[0].contains("/_admin/brains/brain/export"));
         assert!(requests.iter().any(|request| {
-            request.starts_with("PUT /_admin/vaults/vault/folders/general/objects/obj_")
+            request.starts_with("PUT /_admin/brains/brain/folders/general/objects/obj_")
         }));
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/bootstrap"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/bootstrap"))
         );
 
         let state = read_agent_state(&tree).unwrap();
@@ -6033,7 +6600,7 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("vault");
+        let tree = tmp.path().join("brain");
         initialize_private_working_tree(&tree).unwrap();
         fs::create_dir_all(tree.join("General")).unwrap();
         fs::write(tree.join("General/a.md"), "# Accepted\n").unwrap();
@@ -6041,17 +6608,17 @@ mod tests {
         let folder_key = FolderKey::from_bytes([9; 32]);
 
         let now = "2026-06-24T20:46:36Z";
-        let mut state = AgentState::new("vault", now);
+        let mut state = AgentState::new("brain", now);
         state.server_url = Some("http://127.0.0.1:9".to_owned());
         state.daemon.state = DaemonRunState::Running;
         write_agent_state(&tree, &state).unwrap();
         write_json_file(
             &tree.join(".finitebrain/working-tree-state.json"),
-            &VaultWorkingTreeStateManifest {
+            &BrainWorkingTreeStateManifest {
                 version: WORKING_TREE_STATE_VERSION.to_owned(),
                 folder_roots: vec![WorkingTreeFolderRoot {
                     folder_id: "general".to_owned(),
-                    source_vault_id: None,
+                    source_brain_id: None,
                     path: "General".to_owned(),
                     can_read: true,
                     metadata_only: false,
@@ -6066,7 +6633,7 @@ mod tests {
         env.cwd = tree.clone();
         let actor_npub = load_signer(&env).unwrap().npub;
         let export_grant =
-            export_grant_for_test(&env, "vault", "general", 1, &folder_key, &actor_npub);
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
         let (server_url, server) = start_partial_success_sync_server(vec![export_grant]);
         let mut output = Vec::new();
         run_with_env(
@@ -6116,8 +6683,8 @@ mod tests {
             &tmp,
             "0000000000000000000000000000000000000000000000000000000000000001",
         );
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "brain", tree.to_str().unwrap()]);
         let (server_url, server) = start_empty_sync_server();
 
         let mut env = env_for(&tmp);
@@ -6140,7 +6707,7 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .any(|request| request.contains("/_admin/vaults/vault/sync/records?after=0"))
+                .any(|request| request.contains("/_admin/brains/brain/sync/records?after=0"))
         );
     }
 
@@ -6214,8 +6781,8 @@ mod tests {
     fn signed_http_auth_header_validates_against_finite_nostr() {
         let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
             .unwrap();
-        let body = br#"{"vaultId":"agent"}"#;
-        let url = "http://127.0.0.1:3015/_admin/vaults";
+        let body = br#"{"brainId":"agent"}"#;
+        let url = "http://127.0.0.1:3015/_admin/brains";
         let header = signed_http_auth_header(&keys, "POST", url, Some(body)).unwrap();
         let event = decode_http_auth_header(&header).unwrap();
         let expected = finite_nostr::HttpAuthValidation::new("POST", url, unix_timestamp(), 60)
@@ -6281,25 +6848,26 @@ mod tests {
     }
 
     #[test]
-    fn management_parser_uses_current_vault_not_target_positional() {
+    fn management_parser_uses_current_brain_not_target_positional() {
         let tmp = TempDir::new().unwrap();
-        let tree = tmp.path().join("vault");
-        run(&tmp, &["open", "agent-vault", tree.to_str().unwrap()]);
+        let tree = tmp.path().join("brain");
+        run(&tmp, &["open", "agent-brain", tree.to_str().unwrap()]);
 
         let mut env = env_for(&tmp);
         env.cwd = tree;
         let args = vec!["add-member".to_owned(), "npub-target".to_owned()];
 
-        assert_eq!(command_vault_id(&args, &env).unwrap(), "agent-vault");
+        assert_eq!(command_brain_id(&args, &env).unwrap(), "agent-brain");
     }
 
     #[test]
     fn folder_required_recipients_follow_access_mode() {
-        let metadata = VaultMetadataView {
-            vault_id: "org".to_owned(),
+        let metadata = BrainMetadataView {
+            brain_id: "org".to_owned(),
             kind: "organization".to_owned(),
             name: "Org".to_owned(),
             owner_user_id: None,
+            personal_agent: None,
             members: vec!["npub-member".to_owned()],
             admins: vec!["npub-admin".to_owned()],
             folders: Vec::new(),
@@ -6317,11 +6885,14 @@ mod tests {
             vec!["npub-admin".to_owned()]
         );
 
-        let personal_metadata = VaultMetadataView {
-            vault_id: "personal".to_owned(),
+        let personal_metadata = BrainMetadataView {
+            brain_id: "personal".to_owned(),
             kind: "personal".to_owned(),
             name: "Personal".to_owned(),
             owner_user_id: Some("npub-owner".to_owned()),
+            personal_agent: Some(PersonalAgentView {
+                agent_npub: "npub-agent".to_owned(),
+            }),
             members: Vec::new(),
             admins: Vec::new(),
             folders: Vec::new(),
@@ -6330,7 +6901,48 @@ mod tests {
         };
         assert_eq!(
             folder_required_recipients(&personal_metadata, "restricted", &[]).unwrap(),
-            vec!["npub-owner".to_owned()]
+            vec!["npub-agent".to_owned(), "npub-owner".to_owned()]
         );
+    }
+
+    #[test]
+    fn cli_folder_grants_open_through_the_canonical_hosted_contract() {
+        let tmp = TempDir::new().unwrap();
+        let env = env_for(&tmp);
+        import_identity_for(
+            &env,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let issuer = load_signer(&env).unwrap();
+        let recipient =
+            Keys::parse("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+        let recipient_npub = NostrPublicKey::from_protocol(recipient.public_key())
+            .to_npub()
+            .unwrap();
+        let folder_key = FolderKey::generate();
+        let grant = folder_key_grant_request(
+            &issuer,
+            "personal-test",
+            "agent-notes",
+            1,
+            &recipient_npub,
+            &folder_key,
+            &env,
+        )
+        .unwrap();
+        let opened = open_folder_key_grant(
+            &recipient,
+            &BrainGrantIntent {
+                purpose: "folder-key-grant".to_owned(),
+                brain_id: "personal-test".to_owned(),
+                recipient_npub,
+                folder_id: Some("agent-notes".to_owned()),
+                key_version: Some(1),
+            },
+            grant["wrappedEventJson"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(opened.folder_key, folder_key.to_base64());
     }
 }

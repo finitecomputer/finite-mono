@@ -9,8 +9,8 @@ import vm from "node:vm";
 const repoRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const dbPath = process.env.FINITE_BRAIN_DB || "/tmp/finite-brain-smoke-test.sqlite3";
 const keyManifestPath =
-  process.env.FINITE_BRAIN_SMOKE_KEYS || "/tmp/finite-brain-smoke-vault-keys.json";
-const vaultId = process.env.FINITE_BRAIN_SMOKE_VAULT || "smoke";
+  process.env.FINITE_BRAIN_SMOKE_KEYS || "/tmp/finite-brain-smoke-brain-keys.json";
+const brainId = process.env.FINITE_BRAIN_SMOKE_BRAIN || "smoke";
 
 function fail(message) {
   throw new Error(message);
@@ -105,7 +105,7 @@ function readFolders() {
   return sqliteRows(
     `SELECT id || char(9) || path || char(9) || access || char(9) || current_key_version || char(9) || shared_folder_source || char(9) || setup_incomplete
      FROM folders
-     WHERE vault_id = ${sqlQuote(vaultId)}
+     WHERE brain_id = ${sqlQuote(brainId)}
      ORDER BY path;`
   ).map((line) => {
     const [id, folderPath, access, keyVersion, sharedFolderSource, setupIncomplete] =
@@ -125,8 +125,8 @@ function readFolders() {
 function readCurrentObjects() {
   return sqliteRows(
     `SELECT folder_id || char(9) || object_id || char(9) || revision || char(9) || payload_json
-     FROM current_encrypted_vault_objects
-     WHERE vault_id = ${sqlQuote(vaultId)} AND deleted = 0
+     FROM current_encrypted_brain_objects
+     WHERE brain_id = ${sqlQuote(brainId)} AND deleted = 0
      ORDER BY folder_id, object_id;`
   ).map((line) => {
     const [folderId, objectId, revision, payloadJson] = line.split("\t");
@@ -134,7 +134,7 @@ function readCurrentObjects() {
       folderId,
       objectId,
       revision: Number(revision),
-      vaultId,
+      brainId,
       ...JSON.parse(payloadJson),
     };
   });
@@ -152,10 +152,10 @@ async function openFixturePages(client, manifest, objects) {
       issuedAt: manifest.seededAt || new Date(0).toISOString(),
       keyVersion: 1,
       recipientNpub: adminNpub,
-      vaultId,
+      brainId,
     });
   }
-  return client.openSyncObjects(keyring, { objects, vaultId });
+  return client.openSyncObjects(keyring, { objects, brainId });
 }
 
 function checkStaticShell() {
@@ -219,38 +219,38 @@ function checkStaticShell() {
     "revokeShareLinkButton",
     "accessResultPanel",
     "accessBusyStatus",
-    "vaultManagementTitle",
-    "vaultPeopleList",
-    "vaultInvitationList",
-    "vaultInvitationCount",
+    "manageBrainsModalTitle",
+    "brainPeopleList",
+    "brainInvitationList",
+    "brainInvitationCount",
     "sharedFolderList",
     "sharedFolderCount",
     "folderShareLinkListSection",
     "folderShareLinkList",
     "folderShareLinkCount",
-    "vaultPeopleActionPanel",
-    "vaultPeopleActionHint",
-    "addVaultMemberButton",
-    "addVaultAdminButton",
-    "vaultInvitationPanel",
-    "vaultInviteTargetNpubInput",
-    "vaultInviteFoldersInput",
-    "vaultInviteExpiresAtInput",
-    "createVaultInvitationButton",
-    "revokeVaultInvitationButton",
-    "vaultInviteUrlOutput",
-    "vaultInviteUrlInput",
-    "copyVaultInviteUrlButton",
-    "vaultInviteCodeInput",
-    "vaultInviteEmailInput",
-    "vaultInviteEmailProofCreatedAtInput",
-    "vaultInviteSecretInput",
-    "vaultInviteConnectSignerButton",
-    "getVaultInvitationButton",
+    "brainPeopleActionPanel",
+    "brainPeopleActionHint",
+    "addBrainMemberButton",
+    "addBrainAdminButton",
+    "brainInvitationPanel",
+    "brainInviteTargetNpubInput",
+    "brainInviteFoldersInput",
+    "brainInviteExpiresAtInput",
+    "createBrainInvitationButton",
+    "revokeBrainInvitationButton",
+    "brainInviteUrlOutput",
+    "brainInviteUrlInput",
+    "copyBrainInviteUrlButton",
+    "brainInviteCodeInput",
+    "brainInviteEmailInput",
+    "brainInviteEmailProofCreatedAtInput",
+    "brainInviteSecretInput",
+    "brainInviteConnectSignerButton",
+    "getBrainInvitationButton",
     "getEmailInviteInstructionsButton",
-    "acceptVaultInvitationButton",
-    "settingsManageVaultsButton",
-    "manageVaultsModal",
+    "acceptBrainInvitationButton",
+    "settingsManageBrainsButton",
+    "manageBrainsModal",
     "savePageButton",
     "editorSlashMenu",
     "readerPageContent",
@@ -263,7 +263,7 @@ function checkStaticShell() {
     assertIncludes(html, marker, "Product Client HTML");
   }
   const primaryNavigationMarkup = html.match(
-    /<header class="vault-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">([\s\S]*?)<\/nav>/
+    /<header class="brain-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">([\s\S]*?)<\/nav>/
   )?.[1];
   assert.ok(primaryNavigationMarkup, "Product Client HTML should keep primary navigation in the File sidebar header");
   for (const buttonId of [
@@ -277,8 +277,8 @@ function checkStaticShell() {
   }
   assertNotIncludes(html, "app-ribbon", "Product Client HTML");
   assert.ok(
-    !/id="vaultInvitationPanel"[^>]*open/.test(html),
-    "Product Client HTML should keep the Vault invitation panel closed by default"
+    !/id="brainInvitationPanel"[^>]*open/.test(html),
+    "Product Client HTML should keep the Brain invitation panel closed by default"
   );
   assertNotIncludes(html, "graphFilterInput", "Product Client HTML");
   assertNotIncludes(html, "aria-label=\"Filter graph\"", "Product Client HTML");
@@ -288,11 +288,25 @@ function checkStaticShell() {
   assertNotIncludes(css, ".graph-icon-button", "Product Client CSS");
   assertNotIncludes(js, "graphFilterInput", "Product Client JS");
   assertNotIncludes(js, "readerMode", "Product Client JS");
-  assertNotIncludes(js, 'action: "delete-folder"', "Product Client JS");
+  const deleteFolderHandler = js.match(
+    /async function deleteFolderFromContextTarget\(target\) \{[\s\S]*?\n  \}\n\n  function /
+  )?.[0];
+  assert.ok(deleteFolderHandler, "Product Client JS should expose the delete-Folder handler");
+  assert.match(
+    deleteFolderHandler,
+    /if \(\s*!actorHasDestructiveAuthority\(state\.metadata, currentActorNpub\(\)\)\s*\) \{\s*throw new Error\("Your Brain role cannot permanently delete Folders"\);\s*\}/,
+    "Product Client delete-Folder handler must exit before deletion when authority is absent"
+  );
+  assert.ok(
+    deleteFolderHandler.indexOf("actorHasDestructiveAuthority(state.metadata, currentActorNpub())") <
+      deleteFolderHandler.indexOf("const result = await protectedRequest"),
+    "Product Client delete-Folder handler must check authority before its destructive request"
+  );
+  assertIncludes(deleteFolderHandler, 'action: "delete-folder"', "Product Client delete-Folder handler");
   for (const legacyMarker of [
     "accessFolderViewButton",
-    "accessVaultViewButton",
-    "accessVaultPanel",
+    "accessBrainViewButton",
+    "accessBrainPanel",
     "accessOverviewPanel",
     "accessFlowPanel",
     "accessTargetNpubInput",
@@ -339,17 +353,17 @@ function checkStaticShell() {
     ".access-advanced-section",
     ".access-advanced-summary::after",
     ".access-button-row",
-    ".vault-access-action-grid",
-    ".vault-access-option",
-    ".vault-access-option-heading",
-    ".vault-management-section",
-    ".access-vault-admin",
+    ".brain-access-action-grid",
+    ".brain-access-option",
+    ".brain-access-option-heading",
+    ".brain-management-section",
+    ".access-brain-admin",
     ".access-field",
     ".access-checkbox",
     ".access-share-hint",
     ".access-link-status",
     ".access-busy-status",
-    ".vault-invite-url-output",
+    ".brain-invite-url-output",
     ".access-content-panel.is-busy",
     ".access-badge",
     ".note-content-empty",
@@ -376,9 +390,9 @@ function checkStaticShell() {
     "buildFolderKeyGrantRequest",
     "canonicalAdminAccessChangePayload",
     "commandPaletteRows",
-    "visibleVaultOptions",
-    "personalVaultIdForPubkey",
-    "openManageVaultsModal",
+    "visibleBrainOptions",
+    "personalBrainIdForPubkey",
+    "openManageBrainsModal",
     "openSettingsModal",
     "workspaceChromeState",
     "graphNeighborIds",
@@ -388,23 +402,23 @@ function checkStaticShell() {
     "accessPanelState",
     "accessPeopleSummary",
     "identityMetadataForNpub",
-    "vaultPeopleRows",
-    "vaultInvitationRows",
+    "brainPeopleRows",
+    "brainInvitationRows",
     "folderShareLinkRows",
     "sharedFolderRelationshipRows",
-    "refreshVaultAdminLists",
+    "refreshBrainAdminLists",
     "refreshFolderShareLinks",
-    "revokeVaultInvitationById",
+    "revokeBrainInvitationById",
     "revokeShareLinkById",
     "acceptSharedFolderInvitationById",
     "revokeSharedFolderInvitationById",
-    "vaultHealthBadges",
-    "addVaultMemberFromPanel",
-    "addVaultAdminFromPanel",
+    "brainHealthBadges",
+    "addBrainMemberFromPanel",
+    "addBrainAdminFromPanel",
     "buildFolderAccessRemovalRequest",
-    "buildEmailVaultInvitationRequest",
+    "buildEmailBrainInvitationRequest",
     "copyToClipboard",
-    "copyVaultInviteUrl",
+    "copyBrainInviteUrl",
     "buildEmailInviteClaimRequest",
     "emailInviteBootstrapPath",
     "emailInviteClientUrl",
@@ -413,11 +427,11 @@ function checkStaticShell() {
     "openEmailInviteBootstrap",
     "inviteUnwrapKeypairFromSecret",
     "nip44DecryptWithSecret",
-    "buildVaultInvitationRequest",
-    "vaultInvitationCreatePath",
-    "vaultInvitationLinkPath",
-    "vaultInvitationAcceptPath",
-    "vaultInvitationRevokePath",
+    "buildBrainInvitationRequest",
+    "brainInvitationCreatePath",
+    "brainInvitationLinkPath",
+    "brainInvitationAcceptPath",
+    "brainInvitationRevokePath",
     "markdownFromEditorElement",
     "saveActivePage",
     "splitMarkdownTableRow",
@@ -437,27 +451,27 @@ function checkStaticShell() {
 
   assert.match(
     html,
-    /id="vaultInviteUrlOutput"[^>]*hidden/,
+    /id="brainInviteUrlOutput"[^>]*hidden/,
     "Product Client HTML must keep generated invite URLs hidden before an unlocked session creates one"
   );
   assert.match(
     html,
-    /id="vaultInviteUrlInput"[\s\S]{0,180}type="text"[\s\S]{0,180}readonly/,
+    /id="brainInviteUrlInput"[\s\S]{0,180}type="text"[\s\S]{0,180}readonly/,
     "Product Client HTML must expose a generated invite URL as readable local output"
   );
   assert.match(
     html,
-    /id="copyVaultInviteUrlButton"[^>]*aria-label="Copy client-only invite link"/,
-    "Product Client HTML must name the client-only invite copy action"
+    /id="copyBrainInviteUrlButton"[^>]*aria-label="Copy private invite link"/,
+    "Product Client HTML must name the private invite copy action"
   );
   assert.match(
     html,
-    /id="vaultInviteSecretInput"[\s\S]{0,180}type="password"/,
+    /id="brainInviteSecretInput"[\s\S]{0,180}type="password"/,
     "Product Client HTML must keep manually entered Invite Secrets masked"
   );
   assert.match(
     js,
-    /async function copyToClipboard\(text\)/,
+    /async function copyToClipboard\(text, kind = "page-id"\)/,
     "Product Client JS must route copy actions through one safe helper"
   );
   assert.doesNotMatch(
@@ -470,7 +484,7 @@ function checkStaticShell() {
     "obsidian-titlebar",
     "traffic-lights",
     "titlebarTabLabel",
-    "titlebarVaultLabel",
+    "titlebarBrainLabel",
     "pageTabButton",
     "graphTabButton",
     "titlebarNewTabButton",
@@ -485,10 +499,8 @@ function checkStaticShell() {
     "right-sidebar",
     "sidebar-footer",
     "status-bar",
-    "outgoingLinkList",
-    "backlinkList",
     "pageStatusDetail",
-    "vaultStatusDetail",
+    "brainStatusDetail",
     "activityLog",
     "Advanced client tools",
     "Smoke UI",
@@ -499,6 +511,17 @@ function checkStaticShell() {
     "accessAcceptSection",
   ]) {
     assertNotIncludes(html, marker, "Product Client HTML");
+  }
+
+  for (const marker of [
+    "pageLinkContextPanel",
+    "outgoingLinkList",
+    "backlinkList",
+    "unlinkedMentionList",
+    "Linked mentions",
+    "Unlinked mentions",
+  ]) {
+    assertIncludes(html, marker, "Product Client HTML");
   }
 
   for (const marker of [
@@ -579,8 +602,8 @@ async function main() {
 
   const generalPages = client.readerPageRows("general", opened.objects);
   assert.ok(
-    generalPages.some((page) => page.title === "FiniteBrain Smoke Vault"),
-    "general folder should contain the smoke vault index page"
+    generalPages.some((page) => page.title === "FiniteBrain Smoke Brain"),
+    "general folder should contain the smoke brain index page"
   );
 
   const graph = client.buildGraphProjection(readyPages);
@@ -621,7 +644,7 @@ async function main() {
     graphNodes: graph.nodes.length,
     pages: seededObjects.length,
     readyPages: readyPages.length,
-    vaultId,
+    brainId,
   };
   console.log(`obsidian product client smoke ok ${JSON.stringify(summary)}`);
 }

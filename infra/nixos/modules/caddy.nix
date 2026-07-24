@@ -44,6 +44,11 @@ in
       reverse_proxy 127.0.0.1:3015
     '';
 
+    virtualHosts."identity.finite.chat".extraConfig = ''
+      tls ${originCert} ${originKey}
+      reverse_proxy 127.0.0.1:8790
+    '';
+
     # Public URL unchanged; backend port moved 8787 -> 8788 on this box
     # (finitesitesd owns 8787). See modules/finitechat-server.nix.
     virtualHosts."chat.finite.computer".extraConfig = ''

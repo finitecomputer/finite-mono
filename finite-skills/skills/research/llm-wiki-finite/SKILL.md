@@ -1,16 +1,12 @@
 ---
 name: llm-wiki-finite
 description: >
-  LLM-compiled knowledge base manager for Hermes agents. Use it to initialize, ingest,
-  import source collections, collect catalogs, track inventory, index datasets, archive old topics, compile, query, lint, audit, research, plan, and generate outputs from topic-scoped wikis.
-  Activates when the user mentions wiki workflows, knowledge-base management,
-  ingestion, collection ingestion, import wiki, collect, catalog, curate,
-  find all, inventory, source queue,
-  candidate list, watch list, backlog, dataset, large data, data registry,
-  dataset manifest, compilation, querying, linting, audit, research, librarian,
-  scan quality, article quality, content review, output drift, provenance,
-  archive wiki, archive topic, restore wiki, implementation plan, or uses
-  /wiki-style shorthand in a repo with .wiki/, ~/wiki/, or a configured hub path.
+  Repository LLM-wiki workflows for ingesting source collections, maintaining
+  topic-scoped wiki directories, querying compiled knowledge, auditing provenance,
+  and generating outputs. Use when the user explicitly invokes llm-wiki, uses
+  /wiki-style shorthand, or works in a repository with .wiki/, ~/wiki/, or a
+  configured hub path. Ordinary Personal Brain/wiki knowledge-base requests use
+  finitebrain.
 ---
 
 # LLM Wiki Manager

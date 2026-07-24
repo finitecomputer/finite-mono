@@ -4,7 +4,7 @@
 
 - Issue: #13 — Access & sharing in Settings
 - Slice type: AFK
-- Acceptance criteria: Access & sharing in Settings; existing Folder/Vault/share workflows preserved; Access ribbon deep link; fail-closed signer/session behavior; modal-scoped results/busy state
+- Acceptance criteria: Access & sharing in Settings; existing Folder/Brain/share workflows preserved; Access ribbon deep link; fail-closed signer/session behavior; modal-scoped results/busy state
 - Baseline: `93ddfcb`
 - Current diff: `93ddfcb...18d0b10` plus the refresh follow-up in `93ddfcb`
 
@@ -35,5 +35,5 @@ STANDARDS_FINDINGS:
 
 SPEC_STATUS: pass with staged follow-up
 SPEC_FINDINGS:
-- Access controls are Settings-owned at runtime; the historical source anchor and top Vault strip are explicitly deferred to final integration cleanup.
+- Access controls are Settings-owned at runtime; the historical source anchor and top Brain strip are explicitly deferred to final integration cleanup.
 ```

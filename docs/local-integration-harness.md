@@ -99,6 +99,14 @@ This does not pass or replace the canonical real-chat acceptance. It only
 skips the three inference reply assertions; the Hosted Web Device must still
 connect, and all Brain/Apple assertions still run.
 
+To run the destructive Greenfield Brain setup matrix, add
+`DEVFINITY_BRAIN_SETUP_MATRIX=1` to that command. The matrix resets only the
+local FiniteBrain database and the test agent's `fbrain` working state between
+cases. It proves agent-first and user-first Personal Brain setup, agent-first
+Org-Brain-first access, user-first Org Brain setup with the selected agent, and
+user-first human-only Org Brain setup. Do not use this option against shared or
+production state.
+
 Rerun the real launch/chat/restart acceptance test at any time with:
 
 ```sh
@@ -107,9 +115,9 @@ just dev saas-smoke
 
 That check creates or reuses the local Project, waits for the Apple runtime,
 opens the real Hosted Web Device chat, requires a real Hermes response, has the
-owner explicitly pair the runtime Agent Principal with the Personal Vault,
-proves the agent can discover and write only its Agent Workspace through a
-Working Tree under `/data/workspace`, reads the note back as the owner, restarts
+owner establish the runtime Agent Principal as the one Personal Agent,
+proves the agent can discover and write the Personal Brain through a Working
+Tree under `/data/workspace`, reads the note back as the owner, restarts
 the chat services and Agent Runtime, and repeats the identity, access, Working
 Tree, and readback checks before requiring the final chat response.
 

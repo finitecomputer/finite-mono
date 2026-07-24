@@ -5,25 +5,25 @@ pub(crate) async fn create_share_link_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((vault_id, folder_id)): AxumPath<(String, String)>,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Result<Json<ShareLinkResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: CreateShareLinkRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let recipient_identity = resolve_and_record_identity(&state, &request.recipient_npub)?;
     let recipient = UserId::new(recipient_identity.npub.clone())?;
     let current_key_version = {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
-        ensure_vault_admin(&stored, &actor)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
         folder_current_key_version(&stored, &folder_id)?
     };
     let (event, _) = validate_admin_access_change_value(
         request.access_change_event,
-        &vault_id,
+        &brain_id,
         &actor,
         AdminAccessAction::GrantFolderAccess,
         Some(&folder_id),
@@ -44,7 +44,7 @@ pub(crate) async fn create_share_link_handler(
     let id = generated_link_id(
         "share-link",
         &[
-            vault_id.as_str(),
+            brain_id.as_str(),
             folder_id.as_str(),
             recipient.as_str(),
             actor_user_id.as_str(),
@@ -58,7 +58,7 @@ pub(crate) async fn create_share_link_handler(
     let share_link = {
         let mut store = state.store.lock().map_err(lock_error)?;
         store.create_share_link(
-            &vault_id,
+            &brain_id,
             &folder_id,
             &id,
             &recipient,
@@ -83,17 +83,17 @@ pub(crate) async fn list_folder_share_links_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((vault_id, folder_id)): AxumPath<(String, String)>,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
 ) -> Result<Json<ShareLinkListResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let share_links = {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
-        ensure_vault_admin(&stored, &actor)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
         let mut responses = store
-            .list_folder_share_links(&vault_id, &folder_id)?
+            .list_folder_share_links(&brain_id, &folder_id)?
             .into_iter()
             .map(share_link_response)
             .collect::<Vec<_>>();
@@ -142,7 +142,7 @@ pub(crate) async fn accept_share_link_handler(
         let share_link = store.accept_share_link(&share_link_id, &actor, &now)?;
         append_folder_key_grant_record(
             &mut store,
-            &share_link.vault_id,
+            &share_link.brain_id,
             &share_link.folder_key_grant,
         )?;
         share_link
@@ -182,31 +182,31 @@ pub(crate) async fn mark_shared_folder_source_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((vault_id, folder_id)): AxumPath<(String, String)>,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
     body: Bytes,
-) -> Result<Json<VaultMetadataResponse>, ApiError> {
+) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: MarkSharedFolderSourceRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let current_key_version = {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
-        ensure_vault_admin(&stored, &actor)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
         folder_current_key_version(&stored, &folder_id)?
     };
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
-        &vault_id,
+        &brain_id,
         &actor,
         AdminAccessAction::SetFolderAccessMode,
         Some(&folder_id),
         None,
         Some(current_key_version),
     )?;
-    mutate_as_admin(state, vault_id, actor, event, payload, |store, vault_id| {
-        store.mark_shared_folder_source(vault_id, &folder_id)
+    mutate_as_admin(state, brain_id, actor, event, payload, |store, brain_id| {
+        store.mark_shared_folder_source(brain_id, &folder_id)
     })
     .map(Json)
 }
@@ -216,27 +216,27 @@ pub(crate) async fn create_shared_folder_invitation_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((source_vault_id, source_folder_id)): AxumPath<(String, String)>,
+    AxumPath((source_brain_id, source_folder_id)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Result<Json<SharedFolderInvitationResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: CreateSharedFolderInvitationRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let source_vault_id = VaultId::new(source_vault_id)?;
+    let source_brain_id = BrainId::new(source_brain_id)?;
     let source_folder_id = FolderId::new(source_folder_id)?;
-    let destination_vault_id = VaultId::new(request.destination_vault_id)?;
+    let destination_brain_id = BrainId::new(request.destination_brain_id)?;
     let destination_admin_identity =
         resolve_and_record_identity(&state, &request.destination_admin_npub)?;
     let destination_admin = UserId::new(destination_admin_identity.npub.clone())?;
     let current_key_version = {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&source_vault_id)?;
-        ensure_vault_admin(&stored, &actor)?;
+        let stored = store.load_brain(&source_brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
         folder_current_key_version(&stored, &source_folder_id)?
     };
     let (event, _) = validate_admin_access_change_value(
         request.access_change_event,
-        &source_vault_id,
+        &source_brain_id,
         &actor,
         AdminAccessAction::GrantFolderAccess,
         Some(&source_folder_id),
@@ -257,9 +257,9 @@ pub(crate) async fn create_shared_folder_invitation_handler(
     let id = generated_link_id(
         "shared-folder-invitation",
         &[
-            source_vault_id.as_str(),
+            source_brain_id.as_str(),
             source_folder_id.as_str(),
-            destination_vault_id.as_str(),
+            destination_brain_id.as_str(),
             destination_admin.as_str(),
             created_at.as_str(),
         ],
@@ -269,9 +269,9 @@ pub(crate) async fn create_shared_folder_invitation_handler(
     let invitation = {
         let mut store = state.store.lock().map_err(lock_error)?;
         store.create_shared_folder_invitation(
-            &source_vault_id,
+            &source_brain_id,
             &source_folder_id,
-            &destination_vault_id,
+            &destination_brain_id,
             &id,
             &destination_admin,
             &actor_user_id,
@@ -329,13 +329,13 @@ pub(crate) async fn accept_shared_folder_invitation_handler(
         let mut store = state.store.lock().map_err(lock_error)?;
         let invitation = store.load_shared_folder_invitation(&invitation_id)?;
         let connection_id = shared_folder_connection_id(
-            &invitation.source_vault_id,
+            &invitation.source_brain_id,
             &invitation.source_folder_id,
-            &invitation.destination_vault_id,
+            &invitation.destination_brain_id,
         );
         let mount_id = organization_mount_id(
-            &invitation.destination_vault_id,
-            &invitation.source_vault_id,
+            &invitation.destination_brain_id,
+            &invitation.source_brain_id,
             &invitation.source_folder_id,
         );
         let invitation = store.accept_shared_folder_invitation(
@@ -347,7 +347,7 @@ pub(crate) async fn accept_shared_folder_invitation_handler(
         )?;
         append_folder_key_grant_record(
             &mut store,
-            &invitation.source_vault_id,
+            &invitation.source_brain_id,
             &invitation.folder_key_grant,
         )?;
         invitation
@@ -420,7 +420,7 @@ pub(crate) async fn update_shared_folder_connection_members_handler(
                     &grant,
                     &now,
                 )?;
-                append_folder_key_grant_record(&mut store, &connection.source_vault_id, &grant)?;
+                append_folder_key_grant_record(&mut store, &connection.source_brain_id, &grant)?;
                 connection
             }
             "remove" => {
@@ -438,7 +438,7 @@ pub(crate) async fn update_shared_folder_connection_members_handler(
                     &now,
                 )?;
                 let reencrypted_records = rotation_records_from_requests(
-                    &connection.source_vault_id,
+                    &connection.source_brain_id,
                     &connection.source_folder_id,
                     actor.as_str(),
                     new_key_version,
@@ -454,7 +454,7 @@ pub(crate) async fn update_shared_folder_connection_members_handler(
                     &now,
                 )?;
                 for grant in &grants {
-                    append_folder_key_grant_record(&mut store, &connection.source_vault_id, grant)?;
+                    append_folder_key_grant_record(&mut store, &connection.source_brain_id, grant)?;
                 }
                 connection
             }
@@ -498,7 +498,7 @@ pub(crate) async fn revoke_shared_folder_connection_handler(
             &now,
         )?;
         let reencrypted_records = rotation_records_from_requests(
-            &connection.source_vault_id,
+            &connection.source_brain_id,
             &connection.source_folder_id,
             actor.as_str(),
             request.new_key_version,
@@ -513,7 +513,7 @@ pub(crate) async fn revoke_shared_folder_connection_handler(
             &now,
         )?;
         for grant in &grants {
-            append_folder_key_grant_record(&mut store, &connection.source_vault_id, grant)?;
+            append_folder_key_grant_record(&mut store, &connection.source_brain_id, grant)?;
         }
         connection
     };
@@ -530,21 +530,21 @@ pub(crate) async fn list_shared_folder_invitations_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(vault_id): AxumPath<String>,
+    AxumPath(brain_id): AxumPath<String>,
 ) -> Result<Json<SharedFolderInvitationListResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let (outgoing, incoming) = {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
-        ensure_vault_admin(&stored, &actor)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
         let mut outgoing = store
-            .list_shared_folder_invitations(&vault_id, SharedFolderDirection::Source)?
+            .list_shared_folder_invitations(&brain_id, SharedFolderDirection::Source)?
             .into_iter()
             .map(shared_folder_invitation_response)
             .collect::<Vec<_>>();
         let mut incoming = store
-            .list_shared_folder_invitations(&vault_id, SharedFolderDirection::Destination)?
+            .list_shared_folder_invitations(&brain_id, SharedFolderDirection::Destination)?
             .into_iter()
             .map(shared_folder_invitation_response)
             .collect::<Vec<_>>();
@@ -564,21 +564,21 @@ pub(crate) async fn list_shared_folder_connections_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(vault_id): AxumPath<String>,
+    AxumPath(brain_id): AxumPath<String>,
 ) -> Result<Json<SharedFolderConnectionListResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let (outgoing, incoming) = {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
-        ensure_vault_admin(&stored, &actor)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
         let mut outgoing = store
-            .list_shared_folder_connections(&vault_id, SharedFolderDirection::Source)?
+            .list_shared_folder_connections(&brain_id, SharedFolderDirection::Source)?
             .into_iter()
             .map(shared_folder_connection_response)
             .collect::<Vec<_>>();
         let mut incoming = store
-            .list_shared_folder_connections(&vault_id, SharedFolderDirection::Destination)?
+            .list_shared_folder_connections(&brain_id, SharedFolderDirection::Destination)?
             .into_iter()
             .map(shared_folder_connection_response)
             .collect::<Vec<_>>();
@@ -598,16 +598,16 @@ pub(crate) async fn organization_folder_mounts_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(vault_id): AxumPath<String>,
+    AxumPath(brain_id): AxumPath<String>,
 ) -> Result<Json<Vec<MountedFolderResponse>>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
     let actor = UserId::new(actor)?;
-    let vault_id = VaultId::new(vault_id)?;
+    let brain_id = BrainId::new(brain_id)?;
     let projections = {
         let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_vault(&vault_id)?;
+        let stored = store.load_brain(&brain_id)?;
         ensure_metadata_visible(&stored, actor.as_str())?;
-        store.mounted_folder_projection(&vault_id, &actor)?
+        store.mounted_folder_projection(&brain_id, &actor)?
     };
     Ok(Json(mounted_folder_responses(projections)))
 }

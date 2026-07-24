@@ -1,8 +1,8 @@
 ## Issue
 
 - Issue: #20
-- Slice type: Session Lock after confirmed active-Vault authorization loss
-- Acceptance criteria: active Vault membership loss clears session-only
+- Slice type: Session Lock after confirmed active-Brain authorization loss
+- Acceptance criteria: active Brain membership loss clears session-only
   material and locks; unrelated failures do not; safe notice remains visible
 - Baseline: `65b98a7`
 - Current diff: `65b98a7...390c801`
@@ -10,7 +10,7 @@
 ## Implementation Summary
 
 `protectedRequest` preserves response status, reason, and path. A narrow
-predicate recognizes only the server's exact active-Vault membership-loss
+predicate recognizes only the server's exact active-Brain membership-loss
 contract on metadata, export, and sync bootstrap, then clears the session and
 leaves safe guidance. It also suppresses the generic failure strip because the
 Session Lock notice is the relevant user-visible result.
@@ -31,9 +31,9 @@ Session Lock notice is the relevant user-visible result.
 FOCUSED_SELF_REVIEW_STATUS: pass
 FINDINGS:
 - None. The membership-loss predicate is constrained to status 403, reason
-  "vault access required", matching active Vault, and one of the three
-  vault-wide state-read paths.
-- Isolated browser proof passed: the exact active-Vault access-loss response
+  "brain access required", matching active Brain, and one of the three
+  brain-wide state-read paths.
+- Isolated browser proof passed: the exact active-Brain access-loss response
   locks and clears the session while retaining the safe notice. Immediate
   Lock → Unlock also passed after fresh signed auth nonces removed the
   same-second NIP-98 replay collision.

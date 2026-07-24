@@ -4,9 +4,9 @@
 
 - Issue: [finitecomputer/finite-mono#7](https://github.com/finitecomputer/finite-mono/issues/7)
 - Slice type: AFK tracer bullet
-- Acceptance criteria: dashboard-aligned Vault and Folder access surfaces;
+- Acceptance criteria: dashboard-aligned Brain and Folder access surfaces;
   coherent permission, people, invitation, email-bootstrap, share-link,
-  shared-Folder, and cross-Vault workflows; distinct status and destructive
+  shared-Folder, and cross-Brain workflows; distinct status and destructive
   actions; unchanged DOM hooks and authorization/request behavior;
   representative resumed desktop evidence in light and dark; checks green
 - Baseline: `ac6564a`
@@ -17,7 +17,7 @@
 The access and collaboration UI now consumes one semantic presentation layer
 mapped to the Product Client's dashboard-derived light and dark tokens. Tabs,
 selectors, inspectors, cards, people lists, forms, disclosures, invitations,
-sharing, administration, cross-Vault relationships, lifecycle badges, and
+sharing, administration, cross-Brain relationships, lifecycle badges, and
 operational states use warm neutral surfaces, blue product emphasis, readable
 status colors, local Funnel typography, and JetBrains Mono identities. HTML,
 JavaScript, authorization, request construction, and responsive geometry are
@@ -40,13 +40,13 @@ unchanged.
 ### Visual evidence
 
 For both `light` and `dark`, screenshots are recorded under
-`/tmp/finite-brain-ticket7-{theme}-{access,share,vaults}.png` for:
+`/tmp/finite-brain-ticket7-{theme}-{access,share,brains}.png` for:
 
 - resumed Folder access overview and people/share-link lists;
 - expanded share-link fields, disabled state, accept action, and destructive
   revoke action;
-- Vault selector, loaded/available Vault states, Load action, and expanded
-  organization-Vault creation form.
+- Brain selector, loaded/available Brain states, Load action, and expanded
+  organization-Brain creation form.
 
 Browser assertions: Session Lock resumed to `Session unlocked`; the active
 Folder remained `getting-started`; both themes had zero horizontal overflow and

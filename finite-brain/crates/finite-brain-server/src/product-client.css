@@ -1032,13 +1032,13 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   display: none;
 }
 
-.vault-header,
+.brain-header,
 .sidebar-toolbar {
   display: flex;
   align-items: center;
 }
 
-.vault-header {
+.brain-header {
   justify-content: space-between;
   gap: 8px;
   min-height: 44px;
@@ -1047,14 +1047,14 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   padding: 2px 4px 2px 10px;
 }
 
-.vault-header h1 {
+.brain-header h1 {
   font-size: 12px;
   font-weight: 720;
   line-height: 1.1;
   text-wrap: balance;
 }
 
-.vault-header .eyebrow {
+.brain-header .eyebrow {
   display: none;
 }
 
@@ -1072,16 +1072,16 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   min-height: 40px;
 }
 
-.vault-control-strip {
+.brain-control-strip {
   border-bottom: 1px solid var(--line);
   background: var(--surface-soft);
 }
 
-.obsidian-shell[data-vault-loaded="true"] .vault-control-strip:not([open]) {
+.obsidian-shell[data-brain-loaded="true"] .brain-control-strip:not([open]) {
   display: none;
 }
 
-.vault-control-strip > summary {
+.brain-control-strip > summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1096,22 +1096,22 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   text-transform: uppercase;
 }
 
-.vault-control-strip > summary::-webkit-details-marker {
+.brain-control-strip > summary::-webkit-details-marker {
   display: none;
 }
 
-.vault-control-strip > summary::before {
+.brain-control-strip > summary::before {
   color: var(--soft);
   content: "›";
   font-size: 13px;
   margin-right: 7px;
 }
 
-.vault-control-strip[open] > summary::before {
+.brain-control-strip[open] > summary::before {
   content: "⌄";
 }
 
-#vaultControlSummary {
+#brainControlSummary {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
@@ -1122,7 +1122,7 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.vault-control-body {
+.brain-control-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -1130,25 +1130,25 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   padding: 0 10px 8px;
 }
 
-.vault-control-body .inline-control {
+.brain-control-body .inline-control {
   grid-column: 1 / 2;
   gap: 6px;
   min-width: 0;
 }
 
-.vault-picker,
-.vault-create-row {
+.brain-picker,
+.brain-create-row {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
-.vault-picker {
+.brain-picker {
   grid-column: 1 / 3;
 }
 
-.vault-picker select {
+.brain-picker select {
   flex: 1 1 auto;
   padding-right: 28px;
   background-color: color-mix(in srgb, var(--input-bg) 96%, var(--text));
@@ -1163,37 +1163,37 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   text-overflow: ellipsis;
 }
 
-.vault-picker .vault-load-button {
+.brain-picker .brain-load-button {
   flex: 0 0 auto;
   min-width: 68px;
   font-weight: 600;
 }
 
-.obsidian-shell[data-session-status="locked"] .vault-load-button:not(:disabled) {
+.obsidian-shell[data-session-status="locked"] .brain-load-button:not(:disabled) {
   border-color: transparent;
   background: var(--action-primary-bg);
   box-shadow: var(--shadow-control);
   color: var(--action-primary-text);
 }
 
-.obsidian-shell[data-session-status="locked"] .vault-load-button:not(:disabled):hover {
+.obsidian-shell[data-session-status="locked"] .brain-load-button:not(:disabled):hover {
   border-color: transparent;
   background: var(--action-primary-bg-hover);
   box-shadow: var(--shadow-control-hover);
   color: var(--action-primary-text);
 }
 
-.vault-create-row {
+.brain-create-row {
   width: 100%;
 }
 
-.vault-create-details {
+.brain-create-details {
   grid-column: 1 / 3;
   grid-row: 3;
   min-width: 0;
 }
 
-.vault-create-details summary {
+.brain-create-details summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1206,11 +1206,11 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   padding: 2px 3px;
 }
 
-.vault-create-details summary::-webkit-details-marker {
+.brain-create-details summary::-webkit-details-marker {
   display: none;
 }
 
-.vault-create-details summary::after {
+.brain-create-details summary::after {
   content: "";
   width: 6px;
   height: 6px;
@@ -1223,17 +1223,17 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
-.vault-create-details[open] summary::after {
+.brain-create-details[open] summary::after {
   opacity: 0.86;
   transform: rotate(45deg);
 }
 
-.vault-create-details[open] .vault-create-row {
+.brain-create-details[open] .brain-create-row {
   margin-top: 4px;
 }
 
-.vault-control-body input,
-.vault-control-body select {
+.brain-control-body input,
+.brain-control-body select {
   height: var(--control-height);
   min-height: var(--control-height);
   border-color: var(--line-strong);
@@ -1241,13 +1241,13 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   color: var(--text);
 }
 
-.vault-control-body select,
-.vault-create-row input {
+.brain-control-body select,
+.brain-create-row input {
   width: 100%;
   min-width: 0;
 }
 
-.vault-control-body button {
+.brain-control-body button {
   height: var(--control-height);
   min-height: var(--control-height);
   border-color: var(--line-strong);
@@ -1259,7 +1259,7 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   padding: 0 10px;
 }
 
-.vault-connect-button {
+.brain-connect-button {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
@@ -1276,26 +1276,26 @@ button.ribbon-button.utility-active:hover:not(:disabled) {
   text-align: left;
 }
 
-button.vault-connect-button:hover:not(:disabled) {
+button.brain-connect-button:hover:not(:disabled) {
   border-color: transparent;
   background: var(--surface-hover);
   box-shadow: var(--shadow-control-hover);
   color: var(--text);
 }
 
-.vault-connect-button .icon {
+.brain-connect-button .icon {
   width: 16px;
   height: 16px;
 }
 
-.vault-connect-button span {
+.brain-connect-button span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.vault-control-body .compact-icon-button {
+.brain-control-body .compact-icon-button {
   width: var(--control-height);
   min-width: var(--control-height);
   min-height: var(--control-height);
@@ -1307,7 +1307,7 @@ button.vault-connect-button:hover:not(:disabled) {
   height: 16px;
 }
 
-.vault-control-body .primary-action {
+.brain-control-body .primary-action {
   grid-column: 2 / 3;
   grid-row: 2;
 }
@@ -1523,7 +1523,7 @@ button.vault-connect-button:hover:not(:disabled) {
   min-width: 0;
 }
 
-.session-account-vault-button {
+.session-account-brain-button {
   display: flex;
   align-items: center;
   flex: 1 1 auto;
@@ -1537,13 +1537,13 @@ button.vault-connect-button:hover:not(:disabled) {
   text-align: left;
 }
 
-.session-account-vault-button:hover {
+.session-account-brain-button:hover {
   border-color: transparent;
   background: var(--surface-active);
   color: var(--text);
 }
 
-.session-account-vault-button:focus-visible {
+.session-account-brain-button:focus-visible {
   border-color: transparent;
 }
 
@@ -1573,7 +1573,7 @@ button.vault-connect-button:hover:not(:disabled) {
   height: 17px;
 }
 
-.vault-switcher-menu {
+.brain-switcher-menu {
   position: absolute;
   z-index: 28;
   right: 8px;
@@ -1592,31 +1592,31 @@ button.vault-connect-button:hover:not(:disabled) {
   padding: 8px;
 }
 
-.vault-switcher-menu[hidden] {
+.brain-switcher-menu[hidden] {
   display: none;
 }
 
-.vault-switcher-header,
-.vault-switcher-footer {
+.brain-switcher-header,
+.brain-switcher-footer {
   display: flex;
   align-items: center;
   min-width: 0;
 }
 
-.vault-switcher-header {
+.brain-switcher-header {
   justify-content: space-between;
   gap: 10px;
   border-bottom: 1px solid var(--line);
   padding: 2px 3px 8px;
 }
 
-.vault-switcher-header > div {
+.brain-switcher-header > div {
   display: grid;
   gap: 2px;
   min-width: 0;
 }
 
-.vault-switcher-header strong {
+.brain-switcher-header strong {
   overflow: hidden;
   color: var(--text);
   font-size: 12px;
@@ -1624,7 +1624,7 @@ button.vault-connect-button:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.vault-switcher-list {
+.brain-switcher-list {
   display: grid;
   gap: 2px;
   min-width: 0;
@@ -1635,11 +1635,11 @@ button.vault-connect-button:hover:not(:disabled) {
   list-style: none;
 }
 
-.vault-switcher-list li {
+.brain-switcher-list li {
   min-width: 0;
 }
 
-.vault-switcher-list .empty-row {
+.brain-switcher-list .empty-row {
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-control);
   color: var(--muted);
@@ -1647,7 +1647,7 @@ button.vault-connect-button:hover:not(:disabled) {
   padding: 10px;
 }
 
-.vault-switcher-manage {
+.brain-switcher-manage {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
@@ -1662,25 +1662,25 @@ button.vault-connect-button:hover:not(:disabled) {
   text-align: left;
 }
 
-.vault-switcher-manage:hover,
-.vault-switcher-manage:focus-visible {
+.brain-switcher-manage:hover,
+.brain-switcher-manage:focus-visible {
   border-color: transparent;
   background: var(--surface-hover);
   color: var(--text);
 }
 
-.vault-switcher-manage .icon {
+.brain-switcher-manage .icon {
   width: 16px;
   height: 16px;
   color: var(--icon);
 }
 
-.manage-vaults-modal-panel {
+.manage-brains-modal-panel {
   width: min(640px, 100%);
   min-height: min(520px, calc(100vh - 48px));
 }
 
-.manage-vaults-modal-content {
+.manage-brains-modal-content {
   display: grid;
   gap: 18px;
   min-width: 0;
@@ -1688,17 +1688,17 @@ button.vault-connect-button:hover:not(:disabled) {
   padding: 20px;
 }
 
-.manage-vaults-summary {
+.manage-brains-summary {
   display: grid;
   gap: 5px;
 }
 
-.manage-vaults-summary > div {
+.manage-brains-summary > div {
   display: grid;
   gap: 4px;
 }
 
-.manage-vaults-summary strong {
+.manage-brains-summary strong {
   overflow: hidden;
   color: var(--text);
   font-size: 16px;
@@ -1706,12 +1706,12 @@ button.vault-connect-button:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-.manage-vaults-summary p {
+.manage-brains-summary p {
   color: var(--muted);
   font-size: 12px;
 }
 
-.manage-vaults-list-section {
+.manage-brains-list-section {
   display: grid;
   gap: 10px;
   min-width: 0;
@@ -1725,7 +1725,7 @@ button.vault-connect-button:hover:not(:disabled) {
   font-size: 15px;
 }
 
-.manage-vaults-list {
+.manage-brains-list {
   max-height: min(330px, 42vh);
   border: 0;
   border-radius: 10px;
@@ -1734,29 +1734,29 @@ button.vault-connect-button:hover:not(:disabled) {
   padding: 6px;
 }
 
-.manage-vault-actions {
+.manage-brain-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 8px;
 }
 
-.manage-vault-actions button {
+.manage-brain-actions button {
   min-height: 40px;
 }
 
-.manage-vault-actions .manage-vault-unlock-button {
+.manage-brain-actions .manage-brain-unlock-button {
   min-height: 44px !important;
   border-radius: var(--radius-control);
   padding-right: 16px;
   padding-left: 16px;
 }
 
-.manage-vault-create {
+.manage-brain-create {
   border-top: 1px solid var(--line);
   padding-top: 14px;
 }
 
-.manage-vault-create summary {
+.manage-brain-create summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1768,11 +1768,11 @@ button.vault-connect-button:hover:not(:disabled) {
   list-style: none;
 }
 
-.manage-vault-create summary::-webkit-details-marker {
+.manage-brain-create summary::-webkit-details-marker {
   display: none;
 }
 
-.manage-vault-create summary::after {
+.manage-brain-create summary::after {
   content: "";
   width: 6px;
   height: 6px;
@@ -1783,24 +1783,24 @@ button.vault-connect-button:hover:not(:disabled) {
   transition: opacity 150ms ease, transform 150ms ease;
 }
 
-.manage-vault-create[open] summary::after {
+.manage-brain-create[open] summary::after {
   opacity: 0.86;
   transform: rotate(45deg);
 }
 
-.manage-vault-create-body {
+.manage-brain-create-body {
   display: grid;
   gap: 7px;
   padding-top: 7px;
 }
 
-.manage-vault-create-row {
+.manage-brain-create-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
 }
 
-.manage-vault-create-row input {
+.manage-brain-create-row input {
   min-width: 0;
 }
 
@@ -1865,7 +1865,7 @@ button.vault-connect-button:hover:not(:disabled) {
   }
 }
 
-@keyframes vault-switcher-enter {
+@keyframes brain-switcher-enter {
   from {
     opacity: 0;
     filter: blur(4px);
@@ -1899,38 +1899,38 @@ button.vault-connect-button:hover:not(:disabled) {
   animation: settings-section-enter 220ms cubic-bezier(0.2, 0, 0, 1) 100ms both;
 }
 
-.manage-vaults-modal-content > * {
+.manage-brains-modal-content > * {
   animation: settings-section-enter 220ms cubic-bezier(0.2, 0, 0, 1) both;
 }
 
-.manage-vaults-modal-content > *:nth-child(2) {
+.manage-brains-modal-content > *:nth-child(2) {
   animation-delay: 70ms;
 }
 
-.manage-vaults-modal-content > *:nth-child(3) {
+.manage-brains-modal-content > *:nth-child(3) {
   animation-delay: 140ms;
 }
 
-.manage-vaults-modal-content > *:nth-child(4) {
+.manage-brains-modal-content > *:nth-child(4) {
   animation-delay: 210ms;
 }
 
-.vault-switcher-menu:not([hidden]) {
-  animation: vault-switcher-enter 180ms cubic-bezier(0.2, 0, 0, 1) both;
+.brain-switcher-menu:not([hidden]) {
+  animation: brain-switcher-enter 180ms cubic-bezier(0.2, 0, 0, 1) both;
   transform-origin: bottom left;
 }
 
-.vault-switcher-menu:not([hidden]) > .vault-switcher-header,
-.vault-switcher-menu:not([hidden]) > .vault-switcher-list,
-.vault-switcher-menu:not([hidden]) > .vault-switcher-footer {
+.brain-switcher-menu:not([hidden]) > .brain-switcher-header,
+.brain-switcher-menu:not([hidden]) > .brain-switcher-list,
+.brain-switcher-menu:not([hidden]) > .brain-switcher-footer {
   animation: settings-section-enter 180ms cubic-bezier(0.2, 0, 0, 1) both;
 }
 
-.vault-switcher-menu:not([hidden]) > .vault-switcher-list {
+.brain-switcher-menu:not([hidden]) > .brain-switcher-list {
   animation-delay: 60ms;
 }
 
-.vault-switcher-menu:not([hidden]) > .vault-switcher-footer {
+.brain-switcher-menu:not([hidden]) > .brain-switcher-footer {
   animation-delay: 120ms;
 }
 
@@ -2110,13 +2110,13 @@ button.settings-nav-item.active {
   --access-surface-radius: 10px;
 }
 
-.settings-invitations-section #settingsInvitationsPanelMount > .access-vault-admin,
-.settings-invitations-section #settingsInvitationsPanelMount > .vault-management-section,
+.settings-invitations-section #settingsInvitationsPanelMount > .access-brain-admin,
+.settings-invitations-section #settingsInvitationsPanelMount > .brain-management-section,
 .settings-invitations-section #settingsInvitationsPanelMount > .access-admin-section {
   margin: 0;
 }
 
-.settings-invitations-section #settingsInvitationsPanelMount > .vault-access-option {
+.settings-invitations-section #settingsInvitationsPanelMount > .brain-access-option {
   width: auto;
 }
 
@@ -2319,18 +2319,18 @@ button.settings-nav-item.active {
   line-height: 1.45;
 }
 
-.settings-vault-summary {
+.settings-brain-summary {
   display: grid;
   gap: 18px;
 }
 
-.settings-vault-summary > div:first-child {
+.settings-brain-summary > div:first-child {
   display: grid;
   gap: 4px;
 }
 
 .settings-card-label,
-.settings-vault-summary dt {
+.settings-brain-summary dt {
   color: var(--soft);
   font-size: 10px;
   font-weight: 700;
@@ -2338,7 +2338,7 @@ button.settings-nav-item.active {
   text-transform: uppercase;
 }
 
-.settings-vault-summary > div:first-child strong {
+.settings-brain-summary > div:first-child strong {
   overflow: hidden;
   color: var(--text);
   font-size: 16px;
@@ -2346,20 +2346,20 @@ button.settings-nav-item.active {
   white-space: nowrap;
 }
 
-.settings-vault-summary dl {
+.settings-brain-summary dl {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin: 0;
 }
 
-.settings-vault-summary dl > div {
+.settings-brain-summary dl > div {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.settings-vault-summary dd {
+.settings-brain-summary dd {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
@@ -2791,8 +2791,8 @@ button.settings-nav-item.active {
 }
 
 .access-action-stack > .access-advanced-section,
-.access-action-stack > .access-vault-admin,
-.access-state-stack > .vault-management-section {
+.access-action-stack > .access-brain-admin,
+.access-state-stack > .brain-management-section {
   margin: 0;
 }
 
@@ -3429,7 +3429,7 @@ button.settings-nav-item.active {
   margin-top: 8px;
 }
 
-.access-vault-section {
+.access-brain-section {
   flex-shrink: 0;
 }
 
@@ -3957,13 +3957,152 @@ button.command-palette-row.active {
 }
 
 .page-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(244px, 292px);
   padding: 0;
 }
 
 .page-surface {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
   height: 100%;
+}
+
+.page-link-context {
+  min-width: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.page-link-context-header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 49px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-soft) 94%, transparent);
+  padding: 10px 12px;
+  backdrop-filter: blur(10px);
+}
+
+.page-link-context-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.page-link-context-title .icon {
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+}
+
+.page-link-section {
+  border-bottom: 1px solid var(--line);
+}
+
+.page-link-section > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 720;
+  letter-spacing: 0.015em;
+  padding: 8px 12px;
+  text-transform: uppercase;
+}
+
+.page-link-section-count {
+  min-width: 18px;
+  color: var(--soft);
+  font: 650 10px/1 var(--font-mono);
+  text-align: right;
+}
+
+.page-link-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0 7px 9px;
+  list-style: none;
+}
+
+.page-link-list .empty-row {
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 7px 6px 9px;
+}
+
+.page-link-row {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text);
+  padding: 7px 8px;
+  text-align: left;
+}
+
+.page-link-row:hover:not(:disabled),
+.page-link-row:focus-visible {
+  border-color: transparent;
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.page-link-row:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.page-link-row-title,
+.page-link-row-meta,
+.page-link-row-snippet {
+  display: block;
+  min-width: 0;
+}
+
+.page-link-row-title {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.page-link-row-meta {
+  margin-top: 2px;
+  color: var(--soft);
+  font: 600 10px/1.35 var(--font-mono);
+}
+
+.page-link-row-snippet {
+  display: -webkit-box;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-wrap: pretty;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .page-header,
@@ -4622,7 +4761,7 @@ button.command-palette-row.active {
 }
 
 .access-advanced-section[open] .access-advanced-summary::after,
-.access-vault-admin[open] .access-admin-summary::after {
+.access-brain-admin[open] .access-admin-summary::after {
   opacity: 0.86;
   transform: rotate(45deg);
 }
@@ -4761,8 +4900,8 @@ button.command-palette-row.active {
   color: var(--access-danger);
 }
 
-/* Vault Management */
-.vault-management-section {
+/* Brain Management */
+.brain-management-section {
   min-width: 0;
   margin: 0 var(--access-panel-inset) 14px;
   padding: 12px;
@@ -4772,24 +4911,24 @@ button.command-palette-row.active {
   overflow: hidden;
 }
 
-.vault-management-section .access-header {
+.brain-management-section .access-header {
   margin-bottom: 10px;
   padding-bottom: 10px;
 }
 
-.vault-management-section .access-badge-row {
+.brain-management-section .access-badge-row {
   margin-bottom: 10px;
 }
 
-.vault-management-section .access-section-header {
+.brain-management-section .access-section-header {
   min-height: 34px;
 }
 
-.vault-management-section > .access-field-hint {
+.brain-management-section > .access-field-hint {
   margin-top: 8px;
 }
 
-.vault-switch-list {
+.brain-switch-list {
   display: grid;
   gap: 4px;
   margin: 10px 0 0;
@@ -4797,7 +4936,7 @@ button.command-palette-row.active {
   list-style: none;
 }
 
-.vault-switch-button {
+.brain-switch-button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -4817,41 +4956,41 @@ button.command-palette-row.active {
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
-.vault-switch-button:hover {
+.brain-switch-button:hover {
   background: var(--access-surface-hover);
 }
 
-.vault-switch-button:focus-visible {
+.brain-switch-button:focus-visible {
   outline: none;
   box-shadow: var(--shadow-access-accent);
 }
 
-.vault-switch-button:not(:disabled):active {
+.brain-switch-button:not(:disabled):active {
   transform: scale(0.96);
 }
 
-.vault-switch-button.selected,
-.vault-switch-button.loaded {
+.brain-switch-button.selected,
+.brain-switch-button.loaded {
   background: var(--access-accent-soft);
   box-shadow: var(--shadow-access-ring-hover);
   color: var(--access-accent-strong);
 }
 
-.vault-switch-title,
-.vault-switch-meta {
+.brain-switch-title,
+.brain-switch-meta {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.vault-switch-title {
+.brain-switch-title {
   font-size: 13px;
   font-weight: 720;
   line-height: 1.2;
 }
 
-.vault-switch-meta {
+.brain-switch-meta {
   grid-column: 1 / 2;
   color: var(--access-muted);
   font-size: 11px;
@@ -4859,17 +4998,17 @@ button.command-palette-row.active {
   line-height: 1.25;
 }
 
-.vault-switch-button .pill {
+.brain-switch-button .pill {
   grid-row: 1 / 3;
   grid-column: 2 / 3;
 }
 
-.vault-switch-button.selected .vault-switch-meta,
-.vault-switch-button.loaded .vault-switch-meta {
+.brain-switch-button.selected .brain-switch-meta,
+.brain-switch-button.loaded .brain-switch-meta {
   color: var(--access-muted);
 }
 
-.vault-person-action {
+.brain-person-action {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
@@ -4877,7 +5016,7 @@ button.command-palette-row.active {
   white-space: nowrap;
 }
 
-#vaultInvitationListSection .access-who-has-list li,
+#brainInvitationListSection .access-who-has-list li,
 #sharedFolderSection .access-who-has-list li,
 #folderShareLinkList li {
   align-items: flex-start;
@@ -4886,7 +5025,7 @@ button.command-palette-row.active {
   padding-bottom: 10px;
 }
 
-#vaultInvitationListSection .access-person-info,
+#brainInvitationListSection .access-person-info,
 #sharedFolderSection .access-person-info,
 #folderShareLinkList .access-person-info {
   flex: 1 1 100%;
@@ -4896,7 +5035,7 @@ button.command-palette-row.active {
   line-height: 1.25;
 }
 
-#vaultInvitationListSection .access-person-name,
+#brainInvitationListSection .access-person-name,
 #sharedFolderSection .access-person-name,
 #folderShareLinkList .access-person-name {
   flex: 1 1 100%;
@@ -4905,7 +5044,7 @@ button.command-palette-row.active {
   white-space: normal;
 }
 
-#vaultInvitationListSection .access-person-role,
+#brainInvitationListSection .access-person-role,
 #sharedFolderSection .access-person-role,
 #folderShareLinkList .access-person-role {
   flex-shrink: 1;
@@ -4914,11 +5053,11 @@ button.command-palette-row.active {
   white-space: normal;
 }
 
-.vault-management-section .access-who-has-list {
+.brain-management-section .access-who-has-list {
   gap: 0;
 }
 
-.vault-management-section .access-who-has-list li {
+.brain-management-section .access-who-has-list li {
   min-height: 38px;
   padding: 8px 0;
   border-radius: 0;
@@ -4926,21 +5065,21 @@ button.command-palette-row.active {
   box-shadow: none;
 }
 
-.vault-management-section .access-who-has-list li + li {
+.brain-management-section .access-who-has-list li + li {
   border-top: 1px solid var(--access-border);
 }
 
-.vault-management-section .access-empty-state {
+.brain-management-section .access-empty-state {
   min-height: 38px !important;
   padding: 8px 0 !important;
 }
 
-.vault-access-action-grid {
+.brain-access-action-grid {
   display: grid;
   gap: 10px;
 }
 
-.vault-access-option {
+.brain-access-option {
   margin: 0;
   padding: 10px;
   border-radius: 8px;
@@ -4948,18 +5087,18 @@ button.command-palette-row.active {
   box-shadow: var(--shadow-access-ring);
 }
 
-.vault-access-option.primary {
+.brain-access-option.primary {
   background: var(--access-accent-soft);
   box-shadow:
     var(--shadow-access-ring),
     inset 3px 0 0 var(--access-accent);
 }
 
-.vault-access-option + .vault-access-option {
+.brain-access-option + .brain-access-option {
   margin-top: 0;
 }
 
-.vault-access-option-heading {
+.brain-access-option-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4967,21 +5106,21 @@ button.command-palette-row.active {
   margin-bottom: 9px;
 }
 
-.vault-access-option-heading h4 {
+.brain-access-option-heading h4 {
   margin: 0;
 }
 
-.vault-access-option-heading .pill {
+.brain-access-option-heading .pill {
   flex-shrink: 0;
 }
 
-#vaultPeopleActionPanel .access-inline-field {
+#brainPeopleActionPanel .access-inline-field {
   grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
   gap: 7px;
 }
 
-#vaultPeopleActionPanel .access-add-button {
+#brainPeopleActionPanel .access-add-button {
   width: 100%;
   padding-right: 10px;
   padding-left: 10px;
@@ -4989,22 +5128,22 @@ button.command-palette-row.active {
   white-space: normal;
 }
 
-#vaultPeopleActionPanel .access-button-row {
+#brainPeopleActionPanel .access-button-row {
   grid-template-columns: minmax(0, 1fr);
   gap: 7px;
 }
 
-#vaultPeopleActionPanel .access-button-row button {
+#brainPeopleActionPanel .access-button-row button {
   width: 100%;
   line-height: 1.25;
   white-space: normal;
 }
 
-#vaultPeopleSection .access-person-info {
+#brainPeopleSection .access-person-info {
   align-items: flex-start;
 }
 
-#vaultPeopleSection .access-person-name {
+#brainPeopleSection .access-person-name {
   line-height: 1.25;
   overflow: visible;
   overflow-wrap: anywhere;
@@ -5046,8 +5185,8 @@ button.command-palette-row.active {
   color: var(--access-danger);
 }
 
-/* Vault Administration */
-.access-vault-admin {
+/* Brain Administration */
+.access-brain-admin {
   margin: 14px var(--access-panel-inset) 0;
   border: 0;
   border-radius: var(--access-surface-radius);
@@ -5086,24 +5225,24 @@ button.command-palette-row.active {
   margin-top: 10px;
 }
 
-#vaultInvitationPanel .access-button-row {
+#brainInvitationPanel .access-button-row {
   grid-template-columns: minmax(0, 1fr);
   gap: 7px;
 }
 
-#vaultInvitationPanel .access-button-row button {
+#brainInvitationPanel .access-button-row button {
   width: 100%;
   line-height: 1.25;
   white-space: normal;
 }
 
-.vault-invite-url-output {
+.brain-invite-url-output {
   display: grid;
   gap: 8px;
   min-width: 0;
 }
 
-.vault-invite-url-output .access-primary-button {
+.brain-invite-url-output .access-primary-button {
   width: 100%;
 }
 
@@ -5129,6 +5268,22 @@ button.command-palette-row.active {
 
   .access-advanced-summary small {
     max-width: 110px;
+  }
+
+  .page-workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(224px, 252px);
+  }
+}
+
+@media (min-width: 641px) and (max-width: 1040px) {
+  .page-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(180px, 32vh);
+  }
+
+  .page-link-context {
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 }
 
@@ -5194,25 +5349,25 @@ button.command-palette-row.active {
     width: 100%;
   }
 
-  .vault-switcher-menu {
+  .brain-switcher-menu {
     right: 6px;
     left: 6px;
     max-width: none;
   }
 
-  .manage-vaults-modal-panel {
+  .manage-brains-modal-panel {
     min-height: min(520px, calc(100vh - 20px));
   }
 
-  .manage-vaults-modal-content {
+  .manage-brains-modal-content {
     padding: 16px;
   }
 
-  .manage-vault-actions {
+  .manage-brain-actions {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .settings-vault-summary dl {
+  .settings-brain-summary dl {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -5250,8 +5405,8 @@ button.command-palette-row.active {
 
   .access-folder-selector,
   .access-inspector-new,
-  .vault-management-section,
-  .access-vault-admin,
+  .brain-management-section,
+  .access-brain-admin,
   .access-result,
   .access-busy-status {
     margin-left: 8px;

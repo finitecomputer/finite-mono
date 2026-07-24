@@ -184,6 +184,8 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Skills check
         run: nix develop --command just skills check
+      - name: Brain product language check
+        run: nix develop --command just brain-language-check
       - name: Search check
         run: nix develop --command just search check
       - name: Canonical Runtime image contract

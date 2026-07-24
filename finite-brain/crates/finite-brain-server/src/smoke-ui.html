@@ -24,8 +24,8 @@
         </label>
         <div class="grid two">
           <label>
-            Vault id
-            <input id="vaultId" value="smoke" />
+            Brain id
+            <input id="brainId" value="smoke" />
           </label>
           <label>
             Folder id
@@ -69,13 +69,13 @@
           <button id="searchButton" type="button">Search boundary</button>
         </div>
         <details>
-          <summary>Create vault request body</summary>
-          <textarea id="createVaultBody" rows="6" spellcheck="false">{
-  "vaultId": "smoke",
+          <summary>Create brain request body</summary>
+          <textarea id="createBrainBody" rows="6" spellcheck="false">{
+  "brainId": "smoke",
   "kind": "organization",
-  "name": "Smoke Vault"
+  "name": "Smoke Brain"
 }</textarea>
-          <button id="createVaultButton" type="button">POST create vault</button>
+          <button id="createBrainButton" type="button">POST create brain</button>
         </details>
         <details>
           <summary>Create Folder request body</summary>
@@ -101,15 +101,15 @@
           <button id="submitSyncButton" type="button">POST sync record</button>
         </details>
         <details>
-          <summary>Vault Invitation body</summary>
-          <textarea id="vaultInvitationBody" rows="6" spellcheck="false">{
+          <summary>Brain Invitation body</summary>
+          <textarea id="brainInvitationBody" rows="6" spellcheck="false">{
   "targetNpub": "npub...",
   "initialFolderAccess": ["general"],
   "expiresAt": "2026-06-30T00:00:00.000Z"
 }</textarea>
-          <button id="createVaultInvitationButton" type="button">POST vault invitation</button>
-          <button id="getVaultInvitationButton" type="button">GET invitation code</button>
-          <button id="acceptVaultInvitationButton" type="button">POST accept invitation</button>
+          <button id="createBrainInvitationButton" type="button">POST brain invitation</button>
+          <button id="getBrainInvitationButton" type="button">GET invitation code</button>
+          <button id="acceptBrainInvitationButton" type="button">POST accept invitation</button>
         </details>
         <details>
           <summary>Share Link body</summary>
@@ -133,7 +133,7 @@
         <details>
           <summary>Shared Folder / Connection body</summary>
           <textarea id="sharedFolderBody" rows="11" spellcheck="false">{
-  "destinationVaultId": "destination",
+  "destinationBrainId": "destination",
   "destinationAdminNpub": "npub...",
   "grant": {
     "id": "grant-shared-dev",
@@ -156,11 +156,11 @@
         <h2>State</h2>
         <div class="state-grid">
           <div>
-            <p class="label">Vault summary</p>
+            <p class="label">Brain summary</p>
             <ul id="summaryList" class="list"></ul>
           </div>
           <div>
-            <p class="label">Vaults/Folders</p>
+            <p class="label">Brains/Folders</p>
             <ul id="folderList" class="list"></ul>
           </div>
           <div>

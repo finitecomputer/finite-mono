@@ -3,8 +3,8 @@
 FiniteBrain is Finite Computer's encrypted, folder-scoped knowledge system for
 humans and agents.
 
-If a human asks you to work in a FiniteBrain vault, use the `fbrain` CLI. A
-Vault Working Tree is the editable local source of truth for an agent: sync
+If a human asks you to work in a FiniteBrain brain, use the `fbrain` CLI. A
+Brain Working Tree is the editable local source of truth for an agent: sync
 first, edit ordinary markdown in readable Folders, then sync encrypted changes
 back. Each key-using operation reopens encrypted Folder Key Grants in memory;
 there is no durable CLI unlock state.
@@ -107,35 +107,17 @@ When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
 identity. For `@finite.vip` emails, redemption binds the email to the current
 Local Identity Key in finite-identity and returns the NIP-05 identifier for
 that email. Run this binding flow only when the email and current key identify
-the same Principal. An agent must not redeem a human's email this way merely to
-inherit the human's Brain access; that requires a scoped, revocable Email
-Access Delegation or an invitation claim that explicitly grants the agent npub
-access without changing global identity ownership.
+the same Principal. An agent must not redeem a human's email to inherit the
+human identity. Brain instead records exactly one distinct Personal Agent for
+a Personal Brain and automatically grants it every current and future Folder
+Key. The owner can atomically replace or remove it; ownership always stays
+with the human User Nostr Identity.
 
-A Finite Brain Email Access Delegation is separate from a Sites delegation and
-is not itself a decryption key. Brain must issue current Folder Key Grants to
-the agent npub for every Folder the delegation makes readable; revoking the
-delegation must stop future authorization without rebinding either identity.
-
-The first user-owned pairing surface is
-`POST /_admin/vaults/{vault_id}/agent-workspace-pairings`. The Personal Vault
-owner signs the HTTP request and the included Folder access-change event, and
-supplies current NIP-59 grants for both the owner and the distinct Agent
-Principal. Brain atomically records the active delegation, non-admin
-membership, dedicated restricted Agent Workspace Folder, Folder Access, and
-grants. An exact retry returns the same delegation with `duplicate: true`.
-Owners inspect the durable scope and audit record with `GET` on the same path.
-This route is Brain-specific; other services own separate adapters and
-delegations.
-
-For the agent-first path, an explicit Chat setup action issues a short-lived
-bundle through
-`POST /v1/brain/personal-vault-bootstrap-authorizations`; the agent forwards it
-to `POST /_admin/personal-vault-bootstrap` using its own signed request. The
-Personal Vault owner expands a pairing one restricted Folder at a time through
-the pairing's `/folders/{folder_id}` route and revokes it through `DELETE` on
-the pairing resource. Revocation requires next-version grants and complete
-live-object re-encryption for every Folder in the current delegated scope.
+User-first creation resolves the Managed Agent Email before creating the empty
+Personal Brain. Agent-first creation uses the signed
+`POST /_admin/personal-brain-bootstrap` route; Brain derives the owning account
+through Core and the human public identity through Finite Identity. Chat does
+not issue a Brain setup ticket or grant.
 
 Hosted `/client` uses `finite-brain-identity-provider-v1` through the
 WorkOS-bound dashboard bridge. The dashboard injects a signed, expiring
@@ -152,7 +134,7 @@ finite-identity, but FiniteBrain folder sharing still requires an npub target
 for encrypted Folder Key Grants. Email-address folder grants are intentionally
 left for a future crypto-aware slice.
 
-## Open A Vault Working Tree
+## Open A Brain Working Tree
 
 Use an explicit config directory in agent runtimes so fbrain state does not
 depend on shell persistence (the identity itself always resolves from the
@@ -163,15 +145,15 @@ export FINITE_BRAIN_SERVER_URL=https://brain.finite.computer
 export FBRAIN_CONFIG_DIR="$HOME/.config/finitebrain"
 
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" auth status --json
-fbrain --config-dir "$FBRAIN_CONFIG_DIR" open <vault-id> "$HOME/finitebrain/<vault-id>"
-cd "$HOME/finitebrain/<vault-id>"
+fbrain --config-dir "$FBRAIN_CONFIG_DIR" open <brain-id> "$HOME/finitebrain/<brain-id>"
+cd "$HOME/finitebrain/<brain-id>"
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" doctor
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" repair # only when doctor reports an insecure boundary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" conflicts --json
 ```
 
-A Vault Working Tree is intentional persistent plaintext on the Trusted Device.
+A Brain Working Tree is intentional persistent plaintext on the Trusted Device.
 Pausing sync, stopping `fbrain`, restarting the device, or clearing Session
 Folder Keys does not hide or remove its member-authored files. `fbrain repair`
 only restores owner-only permissions on the Working Tree root and
@@ -187,7 +169,7 @@ state only; it is not secure erasure from backups, snapshots, filesystem
 history, or prior copies. Encrypted grants and recovery artifacts remain the
 authority for reopening access.
 
-Before editing, read the Vault Working Tree's `AGENTS.md`, `HUMANS.md`,
+Before editing, read the Brain Working Tree's `AGENTS.md`, `HUMANS.md`,
 Folder-local `_index.md`, `config.md`, and `log.md` files when present.
 
 ## Agent Rules
@@ -225,14 +207,14 @@ uses the connected Member Identity to reopen encrypted Folder Key Grants and
 rebuild readable Pages, drafts, search, graph, and access views in memory.
 **Lock session** clears that in-memory keyring, opened-grant metadata, decrypted
 projections, drafts, prepared writes, import plans, invite secrets, and rendered
-plaintext. Switching Vaults uses the same clearing boundary. It does not change
+plaintext. Switching Brains uses the same clearing boundary. It does not change
 or delete the external signer identity. Navigating away, entering the browser
 back/forward cache, or receiving a signature from a different signer identity
 also locks the session before protected work can continue.
 
 An invitation-link fragment is removed from browser history immediately and
 held only as a one-shot, in-memory pre-session capability. It enters invitation
-controls after explicit **Resume session**; explicit Lock, Vault switching, or a
+controls after explicit **Resume session**; explicit Lock, Brain switching, or a
 failed Resume discards it.
 
 The first-party browser client does not write raw Folder Keys or decrypted

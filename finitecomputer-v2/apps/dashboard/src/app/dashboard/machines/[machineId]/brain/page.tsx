@@ -4,17 +4,21 @@ import { BrainIcon } from "lucide-react";
 import { BrainFrame, BrainHeader } from "@/components/brain-frame";
 import { fetchRuntimeAgentNpub } from "@/lib/agent-contact";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
+import { brainMachinePath } from "@/lib/brain-session-bridge";
 
 export default async function MachineBrainPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ machineId: string }>;
+  searchParams: Promise<{ brainId?: string }>;
 }) {
   const { machineId } = await params;
+  const { brainId } = await searchParams;
   const access = await loadDashboardMachineAccess(machineId, { coreCacheMode: "swr" });
   if (!access) redirect("/dashboard");
   if (access.machineId !== machineId) {
-    redirect(`/dashboard/machines/${encodeURIComponent(access.machineId)}/brain`);
+    redirect(brainMachinePath(access.machineId, brainId));
   }
 
   const enabled = Boolean(process.env.FC_BRAIN_UPSTREAM_URL?.trim());
@@ -29,6 +33,7 @@ export default async function MachineBrainPage({
             agentEmail={access.coreProject.project.agent_email}
             agentName={access.displayName}
             agentNpub={agentNpub}
+            brainId={brainId}
           />
         ) : (
           <main className="finite-product-surface__empty">

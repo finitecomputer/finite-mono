@@ -33,14 +33,14 @@ new `finite-nostr` Rust crate so other Finite repos can reuse it.
   - `finitecomputer/finite-nostr#1` reusable Nostr identity, event, and HTTP auth primitives
   - `finitecomputer/finite-nostr#2` reusable NIP-44 and NIP-59 wrapping primitives
   - `finitecomputer/finite-brain#2` Rust workspace and health smoke path
-  - `finitecomputer/finite-brain#3` core domain model, path rules, and Vault bootstrap
+  - `finitecomputer/finite-brain#3` core domain model, path rules, and Brain bootstrap
   - `finitecomputer/finite-brain#4` Folder Object encryption, canonical hashes, and signed record validation
-  - `finitecomputer/finite-brain#5` SQLite store for Vaults, Folders, access, and grants
+  - `finitecomputer/finite-brain#5` SQLite store for Brains, Folders, access, and grants
   - `finitecomputer/finite-brain#6` sync append log, current projection, and conflict handling
-  - `finitecomputer/finite-brain#7` Nostr-authenticated server shell and Vault metadata APIs
+  - `finitecomputer/finite-brain#7` Nostr-authenticated server shell and Brain metadata APIs
   - `finitecomputer/finite-brain#8` secure object routes and sync APIs
   - `finitecomputer/finite-brain#9` Folder Access, grant, Finish Setup, and rotation flows
-  - `finitecomputer/finite-brain#10` singleton Vault Invitations and Share Links
+  - `finitecomputer/finite-brain#10` singleton Brain Invitations and Share Links
   - `finitecomputer/finite-brain#11` Shared Folder Connections and mounted Folder projection
   - `finitecomputer/finite-brain#12` Encrypted Export, OKF Import/Export, and LLM Wiki privacy rules
   - `finitecomputer/finite-brain#13` development-only Smoke UI

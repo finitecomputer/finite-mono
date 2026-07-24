@@ -23,7 +23,7 @@
 ## Implementation
 
 - Public interface used: the real Rust-served `/client` and its served
-  `/client/app.css`, exercised against the docs-rich smoke Vault through the
+  `/client/app.css`, exercised against the docs-rich smoke Brain through the
   development NIP-07 signer
 - Behaviors covered: Files and Search navigation; Page reading and visual/source
   editing; slash commands; context menu and quick switcher; Graph View selection,

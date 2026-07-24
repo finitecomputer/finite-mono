@@ -18,12 +18,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use finite_brain_core::{
-    AdminAccessAction, AdminAccessChangeValidation, BRAIN_IDENTITY_PROVIDER_VERSION,
-    BrainEventAuthorizationIntent, BrainGrantIntent, BrainHttpAuthorizationIntent, FolderId,
-    FolderKey, IssuedFolderKeyGrant, PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS, VaultId,
-    issue_admin_access_change_event, issue_folder_key_grant,
-    issue_personal_vault_bootstrap_authorization_event, open_folder_key_grant,
-    sign_brain_event_template, validate_brain_event_authorization_intent,
+    BRAIN_IDENTITY_PROVIDER_VERSION, BrainEventAuthorizationIntent, BrainGrantIntent,
+    BrainHttpAuthorizationIntent, BrainId, FolderId, FolderKey, issue_folder_key_grant,
+    open_folder_key_grant, sign_brain_event_template, validate_brain_event_authorization_intent,
     validate_brain_grant_intent, validate_brain_http_authorization_intent,
     wrap_brain_invite_bootstrap,
 };
@@ -57,8 +54,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 pub const WORKOS_USER_HEADER: &str = "x-finite-workos-user-id";
 const CREATED_BY: &str = concat!("finitechat-hosted-device/", env!("CARGO_PKG_VERSION"));
@@ -93,7 +88,6 @@ const DEVICE_LINK_RECONCILE_FANOUT_DOMAIN: &[u8] = b"finitechat.hosted-device-li
 const AGENT_BINDING_VERSION: u16 = 1;
 const AGENT_BINDING_NONCE_BYTES: usize = 12;
 const MAX_AGENT_BINDING_REQUEST_BYTES: usize = 8 * 1024;
-const MAX_BRAIN_BOOTSTRAP_AUTHORIZATION_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_BRAIN_IDENTITY_PROVIDER_REQUEST_BYTES: usize = 1024 * 1024;
 const BRAIN_PUBLIC_ORIGIN_HEADER: &str = "x-finite-brain-public-origin";
 const SITES_IDENTITY_PROVIDER_VERSION: &str = "finite-sites-identity-provider-v1";
@@ -120,9 +114,16 @@ pub struct HostedDeviceConfig {
     pub api_token: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct HostedIdentityAuthorityConfig {
+    pub base_url: String,
+    pub operator_token: String,
+}
+
 #[derive(Clone)]
 struct HostedDeviceState {
     config: HostedDeviceConfig,
+    identity_authority: Option<HostedIdentityAuthorityConfig>,
     runtimes: Arc<Mutex<HashMap<String, Arc<FiniteChatRuntime>>>>,
     device_links: Arc<Mutex<()>>,
     agent_binding_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
@@ -218,9 +219,39 @@ impl HostedDeviceState {
             account_secret_hex: Some(account_secret_hex),
             now_unix_seconds: None,
         })?;
+        if let Some(authority) = &self.identity_authority {
+            register_hosted_user_principal(authority, user_id, &identity.npub())?;
+        }
         runtimes.insert(user_id.to_owned(), Arc::clone(&runtime));
         Ok(runtime)
     }
+}
+
+fn register_hosted_user_principal(
+    authority: &HostedIdentityAuthorityConfig,
+    workos_user_id: &str,
+    user_npub: &str,
+) -> Result<(), HostedDeviceError> {
+    let base_url = authority.base_url.trim().trim_end_matches('/');
+    let operator_token = authority.operator_token.trim();
+    if base_url.is_empty() || operator_token.is_empty() {
+        return Err(HostedDeviceError::IdentityAuthority(
+            "identity authority configuration is incomplete".to_owned(),
+        ));
+    }
+    let body = serde_json::json!({
+        "workosUserId": workos_user_id,
+        "userNpub": user_npub,
+    })
+    .to_string();
+    ureq::post(&format!(
+        "{base_url}/api/v1/operator/account-principal-bindings"
+    ))
+    .set("X-Finite-Operator-Token", operator_token)
+    .set("Content-Type", "application/json")
+    .send_string(&body)
+    .map_err(|error| HostedDeviceError::IdentityAuthority(error.to_string()))?;
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -249,6 +280,8 @@ pub enum HostedDeviceError {
     DeviceLinkConflict(String),
     #[error("Finite Chat link service is unavailable: {0}")]
     DeviceLinkService(String),
+    #[error("Finite Identity account binding is unavailable: {0}")]
+    IdentityAuthority(String),
     #[error("hosted device runtime cache lock poisoned")]
     LockPoisoned,
     #[error("hosted chat state is incomplete; recovery is required")]
@@ -257,8 +290,6 @@ pub enum HostedDeviceError {
     AgentBindingNotFound,
     #[error("canonical Agent conversation requires recovery: {0}")]
     AgentBindingInvalid(String),
-    #[error("invalid Brain bootstrap authorization request: {0}")]
-    InvalidBrainBootstrapAuthorization(String),
     #[error("Finite Chat Hosted Device setup is required before opening Brain")]
     BrainIdentitySetupRequired,
     #[error("invalid Brain Identity Provider request: {0}")]
@@ -288,7 +319,6 @@ impl IntoResponse for HostedDeviceError {
             Self::MissingUser
             | Self::InvalidUser
             | Self::InvalidMultipart(_)
-            | Self::InvalidBrainBootstrapAuthorization(_)
             | Self::InvalidBrainIdentityProvider(_)
             | Self::InvalidSitesIdentityProvider(_) => StatusCode::BAD_REQUEST,
             Self::BrainIdentitySetupRequired | Self::SitesIdentitySetupRequired => {
@@ -300,7 +330,7 @@ impl IntoResponse for HostedDeviceError {
             }
             Self::DeviceLinkConflict(_) | Self::CanonicalChatConflict(_) => StatusCode::CONFLICT,
             Self::InvalidDeviceLink(_) => StatusCode::BAD_REQUEST,
-            Self::DeviceLinkService(_) => StatusCode::BAD_GATEWAY,
+            Self::DeviceLinkService(_) | Self::IdentityAuthority(_) => StatusCode::BAD_GATEWAY,
             Self::AttachmentUnavailable => StatusCode::BAD_GATEWAY,
             Self::IncompleteUserState | Self::AgentBindingInvalid(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -328,14 +358,21 @@ struct HealthResponse {
 }
 
 pub fn app(config: HostedDeviceConfig) -> Router {
-    app_with_test_options(config, None, 0, 0, 0)
+    app_with_test_options(config, None, None, 0, 0, 0)
+}
+
+pub fn app_with_identity_authority(
+    config: HostedDeviceConfig,
+    identity_authority: HostedIdentityAuthorityConfig,
+) -> Router {
+    app_with_test_options(config, Some(identity_authority), None, 0, 0, 0)
 }
 
 /// Test seam for exercising expiry and restart behavior without sleeping.
 /// Production always calls [`app`] and uses the system clock.
 #[doc(hidden)]
 pub fn app_with_fixed_device_link_now(config: HostedDeviceConfig, now_unix_seconds: u64) -> Router {
-    app_with_test_options(config, Some(now_unix_seconds), 0, 0, 0)
+    app_with_test_options(config, None, Some(now_unix_seconds), 0, 0, 0)
 }
 
 /// Test seam for proving recovery when the final binding write fails after its
@@ -345,7 +382,7 @@ pub fn app_with_final_agent_binding_persist_failures(
     config: HostedDeviceConfig,
     failure_count: usize,
 ) -> Router {
-    app_with_test_options(config, None, failure_count, 0, 0)
+    app_with_test_options(config, None, None, failure_count, 0, 0)
 }
 
 /// Test seam for proving recovery after the server accepted the exact Room
@@ -355,7 +392,7 @@ pub fn app_with_profile_bootstrap_room_create_failures(
     config: HostedDeviceConfig,
     failure_count: usize,
 ) -> Router {
-    app_with_test_options(config, None, 0, failure_count, 0)
+    app_with_test_options(config, None, None, 0, failure_count, 0)
 }
 
 /// Test seam for proving recovery after pending MLS state is durable but the
@@ -365,11 +402,12 @@ pub fn app_with_profile_bootstrap_submit_failures(
     config: HostedDeviceConfig,
     failure_count: usize,
 ) -> Router {
-    app_with_test_options(config, None, 0, 0, failure_count)
+    app_with_test_options(config, None, None, 0, 0, failure_count)
 }
 
 fn app_with_test_options(
     config: HostedDeviceConfig,
+    identity_authority: Option<HostedIdentityAuthorityConfig>,
     fixed_device_link_now_unix_seconds: Option<u64>,
     fail_final_agent_binding_persists: usize,
     fail_profile_bootstrap_room_creates_after_server_acceptance: usize,
@@ -377,6 +415,7 @@ fn app_with_test_options(
 ) -> Router {
     let state = HostedDeviceState {
         config,
+        identity_authority,
         runtimes: Arc::new(Mutex::new(HashMap::new())),
         device_links: Arc::new(Mutex::new(())),
         agent_binding_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -409,12 +448,6 @@ fn app_with_test_options(
             "/v1/app/agent-bindings/authorize-bootstrap",
             post(authorize_agent_binding_bootstrap)
                 .layer(DefaultBodyLimit::max(MAX_AGENT_BINDING_REQUEST_BYTES)),
-        )
-        .route(
-            "/v1/brain/personal-vault-bootstrap-authorizations",
-            post(issue_personal_vault_bootstrap_authorization).layer(DefaultBodyLimit::max(
-                MAX_BRAIN_BOOTSTRAP_AUTHORIZATION_REQUEST_BYTES,
-            )),
         )
         .route(
             "/v1/brain/identity-provider",
@@ -1372,26 +1405,6 @@ fn random_runtime_request_id() -> Result<String, HostedDeviceError> {
     Ok(format!("runtime-{}", hex::encode(entropy)))
 }
 
-fn random_brain_bootstrap_authorization_id() -> Result<String, HostedDeviceError> {
-    let mut entropy = [0_u8; 16];
-    getrandom::fill(&mut entropy).map_err(|error| {
-        HostedDeviceError::Task(format!(
-            "Brain bootstrap authorization id generation failed: {error}"
-        ))
-    })?;
-    Ok(format!("brain-bootstrap-{}", hex::encode(entropy)))
-}
-
-fn random_brain_grant_id() -> Result<String, HostedDeviceError> {
-    let mut entropy = [0_u8; 16];
-    getrandom::fill(&mut entropy).map_err(|error| {
-        HostedDeviceError::Task(format!(
-            "Brain Folder Key Grant id generation failed: {error}"
-        ))
-    })?;
-    Ok(format!("brain-grant-{}", hex::encode(entropy)))
-}
-
 const fn default_runtime_command_wait_millis() -> u64 {
     45_000
 }
@@ -1433,40 +1446,6 @@ struct EnsureAgentBindingRequest {
 struct AuthorizeAgentBindingBootstrapRequest {
     project_id: String,
     creation_request_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IssuePersonalVaultBootstrapAuthorizationRequest {
-    agent_npub: String,
-    vault_id: String,
-    workspace_folder_id: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IssuePersonalVaultBootstrapAuthorizationResponse {
-    authorization_id: String,
-    owner_npub: String,
-    agent_npub: String,
-    vault_id: String,
-    name: String,
-    folder_id: String,
-    folder_name: String,
-    folder_path: String,
-    workspace_folder_id: String,
-    expires_at: u64,
-    bootstrap_grants: Vec<BrainBootstrapFolderGrant>,
-    workspace_grants: Vec<IssuedFolderKeyGrant>,
-    bootstrap_authorization: nostr::Event,
-    access_change_event: nostr::Event,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrainBootstrapFolderGrant {
-    folder_id: String,
-    grant: IssuedFolderKeyGrant,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1704,13 +1683,13 @@ async fn execute_brain_identity_provider_operation(
                                 "Folder Key Grant createdAt is required".to_owned(),
                             )
                         })?;
-                        let vault_id = VaultId::new(input.grant.vault_id).map_err(|error| {
+                        let brain_id = BrainId::new(input.grant.brain_id).map_err(|error| {
                             HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
                         })?;
                         let grant = issue_folder_key_grant(
                             &keys,
                             id,
-                            &vault_id,
+                            &brain_id,
                             &folder_id,
                             key_version,
                             input.grant.recipient_npub,
@@ -1723,7 +1702,7 @@ async fn execute_brain_identity_provider_operation(
                         })?;
                         Ok(json!({ "grant": grant }))
                     }
-                    "vault-invite-bootstrap" => {
+                    "brain-invite-bootstrap" => {
                         let plaintext = input.plaintext.ok_or_else(|| {
                             HostedDeviceError::InvalidBrainIdentityProvider(
                                 "Email Invite Bootstrap plaintext is required".to_owned(),
@@ -1851,139 +1830,6 @@ fn brain_user_keys_if_setup(
         )
     })?;
     Ok(Keys::new(secret))
-}
-
-async fn issue_personal_vault_bootstrap_authorization(
-    State(state): State<HostedDeviceState>,
-    headers: HeaderMap,
-    Json(input): Json<IssuePersonalVaultBootstrapAuthorizationRequest>,
-) -> Result<Json<IssuePersonalVaultBootstrapAuthorizationResponse>, HostedDeviceError> {
-    let user_id = authorized_user(&state, &headers)?;
-    let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
-        let vault_id = VaultId::new(input.vault_id).map_err(|error| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-        })?;
-        let workspace_folder_id = FolderId::new(input.workspace_folder_id).map_err(|error| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-        })?;
-        let runtime = state.runtime_for(&user_id)?;
-        let identity = runtime.state()?.identity;
-        let secret_bytes = hex::decode(&identity.account_secret_hex).map_err(|_| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(
-                "Hosted Device User Key is invalid".to_owned(),
-            )
-        })?;
-        let secret = SecretKey::from_slice(&secret_bytes).map_err(|_| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(
-                "Hosted Device User Key is invalid".to_owned(),
-            )
-        })?;
-        let owner_keys = Keys::new(secret);
-        let owner_npub = finitechat_core::npub_from_account_id(identity.account_id)?;
-        let created_at = device_link_now(&state)?;
-        let created_at_rfc3339 = OffsetDateTime::from_unix_timestamp(created_at as i64)
-            .map_err(|error| HostedDeviceError::Task(format!("system clock is invalid: {error}")))?
-            .format(&Rfc3339)
-            .map_err(|error| {
-                HostedDeviceError::Task(format!("system clock is invalid: {error}"))
-            })?;
-        let authorization_id = random_brain_bootstrap_authorization_id()?;
-        let event = issue_personal_vault_bootstrap_authorization_event(
-            &owner_keys,
-            authorization_id.clone(),
-            input.agent_npub.clone(),
-            &vault_id,
-            &workspace_folder_id,
-            created_at,
-        )
-        .map_err(|error| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-        })?;
-        let access_change_event = issue_admin_access_change_event(
-            &owner_keys,
-            &AdminAccessChangeValidation {
-                vault_id: vault_id.clone(),
-                change_id: format!("agent-first-workspace-{authorization_id}"),
-                action: AdminAccessAction::SetFolderAccessMode,
-                admin_npub: owner_npub.clone(),
-                folder_id: Some(workspace_folder_id.clone()),
-                target_npub: None,
-                key_version: Some(1),
-                note: None,
-                created_at: created_at_rfc3339.clone(),
-            },
-            created_at,
-        )
-        .map_err(|error| {
-            HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-        })?;
-        let mut bootstrap_grants = Vec::with_capacity(2);
-        for folder_id in [
-            FolderId::new("getting-started"),
-            FolderId::new("restricted"),
-        ] {
-            let folder_id = folder_id.map_err(|error| {
-                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-            })?;
-            let folder_key = FolderKey::generate();
-            let grant = issue_folder_key_grant(
-                &owner_keys,
-                random_brain_grant_id()?,
-                &vault_id,
-                &folder_id,
-                1,
-                owner_npub.clone(),
-                &folder_key,
-                created_at_rfc3339.clone(),
-                created_at,
-            )
-            .map_err(|error| {
-                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-            })?;
-            bootstrap_grants.push(BrainBootstrapFolderGrant {
-                folder_id: folder_id.to_string(),
-                grant,
-            });
-        }
-        let workspace_key = FolderKey::generate();
-        let mut workspace_grants = Vec::with_capacity(2);
-        for recipient in [&owner_npub, &input.agent_npub] {
-            let grant = issue_folder_key_grant(
-                &owner_keys,
-                random_brain_grant_id()?,
-                &vault_id,
-                &workspace_folder_id,
-                1,
-                recipient.clone(),
-                &workspace_key,
-                created_at_rfc3339.clone(),
-                created_at,
-            )
-            .map_err(|error| {
-                HostedDeviceError::InvalidBrainBootstrapAuthorization(error.to_string())
-            })?;
-            workspace_grants.push(grant);
-        }
-        Ok(IssuePersonalVaultBootstrapAuthorizationResponse {
-            authorization_id,
-            owner_npub,
-            agent_npub: input.agent_npub,
-            vault_id: vault_id.to_string(),
-            name: "Personal Brain".to_owned(),
-            folder_id: workspace_folder_id.to_string(),
-            folder_name: "Agent Workspace".to_owned(),
-            folder_path: "Agent Workspace".to_owned(),
-            workspace_folder_id: workspace_folder_id.to_string(),
-            expires_at: created_at + PERSONAL_VAULT_BOOTSTRAP_MAX_TTL_SECONDS,
-            bootstrap_grants,
-            workspace_grants,
-            bootstrap_authorization: event,
-            access_change_event,
-        })
-    })
-    .await
-    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
-    Ok(Json(response))
 }
 
 async fn open_agent_binding(

@@ -531,6 +531,14 @@ impl Stack {
             &self.dashboard_auth_secret_file(),
             dashboard_auth.as_bytes(),
         )?;
+        write_mode_600(
+            &self.brain_auth_secret_file(),
+            format!(
+                "export FC_CORE_API_TOKEN={}\n",
+                shell_quote(&self.core_token)
+            )
+            .as_bytes(),
+        )?;
 
         if !self.profile.includes_runtime() {
             return Ok(());
@@ -587,6 +595,7 @@ impl Stack {
             self.runner_auth_secret_file(),
             self.limiter_auth_secret_file(),
             self.dashboard_auth_secret_file(),
+            self.brain_auth_secret_file(),
             self.identity_authority_secret_file(),
         ] {
             remove_file_best_effort(&path);
@@ -725,6 +734,8 @@ impl Stack {
                 self.finitechat_dir(),
                 self.hosted_web_device_dir(),
                 self.finitesites_dir(),
+                self.finite_identity_dir(),
+                self.finite_brain_dir(),
                 self.finite_home_dir(),
             ] {
                 if dir.exists() {
@@ -1146,13 +1157,21 @@ wait "$postgres_pid"
         self.write_managed_command(
             yaml,
             process,
-            &[String::from("exec cargo run -p finitechat-hosted-device")],
+            &[
+                format!(
+                    ". {}",
+                    shell_quote(&self.identity_authority_secret_file().display().to_string())
+                ),
+                String::from("exec cargo run -p finitechat-hosted-device"),
+            ],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteChat);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
@@ -1170,6 +1189,7 @@ wait "$postgres_pid"
                     self.hosted_web_device_token.clone(),
                 ),
                 ("FINITECHAT_SERVER_URL", self.finitechat_url()),
+                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
                 ("FINITECHAT_PUBLIC_URL", self.finitechat_url()),
             ],
         );
@@ -1232,13 +1252,25 @@ wait "$postgres_pid"
         self.write_managed_command(
             yaml,
             process,
-            &[String::from("exec cargo run -p finite-brain-app")],
+            &[
+                format!(
+                    ". {}",
+                    shell_quote(&self.brain_auth_secret_file().display().to_string())
+                ),
+                format!(
+                    ". {}",
+                    shell_quote(&self.identity_authority_secret_file().display().to_string())
+                ),
+                String::from("exec cargo run -p finite-brain-app"),
+            ],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RustBuild);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
         let _ = writeln!(yaml, "        condition: process_healthy");
         self.write_environment(
             yaml,
@@ -1256,6 +1288,7 @@ wait "$postgres_pid"
                         .to_string(),
                 ),
                 ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
+                ("FC_CORE_API_BASE_URL", self.core_url()),
             ],
         );
         self.write_http_probe_host(
@@ -1401,11 +1434,16 @@ wait "$postgres_pid"
         if self.inference_mode == InferenceMode::ChainedLimiter {
             urls.push(format!("{}/health", self.runtime_limiter_root_url()));
         }
-        let probe_script = urls
+        let probe_once = urls
             .iter()
             .map(|url| format!("curl -fsS --max-time 5 {} >/dev/null", shell_quote(url)))
             .collect::<Vec<_>>()
             .join(" && ");
+        // A process can be healthy on loopback a moment before Apple Container's
+        // host-gateway route is ready. Bound that separate readiness seam too.
+        let probe_script = format!(
+            "for attempt in $(seq 1 120); do ({probe_once}) && exit 0; sleep 1; done; exit 1"
+        );
         let command = format!(
             "exec container run --rm --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
             shell_quote(RUNTIME_IMAGE_REF),
@@ -2536,6 +2574,9 @@ wait "$postgres_pid"
     fn dashboard_auth_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("dashboard-auth.sh")
     }
+    fn brain_auth_secret_file(&self) -> PathBuf {
+        self.secrets_dir().join("brain-auth.sh")
+    }
     fn identity_authority_secret_file(&self) -> PathBuf {
         self.secrets_dir().join("identity-authority.sh")
     }
@@ -3447,6 +3488,15 @@ mod tests {
         assert!(!dashboard_exports.contains("FC_FINITE_PRIVATE_USAGE_API_TOKEN"));
         assert!(!dashboard_exports.contains("WORKOS_API_KEY"));
 
+        let brain_exports = fs::read_to_string(stack.brain_auth_secret_file()).unwrap();
+        assert_eq!(
+            brain_exports,
+            format!(
+                "export FC_CORE_API_TOKEN={}\n",
+                shell_quote(&stack.core_token)
+            )
+        );
+
         let _ = fs::remove_dir_all(state_dir);
     }
 
@@ -3660,6 +3710,7 @@ mod tests {
         assert!(yaml.contains("runtime-image:"));
         assert!(yaml.contains("--engine apple-container"));
         assert!(yaml.contains("apple-network-probe:"));
+        assert!(yaml.contains("seq 1 120"));
         assert!(yaml.contains("runtime-artifact:"));
         assert!(yaml.contains("runtime-artifact-upsert"));
         assert!(yaml.contains(".image_metadata.digest"));
@@ -3766,12 +3817,16 @@ mod tests {
         stack.ensure_dirs().unwrap();
         fs::create_dir_all(stack.postgres_data_dir()).unwrap();
         fs::write(stack.postgres_data_dir().join("sentinel"), "stale").unwrap();
+        fs::write(stack.finite_identity_dir().join("sentinel"), "stale").unwrap();
+        fs::write(stack.finite_brain_dir().join("sentinel"), "stale").unwrap();
         fs::write(stack.runtime_image_dir().join("sentinel"), "preserve").unwrap();
         fs::write(stack.runner_dir().join("sentinel"), "preserve").unwrap();
 
         stack.prepare_for_start().unwrap();
 
         assert!(!stack.postgres_data_dir().join("sentinel").exists());
+        assert!(!stack.finite_identity_dir().join("sentinel").exists());
+        assert!(!stack.finite_brain_dir().join("sentinel").exists());
         assert_eq!(
             fs::read_to_string(stack.runtime_image_dir().join("sentinel")).unwrap(),
             "preserve"

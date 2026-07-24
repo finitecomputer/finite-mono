@@ -1,4 +1,4 @@
-# Add fbrain daemon watch loop for Vault Working Trees
+# Add fbrain daemon watch loop for Brain Working Trees
 
 ## Parent
 
@@ -7,7 +7,7 @@ Parent PRD: #47
 ## What To Build
 
 Add a resident foreground watch mode to `fbrain` that repeatedly runs the real
-Vault Working Tree sync path. The watcher should be suitable for smoke-box
+Brain Working Tree sync path. The watcher should be suitable for smoke-box
 Agent Runtime use under a supervisor while remaining bounded and deterministic
 in tests.
 

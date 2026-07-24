@@ -1069,12 +1069,14 @@ dependencies = [
  "finite-identity",
  "finite-nostr",
  "nostr",
+ "pulldown-cmark",
  "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "time",
+ "unicode-normalization",
  "ureq",
 ]
 
@@ -1484,6 +1486,7 @@ dependencies = [
  "time",
  "tokio",
  "tower",
+ "ureq",
 ]
 
 [[package]]

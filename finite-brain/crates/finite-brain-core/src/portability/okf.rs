@@ -48,7 +48,7 @@ pub fn export_okf_bundle(input: OkfExportInput) -> Result<OkfBundle, Portability
     }
 
     let source_folders = input
-        .source_vault
+        .source_brain
         .folders
         .iter()
         .map(|folder| (folder.id.clone(), folder))
@@ -102,20 +102,20 @@ pub fn export_okf_bundle(input: OkfExportInput) -> Result<OkfBundle, Portability
     }
 
     let manifest = OkfManifest {
-        version: "finite-okf-vault-export-v1".to_owned(),
+        version: "finite-okf-brain-export-v1".to_owned(),
         exported_at: input.exported_at,
         exported_by_npub: input.exported_by_npub.to_string(),
-        source_vault: OkfSourceVault {
-            id: input.source_vault.id.to_string(),
-            kind: format!("{:?}", input.source_vault.kind).to_lowercase(),
-            name: input.source_vault.name.to_string(),
+        source_brain: OkfSourceBrain {
+            id: input.source_brain.id.to_string(),
+            kind: format!("{:?}", input.source_brain.kind).to_lowercase(),
+            name: input.source_brain.name.to_string(),
         },
         folders: manifest_folders,
         objects: manifest_objects,
         omissions,
     };
     let manifest_json = serde_json::to_string_pretty(&manifest).expect("manifest serializes");
-    files.insert("okf-vault.json".to_owned(), manifest_json);
+    files.insert("okf-brain.json".to_owned(), manifest_json);
 
     Ok(OkfBundle { manifest, files })
 }

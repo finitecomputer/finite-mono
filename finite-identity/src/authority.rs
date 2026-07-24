@@ -342,6 +342,63 @@ impl IdentityStore {
         Ok(())
     }
 
+    pub fn bind_workos_account_principal(
+        &self,
+        workos_user_id: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        if !valid_workos_user_id(workos_user_id) {
+            return Err(StoreError::Validation("invalid_workos_user_id"));
+        }
+        if !hex::is_hex32(pubkey) {
+            return Err(StoreError::Validation("invalid_user_npub"));
+        }
+        let mut conn = self.conn.lock().expect("store mutex never poisoned");
+        let tx = conn.transaction()?;
+        let existing_by_account: Option<String> = tx
+            .query_row(
+                "SELECT pubkey FROM workos_account_principals WHERE workos_user_id = ?1",
+                params![workos_user_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_by_account
+            .as_deref()
+            .is_some_and(|existing| existing != pubkey)
+        {
+            return Err(StoreError::Conflict("workos_account_already_bound"));
+        }
+        let existing_by_principal: Option<String> = tx
+            .query_row(
+                "SELECT workos_user_id FROM workos_account_principals WHERE pubkey = ?1",
+                params![pubkey],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_by_principal
+            .as_deref()
+            .is_some_and(|existing| existing != workos_user_id)
+        {
+            return Err(StoreError::Conflict("user_principal_already_bound"));
+        }
+        tx.execute(
+            "INSERT INTO workos_account_principals
+               (workos_user_id, pubkey, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(workos_user_id) DO UPDATE SET updated_at = excluded.updated_at",
+            params![workos_user_id, pubkey, now],
+        )?;
+        tx.execute(
+            "INSERT INTO native_principals (pubkey, created_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(pubkey) DO NOTHING",
+            params![pubkey, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn disable_vip_email(&self, email: &str, now: u64) -> Result<(), StoreError> {
         let parsed = parse_email(email).ok_or(StoreError::Validation("malformed email"))?;
         self.conn
@@ -382,6 +439,12 @@ impl IdentityStore {
               pubkey TEXT NOT NULL,
               verified_at INTEGER NOT NULL,
               revoked_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS workos_account_principals (
+              workos_user_id TEXT PRIMARY KEY,
+              pubkey TEXT NOT NULL UNIQUE,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS email_only_principals (
               email TEXT NOT NULL,
@@ -525,6 +588,19 @@ impl IdentityStore {
             .query_map(params![pubkey], VipEmailBindingRecord::from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(records)
+    }
+
+    fn workos_account_principal(&self, workos_user_id: &str) -> Result<Option<String>, StoreError> {
+        self.conn
+            .lock()
+            .expect("store mutex never poisoned")
+            .query_row(
+                "SELECT pubkey FROM workos_account_principals WHERE workos_user_id = ?1",
+                params![workos_user_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     fn email_only_principals_by_email(
@@ -732,6 +808,18 @@ pub fn router(state: AuthorityState) -> Router {
         .route(
             "/api/v1/operator/agent-email-bindings",
             post(operator_bind_agent_email),
+        )
+        .route(
+            "/api/v1/operator/account-principal-bindings",
+            post(operator_bind_account_principal),
+        )
+        .route(
+            "/api/v1/operator/brain/agent-resolution",
+            post(operator_resolve_brain_agent),
+        )
+        .route(
+            "/api/v1/operator/brain/user-resolution",
+            post(operator_resolve_brain_user),
         )
         .route(
             "/api/v1/operator/disable-binding",
@@ -1074,6 +1162,100 @@ async fn operator_bind_agent_email(
     }
 }
 
+async fn operator_bind_account_principal(
+    State(state): State<AuthorityState>,
+    headers: HeaderMap,
+    Json(request): Json<OperatorBindAccountPrincipalRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = require_operator(&state, &headers) {
+        return api_error(error.status, error.code);
+    }
+    let pubkey_bytes = match npub::decode(request.user_npub.trim()) {
+        Ok(pubkey) => pubkey,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_user_npub"),
+    };
+    let pubkey = hex::encode(&pubkey_bytes);
+    match state.store.bind_workos_account_principal(
+        request.workos_user_id.trim(),
+        &pubkey,
+        state.clock.now(),
+    ) {
+        Ok(()) => Json(serde_json::json!({
+            "workosUserId": request.workos_user_id.trim(),
+            "userNpub": npub::encode(&pubkey_bytes),
+        }))
+        .into_response(),
+        Err(StoreError::Conflict(code)) => api_error(StatusCode::CONFLICT, code),
+        Err(StoreError::Validation(code)) => api_error(StatusCode::BAD_REQUEST, code),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error)),
+    }
+}
+
+async fn operator_resolve_brain_agent(
+    State(state): State<AuthorityState>,
+    headers: HeaderMap,
+    Json(request): Json<OperatorResolveBrainAgentRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = require_operator(&state, &headers) {
+        return api_error(error.status, error.code);
+    }
+    let pubkey_bytes = match npub::decode(request.agent_npub.trim()) {
+        Ok(pubkey) => pubkey,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_agent_npub"),
+    };
+    let pubkey = hex::encode(&pubkey_bytes);
+    let active = match state.store.vip_bindings_by_pubkey(&pubkey) {
+        Ok(bindings) => bindings
+            .into_iter()
+            .filter(|binding| !binding.disabled())
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+        }
+    };
+    if active.is_empty() {
+        return api_error(StatusCode::NOT_FOUND, "agent_principal_not_bound");
+    }
+    if active.len() != 1 {
+        return api_error(StatusCode::CONFLICT, "ambiguous_agent_principal_binding");
+    }
+    Json(serde_json::json!({
+        "agentNpub": npub::encode(&pubkey_bytes),
+        "managedAgentEmail": active[0].email,
+    }))
+    .into_response()
+}
+
+async fn operator_resolve_brain_user(
+    State(state): State<AuthorityState>,
+    headers: HeaderMap,
+    Json(request): Json<OperatorResolveBrainUserRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = require_operator(&state, &headers) {
+        return api_error(error.status, error.code);
+    }
+    let workos_user_id = request.workos_user_id.trim();
+    if !valid_workos_user_id(workos_user_id) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_workos_user_id");
+    }
+    let pubkey = match state.store.workos_account_principal(workos_user_id) {
+        Ok(Some(pubkey)) => pubkey,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "user_principal_not_bound"),
+        Err(error) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+        }
+    };
+    let pubkey_bytes = match hex::decode32(&pubkey) {
+        Some(pubkey) => pubkey,
+        None => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_pubkey"),
+    };
+    Json(serde_json::json!({
+        "workosUserId": workos_user_id,
+        "userNpub": npub::encode(&pubkey_bytes),
+    }))
+    .into_response()
+}
+
 async fn operator_disable_binding(
     State(state): State<AuthorityState>,
     headers: HeaderMap,
@@ -1340,6 +1522,14 @@ fn valid_email_domain(domain: &str) -> bool {
         })
 }
 
+fn valid_workos_user_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
 #[derive(Debug, Deserialize)]
 struct EmailChallengeRequest {
     email: String,
@@ -1367,6 +1557,25 @@ struct OperatorBindAgentEmailResponse {
     email: String,
     agent_npub: String,
     nip05: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorBindAccountPrincipalRequest {
+    workos_user_id: String,
+    user_npub: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorResolveBrainAgentRequest {
+    agent_npub: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorResolveBrainUserRequest {
+    workos_user_id: String,
 }
 
 #[derive(Debug, Serialize)]

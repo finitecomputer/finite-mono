@@ -45,7 +45,7 @@ pub(crate) fn write_command_response<W: Write>(
         write_json(output, value)
     } else if let Some(id) = value
         .get("id")
-        .or_else(|| value.get("vaultId"))
+        .or_else(|| value.get("brainId"))
         .or_else(|| value.get("folderId"))
         .and_then(serde_json::Value::as_str)
     {

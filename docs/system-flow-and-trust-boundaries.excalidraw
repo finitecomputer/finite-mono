@@ -1703,14 +1703,14 @@
       "updated": 0,
       "link": null,
       "locked": false,
-      "text": "FiniteBrain server\nVault metadata + encrypted\nFolder Objects",
+      "text": "FiniteBrain server\nBrain metadata + encrypted\nFolder Objects",
       "fontSize": 14,
       "fontFamily": 1,
       "textAlign": "center",
       "verticalAlign": "middle",
       "baseline": 37,
       "containerId": null,
-      "originalText": "FiniteBrain server\nVault metadata + encrypted\nFolder Objects",
+      "originalText": "FiniteBrain server\nBrain metadata + encrypted\nFolder Objects",
       "lineHeight": 1.2
     },
     {

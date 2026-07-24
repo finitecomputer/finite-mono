@@ -6,7 +6,7 @@ use std::path::PathBuf;
 pub struct CliEnvironment {
     pub cwd: PathBuf,
     pub config_dir: PathBuf,
-    /// Optional root for default Vault Working Tree placement. Hosted Agent
+    /// Optional root for default Brain Working Tree placement. Hosted Agent
     /// Runtimes set this to their durable workspace; native clients may leave
     /// it unset and keep the current-directory default.
     pub working_tree_root: Option<PathBuf>,

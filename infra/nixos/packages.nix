@@ -85,6 +85,11 @@ in
     crate = "finite-brain-app";
     dir = "finite-brain/crates/finite-brain-app";
   };
+  finite-identity = mkWorkspaceCrate {
+    pname = "finite-identity";
+    dir = "finite-identity";
+    mainProgram = "finite-identityd";
+  };
 
   # CLIs (same mechanism, trivial to carry along)
   fsite = mkWorkspaceCrate {

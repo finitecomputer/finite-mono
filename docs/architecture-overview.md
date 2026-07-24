@@ -206,10 +206,10 @@ an authoring source. User-local skills remain runtime-owned data.
 `finite-search` owns the self-hosted search and extraction services consumed by
 agent tools. It is an ops/integration repo, not a product app.
 
-`finite-brain` owns the encrypted Vault/Folder knowledge system, trusted
-Product Client, `fbrain` CLI, Vault Working Tree sync, and FiniteBrain-specific
+`finite-brain` owns the encrypted Brain/Folder knowledge system, trusted
+Product Client, `fbrain` CLI, Brain Working Tree sync, and FiniteBrain-specific
 policy. Reusable Nostr primitives still belong in `finite-nostr`; FiniteBrain
-Vault, Folder, access, sync, and Product Client policy stays in `finite-brain`.
+Brain, Folder, access, sync, and Product Client policy stays in `finite-brain`.
 
 `finite-nostr` owns reusable Nostr helpers. Product-specific policy should stay
 out of it.

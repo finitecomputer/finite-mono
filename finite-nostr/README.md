@@ -4,7 +4,7 @@ Reusable Nostr primitives for Finite Rust projects.
 
 This crate owns generic Nostr helpers and wrappers that can be reused by
 FiniteBrain, Finite Chat, and other Finite repos. It should not contain
-FiniteBrain vault, folder, sync, or sharing policy.
+FiniteBrain brain, folder, sync, or sharing policy.
 
 Initial target primitives:
 
@@ -30,7 +30,7 @@ The crate currently wraps the lower-level `nostr` protocol crate with:
   product-neutral NIP-59 rumor/seal/gift-wrap flows.
 - `NostrPrimitiveError` for stable typed failures.
 
-FiniteBrain-specific vault, folder, grant, invitation, and share policies stay
+FiniteBrain-specific brain, folder, grant, invitation, and share policies stay
 out of this crate.
 
 ## Development

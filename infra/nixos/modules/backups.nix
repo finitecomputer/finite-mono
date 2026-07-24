@@ -49,18 +49,26 @@ in
       final="$root/$stamp"
       hosted_was_active=0
       chat_was_active=0
+      brain_was_active=0
+      identity_was_active=0
 
       cleanup() {
         rm -rf "$staging"
+        if [ "$identity_was_active" = 1 ]; then systemctl start finite-identity.service; fi
         if [ "$chat_was_active" = 1 ]; then systemctl start finitechat-server.service; fi
         if [ "$hosted_was_active" = 1 ]; then systemctl start finitechat-hosted-device.service; fi
+        if [ "$brain_was_active" = 1 ]; then systemctl start finite-brain-app.service; fi
       }
       trap cleanup EXIT
 
-      install -d -m 0700 "$root" "$staging/hosted-device" "$staging/finite-chat" "$staging/saas-core"
+      install -d -m 0700 "$root" "$staging/hosted-device" "$staging/finite-chat" "$staging/saas-core" "$staging/finite-brain" "$staging/finite-identity"
       systemctl is-active --quiet finitechat-hosted-device.service && hosted_was_active=1 || true
       systemctl is-active --quiet finitechat-server.service && chat_was_active=1 || true
+      systemctl is-active --quiet finite-brain-app.service && brain_was_active=1 || true
+      systemctl is-active --quiet finite-identity.service && identity_was_active=1 || true
+      if [ "$brain_was_active" = 1 ]; then systemctl stop finite-brain-app.service; fi
       if [ "$hosted_was_active" = 1 ]; then systemctl stop finitechat-hosted-device.service; fi
+      if [ "$identity_was_active" = 1 ]; then systemctl stop finite-identity.service; fi
       if [ "$chat_was_active" = 1 ]; then systemctl stop finitechat-server.service; fi
 
       # The brief write fence makes identity files and encrypted binding sidecars
@@ -78,13 +86,17 @@ in
 
       sqlite3 /var/lib/private/finite-chat/data/server.sqlite3 ".backup '$staging/finite-chat/server.sqlite3'"
       test "$(sqlite3 "$staging/finite-chat/server.sqlite3" 'PRAGMA integrity_check;')" = ok
+      sqlite3 /var/lib/private/finitebrain/finite-brain.sqlite3 ".backup '$staging/finite-brain/finite-brain.sqlite3'"
+      test "$(sqlite3 "$staging/finite-brain/finite-brain.sqlite3" 'PRAGMA integrity_check;')" = ok
+      sqlite3 /var/lib/private/finite-identity/identity.db ".backup '$staging/finite-identity/identity.db'"
+      test "$(sqlite3 "$staging/finite-identity/identity.db" 'PRAGMA integrity_check;')" = ok
       runuser -u postgres -- pg_dump --format=custom finite_core > "$staging/saas-core/finite_core.dump"
       pg_restore --list "$staging/saas-core/finite_core.dump" >/dev/null
 
       printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v1' > "$staging/format"
       (
         cd "$staging"
-        find format hosted-device finite-chat saas-core -type f -print0 \
+        find format hosted-device finite-chat saas-core finite-brain finite-identity -type f -print0 \
           | sort -z \
           | xargs -0 sha256sum > manifest.sha256
       )

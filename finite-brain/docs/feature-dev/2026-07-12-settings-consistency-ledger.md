@@ -6,7 +6,7 @@
 - Loop: Feature Dev continuation
 - Target repo: finitecomputer/finite-mono
 - Base branch: `main` (the existing Product Client PR explicitly targets `main`)
-- Feature branch: `feature/finitebrain-settings-vault-ui`
+- Feature branch: `feature/finitebrain-settings-brain-ui`
 - Human owner: Austin
 - Started: 2026-07-12
 - Current status: implementation complete; final review and PR update in progress
@@ -17,7 +17,7 @@
 
 Make every Settings section accurate to FiniteBrain's Product Client truths and
 make the whole modal simpler, more consistently segmented, and easier to
-approach without changing Vault, Folder, Member Identity, Session Lock,
+approach without changing Brain, Folder, Member Identity, Session Lock,
 invitation, or cryptographic behavior.
 
 ## Scope And Decisions
@@ -26,7 +26,7 @@ invitation, or cryptographic behavior.
   new product capability. It is one AFK consistency slice; no new GitHub issue
   is needed while the existing scope remains sufficient.
 - Existing Product Client behavior and `finite-brain/CONTEXT.md` are the source
-  of truth. Presentation must not imply that a selected Vault is loaded, that a
+  of truth. Presentation must not imply that a selected Brain is loaded, that a
   locked Session holds readable data, or that an invitation/link changes access
   before its explicit completion path succeeds.
 - No backend routes, durable browser state, data migrations, key handling, or
@@ -37,7 +37,7 @@ invitation, or cryptographic behavior.
 - CONTEXT updates: none expected; existing glossary terms remain authoritative
 - ADRs: none expected; this pass does not introduce a hard-to-reverse policy
   decision
-- Spec issue: #10 — existing Settings, Vault, and Access shell spec
+- Spec issue: #10 — existing Settings, Brain, and Access shell spec
 - Tickets: #10 continuation, one AFK consistency slice
 - Ticket sessions: this implementation session
 - Review packets: pending final patch and CodeRabbit review
@@ -56,18 +56,18 @@ invitation, or cryptographic behavior.
 
 ## Implementation Notes
 
-- Locked and resuming Settings now expose Session only; navigation, Vault,
+- Locked and resuming Settings now expose Session only; navigation, Brain,
   Access & sharing, and Invitations remain hidden until the Session is
   unlocked.
 - Session owns signer state, the one contextual signer action, Session Lock,
-  and a factual recovery note. Vault is now read-only context plus the explicit
-  Manage Vaults navigation action.
+  and a factual recovery note. Brain is now read-only context plus the explicit
+  Manage Brains navigation action.
 - Settings feedback is shared above the active section, so invitation results
   and busy state no longer disappear inside Access & sharing.
 - Invitation copy distinguishes direct Member Identity membership/access plans
   from email-bootstrap encrypted Folder Key Grant claims. The Join panel is
-  available for a Personal Vault without a pre-existing fragment or code.
-- Member Identity input labels and Personal Vault shortcut language now match
+  available for a Personal Brain without a pre-existing fragment or code.
+- Member Identity input labels and Personal Brain shortcut language now match
   the actual input and mount behavior. Email proof time is placed behind an
   explicit advanced disclosure.
 
@@ -97,13 +97,13 @@ server implementation details; the no-backend-change boundary remains intact.
 - Used the repository's already-installed Playwright runtime after
   `agent-browser` was unavailable in this environment. An opt-in local smoke
   signer and disposable local SQLite database exercised the Rust-served client
-  on port 4040; no production service or user Vault was contacted.
+  on port 4040; no production service or user Brain was contacted.
 - Desktop, system light and dark: locked Settings showed only Session; Session
   showed signer state and recovery disclosure; unlock exposed all four
   sections; relocking returned to Session only.
-- Desktop dark: Vault showed context and the explicit Manage Vaults action;
+- Desktop dark: Brain showed context and the explicit Manage Brains action;
   Access & sharing had no duplicate Access heading; Invitations showed Join a
-  Vault for a Personal Vault and its opened form scrolled within the modal.
+  Brain for a Personal Brain and its opened form scrolled within the modal.
 - Narrow 390px viewport: Settings fit within the viewport, its four nav labels
   remained visible without truncated subtitles, and Invitations stayed
   operable.
@@ -142,7 +142,7 @@ server implementation details; the no-backend-change boundary remains intact.
 ## Open Questions
 
 - No blocking product question is currently known. The pass will preserve the
-  existing explicit unlock, signer, Vault, access, and invitation flows rather
+  existing explicit unlock, signer, Brain, access, and invitation flows rather
   than inventing new configuration behavior.
 
 ## Escalations
@@ -156,7 +156,7 @@ server implementation details; the no-backend-change boundary remains intact.
 - Continue the existing Product Client PR (#16) against `main`; this is a
   focused consistency and reliability slice, not a new product capability.
 - Fix the immediate-create then delete path without changing server-side
-  authorization, Folder access, Vault policy, or signed tombstone semantics.
+  authorization, Folder access, Brain policy, or signed tombstone semantics.
 - Align foundational Product Client color roles with the finitecomputer
   dashboard while preserving the existing information architecture, layout,
   and interaction model.
@@ -205,15 +205,15 @@ server implementation details; the no-backend-change boundary remains intact.
 ### Scope and decision
 
 - Continue the existing Product Client PR (#16) on
-  `feature/finitebrain-settings-vault-ui` against the user-selected `main`
+  `feature/finitebrain-settings-brain-ui` against the user-selected `main`
   base. This is a tiny, isolated, low-risk Product Client markup/CSS slice;
   the current Codex thread is the recorded implementation owner.
 - Remove the separate far-left activity ribbon. Move its existing Files, Graph
-  View, Search, Quick switcher, and Vault access controls into one semantic
+  View, Search, Quick switcher, and Brain access controls into one semantic
   navigation row in the header of the existing File sidebar.
 - Keep the controls' order, IDs, titles, `aria-label`/`aria-pressed` behavior,
   keyboard focus restoration, command behavior, and active-state semantics.
-  No Vault, Folder, Page, Graph View, Session, or access behavior changes.
+  No Brain, Folder, Page, Graph View, Session, or access behavior changes.
 
 ### Acceptance and verification seams
 
@@ -231,7 +231,7 @@ server implementation details; the no-backend-change boundary remains intact.
 ### Implementation and verification
 
 - Removed the standalone rail from the Product Client markup and placed its
-  existing five controls in `sidebar-primary-nav` within `vault-header`.
+  existing five controls in `sidebar-primary-nav` within `brain-header`.
   Their IDs and JavaScript behavior remain unchanged.
 - The shell grid is now two-column at desktop and medium widths, and a true
   one-column sidebar at narrow widths. The workspace and feedback row shifted
@@ -239,7 +239,7 @@ server implementation details; the no-backend-change boundary remains intact.
 - Static Product Client, Rust served-client, and deterministic client
   contracts now require the new header landmark and reject the old rail.
 - Browser smoke verified all five 40px header targets, Search, Graph View,
-  Files, Quick switcher Escape focus restoration, and Vault access. It passed
+  Files, Quick switcher Escape focus restoration, and Brain access. It passed
   at 1440px, 1000px, 390px, and 320px with no horizontal overflow or browser
   console errors.
 - Passed: deterministic Product Client suite, targeted served-client test,

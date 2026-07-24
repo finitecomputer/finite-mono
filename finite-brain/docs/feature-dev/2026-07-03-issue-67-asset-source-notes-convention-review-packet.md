@@ -35,7 +35,7 @@ agent-readable handles for those Assets.
 - `node --check crates/finite-brain-server/src/product-client.js`
 - `git diff --check`
 - `cargo fmt --check`
-- `cargo test -p finite-brain-core exposes_default_vault_pages -- --nocapture`
+- `cargo test -p finite-brain-core exposes_default_brain_pages -- --nocapture`
 - `cargo test -p finite-brain-core working_tree_materializes_accessible_pages_and_safe_agent_conventions -- --nocapture`
 - `cargo test -p finite-brain-cli empty_readable_folders_stay_materialized -- --nocapture`
 - `node crates/finite-brain-server/src/product-client.test.js`

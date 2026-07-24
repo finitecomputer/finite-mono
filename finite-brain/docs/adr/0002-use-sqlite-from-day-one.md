@@ -8,7 +8,7 @@ Date: 2026-06-23
 
 FiniteBrain Portable v1 depends on durable ordered state:
 
-- Vault metadata.
+- Brain metadata.
 - Folder hierarchy and access state.
 - Folder Key Grant metadata.
 - Signed encrypted object revisions and tombstones.
