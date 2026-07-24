@@ -23,6 +23,9 @@ const PROTECTED_WORKOS_PATH_PREFIXES = [
 const PUBLIC_WORKOS_PATHS = new Set([
   "/",
   "/callback",
+  "/client/app.css",
+  "/client/app.js",
+  "/client/config.json",
   "/favicon.ico",
   "/favicon.svg",
   "/login",
@@ -32,7 +35,7 @@ const PUBLIC_WORKOS_PATHS = new Set([
   "/signup",
 ]);
 
-const PUBLIC_WORKOS_PATH_PREFIXES = ["/api/finite"] as const;
+const PUBLIC_WORKOS_PATH_PREFIXES = ["/api/finite", "/client/fonts"] as const;
 
 const WORKOS_PROXY_BYPASS_PATHS = new Set([
   "/callback",

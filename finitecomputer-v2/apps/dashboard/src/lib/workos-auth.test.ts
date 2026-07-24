@@ -81,7 +81,11 @@ test("WorkOS proxy protects app surfaces but leaves entry and callback routes pu
   assert.equal(workosProtectedPath("/dashboard"), true);
   assert.equal(workosProtectedPath("/dashboard/machines/smoke"), true);
   assert.equal(workosProtectedPath("/client"), true);
-  assert.equal(workosProtectedPath("/client/app.js"), true);
+  assert.equal(workosProtectedPath("/client/app.css"), false);
+  assert.equal(workosProtectedPath("/client/app.js"), false);
+  assert.equal(workosProtectedPath("/client/config.json"), false);
+  assert.equal(workosProtectedPath("/client/fonts/funnel-sans-400.ttf"), false);
+  assert.equal(workosProtectedPath("/client/smoke-nip07.js"), true);
   assert.equal(workosProtectedPath("/_admin/brains"), false);
   assert.equal(workosProtectedPath("/api/pwa/manifest"), true);
   assert.equal(workosProtectedPath("/claim/token"), false);
