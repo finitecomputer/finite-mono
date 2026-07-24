@@ -22,23 +22,58 @@ use crate::{
     FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
     FinitePrivateUsageDecision, FinitePrivateUsageNotice, FinitePrivateUsageStatus,
     HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
-    ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
-    ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
-    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RetryRuntimeControlRequestInput,
-    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeRelayCredential, RuntimeRelocationEnvelope, RuntimeRelocationV1,
-    RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
-    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
+    LeaseAgentCreationRequestInput,
+    LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput,
+    LinkVerifiedUserInput,
+    Project,
+    ProjectImportCandidate,
+    ProjectMembershipRole,
+    ProviderOperationEnvelope,
+    ProviderOperationTransition,
+    ProviderOperationTransitionRecord,
+    ProviderOperationV1,
+    ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult,
+    ReconcileExistingHostImportsOptions,
+    ReconcileExistingHostImportsReport,
+    RecordProviderOperationTransitionInput,
+    RegisterAgentCreationRuntimeInput,
+    RelayEventsOutput,
+    RelayHeartbeat,
+    RenewRuntimeControlRequestInput,
+    RequestAgentCreationInput,
+    RequestAgentCreationResult,
+    RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput,
+    RequestRuntimeRestartInput,
+    RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput,
+    ResetFinitePrivateUsageWindowInput,
+    RetryRuntimeControlRequestInput,
+    RevokeFinitePrivateApiKeyInput,
+    RevokeFinitePrivateGrantInput,
+    RotateFinitePrivateApiKeyInput,
+    RuntimeArtifact,
+    RuntimeBootIntent,
+    RuntimeCapabilitiesEnvelope,
+    RuntimeControlExpectedBinding,
+    RuntimeControlKind,
+    RuntimeControlLease,
+    RuntimeControlRequest,
+    RuntimeControlRequestStatus,
+    RuntimePlacement,
+    RuntimeRelayCredential,
+    RuntimeRetirementSnapshot,
+    RuntimeRetirementSnapshotReceipt,
+    RuntimeSpecEnvelope,
+    RuntimeSpecIdentity,
+    RuntimeStatusSnapshot,
+    RuntimeSummaryStatus,
+    RuntimeRelocationEnvelope,
+    RuntimeRelocationV1,
+    IssueFinitePrivateFriendKeyInput,
+    IssuedFinitePrivateFriendKey,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
     UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
@@ -68,7 +103,7 @@ use crate::{
     validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
     validate_runtime_spec_binding, validate_runtime_spec_environment,
 };
-use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Transaction};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -99,6 +134,14 @@ pub struct PostgresCoreStore {
     pool: Pool,
     runtime_environment: Arc<BTreeMap<String, String>>,
     runtime_secret_references: Arc<Vec<String>>,
+    /// When set, every write transaction rolls back instead of committing.
+    ///
+    /// A dry run executes the real SQL against real production rows and then
+    /// discards the write, so the preview reflects the state the operator is
+    /// actually about to change. Previewing against an empty store instead
+    /// would report creations for rows that already exist and would fail every
+    /// operation that looks up an existing row.
+    dry_run: bool,
 }
 
 struct FinitePrivateAdminAuditInsert<'a> {
@@ -121,6 +164,14 @@ impl CoreStore {
     pub async fn connect_postgres(database_url: &str) -> CoreResult<Self> {
         Ok(Self::Postgres(
             PostgresCoreStore::connect(database_url).await?,
+        ))
+    }
+
+    /// Connect a store that reads real production state but rolls back every
+    /// write. Backs `--dry-run` on the admin CLI.
+    pub async fn connect_postgres_dry_run(database_url: &str) -> CoreResult<Self> {
+        Ok(Self::Postgres(
+            PostgresCoreStore::connect_dry_run(database_url).await?,
         ))
     }
 
@@ -721,6 +772,17 @@ impl CoreStore {
         match self {
             Self::Memory(store) => store.admin_issue_finite_private_friend_key(input).await,
             Self::Postgres(store) => store.admin_issue_finite_private_friend_key(input).await,
+        }
+    }
+
+    /// Approve a grant and issue its first key in one transaction.
+    pub async fn issue_finite_private_friend_key(
+        &self,
+        input: IssueFinitePrivateFriendKeyInput,
+    ) -> CoreResult<IssuedFinitePrivateFriendKey> {
+        match self {
+            Self::Memory(store) => store.issue_finite_private_friend_key(input).await,
+            Self::Postgres(store) => store.issue_finite_private_friend_key(input).await,
         }
     }
 
@@ -1370,6 +1432,14 @@ impl MemoryCoreStore {
         state.runtime_control_request(request_id)
     }
 
+    pub async fn issue_finite_private_friend_key(
+        &self,
+        input: IssueFinitePrivateFriendKeyInput,
+    ) -> CoreResult<IssuedFinitePrivateFriendKey> {
+        let mut state = self.state.lock().await;
+        state.issue_finite_private_friend_key(input)
+    }
+
     pub async fn admin_issue_finite_private_friend_key(
         &self,
         input: AdminIssueFinitePrivateFriendKeyInput,
@@ -1508,11 +1578,23 @@ impl PostgresCoreStore {
             pool,
             runtime_environment: Arc::new(BTreeMap::new()),
             runtime_secret_references: Arc::new(Vec::new()),
+            dry_run: false,
         };
         // Fail startup/retry at the same boundary as the former eager
         // connection. Deadpool otherwise opens its first connection lazily.
         let _ = store.connection().await?;
         Ok(store)
+    }
+
+    /// Connect a store whose writes are always rolled back.
+    ///
+    /// Reads still see committed production state, so a preview reports what
+    /// the operation would really do.
+    pub async fn connect_dry_run(database_url: &str) -> CoreResult<Self> {
+        Ok(Self {
+            dry_run: true,
+            ..Self::connect(database_url).await?
+        })
     }
 
     async fn connection(&self) -> CoreResult<Object> {
@@ -1522,6 +1604,18 @@ impl PostgresCoreStore {
                 ..StoreErrorDetail::default()
             }))
         })
+    }
+
+    /// Commit, or roll back when this store is in dry-run mode.
+    ///
+    /// Every write path in this impl ends here, so `--dry-run` cannot silently
+    /// miss a mutation that a later method introduces.
+    async fn finish(&self, tx: Transaction<'_>) -> CoreResult<()> {
+        if self.dry_run {
+            tx.rollback().await.map_err(store_error)
+        } else {
+            tx.commit().await.map_err(store_error)
+        }
     }
 
     pub async fn migrate(&self) -> CoreResult<()> {
@@ -1540,7 +1634,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let report = postgres_reconcile_existing_host_imports(&*tx, &records, options).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(report)
     }
 
@@ -1551,7 +1645,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_claim_project_imports(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1602,7 +1696,7 @@ impl PostgresCoreStore {
             .await
             .map_err(store_error)?;
         }
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(response)
     }
 
@@ -1639,7 +1733,7 @@ impl PostgresCoreStore {
             .ok_or(CoreError::LaunchCodeBatchNotFound)?;
         let batch = launch_code_batch_from_row(&row)?;
         let details = postgres_launch_code_batch_details(&*tx, batch).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(details)
     }
 
@@ -1650,7 +1744,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_upgrade(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1661,7 +1755,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_upgrade_exact(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1672,7 +1766,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_retire_exact(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1711,7 +1805,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_request_agent_creation(&*tx, input, configuration).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1723,7 +1817,7 @@ impl PostgresCoreStore {
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
             postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Restart).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1739,7 +1833,7 @@ impl PostgresCoreStore {
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1751,7 +1845,7 @@ impl PostgresCoreStore {
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
             postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Stop).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1763,7 +1857,7 @@ impl PostgresCoreStore {
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
             postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Destroy).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1802,7 +1896,7 @@ impl PostgresCoreStore {
         if updated == 0 {
             return Err(CoreError::ProjectNotFound);
         }
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(())
     }
 
@@ -1824,7 +1918,7 @@ impl PostgresCoreStore {
             &now,
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(user)
     }
 
@@ -1841,7 +1935,7 @@ impl PostgresCoreStore {
             .await
             .map_err(store_error)?;
         let overview = postgres_billing_overview(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(overview)
     }
 
@@ -1852,7 +1946,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let account = postgres_link_stripe_customer(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(account)
     }
 
@@ -1863,7 +1957,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let account = postgres_sync_stripe_subscription(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(account)
     }
 
@@ -1880,7 +1974,7 @@ impl PostgresCoreStore {
             self.runtime_secret_references.as_ref(),
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1891,7 +1985,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_record_provider_operation_transition(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1908,7 +2002,7 @@ impl PostgresCoreStore {
             self.runtime_secret_references.as_ref(),
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1924,7 +2018,7 @@ impl PostgresCoreStore {
             self.runtime_secret_references.as_ref(),
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1935,7 +2029,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_fail_runtime_control_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1946,7 +2040,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_renew_runtime_control_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1957,7 +2051,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_retry_runtime_control_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1968,7 +2062,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_complete_agent_creation_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1979,7 +2073,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_register_agent_creation_runtime(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -1990,7 +2084,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_fail_agent_creation_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2001,7 +2095,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_cancel_agent_creation_request(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2009,7 +2103,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_record_runtime_heartbeat(&*tx, relay_token).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2096,7 +2190,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let endpoint = postgres_upsert_source_host_relay_endpoint(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(endpoint)
     }
 
@@ -2113,7 +2207,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let artifact = postgres_upsert_runtime_artifact(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(artifact)
     }
 
@@ -2124,7 +2218,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let grant = postgres_approve_finite_private_grant(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(grant)
     }
 
@@ -2135,7 +2229,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let key = postgres_issue_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(key)
     }
 
@@ -2146,7 +2240,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_provision_finite_private_runtime_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2157,7 +2251,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let grant = postgres_revoke_finite_private_grant(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(grant)
     }
 
@@ -2168,7 +2262,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let key = postgres_revoke_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(key)
     }
 
@@ -2179,7 +2273,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let key = postgres_rotate_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(key)
     }
 
@@ -2190,7 +2284,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let grant = postgres_reset_finite_private_usage_window(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(grant)
     }
 
@@ -2206,7 +2300,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let receipt = postgres_admin_archive_unrecoverable_runtime(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(receipt)
     }
 
@@ -2219,7 +2313,7 @@ impl PostgresCoreStore {
         let result =
             postgres_admin_request_runtime_control(&*tx, input, RuntimeControlKind::Restart, None)
                 .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2236,7 +2330,7 @@ impl PostgresCoreStore {
             None,
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2247,7 +2341,18 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_issue_finite_private_friend_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
+        Ok(result)
+    }
+
+    pub async fn issue_finite_private_friend_key(
+        &self,
+        input: IssueFinitePrivateFriendKeyInput,
+    ) -> CoreResult<IssuedFinitePrivateFriendKey> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_issue_finite_private_friend_key(&*tx, input).await?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2258,7 +2363,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_rotate_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2269,7 +2374,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_revoke_finite_private_api_key(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2280,7 +2385,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_reset_finite_private_usage_window(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2303,7 +2408,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let decision = postgres_reserve_finite_private_usage(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(decision)
     }
 
@@ -2314,7 +2419,7 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_settle_finite_private_reservation(&*tx, input).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2333,7 +2438,7 @@ impl PostgresCoreStore {
             now,
         )
         .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2346,7 +2451,7 @@ impl PostgresCoreStore {
         let tx = client.transaction().await.map_err(store_error)?;
         let result =
             postgres_finite_private_usage_status_for_workos_user(&*tx, workos_user_id, now).await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2360,7 +2465,7 @@ impl PostgresCoreStore {
         let result =
             postgres_claim_finite_private_daily_reset_for_api_key(&*tx, presented_api_key, now)
                 .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 
@@ -2374,7 +2479,7 @@ impl PostgresCoreStore {
         let result =
             postgres_claim_finite_private_daily_reset_for_workos_user(&*tx, workos_user_id, now)
                 .await?;
-        tx.commit().await.map_err(store_error)?;
+        self.finish(tx).await?;
         Ok(result)
     }
 }
@@ -8982,6 +9087,42 @@ where
     )
     .await?;
     Ok(new_key)
+}
+
+/// Approve a grant and issue its first key against one client.
+///
+/// Callers pass a transaction, so the pair is atomic: no orphaned grant on a
+/// failed key issue, and a dry run can preview both steps.
+async fn postgres_issue_finite_private_friend_key<C>(
+    client: &C,
+    input: IssueFinitePrivateFriendKeyInput,
+) -> CoreResult<IssuedFinitePrivateFriendKey>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let grant = postgres_approve_finite_private_grant(
+        client,
+        ApproveFinitePrivateGrantInput {
+            verified_email: input.verified_email,
+            workos_user_id: input.workos_user_id,
+            limit_profile_id: input.limit_profile_id,
+            now: Some(now.clone()),
+        },
+    )
+    .await?;
+    let api_key = postgres_issue_finite_private_api_key(
+        client,
+        IssueFinitePrivateApiKeyInput {
+            grant_id: grant.id.clone(),
+            raw_key: input.raw_key,
+            project_id: input.project_id,
+            agent_runtime_id: input.agent_runtime_id,
+            now: Some(now),
+        },
+    )
+    .await?;
+    Ok(IssuedFinitePrivateFriendKey { grant, api_key })
 }
 
 async fn postgres_admin_issue_finite_private_friend_key<C>(

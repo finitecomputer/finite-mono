@@ -7,11 +7,12 @@ use finite_saas_core::{
     AdminArchiveUnrecoverableRuntimeInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
     AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, ApproveFinitePrivateGrantInput,
     CoreResult, ExistingHostProjectImport, FinitePrivateApiKey, FinitePrivateGrant,
-    IssueFinitePrivateApiKeyInput, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, ResetFinitePrivateUsageWindowInput,
-    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeSummaryStatus, SourceHostRelayEndpoint, UpsertRuntimeArtifactInput,
+    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput,
+    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
+    ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
+    RuntimeSummaryStatus, SourceHostRelayEndpoint, UpsertRuntimeArtifactInput,
     UpsertSourceHostRelayEndpointInput,
 };
 use serde::{Deserialize, Serialize};
@@ -606,7 +607,7 @@ async fn serve() -> Result<()> {
     let bind = env::var("FC_CORE_BIND").unwrap_or_else(|_| "127.0.0.1:4200".to_string());
     let addr: SocketAddr = bind.parse()?;
 
-    let store = postgres_store_from_env().await?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
     let agent_creation_placement = optional_agent_creation_placement()?;
     let app = router_with_agent_creation_placement(store, auth, agent_creation_placement)
         .layer(TraceLayer::new_for_http());
@@ -636,10 +637,7 @@ async fn reconcile_imports(
         bail!("at least one --allow-owner email is required");
     }
 
-    let store = match mode {
-        ImportMode::DryRun => CoreStore::memory(),
-        ImportMode::Commit => postgres_store_from_env().await?,
-    };
+    let store = core_store_for_mode(mode).await?;
     store
         .reconcile_existing_host_imports(
             records,
@@ -659,10 +657,7 @@ async fn source_host_relay_upsert(
     now: Option<String>,
     mode: ImportMode,
 ) -> Result<SourceHostRelayEndpoint> {
-    let store = match mode {
-        ImportMode::DryRun => CoreStore::memory(),
-        ImportMode::Commit => postgres_store_from_env().await?,
-    };
+    let store = core_store_for_mode(mode).await?;
     store
         .upsert_source_host_relay_endpoint(UpsertSourceHostRelayEndpointInput {
             source_host_id,
@@ -1276,7 +1271,7 @@ async fn runtime_artifact_rollout<S: RuntimeArtifactRolloutStore>(
 
 async fn runtime_artifact_rollout_command(args: RuntimeArtifactRolloutCliArgs) -> Result<()> {
     let input = RuntimeArtifactRolloutInput::try_from(args)?;
-    let store = postgres_store_from_env().await?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
     let report = runtime_artifact_rollout(&store, input, Duration::from_secs(2)).await?;
     let halted = report.halted;
     print_json(&report)?;
@@ -1289,7 +1284,7 @@ async fn runtime_artifact_rollout_command(args: RuntimeArtifactRolloutCliArgs) -
 async fn runtime_archive_unrecoverable_command(
     args: RuntimeArchiveUnrecoverableCliArgs,
 ) -> Result<finite_saas_core::UnrecoverableRuntimeArchiveReceipt> {
-    let store = postgres_store_from_env().await?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
     store
         .admin_archive_unrecoverable_runtime(AdminArchiveUnrecoverableRuntimeInput {
             admin_verified_email: args.admin_email,
@@ -1323,7 +1318,7 @@ async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs) -> Result
     let admin_verified_email = required_cli_value(args.admin_email, "--admin-email")?;
     let admin_workos_user_id =
         required_cli_value(args.admin_workos_user_id, "--admin-workos-user-id")?;
-    let store = postgres_store_from_env().await?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
     let request = store
         .admin_request_runtime_retire_exact(AdminRuntimeRetireExactInput {
             admin_verified_email,
@@ -1363,7 +1358,7 @@ async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs) -> Result
 async fn runtime_cold_relocate_exact_command(
     args: RuntimeColdRelocateExactCliArgs,
 ) -> Result<finite_saas_core::AgentCreationRequest> {
-    let store = postgres_store_from_env().await?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
     store
         .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
             admin_verified_email: args.admin_email,
@@ -1415,25 +1410,23 @@ async fn finite_private_friend_key_issue(
     input: FinitePrivateFriendKeyIssueArgs,
 ) -> Result<FinitePrivateIssuedKeyOutput> {
     let store = core_store_for_mode(input.mode).await?;
-    let grant = store
-        .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+    let raw_key = raw_key_from_env_or_generate(input.raw_key_env.as_deref())?;
+    let issued = store
+        .issue_finite_private_friend_key(IssueFinitePrivateFriendKeyInput {
             verified_email: input.email,
             workos_user_id: input.workos_user_id,
             limit_profile_id: input.limit_profile_id,
-            now: input.now.clone(),
-        })
-        .await?;
-    let raw_key = raw_key_from_env_or_generate(input.raw_key_env.as_deref())?;
-    let api_key = store
-        .issue_finite_private_api_key(IssueFinitePrivateApiKeyInput {
-            grant_id: grant.id.clone(),
             raw_key: raw_key.value.clone(),
             project_id: input.project_id,
             agent_runtime_id: input.agent_runtime_id,
             now: input.now,
         })
         .await?;
-    Ok(issued_key_output(Some(grant), api_key, raw_key))
+    Ok(issued_key_output(
+        Some(issued.grant),
+        issued.api_key,
+        raw_key,
+    ))
 }
 
 async fn finite_private_api_key_issue(
@@ -1512,11 +1505,13 @@ async fn finite_private_window_reset(
         .map_err(Into::into)
 }
 
+/// Build the store for an admin command.
+///
+/// Both modes talk to real Postgres. A dry run reads committed production
+/// state and rolls its writes back, so the preview reflects what the operator
+/// is actually about to change.
 async fn core_store_for_mode(mode: ImportMode) -> Result<CoreStore> {
-    match mode {
-        ImportMode::DryRun => Ok(CoreStore::memory()),
-        ImportMode::Commit => postgres_store_from_env().await,
-    }
+    postgres_store_from_env(mode).await
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1611,13 +1606,13 @@ impl ImportMode {
     }
 }
 
-async fn postgres_store_from_env() -> Result<CoreStore> {
+async fn postgres_store_from_env(mode: ImportMode) -> Result<CoreStore> {
     let database_url = required_env("FC_CORE_DATABASE_URL")?;
     let timeout = optional_duration_secs("FC_CORE_POSTGRES_CONNECT_TIMEOUT_SECS", 60)?;
     let retry_interval = optional_duration_millis("FC_CORE_POSTGRES_CONNECT_RETRY_MS", 1_000)?;
     let runtime_environment = optional_runtime_environment()?;
     let runtime_secret_references = optional_runtime_secret_references()?;
-    postgres_store_with_retry(&database_url, timeout, retry_interval)
+    postgres_store_with_retry(&database_url, timeout, retry_interval, mode)
         .await?
         .with_runtime_environment(runtime_environment)
         .and_then(|store| store.with_runtime_secret_references(runtime_secret_references))
@@ -1628,13 +1623,14 @@ async fn postgres_store_with_retry(
     database_url: &str,
     timeout: Duration,
     retry_interval: Duration,
+    mode: ImportMode,
 ) -> Result<CoreStore> {
     let started = Instant::now();
     let mut attempts = 0usize;
 
     loop {
         attempts += 1;
-        match connect_and_migrate_postgres(database_url).await {
+        match connect_and_migrate_postgres(database_url, mode).await {
             Ok(store) => return Ok(store),
             Err(error) => {
                 if started.elapsed() >= timeout {
@@ -1650,10 +1646,17 @@ async fn postgres_store_with_retry(
     }
 }
 
-async fn connect_and_migrate_postgres(database_url: &str) -> Result<CoreStore> {
-    let store = CoreStore::connect_postgres(database_url).await?;
-    store.migrate().await?;
-    Ok(store)
+async fn connect_and_migrate_postgres(database_url: &str, mode: ImportMode) -> Result<CoreStore> {
+    match mode {
+        ImportMode::Commit => {
+            let store = CoreStore::connect_postgres(database_url).await?;
+            store.migrate().await?;
+            Ok(store)
+        }
+        // A dry run previews row writes only. It must not run schema DDL,
+        // which commits outside the rolled-back transaction.
+        ImportMode::DryRun => Ok(CoreStore::connect_postgres_dry_run(database_url).await?),
+    }
 }
 
 fn read_import_manifest(path: &PathBuf) -> Result<Vec<ExistingHostProjectImport>> {
@@ -1773,6 +1776,38 @@ mod tests {
     };
     use std::sync::Mutex;
 
+    /// Serializes the tests that point `FC_CORE_DATABASE_URL` at a database,
+    /// since the admin commands read it from the process environment.
+    static DB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Run `test` with `FC_CORE_DATABASE_URL` set to a migrated database, so a
+    /// `--dry-run` command exercises the real SQL path.
+    ///
+    /// The dry-run tests can share one database because every dry run rolls
+    /// back: none of them can observe another's writes. Returns without running
+    /// when `FC_CORE_POSTGRES_TEST_URL` is unset, matching the gating the store
+    /// tests use.
+    async fn with_dry_run_database<F, Fut>(test: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let Ok(url) = env::var("FC_CORE_POSTGRES_TEST_URL") else {
+            return;
+        };
+        let _guard = DB_ENV_LOCK.lock().await;
+        CoreStore::connect_postgres(&url)
+            .await
+            .unwrap()
+            .migrate()
+            .await
+            .unwrap();
+        // SAFETY: every test that reads this variable holds DB_ENV_LOCK.
+        unsafe { env::set_var("FC_CORE_DATABASE_URL", &url) };
+        test().await;
+        unsafe { env::remove_var("FC_CORE_DATABASE_URL") };
+    }
+
     #[test]
     fn parses_control_plane_import_manifest_shape() {
         let records = parse_import_manifest(
@@ -1833,10 +1868,16 @@ mod tests {
         assert!(error.contains("does not match record source_host_id"));
     }
 
+    /// A dry-run reconcile reports what it would do against real state and
+    /// persists nothing.
+    ///
+    /// Running the same record twice is the assertion that matters: if the
+    /// first dry run had committed, the second would report an *update* of the
+    /// row it just wrote instead of a creation.
     #[tokio::test]
-    async fn dry_run_reconcile_uses_allowlist_without_postgres() {
-        let report = reconcile_imports(
-            vec![ExistingHostProjectImport {
+    async fn dry_run_reconcile_reports_creation_and_persists_nothing() {
+        with_dry_run_database(|| async {
+            let record = ExistingHostProjectImport {
                 source_host_id: "smoke".to_string(),
                 source_machine_id: "paul-smoke".to_string(),
                 owner_email: Some("paul@finite.vip".to_string()),
@@ -1849,17 +1890,24 @@ mod tests {
                 published_app_urls: vec!["https://demo.smoke.finite.computer".to_string()],
                 known_external_channel_participants: Vec::new(),
                 admin_visible_to_emails: vec!["admin@finite.vip".to_string()],
-            }],
-            vec!["paul@finite.vip".to_string()],
-            Some("2026-05-25T12:00:00Z".to_string()),
-            ImportMode::DryRun,
-        )
-        .await
-        .unwrap();
+            };
 
-        assert_eq!(report.created_candidates.len(), 1);
-        assert!(report.updated_candidates.is_empty());
-        assert!(report.skipped_records.is_empty());
+            for _ in 0..2 {
+                let report = reconcile_imports(
+                    vec![record.clone()],
+                    vec!["paul@finite.vip".to_string()],
+                    Some("2026-05-25T12:00:00Z".to_string()),
+                    ImportMode::DryRun,
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(report.created_candidates.len(), 1);
+                assert!(report.updated_candidates.is_empty());
+                assert!(report.skipped_records.is_empty());
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1879,43 +1927,97 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_source_host_relay_upsert_validates_and_redacts() {
-        let endpoint = source_host_relay_upsert(
-            "Smoke".to_string(),
-            "https://relay.smoke.finite.computer/".to_string(),
-            "smoke-token".to_string(),
-            Some("2026-05-25T12:00:00Z".to_string()),
-            ImportMode::DryRun,
-        )
-        .await
-        .unwrap();
+        with_dry_run_database(|| async {
+            let endpoint = source_host_relay_upsert(
+                "Smoke".to_string(),
+                "https://relay.smoke.finite.computer/".to_string(),
+                "smoke-token".to_string(),
+                Some("2026-05-25T12:00:00Z".to_string()),
+                ImportMode::DryRun,
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(endpoint.source_host_id, "smoke");
-        assert_eq!(endpoint.url, "https://relay.smoke.finite.computer");
-        assert_eq!(endpoint.admin_token, "smoke-token");
-        assert!(redacted_source_host_relay_endpoint(endpoint).admin_token_configured);
+            assert_eq!(endpoint.source_host_id, "smoke");
+            assert_eq!(endpoint.url, "https://relay.smoke.finite.computer");
+            assert_eq!(endpoint.admin_token, "smoke-token");
+            assert!(redacted_source_host_relay_endpoint(endpoint).admin_token_configured);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn dry_run_finite_private_friend_key_issue_generates_one_time_key() {
-        let output = finite_private_friend_key_issue(FinitePrivateFriendKeyIssueArgs {
-            email: "friend@finite.vip".to_string(),
-            workos_user_id: None,
-            limit_profile_id: None,
-            project_id: None,
-            agent_runtime_id: None,
-            raw_key_env: None,
-            now: Some("2026-05-26T12:00:00Z".to_string()),
-            mode: ImportMode::DryRun,
-        })
-        .await
-        .unwrap();
+        with_dry_run_database(|| async {
+            let output = finite_private_friend_key_issue(FinitePrivateFriendKeyIssueArgs {
+                email: "friend@finite.vip".to_string(),
+                workos_user_id: None,
+                limit_profile_id: None,
+                project_id: None,
+                agent_runtime_id: None,
+                raw_key_env: None,
+                now: Some("2026-05-26T12:00:00Z".to_string()),
+                mode: ImportMode::DryRun,
+            })
+            .await
+            .unwrap();
 
-        let raw_key = output.raw_api_key.as_deref().unwrap();
-        assert!(raw_key.starts_with("fpk_live_"));
-        assert!(output.raw_api_key_generated);
-        assert_eq!(output.grant.as_ref().unwrap().status.as_str(), "active");
-        assert_eq!(output.api_key.status.as_str(), "active");
-        assert_ne!(output.api_key.key_hash, raw_key);
+            let raw_key = output.raw_api_key.as_deref().unwrap();
+            assert!(raw_key.starts_with("fpk_live_"));
+            assert!(output.raw_api_key_generated);
+            assert_eq!(output.grant.as_ref().unwrap().status.as_str(), "active");
+            assert_eq!(output.api_key.status.as_str(), "active");
+            assert_ne!(output.api_key.key_hash, raw_key);
+        })
+        .await;
+    }
+
+    /// `--dry-run` on a revoke reads real state and changes nothing.
+    ///
+    /// This is the regression that made dry runs useless for the revoke
+    /// commands: they previewed against an empty store, so an operator checking
+    /// a perfectly valid production key was told the key was invalid, no matter
+    /// what they passed.
+    #[tokio::test]
+    async fn dry_run_revoke_reads_a_real_key_and_leaves_it_active() {
+        with_dry_run_database(|| async {
+            let issued = finite_private_friend_key_issue(FinitePrivateFriendKeyIssueArgs {
+                email: "dry-run-revoke-probe@finite.vip".to_string(),
+                workos_user_id: None,
+                limit_profile_id: None,
+                project_id: None,
+                agent_runtime_id: None,
+                raw_key_env: None,
+                now: Some("2026-05-26T12:00:00Z".to_string()),
+                mode: ImportMode::Commit,
+            })
+            .await
+            .unwrap();
+            let key_id = issued.api_key.id.clone();
+
+            // The preview finds the real row and reports the revocation it
+            // would perform, instead of failing with "invalid API key".
+            let previewed = finite_private_api_key_revoke(
+                key_id.clone(),
+                Some("2026-05-26T12:05:00Z".to_string()),
+                ImportMode::DryRun,
+            )
+            .await
+            .unwrap();
+            assert_eq!(previewed.id, key_id);
+            assert_eq!(previewed.status.as_str(), "revoked");
+
+            // The preview rolled back, so the key is still usable.
+            let store = postgres_store_from_env(ImportMode::Commit).await.unwrap();
+            let state = store.finite_private_admin_state().await.unwrap();
+            let stored = state
+                .api_keys
+                .iter()
+                .find(|key| key.id == key_id)
+                .expect("issued key is still present");
+            assert_eq!(stored.status.as_str(), "active");
+        })
+        .await;
     }
 
     #[test]
