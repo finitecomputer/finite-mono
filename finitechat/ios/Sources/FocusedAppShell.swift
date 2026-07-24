@@ -1276,43 +1276,59 @@ struct AccountLinkView: View {
     var body: some View {
         VStack(spacing: tokens.sectionSpacing) {
             Spacer()
-            Image(systemName: "bubble.left.and.sparkles")
-                .font(.system(size: 56))
-                .foregroundStyle(.tint)
 
-            VStack(spacing: 8) {
+            VStack(spacing: 20) {
+                FiniteLogoMark()
+                    .fill(.tint)
+                    .frame(width: 112, height: 112)
+                    .accessibilityLabel("Finite")
+
                 Text("Your agent, in your pocket")
-                    .font(.largeTitle.bold())
-                    .multilineTextAlignment(.center)
-                Text("Sign in securely, then this iPhone will receive the encrypted key for your existing Finite account.")
-                    .foregroundStyle(.secondary)
+                    .font(.title.bold())
                     .multilineTextAlignment(.center)
             }
 
-            if let errorMessage {
-                Text(errorMessage)
+            Spacer()
+
+            VStack(spacing: tokens.controlSpacing) {
+                if let errorMessage {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .accessibilityHidden(true)
+
+                        Text(errorMessage)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     .font(.footnote)
                     .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-            }
-
-            Button(action: beginLink) {
-                HStack {
-                    if phase != .ready {
-                        ProgressView()
-                    }
-                    Text(buttonTitle)
+                    .padding(14)
+                    .background(
+                        Color.red.opacity(0.1),
+                        in: RoundedRectangle(cornerRadius: 16)
+                    )
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("AccountLinkError")
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .frame(maxWidth: .infinity)
+
+                Button(action: beginLink) {
+                    HStack {
+                        if phase != .ready {
+                            ProgressView()
+                        }
+                        Text(buttonTitle)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
+                .disabled(phase != .ready)
+                .accessibilityIdentifier("BeginAccountLink")
             }
-            .buttonStyle(.glassProminent)
-            .controlSize(.large)
-            .disabled(phase != .ready)
-            .accessibilityIdentifier("BeginAccountLink")
-            Spacer()
         }
         .padding(tokens.pagePadding)
         .background(Color(.systemGroupedBackground))
+        .animation(.snappy, value: errorMessage)
     }
 
     private var buttonTitle: String {
@@ -1447,4 +1463,12 @@ private enum FocusedPreviewFixtures {
 
 #Preview("Account link — finishing") {
     AccountLinkView(phase: .waiting, errorMessage: nil, beginLink: {})
+}
+
+#Preview("Account link — error") {
+    AccountLinkView(
+        phase: .ready,
+        errorMessage: "This iPhone could not finish linking. Please try again.",
+        beginLink: {}
+    )
 }
