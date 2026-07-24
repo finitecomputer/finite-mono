@@ -77,6 +77,23 @@ JWT and operator organization on every call.
 The CLI subcommands in `finite-saas-core` remain as the break-glass path and
 their help text points at the dashboard admin page.
 
+### `--dry-run`
+
+`--dry-run` runs the real operation against real Core state inside a
+transaction that is always rolled back. It therefore needs
+`FC_CORE_DATABASE_URL`, exactly like a committing run, and reports what the
+command would do to the rows that are actually there.
+
+It previously swapped in an empty in-memory store and never contacted the
+database. That made the preview wrong in both directions: the revoke and
+window-reset commands failed with "not found" for every input including valid
+production IDs, and `reconcile-imports` reported a creation for every record
+because nothing existed to update. Treat dry-run output from before
+2026-07-24 as unreliable.
+
+A dry run never commits, so it is safe to repeat. It does not run schema
+migrations.
+
 ## Operator organization
 
 Core requires `FC_WORKOS_OPERATOR_ORG_ID` at startup. The value names Finite's
