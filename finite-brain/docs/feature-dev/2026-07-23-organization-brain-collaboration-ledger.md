@@ -9,9 +9,8 @@
 - Feature branch: `codex/hybrid-wiki-search-slices-1-3`
 - Human owner: Austin Kelsay
 - Started: 2026-07-23
-- Current status: tickets 217 and 218 independently approved; ticket 219
-  implementation and local integration are complete, with repeat independent
-  review and pushed-commit checks pending
+- Current status: tickets 217, 218, and 219 independently approved; local and
+  pushed-head integration gates are green
 - Skill setup status: configured for GitHub, canonical triage labels, and
   multi-context domain documentation
 
@@ -44,7 +43,8 @@ and Agents how to inspect and repair access.
   `2026-07-23-issue-218-session.md`, `2026-07-23-issue-219-session.md`
 - Agent briefs: pending
 - Review packets: pending
-- Local CodeRabbit report: pending
+- Local CodeRabbit report: first pass resolved; two follow-up passes raised
+  zero issues
 - PR URL: https://github.com/finitecomputer/finite-mono/pull/172
 
 ## Commands
@@ -61,7 +61,7 @@ and Agents how to inspect and repair access.
 | --- | --- | --- | --- | --- | --- |
 | #217 | server + CLI tracer | approved | round 4 approved | none | store/server/CLI suites + clippy + two-Finite-Home acceptance green |
 | #218 | Product Client tracer | approved | repeat independent standards + spec review approved | none | Product Client + server suites + check/clippy/fmt green |
-| #219 | managed skill + smoke tracer | review pending | repeat independent review pending | PR checks pending | skill static + Alpha/Beta smoke + artifact verifier + `just dev smoke` + full product matrix green |
+| #219 | managed skill + smoke tracer | approved | independent standards + spec pass | none | local gates + all pushed-head PR checks green |
 
 ## Parked HITL slices
 
@@ -75,7 +75,7 @@ and Agents how to inspect and repair access.
 | --- | --- | --- | --- | --- | --- |
 | #217 | `894d1ba` | `2026-07-23-issue-217-session.md` | `d13914f` | standards + spec approved in round 4 | store/server/CLI + clippy + built-process acceptance green |
 | #218 | `cc9dfa4` | `2026-07-23-issue-218-session.md` | `e21515e`, `0c71bec` | standards + spec approved after correction | Product Client + server suites + check/clippy/fmt |
-| #219 | `b5f8ba9` | `2026-07-23-issue-219-session.md` | `53953b6` | integration-backed standards/spec rerun pending | skill static + Alpha/Beta smoke + artifact verifier + services/full-product gates green; PR checks pending |
+| #219 | `b5f8ba9` | `2026-07-23-issue-219-session.md` | `53953b6`, `b4859b5`, `871f00e`, `40637f6`, `4513011` | independent standards + spec approved; CodeRabbit follow-ups clean | local gates + all seven pushed-head PR checks green |
 
 ## Open questions
 
