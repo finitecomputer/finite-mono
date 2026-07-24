@@ -3760,12 +3760,8 @@ final class MessageCollectionLayoutTests: XCTestCase {
 }
 
 final class ChatComposerAccessibilityTests: XCTestCase {
-    @MainActor
-    func testComposerTextViewHasStableAccessibilityTarget() {
-        let textView = PastableTextView()
-
-        XCTAssertEqual(textView.accessibilityLabel, "Message")
-        XCTAssertEqual(textView.accessibilityIdentifier, "ComposerMessageField")
+    func testComposerMessageFieldHasStableAccessibilityIdentifier() {
+        XCTAssertEqual(ComposerAccessibility.messageField, "ComposerMessageField")
     }
 }
 
@@ -3799,24 +3795,6 @@ final class StagedComposerAttachmentTests: XCTestCase {
             }
             XCTAssertEqual(filename, "too-large.bin")
         }
-    }
-
-    func testPastedImageStagesAsOutboundAttachment() throws {
-        let bytes = Data([0x47, 0x49, 0x46, 0x38])
-
-        let staged = try StagedComposerAttachment(
-            pastedData: bytes,
-            mimeType: "image/gif"
-        )
-        let outbound = staged.outboundAttachment
-
-        XCTAssertTrue(staged.filename.hasPrefix("pasted-"))
-        XCTAssertTrue(staged.filename.hasSuffix(".gif"))
-        XCTAssertEqual(staged.mimeType, "image/gif")
-        XCTAssertEqual(staged.kind, .image)
-        XCTAssertEqual(outbound.mimeType, "image/gif")
-        XCTAssertEqual(outbound.kind, .image)
-        XCTAssertEqual(outbound.bytes, bytes)
     }
 
     private func temporaryDirectory() throws -> URL {

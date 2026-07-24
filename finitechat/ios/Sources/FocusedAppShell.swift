@@ -304,7 +304,7 @@ struct FocusedHomeView: View {
     let chooseAgent: () -> Void
     @State private var draft = ""
     @State private var isStartingChat = false
-    @State private var isComposerFocused = false
+    @FocusState private var isComposerFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {

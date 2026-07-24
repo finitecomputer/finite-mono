@@ -16,7 +16,7 @@ struct RoomThreadView: View {
     @State private var focusedMessageFrame: CGRect = .zero
     @State private var focusedActionsVisible = false
     @State private var reactionPickerContext: ReactionPickerContext?
-    @State private var composerFocused = false
+    @FocusState private var composerFocused: Bool
     @State private var imagePreviewSelection: ChatImagePreviewSelection?
     @State private var videoPreviewItem: ChatAttachmentPreviewItem?
     @State private var documentPreviewItem: ChatAttachmentPreviewItem?
@@ -317,9 +317,6 @@ struct RoomThreadView: View {
                 isPhotoPickerPresented: $showPhotoPicker,
                 selectedPhotoItems: $selectedPhotoItems,
                 isInputFocused: $composerFocused,
-                reportError: { message in
-                    model.errorText = message
-                },
                 onCancelReply: {
                     replyDraftMessage = nil
                 },
