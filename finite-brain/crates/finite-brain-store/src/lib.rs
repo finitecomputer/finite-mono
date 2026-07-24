@@ -1407,6 +1407,13 @@ impl SyncRecordType {
             Self::BrainAdminAccessChange => "brain_admin_access_change",
         }
     }
+
+    fn as_storage_str(&self) -> &'static str {
+        match self {
+            Self::BrainAdminAccessChange => "vault_admin_access_change",
+            _ => self.as_str(),
+        }
+    }
 }
 
 impl TryFrom<&str> for LinkStatus {
@@ -1446,7 +1453,9 @@ impl TryFrom<&str> for SyncRecordType {
             "folder_object_revision" => Ok(Self::FolderObjectRevision),
             "folder_object_tombstone" => Ok(Self::FolderObjectTombstone),
             "folder_key_grant" => Ok(Self::FolderKeyGrant),
-            "brain_admin_access_change" => Ok(Self::BrainAdminAccessChange),
+            "brain_admin_access_change" | "vault_admin_access_change" => {
+                Ok(Self::BrainAdminAccessChange)
+            }
             _ => Err(StoreError::BrokenInvariant {
                 reason: format!("unknown sync record type: {value}"),
             }),
@@ -2841,7 +2850,7 @@ fn parse_brain_kind(value: &str) -> Result<BrainKind, StoreError> {
 fn folder_role_str(role: FolderRole) -> &'static str {
     match role {
         FolderRole::PersonalHome => "personal_home",
-        FolderRole::BrainOps => "brain_ops",
+        FolderRole::BrainOps => "vault_ops",
         FolderRole::General => "general",
         FolderRole::Folder => "folder",
     }
@@ -2850,7 +2859,7 @@ fn folder_role_str(role: FolderRole) -> &'static str {
 fn parse_folder_role(value: &str) -> Result<FolderRole, StoreError> {
     match value {
         "personal_home" => Ok(FolderRole::PersonalHome),
-        "brain_ops" => Ok(FolderRole::BrainOps),
+        "brain_ops" | "vault_ops" => Ok(FolderRole::BrainOps),
         "general" => Ok(FolderRole::General),
         "folder" => Ok(FolderRole::Folder),
         _ => Err(StoreError::BrokenInvariant {

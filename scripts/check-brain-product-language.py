@@ -19,6 +19,9 @@ SURFACES = (
 )
 DOCUMENTED_EXCEPTIONS = {
     ROOT / "finite-brain/CONTEXT.md",
+    # Deployed SQLite migrations and their forward rename must retain private
+    # legacy identifiers. Product/runtime language remains checked elsewhere.
+    ROOT / "finite-brain/crates/finite-brain-store/src/schema.rs",
     ROOT / "finite-brain/docs/adr/0027-use-brain-as-the-product-language-for-knowledge-spaces.md",
     ROOT / "finite-brain/docs/specs/brain-language-and-setup-reconciliation-spec.md",
 }

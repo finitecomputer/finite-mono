@@ -216,7 +216,7 @@ impl BrainStore {
                 brain_id, sequence, record_event_id, record_type, folder_id, object_id,
                 revision, actor_npub, client_created_at, payload_json, accepted_at,
                 record_event_kind
-            ) VALUES (?1, ?2, ?3, 'brain_admin_access_change', NULL, NULL, NULL, ?4, ?5, ?6, ?5, ?7)"#,
+            ) VALUES (?1, ?2, ?3, 'vault_admin_access_change', NULL, NULL, NULL, ?4, ?5, ?6, ?5, ?7)"#,
             params![
                 brain_id.as_str(),
                 sequence,
