@@ -243,9 +243,6 @@ jobs:
           # checkout per attempt so those artifacts cannot poison checkout.
           path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }} -> target
       - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
         working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
         run: nix develop --command just brain-product-matrix
