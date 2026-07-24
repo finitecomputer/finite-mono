@@ -202,7 +202,7 @@ fn host_cdylib_path(
     core_lib: &str,
     profile: BuildProfile,
 ) -> Result<PathBuf, CliError> {
-    let target = root.join(format!("target/{}", profile.cargo_dir()));
+    let target = cargo_target_directory(root)?.join(profile.cargo_dir());
     let candidates = [
         target.join(format!("lib{core_lib}.dylib")),
         target.join(format!("lib{core_lib}.so")),
@@ -214,9 +214,33 @@ fn host_cdylib_path(
         }
     }
     Err(CliError::operational(format!(
-        "missing built host cdylib (expected target/{}/lib{core_lib}.*)",
-        profile.cargo_dir()
+        "missing built host cdylib under {}",
+        target.display()
     )))
+}
+
+fn cargo_target_directory(root: &Path) -> Result<PathBuf, CliError> {
+    let output = Command::new("cargo")
+        .current_dir(root)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .map_err(|error| {
+            CliError::operational(format!(
+                "failed to locate the Cargo target directory: {error}"
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(CliError::operational(
+            "cargo metadata failed while locating the target directory",
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| CliError::operational(format!("invalid cargo metadata: {error}")))?;
+    metadata
+        .get("target_directory")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| CliError::operational("cargo metadata omitted target_directory"))
 }
 
 fn cargo_build_host(
@@ -632,9 +656,10 @@ fn build_ios_xcframework(
         }
     }
 
+    let target_dir = cargo_target_directory(root)?;
     let mut libraries: Vec<PathBuf> = vec![];
     for target in selected {
-        libraries.push(ios_staticlib_path(root, target, core_lib, profile));
+        libraries.push(ios_staticlib_path(&target_dir, target, core_lib, profile));
     }
 
     let xcf_name = pascal_case(core_lib);
@@ -863,12 +888,16 @@ fn build_android_so(
     Ok(())
 }
 
-fn ios_staticlib_path(root: &Path, target: &str, core_lib: &str, profile: BuildProfile) -> PathBuf {
-    root.join(format!(
-        "target/{}/{}/lib{core_lib}.a",
-        target,
-        profile.cargo_dir()
-    ))
+fn ios_staticlib_path(
+    target_dir: &Path,
+    target: &str,
+    core_lib: &str,
+    profile: BuildProfile,
+) -> PathBuf {
+    target_dir
+        .join(target)
+        .join(profile.cargo_dir())
+        .join(format!("lib{core_lib}.a"))
 }
 
 fn swift_bindings_present(root: &Path) -> Result<bool, CliError> {

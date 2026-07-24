@@ -215,13 +215,14 @@ echo "Starting the local dashboard..."
 dashboard_pid="$!"
 wait_for_url "dashboard" "${dashboard_url}/api/device-links/account-binding" "${dashboard_pid}"
 
-rustup_bin="$(command -v rustup || true)"
-if [[ -z "${rustup_bin}" ]]; then
-  echo "The existing rustup toolchain is required for the Apple Rust targets." >&2
-  echo "No dependency was installed; configure the repository's iOS toolchain and retry." >&2
+cargo_bin="$(command -v cargo || true)"
+rustc_bin="$(command -v rustc || true)"
+if [[ -z "${cargo_bin}" || -z "${rustc_bin}" ]]; then
+  echo "The repository Rust toolchain is required to build the iOS bridge." >&2
+  echo "Enter the repository development environment and retry." >&2
   exit 1
 fi
-rustup_bin_dir="$(cd "$(dirname "${rustup_bin}")" && pwd)"
+rust_bin_dir="$(cd "$(dirname "${cargo_bin}")" && pwd)"
 xcodegen_bin="$(command -v xcodegen || true)"
 if [[ -z "${xcodegen_bin}" ]]; then
   echo "xcodegen is required to generate the iOS project." >&2
@@ -229,13 +230,14 @@ if [[ -z "${xcodegen_bin}" ]]; then
   exit 1
 fi
 xcodegen_bin_dir="$(cd "$(dirname "${xcodegen_bin}")" && pwd)"
-if ! "${rustup_bin}" target list --installed --toolchain stable \
-  | grep -qx "aarch64-apple-ios-sim"
-then
-  echo "The existing stable Rust toolchain is missing aarch64-apple-ios-sim." >&2
-  echo "No dependency was installed; configure the repository's iOS targets and retry." >&2
-  exit 1
-fi
+for rust_target in aarch64-apple-ios aarch64-apple-ios-sim; do
+  target_libdir="$("${rustc_bin}" --print target-libdir --target "${rust_target}")"
+  if [[ ! -d "${target_libdir}" ]]; then
+    echo "The repository Rust toolchain is missing ${rust_target}." >&2
+    echo "Refresh the pinned development environment and retry." >&2
+    exit 1
+  fi
+done
 
 echo "Building and launching Finite Chat in the iOS Simulator..."
 (
@@ -245,13 +247,12 @@ echo "Building and launching Finite Chat in the iOS Simulator..."
     -u OBJCOPY -u OBJDUMP -u SIZE -u SDKROOT -u MACOSX_DEPLOYMENT_TARGET \
     -u NIX_CFLAGS_COMPILE -u NIX_LDFLAGS -u NIX_CC -u NIX_BINTOOLS \
     -u NIX_ENFORCE_NO_NATIVE -u DEVELOPER_DIR -u RUSTC_WRAPPER \
-    PATH="${rustup_bin_dir}:${xcodegen_bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin" \
-    RUSTUP_TOOLCHAIN=stable \
+    PATH="${rust_bin_dir}:${xcodegen_bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin" \
     CARGO_TARGET_DIR="${cargo_target_dir}" \
     FINITECHAT_SERVER_URL="${chat_url}" \
     FINITECHAT_DASHBOARD_URL="${dashboard_url}" \
     FINITECHAT_DEVICE_ID="${ios_device_id}" \
-    "${rustup_bin}" run stable cargo run -q -p finitechat-rmp -- run ios
+    "${cargo_bin}" run -q -p finitechat-rmp -- run ios
 )
 
 echo

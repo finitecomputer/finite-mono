@@ -41,13 +41,16 @@ final class RuntimeConfigTests: XCTestCase {
         let loaded = RuntimeConfig.load(
             environment: [
                 "FINITECHAT_DASHBOARD_URL": "http://127.0.0.1:13002",
+                "FINITECHAT_WORKOS_CLIENT_ID": "client_local_override",
             ],
             args: ["FiniteChat"],
+            bundleInfo: ["WorkOSClientID": "client_release_bundle"],
             storageURL: url,
             allowsDevelopmentOverrides: false
         )
 
         XCTAssertEqual(loaded.dashboardURL, RuntimeConfig.defaultDashboardURL)
+        XCTAssertEqual(loaded.workosClientID, "client_release_bundle")
         XCTAssertEqual(
             loaded.accountIdentityKeychainService,
             KeychainNostrIdentityStore.productionService
@@ -56,6 +59,20 @@ final class RuntimeConfigTests: XCTestCase {
             loaded.accountIdentityKeychainAccount,
             KeychainNostrIdentityStore.primaryAccount
         )
+    }
+
+    func testDevelopmentWorkOSClientIDCanOverrideBundledApplication() throws {
+        let loaded = RuntimeConfig.load(
+            environment: [
+                "FINITECHAT_WORKOS_CLIENT_ID": "client_local_override",
+            ],
+            args: ["FiniteChat"],
+            bundleInfo: ["WorkOSClientID": "client_staging_bundle"],
+            storageURL: try temporaryConfigURL(),
+            allowsDevelopmentOverrides: true
+        )
+
+        XCTAssertEqual(loaded.workosClientID, "client_local_override")
     }
 
     func testDeviceLinkRejectsMixedLocalAndProductionOrigins() {
@@ -448,7 +465,7 @@ final class RuntimeConfigTests: XCTestCase {
         XCTAssertEqual(firstLaunch.serverURL, "http://192.168.1.226:8789")
         XCTAssertEqual(firstLaunch.deviceID, "qt433")
         XCTAssertFalse(firstLaunch.usesTransientStore)
-        XCTAssertEqual(try persistedConfig(at: url), firstLaunch)
+        try assertPersistedRuntimeIdentity(at: url, matches: firstLaunch)
 
         let relaunched = RuntimeConfig.load(
             environment: [:],
@@ -484,7 +501,7 @@ final class RuntimeConfigTests: XCTestCase {
 
         XCTAssertEqual(loaded.serverURL, "https://chat.finite.computer")
         assertGeneratedDefaultDeviceID(loaded.deviceID)
-        XCTAssertEqual(try persistedConfig(at: url), loaded)
+        try assertPersistedRuntimeIdentity(at: url, matches: loaded)
     }
 
     func testMissingConfigIgnoresLegacyPlaceholderStore() throws {
@@ -507,7 +524,7 @@ final class RuntimeConfigTests: XCTestCase {
 
         XCTAssertEqual(loaded.serverURL, "https://chat.finite.computer")
         assertGeneratedDefaultDeviceID(loaded.deviceID)
-        XCTAssertEqual(try persistedConfig(at: url), loaded)
+        try assertPersistedRuntimeIdentity(at: url, matches: loaded)
     }
 
     func testPersistedDevelopmentServerRepairDoesNotRecoverLegacyDeviceStore() throws {
@@ -541,7 +558,7 @@ final class RuntimeConfigTests: XCTestCase {
 
         XCTAssertEqual(loaded.serverURL, "https://chat.finite.computer")
         XCTAssertEqual(loaded.deviceID, "ios")
-        XCTAssertEqual(try persistedConfig(at: url), loaded)
+        try assertPersistedRuntimeIdentity(at: url, matches: loaded)
     }
 
     func testMissingConfigIgnoresMultipleLegacyDeviceStores() throws {
@@ -565,7 +582,7 @@ final class RuntimeConfigTests: XCTestCase {
 
         XCTAssertEqual(loaded.serverURL, "https://chat.finite.computer")
         assertGeneratedDefaultDeviceID(loaded.deviceID)
-        XCTAssertEqual(try persistedConfig(at: url), loaded)
+        try assertPersistedRuntimeIdentity(at: url, matches: loaded)
     }
 
     func testRuntimeDataStoreIgnoresLegacyStoreAndCreatesStableStore() throws {
@@ -677,6 +694,19 @@ final class RuntimeConfigTests: XCTestCase {
     private func persistedConfig(at url: URL) throws -> RuntimeConfig {
         let data = try Data(contentsOf: url)
         return try JSONDecoder().decode(RuntimeConfig.self, from: data)
+    }
+
+    private func assertPersistedRuntimeIdentity(
+        at url: URL,
+        matches runtime: RuntimeConfig,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let persisted = try persistedConfig(at: url)
+        XCTAssertEqual(persisted.serverURL, runtime.serverURL, file: file, line: line)
+        XCTAssertEqual(persisted.dashboardURL, runtime.dashboardURL, file: file, line: line)
+        XCTAssertEqual(persisted.deviceID, runtime.deviceID, file: file, line: line)
+        XCTAssertNil(persisted.workosClientID, file: file, line: line)
     }
 
     private func assertGeneratedDefaultDeviceID(

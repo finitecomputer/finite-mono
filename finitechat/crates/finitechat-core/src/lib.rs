@@ -63,6 +63,7 @@ use thiserror::Error;
 use time::{OffsetDateTime, UtcOffset};
 
 pub mod device_link;
+pub mod native_authkit;
 pub mod native_device_link;
 
 const CLIENT_STORE_FILE: &str = "client.sqlite3";

@@ -781,6 +781,19 @@ private enum FocusedPreviewFixtures {
     )
 }
 
+#Preview("Settings") {
+    FocusedSettingsView(
+        agentName: "Ada",
+        accountLabel: "npub1finite…crownjewel",
+        chooseAgent: {},
+        signOut: {}
+    )
+}
+
 #Preview("Account link") {
     AccountLinkView(phase: .ready, errorMessage: nil, beginLink: {})
+}
+
+#Preview("Account link — finishing") {
+    AccountLinkView(phase: .waiting, errorMessage: nil, beginLink: {})
 }

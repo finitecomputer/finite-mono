@@ -17,6 +17,7 @@ use crate::device_link::{
     DEVICE_LINK_MAX_TTL_SECONDS, DeviceLinkDecryptInput, DeviceLinkPairingKey,
     create_device_link_pairing_key, decrypt_device_link_payload,
 };
+use crate::native_authkit::NativeAuthKitSession;
 
 const MAX_LINK_RESPONSE_BYTES: usize = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -123,6 +124,15 @@ impl NativeDeviceLinkSession {
             ));
         }
         Ok(())
+    }
+
+    /// Approve through an authenticated native AuthKit session without
+    /// exposing its bearer token to Swift.
+    pub fn approve_with_authkit(
+        &self,
+        authkit: Arc<NativeAuthKitSession>,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.approve_authenticated_account(Some(authkit.access_token()?))
     }
 
     /// Poll after authenticated account approval. The plaintext crosses only
@@ -300,6 +310,15 @@ impl NativeDeviceLinkSession {
                 }
             }
         }
+    }
+
+    /// Finish through the same native AuthKit session while its token remains
+    /// inside the Rust boundary.
+    pub fn wait_until_ready_with_authkit(
+        &self,
+        authkit: Arc<NativeAuthKitSession>,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.wait_until_ready(Some(authkit.access_token()?))
     }
 
     pub fn release(&self) {

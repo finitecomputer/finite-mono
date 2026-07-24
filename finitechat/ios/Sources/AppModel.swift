@@ -3,10 +3,25 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+private enum AppAccountLinkError: LocalizedError {
+    case authKitNotConfigured
+    case invalidAuthorizationURL
+
+    var errorDescription: String? {
+        switch self {
+        case .authKitNotConfigured:
+            "AuthKit is not configured"
+        case .invalidAuthorizationURL:
+            "AuthKit returned an invalid authorization URL"
+        }
+    }
+}
+
 struct RuntimeConfig: Codable, Equatable {
     let serverURL: String
     let dashboardURL: String
     let deviceID: String
+    let workosClientID: String?
     let usesTransientStore: Bool
     let persistsRuntimeIdentityUpdates: Bool
 
@@ -28,12 +43,14 @@ struct RuntimeConfig: Codable, Equatable {
         serverURL: String,
         dashboardURL: String = defaultDashboardURL,
         deviceID: String,
+        workosClientID: String? = nil,
         usesTransientStore: Bool = false,
         persistsRuntimeIdentityUpdates: Bool = true
     ) {
         self.serverURL = serverURL
         self.dashboardURL = dashboardURL
         self.deviceID = deviceID
+        self.workosClientID = Self.normalizedWorkOSClientID(workosClientID)
         self.usesTransientStore = usesTransientStore
         self.persistsRuntimeIdentityUpdates = persistsRuntimeIdentityUpdates
     }
@@ -44,6 +61,7 @@ struct RuntimeConfig: Codable, Equatable {
         dashboardURL = try container.decodeIfPresent(String.self, forKey: .dashboardURL)
             ?? Self.defaultDashboardURL
         deviceID = try container.decode(String.self, forKey: .deviceID)
+        workosClientID = nil
         usesTransientStore = false
         persistsRuntimeIdentityUpdates = true
     }
@@ -58,6 +76,7 @@ struct RuntimeConfig: Codable, Equatable {
     static func load(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         args: [String] = CommandLine.arguments,
+        bundleInfo: [String: Any] = Bundle.main.infoDictionary ?? [:],
         storageURL: URL? = nil,
         allowsDevelopmentOverrides: Bool = developmentOverridesEnabled
     ) -> RuntimeConfig {
@@ -68,6 +87,16 @@ struct RuntimeConfig: Codable, Equatable {
         let dashboardURL = allowsDevelopmentOverrides ? requestedDashboardURL : nil
         let deviceID = argumentValue("--finitechat-device", in: args)
             ?? environmentValue("FINITECHAT_DEVICE_ID", in: environment)
+        let bundledWorkOSClientID = normalizedWorkOSClientID(
+            bundleInfo["WorkOSClientID"] as? String
+        )
+        let developmentWorkOSClientID = argumentValue(
+            "--finitechat-workos-client-id",
+            in: args
+        ) ?? environmentValue("FINITECHAT_WORKOS_CLIENT_ID", in: environment)
+        let workosClientID = allowsDevelopmentOverrides
+            ? (normalizedWorkOSClientID(developmentWorkOSClientID) ?? bundledWorkOSClientID)
+            : bundledWorkOSClientID
         let persisted = loadPersisted(storageURL: storageURL)
         let fallback = RuntimeConfig(
             serverURL: persisted.serverURL ?? defaultServerURL,
@@ -89,6 +118,7 @@ struct RuntimeConfig: Codable, Equatable {
             serverURL: serverURL ?? fallback.serverURL,
             dashboardURL: dashboardURL ?? fallback.dashboardURL,
             deviceID: deviceID ?? fallback.deviceID,
+            workosClientID: workosClientID,
             usesTransientStore: transientOverride,
             persistsRuntimeIdentityUpdates: shouldPersistResolvedIdentity
         )
@@ -115,7 +145,8 @@ struct RuntimeConfig: Codable, Equatable {
         let config = RuntimeConfig(
             serverURL: serverURL.trimmingCharacters(in: .whitespacesAndNewlines),
             dashboardURL: dashboardURL.trimmingCharacters(in: .whitespacesAndNewlines),
-            deviceID: deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+            deviceID: deviceID.trimmingCharacters(in: .whitespacesAndNewlines),
+            workosClientID: workosClientID
         )
         guard !config.serverURL.isEmpty,
               !config.dashboardURL.isEmpty,
@@ -158,6 +189,18 @@ struct RuntimeConfig: Codable, Equatable {
             return "\(generatedDeviceIDPrefix)\(UUID().uuidString.lowercased().prefix(12))"
         }
         return "\(generatedDeviceIDPrefix)\(suffix)"
+    }
+
+    private static func normalizedWorkOSClientID(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              value.hasPrefix("client_"),
+              value != "client_replace_me",
+              value.count <= 256,
+              !value.contains(where: \.isNewline)
+        else {
+            return nil
+        }
+        return value
     }
 
     enum ConfigError: Error {
@@ -520,6 +563,8 @@ final class AppModel: ObservableObject, AppReconciler {
     private let runtimeFactory: AppRuntimeFactory
     private let startsUpdateLoop: Bool
     private let nostrIdentityStore: AppNostrIdentityStoring
+    private let webAuthenticationPresenter: any WebAuthenticationPresenting
+    private let workosClientID: String?
     private var updateTask: Task<Void, Never>?
     private var launchAutomationTask: Task<Void, Never>?
     private var postSendCatchUpTask: Task<Void, Never>?
@@ -549,6 +594,7 @@ final class AppModel: ObservableObject, AppReconciler {
         args: [String] = CommandLine.arguments,
         requiresNostrLogin: Bool = false,
         nostrIdentityStore: AppNostrIdentityStoring? = nil,
+        webAuthenticationPresenter: (any WebAuthenticationPresenting)? = nil,
         startsUpdateLoop: Bool = true,
         runtimeFactory: @escaping AppRuntimeFactory = { options in
             try FiniteChatRuntime.open(options: options)
@@ -565,6 +611,7 @@ final class AppModel: ObservableObject, AppReconciler {
         serverURL = resolvedConfig.serverURL
         dashboardURL = resolvedConfig.dashboardURL
         deviceID = resolvedConfig.deviceID
+        workosClientID = resolvedConfig.workosClientID
         usesTransientStore = resolvedConfig.usesTransientStore
         persistsRuntimeIdentityUpdates = resolvedConfig.persistsRuntimeIdentityUpdates
         self.applicationSupportURL = resolvedApplicationSupportURL
@@ -573,6 +620,8 @@ final class AppModel: ObservableObject, AppReconciler {
         self.args = args
         self.runtimeFactory = runtimeFactory
         self.startsUpdateLoop = startsUpdateLoop
+        self.webAuthenticationPresenter = webAuthenticationPresenter
+            ?? NativeWebAuthenticationPresenter()
         let resolvedNostrIdentityStore = nostrIdentityStore
             ?? KeychainNostrIdentityStore(
                 service: resolvedConfig.accountIdentityKeychainService,
@@ -775,7 +824,8 @@ final class AppModel: ObservableObject, AppReconciler {
         let runtimeConfig = RuntimeConfig(
             serverURL: serverURL,
             dashboardURL: dashboardURL,
-            deviceID: deviceID
+            deviceID: deviceID,
+            workosClientID: workosClientID
         )
         guard runtimeConfig.hasCompatibleDeviceLinkOrigins else {
             accountLinkPhase = .ready
@@ -785,6 +835,31 @@ final class AppModel: ObservableObject, AppReconciler {
         accountLinkTask?.cancel()
         accountLinkTask = Task { [weak self] in
             do {
+                guard let self else { return }
+                let authKit: NativeAuthKitSession?
+                if runtimeConfig.usesLocalDeviceLinkEnvironment {
+                    authKit = nil
+                } else {
+                    guard let workosClientID = runtimeConfig.workosClientID else {
+                        throw AppAccountLinkError.authKitNotConfigured
+                    }
+                    let session = try await Task.detached(priority: .userInitiated) {
+                        try NativeAuthKitSession.start(clientId: workosClientID)
+                    }.value
+                    guard let authorizationURL = URL(
+                        string: session.authorizationUrl()
+                    ) else {
+                        throw AppAccountLinkError.invalidAuthorizationURL
+                    }
+                    let callbackURL = try await self.webAuthenticationPresenter.authenticate(
+                        url: authorizationURL
+                    )
+                    try await Task.detached(priority: .userInitiated) {
+                        try session.complete(callbackUrl: callbackURL.absoluteString)
+                    }.value
+                    authKit = session
+                }
+                guard !Task.isCancelled else { return }
                 let link = try await Task.detached(priority: .userInitiated) {
                     try NativeDeviceLinkSession.create(
                         serverUrl: serverURL,
@@ -796,31 +871,37 @@ final class AppModel: ObservableObject, AppReconciler {
                     link.release()
                     return
                 }
-                try await Task.detached(priority: .userInitiated) {
-                    try link.approveAuthenticatedAccount(accessToken: nil)
-                }.value
+                if let authKit {
+                    try await Task.detached(priority: .userInitiated) {
+                        try link.approveWithAuthkit(authkit: authKit)
+                    }.value
+                } else {
+                    try await Task.detached(priority: .userInitiated) {
+                        try link.approveAuthenticatedAccount(accessToken: nil)
+                    }.value
+                }
                 guard !Task.isCancelled else {
                     link.release()
                     return
                 }
-                self?.accountLinkPhase = .waiting
+                self.accountLinkPhase = .waiting
                 let accountSecret = try await Task.detached(priority: .userInitiated) {
                     try link.claimAccountSecret()
                 }.value
                 let material = try nostrIdentityFromAccountSecretHex(
                     accountSecretHex: accountSecret
                 )
-                guard let self else {
-                    link.release()
-                    return
-                }
                 try self.applyNostrIdentity(
                     AppNostrIdentity(material: material),
                     resetStore: true
                 )
                 try await Task.detached(priority: .utility) {
                     try link.acknowledgeStored()
-                    try link.waitUntilReady(accessToken: nil)
+                    if let authKit {
+                        try link.waitUntilReadyWithAuthkit(authkit: authKit)
+                    } else {
+                        try link.waitUntilReady(accessToken: nil)
+                    }
                 }.value
                 self.startFromForeground()
                 self.accountLinkPhase = .ready
@@ -834,6 +915,14 @@ final class AppModel: ObservableObject, AppReconciler {
     }
 
     private static func accountLinkErrorText(_ error: Error) -> String {
+        if let linkError = error as? AppAccountLinkError {
+            switch linkError {
+            case .authKitNotConfigured:
+                return "Secure sign in is not configured in this build."
+            case .invalidAuthorizationURL:
+                return "Secure sign in could not start. Please try again."
+            }
+        }
         let description = String(describing: error)
         if description.localizedCaseInsensitiveContains("canceled") {
             return "Sign in was canceled."

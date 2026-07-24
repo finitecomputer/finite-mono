@@ -4,8 +4,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+FINITECHAT_ROOT="${REPO_ROOT}/finitechat"
+RUST_TOOLCHAIN="1.91.1"
 
-cd "$REPO_ROOT"
+cd "$FINITECHAT_ROOT"
 
 export CARGO_NET_RETRY="${CARGO_NET_RETRY:-10}"
 
@@ -60,8 +62,13 @@ if ! command -v xcodegen >/dev/null 2>&1; then
 fi
 
 export PROTOC="$(command -v protoc)"
+export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
 
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+rustup target add \
+  --toolchain "$RUST_TOOLCHAIN" \
+  aarch64-apple-ios \
+  aarch64-apple-ios-sim
 
 cargo run -q -p finitechat-rmp -- bindings swift --clean
 

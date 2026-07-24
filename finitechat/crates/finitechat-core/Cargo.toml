@@ -29,7 +29,9 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
 uniffi.workspace = true
+workos.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

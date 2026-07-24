@@ -39,6 +39,11 @@ smoke:
 saas-smoke:
     cd .. && cargo run -p devfinity -- up --headless -- scripts/devfinity-saas-smoke
 
+# Starts the local encrypted-chat stack, pairs the iOS app, and launches Simulator.
+# The pinned dev shell provides Rust's Apple targets; Xcode remains a host dependency.
+ios-local-agent:
+    cd .. && finitechat/scripts/ios-local-agent.sh
+
 # Starts the headless stack, runs the ignored Rust smoke test, and tears the stack down
 rust-smoke:
     cd .. && cargo run -p devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- cargo test -p devfinity --locked --test stack_smoke -- --ignored --nocapture

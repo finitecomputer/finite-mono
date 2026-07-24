@@ -36,6 +36,9 @@ targets:
       configs:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+          WORKOS_CLIENT_ID: client_01KYA317YMJJ2H90MHSPJNQKXH
+        Release:
+          WORKOS_CLIENT_ID: client_01KYA32JRWEE23J7QW1F882DVA
     dependencies:
       - framework: Frameworks/FinitechatCore.xcframework
         embed: false

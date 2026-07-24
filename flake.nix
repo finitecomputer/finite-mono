@@ -10,6 +10,8 @@
     # host OS stable while pinning the microVM runtime toolchain independently.
     nixpkgs-kata.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     disko.url = "github:nix-community/disko";
     disko.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -34,6 +36,7 @@
       nixpkgs-lat3,
       nixpkgs-kata,
       flake-utils,
+      rust-overlay,
       disko,
       nixos-anywhere,
       nixos-images,
@@ -86,13 +89,27 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+        };
+        rustToolchain = pkgs.rust-bin.stable."1.91.1".default.override {
+          extensions = [
+            "clippy"
+            "rust-analyzer"
+            "rust-src"
+            "rustfmt"
+          ];
+          targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            "aarch64-apple-ios"
+            "aarch64-apple-ios-sim"
+            "x86_64-apple-ios"
+          ];
+        };
       in
       {
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
-            cargo
-            clippy
             curl
             git
             just
@@ -103,14 +120,11 @@
             process-compose
             python3
             rsync
-            rust-analyzer
-            rustPlatform.rustLibSrc
-            rustc
-            rustfmt
             xxd
+            rustToolchain
           ];
 
-          RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         };
 
         formatter = pkgs.nixfmt-rfc-style;
