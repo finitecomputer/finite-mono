@@ -71,7 +71,7 @@ type HostedChatContextValue = {
   localDeviceRecoveryRequired: boolean;
   selectionPending: boolean;
   load: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
-  claimOwner: () => Promise<HostedChatRetryAttempt>;
+  claimOwner: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
   recoverBinding: () => Promise<HostedChatRetryAttempt>;
   recoverLocalDevice: () => Promise<HostedChatRetryAttempt>;
   dispatch: (action: HostedChatAction) => Promise<HostedChatState>;
@@ -103,6 +103,7 @@ export function HostedChatProvider({
   const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const lastLoadErrorRef = useRef<string | null>(null);
   const ownerClaimRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
+  const lastClaimErrorRef = useRef<string | null>(null);
   const navigationMutationTailRef = useRef<Promise<void>>(Promise.resolve());
   const nextMutationSequenceRef = useRef(0);
   const latestAppliedMutationSequenceRef = useRef(0);
@@ -252,7 +253,7 @@ export function HostedChatProvider({
     return pending;
   }, [apiBase, applyHttpSnapshot, runtime]);
 
-  const claimOwner = useCallback(() => {
+  const claimOwner = useCallback((showError = true) => {
     if (ownerClaimRef.current) return ownerClaimRef.current;
     const pending = (async (): Promise<HostedChatRetryAttempt> => {
       try {
@@ -261,7 +262,9 @@ export function HostedChatProvider({
         setClaimError(null);
         return "succeeded";
       } catch (caught) {
-        setClaimError(hostedChatErrorMessage(caught));
+        const message = hostedChatErrorMessage(caught);
+        lastClaimErrorRef.current = message;
+        if (showError) setClaimError(message);
         const status = caught instanceof HostedChatHttpError ? caught.status : null;
         return shouldRetryHostedChatRequest(status) ? "retry" : "stop";
       }
@@ -486,7 +489,14 @@ export function HostedChatProvider({
   useEffect(() => {
     if (!hasState || ownerClaimed) return;
     const controller = new AbortController();
-    void runInitialHostedChatRetries(claimOwner, controller.signal);
+    void runInitialHostedChatRetries(
+      () => claimOwner(false),
+      controller.signal
+    ).then((result) => {
+      if (result === "stop" && !controller.signal.aborted) {
+        setClaimError(lastClaimErrorRef.current ?? CHAT_UNAVAILABLE_MESSAGE);
+      }
+    });
     return () => controller.abort();
   }, [claimOwner, hasState, ownerClaimed]);
 
@@ -592,7 +602,6 @@ export function HostedChatProvider({
         nextEvents.close();
         events = null;
         setStreamConnected(false);
-        setTransportError((current) => current ?? "Reconnecting…");
         reconnectTimer = setTimeout(connect, STREAM_RECONNECT_DELAY_MS);
       });
     };

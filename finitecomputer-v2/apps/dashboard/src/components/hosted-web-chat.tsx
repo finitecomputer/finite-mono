@@ -92,6 +92,7 @@ const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_ATTACHMENTS = 8;
 const AUTO_FOLLOW_SCROLL_THRESHOLD_PX = 120;
+const RECONNECT_NOTICE_DELAY_MS = 3_000;
 
 type PendingAttachment = {
   id: string;
@@ -150,6 +151,7 @@ export function HostedWebChat({
   const [browserOpen, setBrowserOpen] = useState(false);
   const [activeSiteId, setActiveSiteId] = useState<string | null>(null);
   const [showLatest, setShowLatest] = useState(false);
+  const [showReconnectNotice, setShowReconnectNotice] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -170,6 +172,17 @@ export function HostedWebChat({
   const audioRecordingMountedRef = useRef(true);
   const markedReadSeqRef = useRef(new Map<string, number>());
   const mobilePreview = useMediaQuery("(max-width: 980px)");
+  useEffect(() => {
+    if (!state || streamConnected) {
+      setShowReconnectNotice(false);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setShowReconnectNotice(true),
+      RECONNECT_NOTICE_DELAY_MS
+    );
+    return () => window.clearTimeout(timer);
+  }, [state, streamConnected]);
   const allowedRoomIds = useMemo(() => {
     const binding = state?.hosted_agent_binding;
     if (!binding) return new Set<string>();
@@ -776,7 +789,7 @@ export function HostedWebChat({
           </div>
 
           <div className="finite-chat__topbar-actions">
-            {!streamConnected && state ? (
+            {showReconnectNotice ? (
               <span className="finite-chat__relay-warning">Reconnecting</span>
             ) : null}
             {sites.length > 0 ? (
