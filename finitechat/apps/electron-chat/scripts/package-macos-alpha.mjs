@@ -62,6 +62,7 @@ fs.writeFileSync(
 const packagedDaemon = path.join(resources, "finitechatd");
 fs.copyFileSync(daemonBinary, packagedDaemon);
 fs.chmodSync(packagedDaemon, 0o755);
+makeDaemonPortable(packagedDaemon);
 
 const iconPath = buildIcon(outputRoot, resources);
 const infoPath = path.join(contents, "Info.plist");
@@ -92,6 +93,7 @@ if (signingIdentity) {
 } else {
   signAlphaBundle(outputApp, packagedDaemon, appEntitlements);
 }
+execFileSync(packagedDaemon, ["--help"], { stdio: "ignore" });
 
 console.log(outputApp);
 
@@ -108,6 +110,37 @@ function requireExecutable(filePath, label) {
   }
   if ((metadata.mode & 0o111) === 0) {
     throw new Error(`${label} is not executable: ${filePath}`);
+  }
+}
+
+function daemonDependencies(daemonPath) {
+  return execFileSync("/usr/bin/otool", ["-L", daemonPath], { encoding: "utf8" })
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().split(" (compatibility version", 1)[0])
+    .filter(Boolean);
+}
+
+function makeDaemonPortable(daemonPath) {
+  const nixDependencies = daemonDependencies(daemonPath).filter((dependency) =>
+    dependency.startsWith("/nix/store/")
+  );
+  for (const dependency of nixDependencies) {
+    if (!dependency.endsWith("/lib/libiconv.2.dylib")) {
+      throw new Error(`finitechatd has an unsupported Nix store dependency: ${dependency}`);
+    }
+    execFileSync("/usr/bin/install_name_tool", [
+      "-change",
+      dependency,
+      "/usr/lib/libiconv.2.dylib",
+      daemonPath,
+    ]);
+  }
+  const remaining = daemonDependencies(daemonPath).filter((dependency) =>
+    dependency.startsWith("/nix/store/")
+  );
+  if (remaining.length > 0) {
+    throw new Error(`finitechatd still has Nix store dependencies: ${remaining.join(", ")}`);
   }
 }
 
