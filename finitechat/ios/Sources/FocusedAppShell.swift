@@ -183,7 +183,6 @@ struct ContentView: View {
                 groups: chatGroups,
                 selectedChatID: path.last?.chatID,
                 dismiss: dismissDrawer,
-                openHome: openHomeFromDrawer,
                 startNewChat: startNewChatFromDrawer,
                 createTopic: createTopicFromDrawer,
                 startTopicChat: startTopicChatFromDrawer,
@@ -445,11 +444,6 @@ struct ContentView: View {
         withAnimation(.snappy(duration: 0.28)) {
             showsDrawer = true
         }
-    }
-
-    private func openHomeFromDrawer() {
-        path.removeAll()
-        dismissDrawer()
     }
 
     private func startNewChatFromDrawer() {
@@ -747,7 +741,6 @@ struct ChatDrawerOverlay: View {
     let groups: [ChatTopicGroup]
     let selectedChatID: String?
     let dismiss: () -> Void
-    let openHome: () -> Void
     let startNewChat: () -> Void
     let createTopic: (String, @escaping (Bool) -> Void) -> Void
     let startTopicChat: (ChatTopicGroup, @escaping (Bool) -> Void) -> Void
@@ -811,16 +804,6 @@ struct ChatDrawerOverlay: View {
 
             List {
                 Section {
-                    DrawerNavigationRow(
-                        title: "Home",
-                        systemImage: "house",
-                        isSelected: selectedChatID == nil,
-                        action: openHome
-                    )
-                    .accessibilityIdentifier("DrawerHomeButton")
-                }
-
-                Section {
                     if groups.isEmpty {
                         Label("No chats yet", systemImage: "bubble.left")
                             .foregroundStyle(.secondary)
@@ -868,22 +851,6 @@ struct ChatDrawerOverlay: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
             .accessibilityIdentifier("DrawerNewChatButton")
-
-            Divider()
-
-            Button(action: openSettings) {
-                HStack(spacing: 12) {
-                    Image(systemName: "gearshape")
-                        .frame(width: 24)
-                    Text("Settings")
-                    Spacer()
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .frame(minHeight: 52)
-            .accessibilityIdentifier("DrawerSettingsButton")
         }
         .background {
             Rectangle()
@@ -976,29 +943,6 @@ struct ChatDrawerOverlay: View {
     }
 }
 
-private struct DrawerNavigationRow: View {
-    let title: String
-    let systemImage: String
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .listRowBackground(selectionBackground)
-        .listRowSeparator(.hidden)
-    }
-
-    private var selectionBackground: some View {
-        RoundedRectangle(cornerRadius: 10)
-            .fill(isSelected ? Color.accentColor.opacity(0.13) : .clear)
-    }
-}
-
 private struct DrawerTopicRows: View {
     let group: ChatTopicGroup
     let selectedChatID: String?
@@ -1079,44 +1023,20 @@ private struct DrawerTopicRows: View {
     }
 
     private func chatRow(_ chat: ChatDestination) -> some View {
-        HStack(spacing: 6) {
-            Button {
-                openChat(chat)
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "bubble.left")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 14)
+        Button {
+            openChat(chat)
+        } label: {
+            HStack {
+                Text(chat.title.isEmpty ? "New chat" : chat.title)
+                    .font(.subheadline)
+                    .lineLimit(1)
 
-                    Text(chat.title.isEmpty ? "New chat" : chat.title)
-                        .font(.subheadline)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.leading, 8)
-                .contentShape(Rectangle())
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.plain)
-
-            Menu {
-                Button {
-                    renameChat(chat)
-                } label: {
-                    Label("Rename", systemImage: "pencil")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .accessibilityLabel(
-                "Actions for \(chat.title.isEmpty ? "New chat" : chat.title)"
-            )
+            .padding(.horizontal, 8)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .frame(minHeight: 34)
         .background(
             selectedChatID == chat.chatID
@@ -1124,7 +1044,6 @@ private struct DrawerTopicRows: View {
                 : .clear,
             in: RoundedRectangle(cornerRadius: 9)
         )
-        .padding(.leading, 24)
         .contextMenu {
             Button {
                 renameChat(chat)
@@ -1471,7 +1390,6 @@ private enum FocusedPreviewFixtures {
         ],
         selectedChatID: "ship-ios",
         dismiss: {},
-        openHome: {},
         startNewChat: {},
         createTopic: { _, completion in completion(true) },
         startTopicChat: { _, completion in completion(true) },

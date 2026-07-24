@@ -29,7 +29,8 @@ final class RuntimeConfigTests: XCTestCase {
                             messageCount: 0,
                             startedSeq: 100,
                             updatedSeq: 100,
-                            active: true
+                            active: true,
+                            archived: false
                         ),
                     ]
                 ),
@@ -54,7 +55,8 @@ final class RuntimeConfigTests: XCTestCase {
                             messageCount: 1,
                             startedSeq: 12,
                             updatedSeq: 12,
-                            active: false
+                            active: false,
+                            archived: false
                         ),
                         AppChatSummary(
                             chatId: "empty-older",
@@ -64,7 +66,8 @@ final class RuntimeConfigTests: XCTestCase {
                             messageCount: 0,
                             startedSeq: 2,
                             updatedSeq: 2,
-                            active: false
+                            active: false,
+                            archived: false
                         ),
                         AppChatSummary(
                             chatId: "empty-newer",
@@ -74,7 +77,8 @@ final class RuntimeConfigTests: XCTestCase {
                             messageCount: 0,
                             startedSeq: 10,
                             updatedSeq: 10,
-                            active: true
+                            active: true,
+                            archived: false
                         ),
                     ]
                 ),
@@ -3082,7 +3086,8 @@ final class AppModelPersistenceTests: XCTestCase {
                         messageCount: 1,
                         startedSeq: 1,
                         updatedSeq: 1,
-                        active: true
+                        active: true,
+                        archived: false
                     ),
                 ]
             ),
