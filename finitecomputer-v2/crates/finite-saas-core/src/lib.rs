@@ -8227,6 +8227,156 @@ mod tests {
     const NOW: &str = "2026-05-25T12:00:00Z";
     const LATER: &str = "2026-05-25T13:00:00Z";
 
+    /// Assert the three independent encodings of one enum agree.
+    macro_rules! assert_wire_encodings_agree {
+        ($parse:path, $($variant:expr),+ $(,)?) => {
+            $({
+                let value = $variant;
+                let encoded = serde_json::to_value(value).unwrap();
+                let encoded = encoded
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{value:?} does not serialize to a JSON string"));
+                assert_eq!(
+                    encoded,
+                    value.as_str(),
+                    "serde and as_str disagree for {value:?}",
+                );
+                assert_eq!(
+                    $parse(value.as_str()),
+                    Some(value),
+                    "{} rejects the as_str it must round-trip for {value:?}",
+                    stringify!($parse),
+                );
+            })+
+        };
+    }
+
+    /// Every enum here spells its wire string three times: a serde
+    /// `rename_all` derive, a hand-written `as_str`, and a `parse_*` function.
+    /// Nothing forces those to agree, so adding a variant and updating two of
+    /// the three sites silently encodes one way in the JSON API and another in
+    /// the database column. This pins all three together for every variant.
+    #[test]
+    fn enum_serde_as_str_and_parse_encodings_agree() {
+        use BillingClass::*;
+        assert_wire_encodings_agree!(parse_billing_class, Grandfathered, Sponsored, Standard);
+
+        use BillingSubscriptionStatus::*;
+        assert_wire_encodings_agree!(
+            parse_billing_subscription_status,
+            Incomplete,
+            IncompleteExpired,
+            Trialing,
+            BillingSubscriptionStatus::Active,
+            PastDue,
+            Canceled,
+            Unpaid,
+            Paused,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_import_candidate_status,
+            ImportCandidateStatus::Pending,
+            ImportCandidateStatus::Claimed,
+            ImportCandidateStatus::AdminReview,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_user_link_status,
+            UserLinkStatus::Pending,
+            UserLinkStatus::Linked,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_project_membership_role,
+            ProjectMembershipRole::Owner,
+            ProjectMembershipRole::Admin,
+            ProjectMembershipRole::Member,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_summary_status,
+            RuntimeSummaryStatus::Online,
+            RuntimeSummaryStatus::Offline,
+            RuntimeSummaryStatus::Stale,
+            RuntimeSummaryStatus::Unknown,
+        );
+
+        assert_wire_encodings_agree!(parse_runtime_artifact_kind, RuntimeArtifactKind::OciImage);
+
+        assert_wire_encodings_agree!(
+            parse_hosting_tier,
+            HostingTier::Standard,
+            HostingTier::Confidential,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_resource_class,
+            RuntimeResourceClass::Vcpu4Memory8Gib,
+            RuntimeResourceClass::Vcpu2Memory4Gib,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runner_class,
+            RunnerClass::LocalDocker,
+            RunnerClass::AppleContainer,
+            RunnerClass::Kata,
+            RunnerClass::Phala,
+            RunnerClass::Enclavia,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_control_kind,
+            RuntimeControlKind::Restart,
+            RuntimeControlKind::RecoverKnownGoodChatRuntime,
+            RuntimeControlKind::Upgrade,
+            RuntimeControlKind::Stop,
+            RuntimeControlKind::Destroy,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_runtime_control_request_status,
+            RuntimeControlRequestStatus::Requested,
+            RuntimeControlRequestStatus::Running,
+            RuntimeControlRequestStatus::Succeeded,
+            RuntimeControlRequestStatus::Failed,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_agent_creation_request_status,
+            AgentCreationRequestStatus::Requested,
+            AgentCreationRequestStatus::Launching,
+            AgentCreationRequestStatus::Running,
+            AgentCreationRequestStatus::Failed,
+            AgentCreationRequestStatus::Cancelled,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_finite_private_grant_status,
+            FinitePrivateGrantStatus::Active,
+            FinitePrivateGrantStatus::Revoked,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_finite_private_api_key_status,
+            FinitePrivateApiKeyStatus::Active,
+            FinitePrivateApiKeyStatus::Revoked,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_finite_private_reservation_status,
+            FinitePrivateReservationStatus::Reserved,
+            FinitePrivateReservationStatus::Settled,
+            FinitePrivateReservationStatus::Denied,
+        );
+
+        assert_wire_encodings_agree!(
+            parse_finite_private_settlement_kind,
+            FinitePrivateSettlementKind::Actual,
+            FinitePrivateSettlementKind::Estimate,
+        );
+    }
+
     fn phala_runner_capacity(provider_inventory_count: u32) -> RunnerLeaseCapacity {
         RunnerLeaseCapacity {
             runner_classes: vec![RunnerClass::Phala],
