@@ -618,6 +618,88 @@ async fn product_grants_resolve_against_native_and_vip_principals() {
 }
 
 #[tokio::test]
+async fn one_managed_agent_identity_is_consistent_across_product_resolution_surfaces() {
+    let (app, _store, _mailer, _clock) = fixture();
+    let agent_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());
+    let operator_headers = [("x-finite-operator-token", OPERATOR_TOKEN)];
+
+    let (status, binding) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/agent-email-bindings",
+        serde_json::json!({
+            "email": ALICE_EMAIL,
+            "agent_npub": agent_npub,
+        }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(binding["email"], ALICE_EMAIL);
+    assert_eq!(binding["agent_npub"], agent_npub);
+
+    let (status, nip05) = get_json(
+        app.clone(),
+        &format!("/.well-known/nostr.json?name={ALICE_LOCALPART}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(nip05["names"][ALICE_LOCALPART], ALICE_PUBKEY);
+
+    let (status, product_resolution) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/principal-resolution/satisfies-grant",
+        serde_json::json!({
+            "grant": ALICE_EMAIL,
+            "actor_pubkey": ALICE_PUBKEY,
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(product_resolution["satisfied"], true);
+    assert_eq!(product_resolution["principal"]["kind"], "native");
+    assert_eq!(product_resolution["principal"]["pubkey"], ALICE_PUBKEY);
+
+    let (status, brain_resolution) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/brain/agent-resolution",
+        serde_json::json!({ "agentNpub": agent_npub }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(brain_resolution["agentNpub"], agent_npub);
+    assert_eq!(brain_resolution["managedAgentEmail"], ALICE_EMAIL);
+
+    let (status, unrelated_grant) = json_request(
+        app,
+        "POST",
+        "/api/v1/principal-resolution/satisfies-grant",
+        serde_json::json!({
+            "grant": "unrelated@example.com",
+            "actor_pubkey": ALICE_PUBKEY,
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unrelated_grant["satisfied"], false);
+
+    for response in [binding, nip05, product_resolution, brain_resolution] {
+        let serialized = response.to_string().to_ascii_lowercase();
+        for forbidden in ["operator_token", "private_key", "secret", "nsec"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "identity response exposed forbidden key material marker {forbidden}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn email_only_principal_can_redeem_external_invited_email_and_resolve_grant() {
     let (app, _store, mailer, _clock) = fixture();
     let external_email = "Editor+Docs@Example.COM";

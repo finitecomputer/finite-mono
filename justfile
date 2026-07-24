@@ -33,6 +33,19 @@ web-check:
 brain-language-check:
     python3 scripts/check-brain-product-language.py
 
+# Compositional proof that one managed Agent Principal is bound once, consumed
+# consistently by Chat/Sites/Brain, and never turns identity equivalence into a
+# cross-product permission grant.
+identity-conformance:
+    cargo test --locked -p finite-identity --test authority
+    cargo test --locked -p finite-saas-runner run_once_binds_canonical_agent_email_before_completion
+    cargo test --locked -p finitechat-hosted-device --test http initial_hosted_chat_setup_registers_the_users_public_identity
+    cargo test --locked -p finitechat-hosted-device --test http new_agent_binding_stays_unchanged_across_duplicate_selection_and_restart
+    cargo test --locked -p finitesitesd --test e2e identity_authority_can_satisfy_email_git_auth_without_sites_email_key
+    cargo test --locked -p finite-brain-server owner_creates_personal_brain_by_managed_agent_email_without_trusting_navigation_npub
+    cargo test --locked -p devfinity generated_yaml_contains_core_services
+    nix eval --raw .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
+
 # Evaluate and build immutable system + disko outputs on finite-lat-2. The
 # helper prints the exact, GC-rooted system path used for the deploy handoff.
 nixos-build-lat1 rev:
