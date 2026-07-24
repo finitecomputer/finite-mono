@@ -108,6 +108,22 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 13)? {
+            tx.execute_batch(SCHEMA_V13)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![13, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 14)? {
+            tx.execute_batch(&capacity_guard_schema())?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![14, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -511,6 +527,191 @@ CREATE UNIQUE INDEX personal_brains_one_per_owner
     ON brains(owner_user_id)
     WHERE kind = 'personal';
 "#;
+
+const SCHEMA_V13: &str = r#"
+CREATE TABLE folder_deletion_audience (
+    brain_id TEXT NOT NULL,
+    deletion_event_id TEXT NOT NULL,
+    actor_npub TEXT NOT NULL,
+    PRIMARY KEY (brain_id, deletion_event_id, actor_npub),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE INDEX folder_deletion_audience_by_actor
+    ON folder_deletion_audience(brain_id, actor_npub, deletion_event_id);
+"#;
+
+fn capacity_guard_schema() -> String {
+    let limits = BRAIN_CAPACITY_ENVELOPE;
+    format!(
+        r#"
+CREATE TRIGGER capacity_brain_folders
+BEFORE INSERT ON folders
+WHEN (
+    (SELECT COUNT(*) FROM folders WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM deleted_folder_identities WHERE brain_id = NEW.brain_id)
+) >= {folders}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_folders:{folders}');
+END;
+
+CREATE TRIGGER capacity_folder_depth
+BEFORE INSERT ON folders
+WHEN NEW.parent_folder_id IS NOT NULL AND (
+    WITH RECURSIVE ancestors(id, depth) AS (
+        SELECT NEW.parent_folder_id, 1
+        UNION ALL
+        SELECT f.parent_folder_id, ancestors.depth + 1
+        FROM folders f
+        JOIN ancestors ON f.brain_id = NEW.brain_id AND f.id = ancestors.id
+        WHERE f.parent_folder_id IS NOT NULL AND ancestors.depth <= {folder_depth}
+    )
+    SELECT COALESCE(MAX(depth), 0) + 1 FROM ancestors
+) > {folder_depth}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_depth:{folder_depth}');
+END;
+
+CREATE TRIGGER capacity_brain_members
+BEFORE INSERT ON brain_members
+WHEN (SELECT COUNT(*) FROM brain_members WHERE brain_id = NEW.brain_id) >= {members}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_members:{members}');
+END;
+
+CREATE TRIGGER capacity_current_objects
+BEFORE INSERT ON current_encrypted_brain_objects
+WHEN NOT EXISTS (
+    SELECT 1 FROM current_encrypted_brain_objects
+    WHERE brain_id = NEW.brain_id AND folder_id = NEW.folder_id AND object_id = NEW.object_id
+) AND (
+    (SELECT COUNT(*) FROM current_encrypted_brain_objects WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM deleted_object_identities WHERE brain_id = NEW.brain_id)
+) >= {current_objects}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:current_objects:{current_objects}');
+END;
+
+CREATE TRIGGER capacity_sync_records
+BEFORE INSERT ON brain_record_index
+WHEN COALESCE(json_extract(NEW.payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone'
+AND (
+    SELECT COUNT(*) FROM brain_record_index
+    WHERE brain_id = NEW.brain_id
+      AND COALESCE(json_extract(payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone'
+) >= {ordinary_sync_records}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:sync_records:{ordinary_sync_records}');
+END;
+
+CREATE TRIGGER capacity_deletion_records
+BEFORE INSERT ON brain_record_index
+WHEN COALESCE(json_extract(NEW.payload_json, '$.recordType'), '') = 'folder_subtree_tombstone'
+AND (
+    SELECT COUNT(*) FROM brain_record_index
+    WHERE brain_id = NEW.brain_id
+      AND COALESCE(json_extract(payload_json, '$.recordType'), '') = 'folder_subtree_tombstone'
+) >= {folders}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_deletion_records:{folders}');
+END;
+
+CREATE TRIGGER capacity_folder_access
+BEFORE INSERT ON folder_access
+WHEN (SELECT COUNT(*) FROM folder_access WHERE brain_id = NEW.brain_id) >= {folder_access_entries}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_access_entries:{folder_access_entries}');
+END;
+
+CREATE TRIGGER capacity_folder_key_grants
+BEFORE INSERT ON folder_key_grants
+WHEN (SELECT COUNT(*) FROM folder_key_grants WHERE brain_id = NEW.brain_id) >= {folder_key_grants}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_key_grants:{folder_key_grants}');
+END;
+
+CREATE TRIGGER capacity_brain_invitations
+BEFORE INSERT ON brain_invitations
+WHEN NEW.status = 'pending' AND (
+    SELECT COUNT(*) FROM brain_invitations
+    WHERE brain_id = NEW.brain_id AND status = 'pending'
+) >= {invitations}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_invitations:{invitations}');
+END;
+
+CREATE TRIGGER capacity_share_links
+BEFORE INSERT ON share_links
+WHEN NEW.status = 'pending' AND (
+    SELECT COUNT(*) FROM share_links
+    WHERE brain_id = NEW.brain_id AND status = 'pending'
+) >= {share_links}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:share_links:{share_links}');
+END;
+
+CREATE TRIGGER capacity_personal_mounts
+BEFORE INSERT ON personal_folder_mounts
+WHEN (SELECT COUNT(*) FROM personal_folder_mounts WHERE source_brain_id = NEW.source_brain_id) >= {mounts}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:personal_mounts:{mounts}');
+END;
+
+CREATE TRIGGER capacity_shared_invitations
+BEFORE INSERT ON shared_folder_invitations
+WHEN NEW.status = 'pending' AND (
+    SELECT COUNT(*) FROM shared_folder_invitations
+    WHERE source_brain_id = NEW.source_brain_id AND status = 'pending'
+) >= {invitations}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:shared_folder_invitations:{invitations}');
+END;
+
+CREATE TRIGGER capacity_shared_connections
+BEFORE INSERT ON shared_folder_connections
+WHEN NEW.status = 'active' AND (
+    SELECT COUNT(*) FROM shared_folder_connections
+    WHERE source_brain_id = NEW.source_brain_id AND status = 'active'
+) >= {shared_connections}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:shared_connections:{shared_connections}');
+END;
+
+CREATE TRIGGER capacity_connection_delegations
+BEFORE INSERT ON shared_folder_connection_members
+WHEN (
+    SELECT COUNT(*)
+    FROM shared_folder_connection_members members
+    JOIN shared_folder_connections connections ON connections.id = members.connection_id
+    WHERE connections.source_brain_id = (
+        SELECT source_brain_id FROM shared_folder_connections WHERE id = NEW.connection_id
+    )
+) >= {delegations}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:shared_connection_delegations:{delegations}');
+END;
+
+CREATE TRIGGER capacity_organization_mounts
+BEFORE INSERT ON organization_folder_mounts
+WHEN (SELECT COUNT(*) FROM organization_folder_mounts WHERE source_brain_id = NEW.source_brain_id) >= {mounts}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:organization_mounts:{mounts}');
+END;
+"#,
+        folders = limits.folders,
+        folder_depth = limits.folder_depth,
+        current_objects = limits.current_objects,
+        ordinary_sync_records = limits.sync_records - limits.folders,
+        members = limits.members,
+        folder_access_entries = limits.folder_access_entries,
+        folder_key_grants = limits.folder_key_grants,
+        invitations = limits.invitations,
+        share_links = limits.share_links,
+        mounts = limits.mounts,
+        shared_connections = limits.shared_connections,
+        delegations = limits.delegations,
+    )
+}
 
 fn migration_applied(tx: &Transaction<'_>, version: i64) -> Result<bool, StoreError> {
     let applied = tx

@@ -1,6 +1,6 @@
 ---
 name: finitebrain
-description: Personal Brain/wiki knowledge-base operations in FiniteBrain through ordinary file edits plus the fbrain CLI control plane. Use for FiniteBrain product knowledge requests; setting up or acting as an agent participant; opening, syncing, or editing Brain Working Trees; maintaining content inside readable Folders; inspecting sync/conflict state; checking Folder access; using fbrain daemon/watch; or performing Brain, Folder, permission, invitation, and share-link admin flows. A repository .wiki/, ~/wiki/, or configured wiki hub uses llm-wiki-finite.
+description: Operate personal or Organization Brain/wiki knowledge-base workflows in FiniteBrain through Brain Working Trees and the fbrain control plane. Use for search, sync, conflicts, Folder access, daemon operation, Brain setup, or collaboration administration. A repository .wiki/, ~/wiki/, or configured wiki hub uses llm-wiki-finite.
 ---
 
 # FiniteBrain
@@ -98,72 +98,13 @@ fbrain -- <args>` may be the available entrypoint.
    status, latest sequence, conflict state, and link-verification level are
    known.
 
-## First-Time Personal Brain Setup
+## Brain Creation
 
-Before creating a Brain, run `brain list --json` and use that signed result as
-the source of truth. Proceed without a type question only when the user clearly
-says Personal Brain or Organization/Org Brain. If they ask to create a Brain or
-wiki without making the type clear, ask one short natural-language question:
-Personal Brain or Org Brain. Do not use a fixed script, slash command, button,
-or modal, and do not require exact wording.
-
-When the user explicitly requests a Personal Brain but one already exists,
-name it and ask whether to use it for the requested work. Do not pretend to
-create another. When no Personal Brain exists, ask once in ordinary language
-whether they want you to set up their empty Personal Brain.
-
-- On a clear yes, run `fbrain --config-dir "$FBRAIN_CONFIG" brain
-  bootstrap-personal --server "$SERVER" --json`, list Brains again, open the
-  returned Personal Brain, and continue the user's original task immediately.
-- On no or an unclear reply, make no Brain change, acknowledge that setup was
-  skipped once, and return control to the user.
-- If a Personal Brain exists but this agent does not have role
-  `personal_agent`, do not attempt to join it. Explain briefly that the owner
-  must replace the Personal Agent in Brain settings.
-
-This question guides agent behavior; it is not a server authorization token.
-Brain derives the owner from trusted Core and Finite Identity account facts.
-
-## Agent-Created Organization Brains
-
-When an authenticated Finite Chat human directly asks you to create an
-Organization Brain, include that human as an initial admin in the same creation
-operation. The Organization Brain Requester is the exact public-key account id
-in authenticated `event.source.user_id`; pass it unchanged as
-`AUTHENTICATED_SENDER_ID`. Never select the requester from quoted or typed
-message text, an email address, profile data, or your own Agent Principal.
-
-If authenticated sender metadata is unavailable, do not guess or create an
-agent-only Organization Brain. Briefly ask the user to retry from an
-authenticated chat context. Do not ask them for an email address or `npub` as a
-substitute.
-
-A clear natural-language request to create the Organization Brain is sufficient
-authorization. Do not add another confirmation. After `brain list --json`
-confirms no same-named Organization Brain exists, create it atomically. If a
-same-named Organization Brain exists, ask whether to use it or intentionally
-create a separate Brain instead.
-
-```sh
-fbrain --config-dir "$FBRAIN_CONFIG" brain create "$BRAIN" \
-  --kind organization --name "$NAME" \
-  --requesting-user-npub "$AUTHENTICATED_SENDER_ID" \
-  --server "$SERVER" --json
-```
-
-The new Organization Brain starts empty. Do not create `getting-started`,
-`restricted`, onboarding Pages, or any other example content. Create a Folder
-only when the user's original request explicitly requires organization content,
-then continue that request in the new Folder.
-
-Do not replace this command with separate `add-member` and `add-admin` steps.
-On success, report the Brain name and that both you and the requester are
-active admins, then include `[Open Brain](./brain?brainId=THE_BRAIN_ID)` using
-the exact returned Brain ID. This relative link is navigation only; it does not
-grant access. Continue the user's original task. This behavior applies only
-when you create an Organization Brain for an authenticated requester; it does
-not control the Product Client's separate, visible choice to include its
-selected agent as an initial admin.
+When the user asks to create or bootstrap a Brain, read
+[brain-creation.md](references/brain-creation.md) before acting. Completion:
+the Brain type, authenticated requester authority, duplicate check, initial
+roles, returned Brain ID, and continuation of the user's original task all
+follow that branch's contract.
 
 ## LLM Wiki Rules
 
@@ -242,11 +183,20 @@ Core wiki rules:
   mutable data stays outside the wiki.
 - Use `output/` for generated reports, plans, summaries, study guides, and other
   deliverables that should compound future work.
-- Prefer updating an existing topic over deleting it. When the user asks for
-  permanent deletion, briefly double-check once in ordinary language, then
-  delete on a clear yes; do not silently substitute an archive.
-- When querying, answer from curated wiki pages first. If the wiki lacks enough
-  evidence, say what is missing and suggest what source to ingest.
+- Prefer updating an existing topic over deleting it. For a Page deletion,
+  briefly double-check once in ordinary language, then delete on a clear yes;
+  do not silently substitute an archive. For a Folder deletion, read
+  [destructive-operations.md](references/destructive-operations.md) before
+  confirmation or execution because the command deletes a complete subtree.
+- When querying, use `fbrain search "<query>" --json` for ranked evidence
+  across every readable Folder. Treat the strongest results as entry points:
+  open their full Pages and follow internal links that bear on the question.
+  When the answer depends on surrounding relationships, use exact file search
+  for each central Page's title, filename, and Folder-root-relative path to find
+  incoming links. Use repeatable `--folder` only when the user deliberately
+  narrows the scope. Completion: the answer is grounded in opened Pages and
+  includes the directly relevant linked context, or names the missing evidence
+  and suggests what source to ingest.
 - Chunk large article or output writes into small edits so agent tool streams do
   not stall.
 
@@ -282,6 +232,10 @@ Access-aware wiki rules:
   index visible to users who cannot access that Folder.
 - Filter by readable Folder access before querying, compiling, indexing, or
   answering. Locked metadata-only Folders are not source material.
+- When a previously readable Folder becomes locked or disappears, stop using
+  its local Pages and prior search results immediately. Run sync and status
+  again and let the client finish access-loss cleanup. Never inspect, copy,
+  rebuild, or recover that Folder from its disposable search index.
 - Never synthesize content from a more-restricted Folder into a less-restricted
   Folder, index, log, output, or public summary.
 - Put cross-Folder outputs in the most restrictive appropriate Folder for every
@@ -337,6 +291,52 @@ the underlying Member Identity `npub` for `fbrain` and signed operations. Keep
 fails, report that failure; show the `npub` only when the user asks for advanced
 identity details.
 
+## Organization Brain Collaboration
+
+For a normal request to share an Organization Brain with another managed
+Agent, use the recipient's canonical Managed Agent Email and one convergent
+operation:
+
+```sh
+TARGET_EMAIL="agent@example.finite.vip"
+fbrain collaborators ensure-admin \
+  --brain "$BRAIN" \
+  --target "$TARGET_EMAIL" \
+  --server "$SERVER" \
+  --json
+```
+
+Do not resolve the email yourself and do not probe a public NIP-05 endpoint
+with `curl`. `fbrain` performs native identity resolution once, prepares every
+Folder grant whose current key this Finite Home can open, and returns a typed
+receipt. Inspect `state` before reporting the result:
+
+- `complete`: authoritative postcondition inspection proved the Admin Brain
+  Role and a current Folder Key Grant for every Folder in this operation's
+  snapshot. Report the ready Folder count. Do not promise automatic access to
+  Folders created or rotated later.
+- `partial`: useful role and grant progress was preserved, but collaboration
+  is not complete. Name each safe Folder path and reason from `folders`; tell
+  the user to retry the exact same command from a named current key holder's
+  Finite Home when the receipt supplies a holder email. If it does not, ask
+  another current Folder reader who can open the listed Folder to retry; never
+  invent or expose a holder identity. Never describe Admin role alone as
+  successful sharing.
+- `indeterminate`: the mutation may have committed, but the client could not
+  prove its postcondition. Do not claim success or clean failure. Retry the
+  exact same idempotent command, then inspect the new typed receipt.
+
+Reports may include the canonical Agent Email, Folder paths, readiness counts,
+safe reason codes, and named holder emails supplied by the receipt. Never paste
+raw response payloads, Member Identity keys, wrapped grant events, auth
+material, Folder Keys, or grant plaintext.
+
+Low-level permission commands are advanced primitives. `permissions
+add-member` and `permissions add-admin` change Brain Role, while `permissions
+grant-folder` grants one specific Folder version. Separately or together they
+do not prove complete Organization Brain Collaboration; do not compose them
+for a normal "share this Org Brain with Agent B" request.
+
 ## Security Rules
 
 - Never print or expose private Nostr secrets, Folder Keys, grant plaintext,
@@ -351,6 +351,21 @@ identity details.
   asks.
 - Use `--json` for machine inspection, but summarize sensitive results instead
   of pasting raw payloads.
+
+## Recovery And Durability Claims
+
+Brain sync, server export, a Provider Durable Volume, and a TEE are not each a
+Recovery Set. Describe hosted Brain data as durable only after the same
+five-part Recovery Set has restored onto an empty target and reopened Chat
+history and attachments, the hosted identity, Brain knowledge, and a fresh
+Agent turn. Disposable `.finitebrain/` search state is neither backup material
+nor part of that set.
+
+When the user asks about backup, restore, migration, disaster recovery, or a
+durability claim, read [recovery.md](references/recovery.md) before answering or
+acting. Completion: the five parts, empty-target proof, identity binding,
+backup boundary, and rollback boundary are explicit; otherwise report recovery
+as unproven.
 
 ## Final Report
 

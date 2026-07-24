@@ -37,7 +37,7 @@ pub(crate) async fn smoke_ui_js_handler() -> impl IntoResponse {
 }
 
 const PRODUCT_CLIENT_APP_SCRIPT_TAG: &str =
-    r#"<script src="/client/app.js?v=20260722-backlinks"></script>"#;
+    r#"<script src="/client/app.js?v=20260723-brain-health-backlinks"></script>"#;
 
 pub(crate) async fn product_client_handler(State(state): State<ServerState>) -> impl IntoResponse {
     let mut html = include_str!("../product-client.html").to_owned();
@@ -45,8 +45,8 @@ pub(crate) async fn product_client_handler(State(state): State<ServerState>) -> 
         html = html.replace(
             PRODUCT_CLIENT_APP_SCRIPT_TAG,
             r#"<script>window.__FINITE_BRAIN_DISABLE_AUTOSTART__ = true;</script>
-    <script src="/client/app.js?v=20260722-backlinks"></script>
-    <script src="/client/smoke-nip07.js?v=20260722-backlinks"></script>"#,
+    <script src="/client/app.js?v=20260723-brain-health-backlinks"></script>
+    <script src="/client/smoke-nip07.js?v=20260723-brain-health-backlinks"></script>"#,
         );
     }
     ([(CACHE_CONTROL, PRODUCT_CLIENT_CACHE_CONTROL)], Html(html))

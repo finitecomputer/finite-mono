@@ -62,6 +62,11 @@ struct UpArgs {
     #[arg(long)]
     services_only: bool,
 
+    /// Launch the canonical Agent Runtime with the local Docker Runner. This
+    /// portable full-product profile is intended for disposable CI acceptance.
+    #[arg(long, conflicts_with = "services_only")]
+    docker_runtime: bool,
+
     /// Reset persistent state before starting. Allowed only with
     /// --services-only and intended for an isolated smoke-test state root.
     #[arg(long, requires = "services_only")]
@@ -94,6 +99,8 @@ fn run() -> anyhow::Result<ExitCode> {
         Command::Up(args) => {
             let profile = if args.services_only {
                 StackProfile::ServicesOnly
+            } else if args.docker_runtime {
+                StackProfile::DockerSaas
             } else {
                 StackProfile::AppleSaas
             };

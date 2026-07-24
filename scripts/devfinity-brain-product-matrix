@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""Required deterministic full-product Brain matrix for disposable CI state."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def all_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(all_text(item) for item in value)
+    if isinstance(value, dict):
+        return "\n".join(all_text(item) for item in value.values())
+    return ""
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+class MatrixModel:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.requests = 0
+        self.tool_calls = 0
+        self.managed_skill_reads = 0
+        self.scenarios: set[str] = set()
+        self.personal_create_issued = False
+        self.org_create_issued = False
+        self.org_created = False
+        self.requester_identity_observed = False
+
+    @staticmethod
+    def skill_prefix() -> str:
+        return (
+            'skill="$(find -L "${FINITE_HOME:?}/managed-skills" '
+            "-path '*/finitebrain/SKILL.md' -print -quit)\"; "
+            'test -n "$skill"; grep -Fq "name: finitebrain" "$skill"; '
+        )
+
+    def classify(self, payload: dict[str, Any]) -> tuple[str, str, str | None]:
+        messages = payload.get("messages") or []
+        combined = all_text(messages)
+        last = messages[-1] if messages else {}
+        last_role = str(last.get("role") or "") if isinstance(last, dict) else ""
+        user_messages = [
+            all_text(message.get("content"))
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        last_user = user_messages[-1] if user_messages else ""
+
+        # Hermes currently keeps one model session for the Finite Chat room,
+        # even when the Product Client creates a fresh topic/chat. Select the
+        # nearest preceding matrix request so an older topic cannot capture a
+        # later consent branch.
+        scenario = ""
+        scenario_text = ""
+        for user_message in reversed(user_messages):
+            if "Matrix declined setup" in user_message:
+                scenario, scenario_text = "personal-negative", user_message
+                break
+            if "Matrix unclear setup" in user_message:
+                scenario, scenario_text = "personal-unclear", user_message
+                break
+            if re.search(r"Matrix agent Personal resumed task [0-9]+-[0-9]+", user_message):
+                scenario, scenario_text = "personal-affirmative", user_message
+                break
+            if re.search(r"Matrix Agent Org [0-9]+-[0-9]+", user_message):
+                scenario, scenario_text = "organization-agent-first", user_message
+                break
+
+        tools = payload.get("tools") or []
+        tool_names = {
+            str(tool.get("function", {}).get("name") or tool.get("name") or "")
+            for tool in tools
+            if isinstance(tool, dict)
+        }
+        if "terminal" not in tool_names:
+            raise RuntimeError("Hermes request did not expose the real terminal tool")
+
+        list_command = self.skill_prefix() + "fbrain brain list --json"
+        if scenario == "personal-negative":
+            self.scenarios.add("personal-negative")
+            if re.search(r"\bNo\b", last_user, re.IGNORECASE):
+                return "text", "Understood. I did not set up a Personal Brain.", None
+            if last_role == "tool":
+                return "text", "Would you like me to set up your Personal Brain first?", None
+            return "tool", list_command, None
+
+        if scenario == "personal-unclear":
+            self.scenarios.add("personal-unclear")
+            if "Maybe later" in last_user:
+                return "text", "No setup was performed while your answer remains unclear.", None
+            if last_role == "tool":
+                return "text", "Would you like me to set up your Personal Brain first?", None
+            return "tool", list_command, None
+
+        marker_match = re.search(
+            r"Matrix agent Personal resumed task [0-9]+-[0-9]+", scenario_text
+        )
+        if marker_match:
+            self.scenarios.add("personal-affirmative")
+            marker = marker_match.group(0)
+            if re.search(r"\bYes\b", last_user, re.IGNORECASE):
+                if last_role == "tool" and self.personal_create_issued:
+                    return "text", f"Set up your Personal Brain and created the note containing {marker}.", None
+                self.personal_create_issued = True
+                quoted = shlex.quote(marker)
+                command = self.skill_prefix() + (
+                    "set -euo pipefail; "
+                    "fbrain brain bootstrap-personal --json >/dev/null; "
+                    "brain_id=\"$(fbrain brain list --json | python3 -c "
+                    "'import json,sys; print(json.load(sys.stdin)[\"brains\"][0][\"brainId\"])')\"; "
+                    "fbrain folder create matrix-agent-personal-folder --brain \"$brain_id\" "
+                    f"--name {quoted} --path matrix-agent-personal-folder --json >/dev/null; "
+                    "fbrain open \"$brain_id\" --json >/dev/null; "
+                    "cd \"/data/workspace/finitebrain/$brain_id\"; fbrain sync now --json >/dev/null; "
+                    "mkdir -p matrix-agent-personal-folder; "
+                    f"printf '# Matrix acceptance\\n\\n%s\\n' {quoted} > "
+                    "matrix-agent-personal-folder/matrix-acceptance.md; "
+                    "fbrain sync now --json >/dev/null"
+                )
+                return "tool", command, None
+            if last_role == "tool":
+                return "text", "Would you like me to set up your Personal Brain and continue the note task?", None
+            return "tool", list_command, None
+
+        org_match = re.search(r"Matrix Agent Org [0-9]+-[0-9]+", scenario_text)
+        if org_match:
+            self.scenarios.add("organization-agent-first")
+            org_name = org_match.group(0)
+            if last_role != "tool":
+                return "tool", list_command, None
+            if self.org_created:
+                if last_role == "tool":
+                    return "text", f"The existing Organization Brain {org_name} remains unchanged.", None
+                # Duplicate natural-language requests must still execute the
+                # managed-skill inspection seam; the model may not merely
+                # remember its prior answer and short-circuit fbrain.
+                return "tool", list_command, None
+            if self.org_create_issued:
+                self.org_created = True
+                return "text", f"Created the empty Organization Brain {org_name}.", None
+            source_match = re.search(
+                r"(?:event[._]source[._]user_id|source[._ ]user[_ ]id|user_id)"
+                r"[^a-z0-9]{0,80}"
+                r"(npub1[023456789acdefghjklmnpqrstuvwxyz]+|[0-9a-f]{64})",
+                combined,
+                re.IGNORECASE,
+            )
+            if source_match is None:
+                account_ids = re.findall(
+                    r"npub1[023456789acdefghjklmnpqrstuvwxyz]+|\b[0-9a-f]{64}\b",
+                    combined,
+                    re.IGNORECASE,
+                )
+                source_npub = account_ids[-1] if account_ids else ""
+            else:
+                source_npub = source_match.group(1)
+            if not source_npub:
+                raise RuntimeError("authenticated event.source.user_id was absent from Hermes context")
+            self.requester_identity_observed = True
+            self.org_create_issued = True
+            command = self.skill_prefix() + (
+                "fbrain brain create matrix-agent-org --kind organization "
+                f"--name {shlex.quote(org_name)} "
+                f"--requesting-user-npub {shlex.quote(source_npub)} --json"
+            )
+            return "tool", command, source_npub
+
+        return "text", "finite deterministic Brain matrix reply", None
+
+    def response(self, payload: dict[str, Any]) -> tuple[str, str]:
+        with self.lock:
+            self.requests += 1
+            kind, value, _identity = self.classify(payload)
+            if kind == "tool":
+                self.tool_calls += 1
+                if "managed-skills" in value and "finitebrain/SKILL.md" in value:
+                    self.managed_skill_reads += 1
+            return kind, value
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "format": "finite.brain.product-matrix.v1",
+            "provider": "deterministic OpenAI-compatible model stub",
+            "requestCount": self.requests,
+            "terminalToolCallCount": self.tool_calls,
+            "managedFiniteBrainSkillReadCount": self.managed_skill_reads,
+            "requesterIdentityObserved": self.requester_identity_observed,
+            "scenarios": sorted(self.scenarios),
+            "recordsPromptsCommandsCredentialsOrToolOutput": False,
+        }
+
+
+def start_model(model: MatrixModel) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def do_GET(self) -> None:
+            body = json.dumps({"object": "list", "data": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                kind, value = model.response(payload)
+                if kind == "tool":
+                    delta = {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": f"call_brain_matrix_{model.tool_calls}",
+                            "type": "function",
+                            "function": {
+                                "name": "terminal",
+                                "arguments": json.dumps({"command": value, "timeout": 120}),
+                            },
+                        }],
+                    }
+                    finish = "tool_calls"
+                else:
+                    delta = {"role": "assistant", "content": value}
+                    finish = "stop"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                chunk = {
+                    "id": "chatcmpl-finite-brain-product-matrix",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "finite-brain-matrix",
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                }
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode())
+                self.wfile.flush()
+                self.close_connection = True
+            except Exception as error:  # CI needs an actionable boundary failure.
+                body = json.dumps({"error": {"message": str(error)}}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=Path("target/brain-product-matrix/report.json"),
+    )
+    args = parser.parse_args()
+    report_path = (ROOT / args.report).resolve() if not args.report.is_absolute() else args.report
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    local_state = ROOT / ".local-state"
+    local_state.mkdir(exist_ok=True)
+    state_dir = Path(tempfile.mkdtemp(prefix="brain-product-matrix-", dir=local_state))
+    model = MatrixModel()
+    server = start_model(model)
+    model_port = int(server.server_address[1])
+    env = os.environ.copy()
+    env.update({
+        "DEVFINITY_STATE_DIR": str(state_dir),
+        "DEVFINITY_RUNTIME_AGENT_PORT": str(free_port()),
+        "DEVFINITY_BRAIN_ONLY_SMOKE": "1",
+        "DEVFINITY_BRAIN_PRODUCT_MATRIX": "1",
+        "DEVFINITY_BRAIN_PRODUCT_MATRIX_DISPOSABLE_STATE": str(state_dir / "runs/default"),
+        "FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE": "finite-matrix-local-non-secret",
+        "FC_RUNNER_FINITE_PRIVATE_BASE_URL": f"http://host.docker.internal:{model_port}/v1",
+        "FC_RUNNER_FINITE_PRIVATE_MODEL": "finite-brain-matrix",
+    })
+    command = [
+        "cargo", "run", "-p", "devfinity", "--",
+        "--state-dir", str(state_dir), "up", "--docker-runtime", "--headless", "--",
+        str(ROOT / "scripts/devfinity-saas-smoke"),
+    ]
+    outcome = "failed"
+    try:
+        completed = subprocess.run(command, cwd=ROOT, env=env, check=False)
+        required = {
+            "personal-negative",
+            "personal-unclear",
+            "personal-affirmative",
+            "organization-agent-first",
+        }
+        if completed.returncode == 0 and required <= model.scenarios:
+            if model.managed_skill_reads < 4 or not model.requester_identity_observed:
+                raise RuntimeError("matrix did not prove managed skill and requester identity seams")
+            outcome = "passed"
+        report = model.report() | {"status": outcome, "processExitCode": completed.returncode}
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        return 0 if outcome == "passed" else completed.returncode or 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        # A failed process-compose run can stop Core before it asks Runner to
+        # retire the disposable runtime. Only remove Docker containers whose
+        # bind mounts resolve inside this matrix's freshly-created state tree.
+        containers = subprocess.run(
+            ["docker", "ps", "-aq"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        for container in containers:
+            inspected = subprocess.run(
+                ["docker", "inspect", container],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if inspected.returncode != 0:
+                continue
+            try:
+                metadata = json.loads(inspected.stdout)[0]
+            except (IndexError, json.JSONDecodeError):
+                continue
+            sources = {
+                str(mount.get("Source") or "")
+                for mount in metadata.get("Mounts", [])
+                if isinstance(mount, dict)
+            }
+            if any(
+                source == str(state_dir) or source.startswith(f"{state_dir}{os.sep}")
+                for source in sources
+            ):
+                subprocess.run(
+                    ["docker", "rm", "-f", container],
+                    cwd=ROOT,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        if outcome == "passed":
+            try:
+                shutil.rmtree(state_dir)
+            except PermissionError:
+                # Dockerized services can leave root-owned diagnostic paths
+                # behind even after their containers are removed. The matrix
+                # report is already durable outside this tree, and CI gives
+                # every attempt an isolated checkout, so cleanup residue must
+                # not turn a fully-proven product pass into a false failure.
+                print(
+                    "Brain matrix passed; container-owned state could not be "
+                    f"removed and remains at {state_dir}",
+                    flush=True,
+                )
+        else:
+            logs = state_dir / "runs/default/logs"
+            if logs.is_dir():
+                shutil.copytree(logs, report_path.parent / "logs", dirs_exist_ok=True)
+            print(f"Brain matrix state and boundary logs preserved at {state_dir}", flush=True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

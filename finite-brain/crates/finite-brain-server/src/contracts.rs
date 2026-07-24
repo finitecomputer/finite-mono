@@ -53,6 +53,21 @@ pub struct BrainMetadataResponse {
     pub folders: Vec<FolderMetadataResponse>,
     pub mounted_folders: Vec<MountedFolderResponse>,
     pub grant_count: usize,
+    /// Authoritative current-grant coverage for Organization Brain people.
+    /// Populated only when the metadata requester is an Organization admin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collaborator_readiness: Vec<CollaboratorReadinessResponse>,
+}
+
+/// Brain role and authoritative current Folder Key Grant coverage for one
+/// Organization Brain collaborator.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaboratorReadinessResponse {
+    pub target_npub: String,
+    pub brain_role: String,
+    pub ready_count: usize,
+    pub total_count: usize,
 }
 
 /// The one active Personal Agent relationship for a Personal Brain.
@@ -157,6 +172,10 @@ pub struct ObjectDeleteRequest {
 #[serde(rename_all = "camelCase")]
 pub struct FolderDeleteRequest {
     pub deletion_event: serde_json::Value,
+    /// Exact Folder identities and object count shown by the confirming client.
+    /// Both are mandatory and checked in the deletion transaction.
+    pub expected_folder_ids: Vec<String>,
+    pub expected_object_count: usize,
 }
 
 /// Counts and sync cursor returned after permanent Folder deletion.
@@ -167,6 +186,7 @@ pub struct FolderDeleteResponse {
     pub duplicate: bool,
     pub folder_count: usize,
     pub object_count: usize,
+    pub deleted_folder_ids: Vec<String>,
 }
 
 /// Object write response.
@@ -413,6 +433,100 @@ pub struct GrantFolderAccessResponse {
     #[serde(flatten)]
     pub metadata: BrainMetadataResponse,
     pub outcome: GrantFolderAccessResponseOutcome,
+}
+
+/// One Folder/key-version entry in an Organization Brain collaboration snapshot.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationFolderSnapshot {
+    pub folder_id: String,
+    pub key_version: u32,
+    pub path: String,
+}
+
+/// Client-prepared desired-state Organization Brain collaboration request.
+///
+/// The server receives only opaque wrapped grants. `folders` is the exact
+/// inventory/key-version snapshot observed by the trusted client; grants may
+/// intentionally omit entries whose source key was unavailable locally.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureOrganizationAdminRequest {
+    pub target_npub: String,
+    pub folders: Vec<CollaborationFolderSnapshot>,
+    pub grants: Vec<CollaborationGrantRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+/// One client-prepared wrapped grant tied to its Folder identity.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationGrantRequest {
+    pub folder_id: String,
+    #[serde(flatten)]
+    pub grant: FolderKeyGrantRequest,
+    /// A Folder-scoped signed access-change proof for this grant. A single
+    /// Brain-level AddAdmin event is not sufficient evidence for Folder
+    /// access and would make the audit stream semantically ambiguous.
+    pub access_change_event: serde_json::Value,
+}
+
+/// Stable per-Folder desired-state outcome.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CollaborationFolderOutcome {
+    Granted,
+    AlreadyReady,
+    MissingSourceKey,
+    StaleVersion,
+    Failed,
+}
+
+/// Public identity of a current Folder-key holder. The npub is safe to expose;
+/// a verified NIP-05 is included when the server has one recorded, never any
+/// key or grant plaintext.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationKeyHolder {
+    pub npub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+/// One safe Folder result in a collaboration receipt.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationFolderReceipt {
+    pub folder_id: String,
+    pub path: String,
+    pub expected_key_version: u32,
+    pub outcome: CollaborationFolderOutcome,
+    pub reason: Option<String>,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_holders: Vec<CollaborationKeyHolder>,
+}
+
+/// Typed Organization Brain collaboration receipt shared by CLI and clients.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollaborationReceiptState {
+    Complete,
+    Partial,
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureOrganizationAdminResponse {
+    pub brain_id: String,
+    pub target_npub: String,
+    pub state: CollaborationReceiptState,
+    pub brain_role: String,
+    pub folders: Vec<CollaborationFolderReceipt>,
+    pub ready_count: usize,
+    pub total_count: usize,
+    pub retryable: bool,
 }
 
 /// Stable machine-readable outcome for a Folder access grant.

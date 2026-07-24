@@ -1,6 +1,115 @@
 use crate::*;
 
 impl BrainStore {
+    /// Atomically converge an Organization Brain target to member+admin and
+    /// apply the client-prepared current Folder Key Grants it supplied.
+    ///
+    /// The caller has already classified omitted/stale snapshot entries. This
+    /// boundary validates every opaque grant and commits the useful state in
+    /// one SQLite transaction; no Folder Key is ever interpreted here.
+    pub fn ensure_organization_admin_with_grants(
+        &mut self,
+        brain_id: &BrainId,
+        target: &UserId,
+        grants: &[(FolderKeyGrantMetadata, SyncRecordInput, SyncRecordInput)],
+        admin_record: Option<&SyncRecordInput>,
+    ) -> Result<(), StoreError> {
+        let mut stored = self.load_brain(brain_id)?;
+        if stored.brain.kind != BrainKind::Organization {
+            return Err(StoreError::BrokenInvariant {
+                reason: "organization collaboration requires an organization brain".to_owned(),
+            });
+        }
+        let target_was_member = stored
+            .brain
+            .members
+            .iter()
+            .any(|member| member.user_id == *target);
+        let target_was_admin = stored.brain.admins.iter().any(|admin| admin == target);
+        if !target_was_member {
+            stored.brain.members.push(BrainMember {
+                user_id: target.clone(),
+                folder_access: BTreeSet::new(),
+            });
+        }
+        if !target_was_admin {
+            stored.brain.admins.push(target.clone());
+        }
+
+        for (grant, _, _) in grants {
+            let folder = stored
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == grant.folder_id)
+                .ok_or_else(|| StoreError::MissingFolder {
+                    folder_id: grant.folder_id.to_string(),
+                })?;
+            validate_grant_metadata(grant)?;
+            validate_grant_issuer(&stored.brain, grant, None)?;
+            if grant.key_version != folder.current_key_version {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "collaboration grant key version must match current Folder key version"
+                        .to_owned(),
+                });
+            }
+            if grant.recipient_npub != *target {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "collaboration grant recipient must match target".to_owned(),
+                });
+            }
+            if folder.access == FolderAccessMode::Owner {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "owner Folders do not accept collaboration grants".to_owned(),
+                });
+            }
+        }
+
+        let tx = self.conn.transaction()?;
+        if !target_was_member {
+            insert_member_if_missing(&tx, brain_id, target)?;
+        }
+        if !target_was_admin {
+            tx.execute(
+                "INSERT OR IGNORE INTO brain_admins (brain_id, user_id) VALUES (?1, ?2)",
+                params![brain_id.as_str(), target.as_str()],
+            )?;
+        }
+        for (grant, record, access_record) in grants {
+            let already_ready = stored.grants.iter().any(|existing| {
+                existing.folder_id == grant.folder_id
+                    && existing.key_version == grant.key_version
+                    && existing.recipient_npub == grant.recipient_npub
+            });
+            if already_ready {
+                continue;
+            }
+            let folder = stored
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == grant.folder_id)
+                .expect("grant folder validated above");
+            if folder.access == FolderAccessMode::Restricted {
+                insert_folder_access_if_missing(&tx, brain_id, &grant.folder_id, target)?;
+            }
+            insert_grant(&tx, brain_id, grant)?;
+            sync_records::validate_sync_conflict(&tx, brain_id, record)?;
+            let sequence = sync_records::next_sequence(&tx, brain_id)?;
+            sync_records::insert_sync_record(&tx, brain_id, sequence, record)?;
+            sync_records::validate_sync_conflict(&tx, brain_id, access_record)?;
+            let sequence = sync_records::next_sequence(&tx, brain_id)?;
+            sync_records::insert_sync_record(&tx, brain_id, sequence, access_record)?;
+        }
+        if !target_was_admin && let Some(record) = admin_record {
+            sync_records::validate_sync_conflict(&tx, brain_id, record)?;
+            let sequence = sync_records::next_sequence(&tx, brain_id)?;
+            sync_records::insert_sync_record(&tx, brain_id, sequence, record)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn create_folder(
         &mut self,
         brain_id: &BrainId,

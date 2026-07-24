@@ -194,6 +194,8 @@ jobs:
         run: nix develop --command just lat1-rollout-contract
       - name: Stripe Price contract
         run: nix develop --command just stripe-price-contract
+      - name: Hosted Recovery Set contract
+        run: nix develop --command just hosted-recovery-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 
@@ -229,3 +231,25 @@ jobs:
             echo "===== $f ====="
             tail -50 "$f" || true
           done
+
+  brain-product-matrix:
+    name: Brain full-product matrix
+    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Containerized failures preserve root-owned diagnostics. Use a fresh
+          # checkout per attempt so those artifacts cannot poison checkout.
+          path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
+        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+        run: nix develop --command just brain-product-matrix
+      - name: Upload boundary report and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brain-product-matrix
+          path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}/target/brain-product-matrix
+          if-no-files-found: error

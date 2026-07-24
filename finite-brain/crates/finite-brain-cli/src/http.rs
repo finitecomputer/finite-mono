@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use crate::{
     CliEnvironment, CliError, HealthCheck, HttpResponse, SyncOnceReport, find_agent_state,
-    load_signer, option_value, read_agent_state, run_working_tree_sync, signed_http_auth_header,
+    load_signer, mutate_agent_state, option_value, pending_working_tree_change_paths,
+    read_agent_state, reconcile_local_search_paths, reconcile_search_changes,
+    run_working_tree_sync, signed_http_auth_header,
 };
 
 pub(crate) const FINITE_BRAIN_SERVER_URL_ENV: &str = "FINITE_BRAIN_SERVER_URL";
@@ -31,7 +33,63 @@ pub(crate) fn sync_once(
     args: &[String],
     activity_kind: &str,
 ) -> Result<SyncOnceReport, CliError> {
-    run_working_tree_sync(env, args, activity_kind)
+    sync_once_with_local_paths(env, args, activity_kind, None)
+}
+
+pub(crate) fn sync_once_with_local_paths(
+    env: &CliEnvironment,
+    args: &[String],
+    activity_kind: &str,
+    discovered_local_paths: Option<Vec<String>>,
+) -> Result<SyncOnceReport, CliError> {
+    let root = find_agent_state(&env.cwd).ok().flatten();
+    let local_paths = discovered_local_paths.map_or_else(
+        || {
+            root.as_deref()
+                .map(pending_working_tree_change_paths)
+                .transpose()
+        },
+        |paths| Ok(Some(paths)),
+    );
+    let report = run_working_tree_sync(env, args, activity_kind);
+    let reconciliation = root.as_deref().map(|root| match &report {
+        Ok(report) => reconcile_search_changes(root, report),
+        Err(_) => match &local_paths {
+            Ok(Some(paths)) => reconcile_local_search_paths(root, paths),
+            Ok(None) => Ok(0),
+            Err(error) => Err(CliError::SearchIndex(format!(
+                "local change discovery failed: {error}"
+            ))),
+        },
+    });
+    match reconciliation {
+        Some(Err(error)) => {
+            let message = error.to_string();
+            let _ = mutate_agent_state(env, |state, now| {
+                state.search_lifecycle.reconciliation_pending = true;
+                state.search_lifecycle.consecutive_failures = state
+                    .search_lifecycle
+                    .consecutive_failures
+                    .saturating_add(1)
+                    .min(8);
+                state.add_activity(
+                    now,
+                    "search.index.blocked",
+                    format!("Search index reconciliation failed: {message}"),
+                );
+                Ok(())
+            });
+        }
+        Some(Ok(_)) => {
+            let _ = mutate_agent_state(env, |state, _| {
+                state.search_lifecycle.reconciliation_pending = false;
+                state.search_lifecycle.consecutive_failures = 0;
+                Ok(())
+            });
+        }
+        None => {}
+    }
+    report
 }
 
 pub(crate) fn signed_json_request(
@@ -70,16 +128,19 @@ pub(crate) fn signed_json_request_to_server(
         body.as_deref(),
     )?;
     if !(200..300).contains(&response.status) {
-        return Err(CliError::Http(format!(
-            "server returned {}: {}",
-            response.status,
-            response.body.trim()
-        )));
+        return Err(CliError::HttpStatus {
+            status: response.status,
+            body: response.body,
+        });
     }
     if response.body.trim().is_empty() {
         return Ok(serde_json::json!({ "status": "ok" }));
     }
-    serde_json::from_str(&response.body).map_err(CliError::from)
+    parse_success_json(&response.body)
+}
+
+fn parse_success_json(body: &str) -> Result<serde_json::Value, CliError> {
+    serde_json::from_str(body).map_err(|error| CliError::HttpResponseDecode(error.to_string()))
 }
 
 pub(crate) fn http_request(
@@ -114,10 +175,28 @@ pub(crate) fn http_request(
         Err(ureq::Error::Status(status, response)) => (status, response),
         Err(error) => return Err(CliError::Http(error.to_string())),
     };
-    let body = response
-        .into_string()
-        .map_err(|error| CliError::Http(error.to_string()))?;
+    let body = match response.into_string() {
+        Ok(body) => body,
+        Err(error) if !(200..300).contains(&status) => {
+            return Err(body_read_error(status, error.to_string()));
+        }
+        Err(error) => return Err(CliError::Http(error.to_string())),
+    };
     Ok(HttpResponse { status, body })
+}
+
+fn body_read_error(status: u16, error: String) -> CliError {
+    // Headers are authoritative even when the body stream is broken.
+    // Preserve the status so callers cannot misclassify a server rejection as
+    // transport uncertainty.
+    if !(200..300).contains(&status) {
+        CliError::HttpStatus {
+            status,
+            body: format!("response body could not be read: {error}"),
+        }
+    } else {
+        CliError::Http(error)
+    }
 }
 
 pub(crate) fn server_url_for_command(
@@ -345,5 +424,17 @@ mod tests {
             authorization_url_for_request("http://192.168.67.1:18790", "/_admin/brains", None,),
             "http://192.168.67.1:18790/_admin/brains"
         );
+    }
+
+    #[test]
+    fn malformed_success_body_is_typed_as_response_decode_uncertainty() {
+        let error = parse_success_json("{not-json").unwrap_err();
+        assert!(matches!(error, CliError::HttpResponseDecode(_)));
+    }
+
+    #[test]
+    fn body_read_failure_preserves_authoritative_non_success_status() {
+        let error = body_read_error(409, "connection reset".to_owned());
+        assert!(matches!(error, CliError::HttpStatus { status: 409, .. }));
     }
 }

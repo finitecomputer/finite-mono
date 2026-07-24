@@ -26,16 +26,17 @@ async function main() {
     "create-org-human",
     "create-folder",
     "assert-folder",
+    "assert-absent",
   ]);
   if (!actions.has(action)) {
     throw new Error(
-      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human|create-folder|assert-folder",
+      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human|create-folder|assert-folder|assert-absent",
     );
   }
   if (!agentEmail.includes("@")) {
     throw new Error("DEVFINITY_BRAIN_AGENT_EMAIL must be an email");
   }
-  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human", "create-folder", "assert-folder"].includes(action) && !expectedText) {
+  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human", "create-folder", "assert-folder", "assert-absent"].includes(action) && !expectedText) {
     throw new Error(
       "DEVFINITY_BRAIN_EXPECTED_TEXT is required for assert-note",
     );
@@ -121,7 +122,8 @@ async function main() {
       console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain agent-first Org Brain opens without a Personal Brain");
     } else if (action === "create-org-agent" || action === "create-org-human") {
-      await waitForBrainClient(brain, page);
+      if (targetBrainId) await waitForUnlockedBrain(brain, page);
+      else await waitForBrainClient(brain, page);
       await createOrganizationBrain(
         brain,
         expectedText,
@@ -133,7 +135,11 @@ async function main() {
     } else if (action === "create-folder") {
       await waitForUnlockedBrain(brain, page);
       await brain.locator("#obsidianNewFolderButton").click();
-      await assertOwnerSeesNote(brain, slugFromFolderName(expectedText));
+      await brain
+        .locator("#readerFolderList .obsidian-folder-button")
+        .filter({ hasText: slugFromFolderName(expectedText), visible: true })
+        .first()
+        .waitFor({ state: "visible", timeout: 30_000 });
       console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain browser-created Folder ok");
     } else if (action === "assert-folder") {
@@ -141,6 +147,11 @@ async function main() {
       await assertOwnerSeesNote(brain, expectedText);
       console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain browser Folder readback ok");
+    } else if (action === "assert-absent") {
+      await waitForUnlockedBrain(brain, page);
+      await assertOwnerDoesNotSeeText(brain, expectedText);
+      console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
+      console.log("brain browser deletion convergence ok");
     } else {
       await waitForUnlockedBrain(brain, page);
       await assertOwnerSeesNote(brain, expectedText);
@@ -222,22 +233,56 @@ async function createOrganizationBrain(
   includeAgent: boolean,
 ) {
   await openManageBrains(brain);
+  const existingIds = new Set(
+    await brain
+      .locator("#manageBrainsList .brain-switch-button")
+      .evaluateAll((buttons) =>
+        buttons
+          .map((button) => (button as HTMLElement).dataset.brainId || "")
+          .filter(Boolean),
+      ),
+  );
   await brain.locator("#manageBrainCreateDetails").evaluate((element) => {
     (element as HTMLDetailsElement).open = true;
   });
-  await brain.locator("#manageOrganizationBrainNameInput").fill(name);
   const checkbox = brain.locator("#manageOrganizationAddAgentInput");
   if ((await checkbox.isChecked()) !== includeAgent) await checkbox.click();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const nameInput = brain.locator("#manageOrganizationBrainNameInput");
+  await nameInput.fill(name);
+  assert.equal(
+    await nameInput.inputValue(),
+    name,
+    "Organization Brain name changed while configuring its Agent",
+  );
   await brain.locator("#manageCreateOrganizationBrainButton").click();
+  await assertEventually(
+    async () => {
+      const buttons = brain.locator("#manageBrainsList .brain-switch-button");
+      if ((await buttons.count()) !== existingIds.size + 1) return false;
+      const selectedId = await brain
+        .locator("#manageBrainsList .brain-switch-button.selected")
+        .getAttribute("data-brain-id");
+      return Boolean(selectedId && !existingIds.has(selectedId));
+    },
+    30_000,
+    async () => "Organization Brain creation did not select one new stable Brain id",
+  );
 }
 
 async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
   await openManageBrains(brain);
-  const selected = await brain.locator("#manageBrainsCurrentDetail").textContent();
-  assert.match(selected || "", /Session unlocked/u);
+  assert.equal(
+    await brain.locator(".obsidian-shell").getAttribute("data-session-status"),
+    "unlocked",
+  );
   const selectedBrain = brain.locator("#manageBrainsList .brain-switch-button.selected");
   await selectedBrain.waitFor({ state: "visible", timeout: 30_000 });
-  assert.equal(await brain.locator("#manageBrainsList .brain-switch-button").count(), 1);
+  assert.equal(
+    await selectedBrain.getAttribute("data-brain-id"),
+    brainId,
+    "Direct target did not select the requested stable Brain id",
+  );
   assert.match(
     (await selectedBrain.getAttribute("aria-label")) || "",
     /organization.*admin|admin.*organization/iu,
@@ -253,9 +298,10 @@ async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
 async function waitForUnlockedBrain(brain: FrameLocator, page: Page) {
   const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 90_000);
   const status = brain.locator("#sessionAccountStatus");
+  const shell = brain.locator('.obsidian-shell[data-session-status="unlocked"]');
   await waitForBrainClient(brain, page);
   await assertEventually(
-    async () => (await status.textContent())?.trim() === "Session unlocked",
+    async () => shell.isVisible(),
     timeoutMs,
     async () =>
       `Brain did not unlock; current status: ${(await status.textContent())?.trim()}`,
@@ -296,16 +342,51 @@ async function assertOwnerSeesNote(brain: FrameLocator, expectedText: string) {
     async () => "Brain refresh did not become available",
   );
   await refresh.click();
-  await brain
-    .locator("body")
+  const visibleReaderMatch = brain
+    .locator("#readerPageContent")
     .getByText(expectedText, { exact: false })
-    .first()
+    .filter({ visible: true })
+    .first();
+  if (await visibleReaderMatch.waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false)) {
+    return;
+  }
+  const folders = brain.locator("#readerFolderList .obsidian-folder-button");
+  for (let index = 0; index < await folders.count(); index += 1) {
+    const folder = folders.nth(index);
+    if (!((await folder.getAttribute("class")) || "").includes("expanded")) {
+      await folder.click();
+    }
+  }
+  const page = brain
+    .locator("#readerFolderList .obsidian-page-button")
+    .filter({ hasText: expectedText, visible: true })
+    .first();
+  await page.waitFor({ state: "visible", timeout: timeoutMs });
+  await page.click();
+  await visibleReaderMatch
     .waitFor({ state: "visible", timeout: timeoutMs })
     .catch(async (error) => {
       throw new Error(
         `${String(error)}\nBrain content: ${(await brain.locator("body").innerText()).slice(0, 4000)}`,
       );
     });
+}
+
+async function assertOwnerDoesNotSeeText(brain: FrameLocator, expectedText: string) {
+  const refresh = brain.locator("#refreshReaderButton");
+  await assertEventually(
+    async () => !(await refresh.isDisabled()),
+    30_000,
+    async () => "Brain refresh did not become available",
+  );
+  await refresh.click();
+  await assertEventually(
+    async () =>
+      (await brain.locator("body").getByText(expectedText, { exact: false }).count()) === 0,
+    Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 60_000),
+    async () =>
+      `Deleted Brain text remains visible: ${(await brain.locator("body").innerText()).slice(0, 4000)}`,
+  );
 }
 
 async function assertEventually(

@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { chromium } from "playwright";
 
@@ -15,6 +15,9 @@ export function chromiumLaunchOptions() {
   ]) {
     if (existsSync(executablePath)) return { executablePath };
   }
+  // Prefer Playwright's known-good browser before PATH shims. Package-manager
+  // launchers can remain executable after their application bundle is removed,
+  // which makes an existence-only PATH check select a broken Chromium wrapper.
   const playwrightChromium = chromium.executablePath();
   if (existsSync(playwrightChromium)) return { executablePath: playwrightChromium };
   for (const cacheRoot of [
@@ -34,6 +37,12 @@ export function chromiumLaunchOptions() {
         const executablePath = join(cacheRoot, release, relative);
         if (existsSync(executablePath)) return { executablePath };
       }
+    }
+  }
+  for (const directory of (process.env.PATH || "").split(delimiter)) {
+    for (const executable of ["google-chrome", "chromium", "chromium-browser"]) {
+      const executablePath = join(directory, executable);
+      if (existsSync(executablePath)) return { executablePath };
     }
   }
   return { channel: "chrome" as const };

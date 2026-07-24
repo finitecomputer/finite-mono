@@ -150,11 +150,16 @@ fn collect_managed_entries(
     let mut pending = vec![(directory.to_path_buf(), 0usize)];
     let mut entry_count = 0usize;
     while let Some((current, depth)) = pending.pop() {
-        for entry in fs::read_dir(&current)? {
+        let Some(entries) = read_managed_directory_if_present(&current)? else {
+            continue;
+        };
+        for entry in entries {
             let path = entry?.path();
             entry_count = entry_count.saturating_add(1);
             enforce_managed_traversal_bounds(&path, depth, entry_count)?;
-            let metadata = fs::symlink_metadata(&path)?;
+            let Some(metadata) = managed_metadata_if_present(&path)? else {
+                continue;
+            };
             if metadata.is_dir() {
                 reject_symlink_or_wrong_kind(&path, &metadata, true)?;
                 set_private_directory_permissions(&path)?;
@@ -181,11 +186,16 @@ fn validate_managed_entries(directory: &Path) -> Result<(), CliError> {
     let mut pending = vec![(directory.to_path_buf(), 0usize)];
     let mut entry_count = 0usize;
     while let Some((current, depth)) = pending.pop() {
-        for entry in fs::read_dir(&current)? {
+        let Some(entries) = read_managed_directory_if_present(&current)? else {
+            continue;
+        };
+        for entry in entries {
             let path = entry?.path();
             entry_count = entry_count.saturating_add(1);
             enforce_managed_traversal_bounds(&path, depth, entry_count)?;
-            let metadata = fs::symlink_metadata(&path)?;
+            let Some(metadata) = managed_metadata_if_present(&path)? else {
+                continue;
+            };
             if metadata.is_dir() {
                 reject_symlink_or_wrong_kind(&path, &metadata, true)?;
                 validate_private_directory_metadata(&path, &metadata)?;
@@ -210,11 +220,16 @@ fn validate_managed_entry_structure(directory: &Path) -> Result<(), CliError> {
     let mut pending = vec![(directory.to_path_buf(), 0usize)];
     let mut entry_count = 0usize;
     while let Some((current, depth)) = pending.pop() {
-        for entry in fs::read_dir(&current)? {
+        let Some(entries) = read_managed_directory_if_present(&current)? else {
+            continue;
+        };
+        for entry in entries {
             let path = entry?.path();
             entry_count = entry_count.saturating_add(1);
             enforce_managed_traversal_bounds(&path, depth, entry_count)?;
-            let metadata = fs::symlink_metadata(&path)?;
+            let Some(metadata) = managed_metadata_if_present(&path)? else {
+                continue;
+            };
             if metadata.is_dir() {
                 reject_symlink_or_wrong_kind(&path, &metadata, true)?;
                 validate_owner_traversal_permission(&path, &metadata)?;
@@ -234,6 +249,22 @@ fn validate_managed_entry_structure(directory: &Path) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+fn read_managed_directory_if_present(path: &Path) -> Result<Option<fs::ReadDir>, CliError> {
+    match fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn managed_metadata_if_present(path: &Path) -> Result<Option<fs::Metadata>, CliError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn enforce_managed_traversal_bounds(
@@ -435,7 +466,7 @@ fn create_private_directory_all(path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-fn create_private_directory_if_missing(path: &Path) -> Result<(), CliError> {
+pub(crate) fn create_private_directory_if_missing(path: &Path) -> Result<(), CliError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             reject_symlink_or_wrong_kind(path, &metadata, true)?;
@@ -483,7 +514,7 @@ fn set_private_directory_permissions(_path: &Path) -> Result<(), CliError> {
 }
 
 #[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<(), CliError> {
+pub(crate) fn set_private_file_permissions(path: &Path) -> Result<(), CliError> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
@@ -491,7 +522,7 @@ fn set_private_file_permissions(path: &Path) -> Result<(), CliError> {
 }
 
 #[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<(), CliError> {
+pub(crate) fn set_private_file_permissions(_path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 

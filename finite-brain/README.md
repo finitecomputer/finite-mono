@@ -151,6 +151,7 @@ fbrain --config-dir "$FBRAIN_CONFIG_DIR" doctor
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" repair # only when doctor reports an insecure boundary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" conflicts --json
+fbrain --config-dir "$FBRAIN_CONFIG_DIR" search "credential rotation" --json
 ```
 
 A Brain Working Tree is intentional persistent plaintext on the Trusted Device.

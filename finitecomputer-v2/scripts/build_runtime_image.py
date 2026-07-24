@@ -184,9 +184,7 @@ def native_linux_platform() -> str:
 def effective_build_platform(engine: str, requested: str | None) -> str | None:
     if requested:
         return requested
-    if engine == "apple-container":
-        return native_linux_platform()
-    return None
+    return native_linux_platform()
 
 
 def target_architecture(platform: str) -> str:

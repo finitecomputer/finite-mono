@@ -30,7 +30,7 @@ for the same request.
 ```sh
 fbrain [--config-dir <path>] doctor
 fbrain repair
-fbrain auth status|import [--file <path>]
+fbrain auth status|import [--file <path>]|redeem <email> <token>
 fbrain signer status|public-key|sign|encrypt|decrypt
 fbrain daemon status|start|stop|logs|tick|watch
 fbrain sync status|now [--summary]
@@ -38,11 +38,13 @@ fbrain open <brain-id> [path]
 fbrain status [--json]
 fbrain conflicts
 fbrain resolve <id>
+fbrain search <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]
+fbrain search-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list|grant|revoke
 fbrain brain list|create|bootstrap-personal|metadata|export
-fbrain folder create|list
+fbrain folder create|list|delete
 fbrain mount list
 fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
 fbrain invites create|show|accept|revoke
@@ -69,6 +71,7 @@ status` only reports and never creates one.
 fbrain auth status --json
 fbrain auth import < secret.txt
 fbrain auth import --file <path>
+fbrain auth redeem <email> <token> --json
 fbrain signer public-key
 fbrain signer sign --kind text --content "hello"
 fbrain signer encrypt --to <npub> --text "..."
@@ -80,6 +83,11 @@ shared identity. The secret is read from stdin or `--file`, never from an argv
 flag, and import refuses to overwrite an existing identity. The legacy
 `auth login --nsec`/`auth logout` verbs and the plaintext `auth.json` config
 file are removed.
+
+`auth redeem` binds the current identity to an email through the trusted
+identity authority. Treat the one-time token as sensitive input: never repeat
+it in logs or reports. `auth login` is legacy guidance, not an available login
+flow.
 
 Use `auth status --json` to confirm the acting npub, identity file, and config
 directory. Do not print or request secrets during normal agent work.
@@ -97,6 +105,8 @@ fbrain sync now --summary
 fbrain sync now --json
 fbrain conflicts --json
 fbrain resolve <conflict-id>
+fbrain search "credential rotation" --json
+fbrain search-index status --json
 fbrain activity
 fbrain wiki check --json
 ```
@@ -118,6 +128,34 @@ values include `caught-up`, `applied-remote-records`, `pushed-local-changes`, an
 
 Each `remoteChanges` entry produced from a signed sync record includes
 `actorNpub`; `--summary` renders it as `actor=<npub>`.
+
+## Search Evidence
+
+`fbrain search` returns ranked Markdown Sections from every currently readable
+Folder in one result list. Repeat `--folder` to deliberately narrow the scope;
+an unknown or unreadable Folder fails closed. When mounted Folders reuse an ID,
+use `<source-brain-id>:<folder-id>` to select one unambiguously. Results identify
+the Folder and source Brain, Page path and title, heading ancestry, excerpt,
+sync disposition, and the contributing `lexical`, `semantic`, or combined
+signals. The default is ten results and the maximum explicit limit is fifty.
+
+BM25 is always available. When the runtime supplies
+`FBRAIN_EMBEDDING_ENDPOINT` and `FBRAIN_EMBEDDING_BEARER_TOKEN` and a Folder has
+a current semantic generation, `search` embeds the query once and combines the
+lexical and semantic rankings. Missing, disabled, building, stale, corrupt,
+timed-out, or unavailable semantic state falls back to BM25 without failing the
+search or sync. `--lexical-only` bypasses the provider for diagnostics.
+
+Semantic indexing is selected by default for readable Folders. Inspect it with
+`search-index status`; `disable --folder` deletes that Folder's vectors but
+keeps BM25, while `enable --folder` durably schedules it for the foreground
+`daemon watch` worker to rebuild in the background. Status reports only
+lifecycle, model contract, and counts—not credentials or wiki text. Folder
+selectors use the same readable-Folder and mounted-source rules as `search`.
+
+The lexical index is private disposable state under `.finitebrain/`. It is
+maintained from live daemon saves, startup reconciliation, and sync, but it is
+not synced content, authoritative knowledge, a backup, or a Recovery Set.
 
 `wiki check` scans Markdown Pages in materialized readable Folders only. It
 resolves exact Page titles, unique filenames, and Folder-root-relative Page
@@ -160,6 +198,8 @@ supervisor for long-running work. The default strategy is file-aware:
 initial sync, sync when readable Brain Working Tree markdown changes are
 detected, and bounded periodic remote polling. Use `--remote-poll-ticks 0` to
 disable periodic remote polling and `--poll-only` for legacy every-tick syncing.
+When an embedding provider is configured, semantic generations refresh on a
+separate background worker; provider work never runs inside the sync path.
 
 `daemon status --json` exposes `lastTickAt`, `lastError`, `tickCount`,
 `failureCount`, `retryBackoffMillis`, `watchStrategy`, and
@@ -191,8 +231,15 @@ fbrain brain export --brain <brain-id>
 fbrain folder list --brain <brain-id>
 fbrain folder create <folder-id> --brain <brain-id> --name Notes --path Notes
 fbrain folder create <folder-id> --brain <brain-id> --role folder --access restricted --member <npub>
+fbrain folder delete <folder-id> --brain <brain-id> --json
 fbrain mount list --brain <brain-id>
 ```
+
+`folder delete` permanently deletes the named Folder, all descendant Folders,
+and every durable object in that subtree. The CLI submits the current expected
+Folder IDs and object count so concurrent scope changes fail closed, then
+removes the returned `deletedFolderIds` from the local Working Tree projection.
+Read [destructive-operations.md](destructive-operations.md) before using it.
 
 `--requesting-user-npub` is Organization Brain-only. It atomically makes the
 distinct signing creator and authenticated requester initial members and
@@ -212,7 +259,39 @@ fbrain permissions remove-member --brain <brain-id> --target <npub>
 fbrain permissions add-admin --brain <brain-id> --target <npub>
 fbrain permissions remove-admin --brain <brain-id> --target <npub>
 fbrain permissions grant-folder --brain <brain-id> --folder <folder-id> --target <npub>
+
+# Normal, convergent Organization Brain collaboration
+TARGET_EMAIL="agent@example.finite.vip"
+fbrain collaborators ensure-admin \
+  --brain <brain-id> \
+  --target "$TARGET_EMAIL" \
+  --server "$SERVER" \
+  --json
 ```
+
+`collaborators ensure-admin` is the normal email-first Organization Brain
+sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The
+command resolves the Managed Agent Email natively and returns one typed receipt:
+
+- `complete` proves Admin Brain Role plus current Folder readiness across the
+  authoritative Folder snapshot.
+- `partial` preserves useful progress but names every known incomplete Folder.
+  Retry this exact idempotent command from a named current key holder when the
+  receipt supplies a holder email. Otherwise ask another current Folder reader
+  who can open the listed Folder to retry; never invent or expose a holder
+  identity, and do not report the collaboration as complete.
+- `indeterminate` means the mutation may have committed but its postcondition
+  was not proved. Retry the exact command and inspect its next receipt; do not
+  claim either success or a clean failure.
+
+Human reports should use the target email, safe Folder paths, counts, reason
+codes, and holder emails. Do not paste the raw receipt or expose Member Identity
+keys, wrapped events, auth material, Folder Keys, or grant plaintext.
+
+Low-level permission commands are advanced primitives. `add-member` and
+`add-admin` change Brain Role, and `grant-folder` targets one Folder version;
+they do not prove complete Organization Brain Collaboration and are not the
+normal sharing workflow.
 
 ## Invitations And Sharing
 

@@ -108,6 +108,28 @@ Personal Agent; that relationship grants full operational Brain access without
 transferring ownership. Other limited Member Identities receive only their
 explicit restricted-Folder access.
 
+### Brain Role
+
+A Member Identity's Brain-wide authorization relationship, such as member,
+admin, or owner. A Brain Role does not by itself prove that the Member Identity
+can decrypt a Folder; readable Folder content also requires current Folder
+Access and a current Folder Key Grant. _Avoid_: Brain Access.
+
+### Folder Access Readiness
+
+The observable state in which a Member Identity is entitled to a Folder under
+current policy and holds a valid Folder Key Grant for the Folder's current key
+version. Policy entitlement without a current grant is incomplete and must not
+be presented as readable access. _Avoid_: Effective Access.
+
+### Organization Brain Collaboration
+
+The desired state in which a target Member Identity has the requested
+Organization Brain Role and Folder Access Readiness for every current Folder
+included by the collaboration scope. The default admin collaboration scope is
+all existing Organization Brain Folders; a partial collaboration names every
+unready Folder and remains safe to retry. _Avoid_: Admin Sharing, Brain Access.
+
 ### User Nostr Identity
 
 The human-controlled Nostr `npub` used across Hosted Web, Electron, and iOS.
@@ -346,6 +368,35 @@ each Folder is the enforceable wiki scope because Folder Keys and Folder Access
 define who can read it. Folder-local `_index.md`, `config.md`, and `log.md`
 describe only that Folder. Root/global indexes must not leak private Folder
 titles, summaries, sources, or activity.
+
+### Hybrid Wiki Search
+
+The agent-facing local retrieval capability over the readable Markdown in a
+Vault Working Tree. It combines lexical and semantic relevance when available,
+falls back to lexical relevance alone, and returns one merged result list from
+the acting Member Identity's readable Folders. It returns locations in the
+original Pages rather than creating another knowledge authority.
+
+### Markdown Section
+
+The canonical Hybrid Wiki Search retrieval unit: the readable content under a
+Markdown heading together with its Page path, Page title, and heading ancestry.
+A Page without headings is one Markdown Section, and bounded subdivisions of a
+long section retain the same document context.
+
+### Embedding Provider
+
+The replaceable capability that converts a Markdown Section or search query
+into a semantic vector for Hybrid Wiki Search. Provider model identity and
+version belong to the derived index lifecycle; the provider does not become a
+knowledge authority or modify the underlying Page.
+
+### Search Evidence
+
+A ranked Hybrid Wiki Search result that identifies an original Markdown
+Section, its location, a short excerpt, local-sync disposition, and contributing
+retrieval signals. Search Evidence guides an agent to source Pages; it is not a
+generated answer or a new durable knowledge artifact.
 
 ### Asset
 

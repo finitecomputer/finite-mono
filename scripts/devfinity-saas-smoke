@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+
 declare -a sensitive_files=()
 updates_pid=""
 
@@ -81,6 +83,19 @@ JS
 }
 
 runtime_container_id() {
+  if [[ "$runtime_driver" == docker ]]; then
+    docker ps --format '{{json .}}' --filter "label=computer.finite.v2.project_id=$project_id" \
+      | node -e '
+        let body = "";
+        process.stdin.on("data", (chunk) => body += chunk);
+        process.stdin.on("end", () => {
+          const rows = body.trim().split(/\n+/).filter(Boolean).map(JSON.parse);
+          if (rows.length !== 1 || !rows[0].ID) process.exit(1);
+          process.stdout.write(rows[0].ID);
+        });
+      '
+    return
+  fi
   container list --format json | node -e '
     const projectId = process.argv[1];
     let body = "";
@@ -94,6 +109,14 @@ runtime_container_id() {
       process.stdout.write(runtime.configuration.id);
     });
   ' "$project_id"
+}
+
+runtime_exec() {
+  if [[ "$runtime_driver" == docker ]]; then
+    docker exec "$@"
+  else
+    container exec "$@"
+  fi
 }
 
 wait_for_runtime() {
@@ -384,6 +407,40 @@ send_and_require_reply() {
   wait_for_remote_reply_after "$before" "$room_id" "$topic_id" "$chat_id"
 }
 
+send_and_capture_reply() {
+  local text="$1"
+  local before
+  local room_id
+  local topic_id
+  local chat_id
+  chat_state
+  IFS=$'\t' read -r room_id topic_id chat_id <<<"$(selected_chat_route)"
+  wait_for_scoped_working_clear "$room_id" "$topic_id" "$chat_id"
+  before="$(max_remote_seq "$room_id" "$topic_id" "$chat_id")"
+  send_chat_message "$text"
+  # Working activity is intentionally ephemeral and can be set and cleared
+  # between two Hosted Device projections, especially for deterministic local
+  # model replies. The durable scoped final delivery below is the product
+  # contract; the matrix separately proves the real model and terminal seams.
+  wait_for_remote_reply_after "$before" "$room_id" "$topic_id" "$chat_id"
+  node - "$chat_state_json" "$before" "$room_id" "$topic_id" "$chat_id" <<'JS'
+const fs = require("node:fs");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const previous = Number(process.argv[3]);
+const [roomId, topicId, chatId] = process.argv.slice(4);
+const final = (state.messages || []).findLast((message) =>
+  message.sender_account_id !== state.identity?.account_id
+  && Number(message.seq) > previous
+  && message.room_id === roomId
+  && message.conversation_id === topicId
+  && message.chat_id === chatId
+  && message.final_delivery === true
+);
+if (!final) throw new Error("Hermes turn has no scoped final delivery");
+process.stdout.write(String(final.display_content || final.text || ""));
+JS
+}
+
 last_site_final_timestamp=0
 sites_acceptance_room_id=""
 sites_acceptance_topic_id=""
@@ -573,7 +630,7 @@ reset_brain_setup_matrix_state() {
     "$state_dir/finite-brain/finite-brain.sqlite3" \
     "$state_dir/finite-brain/finite-brain.sqlite3-shm" \
     "$state_dir/finite-brain/finite-brain.sqlite3-wal"
-  container exec "$container_machine_id" /bin/bash -lc \
+  runtime_exec "$container_machine_id" /bin/bash -lc \
     'rm -rf /data/agent/fbrain /data/workspace/finitebrain'
   restart_process finite-brain
   wait_http "FiniteBrain matrix reset" "${FINITE_BRAIN_URL:?}/health" 120
@@ -583,7 +640,7 @@ assert_agent_brain_list() {
   local expected_kind="$1"
   local expected_role="$2"
   local expected_count="$3"
-  container exec "$container_machine_id" fbrain brain list --json >"$brains_json"
+  runtime_exec "$container_machine_id" fbrain brain list --json >"$brains_json"
   node - "$brains_json" "$expected_kind" "$expected_role" "$expected_count" <<'JS'
 const fs = require("node:fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -593,8 +650,8 @@ const count = Number(countText);
 if (brains.length !== count) {
   throw new Error(`expected ${count} agent-visible Brains, received ${JSON.stringify(brains)}`);
 }
-if (count && (brains[0].kind !== kind || brains[0].role !== role)) {
-  throw new Error(`expected ${kind}/${role}, received ${JSON.stringify(brains[0])}`);
+if (brains.some((brain) => brain.kind !== kind || brain.role !== role)) {
+  throw new Error(`expected every Brain to be ${kind}/${role}, received ${JSON.stringify(brains)}`);
 }
 JS
 }
@@ -614,15 +671,17 @@ assert_agent_brain_shape() {
   local brain_id="$1"
   local expected_folder_count="$2"
   local expected_admin_count="$3"
+  local expected_name="${4:-}"
   local metadata_json="$state_dir/brain-matrix-metadata.json"
-  container exec "$container_machine_id" fbrain brain metadata "$brain_id" --json >"$metadata_json"
-  node - "$metadata_json" "$brain_id" "$expected_folder_count" "$expected_admin_count" <<'JS'
+  runtime_exec "$container_machine_id" fbrain brain metadata "$brain_id" --json >"$metadata_json"
+  node - "$metadata_json" "$brain_id" "$expected_folder_count" "$expected_admin_count" "$expected_name" <<'JS'
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const [brainId, folderCountText, adminCountText] = process.argv.slice(3);
+const [brainId, folderCountText, adminCountText, expectedName] = process.argv.slice(3);
 const folderCount = Number(folderCountText);
 const adminCount = Number(adminCountText);
 if (value.brainId !== brainId) throw new Error(`expected ${brainId}, received ${value.brainId}`);
+if (expectedName && value.name !== expectedName) throw new Error(`expected Brain name ${expectedName}, received ${value.name}`);
 if (value.folders.length !== folderCount) throw new Error(`expected ${folderCount} Folders, received ${JSON.stringify(value.folders)}`);
 if (value.admins.length !== adminCount || new Set(value.admins).size !== value.admins.length) {
   throw new Error(`expected ${adminCount} unique admins, received ${JSON.stringify(value.admins)}`);
@@ -643,44 +702,100 @@ browser_brain_id() {
 }
 
 run_brain_setup_matrix() {
-  local requester_npub
   local agent_id
   local browser_id
-  local org_id="matrix-agent-org"
-  requester_npub="$(requesting_user_account_id)"
+  local first_same_name_id
+  local second_same_name_id
+  local reply
+  local personal_marker="Matrix agent Personal resumed task $(date +%s)-$$"
+  local org_name="Matrix Agent Org $(date +%s)-$$"
+  # Negative and unclear clarifications are real Product turns. Each case gets
+  # a fresh chat so prior conversation state cannot answer the question for it.
+  reset_brain_setup_matrix_state
+  create_topic_and_require_first_chat "Brain Personal decline"
+  reply="$(send_and_capture_reply \
+    "Please put a note named Matrix declined setup in my Personal Brain. If it is not set up, ask me before creating it.")"
+  grep -Eiq 'personal.*(set up|setup)|set up.*personal' <<<"$reply" || {
+    echo "managed FiniteBrain skill did not ask the Personal setup question" >&2
+    return 1
+  }
+  send_and_capture_reply "No. Do not set up a Personal Brain and do not create the note." >/dev/null
+  assert_agent_brain_list personal personal_agent 0
 
   reset_brain_setup_matrix_state
-  container exec "$container_machine_id" fbrain brain bootstrap-personal --json >/dev/null
-  container exec "$container_machine_id" fbrain brain bootstrap-personal --json >/dev/null
+  create_topic_and_require_first_chat "Brain Personal unclear"
+  send_and_capture_reply \
+    "Please put a note named Matrix unclear setup in my Personal Brain. If it is not set up, ask me before creating it." >/dev/null
+  send_and_capture_reply "Maybe later; I have not decided." >/dev/null
+  assert_agent_brain_list personal personal_agent 0
+
+  # Agent-first Personal setup starts with natural language, receives one
+  # affirmative clarification, and must resume the original durable task.
+  reset_brain_setup_matrix_state
+  create_topic_and_require_first_chat "Brain Personal affirmative"
+  reply="$(send_and_capture_reply \
+    "Please create a Markdown note whose exact text includes '${personal_marker}' in my Personal Brain. If my Personal Brain is not set up, ask me once and then continue this same task after setup.")"
+  grep -Eiq 'personal.*(set up|setup)|set up.*personal' <<<"$reply" || {
+    echo "managed FiniteBrain skill skipped the Personal setup clarification" >&2
+    return 1
+  }
+  send_and_capture_reply \
+    "Yes, set up my Personal Brain now and continue creating that exact note." >/dev/null
   agent_id="$(agent_visible_brain_id personal personal_agent)"
-  assert_agent_brain_shape "$agent_id" 0 0
+  assert_agent_brain_shape "$agent_id" 1 0
+  runtime_exec "$container_machine_id" fbrain open "$agent_id" --json >/dev/null
+  runtime_exec -w "/data/workspace/finitebrain/$agent_id" \
+    "$container_machine_id" fbrain sync now --json >/dev/null
+  runtime_exec \
+    -e "DEVFINITY_PERSONAL_MARKER=$personal_marker" \
+    "$container_machine_id" /bin/bash -lc '
+      grep -R -F --include="*.md" --exclude="_index.md" \
+        -- "$DEVFINITY_PERSONAL_MARKER" "/data/workspace/finitebrain/$1" >/dev/null
+    ' _ "$agent_id"
   browser_id="$(browser_brain_id assert-existing-personal)"
   [[ "$browser_id" == "$agent_id" ]] || { echo "agent-first Personal Brain ids differ" >&2; return 1; }
-  container exec "$container_machine_id" fbrain folder create matrix-agent-personal-folder \
-    --brain "$agent_id" --name "Matrix Agent Personal Folder" --path matrix-agent-personal-folder --json >/dev/null
-  assert_agent_brain_shape "$agent_id" 1 0
-  brain_browser_smoke assert-folder "matrix-agent-personal-folder" "$agent_id"
+  brain_browser_smoke assert-folder "$personal_marker" "$agent_id"
 
+  # Agent-first Organization setup is likewise a real authenticated Finite
+  # Chat request. The skill must derive the requester from event.source.user_id
+  # and create both admins atomically through the built fbrain executable.
   reset_brain_setup_matrix_state
-  container exec "$container_machine_id" fbrain brain create "$org_id" \
-    --kind organization \
-    --name "Matrix Agent Org" \
-    --requesting-user-npub "$requester_npub" \
-    --json >/dev/null
-  container exec "$container_machine_id" fbrain brain create "$org_id" \
-    --kind organization \
-    --name "Matrix Agent Org" \
-    --requesting-user-npub "$requester_npub" \
-    --json >/dev/null
+  create_topic_and_require_first_chat "Brain agent Organization"
+  send_and_capture_reply \
+    "Create an Organization Brain named '${org_name}'. Keep it empty; do not create example Folders or Pages." >/dev/null
   agent_id="$(agent_visible_brain_id organization admin)"
-  [[ "$agent_id" == "$org_id" ]] || { echo "idempotent Org create changed its id" >&2; return 1; }
   assert_agent_brain_shape "$agent_id" 0 2
-  browser_id="$(browser_brain_id assert-org-first "$org_id")"
+  browser_id="$(browser_brain_id assert-org-first "$agent_id")"
   [[ "$browser_id" == "$agent_id" ]] || { echo "agent-first Org Brain ids differ" >&2; return 1; }
-  container exec "$container_machine_id" fbrain folder create matrix-agent-org-folder \
-    --brain "$agent_id" --name "Matrix Agent Org Folder" --path matrix-agent-org-folder --json >/dev/null
-  assert_agent_brain_shape "$agent_id" 1 2
-  brain_browser_smoke assert-folder "matrix-agent-org-folder" "$agent_id"
+  send_and_capture_reply \
+    "Create an Organization Brain named '${org_name}' again. Do not create a duplicate if it already exists." >/dev/null
+  assert_agent_brain_list organization admin 1
+  assert_agent_brain_shape "$agent_id" 0 2
+
+  # Same display names are deliberately non-identifying. Create both through
+  # the Product Client, then prove its direct-target open selects each stable
+  # Brain id rather than whichever same-name row happens to sort first.
+  reset_brain_setup_matrix_state
+  first_same_name_id="$(browser_brain_id create-org-agent "Matrix Same Name Org")"
+  second_same_name_id="$(browser_brain_id create-org-agent "Matrix Same Name Org" "$first_same_name_id")"
+  [[ -n "$first_same_name_id" && -n "$second_same_name_id" \
+    && "$first_same_name_id" != "$second_same_name_id" ]] || {
+    echo "same-name Organization Brains did not receive distinct stable identities" >&2
+    return 1
+  }
+  assert_agent_brain_list organization admin 2
+  assert_agent_brain_shape "$first_same_name_id" 0 2 "Matrix Same Name Org"
+  assert_agent_brain_shape "$second_same_name_id" 0 2 "Matrix Same Name Org"
+  browser_id="$(browser_brain_id assert-org-first "$first_same_name_id")"
+  [[ "$browser_id" == "$first_same_name_id" ]] || {
+    echo "targeted open selected the wrong first same-name Brain" >&2
+    return 1
+  }
+  browser_id="$(browser_brain_id assert-org-first "$second_same_name_id")"
+  [[ "$browser_id" == "$second_same_name_id" ]] || {
+    echo "targeted open selected the wrong second same-name Brain" >&2
+    return 1
+  }
 
   reset_brain_setup_matrix_state
   browser_id="$(browser_brain_id bootstrap)"
@@ -704,10 +819,14 @@ run_brain_setup_matrix() {
   brain_browser_smoke create-folder "Matrix Human Only Folder" "$browser_id"
   assert_agent_brain_list organization admin 0
 
-  echo "devfinity Brain setup/reconciliation matrix passed"
+  echo "devfinity real Hermes/managed-skill Brain setup/reconciliation matrix passed"
 }
 
 container_started_at() {
+  if [[ "$runtime_driver" == docker ]]; then
+    docker inspect --format '{{.State.StartedAt}}' "$container_machine_id" 2>/dev/null || true
+    return
+  fi
   container inspect "$container_machine_id" 2>/dev/null | node -e '
     let body = "";
     process.stdin.on("data", (chunk) => body += chunk);
@@ -746,7 +865,7 @@ brain_browser_smoke() {
 }
 
 personal_agent_brain_id() {
-  container exec "$container_machine_id" fbrain brain list --json >"$brains_json"
+  runtime_exec "$container_machine_id" fbrain brain list --json >"$brains_json"
   node - "$brains_json" <<'JS'
 const fs = require("node:fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -761,12 +880,12 @@ JS
 }
 
 open_and_sync_personal_brain() {
-  container exec "$container_machine_id" fbrain folder create agent-notes \
+  runtime_exec "$container_machine_id" fbrain folder create agent-notes \
     --brain "$brain_id" \
     --name "Agent notes" \
     --path agent-notes \
     --json >/dev/null
-  container exec "$container_machine_id" fbrain open "$brain_id" --json >"$brain_open_json"
+  runtime_exec "$container_machine_id" fbrain open "$brain_id" --json >"$brain_open_json"
   node - "$brain_open_json" "$brain_tree" <<'JS'
 const fs = require("node:fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -774,10 +893,10 @@ if (response.path !== process.argv[3]) {
   throw new Error(`fbrain opened ${response.path}, expected durable tree ${process.argv[3]}`);
 }
 JS
-  container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
+  runtime_exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
     >"$brain_sync_json"
   assert_personal_agent_scope
-  container exec "$container_machine_id" /bin/bash -lc '
+  runtime_exec "$container_machine_id" /bin/bash -lc '
     test "$FINITE_HOME" = /data/agent
     test "$FBRAIN_CONFIG_DIR" = /data/agent/fbrain
     test "$FBRAIN_WORKING_TREE_ROOT" = /data/workspace/finitebrain
@@ -790,9 +909,9 @@ JS
 }
 
 assert_personal_agent_scope() {
-  container exec "$container_machine_id" cat \
+  runtime_exec "$container_machine_id" cat \
     "$brain_tree/.finitebrain/brain-directory.json" >"$brain_directory_json"
-  container exec "$container_machine_id" cat \
+  runtime_exec "$container_machine_id" cat \
     "$brain_tree/.finitebrain/working-tree-state.json" >"$brain_tree_state_json"
   node - \
     "$brain_directory_json" \
@@ -821,7 +940,7 @@ JS
 }
 
 write_personal_agent_note() {
-  container exec \
+  runtime_exec \
     -e "DEVFINITY_BRAIN_PROOF=$brain_proof" \
     -w "$brain_tree/agent-notes" \
     "$container_machine_id" \
@@ -830,8 +949,337 @@ write_personal_agent_note() {
       printf "# %s\n\nWritten by the paired Agent Principal through fbrain.\n" \
         "$DEVFINITY_BRAIN_PROOF" >devfinity-agent-proof.md
     '
-  container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
+  runtime_exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
     >"$brain_sync_json"
+}
+
+exercise_brain_content_and_deletion_matrix() {
+  local collaborator_npub
+  local shared_brain_id
+  local shared_brain_tree
+  shared_brain_id="$(browser_brain_id create-org-agent "Matrix Shared Deletion Org" "$brain_id")"
+  shared_brain_tree="/data/workspace/finitebrain/$shared_brain_id"
+  local collaborator_tree="/data/matrix-collaborator/workspace/$shared_brain_id"
+  local deletion_marker="Matrix nested deletion $shared_brain_id"
+  local individual_marker="Matrix individual deletion $shared_brain_id"
+  local signer_failure_log="$state_dir/brain-matrix-signer-failure.log"
+  track_sensitive_file "$signer_failure_log"
+  runtime_exec "$container_machine_id" fbrain open "$shared_brain_id" --json >/dev/null
+
+  # A distinct valid signer has no relationship to this Brain. Its signed
+  # request must fail without changing the authorized agent's durable state.
+  if runtime_exec \
+    -e FINITE_HOME=/data/matrix-unauthorized/finite \
+    -e FBRAIN_CONFIG_DIR=/data/matrix-unauthorized/fbrain \
+    -e FBRAIN_WORKING_TREE_ROOT=/data/matrix-unauthorized/workspace \
+    "$container_machine_id" fbrain brain metadata "$shared_brain_id" --json \
+    > /dev/null 2>"$signer_failure_log"; then
+    echo "unrelated signed Brain request unexpectedly succeeded" >&2
+    return 1
+  fi
+  test -s "$signer_failure_log"
+  assert_agent_brain_shape "$shared_brain_id" 0 2
+
+  runtime_exec "$container_machine_id" fbrain folder create matrix-delete-root \
+    --brain "$shared_brain_id" --name "Matrix delete root" --path matrix-delete-root --json >/dev/null
+  runtime_exec "$container_machine_id" fbrain folder create matrix-delete-child \
+    --brain "$shared_brain_id" --parent matrix-delete-root --name "Matrix delete child" \
+    --path matrix-delete-root/child --json >/dev/null
+  runtime_exec -w "$shared_brain_tree" "$container_machine_id" fbrain sync now --json >/dev/null
+  runtime_exec -e "DELETION_MARKER=$deletion_marker" -e "INDIVIDUAL_MARKER=$individual_marker" \
+    "$container_machine_id" /bin/bash -lc '
+      set -euo pipefail
+      mkdir -p "/data/workspace/finitebrain/$1/matrix-delete-root/child"
+      printf "# %s\n\nNested deletion proof\n" "$DELETION_MARKER" \
+        >"/data/workspace/finitebrain/$1/matrix-delete-root/child/nested.md"
+      printf "# %s\n\nIndividual deletion proof\n" "$INDIVIDUAL_MARKER" \
+        >"/data/workspace/finitebrain/$1/matrix-delete-root/individual.md"
+    ' _ "$shared_brain_id"
+  runtime_exec -w "$shared_brain_tree" "$container_machine_id" fbrain sync now --json >/dev/null
+  brain_browser_smoke assert-note "$deletion_marker" "$shared_brain_id"
+  brain_browser_smoke assert-note "$individual_marker" "$shared_brain_id"
+
+  collaborator_npub="$(runtime_exec \
+    -e FINITE_HOME=/data/matrix-collaborator/finite \
+    -e FBRAIN_CONFIG_DIR=/data/matrix-collaborator/fbrain \
+    -e FBRAIN_WORKING_TREE_ROOT=/data/matrix-collaborator/workspace \
+    "$container_machine_id" fbrain signer public-key)"
+  [[ "$collaborator_npub" == npub1* ]] || {
+    echo "matrix collaborator did not produce an npub" >&2
+    return 1
+  }
+  runtime_exec -w "$shared_brain_tree" "$container_machine_id" fbrain permissions add-member \
+    --brain "$shared_brain_id" --target "$collaborator_npub" --json >/dev/null
+  runtime_exec -w "$shared_brain_tree" "$container_machine_id" fbrain permissions grant-folder \
+    --brain "$shared_brain_id" --folder matrix-delete-root --target "$collaborator_npub" --json >/dev/null
+  runtime_exec -w "$shared_brain_tree" "$container_machine_id" fbrain permissions grant-folder \
+    --brain "$shared_brain_id" --folder matrix-delete-child --target "$collaborator_npub" --json >/dev/null
+  runtime_exec \
+    -e FINITE_HOME=/data/matrix-collaborator/finite \
+    -e FBRAIN_CONFIG_DIR=/data/matrix-collaborator/fbrain \
+    -e FBRAIN_WORKING_TREE_ROOT=/data/matrix-collaborator/workspace \
+    "$container_machine_id" fbrain open "$shared_brain_id" --json >/dev/null
+  runtime_exec \
+    -e FINITE_HOME=/data/matrix-collaborator/finite \
+    -e FBRAIN_CONFIG_DIR=/data/matrix-collaborator/fbrain \
+    -e FBRAIN_WORKING_TREE_ROOT=/data/matrix-collaborator/workspace \
+    -w "$collaborator_tree" "$container_machine_id" fbrain sync now --json >/dev/null
+  runtime_exec "$container_machine_id" grep -Fq "$deletion_marker" \
+    "$collaborator_tree/matrix-delete-root/child/nested.md"
+
+  runtime_exec "$container_machine_id" rm \
+    "$shared_brain_tree/matrix-delete-root/individual.md"
+  runtime_exec -w "$shared_brain_tree" "$container_machine_id" fbrain sync now --json >/dev/null
+  brain_browser_smoke assert-absent "$individual_marker" "$shared_brain_id"
+
+  # The collaborator is now offline. Direct deletion must clean the agent's
+  # durable projection before returning, then converge the collaborator on its
+  # first incremental reconnect without a reset.
+  runtime_exec "$container_machine_id" cat \
+    "$collaborator_tree/.finitebrain/working-tree-state.json" \
+    >"$state_dir/brain-matrix-collaborator-before-delete.json"
+  (
+    for _attempt in 1 2 3 4 5 6 7 8; do
+      runtime_exec \
+        -e FINITE_HOME=/data/matrix-collaborator/finite \
+        -e FBRAIN_CONFIG_DIR=/data/matrix-collaborator/fbrain \
+        -e FBRAIN_WORKING_TREE_ROOT=/data/matrix-collaborator/workspace \
+        -w "$collaborator_tree" "$container_machine_id" fbrain sync now --json >/dev/null
+      sleep 0.1
+    done
+  ) &
+  local collaborator_sync_pid=$!
+  runtime_exec -w "$shared_brain_tree" "$container_machine_id" fbrain folder delete matrix-delete-root \
+    --brain "$shared_brain_id" --json >/dev/null
+  wait "$collaborator_sync_pid"
+  if runtime_exec "$container_machine_id" test -e "$shared_brain_tree/matrix-delete-root"; then
+    echo "direct folder deletion left the agent projection root on disk" >&2
+    return 1
+  fi
+  if runtime_exec "$container_machine_id" test -e "$collaborator_tree/matrix-delete-root"; then
+    echo "incremental tombstone sync left the collaborator projection root on disk" >&2
+    return 1
+  fi
+  brain_browser_smoke assert-absent "$deletion_marker" "$shared_brain_id"
+}
+
+exercise_recovery_set_roundtrip() {
+  local recovery_root="$state_dir/brain-product-recovery"
+  local snapshot="$recovery_root/snapshot"
+  local restored="$recovery_root/restored"
+  local recovery_inventory="$recovery_root/preflight-inventory.json"
+  local recovery_attachment="$recovery_root/finite-recovery-proof.txt"
+  local recovered_attachment="$recovery_root/recovered-finite-recovery-proof.txt"
+  local room_id topic_id chat_id before attachment_route
+  rm -rf -- "$recovery_root"
+  install -d -m 0700 \
+    "$snapshot/hosted-device" "$snapshot/finite-chat" "$snapshot/saas-core" \
+    "$snapshot/finite-brain" "$snapshot/finite-identity"
+
+  # Put a known encrypted attachment and completed conversation turn inside
+  # the fenced snapshot boundary, then retain count-only and id/hash evidence
+  # for the service-booted comparison below.
+  printf 'finite Recovery Set attachment proof\n' >"$recovery_attachment"
+  chat_state
+  IFS=$'\t' read -r room_id topic_id chat_id <<<"$(selected_chat_route)"
+  wait_for_scoped_working_clear "$room_id" "$topic_id" "$chat_id"
+  before="$(max_remote_seq "$room_id" "$topic_id" "$chat_id")"
+  curl -fsS --max-time 30 \
+    -F "room_id=$room_id" \
+    -F "topic_id=$topic_id" \
+    -F "chat_id=$chat_id" \
+    -F 'caption=Retain this Recovery Set attachment.' \
+    -F "files=@$recovery_attachment;type=text/plain;filename=finite-recovery-proof.txt" \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/attachments" \
+    >"$chat_state_json"
+  wait_for_remote_reply_after "$before" "$room_id" "$topic_id" "$chat_id"
+  read_core_me
+  chat_state
+  node - "$chat_state_json" "$me_json" >"$recovery_inventory" <<'JS'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const me = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const messages = state.messages || [];
+const attachments = messages.flatMap((message) =>
+  (message.media || []).map((attachment) => ({
+    roomId: message.room_id,
+    conversationId: message.conversation_id || "",
+    chatId: message.chat_id || "",
+    messageId: message.message_id,
+    attachmentId: attachment.attachment_id,
+    filename: attachment.filename,
+    mimeType: attachment.mime_type,
+  }))
+);
+if (!attachments.some((attachment) => attachment.filename === "finite-recovery-proof.txt")) {
+  throw new Error("Recovery Set preflight attachment was not durably projected");
+}
+const history = messages.map((message) => ({
+  roomId: message.room_id,
+  conversationId: message.conversation_id || "",
+  chatId: message.chat_id || "",
+  messageId: message.message_id,
+  contentHash: crypto
+    .createHash("sha256")
+    .update(String(message.display_content || message.text || ""))
+    .digest("hex"),
+})).sort((left, right) => left.messageId.localeCompare(right.messageId));
+const projectRows = me.projects || [];
+const inventory = {
+  format: "finite.recovery-set-preflight.v1",
+  counts: {
+    rooms: (state.rooms || []).length,
+    topics: (state.topics || []).length,
+    chats: (state.topics || []).reduce((count, topic) => count + (topic.chats || []).length, 0),
+    messages: messages.length,
+    attachments: attachments.length,
+    projects: projectRows.length,
+    runtimes: projectRows.filter((entry) => entry.runtime).length,
+    agents: projectRows.filter((entry) => entry.project?.agent_email).length,
+  },
+  history,
+  attachments: attachments.sort((left, right) => left.attachmentId.localeCompare(right.attachmentId)),
+};
+process.stdout.write(JSON.stringify(inventory));
+JS
+  track_sensitive_file "$recovery_inventory"
+  track_sensitive_file "$recovered_attachment"
+
+  stop_process hosted-web-device
+  stop_process finitechat
+  stop_process finite-brain
+  stop_process finite-identity
+  stop_process core
+
+  cp -a "$state_dir/hosted-web-device/." "$snapshot/hosted-device/"
+  while IFS= read -r source; do
+    local relative="${source#"$state_dir/hosted-web-device/"}"
+    local destination="$snapshot/hosted-device/$relative"
+    rm -f -- "$destination" "$destination-wal" "$destination-shm"
+    sqlite3 "$source" ".backup '$destination'"
+  done < <(find "$state_dir/hosted-web-device" -type f -name client.sqlite3 -print)
+  sqlite3 "$state_dir/finitechat/server.sqlite3" \
+    ".backup '$snapshot/finite-chat/server.sqlite3'"
+  sqlite3 "$state_dir/finite-brain/finite-brain.sqlite3" \
+    ".backup '$snapshot/finite-brain/finite-brain.sqlite3'"
+  sqlite3 "$state_dir/finite-identity/identity.db" \
+    ".backup '$snapshot/finite-identity/identity.db'"
+  pg_dump -h 127.0.0.1 -p "${DEVFINITY_POSTGRES_PORT:?}" -U postgres \
+    --format=custom finite_saas_core >"$snapshot/saas-core/finite_core.dump"
+  printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v2 >"$snapshot/format"
+  printf '%s\n' \
+    finite.hosted-web-chat-recovery-snapshot.v2 \
+    $'hosted-device\tdirectory\thosted-device' \
+    $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
+    $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
+    $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
+    $'finite-identity\tsqlite\tfinite-identity/identity.db' \
+    >"$snapshot/recovery-set.tsv"
+  (
+    cd "$snapshot"
+    find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
+      -type f -print0 | sort -z | xargs -0 sha256sum >manifest.sha256
+  )
+  FINITE_RESTORE_ISOLATED=1 \
+    "$repo_root/infra/scripts/restore-hosted-web-chat-snapshot" "$snapshot" "$restored" \
+    >/dev/null
+
+  mv "$state_dir/hosted-web-device" "$recovery_root/original-hosted-device"
+  mv "$state_dir/finitechat" "$recovery_root/original-finitechat"
+  mv "$state_dir/finite-brain" "$recovery_root/original-finite-brain"
+  mv "$state_dir/finite-identity" "$recovery_root/original-finite-identity"
+  mv "$restored/hosted-device" "$state_dir/hosted-web-device"
+  mv "$restored/finite-chat" "$state_dir/finitechat"
+  mv "$restored/finite-brain" "$state_dir/finite-brain"
+  mv "$restored/finite-identity" "$state_dir/finite-identity"
+  dropdb -h 127.0.0.1 -p "$DEVFINITY_POSTGRES_PORT" -U postgres --force finite_saas_core
+  createdb -h 127.0.0.1 -p "$DEVFINITY_POSTGRES_PORT" -U postgres finite_saas_core
+  pg_restore -h 127.0.0.1 -p "$DEVFINITY_POSTGRES_PORT" -U postgres \
+    --dbname=finite_saas_core --exit-on-error --single-transaction \
+    "$restored/saas-core/finite_core.dump"
+
+  restart_process core
+  restart_process finite-identity
+  restart_process finite-brain
+  restart_process finitechat
+  restart_process hosted-web-device
+  wait_http "restored Core" "$core_url/healthz" 120
+  wait_http "restored Finite Identity" "${FINITE_IDENTITY_AUTHORITY:?}/health" 120
+  wait_http "restored Finite Brain" "${FINITE_BRAIN_URL:?}/health" 120
+  wait_http "restored Finite Chat" "$chat_url/health" 120
+  wait_http "restored Hosted Web Device" "$hosted_device_url/healthz" 120
+
+  read_core_me
+  start_chat_updates
+  wait_for_connected_chat
+  [[ "$(personal_agent_brain_id)" == "$brain_id" ]]
+  runtime_exec "$container_machine_id" test -f \
+    "$brain_tree/agent-notes/devfinity-agent-proof.md"
+  brain_browser_smoke assert-note "$brain_proof" "$brain_id"
+  read_core_me
+  chat_state
+  attachment_route="$(node - "$recovery_inventory" "$chat_state_json" "$me_json" <<'JS'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const before = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const state = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const me = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
+const messages = state.messages || [];
+const attachments = messages.flatMap((message) =>
+  (message.media || []).map((attachment) => ({
+    roomId: message.room_id,
+    conversationId: message.conversation_id || "",
+    chatId: message.chat_id || "",
+    messageId: message.message_id,
+    attachmentId: attachment.attachment_id,
+    filename: attachment.filename,
+    mimeType: attachment.mime_type,
+  }))
+);
+const projectRows = me.projects || [];
+const afterCounts = {
+  rooms: (state.rooms || []).length,
+  topics: (state.topics || []).length,
+  chats: (state.topics || []).reduce((count, topic) => count + (topic.chats || []).length, 0),
+  messages: messages.length,
+  attachments: attachments.length,
+  projects: projectRows.length,
+  runtimes: projectRows.filter((entry) => entry.runtime).length,
+  agents: projectRows.filter((entry) => entry.project?.agent_email).length,
+};
+if (JSON.stringify(afterCounts) !== JSON.stringify(before.counts)) {
+  throw new Error(`Recovery Set count mismatch: before=${JSON.stringify(before.counts)} after=${JSON.stringify(afterCounts)}`);
+}
+const afterHistory = new Map(messages.map((message) => [message.message_id, crypto
+  .createHash("sha256")
+  .update(String(message.display_content || message.text || ""))
+  .digest("hex")]));
+for (const retained of before.history) {
+  if (afterHistory.get(retained.messageId) !== retained.contentHash) {
+    throw new Error(`retained conversation history was missing or did not decrypt: ${retained.messageId}`);
+  }
+}
+for (const retained of before.attachments) {
+  if (!attachments.some((attachment) => JSON.stringify(attachment) === JSON.stringify(retained))) {
+    throw new Error(`retained attachment metadata was missing: ${retained.attachmentId}`);
+  }
+}
+const proof = before.attachments.find((attachment) => attachment.filename === "finite-recovery-proof.txt");
+if (!proof) throw new Error("Recovery Set attachment evidence is missing");
+process.stdout.write([
+  proof.roomId,
+  proof.messageId,
+  proof.attachmentId,
+].map(encodeURIComponent).join("/"));
+JS
+)"
+  curl -fsS --max-time 30 \
+    "$dashboard_origin/api/chat/machines/$machine_id/hosted-device/attachments/$attachment_route" \
+    >"$recovered_attachment"
+  cmp "$recovery_attachment" "$recovered_attachment"
+  send_and_require_reply "Reply briefly with: Recovery Set fresh Agent turn works"
+  echo "service-booted five-part Recovery Set counts, history, attachment, Brain, and fresh Agent turn passed"
 }
 
 requesting_user_account_id() {
@@ -854,7 +1302,7 @@ publish_private_requesting_user_site() {
   sites_tree="/data/workspace/${sites_slug}"
   requesting_user_id="$(requesting_user_account_id)"
 
-  container exec \
+  runtime_exec \
     -e "DEVFINITY_SITES_SLUG=$sites_slug" \
     -e "DEVFINITY_SITES_MARKER=$sites_marker" \
     "$container_machine_id" \
@@ -876,16 +1324,16 @@ publish_private_requesting_user_site() {
       printf "<h1>%s</h1>\n" "$DEVFINITY_SITES_MARKER" >"$tree/site/index.html"
     '
 
-  container exec "$container_machine_id" fsite auth register --output json \
+  runtime_exec "$container_machine_id" fsite auth register --output json \
     >"$sites_auth_json"
-  container exec -w "$sites_tree" "$container_machine_id" \
+  runtime_exec -w "$sites_tree" "$container_machine_id" \
     fsite project init \
       --config finite.toml \
       --requesting-user-npub "$requesting_user_id" \
       --dry-run \
       --output json \
     >"$sites_dry_run_json"
-  container exec -w "$sites_tree" "$container_machine_id" \
+  runtime_exec -w "$sites_tree" "$container_machine_id" \
     fsite project init \
       --config finite.toml \
       --requesting-user-npub "$requesting_user_id" \
@@ -917,12 +1365,12 @@ JS
 )"
   IFS=$'\t' read -r sites_output_id sites_url sites_git_remote <<<"$init_fields"
 
-  container exec \
+  runtime_exec \
     -e GIT_CONFIG_GLOBAL=/data/agent/gitconfig \
     "$container_machine_id" \
     fsite auth git "$sites_slug" --store --output json \
     >"$sites_git_auth_json"
-  container exec \
+  runtime_exec \
     -e GIT_CONFIG_GLOBAL=/data/agent/gitconfig \
     -e "DEVFINITY_SITES_GIT_REMOTE=$sites_git_remote" \
     -w "$sites_tree" \
@@ -1014,7 +1462,7 @@ assert_site_unauthorized() {
 }
 
 revoke_requesting_user_site() {
-  container exec -w "$sites_tree" "$container_machine_id" \
+  runtime_exec -w "$sites_tree" "$container_machine_id" \
     fsite project share "$sites_slug" "$sites_output_id" \
       --remove-npub "$requesting_user_id" \
       --output json \
@@ -1054,21 +1502,26 @@ JS
   echo "requesting-user Share revocation invalidated live and future Sites sessions"
 }
 
-need container
 need curl
 need node
 need process-compose
 
-if [[ "${DEVFINITY_PROFILE:-}" != "apple-saas" ]]; then
-  echo "devfinity SaaS smoke requires the apple-saas profile" >&2
-  exit 64
-fi
+case "${DEVFINITY_PROFILE:-}" in
+  apple-saas)
+    runtime_driver=apple
+    need container
+    ;;
+  docker-saas)
+    runtime_driver=docker
+    need docker
+    ;;
+  *)
+    echo "devfinity SaaS smoke requires the apple-saas or docker-saas profile" >&2
+    exit 64
+    ;;
+esac
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" != "1" ]]; then
   echo "DEVFINITY_BRAIN_ONLY_SMOKE must be 0 or 1" >&2
-  exit 64
-fi
-if [[ "${DEVFINITY_BRAIN_SETUP_MATRIX:-0}" != "0" && "${DEVFINITY_BRAIN_SETUP_MATRIX:-0}" != "1" ]]; then
-  echo "DEVFINITY_BRAIN_SETUP_MATRIX must be 0 or 1" >&2
   exit 64
 fi
 if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "1" ]]; then
@@ -1080,6 +1533,11 @@ if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "0" \
   echo "DEVFINITY_CHAT_SITES_ACCEPTANCE must be 0 or 1" >&2
   exit 64
 fi
+if [[ "${DEVFINITY_BRAIN_PRODUCT_MATRIX:-0}" != "0" \
+  && "${DEVFINITY_BRAIN_PRODUCT_MATRIX:-0}" != "1" ]]; then
+  echo "DEVFINITY_BRAIN_PRODUCT_MATRIX must be 0 or 1" >&2
+  exit 64
+fi
 
 core_url="${FC_CORE_URL:?}"
 dashboard_url="${FC_DASHBOARD_URL:?}"
@@ -1088,6 +1546,11 @@ chat_url="${FINITECHAT_SERVER_URL:?}"
 hosted_device_url="${FC_HOSTED_WEB_DEVICE_URL:?}"
 sites_api_url="${FC_SITES_UPSTREAM_URL:?}"
 state_dir="${DEVFINITY_STATE_DIR:?}"
+if [[ "${DEVFINITY_BRAIN_PRODUCT_MATRIX:-0}" == "1" \
+  && "${DEVFINITY_BRAIN_PRODUCT_MATRIX_DISPOSABLE_STATE:-}" != "$state_dir" ]]; then
+  echo "Brain product matrix reset requires its exact disposable state boundary" >&2
+  exit 64
+fi
 dashboard_dir="$(pwd)/finitecomputer-v2/apps/dashboard"
 me_json="$state_dir/saas-smoke-core-me.json"
 chat_state_json="$state_dir/saas-smoke-chat-state.json"
@@ -1176,7 +1639,7 @@ fi
 
 agent_npub_before="$(runtime_agent_npub)"
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
-  if [[ "${DEVFINITY_BRAIN_SETUP_MATRIX:-0}" == "1" ]]; then
+  if [[ "${DEVFINITY_BRAIN_PRODUCT_MATRIX:-0}" == "1" ]]; then
     run_brain_setup_matrix
   fi
   brain_browser_smoke bootstrap
@@ -1186,6 +1649,9 @@ if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
   open_and_sync_personal_brain
   write_personal_agent_note
   brain_browser_smoke assert-note "$brain_proof"
+  if [[ "${DEVFINITY_BRAIN_PRODUCT_MATRIX:-0}" == "1" ]]; then
+    exercise_brain_content_and_deletion_matrix
+  fi
   if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" ]]; then
     publish_private_requesting_user_site
   fi
@@ -1240,13 +1706,13 @@ if [[ "$agent_npub_after" != "$agent_npub_before" ]]; then
   exit 1
 fi
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
-  container exec "$container_machine_id" test -f \
+  runtime_exec "$container_machine_id" test -f \
     "$brain_tree/agent-notes/devfinity-agent-proof.md"
   if [[ "$(personal_agent_brain_id)" != "$brain_id" ]]; then
     echo "Personal Agent lost its Personal Brain across Apple Container restart" >&2
     exit 1
   fi
-  container exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
+  runtime_exec -w "$brain_tree" "$container_machine_id" fbrain sync now --json \
     >"$brain_sync_json"
   assert_personal_agent_scope
   brain_browser_smoke assert-note "$brain_proof"
@@ -1259,6 +1725,10 @@ fi
 wait_for_connected_chat
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: runtime restart healed"
+fi
+
+if [[ "${DEVFINITY_BRAIN_PRODUCT_MATRIX:-0}" == "1" ]]; then
+  exercise_recovery_set_roundtrip
 fi
 
 echo "devfinity real SaaS smoke passed"

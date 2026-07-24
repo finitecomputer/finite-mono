@@ -135,7 +135,37 @@ else:
     ):
         errors.append(f"{component_brain_path}: must match canonical {brain_path}")
 
-    brain_text = brain_path.read_text(encoding="utf-8")
+    brain_reference_dir = brain_path.parent / "references"
+    brain_reference_paths = sorted(brain_reference_dir.glob("*.md"))
+    component_brain_reference_dir = Path(
+        "../finite-brain/skills/finitebrain/references"
+    )
+    canonical_reference_names = {path.name for path in brain_reference_paths}
+    component_reference_names = (
+        {path.name for path in component_brain_reference_dir.glob("*.md")}
+        if component_brain_reference_dir.is_dir()
+        else set()
+    )
+    for missing in sorted(canonical_reference_names - component_reference_names):
+        errors.append(
+            f"{component_brain_reference_dir / missing}: FiniteBrain reference copy is required"
+        )
+    for extra in sorted(component_reference_names - canonical_reference_names):
+        errors.append(
+            f"{component_brain_reference_dir / extra}: has no canonical FiniteBrain reference"
+        )
+    for name in sorted(canonical_reference_names & component_reference_names):
+        canonical = brain_reference_dir / name
+        component = component_brain_reference_dir / name
+        if component.read_text(encoding="utf-8") != canonical.read_text(
+            encoding="utf-8"
+        ):
+            errors.append(f"{component}: must match canonical {canonical}")
+
+    brain_text = "\n".join(
+        [brain_path.read_text(encoding="utf-8")]
+        + [path.read_text(encoding="utf-8") for path in brain_reference_paths]
+    )
     for marker in (
         'SERVER="${FINITE_BRAIN_SERVER_URL:?',
         'FBRAIN_CONFIG_DIR',
@@ -150,9 +180,70 @@ else:
         "different actor means another principal changed the Brain",
         "otherwise report",
         "the cause as unknown",
+        "fbrain collaborators ensure-admin",
+        '--brain "$BRAIN"',
+        "--target \"$TARGET_EMAIL\"",
+        "complete",
+        "partial",
+        "indeterminate",
+        "current key holder",
+        "another current Folder reader",
+        "Low-level permission commands are advanced primitives",
+        "do not prove complete Organization Brain Collaboration",
     ):
         if marker not in brain_text:
             errors.append(f"{brain_path}: missing runtime routing marker {marker!r}")
+
+    normalized_brain_text = re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", brain_text)
+    if re.search(
+        r"curl\b[^\n]*(?:\.well-known/nostr\.json|nip-?05)",
+        normalized_brain_text,
+        re.IGNORECASE,
+    ):
+        errors.append(
+            f"{brain_path}: normal collaboration must use native identity "
+            "resolution rather than an ad hoc NIP-05 curl probe"
+        )
+
+    collaboration_contracts = (
+        (
+            r"Reports may include.*readiness counts.*safe reason codes.*"
+            r"Never paste\s+raw response payloads.*Member Identity keys.*"
+            r"wrapped grant events.*auth\s+material.*Folder Keys.*grant plaintext",
+            "secret-safe collaboration reporting",
+        ),
+        (
+            r"normal request.*canonical Managed Agent Email.*"
+            r"fbrain collaborators ensure-admin.*--target \"\$TARGET_EMAIL\"",
+            "email-first convergent Organization Brain collaboration",
+        ),
+        (
+            r"`complete`.*authoritative postcondition.*Admin Brain\s+Role.*"
+            r"current\s+Folder Key Grant",
+            "complete-state proof",
+        ),
+        (
+            r"`partial`.*not complete.*retry the exact same command.*"
+            r"current key holder.*another current Folder reader.*"
+            r"never\s+invent or expose a holder identity",
+            "partial-state holder retry",
+        ),
+        (
+            r"`indeterminate`.*may have committed.*Do not claim success or "
+            r"clean failure\.\s+Retry the\s+exact same idempotent command",
+            "indeterminate-state retry",
+        ),
+        (
+            r"Low-level permission commands are advanced primitives.*"
+            r"do not prove complete Organization Brain Collaboration",
+            "advanced low-level warning",
+        ),
+    )
+    for pattern, behavior in collaboration_contracts:
+        if not re.search(pattern, brain_text, re.IGNORECASE | re.DOTALL):
+            errors.append(
+                f"{brain_path}: missing managed collaboration behavior for {behavior}"
+            )
 
     behavior_contracts = (
         (r"clearly\s+says\s+Personal Brain\s+or\s+Organization/Org Brain", "explicit Brain types proceed"),
@@ -168,22 +259,9 @@ else:
         if not re.search(pattern, brain_text, re.IGNORECASE | re.DOTALL):
             errors.append(f"{brain_path}: missing managed Brain behavior for {behavior}")
 
-    brain_reference_path = brain_path.parent / "references/fbrain-cli.md"
-    component_brain_reference_path = Path(
-        "../finite-brain/skills/finitebrain/references/fbrain-cli.md"
-    )
+    brain_reference_path = brain_reference_dir / "fbrain-cli.md"
     if not brain_reference_path.is_file():
         errors.append(f"{brain_reference_path}: canonical FiniteBrain CLI reference is required")
-    elif not component_brain_reference_path.is_file():
-        errors.append(
-            f"{component_brain_reference_path}: FiniteBrain CLI reference copy is required"
-        )
-    elif component_brain_reference_path.read_text(
-        encoding="utf-8"
-    ) != brain_reference_path.read_text(encoding="utf-8"):
-        errors.append(
-            f"{component_brain_reference_path}: must match canonical {brain_reference_path}"
-        )
     for forbidden_server in (
         'SERVER="https://finite.computer"',
         'SERVER="https://brain.smoke.finite.computer"',

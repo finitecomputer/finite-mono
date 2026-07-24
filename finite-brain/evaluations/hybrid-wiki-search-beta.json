@@ -1,0 +1,79 @@
+{
+  "version": "finitebrain-hybrid-search-evaluation-v1",
+  "documents": [
+    {
+      "path": "security/credential-rotation.md",
+      "title": "Credential Rotation",
+      "heading": "Device removal",
+      "text": "After removing a device, revoke its session tokens and issue replacement credentials."
+    },
+    {
+      "path": "recovery/empty-target.md",
+      "title": "Empty Target Recovery",
+      "heading": "Restore proof",
+      "text": "Prove recoverability by restoring the Recovery Set onto an empty machine before changing the authority model."
+    },
+    {
+      "path": "operations/incident-owner.md",
+      "title": "Incident Ownership",
+      "heading": "First response",
+      "text": "The incident commander coordinates responders, records decisions, and owns the handoff."
+    },
+    {
+      "path": "product/beta-consent.md",
+      "title": "Internal Beta Consent",
+      "heading": "Embedding trial",
+      "text": "Internal beta participants receive a direct explanation before wiki section text is sent to the temporary embedding service."
+    },
+    {
+      "path": "sharing/folder-grants.md",
+      "title": "Folder Grants",
+      "heading": "Partner access",
+      "text": "Give a partner the minimum Folder grant and remove that grant when the collaboration ends."
+    },
+    {
+      "path": "architecture/search-fallback.md",
+      "title": "Search Fallback",
+      "heading": "Provider outage",
+      "text": "When semantic retrieval is unavailable, continue returning lexical BM25 evidence without blocking sync."
+    }
+  ],
+  "queries": [
+    {
+      "id": "lost-device",
+      "query": "What should I do when a laptop is no longer trusted?",
+      "expectedPage": "security/credential-rotation.md",
+      "expectedHeading": "Device removal"
+    },
+    {
+      "id": "recovery-proof",
+      "query": "How do we know user data can survive a brand new host?",
+      "expectedPage": "recovery/empty-target.md",
+      "expectedHeading": "Restore proof"
+    },
+    {
+      "id": "incident-lead",
+      "query": "Who is responsible for coordinating an outage?",
+      "expectedPage": "operations/incident-owner.md",
+      "expectedHeading": "First response"
+    },
+    {
+      "id": "embedding-disclosure",
+      "query": "How are trial users informed about semantic indexing?",
+      "expectedPage": "product/beta-consent.md",
+      "expectedHeading": "Embedding trial"
+    },
+    {
+      "id": "partner-offboarding",
+      "query": "What access needs to be removed after outside collaboration finishes?",
+      "expectedPage": "sharing/folder-grants.md",
+      "expectedHeading": "Partner access"
+    },
+    {
+      "id": "semantic-outage",
+      "query": "Can agents still search if vector retrieval is down?",
+      "expectedPage": "architecture/search-fallback.md",
+      "expectedHeading": "Provider outage"
+    }
+  ]
+}

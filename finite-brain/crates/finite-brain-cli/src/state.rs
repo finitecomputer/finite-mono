@@ -13,6 +13,17 @@ use crate::{
     write_private_file_atomic_for_migration,
 };
 
+pub(crate) fn write_working_tree_state(
+    root: &Path,
+    tree: &BrainWorkingTreeStateManifest,
+) -> Result<(), CliError> {
+    let revocation_guards =
+        crate::search::revoke_semantic_admission_before_state_publish(root, tree)?;
+    write_json_file(&root.join(".finitebrain/working-tree-state.json"), tree)?;
+    drop(revocation_guards);
+    crate::search::finish_search_lifecycle_after_state_publish(root, tree)
+}
+
 /// Report the shared Finite identity without touching it: status never mints
 /// (finite-identity CLI-CONVENTIONS.md).
 pub(crate) fn auth_status(env: &CliEnvironment) -> Result<AuthStatus, CliError> {

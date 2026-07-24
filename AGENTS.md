@@ -61,3 +61,11 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
 lint/test/build, the finitechat Hermes bridge suite, and skills/search static
 checks. Release and image workflows are described in `infra/images/README.md`
 and the workflow files themselves.
+
+## Agent skills
+
+- **Issue tracker:** GitHub. See `docs/agents/issue-tracker.md`.
+- **Triage labels:** Canonical Matt Pocock skill labels. See
+  `docs/agents/triage-labels.md`.
+- **Domain documentation:** Multi-context monorepo guidance. See
+  `docs/agents/domain.md`.

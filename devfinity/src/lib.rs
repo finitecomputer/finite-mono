@@ -93,17 +93,41 @@ impl ManagedProcess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackProfile {
     AppleSaas,
+    DockerSaas,
     ServicesOnly,
 }
 
 impl StackProfile {
     fn includes_runtime(self) -> bool {
-        matches!(self, Self::AppleSaas)
+        matches!(self, Self::AppleSaas | Self::DockerSaas)
+    }
+
+    fn runner_class(self) -> &'static str {
+        match self {
+            Self::AppleSaas => "apple_container",
+            Self::DockerSaas => "local_docker",
+            Self::ServicesOnly => "apple_container",
+        }
+    }
+
+    fn runner_id(self) -> &'static str {
+        match self {
+            Self::DockerSaas => "devfinity-docker-runner",
+            Self::AppleSaas | Self::ServicesOnly => "devfinity-apple-runner",
+        }
+    }
+
+    fn source_host_id(self) -> &'static str {
+        match self {
+            Self::DockerSaas => "devfinity-docker",
+            Self::AppleSaas | Self::ServicesOnly => "devfinity-apple",
+        }
     }
 
     fn as_str(self) -> &'static str {
         match self {
             Self::AppleSaas => "apple-saas",
+            Self::DockerSaas => "docker-saas",
             Self::ServicesOnly => "services-only",
         }
     }
@@ -157,9 +181,6 @@ impl Default for AppleHostAccess {
 
 const RUNTIME_ARTIFACT_ID_PREFIX: &str = "devfinity-runtime";
 const RUNTIME_IMAGE_REF: &str = "finite-agent-runtime:devfinity";
-const RUNNER_ID: &str = "devfinity-apple-runner";
-const RUNNER_CLASS: &str = "apple_container";
-const RUNNER_SOURCE_HOST_ID: &str = "devfinity-apple";
 const DEVFINITY_RUNNER_CREDENTIAL_ID: &str = "devfinity-apple-current";
 const DEVFINITY_RUNNER_TOKEN_ENV: &str = "FC_CORE_RUNNER_CREDENTIAL_TOKEN_DEVFINITY_APPLE_CURRENT";
 const DEVFINITY_RUNNER_TOKEN: &str = "devfinity-runner-route-token";
@@ -238,13 +259,13 @@ pub fn store_inference_key(state_dir: PathBuf, input: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn devfinity_runner_credentials_json() -> String {
+fn devfinity_runner_credentials_json(profile: StackProfile) -> String {
     serde_json::json!([{
         "credentialId": DEVFINITY_RUNNER_CREDENTIAL_ID,
         "tokenEnv": DEVFINITY_RUNNER_TOKEN_ENV,
-        "runnerId": RUNNER_ID,
-        "runnerClasses": [RUNNER_CLASS],
-        "sourceHostId": RUNNER_SOURCE_HOST_ID,
+        "runnerId": profile.runner_id(),
+        "runnerClasses": [profile.runner_class()],
+        "sourceHostId": profile.source_host_id(),
         "revoked": false,
     }])
     .to_string()
@@ -372,32 +393,46 @@ impl Stack {
         if self.fresh_services_state {
             bail!("--fresh is limited to the isolated services-only smoke profile");
         }
-        if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
+        if self.profile == StackProfile::DockerSaas {
+            let status = Command::new("docker")
+                .args(["info", "--format", "{{.ServerVersion}}"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .context("failed to run Docker; install/start Docker for --docker-runtime")?;
+            if !status.success() {
+                bail!("Docker is not ready; --docker-runtime requires a reachable Docker daemon");
+            }
+            self.apple_host_access = AppleHostAccess {
+                runtime_host: "host.docker.internal".to_string(),
+                bind_host: "0.0.0.0".to_string(),
+                source: "Docker host-gateway alias",
+            };
+        } else if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
             bail!(
                 "the default devfinity SaaS profile requires Apple silicon and macOS 26; use --services-only for the portable service profile"
             );
-        }
-        ensure_apple_container_cli()?;
-
-        if dry_run {
-            if !apple_container_system_running()? {
-                bail!(
-                    "Apple Container services are stopped; run `container system start` before --dry-run (devfinity starts them automatically for a real run)"
-                );
-            }
         } else {
-            run_required(
-                Command::new("container").args(["system", "start"]),
-                "start Apple Container services",
-            )?;
-            if !apple_container_system_running()? {
-                bail!(
-                    "Apple Container services did not report running after `container system start`"
-                );
+            ensure_apple_container_cli()?;
+            if dry_run {
+                if !apple_container_system_running()? {
+                    bail!(
+                        "Apple Container services are stopped; run `container system start` before --dry-run (devfinity starts them automatically for a real run)"
+                    );
+                }
+            } else {
+                run_required(
+                    Command::new("container").args(["system", "start"]),
+                    "start Apple Container services",
+                )?;
+                if !apple_container_system_running()? {
+                    bail!(
+                        "Apple Container services did not report running after `container system start`"
+                    );
+                }
             }
+            self.apple_host_access = detect_apple_host_access()?;
         }
-
-        self.apple_host_access = detect_apple_host_access()?;
 
         if !dry_run {
             if self.inference_mode == InferenceMode::Missing {
@@ -405,14 +440,16 @@ impl Stack {
                     "chat-capable local SaaS requires a Finite Private key. Run `just dev inference-key` once, or set FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY (preferred) or FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE"
                 );
             }
-            // Apple Container 1.1 reports `builder is not running` with exit 0,
-            // while `builder start` itself is idempotent. Invoke the operation
-            // directly instead of inferring state from the exit code.
-            run_required(
-                Command::new("container")
-                    .args(["builder", "start", "--cpus", "8", "--memory", "8G"]),
-                "start the Apple Container image builder",
-            )?;
+            if self.profile == StackProfile::AppleSaas {
+                // Apple Container 1.1 reports `builder is not running` with exit 0,
+                // while `builder start` itself is idempotent. Invoke the operation
+                // directly instead of inferring state from the exit code.
+                run_required(
+                    Command::new("container")
+                        .args(["builder", "start", "--cpus", "8", "--memory", "8G"]),
+                    "start the Apple Container image builder",
+                )?;
+            }
         }
         Ok(())
     }
@@ -476,7 +513,7 @@ impl Stack {
             }
             WorkosMode::Staging(config) => (config.api_key.clone(), None),
         };
-        let runner_credentials_json = devfinity_runner_credentials_json();
+        let runner_credentials_json = devfinity_runner_credentials_json(self.profile);
         let identity_operator_token = random_local_secret()?;
         write_mode_600(
             &self.core_secret_file(),
@@ -1079,7 +1116,7 @@ wait "$postgres_pid"
             (
                 "FC_CORE_AGENT_CREATION_PLACEMENT_JSON",
                 serde_json::json!({
-                    "runnerClass": RUNNER_CLASS,
+                    "runnerClass": self.profile.runner_class(),
                     "runtimeResourceClass": "vcpu4_memory8_gib",
                 })
                 .to_string(),
@@ -1341,14 +1378,20 @@ wait "$postgres_pid"
         let process = ManagedProcess::RuntimeImage;
         let report = self.runtime_image_dir().join("build-report.json");
         let context = self.runtime_image_dir().join("context");
+        let engine = if self.profile == StackProfile::DockerSaas {
+            "docker"
+        } else {
+            "apple-container"
+        };
         let command = format!(
             concat!(
                 "exec python3 finitecomputer-v2/scripts/build_runtime_image.py ",
-                "--engine apple-container ",
+                "--engine {} ",
                 "--image-ref {} ",
                 "--context-dir {} ",
                 "--report {}"
             ),
+            engine,
             shell_quote(RUNTIME_IMAGE_REF),
             shell_quote(&context.display().to_string()),
             shell_quote(&report.display().to_string()),
@@ -1356,7 +1399,7 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
-            "Build the canonical Agent Runtime with Apple Container",
+            "Build the canonical Agent Runtime with the selected OCI engine",
             &self.repo_root,
             process,
         );
@@ -1444,11 +1487,27 @@ wait "$postgres_pid"
         let probe_script = format!(
             "for attempt in $(seq 1 120); do ({probe_once}) && exit 0; sleep 1; done; exit 1"
         );
-        let command = format!(
-            "exec container run --rm --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
-            shell_quote(RUNTIME_IMAGE_REF),
-            shell_quote(&probe_script),
-        );
+        let (cleanup, command) = if self.profile == StackProfile::DockerSaas {
+            (
+                "docker rm --force devfinity-host-network-probe >/dev/null 2>&1 || true"
+                    .to_string(),
+                format!(
+                    "exec docker run --rm --add-host host.docker.internal:host-gateway --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
+                    shell_quote(RUNTIME_IMAGE_REF),
+                    shell_quote(&probe_script),
+                ),
+            )
+        } else {
+            (
+                "container delete --force devfinity-host-network-probe >/dev/null 2>&1 || true"
+                    .to_string(),
+                format!(
+                    "exec container run --rm --name devfinity-host-network-probe --entrypoint /bin/bash {} -lc {}",
+                    shell_quote(RUNTIME_IMAGE_REF),
+                    shell_quote(&probe_script),
+                ),
+            )
+        };
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
@@ -1456,17 +1515,7 @@ wait "$postgres_pid"
             &self.repo_root,
             process,
         );
-        self.write_managed_command(
-            yaml,
-            process,
-            &[
-                String::from(
-                    "container delete --force devfinity-host-network-probe >/dev/null 2>&1 || true",
-                ),
-                command,
-            ],
-            &[],
-        );
+        self.write_managed_command(yaml, process, &[cleanup, command], &[]);
         let _ = writeln!(yaml, "    depends_on:");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::RuntimeImage);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
@@ -1571,7 +1620,7 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
-            "Real local Runner backed by Apple Container",
+            "Real local Runner backed by the selected runtime provider",
             &self.repo_root,
             process,
         );
@@ -1586,13 +1635,13 @@ wait "$postgres_pid"
         self.write_environment(
             yaml,
             &[
-                ("FC_RUNNER_CLASS", RUNNER_CLASS.to_string()),
+                ("FC_RUNNER_CLASS", self.profile.runner_class().to_string()),
                 ("FC_CORE_URL", self.core_url()),
                 ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
-                ("FC_RUNNER_ID", RUNNER_ID.to_string()),
+                ("FC_RUNNER_ID", self.profile.runner_id().to_string()),
                 (
                     "FC_RUNNER_SOURCE_HOST_ID",
-                    RUNNER_SOURCE_HOST_ID.to_string(),
+                    self.profile.source_host_id().to_string(),
                 ),
                 (
                     "FC_RUNNER_WORK_ROOT",
@@ -1628,6 +1677,12 @@ wait "$postgres_pid"
                     "FC_RUNNER_APPLE_CONTAINER_CONTAINER_PORT",
                     "8080".to_string(),
                 ),
+                (
+                    "FC_RUNNER_DOCKER_HOST_PORT",
+                    self.ports.runtime_agent.to_string(),
+                ),
+                ("FC_RUNNER_DOCKER_CONTAINER_PORT", "8080".to_string()),
+                ("FC_RUNNER_DOCKER_PULL_POLICY", "never".to_string()),
                 ("FC_RUNNER_MAX_SANDBOXES", "1".to_string()),
                 ("FC_RUNNER_IDLE_INTERVAL_MS", "1000".to_string()),
                 (
@@ -2252,14 +2307,22 @@ wait "$postgres_pid"
                     ManagedProcess::RuntimeImage => vec![
                         String::from("python3"),
                         String::from("build_runtime_image.py"),
-                        String::from("apple-container"),
+                        String::from(if self.profile == StackProfile::DockerSaas {
+                            "docker"
+                        } else {
+                            "apple-container"
+                        }),
                     ],
                     ManagedProcess::FinitePrivateLimiter => vec![
                         String::from("finite-saas-local"),
                         String::from("finite-private-limiter-up"),
                     ],
                     ManagedProcess::AppleNetworkProbe => vec![
-                        String::from("container"),
+                        String::from(if self.profile == StackProfile::DockerSaas {
+                            "docker"
+                        } else {
+                            "container"
+                        }),
                         String::from("devfinity-host-network-probe"),
                     ],
                     ManagedProcess::RuntimeArtifact => vec![
@@ -2644,6 +2707,7 @@ wait "$postgres_pid"
                 self.sites_viewer_session_token.clone(),
             ),
             ("FINITE_BRAIN_URL", self.finite_brain_url()),
+            ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
             ("FINITE_HOME", self.finite_home_dir().display().to_string()),
             ("DEVFINITY_PROFILE", self.profile.as_str().to_string()),
         ];
@@ -3418,7 +3482,8 @@ mod tests {
     #[test]
     fn runner_credential_metadata_matches_local_runner_identity() {
         let metadata: serde_json::Value =
-            serde_json::from_str(&devfinity_runner_credentials_json()).unwrap();
+            serde_json::from_str(&devfinity_runner_credentials_json(StackProfile::AppleSaas))
+                .unwrap();
 
         assert_eq!(
             metadata,
@@ -3450,7 +3515,9 @@ mod tests {
         let runner_exports = fs::read_to_string(stack.runner_auth_secret_file()).unwrap();
         assert!(core_exports.contains(&format!(
             "export FC_CORE_RUNNER_CREDENTIALS_JSON={}\n",
-            shell_quote(&devfinity_runner_credentials_json())
+            shell_quote(&devfinity_runner_credentials_json(
+                StackProfile::ServicesOnly
+            ))
         )));
         assert!(core_exports.contains(&format!(
             "export {DEVFINITY_RUNNER_TOKEN_ENV}={}\n",

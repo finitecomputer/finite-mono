@@ -63,6 +63,16 @@ runtime-image-contract:
 stripe-price-contract:
     python3 scripts/check_stripe_price_contract.py
 
+# Synthetic empty-target proof for the complete hosted Recovery Set contract.
+hosted-recovery-contract:
+    infra/scripts/test-hosted-web-chat-restore
+
+# Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
+brain-product-matrix:
+    FINITE_BRAIN_COLLABORATION_SMOKE_REPORT="$PWD/target/brain-product-matrix/organization-collaboration.json" cargo test --locked -p finite-brain-cli --test fbrain_process_acceptance built_fbrain_process_two_independent_homes_open_restricted_collaboration -- --nocapture
+    scripts/check-brain-collaboration-smoke-report.py "$PWD/target/brain-product-matrix/organization-collaboration.json"
+    scripts/devfinity-brain-product-matrix
+
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity
