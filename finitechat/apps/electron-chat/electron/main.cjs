@@ -46,6 +46,7 @@ const {
   daemonRequestVersionMatches,
   deviceLinkFailureMessage,
   loadOrCreateDeviceId,
+  markDeviceProfileInitialized,
   resolveDaemonBinary,
   startDaemonRuntime,
   validDeviceId,
@@ -55,6 +56,7 @@ let mainWindow = null;
 let authWindow = null;
 let dashboardSession = null;
 let daemonSupervisor = null;
+let daemonSupervisorDeviceId = null;
 let activeDeviceLink = null;
 let daemonFailure = null;
 let daemonLifecycle = Promise.resolve();
@@ -450,14 +452,33 @@ function daemonDataDir() {
   return process.env.FINITECHAT_HOME || path.join(app.getPath("userData"), "finitechatd");
 }
 
-function identitySecretPath() {
+function legacyIdentitySecretPath() {
   return path.join(app.getPath("userData"), "account-secret.safe");
 }
 
+function identitySecretPath() {
+  return path.join(daemonDataDir(), `account-secret.${daemonDeviceId()}.safe`);
+}
+
+function migrateLegacyIdentitySecret(targetPath) {
+  const legacyPath = legacyIdentitySecretPath();
+  if (
+    fs.existsSync(targetPath)
+    || !fs.existsSync(legacyPath)
+    || !fs.existsSync(path.join(daemonDataDir(), "client.sqlite3"))
+  ) {
+    return;
+  }
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+  fs.renameSync(legacyPath, targetPath);
+}
+
 function identityStore() {
-  if (!accountSecretStore) {
+  const secretPath = identitySecretPath();
+  if (!accountSecretStore || accountSecretStore.secretPath !== secretPath) {
+    migrateLegacyIdentitySecret(secretPath);
     accountSecretStore = new AccountSecretStore({
-      secretPath: identitySecretPath(),
+      secretPath,
       safeStorage,
     });
   }
@@ -539,6 +560,7 @@ function writeProvisionalAccountSecret(secret) {
 
 function promoteProvisionalAccountSecret() {
   identityStore().promoteProvisional();
+  fs.rmSync(legacyIdentitySecretPath(), { force: true });
 }
 
 function discardProvisionalAccountSecret() {
@@ -613,7 +635,7 @@ function daemonBinaryPath() {
   });
 }
 
-function createDaemonSupervisor(accountSecret) {
+function createDaemonSupervisor(accountSecret, deviceId) {
   const binaryPath = daemonBinaryPath();
   return new DaemonSupervisor({
     spawnProcess: spawn,
@@ -626,7 +648,7 @@ function createDaemonSupervisor(accountSecret) {
       "--server-url",
       defaultServerUrl,
       "--device-id",
-      daemonDeviceId(),
+      deviceId,
     ],
     cwd: app.isPackaged ? path.dirname(binaryPath) : repoRoot(),
     accountSecret,
@@ -753,10 +775,24 @@ async function startDaemonNow() {
     return;
   }
   try {
-    if (!daemonSupervisor) {
-      daemonSupervisor = createDaemonSupervisor(accountSecret);
+    const deviceId = daemonDeviceId();
+    if (daemonSupervisor && daemonSupervisorDeviceId !== deviceId) {
+      await daemonSupervisor.stop();
+      daemonSupervisor = null;
+      daemonSupervisorDeviceId = null;
     }
-    await startDaemonProcessRuntime(() => daemonSupervisor.start());
+    if (!daemonSupervisor) {
+      daemonSupervisor = createDaemonSupervisor(accountSecret, deviceId);
+      daemonSupervisorDeviceId = deviceId;
+    }
+    const state = await startDaemonProcessRuntime(() => daemonSupervisor.start());
+    if (state) {
+      markDeviceProfileInitialized({
+        daemonDataDirectory: daemonDataDir(),
+        deviceId,
+      });
+    }
+    return state;
   } catch (error) {
     stopUpdatePump();
     recordDaemonFailure(error);
@@ -1167,6 +1203,7 @@ async function recoverRevokedLocalDevice() {
 
   await stopDaemon();
   daemonSupervisor = null;
+  daemonSupervisorDeviceId = null;
   archiveRevokedDeviceProfile({
     userDataDirectory: app.getPath("userData"),
     daemonDataDirectory: daemonDataDir(),
@@ -1174,6 +1211,7 @@ async function recoverRevokedLocalDevice() {
     secretFile: identitySecretPath(),
     deviceId,
   });
+  accountSecretStore = null;
   daemonFailure = null;
   invalidateLocalDeviceVerification({ cancelLink: true });
   return ensureLocalDevice();
