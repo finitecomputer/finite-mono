@@ -4224,13 +4224,12 @@ button.finite-chat__site-switcher:hover {
 }
 
 .finite-chat__thread-row {
-  display: grid;
+  position: relative;
+  display: block;
   width: 100%;
   max-width: 100%;
   min-height: 30px;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
   box-sizing: border-box;
   border: 0;
   border-radius: 8px;
@@ -4263,18 +4262,24 @@ button.finite-chat__site-switcher:hover {
   color: inherit;
   cursor: pointer;
   font: inherit;
-  padding: 6px 4px 6px 18px;
+  padding: 6px 4px 6px 9px;
   text-align: left;
 }
 
 .finite-chat__thread-actions {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  z-index: 1;
   display: flex;
   min-width: 0;
   flex: 0 0 auto;
   align-items: center;
-  padding-right: 3px;
+  background: color-mix(in srgb, var(--bg-sidebar) 94.5%, var(--text-primary) 5.5%);
+  padding-left: 10px;
   opacity: 0;
   pointer-events: none;
+  transform: translateY(-50%);
   transition: opacity 140ms ease;
 }
 
