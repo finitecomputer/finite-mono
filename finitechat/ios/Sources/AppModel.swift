@@ -1293,6 +1293,59 @@ final class AppModel: ObservableObject, AppReconciler {
         )
     }
 
+    @discardableResult
+    func renameChat(
+        roomID: String,
+        topicID: String,
+        chatID: String,
+        title rawTitle: String,
+        onRenamed: (@MainActor () -> Void)? = nil,
+        onFailure: (@MainActor () -> Void)? = nil
+    ) -> Bool {
+        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return false }
+        return dispatchInBackground(
+            .renameChat(
+                roomId: roomID,
+                topicId: topicID,
+                chatId: chatID,
+                title: title
+            ),
+            onSuccess: onRenamed,
+            onFailure: { _ in onFailure?() }
+        )
+    }
+
+    @discardableResult
+    func createTopic(
+        roomID: String,
+        title rawTitle: String,
+        onCreated: (@MainActor () -> Void)? = nil,
+        onFailure: (@MainActor () -> Void)? = nil
+    ) -> Bool {
+        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return false }
+        return dispatchInBackground(
+            .createTopic(roomId: roomID, title: title),
+            onSuccess: onCreated,
+            onFailure: { _ in onFailure?() }
+        )
+    }
+
+    @discardableResult
+    func startTopicChat(
+        roomID: String,
+        topicID: String,
+        onStarted: (@MainActor () -> Void)? = nil,
+        onFailure: (@MainActor () -> Void)? = nil
+    ) -> Bool {
+        dispatchInBackground(
+            .startTopicChat(roomId: roomID, topicId: topicID, reason: nil),
+            onSuccess: onStarted,
+            onFailure: { _ in onFailure?() }
+        )
+    }
+
     func projection(for roomID: String) -> ChatRoomProjection {
         chatProjections[roomID] ?? .empty(roomID: roomID)
     }
@@ -2299,6 +2352,18 @@ final class AppModel: ObservableObject, AppReconciler {
                 category: "transport",
                 name: "rename_chat",
                 details: ["room": roomId, "topic": topicId, "chat": chatId]
+            )
+        case .createTopic(let roomId, _):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "create_topic",
+                details: ["room": roomId]
+            )
+        case .startTopicChat(let roomId, let topicId, _):
+            return DiagnosticActionSummary(
+                category: "transport",
+                name: "start_topic_chat",
+                details: ["room": roomId, "topic": topicId]
             )
         case .sendMessage(let roomId, _):
             return DiagnosticActionSummary(

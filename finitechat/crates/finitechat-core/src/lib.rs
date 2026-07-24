@@ -3029,11 +3029,6 @@ impl AppRuntimeState {
             "chat-rename",
         )?;
         self.apply_projection_events(vec![event])?;
-        self.app.selected_room_id = Some(room_id);
-        self.app.selected_topic_id = Some(topic_id);
-        self.app.selected_chat_id = Some(chat_id);
-        self.persist_app_state()?;
-        self.sync_selected_room_messages();
         self.app.status = "chat renamed".to_owned();
         Ok(())
     }
@@ -12382,6 +12377,15 @@ mod tests {
             .map(|chat| chat.title.as_str());
         assert_eq!(fallback_title, Some("Implement the chats sidebar"));
 
+        let elsewhere = alice
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Elsewhere".to_owned(),
+            })
+            .unwrap();
+        let elsewhere_topic_id = elsewhere.selected_topic_id.unwrap();
+        let elsewhere_chat_id = elsewhere.selected_chat_id.unwrap();
+
         let renamed = alice
             .dispatch_and_wait(AppAction::RenameChat {
                 room_id: room_id.clone(),
@@ -12397,6 +12401,16 @@ mod tests {
             .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
             .map(|chat| chat.title.as_str());
         assert_eq!(explicit_title, Some("SaaS chat polish"));
+        assert_eq!(
+            renamed.selected_topic_id.as_deref(),
+            Some(elsewhere_topic_id.as_str()),
+            "renaming a background chat must not change the active topic"
+        );
+        assert_eq!(
+            renamed.selected_chat_id.as_deref(),
+            Some(elsewhere_chat_id.as_str()),
+            "renaming a background chat must not change the active chat"
+        );
 
         let bob_synced = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
         let bob_title = bob_synced

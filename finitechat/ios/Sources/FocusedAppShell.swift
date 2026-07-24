@@ -30,12 +30,24 @@ func findReusableEmptyHomeChatDestination(
     roomID: String,
     topics: [AppTopicSummary]
 ) -> ChatDestination? {
-    guard let home = topics.first(where: {
-        $0.roomId == roomID && $0.topicId == "home" && !$0.archived
+    findReusableEmptyChatDestination(
+        roomID: roomID,
+        topicID: "home",
+        topics: topics
+    )
+}
+
+func findReusableEmptyChatDestination(
+    roomID: String,
+    topicID: String,
+    topics: [AppTopicSummary]
+) -> ChatDestination? {
+    guard let topic = topics.first(where: {
+        $0.roomId == roomID && $0.topicId == topicID && !$0.archived
     }) else {
         return nil
     }
-    guard let chat = home.chats
+    guard let chat = topic.chats
         .filter({ $0.messageCount == 0 })
         .max(by: { left, right in
             if left.updatedSeq != right.updatedSeq {
@@ -51,7 +63,7 @@ func findReusableEmptyHomeChatDestination(
     }
     return ChatDestination(
         roomID: roomID,
-        topicID: home.topicId,
+        topicID: topic.topicId,
         chatID: chat.chatId,
         title: chat.title,
         preview: chat.lastMessagePreview,
@@ -72,6 +84,7 @@ private struct PendingHomeSubmission {
 }
 
 struct ChatTopicGroup: Identifiable {
+    let roomID: String
     let id: String
     let title: String
     let chats: [ChatDestination]
@@ -172,6 +185,9 @@ struct ContentView: View {
                 dismiss: dismissDrawer,
                 openHome: openHomeFromDrawer,
                 startNewChat: startNewChatFromDrawer,
+                createTopic: createTopicFromDrawer,
+                startTopicChat: startTopicChatFromDrawer,
+                renameChat: renameChatFromDrawer,
                 openSettings: openSettingsFromDrawer,
                 openChat: openFromDrawer
             )
@@ -253,6 +269,7 @@ struct ContentView: View {
         return model.topics(for: roomID)
             .map { topic in
                 ChatTopicGroup(
+                    roomID: roomID,
                     id: topic.topicId,
                     title: topic.title,
                     chats: topic.chats.map { chat in
@@ -443,6 +460,101 @@ struct ContentView: View {
         }
     }
 
+    private func createTopicFromDrawer(
+        _ title: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard let roomID = model.pairedAgent?.roomId else {
+            completion(false)
+            return
+        }
+        let started = model.createTopic(
+            roomID: roomID,
+            title: title,
+            onCreated: {
+                guard let destination = selectedDestination else {
+                    completion(false)
+                    return
+                }
+                path = [destination]
+                completion(true)
+            },
+            onFailure: {
+                completion(false)
+            }
+        )
+        if !started {
+            completion(false)
+        }
+    }
+
+    private func startTopicChatFromDrawer(
+        _ group: ChatTopicGroup,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if let existing = findReusableEmptyChatDestination(
+            roomID: group.roomID,
+            topicID: group.id,
+            topics: model.topics(for: group.roomID)
+        ) {
+            let opened = model.openChat(
+                roomID: existing.roomID,
+                topicID: existing.topicID,
+                chatID: existing.chatID
+            ) {
+                path = [existing]
+                dismissDrawer()
+                completion(true)
+            }
+            if !opened {
+                completion(false)
+            }
+            return
+        }
+
+        let started = model.startTopicChat(
+            roomID: group.roomID,
+            topicID: group.id,
+            onStarted: {
+                guard let destination = selectedDestination else {
+                    completion(false)
+                    return
+                }
+                path = [destination]
+                dismissDrawer()
+                completion(true)
+            },
+            onFailure: {
+                completion(false)
+            }
+        )
+        if !started {
+            completion(false)
+        }
+    }
+
+    private func renameChatFromDrawer(
+        _ chat: ChatDestination,
+        title: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let started = model.renameChat(
+            roomID: chat.roomID,
+            topicID: chat.topicID,
+            chatID: chat.chatID,
+            title: title,
+            onRenamed: {
+                completion(true)
+            },
+            onFailure: {
+                completion(false)
+            }
+        )
+        if !started {
+            completion(false)
+        }
+    }
+
     private func openSettingsFromDrawer() {
         dismissDrawer()
         Task { @MainActor in
@@ -578,6 +690,56 @@ private struct RecentChatBadges: View {
     }
 }
 
+private enum DrawerNameEditor: Identifiable {
+    case newTopic
+    case renameChat(ChatDestination)
+
+    var id: String {
+        switch self {
+        case .newTopic:
+            "new-topic"
+        case .renameChat(let chat):
+            "rename-chat-\(chat.id)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .newTopic:
+            "New topic"
+        case .renameChat:
+            "Rename chat"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .newTopic:
+            "Topics keep related chats together."
+        case .renameChat:
+            "Choose a name that makes this chat easy to find later."
+        }
+    }
+
+    var initialName: String {
+        switch self {
+        case .newTopic:
+            ""
+        case .renameChat(let chat):
+            chat.title == "New chat" ? "" : chat.title
+        }
+    }
+
+    var submitTitle: String {
+        switch self {
+        case .newTopic:
+            "Create"
+        case .renameChat:
+            "Save"
+        }
+    }
+}
+
 struct ChatDrawerOverlay: View {
     @Environment(\.finiteTokens) private var tokens
     let isPresented: Bool
@@ -587,27 +749,58 @@ struct ChatDrawerOverlay: View {
     let dismiss: () -> Void
     let openHome: () -> Void
     let startNewChat: () -> Void
+    let createTopic: (String, @escaping (Bool) -> Void) -> Void
+    let startTopicChat: (ChatTopicGroup, @escaping (Bool) -> Void) -> Void
+    let renameChat: (ChatDestination, String, @escaping (Bool) -> Void) -> Void
     let openSettings: () -> Void
     let openChat: (ChatDestination) -> Void
+    @State private var dismissOffset: CGFloat = 0
+    @State private var isDismissDragging = false
+    @State private var nameEditor: DrawerNameEditor?
 
     var body: some View {
         GeometryReader { proxy in
+            let drawerWidth = min(tokens.drawerWidth, proxy.size.width * 0.88)
+            let revealProgress = max(0, 1 + dismissOffset / max(drawerWidth, 1))
+
             ZStack(alignment: .leading) {
                 if isPresented {
-                    Color.black.opacity(0.34)
+                    Color.black.opacity(0.34 * revealProgress)
                         .ignoresSafeArea()
                         .contentShape(Rectangle())
                         .onTapGesture(perform: dismiss)
                         .transition(.opacity)
 
                     drawerPanel
-                        .frame(width: min(tokens.drawerWidth, proxy.size.width * 0.88))
+                        .frame(width: drawerWidth)
                         .frame(maxHeight: .infinity)
+                        .offset(x: dismissOffset)
+                        .disabled(isDismissDragging)
+                        .simultaneousGesture(dismissGesture(drawerWidth: drawerWidth))
                         .transition(.move(edge: .leading))
                 }
             }
         }
         .accessibilityHidden(!isPresented)
+        .onChange(of: isPresented) { _, presented in
+            if !presented {
+                dismissOffset = 0
+                isDismissDragging = false
+                nameEditor = nil
+            }
+        }
+        .sheet(item: $nameEditor) { editor in
+            DrawerNameEditorSheet(editor: editor) { name, completion in
+                switch editor {
+                case .newTopic:
+                    createTopic(name, completion)
+                case .renameChat(let chat):
+                    renameChat(chat, name, completion)
+                }
+            }
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+        }
     }
 
     private var drawerPanel: some View {
@@ -627,7 +820,7 @@ struct ChatDrawerOverlay: View {
                     .accessibilityIdentifier("DrawerHomeButton")
                 }
 
-                Section("Topics") {
+                Section {
                     if groups.isEmpty {
                         Label("No chats yet", systemImage: "bubble.left")
                             .foregroundStyle(.secondary)
@@ -638,13 +831,31 @@ struct ChatDrawerOverlay: View {
                             DrawerTopicRows(
                                 group: group,
                                 selectedChatID: selectedChatID,
+                                startNewChat: startTopicChat,
+                                renameChat: {
+                                    nameEditor = .renameChat($0)
+                                },
                                 openChat: openChat
                             )
                         }
                     }
+                } header: {
+                    HStack {
+                        Text("Topics")
+                        Spacer()
+                        Button {
+                            nameEditor = .newTopic
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New topic")
+                        .accessibilityIdentifier("DrawerNewTopicButton")
+                    }
                 }
             }
             .listStyle(.plain)
+            .environment(\.defaultMinListRowHeight, 34)
             .scrollContentBackground(.hidden)
             .contentMargins(.vertical, 8)
 
@@ -735,6 +946,34 @@ struct ChatDrawerOverlay: View {
         .padding(.top, 8)
         .padding(.bottom, 14)
     }
+
+    private func dismissGesture(drawerWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                guard value.translation.width < 0,
+                      abs(value.translation.width) > abs(value.translation.height)
+                else {
+                    return
+                }
+                isDismissDragging = true
+                dismissOffset = max(-drawerWidth, value.translation.width)
+            }
+            .onEnded { value in
+                let horizontal = abs(value.translation.width) > abs(value.translation.height)
+                let passedDistance = value.translation.width < -(drawerWidth * 0.28)
+                let passedPrediction = value.predictedEndTranslation.width < -(drawerWidth * 0.45)
+                if horizontal && (passedDistance || passedPrediction) {
+                    dismiss()
+                } else {
+                    withAnimation(.snappy(duration: 0.22)) {
+                        dismissOffset = 0
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                        isDismissDragging = false
+                    }
+                }
+            }
+    }
 }
 
 private struct DrawerNavigationRow: View {
@@ -763,59 +1002,240 @@ private struct DrawerNavigationRow: View {
 private struct DrawerTopicRows: View {
     let group: ChatTopicGroup
     let selectedChatID: String?
+    let startNewChat: (ChatTopicGroup, @escaping (Bool) -> Void) -> Void
+    let renameChat: (ChatDestination) -> Void
     let openChat: (ChatDestination) -> Void
+    @State private var isExpanded = true
+    @State private var isStartingChat = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Label {
-                Text(group.title)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-            } icon: {
-                Image(systemName: "number")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tint)
-                    .frame(width: 24, height: 24)
-                    .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
-            }
-            .padding(.horizontal, 8)
-            .frame(minHeight: 36)
-
-            ForEach(group.chats) { chat in
-                Button {
-                    openChat(chat)
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "bubble.left")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 14)
-
-                        Text(chat.title.isEmpty ? "New chat" : chat.title)
-                            .font(.subheadline)
-                            .lineLimit(1)
-
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 8)
-                    .contentShape(Rectangle())
+        Group {
+            topicRow
+            if isExpanded {
+                ForEach(group.chats) { chat in
+                    chatRow(chat)
                 }
-                .buttonStyle(.plain)
-                .frame(minHeight: 34)
-                .background(
-                    selectedChatID == chat.chatID
-                        ? Color.accentColor.opacity(0.13)
-                        : .clear,
-                    in: RoundedRectangle(cornerRadius: 9)
-                )
-                .padding(.leading, 24)
-                .accessibilityIdentifier("DrawerChat-\(chat.chatID)")
+            }
+        }
+    }
+
+    private var topicRow: some View {
+        HStack(spacing: 6) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "number")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tint)
+                        .frame(width: 24, height: 24)
+                        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+
+                    Text(group.title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(isExpanded ? "Collapse" : "Expand") \(group.title)")
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+
+            Button(action: beginNewChat) {
+                if isStartingChat {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "plus.message")
+                }
+            }
+            .frame(width: 28, height: 28)
+            .buttonStyle(.plain)
+            .disabled(isStartingChat)
+            .accessibilityLabel("New chat in \(group.title)")
+            .accessibilityIdentifier("DrawerNewChat-\(group.id)")
+        }
+        .padding(.horizontal, 8)
+        .frame(minHeight: 36)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button(action: beginNewChat) {
+                Label("New Chat", systemImage: "plus.message")
             }
         }
         .padding(.vertical, 2)
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+    }
+
+    private func chatRow(_ chat: ChatDestination) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                openChat(chat)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "bubble.left")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 14)
+
+                    Text(chat.title.isEmpty ? "New chat" : chat.title)
+                        .font(.subheadline)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Menu {
+                Button {
+                    renameChat(chat)
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                "Actions for \(chat.title.isEmpty ? "New chat" : chat.title)"
+            )
+        }
+        .frame(minHeight: 34)
+        .background(
+            selectedChatID == chat.chatID
+                ? Color.accentColor.opacity(0.13)
+                : .clear,
+            in: RoundedRectangle(cornerRadius: 9)
+        )
+        .padding(.leading, 24)
+        .contextMenu {
+            Button {
+                renameChat(chat)
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("DrawerChat-\(chat.chatID)")
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+    }
+
+    private func beginNewChat() {
+        guard !isStartingChat else { return }
+        isStartingChat = true
+        startNewChat(group) { _ in
+            isStartingChat = false
+        }
+    }
+}
+
+private struct DrawerNameEditorSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let editor: DrawerNameEditor
+    let save: (String, @escaping (Bool) -> Void) -> Void
+    @State private var name: String
+    @State private var isSaving = false
+    @State private var saveFailed = false
+    @FocusState private var nameFocused: Bool
+
+    init(
+        editor: DrawerNameEditor,
+        save: @escaping (String, @escaping (Bool) -> Void) -> Void
+    ) {
+        self.editor = editor
+        self.save = save
+        _name = State(initialValue: editor.initialName)
+    }
+
+    private var normalizedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var nameIsValid: Bool {
+        !normalizedName.isEmpty && normalizedName.utf8.count <= 120
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Name", text: $name)
+                        .focused($nameFocused)
+                        .textInputAutocapitalization(.sentences)
+                        .submitLabel(.done)
+                        .onSubmit(saveName)
+                        .accessibilityIdentifier("DrawerNameField")
+                } footer: {
+                    if normalizedName.utf8.count > 120 {
+                        Text("Name is too long.")
+                            .foregroundStyle(.red)
+                    } else if saveFailed {
+                        Text("Couldn’t save that change. Try again.")
+                            .foregroundStyle(.red)
+                    } else {
+                        Text(editor.explanation)
+                    }
+                }
+            }
+            .navigationTitle(editor.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .interactiveDismissDisabled(isSaving)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", role: .cancel) {
+                        dismiss()
+                    }
+                    .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(action: saveName) {
+                        if isSaving {
+                            ProgressView()
+                        } else {
+                            Text(editor.submitTitle)
+                        }
+                    }
+                    .disabled(!nameIsValid || isSaving)
+                    .accessibilityIdentifier("DrawerNameSaveButton")
+                }
+            }
+            .task {
+                nameFocused = true
+            }
+        }
+    }
+
+    private func saveName() {
+        guard nameIsValid, !isSaving else { return }
+        isSaving = true
+        saveFailed = false
+        save(normalizedName) { succeeded in
+            isSaving = false
+            if succeeded {
+                dismiss()
+            } else {
+                saveFailed = true
+            }
+        }
     }
 }
 
@@ -1037,11 +1457,13 @@ private enum FocusedPreviewFixtures {
         agentName: "Ada",
         groups: [
             ChatTopicGroup(
+                roomID: "agent",
                 id: "home",
                 title: "Home",
                 chats: FocusedPreviewFixtures.recent.filter { $0.topicID == "home" }
             ),
             ChatTopicGroup(
+                roomID: "agent",
                 id: "writing",
                 title: "Writing",
                 chats: FocusedPreviewFixtures.recent.filter { $0.topicID == "writing" }
@@ -1051,6 +1473,9 @@ private enum FocusedPreviewFixtures {
         dismiss: {},
         openHome: {},
         startNewChat: {},
+        createTopic: { _, completion in completion(true) },
+        startTopicChat: { _, completion in completion(true) },
+        renameChat: { _, _, completion in completion(true) },
         openSettings: {},
         openChat: { _ in }
     )

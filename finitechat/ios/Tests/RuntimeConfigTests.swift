@@ -2285,6 +2285,64 @@ final class AppModelPersistenceTests: XCTestCase {
         XCTAssertEqual(intentKey, "ios-home-photo")
     }
 
+    func testSidebarTopicAndChatActionsDispatchThroughRust() async throws {
+        let state = savedChatStateWithSelectedHomeTopicChat()
+        let runtime = FakeFiniteChatRuntime(
+            initialState: state,
+            startRuntimeState: state
+        )
+        let model = AppModel(
+            config: RuntimeConfig(
+                serverURL: "http://127.0.0.1:1",
+                deviceID: "sidebar-actions"
+            ),
+            applicationSupportURL: try temporarySupportURL(),
+            args: ["FiniteChat"],
+            startsUpdateLoop: false
+        ) { _ in
+            runtime
+        }
+
+        model.start()
+        try await waitForActions(runtime, [.startRuntime])
+
+        XCTAssertFalse(model.renameChat(
+            roomID: "room-main",
+            topicID: "home",
+            chatID: "home-chat",
+            title: "   "
+        ))
+        XCTAssertTrue(model.renameChat(
+            roomID: "room-main",
+            topicID: "home",
+            chatID: "home-chat",
+            title: "  Shipping plan  "
+        ))
+        XCTAssertTrue(model.createTopic(
+            roomID: "room-main",
+            title: "  Design  "
+        ))
+        XCTAssertTrue(model.startTopicChat(
+            roomID: "room-main",
+            topicID: "home"
+        ))
+
+        try await waitForActions(
+            runtime,
+            [
+                .startRuntime,
+                .renameChat(
+                    roomId: "room-main",
+                    topicId: "home",
+                    chatId: "home-chat",
+                    title: "Shipping plan"
+                ),
+                .createTopic(roomId: "room-main", title: "Design"),
+                .startTopicChat(roomId: "room-main", topicId: "home", reason: nil),
+            ]
+        )
+    }
+
     func testAttachmentsUseSelectedTopicChatWhenAvailable() async throws {
         let config = RuntimeConfig(
             serverURL: "http://127.0.0.1:1",
