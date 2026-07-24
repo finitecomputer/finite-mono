@@ -27,6 +27,7 @@ const {
   deviceLinkFailureMessage,
   legacyHostnameDeviceId,
   loadOrCreateDeviceId,
+  markDeviceProfileInitialized,
   parseReadyRecord,
   parseDeviceLinkReadyRecord,
   parseDeviceLinkSecretRecord,
@@ -180,6 +181,101 @@ test("fresh Device ids are random, persisted, and independent of hostname", (con
   assert.equal(first, "electron-11111111-2222-4333-8444-555555555555");
   assert.equal(second, first);
   assert.equal(JSON.parse(fs.readFileSync(settingsFile, "utf8")).deviceId, first);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(daemonDataDirectory, "device-identity.json"), "utf8")),
+    { version: 1, deviceId: first, initialized: false }
+  );
+});
+
+test("deleting a cryptographic profile rotates a stale desktop Device id", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const settingsFile = path.join(root, "desktop-settings.json");
+  const daemonDataDirectory = path.join(root, "finitechatd");
+  const first = loadOrCreateDeviceId({
+    settingsFile,
+    daemonDataDirectory,
+    hostname: "host",
+    randomUUID: () => "11111111-2222-4333-8444-555555555555",
+  });
+  fs.writeFileSync(path.join(daemonDataDirectory, "client.sqlite3"), "cryptographic-state");
+  fs.rmSync(daemonDataDirectory, { recursive: true });
+
+  const replacement = loadOrCreateDeviceId({
+    settingsFile,
+    daemonDataDirectory,
+    hostname: "host",
+    randomUUID: () => "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+  });
+  assert.notEqual(replacement, first);
+  assert.equal(replacement, "electron-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, "utf8")).deviceId, replacement);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(daemonDataDirectory, "device-identity.json"), "utf8")).deviceId,
+    replacement
+  );
+});
+
+test("a persisted cryptographic profile restores its Device id mirror", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const settingsFile = path.join(root, "desktop-settings.json");
+  const daemonDataDirectory = path.join(root, "finitechatd");
+  const deviceId = loadOrCreateDeviceId({
+    settingsFile,
+    daemonDataDirectory,
+    hostname: "host",
+    randomUUID: () => "11111111-2222-4333-8444-555555555555",
+  });
+  fs.rmSync(settingsFile);
+
+  assert.equal(
+    loadOrCreateDeviceId({
+      settingsFile,
+      daemonDataDirectory,
+      hostname: "renamed-host",
+      randomUUID: () => {
+        throw new Error("persisted profile must not rotate");
+      },
+    }),
+    deviceId
+  );
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, "utf8")).deviceId, deviceId);
+});
+
+test("rebuilding an initialized local store rotates its Device generation", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const settingsFile = path.join(root, "desktop-settings.json");
+  const daemonDataDirectory = path.join(root, "finitechatd");
+  const first = loadOrCreateDeviceId({
+    settingsFile,
+    daemonDataDirectory,
+    hostname: "host",
+    randomUUID: () => "11111111-2222-4333-8444-555555555555",
+  });
+  fs.writeFileSync(path.join(daemonDataDirectory, "client.sqlite3"), "cryptographic-state");
+  markDeviceProfileInitialized({ daemonDataDirectory, deviceId: first });
+  fs.writeFileSync(path.join(daemonDataDirectory, `account-secret.${first}.safe`), "encrypted-secret");
+  fs.rmSync(path.join(daemonDataDirectory, "client.sqlite3"));
+
+  const replacement = loadOrCreateDeviceId({
+    settingsFile,
+    daemonDataDirectory,
+    hostname: "host",
+    randomUUID: () => "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+  });
+  assert.equal(replacement, "electron-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  assert.notEqual(replacement, first);
+  assert.equal(fs.existsSync(path.join(daemonDataDirectory, `account-secret.${first}.safe`)), true);
+  assert.equal(
+    fs.existsSync(path.join(daemonDataDirectory, `account-secret.${replacement}.safe`)),
+    false
+  );
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(daemonDataDirectory, "device-identity.json"), "utf8")),
+    { version: 1, deviceId: replacement, initialized: false }
+  );
 });
 
 test("a pre-alpha data directory pins the legacy hostname Device id once", (context) => {
@@ -207,6 +303,11 @@ test("a pre-alpha data directory pins the legacy hostname Device id once", (cont
       randomUUID: () => "unused",
     }),
     migrated
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(daemonDataDirectory, "device-identity.json"), "utf8"))
+      .initialized,
+    true
   );
 });
 

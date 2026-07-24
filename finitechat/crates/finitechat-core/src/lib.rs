@@ -5448,12 +5448,14 @@ impl AppRuntimeState {
                             .to_owned(),
                     });
                 }
-                self.core.store.start_link_fanout_and_save(
-                    &mut self.core.device,
-                    fanout_id.clone(),
-                    target.clone(),
-                )
-                .map_err(store_error)?;
+                self.core
+                    .store
+                    .start_link_fanout_and_save(
+                        &mut self.core.device,
+                        fanout_id.clone(),
+                        target.clone(),
+                    )
+                    .map_err(store_error)?;
             }
         }
 
@@ -18283,7 +18285,7 @@ mod tests {
                 .join("electron-replacement")
                 .to_string_lossy()
                 .into_owned(),
-            server_url,
+            server_url: server_url.clone(),
             device_id: "electron-alpha".to_owned(),
             account_secret_hex: Some(hosted.state().unwrap().identity.account_secret_hex),
             now_unix_seconds: Some(NOW),
@@ -18308,6 +18310,36 @@ mod tests {
                 .to_string()
                 .contains("already belongs to an enrolled Device"),
             "a replacement cryptographic state must fail closed instead of reporting ready: {collision}"
+        );
+
+        let fresh_replacement = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir
+                .path()
+                .join("electron-fresh-replacement")
+                .to_string_lossy()
+                .into_owned(),
+            server_url,
+            device_id: "electron-beta".to_owned(),
+            account_secret_hex: Some(hosted.state().unwrap().identity.account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        fresh_replacement
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("fresh replacement publishes its own cryptographic state");
+        let fresh_link = hosted
+            .link_device_and_wait(
+                "link-fresh-replacement".to_owned(),
+                "electron-beta".to_owned(),
+            )
+            .expect("a fresh Device generation links normally");
+        assert!(fresh_link.fanout_complete);
+        let fresh_state = fresh_replacement
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("fresh replacement activates its Welcome");
+        assert_eq!(
+            app_room(&fresh_state, &room_id).state,
+            AppRoomState::Connected
         );
     }
 
