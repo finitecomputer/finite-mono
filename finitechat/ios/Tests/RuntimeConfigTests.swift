@@ -1580,14 +1580,18 @@ final class AppModelPersistenceTests: XCTestCase {
 
     func testSignOutDeletesSavedNostrIdentityAndReturnsToLoginGate() throws {
         let material = try createNostrIdentity()
-        let config = RuntimeConfig(
-            serverURL: "http://127.0.0.1:1",
-            deviceID: "qt433"
+        let supportURL = try temporarySupportURL()
+        let configURL = supportURL.appendingPathComponent("finitechat_config.json")
+        let config = RuntimeConfig.load(
+            environment: [:],
+            args: ["FiniteChat"],
+            storageURL: configURL
         )
+        let signedOutDeviceID = config.deviceID
         var state = emptyChatState()
         state.identity = Identity(
             accountId: material.accountId,
-            deviceId: "qt433",
+            deviceId: signedOutDeviceID,
             accountSecretHex: material.accountSecretHex
         )
         let runtime = FakeFiniteChatRuntime(
@@ -1597,7 +1601,8 @@ final class AppModelPersistenceTests: XCTestCase {
         let identityStore = MemoryNostrIdentityStore(identity: AppNostrIdentity(material: material))
         let model = AppModel(
             config: config,
-            applicationSupportURL: try temporarySupportURL(),
+            applicationSupportURL: supportURL,
+            args: ["FiniteChat"],
             requiresNostrLogin: true,
             nostrIdentityStore: identityStore,
             startsUpdateLoop: false
@@ -1618,6 +1623,11 @@ final class AppModelPersistenceTests: XCTestCase {
         XCTAssertNil(model.runtimeStorePath)
         XCTAssertEqual(model.serverURL, "https://chat.finite.computer")
         assertGeneratedDefaultDeviceID(model.deviceID)
+        XCTAssertNotEqual(
+            model.deviceID,
+            signedOutDeviceID,
+            "deleting one cryptographic Device state must not reuse its remote Device id"
+        )
     }
 
     func testSignOutRemovesPushTokenBeforeClearingRuntime() async throws {

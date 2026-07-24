@@ -162,7 +162,7 @@ struct RuntimeConfig: Codable, Equatable {
         return config.normalized()
     }
 
-    private static func configURL() throws -> URL {
+    fileprivate static func configURL() throws -> URL {
         let support = try FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -173,14 +173,10 @@ struct RuntimeConfig: Codable, Equatable {
     }
 
     private static func generatedDefaultDeviceID() -> String {
-        let installID = UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
-        let normalized = installID
+        let normalized = UUID().uuidString
             .lowercased()
             .filter { $0.isLetter || $0.isNumber }
         let suffix = normalized.prefix(12)
-        if suffix.isEmpty {
-            return "\(generatedDeviceIDPrefix)\(UUID().uuidString.lowercased().prefix(12))"
-        }
         return "\(generatedDeviceIDPrefix)\(suffix)"
     }
 
@@ -616,6 +612,7 @@ final class AppModel: ObservableObject, AppReconciler {
         let resolvedApplicationSupportURL = applicationSupportURL ?? productHarnessSupport.url
         let resolvedConfigStorageURL = configStorageURL
             ?? resolvedApplicationSupportURL?.appendingPathComponent("finitechat_config.json")
+            ?? (try? RuntimeConfig.configURL())
         let resolvedConfig = config ?? RuntimeConfig.load(
             args: args,
             storageURL: resolvedConfigStorageURL
