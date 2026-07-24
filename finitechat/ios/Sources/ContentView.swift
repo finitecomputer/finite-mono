@@ -567,47 +567,81 @@ private struct FocusedMessageOverlay: View {
 
     var body: some View {
         GeometryReader { geometry in
+            let top = overlayTop(in: geometry)
+            let availableHeight = max(1, geometry.size.height - top - 12)
+
             ZStack {
                 Color.black.opacity(0.18)
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onDismiss)
 
-                VStack(alignment: message.isMine ? .trailing : .leading, spacing: 10) {
-                    if canReact {
-                        FocusedReactionBar(onReact: onReact, onMore: onMoreReaction)
-                    }
-
-                    FocusedChatMessageCard(
-                        message: message,
-                        replyTarget: replyTarget
-                    )
-                    .frame(maxWidth: min(geometry.size.width * 0.82, 360))
-
-                    if actionsVisible {
-                        FocusedMessageActionCard(
-                            canReply: canReply,
-                            canRetry: canRetry,
-                            canCopy: canCopy,
-                            onReply: onReply,
-                            onRetry: onRetry,
-                            onCopy: onCopy,
-                            onSaveMedia: onSaveMedia,
-                            saveMediaTitle: saveMediaTitle
-                        )
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-                }
+                focusedContent(in: geometry)
                 .frame(
                     maxWidth: .infinity,
-                    maxHeight: .infinity,
+                    maxHeight: availableHeight,
                     alignment: message.isMine ? .topTrailing : .topLeading
                 )
-                .padding(.top, overlayTop(in: geometry))
+                .padding(.top, top)
                 .padding(.horizontal, 20)
                 .animation(.easeOut(duration: 0.16), value: actionsVisible)
             }
         }
+    }
+
+    private func focusedContent(in geometry: GeometryProxy) -> some View {
+        ViewThatFits(in: .vertical) {
+            focusedStack {
+                focusedMessageCard(in: geometry)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+
+            focusedStack {
+                ScrollView(.vertical) {
+                    focusedMessageCard(in: geometry)
+                        .frame(
+                            maxWidth: .infinity,
+                            alignment: message.isMine ? .trailing : .leading
+                        )
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .accessibilityIdentifier("FocusedMessageScroller")
+            }
+        }
+    }
+
+    private func focusedStack<MessageContent: View>(
+        @ViewBuilder messageContent: () -> MessageContent
+    ) -> some View {
+        VStack(alignment: message.isMine ? .trailing : .leading, spacing: 10) {
+            if canReact {
+                FocusedReactionBar(onReact: onReact, onMore: onMoreReaction)
+            }
+
+            messageContent()
+
+            if actionsVisible {
+                FocusedMessageActionCard(
+                    canReply: canReply,
+                    canRetry: canRetry,
+                    canCopy: canCopy,
+                    onReply: onReply,
+                    onRetry: onRetry,
+                    onCopy: onCopy,
+                    onSaveMedia: onSaveMedia,
+                    saveMediaTitle: saveMediaTitle
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    private func focusedMessageCard(in geometry: GeometryProxy) -> some View {
+        FocusedChatMessageCard(
+            message: message,
+            replyTarget: replyTarget
+        )
+        .frame(maxWidth: min(geometry.size.width * 0.82, 360))
     }
 
     private func overlayTop(in geometry: GeometryProxy) -> CGFloat {
@@ -615,8 +649,21 @@ private struct FocusedMessageOverlay: View {
         let localAnchorY = anchorFrame.minY - overlayOriginY
         let reactionBarSpace: CGFloat = canReact ? 58 : 0
         let idealTop = localAnchorY - reactionBarSpace
-        let maxTop = max(12, geometry.size.height * 0.58)
+        let maxTop = max(
+            12,
+            min(
+                geometry.size.height * 0.58,
+                geometry.size.height - minimumVisibleContentHeight
+            )
+        )
         return min(max(idealTop, 12), maxTop)
+    }
+
+    private var minimumVisibleContentHeight: CGFloat {
+        let reactionHeight: CGFloat = canReact ? 58 : 0
+        let actionRows = 2 + (canRetry ? 1 : 0) + (onSaveMedia == nil ? 0 : 1)
+        let actionsHeight = actionsVisible ? CGFloat(actionRows * 42) + 10 : 0
+        return reactionHeight + actionsHeight + 108
     }
 }
 
@@ -1196,3 +1243,69 @@ private extension AppRoomState {
         }
     }
 }
+
+#Preview("Focused message — long") {
+    ZStack {
+        Color(.systemGroupedBackground)
+            .ignoresSafeArea()
+
+        FocusedMessageOverlay(
+            message: ChatMessage(
+                roomId: "preview-room",
+                seq: 1,
+                messageId: "preview-long-message",
+                conversationId: nil,
+                chatId: "preview-chat",
+                senderAccountId: "agent",
+                senderDeviceId: "agent-device",
+                senderDisplayName: "Finite",
+                senderNpub: nil,
+                text: focusedMessagePreviewText,
+                displayContent: focusedMessagePreviewText,
+                richTextJson: "",
+                kind: .message,
+                status: .complete,
+                finalDelivery: true,
+                editOfMessageId: nil,
+                payload: Data(focusedMessagePreviewText.utf8),
+                replyToMessageId: nil,
+                isMine: false,
+                outboundDelivery: nil,
+                reactions: [],
+                media: [],
+                readReceipt: nil,
+                poll: nil,
+                timestampUnixSeconds: 1_700_000_000,
+                displayTimestamp: "9:41 AM"
+            ),
+            replyTarget: nil,
+            anchorFrame: CGRect(x: 48, y: 260, width: 280, height: 520),
+            actionsVisible: true,
+            onDismiss: {},
+            onReact: { _ in },
+            onMoreReaction: {},
+            onReply: {},
+            onRetry: {},
+            onCopy: {},
+            onSaveMedia: nil,
+            saveMediaTitle: nil,
+            canReact: true,
+            canReply: true,
+            canRetry: false,
+            canCopy: true
+        )
+    }
+}
+
+private let focusedMessagePreviewText = """
+An everything bagel is topped with a mix of classic savory seasonings:
+
+• Sesame seeds
+• Poppy seeds
+• Dried garlic
+• Dried onion
+• Coarse salt
+
+The preview intentionally continues long enough to exercise the bounded focused-message layout. \
+Reactions and actions should remain visible while this message body scrolls independently.
+"""
