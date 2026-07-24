@@ -429,28 +429,18 @@ function parseDeviceLinkReadyRecord(line) {
     !record ||
     typeof record !== "object" ||
     Array.isArray(record) ||
+    Object.keys(record).length !== 3 ||
     record.event !== "link_ready" ||
     typeof record.link_session_id !== "string" ||
     !record.link_session_id ||
     typeof record.target_device_id !== "string" ||
-    !validDeviceId(record.target_device_id) ||
-    typeof record.approval_url !== "string"
+    !validDeviceId(record.target_device_id)
   ) {
     throw new Error("Finite Chat device link emitted an invalid status record");
-  }
-  let approvalUrl;
-  try {
-    approvalUrl = new URL(record.approval_url);
-  } catch {
-    throw new Error("Finite Chat device link emitted an invalid approval address");
-  }
-  if (!matchesAllowedWebProtocol(approvalUrl) || approvalUrl.username || approvalUrl.password) {
-    throw new Error("Finite Chat device link emitted an invalid approval address");
   }
   return {
     link_session_id: record.link_session_id,
     target_device_id: record.target_device_id,
-    approval_url: approvalUrl.toString(),
   };
 }
 
@@ -478,25 +468,6 @@ function parseDeviceLinkSecretRecord(line) {
     throw new Error("Finite Chat device link emitted an invalid private result");
   }
   return record.account_secret;
-}
-
-function validDeviceLinkApproval(ready, dashboardUrl) {
-  try {
-    const approval = new URL(ready.approval_url);
-    const dashboard = new URL(dashboardUrl);
-    const queryKeys = [...approval.searchParams.keys()];
-    return (
-      approval.origin === dashboard.origin &&
-      approval.pathname === "/dashboard/device-link" &&
-      queryKeys.length === 2 &&
-      queryKeys.includes("link_session_id") &&
-      queryKeys.includes("target_device_id") &&
-      approval.searchParams.get("link_session_id") === ready.link_session_id &&
-      approval.searchParams.get("target_device_id") === ready.target_device_id
-    );
-  } catch {
-    return false;
-  }
 }
 
 class BoundedLineReader {
@@ -543,7 +514,6 @@ class DeviceLinkSupervisor {
     spawnProcess,
     binaryPath,
     serverUrl,
-    dashboardUrl,
     deviceId,
     cwd,
     storeAccountSecret,
@@ -553,7 +523,6 @@ class DeviceLinkSupervisor {
     this.spawnProcess = spawnProcess;
     this.binaryPath = binaryPath;
     this.serverUrl = serverUrl;
-    this.dashboardUrl = dashboardUrl;
     this.deviceId = deviceId;
     this.cwd = cwd;
     this.storeAccountSecret = storeAccountSecret;
@@ -584,8 +553,6 @@ class DeviceLinkSupervisor {
         "link",
         "--server-url",
         this.serverUrl,
-        "--dashboard-url",
-        this.dashboardUrl,
         "--device-id",
         this.deviceId,
         "--result-fd",
@@ -660,10 +627,6 @@ class DeviceLinkSupervisor {
       }
       if (this.ready.target_device_id !== this.deviceId) {
         this.#fail(new Error("Finite Chat device link targeted a different Device"));
-        return;
-      }
-      if (!validDeviceLinkApproval(this.ready, this.dashboardUrl)) {
-        this.#fail(new Error("Finite Chat device link emitted an invalid approval address"));
         return;
       }
       this.resolveReady(this.ready);
@@ -1097,6 +1060,5 @@ module.exports = {
   resolveDaemonBinary,
   startDaemonRuntime,
   startupDocument,
-  validDeviceLinkApproval,
   validDeviceId,
 };

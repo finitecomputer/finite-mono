@@ -84,7 +84,6 @@ async fn link_process_keeps_the_account_secret_on_fd3_until_fd4_confirms_storage
 exec 4<"$FINITECHAT_TEST_CONFIRM"
 exec "$FINITECHAT_TEST_BIN" link \
   --server-url "$FINITECHAT_TEST_SERVER_URL" \
-  --dashboard-url https://finite.test \
   --device-id electron-process-link \
   --result-fd 3 \
   --confirm-fd 4 \
@@ -123,12 +122,7 @@ exec "$FINITECHAT_TEST_BIN" link \
     let ready: Value = serde_json::from_str(&ready_line).unwrap();
     assert_eq!(ready["event"], "link_ready");
     assert_eq!(ready["target_device_id"], "electron-process-link");
-    assert!(
-        ready["approval_url"]
-            .as_str()
-            .unwrap()
-            .starts_with("https://finite.test/dashboard/device-link?")
-    );
+    assert_eq!(ready.as_object().unwrap().len(), 3);
     assert!(!ready_line.contains(ACCOUNT_SECRET));
     assert!(ready.get("pairing_secret_key").is_none());
 

@@ -34,7 +34,6 @@ const {
   resolveDaemonBinary,
   startDaemonRuntime,
   startupDocument,
-  validDeviceLinkApproval,
 } = require("./daemon-process.cjs");
 
 function temporaryDirectory() {
@@ -63,8 +62,6 @@ function emitDeviceLinkReady(child) {
       event: "link_ready",
       link_session_id: "link-public-test",
       target_device_id: "electron-test-device",
-      approval_url:
-        "https://finite.computer/dashboard/device-link?link_session_id=link-public-test&target_device_id=electron-test-device",
     })}\n`
   );
 }
@@ -367,16 +364,17 @@ test("device-link public and private records are narrow and independently valida
       event: "link_ready",
       link_session_id: "link-public-test",
       target_device_id: "electron-test-device",
-      approval_url:
-        "https://finite.computer/dashboard/device-link?link_session_id=link-public-test&target_device_id=electron-test-device",
     })
   );
-  assert.equal(ready.link_session_id, "link-public-test");
-  assert.equal(validDeviceLinkApproval(ready, "https://finite.computer"), true);
-  assert.equal(validDeviceLinkApproval(ready, "https://operator.example"), false);
+  assert.deepEqual(ready, {
+    link_session_id: "link-public-test",
+    target_device_id: "electron-test-device",
+  });
   assert.equal(parseDeviceLinkSecretRecord(JSON.stringify({ account_secret: "c".repeat(64) })), "c".repeat(64));
   assert.throws(
-    () => parseDeviceLinkReadyRecord('{"event":"link_ready","approval_url":"file:///tmp/secret"}'),
+    () => parseDeviceLinkReadyRecord(
+      '{"event":"link_ready","link_session_id":"link-public-test","target_device_id":"electron-test-device","unexpected":"value"}'
+    ),
     /invalid status record/
   );
   assert.throws(
@@ -569,7 +567,6 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
     },
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async (secret) => storedSecrets.push(secret),
@@ -582,8 +579,6 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
       event: "link_ready",
       link_session_id: "link-public-test",
       target_device_id: "electron-test-device",
-      approval_url:
-        "https://finite.computer/dashboard/device-link?link_session_id=link-public-test&target_device_id=electron-test-device",
     })}\n`
   );
   const ready = await readyPromise;
@@ -593,8 +588,6 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
     "link",
     "--server-url",
     "https://chat.finite.computer",
-    "--dashboard-url",
-    "https://finite.computer",
     "--device-id",
     "electron-test-device",
     "--result-fd",
@@ -620,7 +613,6 @@ test("device link propagates an allowlisted payload rejection without reflecting
     spawnProcess: () => child,
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async () => {},
@@ -653,7 +645,6 @@ test("device link keeps unknown child stderr behind the generic renderer failure
     spawnProcess: () => child,
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async () => {},
@@ -686,7 +677,6 @@ test("device link drains final stdout data after exit before settling on close",
     spawnProcess: () => child,
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async () => {},
@@ -699,8 +689,6 @@ test("device link drains final stdout data after exit before settling on close",
       event: "link_ready",
       link_session_id: "link-public-test",
       target_device_id: "electron-test-device",
-      approval_url:
-        "https://finite.computer/dashboard/device-link?link_session_id=link-public-test&target_device_id=electron-test-device",
     })}\n`
   );
   await readyPromise;
@@ -824,7 +812,6 @@ test("restart discards a provisional secret after a crash between fd3 and fd4", 
     spawnProcess: () => child,
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async (secret) => {
@@ -869,7 +856,6 @@ test("restart discards a provisional secret after fd4 but before linked", async 
     spawnProcess: () => child,
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async (secret) => store.writeProvisional(secret),
@@ -903,7 +889,6 @@ test("the final linked event promotes the provisional safe-storage file", async 
     spawnProcess: () => child,
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async (secret) => store.writeProvisional(secret),
@@ -934,7 +919,6 @@ test("device link never confirms when secure storage fails", async () => {
     spawnProcess: () => child,
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async () => {
@@ -948,8 +932,6 @@ test("device link never confirms when secure storage fails", async () => {
       event: "link_ready",
       link_session_id: "link-public-test",
       target_device_id: "electron-test-device",
-      approval_url:
-        "https://finite.computer/dashboard/device-link?link_session_id=link-public-test&target_device_id=electron-test-device",
     })}\n`
   );
   await readyPromise;
@@ -972,7 +954,6 @@ test("cancelling during secure storage never confirms and waits for the write", 
     spawnProcess: () => child,
     binaryPath: "/tmp/finitechatd",
     serverUrl: "https://chat.finite.computer",
-    dashboardUrl: "https://finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async () => storageGate,
@@ -983,8 +964,6 @@ test("cancelling during secure storage never confirms and waits for the write", 
       event: "link_ready",
       link_session_id: "link-public-test",
       target_device_id: "electron-test-device",
-      approval_url:
-        "https://finite.computer/dashboard/device-link?link_session_id=link-public-test&target_device_id=electron-test-device",
     })}\n`
   );
   await readyPromise;

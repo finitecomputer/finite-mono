@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const {
   assertDesktopChatAction,
@@ -303,30 +304,45 @@ test("account and daemon identity projections are exact and fail closed on misma
 
 test("remote dashboard preload contains only the versioned local-chat bridge", () => {
   const preload = fs.readFileSync(path.join(__dirname, "preload.cjs"), "utf8");
-  for (const capability of [
-    "ensureLocalDevice",
-    "recoverLocalDevice",
+  let exposed;
+  vm.runInNewContext(preload, {
+    require(moduleName) {
+      assert.equal(moduleName, "electron");
+      return {
+        contextBridge: {
+          exposeInMainWorld(name, value) {
+            assert.equal(name, "finiteChatDesktop");
+            exposed = value;
+          },
+        },
+        ipcRenderer: {
+          invoke() {},
+          on() {},
+          removeListener() {},
+        },
+      };
+    },
+    TextEncoder,
+  });
+  assert.deepEqual([...exposed.capabilities], [
+    "local-chat-v1",
+    "automatic-device-link-v1",
+    "revoked-device-recovery-v1",
+  ]);
+  assert.deepEqual(Object.keys(exposed).sort(), [
+    "attachmentUrl",
+    "capabilities",
     "daemonState",
     "dispatchDaemonAction",
-    "uploadDaemonAttachments",
-    "attachmentUrl",
-    "onDaemonUpdate",
-    "onDaemonGeneration",
+    "ensureLocalDevice",
     "onDaemonError",
+    "onDaemonGeneration",
+    "onDaemonUpdate",
     "onDeviceLinkStatus",
-  ]) {
-    assert.match(preload, new RegExp(`\\b${capability}\\b`));
-  }
-  for (const forbidden of [
-    "clearAccountSecret",
-    "openDeviceLinkApproval",
-    "copyText",
-    "completeOnboarding",
-    "consumePendingTargetUrl",
-    "daemonConnection",
-  ]) {
-    assert.doesNotMatch(preload, new RegExp(`\\b${forbidden}\\b`));
-  }
+    "recoverLocalDevice",
+    "uploadDaemonAttachments",
+    "version",
+  ].sort());
 });
 
 test("daemon bootstrap stays internal and the remote shell does not claim invite deep links", () => {
