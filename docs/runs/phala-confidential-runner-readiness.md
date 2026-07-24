@@ -1,8 +1,14 @@
 # Phala Confidential Runner Readiness
 
-Status: ACTIVE (2026-07-23 — Paul explicitly authorized one paid
-`tdx.medium` canary for `paul@finite.vip`, the activation path, and bounded
-create/start/restart/stop authority under the hard cap of one)
+Status: PAUSED (2026-07-24 — Paul explicitly moved the active sequence to the
+focused iOS existing-agent companion App Store run)
+
+Sequence note: On 2026-07-24, Paul activated
+[`iOS Existing-Agent Companion App Store Activation`](ios-existing-agent-app-store-activation.md)
+to get the focused native app into internal TestFlight and through App Review
+readiness. This run's queue and prior one-canary authority are preserved, but
+PAUSED status removes current mutation and provider-spend authority. Resume
+only through an explicit sequence change recorded in both run documents.
 
 Sequence note: On 2026-07-23, Paul moved work here from
 [`Stripe Production Activation`](stripe-production-activation.md). That run is
