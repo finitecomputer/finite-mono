@@ -72,7 +72,7 @@ struct Composer: View {
                     FinitePerformance.recordComposerEdit()
                 }
                 .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
-                .frame(minHeight: 52, alignment: .topLeading)
+                .frame(minHeight: 52)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
 
