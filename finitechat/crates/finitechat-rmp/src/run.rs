@@ -95,6 +95,14 @@ where
     if !args.is_empty() {
         args.push("--finitechat-transient-config".to_owned());
     }
+    if get("FINITECHAT_IOS_PERFORMANCE_PROBES").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    }) {
+        args.push("--finitechat-performance-probes".to_owned());
+    }
     args
 }
 
@@ -2060,6 +2068,15 @@ mod tests {
     #[test]
     fn ios_simulator_launch_args_are_empty_without_overrides() {
         assert!(ios_simulator_launch_args_with(|_| None).is_empty());
+    }
+
+    #[test]
+    fn ios_simulator_launch_args_enable_performance_probes_explicitly() {
+        let args = ios_simulator_launch_args_with(|key| match key {
+            "FINITECHAT_IOS_PERFORMANCE_PROBES" => Some("true".to_owned()),
+            _ => None,
+        });
+        assert_eq!(args, vec!["--finitechat-performance-probes"]);
     }
 
     #[test]

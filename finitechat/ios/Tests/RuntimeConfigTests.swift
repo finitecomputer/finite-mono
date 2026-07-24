@@ -902,6 +902,56 @@ final class ChatTimelineActivityTests: XCTestCase {
 @MainActor
 final class AppModelPersistenceTests: XCTestCase {
 
+    func testTypingDispatchesOnlyWhenTheMeaningfulIntentChanges() async throws {
+        let state = savedChatState()
+        let runtime = FakeFiniteChatRuntime(
+            initialState: state,
+            startRuntimeState: state
+        )
+        let model = AppModel(
+            config: RuntimeConfig(
+                serverURL: "http://127.0.0.1:1",
+                deviceID: "typing-perf"
+            ),
+            applicationSupportURL: try temporarySupportURL(),
+            args: ["FiniteChat"],
+            startsUpdateLoop: false
+        ) { _ in
+            runtime
+        }
+
+        model.start()
+        try await waitForActions(runtime, [.startRuntime])
+
+        for _ in 0..<100 {
+            model.setTyping(roomID: "room-main", isTyping: false)
+        }
+        XCTAssertEqual(runtime.dispatchedActions, [.startRuntime])
+
+        for _ in 0..<100 {
+            model.setTyping(roomID: "room-main", isTyping: true)
+        }
+        try await waitForActions(
+            runtime,
+            [
+                .startRuntime,
+                .setTyping(roomId: "room-main", isTyping: true),
+            ]
+        )
+
+        for _ in 0..<100 {
+            model.setTyping(roomID: "room-main", isTyping: false)
+        }
+        try await waitForActions(
+            runtime,
+            [
+                .startRuntime,
+                .setTyping(roomId: "room-main", isTyping: true),
+                .setTyping(roomId: "room-main", isTyping: false),
+            ]
+        )
+    }
+
 
 
     func testForceCloseStyleRelaunchUsesSameStableStoreAndKeepsSavedProjection() async throws {

@@ -68,6 +68,9 @@ struct Composer: View {
                     guard showsSendButton, !sendDisabled else { return }
                     onSend()
                 }
+                .onChange(of: text) { _, _ in
+                    FinitePerformance.recordComposerEdit()
+                }
                 .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
                 .frame(minHeight: 52, alignment: .topLeading)
                 .padding(.horizontal, 12)
@@ -192,6 +195,99 @@ struct Composer: View {
     }
 }
 
+struct RoomComposer: View {
+    let canCompose: Bool
+    let replyTarget: ChatMessage?
+    @Binding var stagedAttachments: [StagedComposerAttachment]
+    @Binding var isPhotoPickerPresented: Bool
+    @Binding var selectedPhotoItems: [PhotosPickerItem]
+    var isInputFocused: FocusState<Bool>.Binding
+    let onCancelReply: () -> Void
+    let onSend: (String, @escaping (Bool) -> Void) -> Void
+    let onTypingIntentChange: (Bool) -> Void
+    var outerHorizontalPadding: CGFloat = 16
+    var surfaceRadius: CGFloat = 28
+    var onStartVoiceRecording: (() -> Void)?
+    var onAttach: (() -> Void)?
+    var onCreatePoll: (() -> Void)?
+    @State private var text: String
+
+    init(
+        initialText: String,
+        canCompose: Bool,
+        replyTarget: ChatMessage?,
+        stagedAttachments: Binding<[StagedComposerAttachment]>,
+        isPhotoPickerPresented: Binding<Bool>,
+        selectedPhotoItems: Binding<[PhotosPickerItem]>,
+        isInputFocused: FocusState<Bool>.Binding,
+        onCancelReply: @escaping () -> Void,
+        onSend: @escaping (String, @escaping (Bool) -> Void) -> Void,
+        onTypingIntentChange: @escaping (Bool) -> Void,
+        outerHorizontalPadding: CGFloat = 16,
+        surfaceRadius: CGFloat = 28,
+        onStartVoiceRecording: (() -> Void)? = nil,
+        onAttach: (() -> Void)? = nil,
+        onCreatePoll: (() -> Void)? = nil
+    ) {
+        self.canCompose = canCompose
+        self.replyTarget = replyTarget
+        _stagedAttachments = stagedAttachments
+        _isPhotoPickerPresented = isPhotoPickerPresented
+        _selectedPhotoItems = selectedPhotoItems
+        self.isInputFocused = isInputFocused
+        self.onCancelReply = onCancelReply
+        self.onSend = onSend
+        self.onTypingIntentChange = onTypingIntentChange
+        self.outerHorizontalPadding = outerHorizontalPadding
+        self.surfaceRadius = surfaceRadius
+        self.onStartVoiceRecording = onStartVoiceRecording
+        self.onAttach = onAttach
+        self.onCreatePoll = onCreatePoll
+        _text = State(initialValue: initialText)
+    }
+
+    var body: some View {
+        Composer(
+            text: $text,
+            replyTarget: replyTarget,
+            canSubmit: canSubmit,
+            stagedAttachments: $stagedAttachments,
+            isPhotoPickerPresented: $isPhotoPickerPresented,
+            selectedPhotoItems: $selectedPhotoItems,
+            isInputFocused: isInputFocused,
+            onCancelReply: onCancelReply,
+            onSend: send,
+            outerHorizontalPadding: outerHorizontalPadding,
+            surfaceRadius: surfaceRadius,
+            onStartVoiceRecording: onStartVoiceRecording,
+            onAttach: onAttach,
+            onCreatePoll: onCreatePoll
+        )
+        .task(id: hasMeaningfulText) {
+            if hasMeaningfulText {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+            }
+            onTypingIntentChange(hasMeaningfulText)
+        }
+    }
+
+    private var hasMeaningfulText: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canSubmit: Bool {
+        canCompose && hasMeaningfulText
+    }
+
+    private func send() {
+        onSend(text) { success in
+            guard success else { return }
+            text = ""
+        }
+    }
+}
+
 enum ComposerLaunchAction: Hashable {
     case photos
     case files
@@ -199,7 +295,6 @@ enum ComposerLaunchAction: Hashable {
 }
 
 struct NewChatComposer: View {
-    @Binding var text: String
     var isInputFocused: FocusState<Bool>.Binding
     let placeholder: String
     let onStartChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
@@ -209,6 +304,7 @@ struct NewChatComposer: View {
     @State private var isPhotoPickerPresented = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var isStartingChat = false
+    @State private var text = ""
 
     var body: some View {
         Composer(

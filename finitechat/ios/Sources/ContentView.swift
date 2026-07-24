@@ -22,7 +22,6 @@ struct RoomThreadView: View {
     @State private var imagePreviewSelection: ChatImagePreviewSelection?
     @State private var videoPreviewItem: ChatAttachmentPreviewItem?
     @State private var documentPreviewItem: ChatAttachmentPreviewItem?
-    @State private var composerText: String
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var stagedAttachments: [StagedComposerAttachment] = []
     @State private var showPhotoPicker = false
@@ -42,7 +41,6 @@ struct RoomThreadView: View {
         self.roomID = roomID
         self.composerLaunch = composerLaunch
         self.openDrawer = openDrawer
-        _composerText = State(initialValue: composerLaunch?.draft ?? "")
     }
 
     private var room: AppRoomSummary? {
@@ -204,9 +202,6 @@ struct RoomThreadView: View {
         .onChange(of: selectedPhotoItems) { _, items in
             stagePhotoItems(items)
         }
-        .onChange(of: composerText) { _, text in
-            updateTypingIntent(text)
-        }
         .task(id: composerLaunch?.id) {
             await consumeComposerLaunch()
         }
@@ -324,10 +319,10 @@ struct RoomThreadView: View {
             )
             .transition(.move(edge: .bottom).combined(with: .opacity))
         } else {
-            Composer(
-                text: $composerText,
+            RoomComposer(
+                initialText: composerLaunch?.draft ?? "",
+                canCompose: room?.state == .connected,
                 replyTarget: replyDraftMessage,
-                canSubmit: model.canSend(roomID: roomID, text: composerText),
                 stagedAttachments: $stagedAttachments,
                 isPhotoPickerPresented: $showPhotoPicker,
                 selectedPhotoItems: $selectedPhotoItems,
@@ -335,8 +330,11 @@ struct RoomThreadView: View {
                 onCancelReply: {
                     replyDraftMessage = nil
                 },
-                onSend: {
-                    sendComposerDraft()
+                onSend: { text, completion in
+                    sendComposerDraft(text: text, completion: completion)
+                },
+                onTypingIntentChange: { isTyping in
+                    updateTypingIntent(isTyping)
                 },
                 outerHorizontalPadding: tokens.composerHorizontalPadding,
                 surfaceRadius: tokens.composerRadius,
@@ -418,9 +416,8 @@ struct RoomThreadView: View {
         return projection.messagesById[replyToMessageId]
     }
 
-    private func updateTypingIntent(_ text: String) {
+    private func updateTypingIntent(_ isTyping: Bool) {
         guard room?.state == .connected else { return }
-        let isTyping = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         model.setTyping(roomID: roomID, isTyping: isTyping)
     }
 
@@ -443,12 +440,17 @@ struct RoomThreadView: View {
         }
     }
 
-    private func sendComposerDraft() {
+    private func sendComposerDraft(
+        text: String,
+        completion: @escaping (Bool) -> Void
+    ) {
         if stagedAttachments.isEmpty {
-            if model.send(roomID: roomID, text: composerText, replyTo: replyDraftMessage) {
-                composerText = ""
+            if model.send(roomID: roomID, text: text, replyTo: replyDraftMessage) {
                 model.setTyping(roomID: roomID, isTyping: false)
                 replyDraftMessage = nil
+                completion(true)
+            } else {
+                completion(false)
             }
             return
         }
@@ -458,13 +460,13 @@ struct RoomThreadView: View {
             roomID: roomID,
             attachments: outbound,
             replyTo: replyDraftMessage,
-            captionOverride: composerText
+            captionOverride: text
         ) {
-            composerText = ""
             model.setTyping(roomID: roomID, isTyping: false)
             stagedAttachments = []
             selectedPhotoItems = []
             replyDraftMessage = nil
+            completion(true)
         }
     }
 

@@ -274,6 +274,21 @@ skips hosted WorkOS AuthKit and its HTTPS/AASA callback. The bypass fails closed
 for mixed, non-loopback, and deployed origins, so hosted builds still require
 normal authentication.
 
+To audit interactive performance in the same local loop, enable the opt-in
+performance probes:
+
+```sh
+FINITECHAT_IOS_PERFORMANCE_PROBES=1 just dev ios-local-agent
+```
+
+The native app emits Instruments signpost intervals for Rust dispatch, runtime
+snapshot application, chat projection rebuilding, transcript-host updates, and
+composer measurement. The probes also log when composer input waits longer
+than one 60 Hz frame for the next main-queue turn or when a measured main-thread
+operation exceeds its budget. Message text and identifiers are never included.
+Use the simulator warnings for the fast local loop; use the SwiftUI and Time
+Profiler instruments on a Release build on a physical device before shipping.
+
 For low-level server or build troubleshooting, the primitives can still run
 independently. They do not create the complete local account-link fixture; use
 the Devfinity workflow above when the app needs to chat:

@@ -519,6 +519,21 @@ private struct DiagnosticActionSummary {
 final class AppModel: ObservableObject, AppReconciler {
     private static let developerDiagnosticsLimit = 200
     private static let optimisticSequenceBase = UInt64.max - 1_000_000
+#if DEBUG
+    private static let debugDiagnosticsQueue = DispatchQueue(
+        label: "computer.finite.finitechat.debug-diagnostics",
+        qos: .utility
+    )
+#endif
+    private static let diagnosticRedactions: [(regex: NSRegularExpression, replacement: String)] = [
+        (#"https?://[^\s\)"]+"#, "[url]"),
+        (#"file://[^\s\)"]+"#, "[url]"),
+        (#"/(?:Users|private|var|tmp|Volumes)/[^\s]+"#, "[path]"),
+        (#"\b[0-9a-fA-F]{32,}\b"#, "[hex]"),
+    ].compactMap { pattern, replacement in
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        return (regex, replacement)
+    }
     private static let optimisticTimestampFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
@@ -665,6 +680,11 @@ final class AppModel: ObservableObject, AppReconciler {
     }
 
     private func applyRuntimeSnapshot(_ nextState: AppState) {
+        let performanceInterval = FinitePerformance.begin(
+            "Apply runtime snapshot",
+            warningBudgetMilliseconds: 16.67
+        )
+        defer { FinitePerformance.end(performanceInterval) }
         if nextState.rev < lastAppliedRuntimeRev {
             return
         }
@@ -1037,7 +1057,7 @@ final class AppModel: ObservableObject, AppReconciler {
         do {
             let runtime = try currentRuntime()
             let runtimeKey = openKey
-            applyRuntimeSnapshot(try runtime.state())
+            applyRuntimeSnapshot(try readRuntimeState(runtime))
             enqueueRuntimeDispatch(
                 .startRuntime,
                 runtime: runtime,
@@ -1080,7 +1100,7 @@ final class AppModel: ObservableObject, AppReconciler {
         do {
             let runtime = try currentRuntime()
             let runtimeKey = openKey
-            applyRuntimeSnapshot(try runtime.state())
+            applyRuntimeSnapshot(try readRuntimeState(runtime))
             foregroundStartKey = runtimeKey
             enqueueRuntimeDispatch(
                 .startRuntime,
@@ -1650,7 +1670,8 @@ final class AppModel: ObservableObject, AppReconciler {
     }
 
     func setTyping(roomID: String, isTyping: Bool) {
-        guard lastTypingIntentByRoom[roomID] != isTyping else { return }
+        let previousIntent = lastTypingIntentByRoom[roomID] ?? false
+        guard previousIntent != isTyping else { return }
         lastTypingIntentByRoom[roomID] = isTyping
         dispatchInBackground(
             .setTyping(roomId: roomID, isTyping: isTyping),
@@ -1781,7 +1802,9 @@ final class AppModel: ObservableObject, AppReconciler {
             guard !Task.isCancelled, let self else { return }
             do {
                 let nextState = try await Task.detached(priority: priority) {
-                    try runtime.dispatchAndWait(action: action)
+                    let performanceInterval = FinitePerformance.begin("Rust runtime dispatch")
+                    defer { FinitePerformance.end(performanceInterval) }
+                    return try runtime.dispatchAndWait(action: action)
                 }.value
                 guard !Task.isCancelled, self.openKey == runtimeKey else { return }
                 self.applyRuntimeSnapshot(nextState)
@@ -1909,6 +1932,11 @@ final class AppModel: ObservableObject, AppReconciler {
         if let runtime, openKey == key {
             return runtime
         }
+        let performanceInterval = FinitePerformance.begin(
+            "Open Rust runtime",
+            warningBudgetMilliseconds: 16.67
+        )
+        defer { FinitePerformance.end(performanceInterval) }
         let dataDir = try RuntimeDataStore.dataDir(
             deviceID: deviceID,
             applicationSupportURL: applicationSupportURL,
@@ -1932,7 +1960,7 @@ final class AppModel: ObservableObject, AppReconciler {
                 nowUnixSeconds: nil
             )
         )
-        let openedState = try opened.state()
+        let openedState = try readRuntimeState(opened)
         applyRuntimeSnapshot(openedState)
         syncNostrIdentityFromRuntime(openedState.identity)
         let resolvedDeviceID = openedState.identity.deviceId
@@ -1959,6 +1987,17 @@ final class AppModel: ObservableObject, AppReconciler {
         opened.listenForUpdates(reconciler: self)
         appendDiagnostic(category: "runtime", event: "open.succeeded")
         return opened
+    }
+
+    private func readRuntimeState(
+        _ runtime: any FiniteChatRuntimeProtocol
+    ) throws -> AppState {
+        let performanceInterval = FinitePerformance.begin(
+            "Read Rust runtime state",
+            warningBudgetMilliseconds: 8
+        )
+        defer { FinitePerformance.end(performanceInterval) }
+        return try runtime.state()
     }
 
     private func syncNostrIdentityFromRuntime(_ identity: Identity) {
@@ -1999,6 +2038,11 @@ final class AppModel: ObservableObject, AppReconciler {
     }
 
     private func rebuildChatProjections() {
+        let performanceInterval = FinitePerformance.begin(
+            "Rebuild chat projections",
+            warningBudgetMilliseconds: 8
+        )
+        defer { FinitePerformance.end(performanceInterval) }
         guard let state else {
             chatProjections = [:]
             return
@@ -2157,19 +2201,6 @@ final class AppModel: ObservableObject, AppReconciler {
 
 #if DEBUG
     private func persistDebugDiagnostic(_ entry: DeveloperDiagnosticEntry) {
-        let supportURL: URL
-        if let applicationSupportURL {
-            supportURL = applicationSupportURL
-        } else if let defaultURL = try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ) {
-            supportURL = defaultURL
-        } else {
-            return
-        }
         let details = entry.details
             .sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
@@ -2180,8 +2211,28 @@ final class AppModel: ObservableObject, AppReconciler {
         } else {
             line = "seq=\(entry.id) ts=\(entry.timestampUnixSeconds) category=\(entry.category) event=\(entry.event) \(details)\n"
         }
-        let url = supportURL.appendingPathComponent("finitechat_debug_diagnostics.log")
         guard let data = line.data(using: .utf8) else { return }
+        let configuredSupportURL = applicationSupportURL
+        Self.debugDiagnosticsQueue.async {
+            let supportURL: URL
+            if let configuredSupportURL {
+                supportURL = configuredSupportURL
+            } else if let defaultURL = try? FileManager.default.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            ) {
+                supportURL = defaultURL
+            } else {
+                return
+            }
+            let url = supportURL.appendingPathComponent("finitechat_debug_diagnostics.log")
+            Self.appendDebugDiagnostic(data, to: url)
+        }
+    }
+
+    nonisolated private static func appendDebugDiagnostic(_ data: Data, to url: URL) {
         if FileManager.default.fileExists(atPath: url.path),
            let handle = try? FileHandle(forWritingTo: url)
         {
@@ -2457,47 +2508,19 @@ final class AppModel: ObservableObject, AppReconciler {
 
     private static func redactedDiagnosticValue(_ value: String) -> String {
         var output = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        output = replacingMatches(
-            in: output,
-            pattern: #"https?://[^\s\)"]+"#,
-            replacement: "[url]"
-        )
-        output = replacingMatches(
-            in: output,
-            pattern: #"file://[^\s\)"]+"#,
-            replacement: "[url]"
-        )
-        output = replacingMatches(
-            in: output,
-            pattern: #"/(?:Users|private|var|tmp|Volumes)/[^\s]+"#,
-            replacement: "[path]"
-        )
-        output = replacingMatches(
-            in: output,
-            pattern: #"\b[0-9a-fA-F]{32,}\b"#,
-            replacement: "[hex]"
-        )
+        for redaction in diagnosticRedactions {
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = redaction.regex.stringByReplacingMatches(
+                in: output,
+                options: [],
+                range: range,
+                withTemplate: redaction.replacement
+            )
+        }
         if output.count > 240 {
             output = String(output.prefix(237)) + "..."
         }
         return output
-    }
-
-    private static func replacingMatches(
-        in value: String,
-        pattern: String,
-        replacement: String
-    ) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return value
-        }
-        let range = NSRange(value.startIndex..<value.endIndex, in: value)
-        return regex.stringByReplacingMatches(
-            in: value,
-            options: [],
-            range: range,
-            withTemplate: replacement
-        )
     }
 
     private func runLaunchAutomationIfRequested() {

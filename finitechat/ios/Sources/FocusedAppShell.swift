@@ -387,7 +387,6 @@ struct FocusedHomeView: View {
     let startChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
     let openChat: (ChatDestination) -> Void
     let chooseAgent: () -> Void
-    @State private var draft = ""
     @FocusState private var isComposerFocused: Bool
 
     var body: some View {
@@ -439,7 +438,6 @@ struct FocusedHomeView: View {
 
             if agentName != nil {
                 NewChatComposer(
-                    text: $draft,
                     isInputFocused: $isComposerFocused,
                     placeholder: "What do you want to work on?",
                     onStartChat: startChat,

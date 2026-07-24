@@ -124,6 +124,11 @@ struct ChatTranscriptView<AccessoryContent: View>: UIViewControllerRepresentable
         _ viewController: ChatTranscriptHostController<AccessoryContent>,
         context: Context
     ) {
+        let performanceInterval = FinitePerformance.begin(
+            "Update chat transcript host",
+            warningBudgetMilliseconds: 16.67
+        )
+        defer { FinitePerformance.end(performanceInterval) }
         let coordinator = context.coordinator
         coordinator.parent = self
         coordinator.collectionView = viewController.collectionView
@@ -905,6 +910,11 @@ final class AccessoryHostingView<AccessoryContent: View>: UIView {
 
     @discardableResult
     func update(rootView: AccessoryContent) -> Bool {
+        let performanceInterval = FinitePerformance.begin(
+            "Measure chat composer",
+            warningBudgetMilliseconds: 8
+        )
+        defer { FinitePerformance.end(performanceInterval) }
         let configuration = UIHostingConfiguration {
             rootView
                 .background(Color.clear)
