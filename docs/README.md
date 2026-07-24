@@ -24,6 +24,9 @@ commands against the owning source folder before relying on them.
 - [Fedimint monorepo structure analysis](fedimint-monorepo-structure-analysis.md):
   reference analysis used to calibrate Finite's Rust, Nix, command, docs,
   harness, CI, and quality-gate choices.
+- [Rustgrep integration proposal and initial findings](rustgrep-integration-proposal.md):
+  evaluation of syntax-aware Rust symbol search, proposed Nix dev-shell
+  integration, initial architecture findings, and tool limitations.
 - [Recoverability precedes operator-blindness](adr/0001-recoverability-precedes-operator-blindness.md):
   system security decision governing recovery, privacy claims, TEEs, and
   Break-Glass Recovery.
