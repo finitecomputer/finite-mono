@@ -316,10 +316,10 @@
 
                     <section class="access-admin-section brain-access-option">
                       <div class="brain-access-option-heading">
-                        <h4>Make admin</h4>
+                        <h4>Add administrator</h4>
                       </div>
                       <label class="access-inline-field">
-                        <span class="access-inline-label">Member email</span>
+                        <span class="access-inline-label">Administrator email</span>
                         <input
                           id="brainAdminEmailInput"
                           type="email"
@@ -330,7 +330,7 @@
                         />
                         <button id="addBrainAdminButton" type="button" class="access-add-button">Add admin</button>
                       </label>
-                      <p id="brainPeopleHint" class="access-field-hint">Admins must already be Brain members.</p>
+                      <p id="brainPeopleHint" class="access-field-hint">Adding an admin also prepares access to every current Folder you can open.</p>
                     </section>
                   </div>
                 </div>
@@ -421,6 +421,7 @@
                   <span class="section-title">People</span>
                   <span id="brainPeopleCount" class="pill muted">0</span>
                 </div>
+                <p class="access-field-hint brain-people-readiness-hint">Brain role and current Folder access are shown separately.</p>
                 <ol id="brainPeopleList" class="access-who-has-list">
                   <li class="access-empty-state">Load an Organization Brain to manage people.</li>
                 </ol>

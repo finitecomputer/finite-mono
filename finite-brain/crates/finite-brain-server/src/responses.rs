@@ -32,6 +32,13 @@ pub(crate) fn metadata_response_for_actor(
     mounted_folders: Vec<MountedFolderProjection>,
     actor_npub: &str,
 ) -> BrainMetadataResponse {
+    let organization_admin_readiness = (stored.brain.kind == BrainKind::Organization
+        && stored
+            .brain
+            .admins
+            .iter()
+            .any(|admin| admin.as_str() == actor_npub))
+    .then(|| organization_collaborator_readiness(&stored));
     let is_limited_personal_member = stored.brain.kind == BrainKind::Personal
         && stored
             .brain
@@ -43,7 +50,9 @@ pub(crate) fn metadata_response_for_actor(
             .as_ref()
             .is_none_or(|relationship| relationship.agent_npub.as_str() != actor_npub);
     if !is_limited_personal_member {
-        return metadata_response_with_mounts(stored, mounted_folders);
+        let mut response = metadata_response_with_mounts(stored, mounted_folders);
+        response.collaborator_readiness = organization_admin_readiness.unwrap_or_default();
+        return response;
     }
 
     let visible_folder_ids = stored
@@ -132,7 +141,92 @@ pub(crate) fn metadata_response_with_mounts(
             .collect(),
         mounted_folders: mounted_folder_responses(mounted_folders),
         grant_count: stored.grants.len(),
+        collaborator_readiness: Vec::new(),
     }
+}
+
+fn organization_collaborator_readiness(stored: &StoredBrain) -> Vec<CollaboratorReadinessResponse> {
+    let collaborators = stored
+        .brain
+        .members
+        .iter()
+        .map(|member| member.user_id.clone())
+        .chain(stored.brain.admins.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Durable mutations enforce the central member envelope. Keep this
+    // projection one constant-size summary per collaborator (never
+    // collaborator × Folder detail) so metadata response work and wire size
+    // remain bounded by that accepted-state limit.
+    debug_assert!(collaborators.len() <= finite_brain_core::BRAIN_CAPACITY_ENVELOPE.members);
+    let admin_npubs = stored
+        .brain
+        .admins
+        .iter()
+        .map(UserId::as_str)
+        .collect::<BTreeSet<_>>();
+    let all_member_folder_count = stored
+        .brain
+        .folders
+        .iter()
+        .filter(|folder| folder.access == FolderAccessMode::AllMembers)
+        .count();
+    let mut restricted_folder_count = BTreeMap::<&str, usize>::new();
+    for folder in stored
+        .brain
+        .folders
+        .iter()
+        .filter(|folder| folder.access == FolderAccessMode::Restricted)
+    {
+        for user in stored.folder_access.get(&folder.id).into_iter().flatten() {
+            *restricted_folder_count.entry(user.as_str()).or_default() += 1;
+        }
+    }
+    let folder_by_id = stored
+        .brain
+        .folders
+        .iter()
+        .map(|folder| (folder.id.as_str(), folder))
+        .collect::<BTreeMap<_, _>>();
+    let ready_pairs = stored
+        .grants
+        .iter()
+        .filter_map(|grant| {
+            let folder = folder_by_id.get(grant.folder_id.as_str())?;
+            (grant.key_version == folder.current_key_version
+                && folder_visible(stored, &grant.folder_id, grant.recipient_npub.as_str()))
+            .then(|| (grant.recipient_npub.as_str(), grant.folder_id.as_str()))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut ready_count_by_npub = BTreeMap::<&str, usize>::new();
+    for (npub, _) in ready_pairs {
+        *ready_count_by_npub.entry(npub).or_default() += 1;
+    }
+    collaborators
+        .into_iter()
+        .map(|target| {
+            let is_admin = admin_npubs.contains(target.as_str());
+            let total_count = if is_admin {
+                stored.brain.folders.len()
+            } else {
+                all_member_folder_count
+                    + restricted_folder_count
+                        .get(target.as_str())
+                        .copied()
+                        .unwrap_or_default()
+            };
+            CollaboratorReadinessResponse {
+                target_npub: target.to_string(),
+                brain_role: if is_admin { "admin" } else { "member" }.to_owned(),
+                ready_count: ready_count_by_npub
+                    .get(target.as_str())
+                    .copied()
+                    .unwrap_or_default(),
+                total_count,
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn visible_brains_response(brains: Vec<VisibleBrain>) -> VisibleBrainsResponse {

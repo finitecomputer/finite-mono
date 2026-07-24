@@ -9,7 +9,8 @@
 - Feature branch: `codex/hybrid-wiki-search-slices-1-3`
 - Human owner: Austin Kelsay
 - Started: 2026-07-23
-- Current status: ticket 217 independently approved; ticket 218 is next
+- Current status: ticket 218 implemented with first-pass findings resolved;
+  final independent review pending
 - Skill setup status: configured for GitHub, canonical triage labels, and
   multi-context domain documentation
 
@@ -57,7 +58,7 @@ and Agents how to inspect and repair access.
 | Issue | Type | Status | Review thread | Fixes needed | Verified |
 | --- | --- | --- | --- | --- | --- |
 | #217 | server + CLI tracer | approved | round 4 approved | none | store/server/CLI suites + clippy + two-Finite-Home acceptance green |
-| #218 | Product Client tracer | ready | pending | pending | no |
+| #218 | Product Client tracer | implementation complete | first pass complete; final independent review pending | none from first pass | Product Client + server suites green |
 | #219 | managed skill + smoke tracer | blocked by #217 and #218 | pending | pending | no |
 
 ## Parked HITL slices
@@ -71,6 +72,7 @@ and Agents how to inspect and repair access.
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
 | #217 | `894d1ba` | `2026-07-23-issue-217-session.md` | `d13914f` | standards + spec approved in round 4 | store/server/CLI + clippy + built-process acceptance green |
+| #218 | `cc9dfa4` | `2026-07-23-issue-218-session.md` | pending | first-pass findings resolved; final independent review pending | Product Client + server suites + clippy |
 
 ## Open questions
 

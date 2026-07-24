@@ -7084,6 +7084,38 @@ mod tests {
         let target_keys = Keys::generate();
         let target = npub(&target_keys);
         let router = router_with_test_org_folders(&admin_keys).await;
+        let member_keys = Keys::generate();
+        let member = npub(&member_keys);
+        let add_member = serde_json::json!({
+            "targetNpub": member,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-readiness-member",
+                AdminAccessAction::AddMember,
+                None,
+                Some(&member),
+                None,
+            ),
+        })
+        .to_string();
+        let add_member = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/members",
+            Some(add_member),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(add_member.status(), StatusCode::OK);
+        let member_metadata = get_metadata(router.clone(), &member_keys, "acme", TEST_NOW).await;
+        assert_eq!(member_metadata.status(), StatusCode::OK);
+        let member_metadata: BrainMetadataResponse = read_json(member_metadata).await;
+        assert!(
+            member_metadata.collaborator_readiness.is_empty(),
+            "non-admin metadata must not expose collaborator grant relationships"
+        );
         let folders = serde_json::json!([
             {"folderId":"getting-started","keyVersion":1,"path":"getting-started"},
             {"folderId":"restricted","keyVersion":1,"path":"restricted"}
@@ -7169,6 +7201,17 @@ mod tests {
                 .iter()
                 .any(|folder| folder.reason.as_deref() == Some("sourceKeyUnavailable"))
         );
+        let metadata = get_metadata(router.clone(), &admin_keys, "acme", TEST_NOW + 1).await;
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let metadata: BrainMetadataResponse = read_json(metadata).await;
+        let incomplete_admin = metadata
+            .collaborator_readiness
+            .iter()
+            .find(|entry| entry.target_npub == partial_target)
+            .expect("partial administrator readiness");
+        assert_eq!(incomplete_admin.brain_role, "admin");
+        assert_eq!(incomplete_admin.ready_count, 0);
+        assert_eq!(incomplete_admin.total_count, 2);
 
         let repair_body = serde_json::json!({
             "targetNpub": partial_target,
@@ -7184,7 +7227,7 @@ mod tests {
             "accessChangeEvent":admin_event(&admin_keys,"acme","collab-repair-admin",AdminAccessAction::AddAdmin,None,Some(&partial_target),None)
         }).to_string();
         let repair = authed_request(
-            router,
+            router.clone(),
             &admin_keys,
             "POST",
             "/_admin/brains/acme/collaborators/ensure-admin",
@@ -7197,6 +7240,118 @@ mod tests {
         assert_eq!(repair.state, CollaborationReceiptState::Complete);
         assert_eq!(repair.brain_role, "admin");
         assert_eq!(repair.ready_count, 2);
+
+        let ready_metadata = get_metadata(router.clone(), &admin_keys, "acme", TEST_NOW + 2).await;
+        assert_eq!(ready_metadata.status(), StatusCode::OK);
+        let ready_metadata: BrainMetadataResponse = read_json(ready_metadata).await;
+        let ready_admin = ready_metadata
+            .collaborator_readiness
+            .iter()
+            .find(|entry| entry.target_npub == partial_target)
+            .expect("repaired administrator readiness");
+        assert_eq!((ready_admin.ready_count, ready_admin.total_count), (2, 2));
+
+        let grant_member_body = serde_json::json!({
+            "targetNpub": member,
+            "grant": folder_key_grant_value(
+                "grant-restricted-member-before-rotation",
+                1,
+                member.as_str(),
+            ),
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-grant-member-before-rotation",
+                AdminAccessAction::GrantFolderAccess,
+                Some("restricted"),
+                Some(member.as_str()),
+                Some(1),
+            ),
+        })
+        .to_string();
+        let grant_member = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/_admin/brains/acme/folders/restricted/access",
+            Some(grant_member_body),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(grant_member.status(), StatusCode::OK);
+
+        let rotate_body = serde_json::json!({
+            "newKeyVersion": 2,
+            "grants": [
+                folder_key_grant_value(
+                    "grant-restricted-admin-v2",
+                    2,
+                    npub(&admin_keys).as_str(),
+                ),
+                folder_key_grant_value(
+                    "grant-restricted-complete-target-v2",
+                    2,
+                    target.as_str(),
+                ),
+                folder_key_grant_value(
+                    "grant-restricted-repaired-target-v2",
+                    2,
+                    partial_target.as_str(),
+                )
+            ],
+            "reencryptedRecords": [],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "collab-rotate-restricted",
+                AdminAccessAction::RemoveFolderAccess,
+                Some("restricted"),
+                Some(member.as_str()),
+                Some(2),
+            ),
+        })
+        .to_string();
+        let rotate = authed_request(
+            router.clone(),
+            &admin_keys,
+            "DELETE",
+            &format!("/_admin/brains/acme/folders/restricted/access/{member}"),
+            Some(rotate_body),
+            TEST_NOW + 2,
+        )
+        .await;
+        let rotate_status = rotate.status();
+        let rotate_text = read_text(rotate).await;
+        assert_eq!(rotate_status, StatusCode::OK, "{rotate_text}");
+        let rotated_metadata = get_metadata(router, &admin_keys, "acme", TEST_NOW + 3).await;
+        assert_eq!(rotated_metadata.status(), StatusCode::OK);
+        let rotated_metadata: BrainMetadataResponse = read_json(rotated_metadata).await;
+        let drifted_member = rotated_metadata
+            .collaborator_readiness
+            .iter()
+            .find(|entry| entry.target_npub == member)
+            .expect("rotated collaborator readiness");
+        assert_eq!(
+            (drifted_member.ready_count, drifted_member.total_count),
+            (0, 1),
+            "a member is measured only against policy-entitled current Folders"
+        );
+        let ready_admin = rotated_metadata
+            .collaborator_readiness
+            .iter()
+            .find(|entry| entry.target_npub == partial_target)
+            .expect("administrator readiness after rotation");
+        assert_eq!(
+            (ready_admin.ready_count, ready_admin.total_count),
+            (2, 2),
+            "the rotated current-version grant remains authoritative"
+        );
+        let restricted = rotated_metadata
+            .folders
+            .iter()
+            .find(|folder| folder.id == "restricted")
+            .expect("rotated Folder metadata");
+        assert_eq!(restricted.current_key_version, 2);
     }
 
     #[tokio::test]

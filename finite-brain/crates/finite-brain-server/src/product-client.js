@@ -136,6 +136,7 @@ const FiniteBrainProductClient = (() => {
   const MAX_FOLDER_ROTATION_RECORDS = 1000;
   const MAX_PERSONAL_AGENT_ROTATION_GRANTS = 10000;
   const MAX_PERSONAL_AGENT_ROTATION_RECORDS = 10000;
+  const MAX_COLLABORATION_FOLDERS = 1000;
   const BRAIN_ACCESS_CHANGED_NOTICE =
     "Brain access changed. Your Brain was locked. Select a Brain you can open, then open it again.";
   const BRAIN_ACCESS_REQUIRED_REASON = "brain access required";
@@ -7831,14 +7832,51 @@ const FiniteBrainProductClient = (() => {
 
   function brainPeopleRows(metadata) {
     if (!metadata) return [];
+    const readinessByNpub = new Map(
+      (metadata.collaboratorReadiness || metadata.collaborator_readiness || []).map((entry) => [
+        entry.targetNpub || entry.target_npub,
+        entry,
+      ])
+    );
     const brainPersonRow = (npub, role, type, removable) => {
       const identity = identityMetadataForNpub(npub);
+      const organizationCollaboration = metadata.kind === "organization";
+      const readiness = readinessByNpub.get(npub) || null;
+      const readyCount = Number(readiness?.readyCount ?? readiness?.ready_count);
+      const totalCount = Number(readiness?.totalCount ?? readiness?.total_count);
+      const hasAuthoritativeReadiness =
+        Number.isInteger(readyCount) &&
+        readyCount >= 0 &&
+        Number.isInteger(totalCount) &&
+        totalCount >= 0 &&
+        readyCount <= totalCount;
+      const collaborationState = !hasAuthoritativeReadiness
+        ? "indeterminate"
+        : readyCount === totalCount
+          ? "complete"
+          : "partial";
       return {
+        brainRoleLabel: organizationCollaboration
+          ? role === "admin"
+            ? "Admin"
+            : "Member"
+          : null,
         canMutate: Boolean(identity.email),
+        collaborationState: organizationCollaboration ? collaborationState : null,
         details: identity.details,
+        folderReadinessLabel: organizationCollaboration
+          ? hasAuthoritativeReadiness
+            ? `${readyCount}/${totalCount} — ${readyCount === totalCount ? "ready" : "needs repair"}`
+            : "Not verified"
+          : null,
         id: npub,
         name: identity.display,
         npub: identity.npub,
+        repairable:
+          organizationCollaboration &&
+          role === "admin" &&
+          hasAuthoritativeReadiness &&
+          readyCount < totalCount,
         role,
         status: identity.status,
         tooltip: identity.tooltip,
@@ -7861,6 +7899,47 @@ const FiniteBrainProductClient = (() => {
       rows.push(brainPersonRow(member, "member", "member", true));
     }
     return rows;
+  }
+
+  function collaborationReceiptPresentation(receipt, targetEmail) {
+    const stateValue = ["complete", "partial", "indeterminate"].includes(receipt?.state)
+      ? receipt.state
+      : "indeterminate";
+    if (stateValue === "indeterminate") {
+      return {
+        tone: "warn",
+        title: "Admin access needs checking",
+        detail:
+          "The result could not be confirmed. Check this collaborator’s Folder access, then repair if needed.",
+        retryable: true,
+        unreadyFolders: [],
+      };
+    }
+    const readyCount = Number.isInteger(receipt?.readyCount) ? receipt.readyCount : 0;
+    const totalCount = Number.isInteger(receipt?.totalCount) ? receipt.totalCount : 0;
+    const unreadyFolders = (receipt?.folders || [])
+      .filter((folder) => !["granted", "alreadyReady"].includes(folder.outcome))
+      .map((folder) => String(folder.path || "").trim())
+      .filter(Boolean);
+    if (stateValue === "complete") {
+      return {
+        tone: "ready",
+        title: "Admin access ready",
+        detail: `${targetEmail} has Brain role: Admin and Folder access: ${readyCount}/${totalCount}.`,
+        retryable: false,
+        unreadyFolders: [],
+      };
+    }
+    const repairDetail = unreadyFolders.length
+      ? ` Needs repair: ${unreadyFolders.join(", ")}.`
+      : " Repair the incomplete Folder access.";
+    return {
+      tone: "warn",
+      title: "Admin access needs repair",
+      detail: `${targetEmail} has Brain role: Admin and Folder access: ${readyCount}/${totalCount}.${repairDetail}`,
+      retryable: receipt?.retryable !== false,
+      unreadyFolders,
+    };
   }
 
   function brainHealthBadges(metadata, signerStatus = state.signerStatus) {
@@ -8043,11 +8122,19 @@ const FiniteBrainProductClient = (() => {
 
       const roleSpan = document.createElement("span");
       roleSpan.className = "access-person-role";
-      roleSpan.textContent = person.role;
+      roleSpan.textContent = person.brainRoleLabel
+        ? `Brain role: ${person.brainRoleLabel}`
+        : person.role;
 
       personInfo.appendChild(icon);
       personInfo.appendChild(nameSpan);
       personInfo.appendChild(roleSpan);
+      if (person.folderReadinessLabel) {
+        const readinessSpan = document.createElement("span");
+        readinessSpan.className = `access-person-readiness ${person.collaborationState}`;
+        readinessSpan.textContent = `Folder access: ${person.folderReadinessLabel}`;
+        personInfo.appendChild(readinessSpan);
+      }
       item.appendChild(personInfo);
 
       const detailButton = document.createElement("button");
@@ -8077,6 +8164,24 @@ const FiniteBrainProductClient = (() => {
       });
       item.appendChild(detailButton);
 
+      if (person.repairable && canManage) {
+        const repairButton = document.createElement("button");
+        repairButton.className = "access-repair-person brain-person-action";
+        repairButton.type = "button";
+        repairButton.textContent = "Repair Folder access";
+        repairButton.setAttribute(
+          "aria-label",
+          `Repair Folder access for ${person.name}`
+        );
+        repairButton.addEventListener("click", () => {
+          ensureOrganizationAdminCollaboration(person.id, person.name).catch((error) => {
+            reportClientActionFailure(error);
+            log("Failed to repair collaborator Folder access.", { error: error.message });
+          });
+        });
+        item.appendChild(repairButton);
+      }
+
       if (person.removable && person.canMutate && canManage) {
         const removeButton = document.createElement("button");
         removeButton.className = "access-remove-person brain-person-action";
@@ -8104,7 +8209,7 @@ const FiniteBrainProductClient = (() => {
       : metadata.kind !== "organization"
         ? "Personal Brains use Folder access and share links instead of member lists."
         : actorIsBrainAdmin(metadata)
-          ? "Admins must already be Brain members."
+          ? "Adding an admin also prepares access to every current Folder you can open."
           : "Only Brain admins can change organization members and admins.";
     setText("brainPeopleHint", hint);
     setText("brainPeopleActionHint", canManage ? "Invite, add, or promote by email" : "Admin-only");
@@ -10856,6 +10961,188 @@ const FiniteBrainProductClient = (() => {
     };
   }
 
+  async function buildOrganizationAdminCollaborationRequest(input) {
+    const brainId = String(input?.brainId || "").trim();
+    const targetNpub = String(input?.targetNpub || "").trim();
+    npubToHex(targetNpub);
+    if (!brainId) throw new Error("Organization collaboration requires a Brain");
+    if (input?.metadata?.kind !== "organization") {
+      throw new Error("Administrator collaboration is available only for Organization Brains");
+    }
+    const folderRows = metadataFolderRows(input.metadata);
+    if (folderRows.length > MAX_COLLABORATION_FOLDERS) {
+      throw new Error(
+        `Organization collaboration exceeds ${MAX_COLLABORATION_FOLDERS} current Folders`
+      );
+    }
+    const folders = folderRows.map((row) => ({
+      folderId: row.id,
+      keyVersion: row.currentKeyVersion,
+      path: row.path,
+    }));
+    const grants = [];
+    for (const row of folderRows) {
+      const key = input.keyring?.keys?.get(
+        folderKeyId(brainId, row.id, row.currentKeyVersion)
+      );
+      if (!key) continue;
+      const grant = await buildFolderKeyGrantRequest({
+        brainId,
+        folderId: row.id,
+        keyVersion: row.currentKeyVersion,
+        rawKey: key.rawKey,
+        recipientNpub: targetNpub,
+        issuerNpub: input.issuerNpub,
+        brainIdentityProvider: input.brainIdentityProvider,
+        provider: input.provider,
+        signEvent: input.signEvent,
+        encrypt: input.encrypt,
+        createdAtUnix: input.createdAtUnix,
+      });
+      grants.push({
+        folderId: row.id,
+        ...grant,
+        accessChangeEvent: await buildAdminAccessChangeEvent({
+          action: "grant-folder-access",
+          brainId,
+          folderId: row.id,
+          keyVersion: row.currentKeyVersion,
+          targetNpub,
+          adminNpub: input.issuerNpub,
+          brainIdentityProvider: input.brainIdentityProvider,
+          provider: input.provider,
+          signEvent: input.signEvent,
+          createdAtUnix: input.createdAtUnix,
+        }),
+      });
+    }
+    return {
+      targetNpub,
+      folders,
+      grants,
+      accessChangeEvent: await buildAdminAccessChangeEvent({
+        action: "add-admin",
+        brainId,
+        targetNpub,
+        adminNpub: input.issuerNpub,
+        brainIdentityProvider: input.brainIdentityProvider,
+        provider: input.provider,
+        signEvent: input.signEvent,
+        createdAtUnix: input.createdAtUnix,
+      }),
+    };
+  }
+
+  function indeterminateCollaborationReceipt(totalCount) {
+    return {
+      state: "indeterminate",
+      brainRole: "admin",
+      folders: [],
+      readyCount: 0,
+      totalCount,
+      retryable: true,
+    };
+  }
+
+  function collaborationReceiptMatchesIntent(receipt, brainId, targetNpub) {
+    if (
+      !receipt ||
+      typeof receipt !== "object" ||
+      !["complete", "partial", "indeterminate"].includes(receipt.state) ||
+      receipt.brainId !== brainId ||
+      receipt.targetNpub !== targetNpub ||
+      receipt.brainRole !== "admin" ||
+      !Array.isArray(receipt.folders)
+    ) {
+      return false;
+    }
+    if (receipt.state === "indeterminate") return true;
+    if (
+      !Number.isInteger(receipt.readyCount) ||
+      !Number.isInteger(receipt.totalCount) ||
+      receipt.readyCount < 0 ||
+      receipt.totalCount < 0 ||
+      receipt.readyCount > receipt.totalCount ||
+      receipt.totalCount !== receipt.folders.length
+    ) {
+      return false;
+    }
+    const readyCount = receipt.folders.filter((folder) =>
+      ["granted", "alreadyReady"].includes(folder?.outcome)
+    ).length;
+    if (readyCount !== receipt.readyCount) return false;
+    return receipt.state === "complete"
+      ? receipt.readyCount === receipt.totalCount
+      : receipt.readyCount < receipt.totalCount;
+  }
+
+  async function submitOrganizationAdminCollaboration(input) {
+    const brainId = String(input?.brainId || "").trim();
+    if (!brainId) throw new Error("Organization collaboration requires a Brain");
+    const request = input?.request;
+    if (!request || !Array.isArray(request.folders)) {
+      throw new Error("Organization collaboration requires a current Folder snapshot");
+    }
+    const path = `/_admin/brains/${encodeURIComponent(brainId)}/collaborators/ensure-admin`;
+    let receipt;
+    try {
+      receipt = await (input.send || protectedRequest)(path, {
+        method: "POST",
+        body: JSON.stringify(request),
+      });
+    } catch (error) {
+      if (Number.isInteger(error?.status)) throw error;
+      return indeterminateCollaborationReceipt(request.folders.length);
+    }
+    if (
+      !collaborationReceiptMatchesIntent(
+        receipt,
+        brainId,
+        request.targetNpub
+      )
+    ) {
+      return indeterminateCollaborationReceipt(request.folders.length);
+    }
+    return receipt;
+  }
+
+  async function ensureOrganizationAdminCollaboration(targetNpub, targetEmail) {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const brainId = state.activeBrainId;
+    beginAccessOperation(sessionEpoch);
+    try {
+      const request = await buildOrganizationAdminCollaborationRequest({
+        brainId,
+        targetNpub,
+        metadata: state.metadata,
+        keyring: state.keyring,
+        brainIdentityProvider: state.identityProvider,
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      const receipt = await submitOrganizationAdminCollaboration({
+        brainId,
+        request,
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      const presentation = collaborationReceiptPresentation(receipt, targetEmail);
+      setAccessResult(
+        presentation.tone,
+        presentation.title,
+        presentation.detail
+      );
+      await loadBrainMetadata({ preserveActive: true }).catch((error) => {
+        requireCurrentSessionEpoch(sessionEpoch);
+        log("Could not refresh collaborator readiness after the access operation.", {
+          error: error.message,
+        });
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      return receipt;
+    } finally {
+      finishAccessOperation(sessionEpoch);
+    }
+  }
+
   async function mutateBrainPeople(path, options, sessionEpoch) {
     requireCurrentSessionEpoch(sessionEpoch);
     const metadata = await protectedRequest(path, options);
@@ -10898,27 +11185,28 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function addBrainAdminFromPanel() {
-    const sessionEpoch = captureSessionOperationEpoch();
-    const brainId = state.activeBrainId;
-    const targetNpub = await normalizedEmailNpubInput("brainAdminEmailInput", "Enter a valid member email first");
-    requireCurrentSessionEpoch(sessionEpoch);
-    beginAccessOperation(sessionEpoch);
+    const targetEmail = canonicalInviteEmail($("brainAdminEmailInput").value);
+    const targetNpub = await normalizedEmailNpubValue(
+      targetEmail,
+      "Enter a valid admin email first"
+    );
     try {
-      const body = JSON.stringify(await buildBrainPeopleMutationRequest("add-admin", targetNpub));
-      requireCurrentSessionEpoch(sessionEpoch);
-      await mutateBrainPeople(`/_admin/brains/${encodeURIComponent(brainId)}/admins`, {
-        method: "POST",
-        body,
-      }, sessionEpoch);
-      requireCurrentSessionEpoch(sessionEpoch);
+      const receipt = await ensureOrganizationAdminCollaboration(targetNpub, targetEmail);
       $("brainAdminEmailInput").value = "";
-      setAccessResult("ready", "Admin added", `${identityDisplay(targetNpub)} can manage this Brain.`);
-      log("Added Brain admin.", { targetNpub: identityDisplay(targetNpub), brainId });
+      log("Updated Organization Brain collaborator.", {
+        target: targetEmail,
+        state: receipt.state,
+      });
+      return receipt;
     } catch (error) {
-      failAccessOperation(sessionEpoch, "Add admin failed", error);
+      const sessionEpoch = state.sessionEpoch;
+      failAccessOperation(
+        sessionEpoch,
+        "Admin access could not be updated",
+        error,
+        () => "The server rejected this access change. Check your Brain role and try again."
+      );
       throw error;
-    } finally {
-      finishAccessOperation(sessionEpoch);
     }
   }
 
@@ -12361,6 +12649,7 @@ const FiniteBrainProductClient = (() => {
     buildBrainAuthorizationHeader,
     brainTargetFromSearch,
     brainIdFromName,
+    buildOrganizationAdminCollaborationRequest,
     buildFolderAccessRemovalRequest,
     buildEmailInviteAuthorizationEvent,
     buildEmailInviteClaimProofEvent,
@@ -12484,6 +12773,7 @@ const FiniteBrainProductClient = (() => {
     sidebarModeLabel,
     shortKey,
     start,
+    submitOrganizationAdminCollaboration,
     lockSession,
     rememberIdentity,
     identityMetadataForNpub,
@@ -12504,6 +12794,7 @@ const FiniteBrainProductClient = (() => {
     brainInvitationRows,
     brainInvitationUnavailableDetail,
     brainPeopleRows,
+    collaborationReceiptPresentation,
     toggleMarkdownTask,
     taskCheckboxAriaLabel,
   };

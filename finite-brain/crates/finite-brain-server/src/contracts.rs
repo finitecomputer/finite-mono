@@ -53,6 +53,21 @@ pub struct BrainMetadataResponse {
     pub folders: Vec<FolderMetadataResponse>,
     pub mounted_folders: Vec<MountedFolderResponse>,
     pub grant_count: usize,
+    /// Authoritative current-grant coverage for Organization Brain people.
+    /// Populated only when the metadata requester is an Organization admin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collaborator_readiness: Vec<CollaboratorReadinessResponse>,
+}
+
+/// Brain role and authoritative current Folder Key Grant coverage for one
+/// Organization Brain collaborator.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaboratorReadinessResponse {
+    pub target_npub: String,
+    pub brain_role: String,
+    pub ready_count: usize,
+    pub total_count: usize,
 }
 
 /// The one active Personal Agent relationship for a Personal Brain.
