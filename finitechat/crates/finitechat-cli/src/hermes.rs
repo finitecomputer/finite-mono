@@ -39,8 +39,8 @@ use finitechat_client::{
     SqliteClientStore, SqliteClientStoreOptions, StoredAppEvent,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppRoomState, AppSentMessage, AppState, ChatMediaKind,
-    FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
+    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppSentMessage, AppState,
+    ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
 };
 use finitechat_hermes::{
     HermesAckRequestV1, HermesActivityRequestV1, HermesEditRequestV1, HermesMessagePayloadV1,
@@ -506,6 +506,7 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
                     Ok(bridge) => {
                         retry_millis = 250;
                         sync_immediately = false;
+                        let has_updates = bridge_sync_has_updates(&bridge);
                         if !bridge.joined_account_ids.is_empty()
                             && let Ok(mut joined) = state.joined_account_ids.lock()
                         {
@@ -513,7 +514,9 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
                             joined.sort();
                             joined.dedup();
                         }
-                        signal_bridge_update(&state);
+                        if has_updates {
+                            signal_bridge_update(&state);
+                        }
                     }
                     Err(_) => {
                         std::thread::sleep(Duration::from_millis(retry_millis));
@@ -525,6 +528,10 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
         })
         .map(|_| ())
         .map_err(|error| CliError::Hermes(format!("could not start resident sync: {error}")))
+}
+
+fn bridge_sync_has_updates(bridge: &AppBridgeSync) -> bool {
+    !bridge.joined_account_ids.is_empty() || !bridge.events.is_empty()
 }
 
 fn signal_bridge_update(state: &HermesServiceState) {
@@ -993,15 +1000,22 @@ fn collect_hermes_service_inbound_payload(
     let limit = normalized_hermes_poll_limit(request);
     let _guard = lock_service_mutex(&state.inbox_lock)?;
     let mut inbox = load_hermes_inbox(&state.agent_home)?;
-    initialize_hermes_inbox_cursors(&state.agent_home, home, &mut inbox)?;
+    let recent_events = load_recent_agent_app_events(home)?;
+    initialize_hermes_inbox_cursors_from_events(
+        &state.agent_home,
+        &mut inbox,
+        &home.config.account_id,
+        recent_events.iter(),
+    )?;
     let joined = take_joined_accounts(state);
 
-    recover_stored_hermes_events(
+    recover_stored_hermes_events_from_events(
         &state.agent_home,
         home,
         &state.account_id,
         request.room_id.as_deref(),
         &mut inbox,
+        recent_events,
     )?;
     let events = pending_hermes_inbox_events(&inbox, request.room_id.as_deref(), limit);
     Ok(json!({ "events": events, "joined": joined }))
@@ -1854,6 +1868,9 @@ fn initialize_hermes_inbox_cursors(
     home: &AgentHome,
     inbox: &mut HermesInboxState,
 ) -> Result<(), CliError> {
+    if !inbox.cursors.is_empty() {
+        return Ok(());
+    }
     let recent_events = load_recent_agent_app_events(home)?;
     initialize_hermes_inbox_cursors_from_events(
         home_dir,
@@ -1921,8 +1938,27 @@ fn recover_stored_hermes_events(
     room_filter: Option<&str>,
     inbox: &mut HermesInboxState,
 ) -> Result<(), CliError> {
+    let recent_events = load_recent_agent_app_events(home)?;
+    recover_stored_hermes_events_from_events(
+        home_dir,
+        home,
+        own_account,
+        room_filter,
+        inbox,
+        recent_events,
+    )
+}
+
+fn recover_stored_hermes_events_from_events(
+    home_dir: &Path,
+    home: &AgentHome,
+    own_account: &str,
+    room_filter: Option<&str>,
+    inbox: &mut HermesInboxState,
+    recent_events: Vec<StoredAppEvent>,
+) -> Result<(), CliError> {
     let mut cursor_changed = false;
-    for stored in load_recent_agent_app_events(home)? {
+    for stored in recent_events {
         if let Some(room_id) = room_filter
             && room_id != stored.room_id
         {
@@ -3464,6 +3500,50 @@ mod tests {
         assert_eq!(
             options.account_secret_hex,
             Some(hex_lower(home.secret.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn resident_bridge_only_wakes_consumers_for_observed_updates() {
+        assert!(!bridge_sync_has_updates(&AppBridgeSync::default()));
+        assert!(bridge_sync_has_updates(&AppBridgeSync {
+            joined_account_ids: vec!["joined-account".to_owned()],
+            events: Vec::new(),
+        }));
+        assert!(bridge_sync_has_updates(&AppBridgeSync {
+            joined_account_ids: Vec::new(),
+            events: vec![finitechat_core::AppBridgeAppliedEvent {
+                room_id: "room-main".to_owned(),
+                seq: 1,
+                message_id: "message-1".to_owned(),
+                sender_account_id: "sender-account".to_owned(),
+                sender_device_id: "sender-device".to_owned(),
+                plaintext: b"event".to_vec(),
+            }],
+        }));
+    }
+
+    #[test]
+    fn initialized_hermes_inbox_does_not_reopen_event_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_home = dir.path().join("store-must-remain-unopened");
+        let home = AgentHome {
+            dir: agent_home.clone(),
+            config: AgentConfig {
+                server_url: "http://127.0.0.1:1".to_owned(),
+                device_id: "agent-device".to_owned(),
+                account_id: "agent-account".to_owned(),
+            },
+            secret: NostrSecretKey::from_bytes([0x19; 32]).unwrap(),
+        };
+        let mut inbox = HermesInboxState::default();
+        inbox.cursors.insert("room-main".to_owned(), 7);
+
+        initialize_hermes_inbox_cursors(&agent_home, &home, &mut inbox).unwrap();
+
+        assert!(
+            !agent_home.exists(),
+            "an initialized inbox should not open or scan the encrypted Agent store"
         );
     }
 

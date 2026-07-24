@@ -798,8 +798,17 @@ class DaemonUpdateRelay {
   }
 
   update(state) {
+    if (
+      this.latestState &&
+      Number.isSafeInteger(this.latestState.rev) &&
+      Number.isSafeInteger(state?.rev) &&
+      this.latestState.rev === state.rev
+    ) {
+      return false;
+    }
     this.latestState = state;
     this.deliver("finitechat:daemon-update", state);
+    return true;
   }
 
   replay(deliver = this.deliver) {
