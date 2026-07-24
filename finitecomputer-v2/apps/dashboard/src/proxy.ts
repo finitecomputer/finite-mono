@@ -10,7 +10,7 @@ import {
   workosInteractiveAuthRequest,
   workosAuthStatus,
   workosProtectedPath,
-  workosProxyBypassPath,
+  workosProxyBypassRequest,
 } from "@/lib/workos-auth";
 
 export default async function proxy(request: NextRequest) {
@@ -20,7 +20,7 @@ export default async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (workosProxyBypassPath(request.nextUrl.pathname)) {
+  if (workosProxyBypassRequest(request.nextUrl.pathname, request.headers)) {
     return NextResponse.next();
   }
 

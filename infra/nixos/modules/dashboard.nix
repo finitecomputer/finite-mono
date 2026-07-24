@@ -12,13 +12,14 @@
     # bridge networking neither side of that loopback contract holds.
     extraOptions = [ "--network=host" ];
 
-    # Non-secret config: the 8 ConfigMap finite-computer-config keys
+    # Non-secret config mirrored from finite-computer-config
     # (infra/hosts/lat1/k8s/configmap.yaml), with FC_CORE_BASE_URL rewritten
     # from the k8s service name to the local core bind.
     environment = {
       HOSTNAME = "127.0.0.1"; # Next.js bind address (loopback-only)
       PORT = "3000";
       FC_WORKOS_AUTH_ENABLED = "true";
+      FC_WORKOS_IOS_CLIENT_ID = "client_01KYA32JRWEE23J7QW1F882DVA";
       FC_DASHBOARD_RUNTIME_MODE = "customer";
       FC_DASHBOARD_DEFAULT_RUNNER_CLASS = "kata";
       FC_DASHBOARD_RUNNER_CLASSES = "kata";

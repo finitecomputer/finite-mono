@@ -47,6 +47,11 @@ const WORKOS_PROXY_BYPASS_PATHS = new Set([
   "/signup",
 ]);
 
+const NATIVE_DEVICE_LINK_BEARER_PATHS = new Set([
+  "/api/device-links/approve",
+  "/api/device-links/status",
+]);
+
 // Brain's product client is a WorkOS-authenticated browser surface, while
 // the opaque-frame identity provider uses its frame capability plus a fresh,
 // request-bound WorkOS session proof. /_admin uses Brain-owned route-level auth
@@ -110,6 +115,20 @@ export function workosProxyBypassPath(pathname: string) {
 
   return WORKOS_PROXY_BYPASS_PATH_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+  );
+}
+
+export function workosProxyBypassRequest(
+  pathname: string,
+  headers: Pick<Headers, "get">
+) {
+  if (workosProxyBypassPath(pathname)) {
+    return true;
+  }
+
+  return (
+    NATIVE_DEVICE_LINK_BEARER_PATHS.has(pathname) &&
+    headers.get("authorization")?.startsWith("Bearer ") === true
   );
 }
 

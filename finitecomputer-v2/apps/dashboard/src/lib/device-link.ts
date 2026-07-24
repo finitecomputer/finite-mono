@@ -1,4 +1,7 @@
-import { getAccountAuthContext } from "@/lib/dashboard-auth";
+import {
+  getAccountAuthContext,
+  type AccountAuthContext,
+} from "@/lib/dashboard-auth";
 import {
   HostedDeviceRequestError,
   hostedDeviceAction,
@@ -120,18 +123,22 @@ export async function parseDeviceLinkJsonRequest(
 }
 
 export async function approveCurrentAccountDeviceLink(
-  input: HostedDeviceLinkRequest
+  input: HostedDeviceLinkRequest,
+  account?: AccountAuthContext
 ): Promise<HostedDeviceLinkResponse> {
-  return withCurrentAccount((config, account) =>
-    hostedDeviceApproveLink(config, account, input)
+  return withCurrentAccount(
+    (config, account) => hostedDeviceApproveLink(config, account, input),
+    account
   );
 }
 
 export async function currentAccountDeviceLinkStatus(
-  input: HostedDeviceLinkRequest
+  input: HostedDeviceLinkRequest,
+  account?: AccountAuthContext
 ): Promise<HostedDeviceLinkResponse> {
-  return withCurrentAccount((config, account) =>
-    hostedDeviceLinkStatus(config, account, input)
+  return withCurrentAccount(
+    (config, account) => hostedDeviceLinkStatus(config, account, input),
+    account
   );
 }
 
@@ -242,9 +249,10 @@ async function withCurrentAccount<T>(
   operation: (
     config: NonNullable<ReturnType<typeof hostedDeviceConfig>>,
     account: Awaited<ReturnType<typeof getAccountAuthContext>>
-  ) => Promise<T>
+  ) => Promise<T>,
+  authenticatedAccount?: AccountAuthContext
 ): Promise<T> {
-  const account = await getAccountAuthContext();
+  const account = authenticatedAccount ?? await getAccountAuthContext();
   if (
     !account.workosUserId ||
     !account.emailVerified ||
