@@ -26,6 +26,39 @@ struct ChatDestination: Hashable, Identifiable {
     }
 }
 
+func findReusableEmptyHomeChatDestination(
+    roomID: String,
+    topics: [AppTopicSummary]
+) -> ChatDestination? {
+    guard let home = topics.first(where: {
+        $0.roomId == roomID && $0.topicId == "home" && !$0.archived
+    }) else {
+        return nil
+    }
+    guard let chat = home.chats
+        .filter({ $0.messageCount == 0 })
+        .max(by: { left, right in
+            if left.updatedSeq != right.updatedSeq {
+                return left.updatedSeq < right.updatedSeq
+            }
+            if left.startedSeq != right.startedSeq {
+                return left.startedSeq < right.startedSeq
+            }
+            return left.chatId < right.chatId
+        })
+    else {
+        return nil
+    }
+    return ChatDestination(
+        roomID: roomID,
+        topicID: home.topicId,
+        chatID: chat.chatId,
+        title: chat.title,
+        preview: chat.lastMessagePreview,
+        updatedSequence: chat.updatedSeq
+    )
+}
+
 struct ComposerLaunch: Hashable {
     let id: UUID
     let action: ComposerLaunchAction
@@ -123,6 +156,8 @@ struct ContentView: View {
                 RoomThreadView(
                     model: model,
                     roomID: destination.roomID,
+                    topicID: destination.topicID,
+                    chatID: destination.chatID,
                     composerLaunch: destination.composerLaunch,
                     openDrawer: presentDrawer
                 )
@@ -249,34 +284,26 @@ struct ContentView: View {
             intentKey: "ios-home-\(UUID().uuidString.lowercased())"
         )
         pendingHomeSubmission = pending
+        if let reusableDestination = reusableEmptyHomeChatDestination {
+            reuseEmptyHomeChat(
+                reusableDestination,
+                text: text,
+                launchAction: launchAction,
+                completion: completion
+            )
+            return
+        }
         let onCreated: @MainActor () -> Void = {
             guard let destination = selectedDestination else {
                 completion(false)
                 return
             }
-
-            let routedDestination: ChatDestination
-            if let launchAction {
-                routedDestination = ChatDestination(
-                    roomID: destination.roomID,
-                    topicID: destination.topicID,
-                    chatID: destination.chatID,
-                    title: destination.title,
-                    preview: destination.preview,
-                    updatedSequence: destination.updatedSequence,
-                    composerLaunch: ComposerLaunch(
-                        id: UUID(),
-                        action: launchAction,
-                        draft: text
-                    )
-                )
-            } else {
-                routedDestination = destination
-            }
-
-            pendingHomeSubmission = nil
-            path.append(routedDestination)
-            completion(true)
+            finishHomeNavigation(
+                to: destination,
+                text: text,
+                launchAction: launchAction,
+                completion: completion
+            )
         }
         let onFailure: @MainActor () -> Void = {
             completion(false)
@@ -299,6 +326,73 @@ struct ContentView: View {
         if !started {
             completion(false)
         }
+    }
+
+    private var reusableEmptyHomeChatDestination: ChatDestination? {
+        guard let roomID = model.pairedAgent?.roomId else { return nil }
+        return findReusableEmptyHomeChatDestination(
+            roomID: roomID,
+            topics: model.topics(for: roomID)
+        )
+    }
+
+    private func reuseEmptyHomeChat(
+        _ destination: ChatDestination,
+        text: String,
+        launchAction: ComposerLaunchAction?,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let opened = model.openChat(
+            roomID: destination.roomID,
+            topicID: destination.topicID,
+            chatID: destination.chatID
+        ) {
+            if launchAction == nil,
+               !model.send(roomID: destination.roomID, text: text)
+            {
+                completion(false)
+                return
+            }
+            finishHomeNavigation(
+                to: destination,
+                text: text,
+                launchAction: launchAction,
+                completion: completion
+            )
+        }
+        if !opened {
+            completion(false)
+        }
+    }
+
+    private func finishHomeNavigation(
+        to destination: ChatDestination,
+        text: String,
+        launchAction: ComposerLaunchAction?,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let routedDestination: ChatDestination
+        if let launchAction {
+            routedDestination = ChatDestination(
+                roomID: destination.roomID,
+                topicID: destination.topicID,
+                chatID: destination.chatID,
+                title: destination.title,
+                preview: destination.preview,
+                updatedSequence: destination.updatedSequence,
+                composerLaunch: ComposerLaunch(
+                    id: UUID(),
+                    action: launchAction,
+                    draft: text
+                )
+            )
+        } else {
+            routedDestination = destination
+        }
+
+        pendingHomeSubmission = nil
+        path.append(routedDestination)
+        completion(true)
     }
 
     private func open(_ destination: ChatDestination) {

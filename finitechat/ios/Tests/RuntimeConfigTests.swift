@@ -4,6 +4,88 @@ import UIKit
 @testable import FiniteChat
 
 final class RuntimeConfigTests: XCTestCase {
+    func testReusableEmptyHomeChatPrefersTheMostRecentlyUpdatedCandidate() {
+        let destination = findReusableEmptyHomeChatDestination(
+            roomID: "room-main",
+            topics: [
+                AppTopicSummary(
+                    roomId: "room-main",
+                    topicId: "other",
+                    title: "Other",
+                    description: nil,
+                    lastMessagePreview: "",
+                    unreadCount: 0,
+                    messageCount: 0,
+                    createdSeq: 1,
+                    updatedSeq: 100,
+                    archived: false,
+                    activeChatId: "other-empty",
+                    chats: [
+                        AppChatSummary(
+                            chatId: "other-empty",
+                            title: "New chat",
+                            lastMessagePreview: "",
+                            unreadCount: 0,
+                            messageCount: 0,
+                            startedSeq: 100,
+                            updatedSeq: 100,
+                            active: true
+                        ),
+                    ]
+                ),
+                AppTopicSummary(
+                    roomId: "room-main",
+                    topicId: "home",
+                    title: "Home",
+                    description: nil,
+                    lastMessagePreview: "already used",
+                    unreadCount: 0,
+                    messageCount: 1,
+                    createdSeq: 1,
+                    updatedSeq: 12,
+                    archived: false,
+                    activeChatId: "empty-newer",
+                    chats: [
+                        AppChatSummary(
+                            chatId: "filled",
+                            title: "Existing chat",
+                            lastMessagePreview: "already used",
+                            unreadCount: 0,
+                            messageCount: 1,
+                            startedSeq: 12,
+                            updatedSeq: 12,
+                            active: false
+                        ),
+                        AppChatSummary(
+                            chatId: "empty-older",
+                            title: "New chat",
+                            lastMessagePreview: "",
+                            unreadCount: 0,
+                            messageCount: 0,
+                            startedSeq: 2,
+                            updatedSeq: 2,
+                            active: false
+                        ),
+                        AppChatSummary(
+                            chatId: "empty-newer",
+                            title: "New chat",
+                            lastMessagePreview: "",
+                            unreadCount: 0,
+                            messageCount: 0,
+                            startedSeq: 10,
+                            updatedSeq: 10,
+                            active: true
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        XCTAssertEqual(destination?.roomID, "room-main")
+        XCTAssertEqual(destination?.topicID, "home")
+        XCTAssertEqual(destination?.chatID, "empty-newer")
+    }
+
     func testLocalDeviceLinkUsesElectronCompatibleDashboardOverride() throws {
         let url = try temporaryConfigURL()
 

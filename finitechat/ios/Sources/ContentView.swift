@@ -9,6 +9,8 @@ struct RoomThreadView: View {
     @Environment(\.finiteTokens) private var tokens
     @ObservedObject var model: AppModel
     let roomID: String
+    let topicID: String
+    let chatID: String
     let composerLaunch: ComposerLaunch?
     let openDrawer: () -> Void
     @State private var followsBottom = true
@@ -34,11 +36,15 @@ struct RoomThreadView: View {
     init(
         model: AppModel,
         roomID: String,
+        topicID: String,
+        chatID: String,
         composerLaunch: ComposerLaunch? = nil,
         openDrawer: @escaping () -> Void
     ) {
         self.model = model
         self.roomID = roomID
+        self.topicID = topicID
+        self.chatID = chatID
         self.composerLaunch = composerLaunch
         self.openDrawer = openDrawer
     }
@@ -52,11 +58,11 @@ struct RoomThreadView: View {
     }
 
     private var selectedTopic: AppTopicSummary? {
-        model.selectedTopic(in: roomID)
+        model.topics(for: roomID).first(where: { $0.topicId == topicID })
     }
 
     private var selectedChat: AppChatSummary? {
-        selectedTopic.flatMap { model.selectedChat(in: $0) }
+        selectedTopic?.chats.first(where: { $0.chatId == chatID })
     }
 
     private var chatNavigationTitle: String {
@@ -151,9 +157,7 @@ struct RoomThreadView: View {
             }
         }
         .onAppear {
-            if let room {
-                model.openRoom(room)
-            }
+            openDestinationIfNeeded()
         }
         .onChange(of: latestMessageID) { _, _ in
             markRoomReadIfNeeded()
@@ -414,6 +418,16 @@ struct RoomThreadView: View {
     private func focusedReplyTarget(for message: ChatMessage) -> ChatMessage? {
         guard let replyToMessageId = message.replyToMessageId else { return nil }
         return projection.messagesById[replyToMessageId]
+    }
+
+    private func openDestinationIfNeeded() {
+        guard model.state?.selectedRoomId != roomID
+                || model.state?.selectedTopicId != topicID
+                || model.state?.selectedChatId != chatID
+        else {
+            return
+        }
+        model.openChat(roomID: roomID, topicID: topicID, chatID: chatID)
     }
 
     private func updateTypingIntent(_ isTyping: Bool) {
