@@ -8,7 +8,7 @@ use crate::bindings;
 use crate::bindings::BuildProfile;
 use crate::cli::{CliError, JsonOk, human_log, json_print};
 use crate::config::load_rmp_toml;
-use crate::util::{discover_xcode_dev_dir, run_capture};
+use crate::util::{discover_xcode_dev_dir, run_capture, sanitize_apple_toolchain_environment};
 
 const IOS_DEVICE_STORE_DIR: &str = "FiniteChatStore";
 const IOS_DEVICE_STORE_SOURCE: &str = "Library/Application Support/FiniteChatStore";
@@ -314,10 +314,8 @@ pub(crate) fn build_install_ios_simulator(
         format!("xcodebuild ({xcode_config}, iphonesimulator, arch={xcode_arch})"),
     );
     let mut cmd = Command::new("/usr/bin/xcrun");
+    sanitize_apple_toolchain_environment(&mut cmd);
     cmd.env("DEVELOPER_DIR", &dev_dir)
-        .env_remove("LD")
-        .env_remove("CC")
-        .env_remove("CXX")
         .arg("xcodebuild")
         .arg("-project")
         .arg(&xcode_project_path)
@@ -435,10 +433,8 @@ pub(crate) fn build_install_ios_device(
         format!("xcodebuild ({xcode_config}, iphoneos, arch={xcode_arch})"),
     );
     let mut cmd = Command::new("/usr/bin/xcrun");
+    sanitize_apple_toolchain_environment(&mut cmd);
     cmd.env("DEVELOPER_DIR", &dev_dir)
-        .env_remove("LD")
-        .env_remove("CC")
-        .env_remove("CXX")
         .arg("xcodebuild")
         .arg("-project")
         .arg(&xcode_project_path)
@@ -1964,10 +1960,8 @@ fn resolve_ios_app_path(
     xcode_arch: &str,
 ) -> Result<PathBuf, CliError> {
     let mut cmd = Command::new("/usr/bin/xcrun");
+    sanitize_apple_toolchain_environment(&mut cmd);
     cmd.env("DEVELOPER_DIR", dev_dir)
-        .env_remove("LD")
-        .env_remove("CC")
-        .env_remove("CXX")
         .arg("xcodebuild")
         .arg("-project")
         .arg(xcode_project_path)

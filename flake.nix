@@ -103,26 +103,30 @@
           targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
             "aarch64-apple-ios"
             "aarch64-apple-ios-sim"
-            "x86_64-apple-ios"
           ];
         };
       in
       {
         devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            curl
-            git
-            just
-            nodejs_24
-            openssl
-            postgresql_16
-            pkg-config
-            process-compose
-            python3
-            rsync
-            xxd
-            rustToolchain
-          ];
+          packages =
+            with pkgs;
+            [
+              curl
+              git
+              jq
+              just
+              nodejs_24
+              openssl
+              postgresql_16
+              pkg-config
+              process-compose
+              protobuf
+              python3
+              rsync
+              xxd
+              rustToolchain
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         };

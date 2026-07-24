@@ -254,18 +254,11 @@ FINITECHAT_PUBLIC_URL=https://chat.example.com \
 `--public-url URL` is the equivalent command-line option. The value must be a
 bare `http` or `https` origin, without a path, query, credentials, or fragment.
 
-Run the iOS simulator app against that server with an explicit override:
+For normal local iOS product and UX iteration, run the blessed Devfinity
+workflow from the monorepo root:
 
 ```sh
-FINITECHAT_SERVER_URL=http://127.0.0.1:8787 cargo run -p finitechat-rmp -- run ios
-```
-
-For the complete local product loop—real hosted human device, encrypted
-dashboard device-link, real Hermes gateway, and iOS Simulator—run this from
-the monorepo root:
-
-```sh
-just ios-local-agent
+just dev ios-local-agent
 ```
 
 The command launches the app against loopback-only services, creates one
@@ -276,18 +269,26 @@ Electron uses; there is no separate approval page. No deployment or production
 account is involved. Logs stay under
 `finitechat/.state/ios-local-agent/`.
 
-To test the iOS app surface with a real local Hermes gateway, use the bundled
-runner instead of the plain server command. This is a low-level local runner,
-not the physical-phone canary gate:
+Because both configured origins are loopback HTTP URLs, the app intentionally
+skips hosted WorkOS AuthKit and its HTTPS/AASA callback. The bypass fails closed
+for mixed, non-loopback, and deployed origins, so hosted builds still require
+normal authentication.
+
+For low-level server or build troubleshooting, the primitives can still run
+independently. They do not create the complete local account-link fixture; use
+the Devfinity workflow above when the app needs to chat:
+
+```sh
+cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3
+FINITECHAT_SERVER_URL=http://127.0.0.1:8787 \
+  cargo run -p finitechat-rmp -- run ios
+```
+
+To isolate the real Hermes gateway without the rest of the product loop, use
+the lower-level runner:
 
 ```sh
 scripts/hermes-real-gateway-demo.sh
-```
-
-In another terminal, point the simulator app at the runner's local server:
-
-```sh
-FINITECHAT_SERVER_URL=http://127.0.0.1:18788 cargo run -p finitechat-rmp -- run ios
 ```
 
 The Hermes runner launches the same `hermes-agent==0.18.2` package pinned by

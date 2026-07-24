@@ -228,13 +228,16 @@ Documented tools:
 - `.env.example` for Hermes model keys, physical-device IDs, remote Docker, and
   restic/Tinfoil canary settings.
 
-Local server and simulator:
+Blessed local iOS product loop:
 
 ```bash
-cd finitechat
-cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3
-FINITECHAT_SERVER_URL=http://127.0.0.1:8787 cargo run -p finitechat-rmp -- run ios
+just dev ios-local-agent
 ```
+
+This loop uses only loopback HTTP origins, so the native app skips hosted
+WorkOS/AASA authentication and uses the bounded development Device Link.
+Direct `finitechat-server` and `finitechat-rmp run ios` commands remain
+low-level troubleshooting tools rather than alternate setup paths.
 
 Agent CLI and Hermes onboarding:
 

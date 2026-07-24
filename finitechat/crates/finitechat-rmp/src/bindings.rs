@@ -6,7 +6,9 @@ use walkdir::WalkDir;
 
 use crate::cli::{CliError, JsonOk, human_log, json_print};
 use crate::config::{RmpToml, load_rmp_toml};
-use crate::util::{discover_xcode_dev_dir, run_capture, which};
+use crate::util::{
+    discover_xcode_dev_dir, run_capture, sanitize_apple_toolchain_environment, which,
+};
 
 const BINDGEN_HASH_FILE_PREFIX: &str = "target/.rmp-bindgen-hash";
 
@@ -72,17 +74,11 @@ fn build_swift_for_run_with_output(
     let core_pkg = cfg.core.crate_.clone();
     let core_lib = core_pkg.replace('-', "_");
     generate_ios_sources_with_output(root, &cfg, profile, true, verbose, stdout_to_stderr)?;
-    let mut targets = vec![rust_target];
-    for default_target in default_ios_targets() {
-        if !targets.contains(&default_target) {
-            targets.push(default_target);
-        }
-    }
     build_ios_xcframework(
         root,
         &core_lib,
         &core_pkg,
-        &targets,
+        &[rust_target],
         profile,
         verbose,
         stdout_to_stderr,
@@ -665,6 +661,7 @@ fn build_ios_xcframework(
     let xcf_name = pascal_case(core_lib);
     let out_xcf = frameworks_dir.join(format!("{xcf_name}.xcframework"));
     let mut cmd = Command::new("/usr/bin/xcrun");
+    sanitize_apple_toolchain_environment(&mut cmd);
     cmd.env("DEVELOPER_DIR", &dev_dir)
         .arg("xcodebuild")
         .arg("-create-xcframework");
@@ -758,6 +755,7 @@ fn build_ios_staticlibs(
             }
         };
         let mut cmd = Command::new("cargo");
+        sanitize_apple_toolchain_environment(&mut cmd);
         cmd.current_dir(root)
             .arg("build")
             .arg("-p")
@@ -767,20 +765,6 @@ fn build_ios_staticlibs(
             .arg(target);
         if let Some(flag) = profile.cargo_release_arg() {
             cmd.arg(flag);
-        }
-
-        // Clean out Nix/toolchain vars that break iOS builds.
-        for k in [
-            "LIBRARY_PATH",
-            "SDKROOT",
-            "MACOSX_DEPLOYMENT_TARGET",
-            "CC",
-            "CXX",
-            "AR",
-            "RANLIB",
-            "LD",
-        ] {
-            cmd.env_remove(k);
         }
 
         cmd.env("DEVELOPER_DIR", dev_dir)
@@ -799,6 +783,7 @@ fn build_ios_staticlibs(
                     ios_min
                 ),
             );
+        cmd.env("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER", &cc);
 
         // Ensure linker is clang for relevant targets.
         match *target {

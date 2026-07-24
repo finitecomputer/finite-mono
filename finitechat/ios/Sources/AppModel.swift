@@ -90,13 +90,6 @@ struct RuntimeConfig: Codable, Equatable {
         let bundledWorkOSClientID = normalizedWorkOSClientID(
             bundleInfo["WorkOSClientID"] as? String
         )
-        let developmentWorkOSClientID = argumentValue(
-            "--finitechat-workos-client-id",
-            in: args
-        ) ?? environmentValue("FINITECHAT_WORKOS_CLIENT_ID", in: environment)
-        let workosClientID = allowsDevelopmentOverrides
-            ? (normalizedWorkOSClientID(developmentWorkOSClientID) ?? bundledWorkOSClientID)
-            : bundledWorkOSClientID
         let persisted = loadPersisted(storageURL: storageURL)
         let fallback = RuntimeConfig(
             serverURL: persisted.serverURL ?? defaultServerURL,
@@ -118,7 +111,7 @@ struct RuntimeConfig: Codable, Equatable {
             serverURL: serverURL ?? fallback.serverURL,
             dashboardURL: dashboardURL ?? fallback.dashboardURL,
             deviceID: deviceID ?? fallback.deviceID,
-            workosClientID: workosClientID,
+            workosClientID: bundledWorkOSClientID,
             usesTransientStore: transientOverride,
             persistsRuntimeIdentityUpdates: shouldPersistResolvedIdentity
         )
@@ -217,6 +210,10 @@ struct RuntimeConfig: Codable, Equatable {
 
     var usesLocalDeviceLinkEnvironment: Bool {
         Self.isLoopbackHTTPURL(serverURL) && Self.isLoopbackHTTPURL(dashboardURL)
+    }
+
+    var requiresWorkOSAuthentication: Bool {
+        !usesLocalDeviceLinkEnvironment
     }
 
     var hasCompatibleDeviceLinkOrigins: Bool {
@@ -837,9 +834,7 @@ final class AppModel: ObservableObject, AppReconciler {
             do {
                 guard let self else { return }
                 let authKit: NativeAuthKitSession?
-                if runtimeConfig.usesLocalDeviceLinkEnvironment {
-                    authKit = nil
-                } else {
+                if runtimeConfig.requiresWorkOSAuthentication {
                     guard let workosClientID = runtimeConfig.workosClientID else {
                         throw AppAccountLinkError.authKitNotConfigured
                     }
@@ -858,6 +853,8 @@ final class AppModel: ObservableObject, AppReconciler {
                         try session.complete(callbackUrl: callbackURL.absoluteString)
                     }.value
                     authKit = session
+                } else {
+                    authKit = nil
                 }
                 guard !Task.isCancelled else { return }
                 let link = try await Task.detached(priority: .userInitiated) {

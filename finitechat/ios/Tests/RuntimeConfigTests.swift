@@ -14,6 +14,7 @@ final class RuntimeConfigTests: XCTestCase {
                 "FINITECHAT_DEVICE_ID": "ios-local",
             ],
             args: ["FiniteChat", "--finitechat-transient-config"],
+            bundleInfo: ["WorkOSClientID": "client_staging_bundle"],
             storageURL: url,
             allowsDevelopmentOverrides: true
         )
@@ -23,7 +24,9 @@ final class RuntimeConfigTests: XCTestCase {
         XCTAssertEqual(loaded.deviceID, "ios-local")
         XCTAssertTrue(loaded.usesTransientStore)
         XCTAssertTrue(loaded.usesLocalDeviceLinkEnvironment)
+        XCTAssertFalse(loaded.requiresWorkOSAuthentication)
         XCTAssertTrue(loaded.hasCompatibleDeviceLinkOrigins)
+        XCTAssertEqual(loaded.workosClientID, "client_staging_bundle")
         XCTAssertEqual(
             loaded.accountIdentityKeychainService,
             KeychainNostrIdentityStore.localDevelopmentService
@@ -41,7 +44,6 @@ final class RuntimeConfigTests: XCTestCase {
         let loaded = RuntimeConfig.load(
             environment: [
                 "FINITECHAT_DASHBOARD_URL": "http://127.0.0.1:13002",
-                "FINITECHAT_WORKOS_CLIENT_ID": "client_local_override",
             ],
             args: ["FiniteChat"],
             bundleInfo: ["WorkOSClientID": "client_release_bundle"],
@@ -61,20 +63,6 @@ final class RuntimeConfigTests: XCTestCase {
         )
     }
 
-    func testDevelopmentWorkOSClientIDCanOverrideBundledApplication() throws {
-        let loaded = RuntimeConfig.load(
-            environment: [
-                "FINITECHAT_WORKOS_CLIENT_ID": "client_local_override",
-            ],
-            args: ["FiniteChat"],
-            bundleInfo: ["WorkOSClientID": "client_staging_bundle"],
-            storageURL: try temporaryConfigURL(),
-            allowsDevelopmentOverrides: true
-        )
-
-        XCTAssertEqual(loaded.workosClientID, "client_local_override")
-    }
-
     func testDeviceLinkRejectsMixedLocalAndProductionOrigins() {
         let localServer = RuntimeConfig(
             serverURL: "http://127.0.0.1:18788",
@@ -89,6 +77,8 @@ final class RuntimeConfigTests: XCTestCase {
 
         XCTAssertFalse(localServer.hasCompatibleDeviceLinkOrigins)
         XCTAssertFalse(localDashboard.hasCompatibleDeviceLinkOrigins)
+        XCTAssertTrue(localServer.requiresWorkOSAuthentication)
+        XCTAssertTrue(localDashboard.requiresWorkOSAuthentication)
         XCTAssertFalse(
             RuntimeConfig(
                 serverURL: "https://chat.staging.example",
