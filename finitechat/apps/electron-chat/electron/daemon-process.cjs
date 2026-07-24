@@ -82,17 +82,6 @@ function validDeviceId(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 255 && /^[a-zA-Z0-9._-]+$/.test(value);
 }
 
-function directoryHasEntries(directory, fileSystem = fs) {
-  try {
-    return fileSystem.readdirSync(directory).length > 0;
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return false;
-    }
-    throw error;
-  }
-}
-
 function readJsonObject(filePath, fileSystem = fs) {
   try {
     const value = JSON.parse(fileSystem.readFileSync(filePath, "utf8"));
@@ -123,13 +112,13 @@ function writeJsonObject(filePath, value, fileSystem = fs) {
 }
 
 /**
- * Return this installation's stable Device id.
+ * Return this cryptographic profile's stable Device id.
  *
- * Fresh installations receive an opaque random id. An installation which has
- * daemon data from the hostname-derived pre-alpha keeps that old id exactly
- * once and persists it, so an upgrade does not strand its local MLS state or
- * silently enroll a duplicate Device. A later hostname change cannot change
- * either form of persisted id.
+ * The canonical binding lives inside the daemon data directory so deleting
+ * that MLS/runtime profile also deletes its Device identity. Desktop settings
+ * mirror the id for compatibility, but cannot carry an old id into a freshly
+ * rebuilt store. An installation which has daemon data from the
+ * hostname-derived pre-alpha keeps that old id exactly once.
  */
 function loadOrCreateDeviceId({
   settingsFile,
@@ -139,19 +128,53 @@ function loadOrCreateDeviceId({
   fileSystem = fs,
 }) {
   const settings = readJsonObject(settingsFile, fileSystem);
-  if (validDeviceId(settings.deviceId)) {
-    return settings.deviceId;
+  const identityFile = path.join(daemonDataDirectory, "device-identity.json");
+  const clientStoreFile = path.join(daemonDataDirectory, "client.sqlite3");
+  const identity = readJsonObject(identityFile, fileSystem);
+  if (validDeviceId(identity.deviceId)) {
+    if (identity.version !== 1 || typeof identity.initialized !== "boolean") {
+      throw new Error("Finite Chat local Device profile metadata is invalid");
+    }
+    if (identity.initialized && !pathExists(clientStoreFile, fileSystem)) {
+      const deviceId = `electron-${randomUUID()}`;
+      if (!validDeviceId(deviceId)) {
+        throw new Error("Failed to create a valid Finite Chat Device id");
+      }
+      writeJsonObject(identityFile, { version: 1, deviceId, initialized: false }, fileSystem);
+      settings.deviceId = deviceId;
+      delete settings.pendingDeviceLink;
+      writeJsonObject(settingsFile, settings, fileSystem);
+      return deviceId;
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(settings, "deviceId") &&
+      settings.deviceId !== identity.deviceId
+    ) {
+      throw new Error("Finite Chat desktop settings do not match the local Device profile");
+    }
+    if (settings.deviceId !== identity.deviceId) {
+      settings.deviceId = identity.deviceId;
+      writeJsonObject(settingsFile, settings, fileSystem);
+    }
+    return identity.deviceId;
+  }
+  if (Object.prototype.hasOwnProperty.call(identity, "deviceId")) {
+    throw new Error("Finite Chat local Device profile contains an invalid Device id");
   }
   if (Object.prototype.hasOwnProperty.call(settings, "deviceId")) {
-    throw new Error("Finite Chat desktop settings contain an invalid Device id");
+    if (!validDeviceId(settings.deviceId)) {
+      throw new Error("Finite Chat desktop settings contain an invalid Device id");
+    }
   }
 
-  const deviceId = directoryHasEntries(daemonDataDirectory, fileSystem)
-    ? legacyHostnameDeviceId(hostname)
+  const hasDaemonState = pathExists(clientStoreFile, fileSystem);
+  const deviceId = hasDaemonState
+    ? settings.deviceId ?? legacyHostnameDeviceId(hostname)
     : `electron-${randomUUID()}`;
   if (!validDeviceId(deviceId)) {
     throw new Error("Failed to create a valid Finite Chat Device id");
   }
+  writeJsonObject(identityFile, { version: 1, deviceId, initialized: hasDaemonState }, fileSystem);
   settings.deviceId = deviceId;
   writeJsonObject(settingsFile, settings, fileSystem);
   return deviceId;
@@ -164,6 +187,28 @@ function pathExists(filePath, fileSystem = fs) {
   } catch (error) {
     if (error?.code === "ENOENT") return false;
     throw error;
+  }
+}
+
+function markDeviceProfileInitialized({
+  daemonDataDirectory,
+  deviceId,
+  fileSystem = fs,
+}) {
+  const identityFile = path.join(daemonDataDirectory, "device-identity.json");
+  const identity = readJsonObject(identityFile, fileSystem);
+  if (
+    identity.version !== 1
+    || identity.deviceId !== deviceId
+    || typeof identity.initialized !== "boolean"
+  ) {
+    throw new Error("Finite Chat cannot initialize a mismatched local Device profile");
+  }
+  if (!pathExists(path.join(daemonDataDirectory, "client.sqlite3"), fileSystem)) {
+    throw new Error("Finite Chat cannot initialize a Device profile without its local store");
+  }
+  if (!identity.initialized) {
+    writeJsonObject(identityFile, { ...identity, initialized: true }, fileSystem);
   }
 }
 
@@ -1058,9 +1103,9 @@ module.exports = {
   DeviceLinkSupervisor,
   daemonRequestVersionMatches,
   deviceLinkFailureMessage,
-  directoryHasEntries,
   legacyHostnameDeviceId,
   loadOrCreateDeviceId,
+  markDeviceProfileInitialized,
   archiveRevokedDeviceProfile,
   parseReadyRecord,
   parseDeviceLinkReadyRecord,

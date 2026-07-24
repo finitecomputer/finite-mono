@@ -5431,6 +5431,7 @@ impl AppRuntimeState {
             .link_fanouts
             .into_iter()
             .find(|fanout| fanout.fanout_id == fanout_id);
+        let mut delivery = self.core.home_delivery();
         match existing {
             Some(existing) if existing.target_device != target => {
                 return Err(FiniteChatCoreError::Client {
@@ -5438,18 +5439,26 @@ impl AppRuntimeState {
                 });
             }
             Some(_) => {}
-            None => self
-                .core
-                .store
-                .start_link_fanout_and_save(
-                    &mut self.core.device,
-                    fanout_id.clone(),
-                    target.clone(),
-                )
-                .map_err(store_error)?,
+            None => {
+                let (existing_room_count, _) =
+                    device_room_counts(&mut delivery, &target).map_err(delivery_error)?;
+                if existing_room_count > 0 {
+                    return Err(FiniteChatCoreError::Client {
+                        reason: "linked Device id already belongs to an enrolled Device; use a fresh Device id"
+                            .to_owned(),
+                    });
+                }
+                self.core
+                    .store
+                    .start_link_fanout_and_save(
+                        &mut self.core.device,
+                        fanout_id.clone(),
+                        target.clone(),
+                    )
+                    .map_err(store_error)?;
+            }
         }
 
-        let mut delivery = self.core.home_delivery();
         let fanout = run_link_fanout_tick(
             &mut self.core.store,
             &mut self.core.device,
@@ -18267,6 +18276,70 @@ mod tests {
                 .messages
                 .iter()
                 .any(|message| message.text == "from the local Device" && !message.is_mine)
+        );
+
+        drop(electron);
+        let replacement = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir
+                .path()
+                .join("electron-replacement")
+                .to_string_lossy()
+                .into_owned(),
+            server_url: server_url.clone(),
+            device_id: "electron-alpha".to_owned(),
+            account_secret_hex: Some(hosted.state().unwrap().identity.account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        let replacement_state = replacement
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("replacement publishes its own cryptographic state");
+        assert!(
+            !replacement_state
+                .rooms
+                .iter()
+                .any(|room| room.room_id == room_id),
+            "replacement must not inherit the old Device generation's room"
+        );
+
+        let collision = hosted
+            .link_device_and_wait("link-replacement".to_owned(), "electron-alpha".to_owned())
+            .unwrap_err();
+        assert!(
+            collision
+                .to_string()
+                .contains("already belongs to an enrolled Device"),
+            "a replacement cryptographic state must fail closed instead of reporting ready: {collision}"
+        );
+
+        let fresh_replacement = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir
+                .path()
+                .join("electron-fresh-replacement")
+                .to_string_lossy()
+                .into_owned(),
+            server_url,
+            device_id: "electron-beta".to_owned(),
+            account_secret_hex: Some(hosted.state().unwrap().identity.account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        fresh_replacement
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("fresh replacement publishes its own cryptographic state");
+        let fresh_link = hosted
+            .link_device_and_wait(
+                "link-fresh-replacement".to_owned(),
+                "electron-beta".to_owned(),
+            )
+            .expect("a fresh Device generation links normally");
+        assert!(fresh_link.fanout_complete);
+        let fresh_state = fresh_replacement
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("fresh replacement activates its Welcome");
+        assert_eq!(
+            app_room(&fresh_state, &room_id).state,
+            AppRoomState::Connected
         );
     }
 
