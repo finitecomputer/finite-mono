@@ -46,9 +46,10 @@ self-hosted Hermes pairing, People, invites, or legacy migration.
 
 ## Authority and constraints
 
-- ACTIVE status authorizes repository work, CI configuration for this app,
-  branch publication needed by Xcode Cloud, internal TestFlight distribution,
-  and non-destructive staging/production verification needed by the queue.
+- ACTIVE status currently authorizes local repository work, validation, and
+  milestone commits in the isolated iOS worktree. Branch publication, pull
+  requests, deployments, Xcode Cloud builds/uploads, TestFlight distribution,
+  and merges require Paul's explicit go-ahead.
 - Public App Store release, destructive account or Agent deletion, production
   user-state repair, new paid infrastructure, StoreKit products, and customer
   admission require separate explicit authority.
@@ -100,6 +101,33 @@ Externally reported by Paul:
 
 These external facts remain unaccepted until read-only inspection or a real
 build proves them.
+
+Read-only App Store Connect inspection on 2026-07-24 established:
+
+- the `computer.finite.finitechat` app record exists as version `1.0` in
+  Prepare for Submission;
+- the existing `Default` Xcode Cloud workflow is still attached to the archived
+  `finitecomputer/finitechat` repository, project `ios/FiniteChat.xcodeproj`,
+  and `main`;
+- Build 42 compiled, tested, archived, and exported successfully from that old
+  repository, then failed only while preparing version `0.1.0` for App Store
+  Connect;
+- the workflow prepares for App Store Connect rather than internal-only
+  TestFlight and has no TestFlight post-action; and
+- TestFlight contains no builds, internal groups, or testers yet.
+
+Local release-path evidence on 2026-07-24 established:
+
+- the RMP device path regenerated a device-capable Rust XCFramework, compiled
+  the Swift app with the Release configuration, installed it on Paulphone Air
+  running iOS 26.5.2 without erasing its app data, and launched it;
+- the full `finitechat-rmp` unit suite passed (69 tests);
+- the cold Xcode Cloud preflight regenerated the bridge and Xcode project,
+  verified bundle id `computer.finite.finitechat`, marketing version `1.0`,
+  production WorkOS client configuration, and completed an unsigned Release
+  Simulator build; and
+- Paul's production login, existing-agent selection, and chat observations on
+  that device remain pending.
 
 ## Queue
 

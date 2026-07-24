@@ -108,6 +108,11 @@ chat-electron-package:
     cargo build --locked --release -p finitechat-daemon
     cd finitechat/apps/electron-chat && npm ci && FINITECHAT_DAEMON_BINARY="{{justfile_directory()}}/target/release/finitechatd" npm run package:mac
 
+# Regenerate the native iOS bridge/project and prove the unsigned Release
+# configuration Xcode Cloud will archive.
+ios-cloud-preflight:
+    finitechat/scripts/ios-xcode-cloud-preflight.sh
+
 # Opt-in Stripe test-mode clock E2E. Credentials come from the caller's
 # environment and the harness never prints their values.
 stripe-billing-clock:

@@ -70,6 +70,6 @@ rustup target add \
   aarch64-apple-ios \
   aarch64-apple-ios-sim
 
-cargo run -q -p finitechat-rmp -- bindings swift --clean
+cargo run --locked -q -p finitechat-rmp -- bindings swift --clean
 
 (cd ios && xcodegen generate)
