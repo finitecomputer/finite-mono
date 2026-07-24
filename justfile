@@ -69,8 +69,8 @@ hosted-recovery-contract:
 
 # Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
 brain-product-matrix:
-    FINITE_BRAIN_COLLABORATION_SMOKE_REPORT=target/brain-product-matrix/organization-collaboration.json cargo test --locked -p finite-brain-cli --test fbrain_process_acceptance built_fbrain_process_two_independent_homes_open_restricted_collaboration -- --nocapture
-    scripts/check-brain-collaboration-smoke-report.py target/brain-product-matrix/organization-collaboration.json
+    FINITE_BRAIN_COLLABORATION_SMOKE_REPORT="$PWD/target/brain-product-matrix/organization-collaboration.json" cargo test --locked -p finite-brain-cli --test fbrain_process_acceptance built_fbrain_process_two_independent_homes_open_restricted_collaboration -- --nocapture
+    scripts/check-brain-collaboration-smoke-report.py "$PWD/target/brain-product-matrix/organization-collaboration.json"
     scripts/devfinity-brain-product-matrix
 
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
