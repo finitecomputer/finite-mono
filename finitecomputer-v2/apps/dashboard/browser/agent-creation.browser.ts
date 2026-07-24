@@ -585,12 +585,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         async () => `agent navigation did not hydrate from Core\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
-      const brainLink = productNav.getByRole("link", { name: "Brain", exact: true });
-      await brainLink.waitFor({ state: "visible" });
-      assert.equal(
-        await brainLink.getAttribute("href"),
-        "/dashboard/machines/runtime_completed-oslo-bot/brain",
-      );
+      const brainItem = productNav
+        .getByText("Brain", { exact: true })
+        .locator("xpath=..");
+      await brainItem.waitFor({ state: "visible" });
+      assert.equal(await brainItem.getAttribute("aria-disabled"), "true");
+      assert.equal(await brainItem.getAttribute("href"), null);
       const skillsLink = productNav.getByRole("link", { name: "Skills", exact: true });
       await skillsLink.waitFor({ state: "visible" });
       assert.equal(
@@ -855,16 +855,15 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       const completedProductNav = page.getByRole("navigation", {
         name: "Agent navigation",
       });
-      const completedBrainLink = completedProductNav.getByRole("link", {
-        name: "Brain",
-        exact: true,
-      });
-      await completedBrainLink.waitFor({ state: "visible" });
-      assert.equal(
-        await completedBrainLink.getAttribute("href"),
-        "/dashboard/machines/runtime_completed-oslo-bot/brain",
+      const completedBrainItem = completedProductNav
+        .getByText("Brain", { exact: true })
+        .locator("xpath=..");
+      await completedBrainItem.waitFor({ state: "visible" });
+      assert.equal(await completedBrainItem.getAttribute("aria-disabled"), "true");
+      assert.equal(await completedBrainItem.getAttribute("href"), null);
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_completed-oslo-bot/brain`
       );
-      await completedBrainLink.click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/brain$/u);
       await waitFor(async () => (await page.getByRole("main").evaluate((element) => element.scrollTop)) === 0);
       const brainFrame = page.frameLocator('iframe[title="Completed Oslo Bot Brain"]');
