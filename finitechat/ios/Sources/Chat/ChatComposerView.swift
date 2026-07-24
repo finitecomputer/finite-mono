@@ -73,7 +73,7 @@ struct Composer: View {
                 }
                 .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
                 .frame(minHeight: 52)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 8)
 
                 HStack(spacing: 12) {
