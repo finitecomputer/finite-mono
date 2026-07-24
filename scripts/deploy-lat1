@@ -114,8 +114,9 @@ ssh -n -o BatchMode=yes root@64.34.82.77 systemctl stop "$UNIT"
 echo "SWITCHED: $ACTUAL"
 SCRIPT
 
-# Deploys are when recovery snapshots happen (no calendar timer since
-# 2026-07-14): capture pre-upgrade state while a service blip is expected.
+# Deploys are when the Hosted Web Chat + Identity recovery snapshot happens
+# (no calendar timer since 2026-07-14): capture pre-upgrade state while a
+# service blip is expected.
 echo "==> taking pre-deploy recovery snapshot on lat1"
 ssh -n -o BatchMode=yes "$LAT1" \
   'systemctl start finite-hosted-web-chat-snapshot.service && readlink /data/recovery-snapshots/hosted-web-chat/latest'

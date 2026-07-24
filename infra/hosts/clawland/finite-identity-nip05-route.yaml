@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fc-identity-edge
+---
+# This selectorless service targets the canonical Authority edge on lat1.
+# It exists only so the legacy finite.vip apex can serve the standard NIP-05
+# path without moving the apex or wildcard away from the legacy fleet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: finite-identity-authority
+  namespace: fc-identity-edge
+spec:
+  ports:
+    - name: https
+      port: 443
+      targetPort: 443
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: finite-identity-authority
+  namespace: fc-identity-edge
+subsets:
+  - addresses:
+      - ip: 64.34.82.77
+    ports:
+      - name: https
+        port: 443
+        protocol: TCP
+---
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: finite-identity-authority
+  namespace: fc-identity-edge
+spec:
+  serverName: identity.finite.vip
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: finite-identity-authority-host
+  namespace: fc-identity-edge
+spec:
+  headers:
+    customRequestHeaders:
+      Host: identity.finite.vip
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: finite-identity-nip05
+  namespace: fc-identity-edge
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`finite.vip`) && Path(`/.well-known/nostr.json`)
+      priority: 10000
+      middlewares:
+        - name: finite-identity-authority-host
+      services:
+        - name: finite-identity-authority
+          port: 443
+          scheme: https
+          serversTransport: finite-identity-authority
+  tls:
+    certResolver: letsencrypt

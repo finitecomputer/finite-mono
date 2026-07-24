@@ -558,12 +558,14 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         async () => `agent navigation did not hydrate from Core\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
       await productNav.getByRole("link", { name: "Connections", exact: true }).waitFor({ state: "visible" });
-      const brainLink = productNav.getByRole("link", { name: "Brain", exact: true });
-      await brainLink.waitFor({ state: "visible" });
       assert.equal(
-        await brainLink.getAttribute("href"),
-        "/dashboard/machines/runtime_completed-oslo-bot/brain"
+        await productNav.getByRole("link", { name: "Brain", exact: true }).count(),
+        0,
       );
+      const brainItem = productNav.getByText("Brain", { exact: true }).locator("..");
+      await brainItem.waitFor({ state: "visible" });
+      assert.equal(await brainItem.getAttribute("aria-disabled"), "true");
+      assert.equal(await brainItem.getAttribute("title"), "Temporarily unavailable");
       const skillsLink = productNav.getByRole("link", { name: "Skills", exact: true });
       await skillsLink.waitFor({ state: "visible" });
       assert.equal(
@@ -823,14 +825,20 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByRole("main").evaluate((element) => {
         element.scrollTop = 120;
       });
-      const completedBrainLink = page
-        .getByRole("navigation", { name: "Agent navigation" })
-        .getByRole("link", { name: "Brain", exact: true });
-      await completedBrainLink.waitFor({ state: "visible" });
+      const completedProductNav = page.getByRole("navigation", {
+        name: "Agent navigation",
+      });
       assert.equal(
-        await completedBrainLink.getAttribute("href"),
-        "/dashboard/machines/runtime_completed-oslo-bot/brain"
+        await completedProductNav
+          .getByRole("link", { name: "Brain", exact: true })
+          .count(),
+        0,
       );
+      const completedBrainItem = completedProductNav
+        .getByText("Brain", { exact: true })
+        .locator("..");
+      await completedBrainItem.waitFor({ state: "visible" });
+      assert.equal(await completedBrainItem.getAttribute("aria-disabled"), "true");
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/completed-oslo-bot/brain`
       );

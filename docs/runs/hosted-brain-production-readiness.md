@@ -36,8 +36,9 @@ an incomplete production flow.
 
 - Reuse the merged Finite Identity and Brain contracts; do not introduce a
   second identity store, pairing protocol, or product-specific email resolver.
-- Use `https://identity.finite.chat` as the canonical public Identity Authority
-  origin; trusted co-located services use its loopback transport.
+- The canonical Identity Authority signing/API origin is
+  `https://identity.finite.vip`; trusted same-host products use its loopback
+  listener. Production examples must not reintroduce an older placeholder.
 - Keep Identity Authority operator credentials on trusted services only. They
   never enter an Agent Runtime.
 - Treat the Identity Authority SQLite directory and Brain SQLite database as

@@ -44,9 +44,19 @@ in
       reverse_proxy 127.0.0.1:3015
     '';
 
-    virtualHosts."identity.finite.chat".extraConfig = ''
-      tls ${originCert} ${originKey}
-      reverse_proxy 127.0.0.1:8790
+    # Canonical Finite Identity signing/API origin. Only the browser-facing
+    # challenge, redeem, health, and NIP-05 routes are public. Operator and
+    # Principal Resolution endpoints remain loopback-only until their HTTP
+    # contracts authenticate product callers.
+    virtualHosts."identity.finite.vip".extraConfig = ''
+      @identityPublic path /health /.well-known/nostr.json /api/v1/email-challenges /api/v1/vip-email-bindings/redeem /api/v1/email-only-principals/redeem
+      handle @identityPublic {
+        header /.well-known/nostr.json Access-Control-Allow-Origin "*"
+        reverse_proxy 127.0.0.1:8790
+      }
+      handle {
+        respond 404
+      }
     '';
 
     # Public URL unchanged; backend port moved 8787 -> 8788 on this box

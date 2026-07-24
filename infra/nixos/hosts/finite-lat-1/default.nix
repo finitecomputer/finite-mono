@@ -8,10 +8,10 @@
     ../../modules/finite-saas-core.nix
     ../../modules/finite-saas-runner.nix
     ../../modules/finite-saas-phala-runner.nix
+    ../../modules/finite-identity.nix
     ../../modules/finitechat-server.nix
     ../../modules/finitechat-hosted-device.nix
     ../../modules/finitesitesd.nix
-    ../../modules/finite-identity.nix
     ../../modules/finite-brain.nix
     ../../modules/dashboard.nix
     ../../modules/finite-search.nix
