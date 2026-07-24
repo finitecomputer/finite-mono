@@ -194,9 +194,10 @@ else:
         if marker not in brain_text:
             errors.append(f"{brain_path}: missing runtime routing marker {marker!r}")
 
+    normalized_brain_text = re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", brain_text)
     if re.search(
         r"curl\b[^\n]*(?:\.well-known/nostr\.json|nip-?05)",
-        brain_text,
+        normalized_brain_text,
         re.IGNORECASE,
     ):
         errors.append(
@@ -205,6 +206,12 @@ else:
         )
 
     collaboration_contracts = (
+        (
+            r"Reports may include.*readiness counts.*safe reason codes.*"
+            r"Never paste\s+raw response payloads.*Member Identity keys.*"
+            r"wrapped grant events.*auth\s+material.*Folder Keys.*grant plaintext",
+            "secret-safe collaboration reporting",
+        ),
         (
             r"normal request.*canonical Managed Agent Email.*"
             r"fbrain collaborators ensure-admin.*--target \"\$TARGET_EMAIL\"",
