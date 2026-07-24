@@ -194,6 +194,8 @@ jobs:
         run: nix develop --command just lat1-rollout-contract
       - name: Stripe Price contract
         run: nix develop --command just stripe-price-contract
+      - name: Hosted Recovery Set contract
+        run: nix develop --command just hosted-recovery-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 

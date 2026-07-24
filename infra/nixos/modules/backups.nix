@@ -124,12 +124,18 @@ in
         runuser -u postgres -- pg_dump --format=custom finite_core > "$staging/saas-core/finite_core.dump"
         pg_restore --list "$staging/saas-core/finite_core.dump" >/dev/null
 
-        # #178 upgrades this format to a versioned, exact Recovery Set manifest
-        # and supplies the corresponding empty-target restore contract.
-        printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v1' > "$staging/format"
+        printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v2' > "$staging/format"
+        printf '%s\n' \
+          'finite.hosted-web-chat-recovery-snapshot.v2' \
+          $'hosted-device\tdirectory\thosted-device' \
+          $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
+          $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
+          $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
+          $'finite-identity\tsqlite\tfinite-identity/identity.db' \
+          > "$staging/recovery-set.tsv"
         (
           cd "$staging"
-          find format hosted-device finite-chat saas-core finite-brain finite-identity -type f -print0 \
+          find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity -type f -print0 \
             | sort -z \
             | xargs -0 sha256sum > manifest.sha256
         )
@@ -161,6 +167,17 @@ in
           echo "Hosted Recovery Snapshot is stale ($age seconds); deploy or run finite-hosted-web-chat-snapshot.service" >&2
           exit 1
         fi
+        test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v2
+        expected_recovery_set=$(
+          printf '%s\n' \
+            'finite.hosted-web-chat-recovery-snapshot.v2' \
+            $'hosted-device\tdirectory\thosted-device' \
+            $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
+            $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
+            $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
+            $'finite-identity\tsqlite\tfinite-identity/identity.db'
+        )
+        test "$(cat "$latest/recovery-set.tsv")" = "$expected_recovery_set"
         (cd "$latest" && sha256sum --check manifest.sha256)
       '';
     };
@@ -283,6 +300,17 @@ in
       preHook = ''
         latest=${snapshotRoot}/latest
         test -L "$latest"
+        test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v2
+        expected_recovery_set=$(
+          printf '%s\n' \
+            'finite.hosted-web-chat-recovery-snapshot.v2' \
+            $'hosted-device\tdirectory\thosted-device' \
+            $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
+            $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
+            $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
+            $'finite-identity\tsqlite\tfinite-identity/identity.db'
+        )
+        test "$(cat "$latest/recovery-set.tsv")" = "$expected_recovery_set"
         (cd "$latest" && sha256sum --check manifest.sha256)
         identity_latest=$(
           ${pkgs.findutils}/bin/find ${identityBackupRoot} -maxdepth 1 -type f -name 'identity-20*T*Z.db' -print \
