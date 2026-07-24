@@ -1020,6 +1020,16 @@ struct ChatProjectionState {
 struct ChatArchiveProjectionEntry {
     accepted_seq: u64,
     archived: bool,
+    source: ChatArchiveProjectionSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatArchiveProjectionSource {
+    /// An actual `finitechat.chat.archive.v1` event consumed from the Room log.
+    CanonicalEvent,
+    /// A local restart or same-account bootstrap display fallback. This may
+    /// initialize UI, but it never outranks or becomes proof of a Room event.
+    CacheFallback,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5882,6 +5892,7 @@ impl AppRuntimeState {
                     chat_id: archive.chat_id,
                     archived: archive.archived,
                 },
+                ChatArchiveProjectionSource::CacheFallback,
             );
         }
         if archive_state_changed {
@@ -9547,9 +9558,12 @@ impl ChatProjectionState {
                 self.apply_poll_vote(&event.room_id, &event.sender, owner, vote);
                 false
             }
-            DecodedAppEvent::ChatArchive(archive) => {
-                self.apply_chat_archive(&event.room_id, event.seq, archive)
-            }
+            DecodedAppEvent::ChatArchive(archive) => self.apply_chat_archive(
+                &event.room_id,
+                event.seq,
+                archive,
+                ChatArchiveProjectionSource::CanonicalEvent,
+            ),
             DecodedAppEvent::ChatRename(rename) => {
                 self.apply_chat_rename(&event.room_id, event.seq, rename);
                 false
@@ -9570,6 +9584,7 @@ impl ChatProjectionState {
                     chat_id: archive.chat_id.clone(),
                     archived: archive.archived,
                 },
+                ChatArchiveProjectionSource::CacheFallback,
             );
         }
     }
@@ -9593,6 +9608,7 @@ impl ChatProjectionState {
         self.chat_archives
             .iter()
             .filter(|((candidate_room_id, _, _), _)| candidate_room_id == room_id)
+            .filter(|(_, archive)| archive.source == ChatArchiveProjectionSource::CanonicalEvent)
             .map(
                 |((_, topic_id, chat_id), archive)| DeviceLinkBootstrapChatArchiveV1 {
                     topic_id: topic_id.clone(),
@@ -10024,6 +10040,7 @@ impl ChatProjectionState {
         room_id: &str,
         accepted_seq: u64,
         archive: ChatArchiveV1,
+        source: ChatArchiveProjectionSource,
     ) -> bool {
         let key = (room_id.to_owned(), archive.topic_id, archive.chat_id);
         if !self.chat_archives.contains_key(&key)
@@ -10031,16 +10048,27 @@ impl ChatProjectionState {
         {
             return false;
         }
-        let should_replace = self
-            .chat_archives
-            .get(&key)
-            .is_none_or(|existing| accepted_seq >= existing.accepted_seq);
+        let should_replace =
+            self.chat_archives
+                .get(&key)
+                .is_none_or(|existing| match (existing.source, source) {
+                    (
+                        ChatArchiveProjectionSource::CacheFallback,
+                        ChatArchiveProjectionSource::CanonicalEvent,
+                    ) => true,
+                    (
+                        ChatArchiveProjectionSource::CanonicalEvent,
+                        ChatArchiveProjectionSource::CacheFallback,
+                    ) => false,
+                    _ => accepted_seq >= existing.accepted_seq,
+                });
         if should_replace {
             self.chat_archives.insert(
                 key,
                 ChatArchiveProjectionEntry {
                     accepted_seq,
                     archived: archive.archived,
+                    source,
                 },
             );
         }
@@ -12255,6 +12283,62 @@ mod tests {
             Some("SaaS chat polish"),
             "cold replay must not depend on Hermes or a live server"
         );
+    }
+
+    #[test]
+    fn cached_archive_state_is_display_fallback_not_ordering_authority() {
+        let mut projection = ChatProjectionState::default();
+        projection.restore_chat_archives(&[StoredChatArchiveState {
+            room_id: "room-main".to_owned(),
+            topic_id: "topic-main".to_owned(),
+            chat_id: "chat-main".to_owned(),
+            accepted_seq: 50,
+            archived: true,
+        }]);
+        assert!(
+            projection.stored_chat_archives()[0].archived,
+            "cache fallback may restore local display when canonical history was pruned"
+        );
+        assert!(
+            projection
+                .chat_archive_values_for_room("room-main")
+                .is_empty(),
+            "cache fallback must not be exported as canonical evidence"
+        );
+
+        assert!(projection.apply_chat_archive(
+            "room-main",
+            40,
+            ChatArchiveV1 {
+                topic_id: "topic-main".to_owned(),
+                chat_id: "chat-main".to_owned(),
+                archived: false,
+            },
+            ChatArchiveProjectionSource::CanonicalEvent,
+        ));
+        let canonical = projection.stored_chat_archives();
+        assert_eq!(canonical[0].accepted_seq, 40);
+        assert!(!canonical[0].archived);
+        assert_eq!(
+            projection.chat_archive_values_for_room("room-main"),
+            vec![DeviceLinkBootstrapChatArchiveV1 {
+                topic_id: "topic-main".to_owned(),
+                chat_id: "chat-main".to_owned(),
+                accepted_seq: 40,
+                archived: false,
+            }]
+        );
+
+        projection.restore_chat_archives(&[StoredChatArchiveState {
+            room_id: "room-main".to_owned(),
+            topic_id: "topic-main".to_owned(),
+            chat_id: "chat-main".to_owned(),
+            accepted_seq: 60,
+            archived: true,
+        }]);
+        let after_confused_cache = projection.stored_chat_archives();
+        assert_eq!(after_confused_cache[0].accepted_seq, 40);
+        assert!(!after_confused_cache[0].archived);
     }
 
     #[test]

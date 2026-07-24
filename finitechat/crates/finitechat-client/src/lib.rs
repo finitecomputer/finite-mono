@@ -7586,7 +7586,7 @@ fn decrypt_app_state_metadata(
     )
     .map_err(ClientError::from)?;
     for archive in &metadata.chat_archives {
-        archive.validate_limits().map_err(ClientError::from)?;
+        archive.validate_limits()?;
     }
     Ok(metadata)
 }
