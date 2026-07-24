@@ -29,9 +29,18 @@ class Platform(Enum):
 
 
 @dataclass
+class HomeChannel:
+    platform: Platform
+    chat_id: str
+    name: str
+    thread_id: str | None = None
+
+
+@dataclass
 class PlatformConfig:
     enabled: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
+    home_channel: HomeChannel | None = None
 
 
 class MessageType(Enum):
@@ -132,6 +141,7 @@ def install_gateway_stubs() -> None:
 
     config_module = cast(Any, config)
     base_module = cast(Any, base)
+    config_module.HomeChannel = HomeChannel
     config_module.Platform = Platform
     config_module.PlatformConfig = PlatformConfig
     base_module.BasePlatformAdapter = BasePlatformAdapter
@@ -199,11 +209,27 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             else:
                 sys.modules[name] = module
 
-    def adapter(self, room_id: str | None = "room-agent-1"):
+    def adapter(
+        self,
+        room_id: str | None = "room-agent-1",
+        *,
+        configured_home: bool = True,
+    ):
         extra = {"home": "/tmp/finite-agent-home", "finitechat_bin": "/bin/echo"}
         if room_id:
             extra["room_id"] = room_id
-        return self.module.FiniteChatAdapter(PlatformConfig(extra=extra))
+        home_channel = (
+            HomeChannel(
+                platform=Platform.FINITECHAT,
+                chat_id=room_id or "room-agent-1",
+                name="Finite Chat",
+            )
+            if configured_home
+            else None
+        )
+        return self.module.FiniteChatAdapter(
+            PlatformConfig(extra=extra, home_channel=home_channel)
+        )
 
     def test_register_exposes_finitechat_platform_contract(self):
         ctx = MockPluginContext()
@@ -220,6 +246,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(entry["label"], "Finite Chat")
         self.assertEqual(entry["required_env"], ["FINITECHAT_HOME"])
         self.assertEqual(entry["allowed_users_env"], "FINITECHAT_ALLOWED_USERS")
+        self.assertEqual(entry["cron_deliver_env_var"], "FINITECHAT_HOME_CHANNEL")
         self.assertEqual(ctx.registered_tools, [])
         self.assertEqual(ctx.registered_commands, [])
         self.assertEqual(
@@ -414,6 +441,113 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
     def test_adapter_disables_edit_streaming_for_ios_rendering_compatibility(self):
         self.assertFalse(self.module.FiniteChatAdapter.SUPPORTS_MESSAGE_EDITING)
+
+    def test_first_inbound_hydrates_authoritative_home_before_handling(self):
+        module = cast(Any, self.module)
+        adapter = self.adapter(configured_home=False)
+        calls = []
+        observed = []
+
+        async def fake_json(action, payload, *, timeout):
+            calls.append((action, payload, timeout))
+            if action == "home-channel-show":
+                return module._FiniteChatResult(
+                    True,
+                    {"home_channel": {"room_id": "room-canonical"}},
+                    None,
+                    False,
+                )
+            return module._FiniteChatResult(True, {}, None, False)
+
+        async def handle_message(event):
+            observed.append(
+                (
+                    os.getenv("FINITECHAT_HOME_CHANNEL"),
+                    adapter.config.home_channel,
+                    event.text,
+                )
+            )
+
+        def save_home(room_id):
+            os.environ["FINITECHAT_HOME_CHANNEL"] = room_id
+
+        adapter._finitechat_json = fake_json
+        adapter.handle_message = handle_message
+        event = MessageEvent(
+            text="hello",
+            source=types.SimpleNamespace(chat_id="room-canonical"),
+            raw_message={"conversation_id": "home", "segment_id": "chat-1"},
+        )
+        with (
+            patch.dict(os.environ, {"FINITECHAT_HOME_CHANNEL": ""}),
+            patch.object(module, "_save_hermes_home_channel_env", side_effect=save_home),
+        ):
+            asyncio.run(
+                adapter._admit_finitechat_event(
+                    event,
+                    "room-canonical",
+                    1,
+                    "message-1",
+                    "room-canonical:1",
+                )
+            )
+
+        self.assertEqual(calls[0], ("home-channel-show", {}, 5))
+        self.assertEqual(observed[0][0], "room-canonical")
+        self.assertEqual(observed[0][1].chat_id, "room-canonical")
+        self.assertEqual(observed[0][2], "hello")
+
+    def test_explicit_native_home_precedes_finitechat_metadata(self):
+        explicit = HomeChannel(
+            platform=Platform.FINITECHAT,
+            chat_id="room-explicit",
+            name="Explicit",
+        )
+        adapter = self.module.FiniteChatAdapter(
+            PlatformConfig(
+                extra={"home": "/tmp/finite-agent-home", "finitechat_bin": "/bin/echo"},
+                home_channel=explicit,
+            )
+        )
+
+        async def unexpected_json(action, payload, *, timeout):
+            self.fail(f"unexpected Finite Chat request: {action} {payload} {timeout}")
+
+        adapter._finitechat_json = unexpected_json
+        with patch.dict(os.environ, {"FINITECHAT_HOME_CHANNEL": ""}):
+            asyncio.run(adapter._hydrate_hermes_home_channel_if_needed())
+
+        self.assertIs(adapter.config.home_channel, explicit)
+        self.assertTrue(adapter._home_channel_hydrated)
+
+    def test_missing_or_malformed_home_metadata_fails_closed(self):
+        module = cast(Any, self.module)
+        adapter = self.adapter(configured_home=False)
+        responses = [
+            module._FiniteChatResult(True, {"home_channel": None}, None, False),
+            module._FiniteChatResult(
+                True,
+                {"home_channel": {"room_id": "   "}},
+                None,
+                False,
+            ),
+        ]
+
+        async def fake_json(action, payload, *, timeout):
+            self.assertEqual((action, payload, timeout), ("home-channel-show", {}, 5))
+            return responses.pop(0)
+
+        adapter._finitechat_json = fake_json
+        with (
+            patch.dict(os.environ, {"FINITECHAT_HOME_CHANNEL": ""}),
+            patch.object(module, "_save_hermes_home_channel_env") as save_home,
+        ):
+            asyncio.run(adapter._hydrate_hermes_home_channel_if_needed())
+            asyncio.run(adapter._hydrate_hermes_home_channel_if_needed())
+
+        save_home.assert_not_called()
+        self.assertIsNone(adapter.config.home_channel)
+        self.assertFalse(adapter._home_channel_hydrated)
 
     def test_post_turn_notice_uses_the_exact_inbound_conversation_and_chat(self):
         module = cast(Any, self.module)
@@ -2107,7 +2241,12 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/false",
                     "inbound_stream": True,
-                }
+                },
+                home_channel=HomeChannel(
+                    platform=Platform.FINITECHAT,
+                    chat_id="room-agent-1",
+                    name="Finite Chat",
+                ),
             )
         )
         adapter._mark_connected()
@@ -2237,7 +2376,12 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                     "service_url": "http://127.0.0.1:9999",
                     "finitechat_bin": "/bin/false",
                     "inbound_stream": True,
-                }
+                },
+                home_channel=HomeChannel(
+                    platform=Platform.FINITECHAT,
+                    chat_id="room-agent-1",
+                    name="Finite Chat",
+                ),
             )
         )
         adapter._mark_connected()

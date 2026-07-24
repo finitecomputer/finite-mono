@@ -952,7 +952,8 @@ final class AccessoryHostingView<AccessoryContent: View>: UIView {
 
     @discardableResult
     private func updatePreferredContentSize() -> Bool {
-        let fittingWidth = max(bounds.width, UIScreen.main.bounds.width)
+        let sceneWidth = window?.windowScene?.screen.bounds.width ?? 0
+        let fittingWidth = max(bounds.width, sceneWidth, 1)
         let height = preferredSize(forWidth: fittingWidth).height.rounded(.up)
         guard abs(height - lastReportedHeight) > 0.5 else { return false }
         lastReportedHeight = height
@@ -964,7 +965,8 @@ final class AccessoryHostingView<AccessoryContent: View>: UIView {
         guard let hostedView else {
             return CGSize(width: UIView.noIntrinsicMetric, height: 0)
         }
-        let fittingWidth = width > 0 ? width : UIScreen.main.bounds.width
+        let sceneWidth = window?.windowScene?.screen.bounds.width ?? 0
+        let fittingWidth = width > 0 ? width : max(sceneWidth, 1)
         let targetSize = CGSize(
             width: fittingWidth,
             height: UIView.layoutFittingCompressedSize.height

@@ -5,13 +5,11 @@ struct AppNostrIdentity: Codable, Equatable, Sendable {
     let accountSecretHex: String
     let accountID: String
     let npub: String
-    let nsec: String
 
     init(material: NostrIdentityMaterial) {
         accountSecretHex = material.accountSecretHex
         accountID = material.accountId
         npub = material.npub
-        nsec = material.nsec
     }
 }
 

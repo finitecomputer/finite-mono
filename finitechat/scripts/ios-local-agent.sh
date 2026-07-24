@@ -163,6 +163,37 @@ if [[ "${binding_ready}" != "1" ]]; then
   exit 1
 fi
 
+canonical_room_id="$(jq -er \
+  '.hosted_agent_binding.canonical_room_id | select(type == "string" and length > 0)' \
+  "${state_root}/agent-binding.json")"
+hermes_service_url="$(jq -er \
+  '.service_url | select(type == "string" and length > 0)' \
+  "${hermes_state}/ready.json")"
+home_channel_payload="$(jq -cn \
+  --arg room_id "${canonical_room_id}" \
+  '{room_id: $room_id}')"
+home_channel_ready=0
+for _ in {1..120}; do
+  status="$(curl -sS -o "${state_root}/home-channel.json" -w '%{http_code}' \
+    -H "content-type: application/json" \
+    -d "${home_channel_payload}" \
+    "${hermes_service_url}/v1/hermes/home-channel-set")"
+  if [[ "${status}" == "200" ]] \
+    && jq -e --arg room_id "${canonical_room_id}" \
+      '.home_channel.room_id == $room_id' \
+      "${state_root}/home-channel.json" >/dev/null
+  then
+    home_channel_ready=1
+    break
+  fi
+  sleep 0.25
+done
+if [[ "${home_channel_ready}" != "1" ]]; then
+  echo "Local Agent did not accept its canonical chat as the Hermes home channel." >&2
+  echo "See ${state_root}/hermes.log and ${state_root}/home-channel.json." >&2
+  exit 1
+fi
+
 echo "Starting the local dashboard..."
 (
   cd "${dashboard_root}"

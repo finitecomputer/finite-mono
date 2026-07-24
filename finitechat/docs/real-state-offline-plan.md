@@ -1,7 +1,13 @@
 # Real State And Offline Plan
 
 Date: 2026-06-17
-Status: active plan
+Status: active core/offline reference; iOS product-surface scope superseded
+
+The offline and persistence invariants in this document still apply to the
+focused iOS chat slice. Historical invite, profile, device-list, create-room,
+and scan/PIN scenarios below are Rust runtime regression coverage only; they
+must not be restored as iOS UI or AppModel paths. See
+[ADR 0013](adr/0013-ios-single-agent-client.md).
 
 ## Problem Statement
 

@@ -26,6 +26,10 @@ struct FiniteDesignTokens {
     var composerRadius: CGFloat = 28
     var panelRadius: CGFloat = 30
     var drawerWidth: CGFloat = 340
+    var homeHeroMarkSize: CGFloat = 104
+    var homeHeroTopSpacing: CGFloat = 92
+    var recentBadgeSpacing: CGFloat = 8
+    var homeDockBottomSpacing: CGFloat = 10
 }
 
 private struct FiniteDesignTokensKey: EnvironmentKey {
@@ -296,74 +300,76 @@ struct FocusedHomeView: View {
     @State private var isStartingChat = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: tokens.sectionSpacing) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(agentName.map { "Talk to \($0)" } ?? "Choose your agent")
-                        .font(.largeTitle.bold())
-                    Text(
-                        agentName == nil
-                            ? "Pair one agent to make this space yours."
-                            : "One human, one agent, and the work in between."
-                    )
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                }
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: tokens.sectionSpacing) {
+                    Spacer(minLength: tokens.homeHeroTopSpacing)
 
-                if agentName == nil {
-                    Button(action: chooseAgent) {
-                        Label("Choose an agent", systemImage: "sparkles")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.glassProminent)
-                    .controlSize(.large)
-                } else {
-                    HomeComposer(
-                        text: $draft,
-                        isSending: isStartingChat,
-                        send: {
-                            let message = draft
-                            isStartingChat = true
-                            startChat(message) { success in
-                                isStartingChat = false
-                                if success {
-                                    draft = ""
-                                }
-                            }
+                    VStack(spacing: 16) {
+                        FiniteLogoMark()
+                            .fill(.tint)
+                            .frame(
+                                width: tokens.homeHeroMarkSize,
+                                height: tokens.homeHeroMarkSize
+                            )
+                            .accessibilityLabel("Finite logo")
+
+                        Text("It’s time to build")
+                            .font(.title2.weight(.semibold))
+
+                        if let agentName {
+                            Text("with \(agentName)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                         }
-                    )
-                }
+                    }
+                    .frame(maxWidth: .infinity)
 
-                VStack(alignment: .leading, spacing: tokens.controlSpacing) {
-                    Text("Recent")
-                        .font(.headline)
-
-                    if recentChats.isEmpty {
-                        ContentUnavailableView(
-                            "No chats yet",
-                            systemImage: "bubble.left.and.text.bubble.right",
-                            description: Text("Your three most recent chats will appear here.")
+                    if agentName == nil {
+                        Button(action: chooseAgent) {
+                            Label("Choose an agent", systemImage: "sparkles")
+                        }
+                        .buttonStyle(.glassProminent)
+                        .controlSize(.large)
+                    } else if !recentChats.isEmpty {
+                        RecentChatBadges(
+                            chats: recentChats,
+                            spacing: tokens.recentBadgeSpacing,
+                            openChat: openChat
                         )
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 24)
-                    } else {
-                        ForEach(recentChats) { chat in
-                            Button {
-                                openChat(chat)
-                            } label: {
-                                RecentChatRow(chat: chat)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("RecentChat-\(chat.chatID)")
-                        }
                     }
+
+                    Spacer(minLength: 72)
                 }
+                .padding(.horizontal, tokens.pagePadding)
+                .padding(.bottom, tokens.sectionSpacing)
             }
-            .padding(tokens.pagePadding)
+            .scrollDismissesKeyboard(.interactively)
+
+            if agentName != nil {
+                HomeComposer(
+                    text: $draft,
+                    isSending: isStartingChat,
+                    send: submitDraft
+                )
+                .padding(.horizontal, tokens.pagePadding)
+                .padding(.bottom, tokens.homeDockBottomSpacing)
+            }
         }
-        .background(Color(.systemGroupedBackground))
-        .navigationTitle("Finite")
+        .background(Color(.systemBackground))
+        .navigationTitle("Home")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func submitDraft() {
+        let message = draft
+        isStartingChat = true
+        startChat(message) { success in
+            isStartingChat = false
+            if success {
+                draft = ""
+            }
+        }
     }
 }
 
@@ -405,36 +411,44 @@ private struct HomeComposer: View {
     }
 }
 
-private struct RecentChatRow: View {
-    let chat: ChatDestination
+private struct RecentChatBadges: View {
+    let chats: [ChatDestination]
+    let spacing: CGFloat
+    let openChat: (ChatDestination) -> Void
 
     var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "bubble.left")
+        VStack(spacing: 10) {
+            Text("Recent")
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
+                .textCase(.uppercase)
+                .tracking(0.7)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(chat.title)
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                if !chat.preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(chat.preview)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+            ScrollView(.horizontal) {
+                GlassEffectContainer(spacing: spacing) {
+                    HStack(spacing: spacing) {
+                        ForEach(chats) { chat in
+                            Button {
+                                openChat(chat)
+                            } label: {
+                                Label(chat.title, systemImage: "bubble.left")
+                                    .font(.subheadline.weight(.medium))
+                                    .lineLimit(1)
+                                    .frame(width: 82, alignment: .leading)
+                            }
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                            .accessibilityLabel("Recent chat: \(chat.title)")
+                            .accessibilityIdentifier("RecentChat-\(chat.chatID)")
+                        }
+                    }
+                    .padding(.horizontal, 2)
                 }
             }
-
-            Spacer(minLength: 8)
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            .scrollIndicators(.hidden)
+            .contentMargins(.horizontal, 1, for: .scrollContent)
         }
-        .padding(16)
-        .background(.background, in: .rect(cornerRadius: 18))
-        .contentShape(.rect)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -716,6 +730,18 @@ private enum FocusedPreviewFixtures {
     NavigationStack {
         FocusedHomeView(
             agentName: nil,
+            recentChats: [],
+            startChat: { _, completion in completion(true) },
+            openChat: { _ in },
+            chooseAgent: {}
+        )
+    }
+}
+
+#Preview("Home — paired, no recents") {
+    NavigationStack {
+        FocusedHomeView(
+            agentName: "Ada",
             recentChats: [],
             startChat: { _, completion in completion(true) },
             openChat: { _ in },

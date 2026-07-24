@@ -1525,7 +1525,7 @@ private struct ChatRichTextView: View {
 
     private func inlineText(from children: [ChatRichTextAstNode]?) -> Text {
         (children ?? []).reduce(Text("")) { partial, node in
-            partial + inlineTextNode(node)
+            Text("\(partial)\(inlineTextNode(node))")
         }
     }
 

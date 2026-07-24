@@ -424,12 +424,6 @@ struct RuntimeDataStore {
     }
 }
 
-enum AppScanTargetResult {
-    case empty
-    case profile(AppProfileSummary)
-    case unavailable
-}
-
 private struct ProductHarnessSupportResolution {
     let url: URL?
     let error: String?
@@ -505,13 +499,10 @@ final class AppModel: ObservableObject, AppReconciler {
     }
     @Published private(set) var chatProjections: [String: ChatRoomProjection] = [:]
     @Published var errorText: String?
-    @Published var roomDraft: String = ""
-    @Published var scanDraft: String = ""
     @Published var outboundText: String = ""
     @Published private(set) var runtimeStorePath: String?
     @Published private(set) var developerDiagnostics: [DeveloperDiagnosticEntry] = []
     @Published private(set) var nostrIdentity: AppNostrIdentity?
-    @Published private(set) var relayedMyProfile: AppProfileSummary?
     @Published private(set) var requiresNostrLogin: Bool
     @Published private(set) var canRecoverRuntimeIdentity: Bool
     @Published private(set) var accountLinkPhase: AccountLinkPhase = .ready
@@ -529,14 +520,10 @@ final class AppModel: ObservableObject, AppReconciler {
     private let runtimeFactory: AppRuntimeFactory
     private let startsUpdateLoop: Bool
     private let nostrIdentityStore: AppNostrIdentityStoring
-    private let nostrProfileService: NostrRelayProfileService
-    private let nostrPeopleCache: NostrPeopleCache?
     private var updateTask: Task<Void, Never>?
     private var launchAutomationTask: Task<Void, Never>?
     private var postSendCatchUpTask: Task<Void, Never>?
     private var runtimeDispatchTail: Task<Void, Never>?
-    private var myProfileHydrationTask: Task<Void, Never>?
-    private var myProfileHydrationKey: String?
     private var lastAppliedRuntimeRev: UInt64 = 0
     private var attachmentDownloadsInFlight = Set<String>()
     private var messageRetriesInFlight = Set<String>()
@@ -552,7 +539,6 @@ final class AppModel: ObservableObject, AppReconciler {
         launchAutomationTask?.cancel()
         postSendCatchUpTask?.cancel()
         runtimeDispatchTail?.cancel()
-        myProfileHydrationTask?.cancel()
         accountLinkTask?.cancel()
     }
 
@@ -563,8 +549,6 @@ final class AppModel: ObservableObject, AppReconciler {
         args: [String] = CommandLine.arguments,
         requiresNostrLogin: Bool = false,
         nostrIdentityStore: AppNostrIdentityStoring? = nil,
-        nostrProfileService: NostrRelayProfileService = NostrRelayProfileService(),
-        nostrPeopleCache: NostrPeopleCache? = .shared,
         startsUpdateLoop: Bool = true,
         runtimeFactory: @escaping AppRuntimeFactory = { options in
             try FiniteChatRuntime.open(options: options)
@@ -593,10 +577,8 @@ final class AppModel: ObservableObject, AppReconciler {
             ?? KeychainNostrIdentityStore(
                 service: resolvedConfig.accountIdentityKeychainService,
                 account: resolvedConfig.accountIdentityKeychainAccount
-            )
+        )
         self.nostrIdentityStore = resolvedNostrIdentityStore
-        self.nostrProfileService = nostrProfileService
-        self.nostrPeopleCache = nostrPeopleCache
         let storedNostrIdentity = resolvedNostrIdentityStore.load()
         let hasRecoverableRuntimeIdentity = !usesTransientStore
             && storedNostrIdentity == nil
@@ -645,7 +627,6 @@ final class AppModel: ObservableObject, AppReconciler {
         }
         lastAppliedRuntimeRev = nextState.rev
         state = nextState
-        hydrateMyProfileFromNostrIfNeeded()
     }
 
     var rooms: [AppRoomSummary] {
@@ -750,10 +731,6 @@ final class AppModel: ObservableObject, AppReconciler {
         userNoticeText ?? developerErrorText
     }
 
-    var scanInFlight: Bool {
-        state?.flow.scanInFlight ?? false
-    }
-
     var developerErrorText: String? {
         errorText?.nonEmptyTrimmed
     }
@@ -778,31 +755,6 @@ final class AppModel: ObservableObject, AppReconciler {
         Array(developerDiagnostics.suffix(8))
     }
 
-    var activeProfile: AppProfileSummary? {
-        guard let state, let activeProfileId = state.activeProfileId else { return nil }
-        return state.profiles.first { $0.accountId == activeProfileId }
-    }
-
-    var myProfile: AppProfileSummary? {
-        guard let accountID = activeAccountID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !accountID.isEmpty
-        else {
-            return nil
-        }
-        let stateProfile = state?.profiles.first {
-            $0.accountId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == accountID
-        }
-        guard let stateProfile else {
-            return relayedMyProfile?.accountId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == accountID ? relayedMyProfile : nil
-        }
-        guard let relayedMyProfile,
-              relayedMyProfile.accountId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == accountID
-        else {
-            return stateProfile
-        }
-        return mergedProfile(primary: stateProfile, fallback: relayedMyProfile)
-    }
-
     var myNpub: String? {
         if let npub = nostrIdentity?.npub {
             return npub
@@ -811,81 +763,6 @@ final class AppModel: ObservableObject, AppReconciler {
             return nil
         }
         return try? npubFromAccountId(accountId: accountID)
-    }
-
-    var activeAccountID: String? {
-        nostrIdentity?.accountID.nonEmptyTrimmed
-            ?? state?.identity.accountId.nonEmptyTrimmed
-    }
-
-    private func mergedProfile(
-        primary: AppProfileSummary,
-        fallback: AppProfileSummary
-    ) -> AppProfileSummary {
-        if primary.stale && !fallback.stale {
-            return fallback
-        }
-        return primary
-    }
-
-    private func hydrateMyProfileFromNostrIfNeeded() {
-        guard let accountID = activeAccountID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !accountID.isEmpty
-        else {
-            myProfileHydrationTask?.cancel()
-            myProfileHydrationTask = nil
-            myProfileHydrationKey = nil
-            relayedMyProfile = nil
-            return
-        }
-        let key = "\(serverURL)|\(accountID)"
-        guard myProfileHydrationKey != key else { return }
-        myProfileHydrationKey = key
-        myProfileHydrationTask?.cancel()
-        let profileService = nostrProfileService
-        let cache = nostrPeopleCache
-        myProfileHydrationTask = Task { [weak self, profileService, cache, accountID, key] in
-            if let cached = await cache?.loadProfile(accountID: accountID) {
-                await MainActor.run {
-                    guard let self, self.myProfileHydrationKey == key else { return }
-                    self.relayedMyProfile = cached.appProfileSummary
-                    self.appendDiagnostic(category: "profile", event: "nostr_profile.cache_loaded")
-                }
-            }
-            guard !Task.isCancelled else { return }
-            if let fetched = await profileService.fetchProfile(forAccountID: accountID) {
-                await cache?.saveProfile(fetched)
-                await MainActor.run {
-                    guard let self, self.myProfileHydrationKey == key else { return }
-                    self.relayedMyProfile = fetched.appProfileSummary
-                    self.appendDiagnostic(category: "profile", event: "nostr_profile.loaded")
-                }
-            }
-        }
-    }
-
-    @discardableResult
-    func createAndSignInNostrIdentity() -> Bool {
-        do {
-            let material = try createNostrIdentity()
-            try applyNostrIdentity(AppNostrIdentity(material: material), resetStore: true)
-            return true
-        } catch {
-            errorText = String(describing: error)
-            return false
-        }
-    }
-
-    @discardableResult
-    func signInWithNsec(_ nsec: String) -> Bool {
-        do {
-            let material = try nostrIdentityFromNsec(nsec: nsec)
-            try applyNostrIdentity(AppNostrIdentity(material: material), resetStore: true)
-            return true
-        } catch {
-            errorText = String(describing: error)
-            return false
-        }
     }
 
     func beginAccountLink() {
@@ -996,7 +873,6 @@ final class AppModel: ObservableObject, AppReconciler {
         pendingPushToken = nil
         nostrIdentityStore.clear()
         closeRuntime()
-        resetMyProfileHydration()
         try? RuntimeDataStore.deleteDataDir(
             deviceID: deviceID,
             applicationSupportURL: applicationSupportURL,
@@ -1013,13 +889,6 @@ final class AppModel: ObservableObject, AppReconciler {
         requiresNostrLogin = true
         canRecoverRuntimeIdentity = false
         errorText = nil
-    }
-
-    private func resetMyProfileHydration() {
-        myProfileHydrationTask?.cancel()
-        myProfileHydrationTask = nil
-        myProfileHydrationKey = nil
-        relayedMyProfile = nil
     }
 
     func useDefaultServer() {
@@ -1305,220 +1174,6 @@ final class AppModel: ObservableObject, AppReconciler {
         chatProjections[roomID] ?? .empty(roomID: roomID)
     }
 
-    func createRoom() {
-        let name = roomDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        roomDraft = ""
-        dispatchInBackground(.createRoom(displayName: name))
-    }
-
-    @discardableResult
-    func createTopic(roomID: String, title rawTitle: String) -> Bool {
-        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else { return false }
-        return dispatchInBackground(.createTopic(roomId: roomID, title: title))
-    }
-
-    @discardableResult
-    func startChat(in topic: AppTopicSummary) -> Bool {
-        dispatchInBackground(.startTopicChat(
-            roomId: topic.roomId,
-            topicId: topic.topicId,
-            reason: nil
-        ))
-    }
-
-    func startProfileChat(
-        for profile: AppProfileSummary,
-        onStarted: (@MainActor (AppRoomSummary) -> Void)? = nil
-    ) -> Bool {
-        let existingRoomIDs = Set(rooms.map(\.roomId))
-        let displayName = profile.displayName.nonEmptyTrimmed ?? profile.npub
-        return dispatchInBackground(.startProfileChat(
-            profile: profile,
-            displayName: "Chat with \(displayName)"
-        )) { [weak self] in
-            guard let self else { return }
-            if let room = self.rooms.first(where: { !existingRoomIDs.contains($0.roomId) }) {
-                if room.state == .connected {
-                    onStarted?(room)
-                }
-                return
-            }
-            let status = self.state?.status.nonEmptyTrimmed
-            if let room = self.selectedRoom,
-               room.state == .connected,
-               status == "chat opened" || status == "chat created"
-            {
-                onStarted?(room)
-                return
-            }
-            if self.userNoticeText == nil {
-                self.errorText = "Chat could not be created."
-            }
-        }
-    }
-
-    func startNewChat(
-        named rawName: String,
-        with profiles: [AppProfileSummary],
-        onCreated: (@MainActor (AppRoomSummary) -> Void)? = nil
-    ) -> Bool {
-        let candidates = profiles.filter {
-            !$0.accountId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        guard !candidates.isEmpty else { return false }
-
-        let action: AppAction
-        if candidates.count == 1, let profile = candidates.first {
-            let displayName = profile.displayName.nonEmptyTrimmed ?? profile.npub
-            action = .startProfileChat(
-                profile: profile,
-                displayName: "Chat with \(displayName)"
-            )
-        } else {
-            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return false }
-            action = .startGroupChat(profiles: candidates, displayName: name)
-        }
-
-        let existingRoomIDs = Set(rooms.map(\.roomId))
-        return dispatchInBackground(action) { [weak self] in
-            guard let self else { return }
-            if let room = self.rooms.first(where: { !existingRoomIDs.contains($0.roomId) })
-                ?? self.selectedRoom
-            {
-                onCreated?(room)
-                return
-            }
-            if self.userNoticeText == nil {
-                self.errorText = "Chat could not be created."
-            }
-        }
-    }
-
-    func addMembers(
-        to room: AppRoomSummary,
-        profiles: [AppProfileSummary],
-        onSuccess: (@MainActor () -> Void)? = nil
-    ) -> Bool {
-        guard room.state == .connected else { return false }
-        let hasProfiles = profiles
-            .map(\.accountId)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .contains { !$0.isEmpty }
-        guard hasProfiles else { return false }
-        return dispatchInBackground(
-            .addRoomMembers(roomId: room.roomId, profiles: profiles)
-        ) { [weak self] in
-            guard let self else { return }
-            if self.state?.status == "people added" {
-                onSuccess?()
-                return
-            }
-            if self.userNoticeText == nil {
-                self.errorText = "People could not be added to this chat."
-            }
-        }
-    }
-
-    @discardableResult
-    func scanTarget(
-        onComplete: @escaping @MainActor (AppScanTargetResult) -> Void
-    ) -> Bool {
-        let value = scanDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else {
-            onComplete(.empty)
-            return false
-        }
-
-        let action = AppAction.scanTarget(value: value)
-        let diagnostic = diagnosticAction(action)
-        appendDiagnostic(
-            category: diagnostic.category,
-            event: "\(diagnostic.name).requested",
-            details: diagnostic.details
-        )
-
-        let runtime: any FiniteChatRuntimeProtocol
-        let runtimeKey: String
-        do {
-            runtime = try currentRuntime()
-            runtimeKey = openKey
-        } catch {
-            appendDiagnostic(
-                category: diagnostic.category,
-                event: "\(diagnostic.name).failed",
-                details: diagnosticErrorDetails(error)
-            )
-            errorText = String(describing: error)
-            onComplete(.unavailable)
-            return false
-        }
-
-        enqueueRuntimeDispatch(
-            action,
-            runtime: runtime,
-            runtimeKey: runtimeKey,
-            priority: .userInitiated,
-            onSuccess: { [weak self] nextState in
-                guard let self else { return }
-                self.applyRuntimeSnapshot(nextState)
-                self.errorText = nil
-                self.appendDiagnostic(
-                    category: diagnostic.category,
-                    event: "\(diagnostic.name).succeeded",
-                    details: diagnostic.details
-                )
-                self.restartUpdateLoopIfEnabled()
-                onComplete(self.scanTargetResultFromUpdatedState())
-            },
-            onFailure: { [weak self] error in
-                guard let self else { return }
-                self.appendDiagnostic(
-                    category: diagnostic.category,
-                    event: "\(diagnostic.name).failed",
-                    details: self.diagnosticErrorDetails(error)
-                )
-                self.errorText = String(describing: error)
-                onComplete(.unavailable)
-            }
-        )
-        return true
-    }
-
-    func openTargetURL(_ url: URL) {
-        let value = url.absoluteString.trimmingCharacters(in: .whitespacesAndNewlines)
-        appendDiagnostic(
-            category: "transport",
-            event: "open_target_url.requested",
-            details: ["scheme": url.scheme ?? "none"]
-        )
-        launchAutomationTask?.cancel()
-        launchAutomationTask = Task { [weak self] in
-            guard let self else { return }
-            await MainActor.run {
-                self.scanDraft = value
-                _ = self.scanTarget { [weak self] result in
-                    guard let self, case .profile(let profile) = result else { return }
-                    _ = self.startProfileChat(for: profile)
-                }
-            }
-        }
-    }
-
-    private func scanTargetResultFromUpdatedState() -> AppScanTargetResult {
-        guard let scanResult = state?.flow.scanResult else { return .unavailable }
-        switch scanResult {
-        case .profile:
-            guard let profile = activeProfile else { return .unavailable }
-            scanDraft = ""
-            return .profile(profile)
-        case .unavailable, .none:
-            return .unavailable
-        }
-    }
-
     @discardableResult
     func retry(_ message: ChatMessage) -> Bool {
         guard Self.messageAllowsRetry(message) else { return false }
@@ -1558,134 +1213,6 @@ final class AppModel: ObservableObject, AppReconciler {
             }
         )
         return true
-    }
-
-    func refreshDevices() {
-        dispatchInBackground(.refreshDevices, priority: .utility)
-    }
-
-    @discardableResult
-    func saveMyProfile(
-        displayName: String,
-        about: String,
-        picture: String?,
-        onComplete: @escaping @MainActor (Bool) -> Void
-    ) -> Bool {
-        dispatchInBackground(
-            .saveProfile(displayName: displayName, about: about, picture: picture),
-            priority: .userInitiated,
-            onSuccess: {
-                onComplete(true)
-            },
-            onFailure: { _ in
-                onComplete(false)
-            }
-        )
-    }
-
-    func saveMyProfile(
-        displayName: String,
-        about: String,
-        picture: String?
-    ) async -> Bool {
-        await withCheckedContinuation { continuation in
-            let started = saveMyProfile(
-                displayName: displayName,
-                about: about,
-                picture: picture
-            ) { success in
-                continuation.resume(returning: success)
-            }
-            if !started {
-                continuation.resume(returning: false)
-            }
-        }
-    }
-
-    func saveRoomMetadata(
-        roomID: String,
-        displayName: String,
-        picture: String?
-    ) async -> Bool {
-        await withCheckedContinuation { continuation in
-            let started = dispatchInBackground(
-                .saveRoomMetadata(
-                    roomId: roomID,
-                    displayName: displayName,
-                    picture: picture
-                ),
-                priority: .userInitiated,
-                onSuccess: {
-                    continuation.resume(returning: true)
-                },
-                onFailure: { _ in
-                    continuation.resume(returning: false)
-                }
-            )
-            if !started {
-                continuation.resume(returning: false)
-            }
-        }
-    }
-
-    func uploadImage(data: Data, mimeType: String) async -> String? {
-        appendDiagnostic(
-            category: "image",
-            event: "image.upload.requested",
-            details: ["mime_type": Self.redactedDiagnosticValue(mimeType)]
-        )
-        let runtime: any FiniteChatRuntimeProtocol
-        do {
-            runtime = try currentRuntime()
-        } catch {
-            appendDiagnostic(
-                category: "image",
-                event: "image.upload.failed",
-                details: diagnosticErrorDetails(error)
-            )
-            errorText = String(describing: error)
-            return nil
-        }
-
-        let action = AppAction.uploadImage(bytes: data, contentType: mimeType)
-        do {
-            let nextState = try await Task.detached(priority: .userInitiated) {
-                try runtime.dispatchAndWait(action: action)
-            }.value
-            applyRuntimeSnapshot(nextState)
-            guard let url = nextState.flow.imageUploadUrl?.nonEmptyTrimmed else {
-                let error = "Image upload did not return a URL"
-                appendDiagnostic(
-                    category: "image",
-                    event: "image.upload.failed",
-                    details: diagnosticErrorDetails(error)
-                )
-                errorText = error
-                return nil
-            }
-            appendDiagnostic(
-                category: "image",
-                event: "image.upload.succeeded"
-            )
-            errorText = nil
-            return url
-        } catch {
-            appendDiagnostic(
-                category: "image",
-                event: "image.upload.failed",
-                details: diagnosticErrorDetails(error)
-            )
-            errorText = String(describing: error)
-            return nil
-        }
-    }
-
-    func revokeDevice(_ device: AppDeviceSummary) {
-        guard !device.currentDevice, !device.revoked else { return }
-        dispatchInBackground(
-            .revokeDevice(accountId: device.accountId, deviceId: device.deviceId),
-            priority: .utility
-        )
     }
 
     @discardableResult
@@ -2044,7 +1571,6 @@ final class AppModel: ObservableObject, AppReconciler {
         }
         try nostrIdentityStore.save(identity)
         nostrIdentity = identity
-        resetMyProfileHydration()
         requiresNostrLogin = false
         canRecoverRuntimeIdentity = false
         appendDiagnostic(category: "persistence", event: "nostr_identity.applied")
@@ -2620,66 +2146,6 @@ final class AppModel: ObservableObject, AppReconciler {
                 name: "rename_chat",
                 details: ["room": roomId, "topic": topicId, "chat": chatId]
             )
-        case .createRoom:
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "create_room",
-                details: [:]
-            )
-        case .createTopic(let roomId, _):
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "create_topic",
-                details: ["room": roomId]
-            )
-        case .startTopicChat(let roomId, let topicId, _):
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "start_topic_chat",
-                details: ["room": roomId, "topic": topicId]
-            )
-        case .saveProfile:
-            return DiagnosticActionSummary(
-                category: "profile",
-                name: "save_profile",
-                details: [:]
-            )
-        case .uploadImage:
-            return DiagnosticActionSummary(
-                category: "image",
-                name: "upload_image",
-                details: [:]
-            )
-        case .saveRoomMetadata(let roomId, _, _):
-            return DiagnosticActionSummary(
-                category: "room",
-                name: "save_room_metadata",
-                details: ["room": roomId]
-            )
-        case .startProfileChat(let profile, _):
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "start_profile_chat",
-                details: ["account": profile.accountId]
-            )
-        case .startGroupChat(let profiles, _):
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "start_group_chat",
-                details: ["members": "\(profiles.count)"]
-            )
-        case .addRoomMembers(let roomId, let profiles):
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "add_room_members",
-                details: ["room": roomId, "members": "\(profiles.count)"]
-            )
-        case .scanTarget:
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "scan_target",
-                details: [:]
-            )
         case .sendMessage(let roomId, _):
             return DiagnosticActionSummary(
                 category: "transport",
@@ -2848,18 +2314,6 @@ final class AppModel: ObservableObject, AppReconciler {
                 name: "set_typing",
                 details: ["room": roomId, "typing": isTyping ? "true" : "false"]
             )
-        case .refreshDevices:
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "refresh_devices",
-                details: [:]
-            )
-        case .revokeDevice(let accountId, let deviceId):
-            return DiagnosticActionSummary(
-                category: "transport",
-                name: "revoke_device",
-                details: ["account": accountId, "device": deviceId]
-            )
         case .setPushToken:
             return DiagnosticActionSummary(
                 category: "push",
@@ -2870,6 +2324,12 @@ final class AppModel: ObservableObject, AppReconciler {
             return DiagnosticActionSummary(
                 category: "push",
                 name: "remove_push_token",
+                details: [:]
+            )
+        default:
+            return DiagnosticActionSummary(
+                category: "runtime",
+                name: "unsupported_ios_action",
                 details: [:]
             )
         }
@@ -2939,8 +2399,6 @@ final class AppModel: ObservableObject, AppReconciler {
 
     private func runLaunchAutomationIfRequested() {
         guard !didRunLaunchAutomation else { return }
-        let createRoomName = Self.argumentValue("--finitechat-auto-create-room", in: args)
-        let profileChatNpub = Self.argumentValue("--finitechat-auto-start-profile-chat-npub", in: args)
         let outbound = Self.argumentValue("--finitechat-auto-send", in: args)
         let attachmentText = Self.argumentValue(
             "--finitechat-auto-send-attachment-text",
@@ -2966,9 +2424,7 @@ final class AppModel: ObservableObject, AppReconciler {
             "--finitechat-auto-send-attachment-caption",
             in: args
         )
-        guard createRoomName != nil
-            || profileChatNpub != nil
-            || outbound != nil
+        guard outbound != nil
             || attachmentText != nil
             || attachmentFile != nil
             || attachmentBase64 != nil
@@ -2982,17 +2438,6 @@ final class AppModel: ObservableObject, AppReconciler {
         let requestedRoomID = Self.argumentValue("--finitechat-room", in: args)
 
         launchAutomationTask = Task {
-            if let createRoomName,
-               !createRoomName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            {
-                self.roomDraft = createRoomName
-                self.createRoom()
-            }
-            if let profileChatNpub,
-               !profileChatNpub.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            {
-                self.startLaunchAutomationProfileChat(npub: profileChatNpub)
-            }
             let roomID = requestedRoomID ?? self.state?.selectedRoomId
             if let outbound, !outbound.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 await self.sendLaunchAutomationMessage(roomID: roomID, text: outbound)
@@ -3022,25 +2467,6 @@ final class AppModel: ObservableObject, AppReconciler {
                     caption: attachmentCaption ?? ""
                 )
             }
-        }
-    }
-
-    private func startLaunchAutomationProfileChat(npub rawNpub: String) {
-        let npub = rawNpub.trimmingCharacters(in: .whitespacesAndNewlines)
-        do {
-            let accountID = try accountIdFromNpub(npub: npub)
-            let profile = AppProfileSummary(
-                accountId: accountID,
-                npub: npub,
-                displayName: shortenedDisplayNpub(npub),
-                about: nil,
-                picture: nil,
-                stale: true,
-                isAgent: false
-            )
-            _ = startProfileChat(for: profile)
-        } catch {
-            errorText = "Launch automation profile npub was invalid"
         }
     }
 
@@ -3174,8 +2600,6 @@ final class AppModel: ObservableObject, AppReconciler {
 
     private static func hasLaunchAutomation(args: [String]) -> Bool {
         [
-            "--finitechat-auto-create-room",
-            "--finitechat-auto-start-profile-chat-npub",
             "--finitechat-auto-send",
             "--finitechat-auto-send-attachment-text",
             "--finitechat-auto-send-attachment-file",

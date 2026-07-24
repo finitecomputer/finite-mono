@@ -5,11 +5,6 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-func shortenedDisplayNpub(_ npub: String) -> String {
-    guard npub.count > 18 else { return npub }
-    return "\(npub.prefix(10))...\(npub.suffix(4))"
-}
-
 struct RoomThreadView: View {
     @ObservedObject var model: AppModel
     let roomID: String

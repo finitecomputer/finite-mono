@@ -103,6 +103,6 @@ Also verify:
   are explicit development/test overrides only.
 - `ios/Info.plist` does not declare `NSLocalNetworkUsageDescription` or
   `NSAllowsLocalNetworking` for TestFlight/App Store builds.
-- Review notes explain that Finite Chat uses end-to-end encryption, Nostr
-  identity material, camera QR scanning, microphone recording, speech
-  transcription, and optional photo-library saves initiated by the user.
+- Review notes explain that Finite Chat uses end-to-end encryption, a linked
+  account key stored in Keychain, microphone recording, speech transcription,
+  and optional photo-library saves initiated by the user.
