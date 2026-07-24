@@ -133,11 +133,7 @@ struct RoomThreadView: View {
         .chatNavigationBarChrome()
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button(action: openDrawer) {
-                    Image(systemName: "line.3.horizontal")
-                }
-                .accessibilityLabel("Chats")
-                .accessibilityIdentifier("ChatPickerButton")
+                ChatDrawerToolbarButton(action: openDrawer)
             }
         }
         .onAppear {

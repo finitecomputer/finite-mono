@@ -1,5 +1,17 @@
 import SwiftUI
 
+struct ChatDrawerToolbarButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "line.3.horizontal")
+        }
+        .accessibilityLabel("Chats")
+        .accessibilityIdentifier("ChatPickerButton")
+    }
+}
+
 struct ChatDestination: Hashable, Identifiable {
     let roomID: String
     let topicID: String
@@ -88,23 +100,15 @@ struct ContentView: View {
                 }
             )
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showsSettings = true
-                    } label: {
-                        Label("Settings", systemImage: "gearshape")
-                    }
+                ToolbarItem(placement: .topBarLeading) {
+                    ChatDrawerToolbarButton(action: presentDrawer)
                 }
             }
             .navigationDestination(for: ChatDestination.self) { destination in
                 RoomThreadView(
                     model: model,
                     roomID: destination.roomID,
-                    openDrawer: {
-                        withAnimation(.snappy(duration: 0.28)) {
-                            showsDrawer = true
-                        }
-                    }
+                    openDrawer: presentDrawer
                 )
             }
         }
@@ -267,6 +271,12 @@ struct ContentView: View {
     private func dismissDrawer() {
         withAnimation(.snappy(duration: 0.24)) {
             showsDrawer = false
+        }
+    }
+
+    private func presentDrawer() {
+        withAnimation(.snappy(duration: 0.28)) {
+            showsDrawer = true
         }
     }
 
