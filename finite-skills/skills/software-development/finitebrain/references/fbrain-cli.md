@@ -7,11 +7,13 @@ build once and run `target/debug/fbrain`.
 Global flags:
 
 - `--config-dir <path>`: override fbrain config state for this invocation. The
-  signing identity is not stored here (see Identity below).
+  signing identity is not stored here (see Identity below). Normal hosted use
+  does not need this override: config defaults below `$FINITE_HOME/fbrain`.
 - `--json`: return machine-readable output where the command supports it.
-- `--server <url>`: command-specific server override. Server resolution is
-  explicit `--server`, saved Brain Working Tree server, `FINITE_BRAIN_SERVER_URL`,
-  then legacy `FINITE_BRAIN_PUBLIC_BASE_URL`.
+- `--server <url>`: advanced command-specific server override. Server
+  resolution is explicit `--server`, saved Brain Working Tree server,
+  `FINITE_BRAIN_SERVER_URL`, legacy `FINITE_BRAIN_PUBLIC_BASE_URL`, then the
+  built-in `https://brain.finite.computer` production default.
 
 Transport accepts `https://` endpoints and `http://` only for localhost,
 loopback IPs, or the exact host named by the local-harness-only
@@ -23,7 +25,10 @@ blocked state; `fbrain` never substitutes another Brain server.
 canonical origin into Nostr HTTP authorization events while sending the request
 through the transport URL. This lets the current server-side signer adapter
 behave like a future client daemon without teaching Brain multiple identities
-for the same request.
+for the same request. The hosted Runtime sets both to the canonical production
+origin, so normal commands require neither environment setup nor override flags.
+Set both only when an advanced proxy or local harness intentionally splits
+transport from its public authorization origin.
 
 ## Command Map
 
@@ -87,9 +92,9 @@ directory. Do not print or request secrets during normal agent work.
 ## Working Tree And Sync
 
 ```sh
-fbrain doctor --server "$SERVER"
-fbrain brain list --server "$SERVER" --json
-fbrain open <brain-id> <tree-path> --server "$SERVER"
+fbrain doctor
+fbrain brain list --json
+fbrain open <brain-id>
 cd <tree-path>
 fbrain status --json
 fbrain sync status --json
@@ -107,9 +112,11 @@ export, opens available grants, pushes local markdown changes, bootstraps latest
 state, and materializes readable Folders back into the tree.
 
 When the path is omitted, `open` uses `$FBRAIN_WORKING_TREE_ROOT/<brain-id>` if
-configured, otherwise `<current-directory>/<brain-id>`. The hosted runtime sets
+configured, otherwise `<current-directory>/<brain-id>`. The hosted Runtime sets
 `FBRAIN_CONFIG_DIR=/data/agent/fbrain` and
-`FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain`.
+`FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain`. Outside a hosted
+Runtime, fbrain config defaults to `$FINITE_HOME/fbrain` when `FINITE_HOME` is
+set, then `$HOME/.finitebrain/fbrain`.
 
 Useful `sync now --json` fields include `status`, `latestSequence`,
 `recordCount`, `localChanges`, `remoteChanges`, and `conflicts`. Expected status
@@ -182,7 +189,7 @@ contains `newKeyVersion`, `grants`, `reencryptedRecords`, and
 `accessChangeEvent`.
 
 ```sh
-fbrain brain bootstrap-personal --server "$SERVER" --json
+fbrain brain bootstrap-personal --json
 fbrain brain create <brain-id> --kind organization --name "Org Brain"
 fbrain brain create <brain-id> --kind organization --name "Org Brain" --requesting-user-npub <npub|hex>
 fbrain brain metadata --brain <brain-id>

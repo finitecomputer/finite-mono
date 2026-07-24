@@ -7,8 +7,6 @@ use crate::{
     load_signer, option_value, read_agent_state, run_working_tree_sync, signed_http_auth_header,
 };
 
-pub(crate) const FINITE_BRAIN_SERVER_URL_ENV: &str = "FINITE_BRAIN_SERVER_URL";
-pub(crate) const FINITE_BRAIN_PUBLIC_BASE_URL_ENV: &str = "FINITE_BRAIN_PUBLIC_BASE_URL";
 pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
     "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST";
 
@@ -54,11 +52,8 @@ pub(crate) fn signed_json_request_to_server(
 ) -> Result<serde_json::Value, CliError> {
     let body = body.map(|body| serde_json::to_vec(&body)).transpose()?;
     let transport_url = absolute_server_url(server_url, path);
-    let authorization_url = authorization_url_for_request(
-        server_url,
-        path,
-        env::var(FINITE_BRAIN_PUBLIC_BASE_URL_ENV).ok().as_deref(),
-    );
+    let authorization_url =
+        authorization_url_for_request(server_url, path, env.public_base_url.as_deref());
     validate_http_url(&authorization_url)?;
     let signer = load_signer(env)?;
     let authorization =
@@ -134,17 +129,20 @@ pub(crate) fn server_url_for_optional_command(
     select_server_url(
         option_value(args, "--server"),
         saved_server_url(env),
-        env::var(FINITE_BRAIN_SERVER_URL_ENV).ok(),
-        env::var(FINITE_BRAIN_PUBLIC_BASE_URL_ENV).ok(),
+        env.server_url.clone(),
+        env.public_base_url.clone(),
     )
 }
 
-pub(crate) fn configured_server_url_for_open(args: &[String]) -> Option<String> {
+pub(crate) fn configured_server_url_for_open(
+    env: &CliEnvironment,
+    args: &[String],
+) -> Option<String> {
     select_server_url(
         option_value(args, "--server"),
         None,
-        env::var(FINITE_BRAIN_SERVER_URL_ENV).ok(),
-        env::var(FINITE_BRAIN_PUBLIC_BASE_URL_ENV).ok(),
+        env.server_url.clone(),
+        env.public_base_url.clone(),
     )
 }
 

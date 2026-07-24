@@ -995,7 +995,7 @@ fn open_brain<W: Write>(
                 .unwrap_or(&env.cwd)
                 .join(brain_id.as_str())
         });
-    let server_url = configured_server_url_for_open(args);
+    let server_url = configured_server_url_for_open(env, args);
     if let Some(server_url) = server_url.as_deref() {
         validate_http_url(server_url)?;
     }
@@ -2583,6 +2583,8 @@ mod tests {
         CliEnvironment {
             cwd: tmp.path().to_path_buf(),
             config_dir: tmp.path().join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
@@ -2712,6 +2714,62 @@ mod tests {
                 let (request_line, _) = read_http_request(&mut stream);
                 requests.push(request_line.clone());
                 let body = if request_line.contains("/export") {
+                    export_body(&[])
+                } else if request_line.contains("/sync/records") {
+                    serde_json::json!({
+                        "brainId": "brain",
+                        "afterSequence": 0,
+                        "latestSequence": 0,
+                        "records": [],
+                        "count": 0,
+                        "hasMore": false,
+                        "nextSequence": 0
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({
+                        "latestSequence": 0,
+                        "objects": []
+                    })
+                    .to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, handle)
+    }
+
+    fn start_hosted_default_flow_server() -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            while requests.len() < 5 && started.elapsed() < Duration::from_secs(5) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                let (request_line, _) = read_http_request(&mut stream);
+                requests.push(request_line.clone());
+                let body = if request_line == "GET /_admin/brains HTTP/1.1" {
+                    serde_json::json!({
+                        "brains": [{
+                            "brainId": "brain",
+                            "kind": "personal",
+                            "name": "Personal Brain",
+                            "role": "personal_agent",
+                            "inviteCode": null
+                        }]
+                    })
+                    .to_string()
+                } else if request_line.contains("/export") {
                     export_body(&[])
                 } else if request_line.contains("/sync/records") {
                     serde_json::json!({
@@ -4321,6 +4379,60 @@ mod tests {
             working_tree_root
                 .join("paired-personal-brain/.finitebrain/agent-state.json")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn hosted_runtime_lists_opens_and_syncs_with_contract_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let (server_url, server) = start_hosted_default_flow_server();
+        let runtime_root = tmp.path().join("data");
+        let working_tree_root = runtime_root.join("workspace/finitebrain");
+        let mut env = env_for(&tmp);
+        env.config_dir = runtime_root.join("agent/fbrain");
+        env.server_url = Some(server_url.clone());
+        env.working_tree_root = Some(working_tree_root.clone());
+        import_identity_for(&env, TEST_SECRET_HEX);
+
+        let mut output = Vec::new();
+        run_with_env(["brain", "list", "--json"], env.clone(), &mut output).unwrap();
+        let list: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(list["brains"][0]["brainId"], "brain");
+        assert_eq!(list["brains"][0]["role"], "personal_agent");
+
+        output.clear();
+        run_with_env(["open", "brain", "--json"], env.clone(), &mut output).unwrap();
+        let opened: Value = serde_json::from_slice(&output).unwrap();
+        let tree = working_tree_root.join("brain");
+        assert_eq!(opened["path"], tree.display().to_string());
+        assert_eq!(opened["syncStatus"], "caught-up");
+        assert_eq!(
+            read_agent_state(&tree).unwrap().server_url.as_deref(),
+            Some(server_url.as_str())
+        );
+
+        output.clear();
+        env.cwd = tree;
+        run_with_env(["sync", "now", "--json"], env, &mut output).unwrap();
+        let synced: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(synced["status"], "caught-up");
+        assert_eq!(synced["latestSequence"], 0);
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0], "GET /_admin/brains HTTP/1.1");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("/_admin/brains/brain/export"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("/_admin/brains/brain/sync/records?after=0"))
+                .count(),
+            2
         );
     }
 
@@ -6462,6 +6574,8 @@ mod tests {
         let env_a = CliEnvironment {
             cwd: agent_a_tree.clone(),
             config_dir: agent_a_config.clone(),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
@@ -6470,6 +6584,8 @@ mod tests {
         let env_b = CliEnvironment {
             cwd: agent_b_tree.clone(),
             config_dir: agent_b_config,
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-24T20:46:36Z".to_owned()),
             identity_authority_url: None,
@@ -6821,7 +6937,7 @@ mod tests {
     }
 
     #[test]
-    fn server_url_selection_prefers_agent_transport_before_public_origin() {
+    fn server_url_precedence_keeps_explicit_saved_and_runtime_overrides() {
         assert_eq!(
             select_server_url(
                 Some("https://explicit.finite.test".to_owned()),

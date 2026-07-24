@@ -2828,6 +2828,8 @@ mod tests {
         let env = CliEnvironment {
             cwd: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
@@ -3055,6 +3057,8 @@ mod tests {
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
@@ -3145,6 +3149,8 @@ mod tests {
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
@@ -3315,6 +3321,8 @@ mod tests {
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,

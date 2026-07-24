@@ -137,10 +137,13 @@ else:
 
     brain_text = brain_path.read_text(encoding="utf-8")
     for marker in (
-        'SERVER="${FINITE_BRAIN_SERVER_URL:?',
-        'FBRAIN_CONFIG_DIR',
+        'Use the hosted Runtime defaults for normal work',
         'FBRAIN_WORKING_TREE_ROOT',
         'BRAIN="replace-with-brain-id"',
+        'fbrain brain list --json',
+        'fbrain open "$BRAIN"',
+        'fbrain sync now --summary',
+        'intentional advanced override',
         "A Working Tree remembers the server",
         "bootstrap-personal",
         "role `personal_agent`",
@@ -201,6 +204,19 @@ else:
             errors.append(
                 f"{brain_path}: retired Personal Agent contract remains {retired_contract!r}"
             )
+    retired_brain_command = re.compile(r"\bvault\s+list\b", re.IGNORECASE)
+    for checked_path in (brain_path, brain_reference_path):
+        if checked_path.is_file():
+            match = retired_brain_command.search(
+                checked_path.read_text(encoding="utf-8")
+            )
+            if match:
+                line = checked_path.read_text(encoding="utf-8").count(
+                    "\n", 0, match.start()
+                ) + 1
+                errors.append(
+                    f"{checked_path}:{line}: retired FiniteBrain command 'vault list'"
+                )
 
 compat_path = root / "software-development/publish-web-apps-finite/SKILL.md"
 if not compat_path.is_file():

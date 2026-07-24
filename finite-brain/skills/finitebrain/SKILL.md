@@ -13,27 +13,26 @@ into memory for that operation; the CLI has no durable unlock state.
 
 ## Quick Start
 
-Prefer explicit `--config-dir` in agent runtimes. The CLI default is
-`$FBRAIN_CONFIG_DIR`, then `$HOME/.finitebrain/fbrain`, but explicit state avoids
-surprises when shell environment resets between calls. The signing identity is
-not stored there: it is the current Finite Home's Local Identity Key, resolved from
-`$FINITE_HOME/identity/identity.json` (else `~/.finite/identity/identity.json`)
-regardless of `--config-dir`.
+Use the hosted Runtime defaults for normal work. The Runtime supplies durable
+config and Working Tree paths, and `fbrain` defaults to the canonical production
+Brain server. The signing identity is the current Finite Home's Local Identity
+Key, resolved from `$FINITE_HOME/identity/identity.json` (else
+`~/.finite/identity/identity.json`). Use `--config-dir`, `--server`, or the
+corresponding environment variables only for an intentional advanced override
+such as a local development server or dedicated CLI state. Direct-key clients
+use the same defaults without changing the identity contract.
 
 ```sh
-SERVER="${FINITE_BRAIN_SERVER_URL:?FiniteBrain server is not configured}"
-FBRAIN_CONFIG="${FBRAIN_CONFIG_DIR:-${FINITE_HOME:-$HOME/.finite}/fbrain}"
-TREE_ROOT="${FBRAIN_WORKING_TREE_ROOT:-${FINITECHAT_WORKSPACE:-$HOME/finitebrain}}"
 BRAIN="replace-with-brain-id"
-TREE="$TREE_ROOT/$BRAIN"
+TREE="${FBRAIN_WORKING_TREE_ROOT:-$PWD}/$BRAIN"
 
-fbrain --config-dir "$FBRAIN_CONFIG" doctor --server "$SERVER"
-fbrain --config-dir "$FBRAIN_CONFIG" auth status --json
-fbrain --config-dir "$FBRAIN_CONFIG" brain list --server "$SERVER" --json
-fbrain --config-dir "$FBRAIN_CONFIG" open "$BRAIN" "$TREE" --server "$SERVER"
+fbrain doctor
+fbrain auth status --json
+fbrain brain list --json
+fbrain open "$BRAIN"
 cd "$TREE"
-fbrain --config-dir "$FBRAIN_CONFIG" sync now --summary
-fbrain --config-dir "$FBRAIN_CONFIG" conflicts --json
+fbrain sync now --summary
+fbrain conflicts --json
 ```
 
 A Working Tree remembers the server it was opened against. Before reusing an
@@ -112,8 +111,7 @@ name it and ask whether to use it for the requested work. Do not pretend to
 create another. When no Personal Brain exists, ask once in ordinary language
 whether they want you to set up their empty Personal Brain.
 
-- On a clear yes, run `fbrain --config-dir "$FBRAIN_CONFIG" brain
-  bootstrap-personal --server "$SERVER" --json`, list Brains again, open the
+- On a clear yes, run `fbrain brain bootstrap-personal --json`, list Brains again, open the
   returned Personal Brain, and continue the user's original task immediately.
 - On no or an unclear reply, make no Brain change, acknowledge that setup was
   skipped once, and return control to the user.
@@ -145,10 +143,10 @@ same-named Organization Brain exists, ask whether to use it or intentionally
 create a separate Brain instead.
 
 ```sh
-fbrain --config-dir "$FBRAIN_CONFIG" brain create "$BRAIN" \
+fbrain brain create "$BRAIN" \
   --kind organization --name "$NAME" \
   --requesting-user-npub "$AUTHENTICATED_SENDER_ID" \
-  --server "$SERVER" --json
+  --json
 ```
 
 The new Organization Brain starts empty. Do not create `getting-started`,
@@ -263,7 +261,7 @@ knowledge edit, close the wiki before the final sync:
 4. Update durable `index.md` from the actual Pages and frontmatter. Do not
    update `_index.md` or `_wiki/*`.
 5. Append one concise `log.md` entry for the coherent change.
-6. Run `fbrain --config-dir "$FBRAIN_CONFIG" wiki check --json` from the Brain
+6. Run `fbrain wiki check --json` from the Brain
    Working Tree. Resolve every reported missing or ambiguous link before the
    final sync. This command checks only materialized readable Folders.
 7. After sync, inspect backlinks and Graph View in the Product Client when
@@ -301,10 +299,10 @@ and the relevant command in [fbrain-cli.md](references/fbrain-cli.md).
 If daemon state is missing, stale, or repeatedly failing, use:
 
 ```sh
-fbrain --config-dir "$FBRAIN_CONFIG" daemon status --json
-fbrain --config-dir "$FBRAIN_CONFIG" daemon start
-fbrain --config-dir "$FBRAIN_CONFIG" daemon logs --json
-fbrain --config-dir "$FBRAIN_CONFIG" daemon tick --json
+fbrain daemon status --json
+fbrain daemon start
+fbrain daemon logs --json
+fbrain daemon tick --json
 ```
 
 Use `daemon watch` only as a foreground process under a supervisor such as tmux,

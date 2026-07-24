@@ -5155,6 +5155,10 @@ mod tests {
         assert!(dockerfile.contains("ENV FINITECHAT_WORKSPACE=/data/workspace"));
         assert!(dockerfile.contains("ENV FBRAIN_CONFIG_DIR=/data/agent/fbrain"));
         assert!(dockerfile.contains("ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain"));
+        assert!(dockerfile.contains("ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer"));
+        assert!(
+            dockerfile.contains("ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer")
+        );
         assert!(dockerfile.contains("ENTRYPOINT [\"/opt/agent-entrypoint.sh\"]"));
         assert!(!dockerfile.contains("finitechat-entrypoint.sh"));
         assert!(!dockerfile.contains("/finite-state"));
@@ -5167,10 +5171,13 @@ mod tests {
         let package = read_repo_file("../finite-brain/skills/finitebrain/SKILL.md");
 
         assert_eq!(bundled, package);
-        assert!(bundled.contains("FINITE_BRAIN_SERVER_URL"));
-        assert!(bundled.contains("FBRAIN_CONFIG_DIR"));
         assert!(bundled.contains("FBRAIN_WORKING_TREE_ROOT"));
-        assert!(bundled.contains("bootstrap-personal --server"));
+        assert!(bundled.contains("Use `--config-dir`, `--server`"));
+        assert!(bundled.contains("intentional advanced override"));
+        assert!(bundled.contains("fbrain brain bootstrap-personal --json"));
+        assert!(bundled.contains("fbrain brain list --json"));
+        assert!(bundled.contains("fbrain open \"$BRAIN\""));
+        assert!(!bundled.contains("vault list"));
         assert!(bundled.contains("role `personal_agent`"));
         assert!(bundled.contains("## Agent-Created Organization Brains"));
         assert!(bundled.contains("authenticated `event.source.user_id`"));
