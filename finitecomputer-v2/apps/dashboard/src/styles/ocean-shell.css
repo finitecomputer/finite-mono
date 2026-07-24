@@ -4302,6 +4302,41 @@ button.finite-chat__site-switcher:hover {
   color: var(--text-primary);
 }
 
+.finite-chat__archive-group {
+  display: grid;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  gap: 2px;
+  margin-top: 2px;
+  overflow: hidden;
+}
+
+.finite-chat__archive-group > div {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.finite-chat__archive-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 5px 8px 5px 40px;
+  text-align: left;
+}
+
+.finite-chat__archive-toggle:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
 @media (hover: none) {
   .finite-chat__thread-actions {
     opacity: 1;

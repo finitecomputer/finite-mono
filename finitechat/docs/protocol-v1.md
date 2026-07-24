@@ -69,6 +69,12 @@ Finite Chat records only the durable segment boundary and current active
 segment id. The app/runtime owns prompt trimming, memory selection, and any
 Hermes session reset mapped from that boundary.
 
+`Chat`
+
+Product language for a resumable context session backed by one segment inside
+a topic. A chat does not add a membership, encryption, ordering, or delivery
+boundary.
+
 `Room Server`
 
 Delivery Service for KeyPackages, ordered room log entries, Welcomes, sessions,
@@ -514,6 +520,16 @@ room order: the later accepted update is the visible title.
 existing topic, for example Hermes `/new` in a Telegram topic. It is a durable
 encrypted event so every device agrees on the boundary, but it does not create a
 new conversation, room, membership set, delivery log, or cryptographic state.
+
+Finite's product projection stores chat names and archived state as encrypted,
+non-notifying namespaced durable events scoped to the owning `conversation_id`
+and `segment_id`. `finitechat.chat.archive.v1` carries the desired archived
+boolean; later accepted room order wins. Archiving is organizational only:
+clients choose its presentation, the transcript remains readable and sendable,
+and new messages do not implicitly restore the chat. Clients retain the
+encrypted current-value projection when pruning their transcript cache, and a
+same-account Device link transfers that projection in bounded bootstrap chunks;
+neither cache is a server-side source of truth.
 
 Push policy is part of the server-visible envelope, not the encrypted semantic
 kind. V1 defaults are:

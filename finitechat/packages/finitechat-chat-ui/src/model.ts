@@ -40,6 +40,7 @@ export type AppChatSummary = {
   started_seq: number;
   updated_seq: number;
   active: boolean;
+  archived: boolean;
 };
 
 export type AppTopicSummary = {
@@ -248,6 +249,7 @@ export type AppAction =
   | { OpenTopic: { room_id: string; topic_id: string } }
   | { OpenChat: { room_id: string; topic_id: string; chat_id: string } }
   | { RenameChat: { room_id: string; topic_id: string; chat_id: string; title: string } }
+  | { SetChatArchived: { room_id: string; topic_id: string; chat_id: string; archived: boolean } }
   | { CreateRoom: { display_name: string } }
   | { CreateTopic: { room_id: string; title: string } }
   | { StartTopicChat: { room_id: string; topic_id: string; reason?: string | null } }

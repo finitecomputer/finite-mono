@@ -91,12 +91,14 @@ pub const FINITECHAT_ACTIVITY_KIND_PRESENT: &str = "present";
 pub const FINITECHAT_ACTIVITY_TYPING_EXPIRY_MILLIS: u64 = 30 * 1000;
 pub const FINITECHAT_ACTIVITY_PRESENT_EXPIRY_MILLIS: u64 = 2 * 60 * 1000;
 pub const FINITECHAT_ACTIVITY_WORKING_EXPIRY_MILLIS: u64 = 5 * 60 * 1000;
+pub const FINITECHAT_CHAT_ARCHIVE_EVENT_V1: &str = "finitechat.chat.archive.v1";
 pub const FINITECHAT_CHAT_RENAME_EVENT_V1: &str = "finitechat.chat.rename.v1";
 pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1: &str = "finitechat.device-link.bootstrap.v1";
 pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1: &str =
     "finitechat.device-link.bootstrap-request.v1";
 pub const DEVICE_LINK_BOOTSTRAP_VERSION_V1: u16 = 1;
 pub const MAX_DEVICE_LINK_BOOTSTRAP_EVENTS: u32 = 64;
+pub const MAX_DEVICE_LINK_BOOTSTRAP_CHAT_ARCHIVES: u32 = 256;
 pub const MAX_DEVICE_LINK_BOOTSTRAP_PROFILES: u32 = MAX_ACCOUNT_DEVICES_PER_ROOM;
 // The bootstrap is itself carried as a base64 payload inside a JSON
 // DecryptedApplicationEventV1. Leave room for that 4/3 expansion and the
@@ -432,6 +434,24 @@ pub struct ChatRenameV1 {
     pub title: String,
 }
 
+/// Durable organizational state for one product Chat. It is carried by the
+/// encrypted `finitechat.chat.archive.v1` namespaced application event with a
+/// non-notifying delivery policy. Later accepted events replace earlier state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatArchiveV1 {
+    pub topic_id: ConversationId,
+    pub chat_id: ConversationSegmentId,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLinkBootstrapChatArchiveV1 {
+    pub topic_id: ConversationId,
+    pub chat_id: ConversationSegmentId,
+    pub accepted_seq: u64,
+    pub archived: bool,
+}
+
 /// An account-authored snapshot sent immediately after a Device is added to a
 /// room. The enclosing application event is MLS encrypted and is accepted only
 /// by `target`; the server never sees these fields or the copied transcript.
@@ -450,6 +470,11 @@ pub struct DeviceLinkBootstrapV1 {
     pub canonical_selection: Option<DeviceLinkBootstrapSelectionV1>,
     #[serde(default)]
     pub profiles: Vec<DeviceLinkBootstrapProfileV1>,
+    /// Compact current-value projection chunks for chat archive state. This is
+    /// a same-account Device bootstrap snapshot derived from durable archive
+    /// events, not a second server-side source of truth.
+    #[serde(default)]
+    pub chat_archives: Vec<DeviceLinkBootstrapChatArchiveV1>,
     #[serde(default)]
     pub history: Vec<DeviceLinkBootstrapEventV1>,
 }
@@ -2494,6 +2519,27 @@ impl ChatRenameV1 {
     }
 }
 
+impl ChatArchiveV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        validate_bytes_non_empty("chat_archive.topic_id", self.topic_id.len())?;
+        validate_string_bytes("chat_archive.topic_id", &self.topic_id, MAX_OBJECT_ID_BYTES)?;
+        validate_bytes_non_empty("chat_archive.chat_id", self.chat_id.len())?;
+        validate_string_bytes("chat_archive.chat_id", &self.chat_id, MAX_OBJECT_ID_BYTES)?;
+        Ok(())
+    }
+}
+
+impl DeviceLinkBootstrapChatArchiveV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        ChatArchiveV1 {
+            topic_id: self.topic_id.clone(),
+            chat_id: self.chat_id.clone(),
+            archived: self.archived,
+        }
+        .validate_limits()
+    }
+}
+
 impl DeviceLinkBootstrapV1 {
     pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
         validate_bytes_non_empty(
@@ -2517,6 +2563,14 @@ impl DeviceLinkBootstrapV1 {
         )?;
         for profile in &self.profiles {
             profile.validate_limits()?;
+        }
+        validate_item_count(
+            "device_link_bootstrap.chat_archives",
+            self.chat_archives.len(),
+            MAX_DEVICE_LINK_BOOTSTRAP_CHAT_ARCHIVES,
+        )?;
+        for archive in &self.chat_archives {
+            archive.validate_limits()?;
         }
         validate_item_count(
             "device_link_bootstrap.history",
@@ -3448,6 +3502,45 @@ mod tests {
         assert!(matches!(
             oversized.validate_limits().unwrap_err(),
             ProtocolLimitError::BytesTooLong { field, .. } if field == "chat_rename.title"
+        ));
+    }
+
+    #[test]
+    fn chat_archive_is_bounded_and_namespaced_event_is_non_notifying() {
+        let archive = ChatArchiveV1 {
+            topic_id: "topic-build".to_owned(),
+            chat_id: "segment-2".to_owned(),
+            archived: true,
+        };
+        archive.validate_limits().unwrap();
+        let kind = DurableAppEventKind::Namespaced {
+            name: FINITECHAT_CHAT_ARCHIVE_EVENT_V1.to_owned(),
+            policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
+        };
+        assert_eq!(
+            kind.delivery_policy(),
+            ApplicationDeliveryPolicy::NON_NOTIFYING
+        );
+        assert!(!kind.delivery_policy().creates_push());
+        assert!(!kind.delivery_policy().creates_unread());
+
+        let empty_topic = ChatArchiveV1 {
+            topic_id: String::new(),
+            ..archive.clone()
+        };
+        assert_eq!(
+            empty_topic.validate_limits().unwrap_err(),
+            ProtocolLimitError::BytesEmpty {
+                field: "chat_archive.topic_id".to_owned()
+            }
+        );
+        let oversized_chat = ChatArchiveV1 {
+            chat_id: "x".repeat(MAX_OBJECT_ID_BYTES as usize + 1),
+            ..archive
+        };
+        assert!(matches!(
+            oversized_chat.validate_limits().unwrap_err(),
+            ProtocolLimitError::BytesTooLong { field, .. } if field == "chat_archive.chat_id"
         ));
     }
 

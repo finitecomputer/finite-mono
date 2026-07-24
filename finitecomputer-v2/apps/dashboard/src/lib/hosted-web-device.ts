@@ -33,6 +33,7 @@ export type HostedChatSummary = {
   started_seq: number;
   updated_seq: number;
   active: boolean;
+  archived: boolean;
 };
 
 export type HostedChatTopic = {
@@ -194,6 +195,14 @@ export type HostedChatAction =
         topic_id: string;
         chat_id: string;
         title: string;
+      };
+    }
+  | {
+      SetChatArchived: {
+        room_id: string;
+        topic_id: string;
+        chat_id: string;
+        archived: boolean;
       };
     }
   | { ScanTarget: { value: string } }

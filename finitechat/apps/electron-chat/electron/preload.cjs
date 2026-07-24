@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 // Sandboxed preloads may require Electron but not sibling files. Keep this
 // public, non-secret projection self-contained and mirror its constants in the
 // main-process validators' tests.
-const DESKTOP_BRIDGE_CONTRACT_VERSION = 2;
+const DESKTOP_BRIDGE_CONTRACT_VERSION = 3;
 const attachmentMediaScheme = "finitechat-media";
 const maxOpaqueIdBytes = 1024;
 
@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld("finiteChatDesktop", Object.freeze({
     "local-chat-v1",
     "automatic-device-link-v1",
     "revoked-device-recovery-v1",
+    "durable-chat-archive-v1",
   ]),
   ensureLocalDevice: () => ipcRenderer.invoke("finitechat:ensure-local-device"),
   recoverLocalDevice: () => ipcRenderer.invoke("finitechat:recover-local-device"),

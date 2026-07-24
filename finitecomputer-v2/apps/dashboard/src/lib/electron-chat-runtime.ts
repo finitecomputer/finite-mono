@@ -12,6 +12,10 @@ const ELECTRON_CHAT_CAPABILITIES_V2 = [
   ...ELECTRON_CHAT_CAPABILITIES_V1,
   "revoked-device-recovery-v1",
 ] as const;
+const ELECTRON_CHAT_CAPABILITIES_V3 = [
+  ...ELECTRON_CHAT_CAPABILITIES_V2,
+  "durable-chat-archive-v1",
+] as const;
 
 const ELECTRON_ROOM_RECONCILIATION_ATTEMPTS = 8;
 const ELECTRON_ROOM_RECONCILIATION_DELAY_MS = 1_000;
@@ -106,7 +110,22 @@ export type ElectronChatRuntimeV2 = ElectronChatRuntimeCommon & {
   recoverLocalDevice(): Promise<ElectronLocalDeviceResult>;
 };
 
-export type ElectronChatRuntime = ElectronChatRuntimeV1 | ElectronChatRuntimeV2;
+export type ElectronChatRuntimeV3 = ElectronChatRuntimeCommon & {
+  version: 3;
+  capabilities: readonly [
+    "local-chat-v1",
+    "automatic-device-link-v1",
+    "revoked-device-recovery-v1",
+    "durable-chat-archive-v1",
+  ];
+  ensureLocalDevice(): Promise<ElectronLocalDeviceResult>;
+  recoverLocalDevice(): Promise<ElectronLocalDeviceResult>;
+};
+
+export type ElectronChatRuntime =
+  | ElectronChatRuntimeV1
+  | ElectronChatRuntimeV2
+  | ElectronChatRuntimeV3;
 
 export type ElectronRoomReconciliation = {
   project_id: string;
@@ -154,7 +173,20 @@ export function electronChatRuntime(): ElectronChatRuntime | null {
   ) {
     return candidate as ElectronChatRuntimeV2;
   }
+  if (
+    bridge.version === 3
+    && hasExactCapabilities(bridge.capabilities, ELECTRON_CHAT_CAPABILITIES_V3)
+    && typeof bridge.recoverLocalDevice === "function"
+  ) {
+    return candidate as ElectronChatRuntimeV3;
+  }
   return null;
+}
+
+export function electronRuntimeSupportsChatArchive(
+  runtime: ElectronChatRuntime | null
+): boolean {
+  return runtime === null || runtime.version >= 3;
 }
 
 export function isElectronLocalDeviceRecoveryRequired(

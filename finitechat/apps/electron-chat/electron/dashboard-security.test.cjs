@@ -177,6 +177,7 @@ test("desktop chat bridge exposes an exact action allowlist", () => {
     "OpenRoom",
     "CreateTopic",
     "StartTopicChatIntent",
+    "SetChatArchived",
     "SendChatMessage",
     "RefreshDevices",
   ]) {
@@ -328,6 +329,7 @@ test("remote dashboard preload contains only the versioned local-chat bridge", (
     "local-chat-v1",
     "automatic-device-link-v1",
     "revoked-device-recovery-v1",
+    "durable-chat-archive-v1",
   ]);
   assert.deepEqual(Object.keys(exposed).sort(), [
     "attachmentUrl",

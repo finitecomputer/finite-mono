@@ -17,6 +17,7 @@ type Scenario = "healthy" | "unavailable" | "recovering";
 
 type FixtureState = {
   rev: number;
+  chatArchived: boolean;
   chatTitle: string;
   extraTopics: Array<{
     topicId: string;
@@ -429,6 +430,10 @@ function applyAction(action: Record<string, unknown>) {
     // The current real UI gets the renamed title through the same state payload.
     state.chatTitle = rename.title.trim().slice(0, 120);
   }
+  const archive = action.SetChatArchived as { archived?: unknown } | undefined;
+  if (archive && typeof archive.archived === "boolean") {
+    state.chatArchived = archive.archived;
+  }
   const createTopic = action.CreateTopic as { title?: unknown } | undefined;
   if (createTopic && typeof createTopic.title === "string" && createTopic.title.trim()) {
     const createdSeq = state.rev + 1;
@@ -461,7 +466,12 @@ function appState() {
         updated_seq: state.rev,
         archived: false,
         active_chat_id: "chat_design",
-        chats: [{ chat_id: "chat_design", title: state.chatTitle, active: true }],
+        chats: [{
+          chat_id: "chat_design",
+          title: state.chatTitle,
+          active: true,
+          archived: state.chatArchived,
+        }],
       },
       ...state.extraTopics.map((topic) => ({
         room_id: "room_design",
@@ -518,6 +528,7 @@ function loadState(): FixtureState {
     if (Number.isInteger(parsed.rev) && Array.isArray(parsed.messages)) {
       return {
         rev: parsed.rev,
+        chatArchived: parsed.chatArchived === true,
         chatTitle:
           typeof parsed.chatTitle === "string" && parsed.chatTitle.trim()
             ? parsed.chatTitle
@@ -577,6 +588,7 @@ function persistAttachment(attachmentId: string, bytes: Buffer) {
 function initialState(): FixtureState {
   return {
     rev: 1,
+    chatArchived: false,
     chatTitle: "Design review",
     extraTopics: [],
     messages: [

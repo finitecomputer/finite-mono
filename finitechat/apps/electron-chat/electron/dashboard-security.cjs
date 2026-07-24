@@ -1,6 +1,6 @@
 const { URL } = require("node:url");
 
-const DESKTOP_BRIDGE_CONTRACT_VERSION = 2;
+const DESKTOP_BRIDGE_CONTRACT_VERSION = 3;
 const MAX_DESKTOP_ACTION_BYTES = 256 * 1024;
 const MAX_DEVICE_LINK_TOKEN_BYTES = 256;
 const NOSTR_ACCOUNT_ID = /^[0-9a-f]{64}$/;
@@ -12,6 +12,7 @@ const desktopChatActions = new Set([
   "CreateTopic",
   "StartTopicChatIntent",
   "RenameChat",
+  "SetChatArchived",
   "SendMessage",
   "SendTopicMessage",
   "SendChatMessage",

@@ -1,9 +1,11 @@
 "use client";
 
 import type { CSSProperties, FormEvent, ReactNode } from "react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
   ChevronRightIcon,
   HashIcon,
   MessageSquarePlusIcon,
@@ -27,12 +29,18 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { CHAT_TOPIC_DESCRIPTION } from "@/lib/chat-product-copy";
+import {
+  electronChatRuntime,
+  electronRuntimeSupportsChatArchive,
+} from "@/lib/electron-chat-runtime";
 import type {
   HostedChatAction,
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
 import { canonicalNewChatTopic, HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
+
+const subscribeHydration = () => () => undefined;
 
 export function AgentSidebar({
   collapsed,
@@ -63,11 +71,21 @@ export function AgentSidebar({
     recoverBinding,
     dispatch,
   } = useHostedChat();
+  const hydrated = useSyncExternalStore(
+    subscribeHydration,
+    () => true,
+    () => false
+  );
+  const supportsChatArchive =
+    hydrated && electronRuntimeSupportsChatArchive(electronChatRuntime());
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [createTopicOpen, setCreateTopicOpen] = useState(false);
   const [createTopicTitle, setCreateTopicTitle] = useState("");
   const [collapsedTopicKeys, setCollapsedTopicKeys] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [expandedArchiveKeys, setExpandedArchiveKeys] = useState<Set<string>>(
     () => new Set()
   );
   const [renameTarget, setRenameTarget] = useState<{
@@ -141,6 +159,37 @@ export function AgentSidebar({
         next.add(topicKey);
       }
       return next;
+    });
+  }
+
+  function toggleArchiveExpanded(topicKey: string) {
+    setExpandedArchiveKeys((current) => {
+      const next = new Set(current);
+      if (next.has(topicKey)) {
+        next.delete(topicKey);
+      } else {
+        next.add(topicKey);
+      }
+      return next;
+    });
+  }
+
+  function setChatArchived(
+    topic: HostedChatTopic,
+    chat: HostedChatSummary,
+    archived: boolean
+  ) {
+    if (archived) {
+      const topicKey = `${topic.room_id}:${topic.topic_id}`;
+      setExpandedArchiveKeys((current) => new Set(current).add(topicKey));
+    }
+    void act({
+      SetChatArchived: {
+        room_id: topic.room_id,
+        topic_id: topic.topic_id,
+        chat_id: chat.chat_id,
+        archived,
+      },
     });
   }
 
@@ -266,7 +315,19 @@ export function AgentSidebar({
           {topics.map((topic) => {
             const topicKey = `${topic.room_id}:${topic.topic_id}`;
             const topicBodyId = `finite-chat-topic-${safeDomId(topicKey)}`;
+            const archiveBodyId = `${topicBodyId}-archive`;
             const topicCollapsed = collapsedTopicKeys.has(topicKey);
+            const visibleChats = supportsChatArchive
+              ? topic.chats.filter((chat) => !chat.archived)
+              : topic.chats;
+            const archivedChats = supportsChatArchive
+              ? topic.chats.filter((chat) => chat.archived)
+              : [];
+            const selectedChatIsArchived = archivedChats.some(
+              (chat) => topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId
+            );
+            const archiveExpanded =
+              expandedArchiveKeys.has(topicKey) || selectedChatIsArchived;
             return (
               <div className="finite-chat__folder" key={topicKey}>
                 <div className="finite-chat__folder-header">
@@ -304,16 +365,47 @@ export function AgentSidebar({
                   className="finite-chat__folder-body"
                   hidden={topicCollapsed}
                 >
-                  {topic.chats.map((chat) => (
+                  {visibleChats.map((chat) => (
                     <ChatRow
                       key={chat.chat_id}
                       active={topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId}
+                      archived={false}
                       chat={chat}
                       disabled={busy}
+                      onArchiveChange={supportsChatArchive
+                        ? (archived) => setChatArchived(topic, chat, archived)
+                        : undefined}
                       onOpen={() => openChat(topic, chat)}
                       onRename={() => openRename(topic, chat)}
                     />
                   ))}
+                  {archivedChats.length > 0 ? (
+                    <div className="finite-chat__archive-group">
+                      <button
+                        type="button"
+                        className="finite-chat__archive-toggle"
+                        aria-controls={archiveBodyId}
+                        aria-expanded={archiveExpanded}
+                        onClick={() => toggleArchiveExpanded(topicKey)}
+                      >
+                        <span>Archive</span>
+                      </button>
+                      <div id={archiveBodyId} hidden={!archiveExpanded}>
+                        {archivedChats.map((chat) => (
+                          <ChatRow
+                            key={chat.chat_id}
+                            active={topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId}
+                            archived
+                            chat={chat}
+                            disabled={busy}
+                            onArchiveChange={(archived) => setChatArchived(topic, chat, archived)}
+                            onOpen={() => openChat(topic, chat)}
+                            onRename={() => openRename(topic, chat)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             );
@@ -400,14 +492,18 @@ export function AgentSidebar({
 
 function ChatRow({
   active,
+  archived,
   chat,
   disabled,
+  onArchiveChange,
   onOpen,
   onRename,
 }: {
   active: boolean;
+  archived: boolean;
   chat: HostedChatSummary;
   disabled: boolean;
+  onArchiveChange?: (archived: boolean) => void;
   onOpen: () => void;
   onRename: () => void;
 }) {
@@ -426,16 +522,32 @@ function ChatRow({
         </span>
       </button>
       <div className="finite-chat__thread-actions">
-        <button
-          type="button"
-          className="finite-chat__thread-action"
-          aria-label={`Rename ${title}`}
-          title="Rename chat"
-          disabled={disabled}
-          onClick={onRename}
-        >
-          <PencilIcon className="size-3.5" aria-hidden />
-        </button>
+        {!archived ? (
+          <button
+            type="button"
+            className="finite-chat__thread-action"
+            aria-label={`Rename ${title}`}
+            title="Rename chat"
+            disabled={disabled}
+            onClick={onRename}
+          >
+            <PencilIcon className="size-3.5" aria-hidden />
+          </button>
+        ) : null}
+        {onArchiveChange ? (
+          <button
+            type="button"
+            className="finite-chat__thread-action"
+            aria-label={archived ? `Restore ${title}` : `Archive ${title}`}
+            title={archived ? "Restore chat" : "Archive chat"}
+            disabled={disabled}
+            onClick={() => onArchiveChange(!archived)}
+          >
+            {archived
+              ? <ArchiveRestoreIcon className="size-3.5" aria-hidden />
+              : <ArchiveIcon className="size-3.5" aria-hidden />}
+          </button>
+        ) : null}
       </div>
     </div>
   );

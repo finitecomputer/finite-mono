@@ -147,6 +147,13 @@ _Avoid_: Thread, room
 An app-owned context boundary inside a conversation.
 _Avoid_: Topic, conversation, room
 
+**Chat**:
+A user-facing resumable context session inside a Topic, durably backed by one
+Segment. Archiving a Chat is shared organizational metadata: it does not delete
+the transcript, make the Chat read-only, or automatically change when a new
+Message arrives.
+_Avoid_: browser-local hidden chat, deleted chat, separate Room
+
 **Activity**:
 TTL-bound encrypted intermediate state inside a room or conversation.
 _Avoid_: Message, notification
@@ -304,6 +311,8 @@ _Avoid_: Unit fixture, row-level cleanup, transient diagnostics
 - A **Topic** is a **Conversation** presented as a named lane.
 - A **Conversation** contains one or more **Segments** when an app supports context resets.
 - A **Segment** belongs to exactly one **Conversation**.
+- A product **Chat** is backed by one **Segment** and may carry shared,
+  encrypted organizational metadata such as its name and archived state.
 - **Activity** may be scoped to a **Room** or to one **Conversation**.
 - **Runtime State** belongs to one agent runtime device and is projected by key.
 - A **Finite Chat Daemon** owns one or more **Devices** and may observe an
