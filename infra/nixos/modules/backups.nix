@@ -36,6 +36,7 @@ in
       path = [
         config.services.postgresql.package
         pkgs.coreutils
+        pkgs.diffutils
         pkgs.findutils
         pkgs.gnused
         pkgs.sqlite
@@ -85,7 +86,8 @@ in
           "$staging/finite-chat" \
           "$staging/saas-core" \
           "$staging/finite-brain" \
-          "$staging/finite-identity"
+          "$staging/finite-identity" \
+          "$staging/finite-sites"
         systemctl is-active --quiet finitechat-hosted-device.service && hosted_was_active=1 || true
         systemctl is-active --quiet finitechat-server.service && chat_was_active=1 || true
         systemctl is-active --quiet finite-saas-core.service && core_was_active=1 || true
@@ -125,22 +127,45 @@ in
         test "$(sqlite3 "$staging/finite-brain/finite-brain.sqlite3" 'PRAGMA integrity_check;')" = ok
         sqlite3 /var/lib/finite-identity/identity.db ".backup '$staging/finite-identity/identity.db'"
         test "$(sqlite3 "$staging/finite-identity/identity.db" 'PRAGMA integrity_check;')" = ok
+        cp -a /var/lib/finite-sites/. "$staging/finite-sites/"
+        rm -f \
+          "$staging/finite-sites/registry.db" \
+          "$staging/finite-sites/registry.db-wal" \
+          "$staging/finite-sites/registry.db-shm"
+        sqlite3 /var/lib/finite-sites/registry.db ".backup '$staging/finite-sites/registry.db'"
+        test "$(sqlite3 "$staging/finite-sites/registry.db" 'PRAGMA integrity_check;')" = ok
         runuser -u postgres -- pg_dump --format=custom finite_core > "$staging/saas-core/finite_core.dump"
         pg_restore --list "$staging/saas-core/finite_core.dump" >/dev/null
 
-        printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v2' > "$staging/format"
+        printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v3' > "$staging/format"
         printf '%s\n' \
-          'finite.hosted-web-chat-recovery-snapshot.v2' \
+          'finite.hosted-web-chat-recovery-snapshot.v3' \
           $'hosted-device\tdirectory\thosted-device' \
           $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
           $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
           $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
           $'finite-identity\tsqlite\tfinite-identity/identity.db' \
+          $'finite-sites\tdirectory\tfinite-sites' \
           > "$staging/recovery-set.tsv"
+        if [ -n "$(find "$staging" -type l ! -path "$staging/finite-sites/*" -print -quit)" ]; then
+          echo "Hosted Recovery Snapshot contains a symlink outside Finite Sites" >&2
+          exit 1
+        fi
+        if [ -n "$(find "$staging" ! -type d ! -type f ! -type l -print -quit)" ]; then
+          echo "Hosted Recovery Snapshot contains an unsupported filesystem entry" >&2
+          exit 1
+        fi
+        (
+          cd "$staging/finite-sites"
+          while IFS= read -r -d "" link; do
+            printf '%s\0' "''${link#./}"
+            readlink --zero -- "$link"
+          done < <(find . -type l -print0 | LC_ALL=C sort -z)
+        ) > "$staging/finite-sites-symlinks.bin"
         (
           cd "$staging"
-          find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity -type f -print0 \
-            | sort -z \
+          find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites -type f -print0 \
+            | LC_ALL=C sort -z \
             | xargs -0 sha256sum > manifest.sha256
         )
         mv "$staging" "$final"
@@ -157,7 +182,11 @@ in
     # service runs when a deploy triggers it or when started manually.
     systemd.services.finite-hosted-web-chat-snapshot-health = {
       description = "Fail if the hosted Recovery Snapshot is older than 7 days or corrupt";
-      path = [ pkgs.coreutils ];
+      path = [
+        pkgs.coreutils
+        pkgs.diffutils
+        pkgs.findutils
+      ];
       serviceConfig = {
         Type = "oneshot";
         User = "root";
@@ -171,18 +200,38 @@ in
           echo "Hosted Recovery Snapshot is stale ($age seconds); deploy or run finite-hosted-web-chat-snapshot.service" >&2
           exit 1
         fi
-        test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v2
+        test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v3
         expected_recovery_set=$(
           printf '%s\n' \
-            'finite.hosted-web-chat-recovery-snapshot.v2' \
+            'finite.hosted-web-chat-recovery-snapshot.v3' \
             $'hosted-device\tdirectory\thosted-device' \
             $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
             $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
             $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
-            $'finite-identity\tsqlite\tfinite-identity/identity.db'
+            $'finite-identity\tsqlite\tfinite-identity/identity.db' \
+            $'finite-sites\tdirectory\tfinite-sites'
         )
         test "$(cat "$latest/recovery-set.tsv")" = "$expected_recovery_set"
-        (cd "$latest" && sha256sum --check manifest.sha256)
+        test -z "$(find "$latest" -type l ! -path "$latest/finite-sites/*" -print -quit)"
+        test -z "$(find "$latest" ! -type d ! -type f ! -type l -print -quit)"
+        cmp --silent \
+          "$latest/finite-sites-symlinks.bin" \
+          <(
+            cd "$latest/finite-sites"
+            while IFS= read -r -d "" link; do
+              printf '%s\0' "''${link#./}"
+              readlink --zero -- "$link"
+            done < <(find . -type l -print0 | LC_ALL=C sort -z)
+          )
+        cmp --silent \
+          "$latest/manifest.sha256" \
+          <(
+            cd "$latest"
+            find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites \
+              -type f -print0 \
+              | LC_ALL=C sort -z \
+              | xargs -0 sha256sum
+          )
       '';
     };
 
@@ -304,18 +353,38 @@ in
       preHook = ''
         latest=${snapshotRoot}/latest
         test -L "$latest"
-        test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v2
+        test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v3
         expected_recovery_set=$(
           printf '%s\n' \
-            'finite.hosted-web-chat-recovery-snapshot.v2' \
+            'finite.hosted-web-chat-recovery-snapshot.v3' \
             $'hosted-device\tdirectory\thosted-device' \
             $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
             $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
             $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
-            $'finite-identity\tsqlite\tfinite-identity/identity.db'
+            $'finite-identity\tsqlite\tfinite-identity/identity.db' \
+            $'finite-sites\tdirectory\tfinite-sites'
         )
         test "$(cat "$latest/recovery-set.tsv")" = "$expected_recovery_set"
-        (cd "$latest" && sha256sum --check manifest.sha256)
+        test -z "$(${pkgs.findutils}/bin/find "$latest" -type l ! -path "$latest/finite-sites/*" -print -quit)"
+        test -z "$(${pkgs.findutils}/bin/find "$latest" ! -type d ! -type f ! -type l -print -quit)"
+        ${pkgs.diffutils}/bin/cmp --silent \
+          "$latest/finite-sites-symlinks.bin" \
+          <(
+            cd "$latest/finite-sites"
+            while IFS= read -r -d "" link; do
+              printf '%s\0' "''${link#./}"
+              ${pkgs.coreutils}/bin/readlink --zero -- "$link"
+            done < <(${pkgs.findutils}/bin/find . -type l -print0 | LC_ALL=C ${pkgs.coreutils}/bin/sort -z)
+          )
+        ${pkgs.diffutils}/bin/cmp --silent \
+          "$latest/manifest.sha256" \
+          <(
+            cd "$latest"
+            ${pkgs.findutils}/bin/find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites \
+              -type f -print0 \
+              | LC_ALL=C ${pkgs.coreutils}/bin/sort -z \
+              | ${pkgs.findutils}/bin/xargs -0 ${pkgs.coreutils}/bin/sha256sum
+          )
         identity_latest=$(
           ${pkgs.findutils}/bin/find ${identityBackupRoot} -maxdepth 1 -type f -name 'identity-20*T*Z.db' -print \
             | ${pkgs.coreutils}/bin/sort \

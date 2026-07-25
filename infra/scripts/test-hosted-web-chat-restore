@@ -22,6 +22,9 @@ install -d -m 0700 \
   "$snapshot/saas-core" \
   "$snapshot/finite-brain" \
   "$snapshot/finite-identity" \
+  "$snapshot/finite-sites/blobs" \
+  "$snapshot/finite-sites/git/site-recovery.git" \
+  "$snapshot/finite-sites/apps/site-recovery" \
   "$socket"
 identity_account=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
 sqlite3 "$snapshot/hosted-device/users/user-a/chat/client.sqlite3" \
@@ -43,6 +46,15 @@ sqlite3 "$snapshot/finite-brain/finite-brain.sqlite3" \
   "CREATE TABLE brain_access (brain_id TEXT, actor_principal TEXT, content TEXT); INSERT INTO brain_access VALUES ('brain-recovery', '$identity_account', 'recoverable brain content');"
 sqlite3 "$snapshot/finite-identity/identity.db" \
   "CREATE TABLE identities (workos_user_id TEXT, principal TEXT, email TEXT); INSERT INTO identities VALUES ('user-recovery', '$identity_account', 'recovery@example.test');"
+sqlite3 "$snapshot/finite-sites/registry.db" \
+  "CREATE TABLE sites (id TEXT PRIMARY KEY, owner_principal TEXT NOT NULL, published_version TEXT NOT NULL); INSERT INTO sites VALUES ('site-recovery', '$identity_account', 'version-recovery');"
+printf '%s\n' 'recoverable site blob' > "$snapshot/finite-sites/blobs/site-recovery.tar.zst"
+printf '%s\n' 'recoverable bare repository' > "$snapshot/finite-sites/git/site-recovery.git/HEAD"
+printf '%s\n' 'recoverable published app data' > "$snapshot/finite-sites/apps/site-recovery/data.txt"
+printf '%s\n' 'recoverable spaced path' > "$snapshot/finite-sites/apps/site-recovery/asset with space.txt"
+ln -s data.txt "$snapshot/finite-sites/apps/site-recovery/current"
+ln -s /data/.cache/uv/archive-v0/synthetic \
+  "$snapshot/finite-sites/apps/site-recovery/external-build-cache"
 
 initdb -D "$scratch/postgres" -A trust -U postgres >/dev/null
 pg_ctl -D "$scratch/postgres" -o "-F -k $socket -h '' -p 55439" -w start >/dev/null
@@ -54,19 +66,27 @@ psql -h "$socket" -p 55439 -U postgres recovery_fixture \
 pg_dump -h "$socket" -p 55439 -U postgres --format=custom recovery_fixture \
   > "$snapshot/saas-core/finite_core.dump"
 
-printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v2 > "$snapshot/format"
+printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v3 > "$snapshot/format"
 printf '%s\n' \
-  finite.hosted-web-chat-recovery-snapshot.v2 \
+  finite.hosted-web-chat-recovery-snapshot.v3 \
   $'hosted-device\tdirectory\thosted-device' \
   $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
   $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
   $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
   $'finite-identity\tsqlite\tfinite-identity/identity.db' \
+  $'finite-sites\tdirectory\tfinite-sites' \
   > "$snapshot/recovery-set.tsv"
 (
+  cd "$snapshot/finite-sites"
+  while IFS= read -r -d '' link; do
+    printf '%s\0' "${link#./}"
+    readlink --zero -- "$link"
+  done < <(find . -type l -print0 | LC_ALL=C sort -z)
+) > "$snapshot/finite-sites-symlinks.bin"
+(
   cd "$snapshot"
-  find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
-    -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256
+  find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites \
+    -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > manifest.sha256
 )
 
 target="$scratch/restored"
@@ -77,7 +97,12 @@ for required in \
   finite-chat/server.sqlite3 \
   saas-core/finite_core.dump \
   finite-brain/finite-brain.sqlite3 \
-  finite-identity/identity.db; do
+  finite-identity/identity.db \
+  finite-sites/registry.db \
+  finite-sites/blobs/site-recovery.tar.zst \
+  finite-sites/git/site-recovery.git/HEAD \
+  finite-sites/apps/site-recovery/data.txt \
+  'finite-sites/apps/site-recovery/asset with space.txt'; do
   test -f "$target/$required"
 done
 
@@ -97,6 +122,15 @@ test "$(sqlite3 "$target/finite-chat/server.sqlite3" \
   "SELECT body FROM messages WHERE author_principal='$identity_account';")" = 'recoverable chat content'
 test "$(sqlite3 "$target/finite-brain/finite-brain.sqlite3" \
   "SELECT content FROM brain_access WHERE actor_principal='$identity_account';")" = 'recoverable brain content'
+test "$(sqlite3 "$target/finite-sites/registry.db" \
+  "SELECT published_version FROM sites WHERE owner_principal='$identity_account';")" = version-recovery
+test "$(cat "$target/finite-sites/blobs/site-recovery.tar.zst")" = 'recoverable site blob'
+test "$(cat "$target/finite-sites/git/site-recovery.git/HEAD")" = 'recoverable bare repository'
+test "$(cat "$target/finite-sites/apps/site-recovery/data.txt")" = 'recoverable published app data'
+test "$(cat "$target/finite-sites/apps/site-recovery/asset with space.txt")" = 'recoverable spaced path'
+test "$(readlink "$target/finite-sites/apps/site-recovery/current")" = data.txt
+test "$(readlink "$target/finite-sites/apps/site-recovery/external-build-cache")" \
+  = /data/.cache/uv/archive-v0/synthetic
 
 mismatched_snapshot="$scratch/mismatched-snapshot"
 cp -a "$snapshot" "$mismatched_snapshot"
@@ -111,8 +145,8 @@ mv "$mismatched_snapshot/identity.json.tmp" \
 chmod 0600 "$mismatched_snapshot/hosted-device/users/user-a/finite-home/identity/identity.json"
 (
   cd "$mismatched_snapshot"
-  find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
-    -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256
+  find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites \
+    -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > manifest.sha256
 )
 if FINITE_RESTORE_ISOLATED=1 "$restore" "$mismatched_snapshot" \
   "$scratch/mismatched-target" >/dev/null 2>&1; then
@@ -130,8 +164,8 @@ mv "$invalid_secret_snapshot/identity.json.tmp" \
 chmod 0600 "$invalid_secret_snapshot/hosted-device/users/user-a/finite-home/identity/identity.json"
 (
   cd "$invalid_secret_snapshot"
-  find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
-    -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256
+  find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites \
+    -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > manifest.sha256
 )
 if FINITE_RESTORE_ISOLATED=1 "$restore" "$invalid_secret_snapshot" \
   "$scratch/invalid-secret-target" >/dev/null 2>&1; then
@@ -148,10 +182,22 @@ rm "$snapshot/finite-chat/unmanifested.sqlite3"
 
 ln -s server.sqlite3 "$snapshot/finite-chat/unmanifested-link"
 if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/symlink-target" >/dev/null 2>&1; then
-  echo "recovery contract test failed: symlink was accepted" >&2
+  echo "recovery contract test failed: symlink outside Sites was accepted" >&2
   exit 1
 fi
 rm "$snapshot/finite-chat/unmanifested-link"
+
+tampered_sites_link_snapshot="$scratch/tampered-sites-link-snapshot"
+cp -a "$snapshot" "$tampered_sites_link_snapshot"
+rm "$tampered_sites_link_snapshot/finite-sites/apps/site-recovery/current"
+ln -s 'asset with space.txt' \
+  "$tampered_sites_link_snapshot/finite-sites/apps/site-recovery/current"
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$tampered_sites_link_snapshot" \
+  "$scratch/tampered-sites-link-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: altered Sites symlink was accepted" >&2
+  exit 1
+fi
+test ! -e "$scratch/tampered-sites-link-target"
 
 corrupt_snapshot="$scratch/corrupt-snapshot"
 cp -a "$snapshot" "$corrupt_snapshot"
@@ -163,20 +209,36 @@ if FINITE_RESTORE_ISOLATED=1 "$restore" "$corrupt_snapshot" \
 fi
 test ! -e "$scratch/corrupt-target"
 
+corrupt_sites_snapshot="$scratch/corrupt-sites-snapshot"
+cp -a "$snapshot" "$corrupt_sites_snapshot"
+printf '%s\n' 'not a sqlite database' > "$corrupt_sites_snapshot/finite-sites/registry.db"
+(
+  cd "$corrupt_sites_snapshot"
+  find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites \
+    -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > manifest.sha256
+)
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$corrupt_sites_snapshot" \
+  "$scratch/corrupt-sites-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: corrupt Sites registry was accepted" >&2
+  exit 1
+fi
+test ! -e "$scratch/corrupt-sites-target"
+
 mismatched_set_snapshot="$scratch/mismatched-set-snapshot"
 cp -a "$snapshot" "$mismatched_set_snapshot"
 printf '%s\n' \
-  finite.hosted-web-chat-recovery-snapshot.v2 \
+  finite.hosted-web-chat-recovery-snapshot.v3 \
   $'hosted-device\tdirectory\thosted-device' \
   $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
   $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
   $'finite-brain\tdirectory\tfinite-brain' \
   $'finite-identity\tsqlite\tfinite-identity/identity.db' \
+  $'finite-sites\tdirectory\tfinite-sites' \
   > "$mismatched_set_snapshot/recovery-set.tsv"
 (
   cd "$mismatched_set_snapshot"
-  find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
-    -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256
+  find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites \
+    -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > manifest.sha256
 )
 if FINITE_RESTORE_ISOLATED=1 "$restore" "$mismatched_set_snapshot" \
   "$scratch/mismatched-set-target" >/dev/null 2>&1; then
@@ -225,11 +287,18 @@ fi
 test ! -e "$scratch/v1-target"
 
 printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v2 > "$snapshot/format"
-rm "$snapshot/finite-brain/finite-brain.sqlite3"
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/v2-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: incomplete v2 snapshot was accepted" >&2
+  exit 1
+fi
+test ! -e "$scratch/v2-target"
+
+printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v3 > "$snapshot/format"
+rm "$snapshot/finite-sites/registry.db"
 if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/partial-target" >/dev/null 2>&1; then
   echo "recovery contract test failed: partial Recovery Set was accepted" >&2
   exit 1
 fi
 test ! -e "$scratch/partial-target"
 
-echo "hosted recovery v2 positive and negative contract checks passed"
+echo "hosted recovery v3 positive and negative contract checks passed"
