@@ -84,16 +84,6 @@ pub(crate) struct LaunchCodeRecord {
     pub created_at: String,
 }
 
-impl LaunchCodeRecord {
-    pub(crate) fn status(&self) -> LaunchCodeStatus {
-        LaunchCodeStatus {
-            id: self.id.clone(),
-            redeemed_customer_org_id: self.redeemed_customer_org_id.clone(),
-            redeemed_at: self.redeemed_at.clone(),
-        }
-    }
-}
-
 pub(crate) struct PreparedLaunchCodeBatch {
     pub batch: LaunchCodeBatch,
     pub records: Vec<LaunchCodeRecord>,
