@@ -11,6 +11,7 @@ import {
   coreAgentCreationRequestBody,
   coreBridgeStatus,
   coreIdentityHeaders,
+  coreInitialAgentCreationRequests,
   coreLaunchCodeBatchRequestBody,
   coreProjectLabel,
   coreProjectLaunchStatusLabel,
@@ -357,6 +358,45 @@ test("core project helpers expose self-serve launch status without fake runtime 
   assert.equal(coreProjectRuntimeId(project), null);
   assert.equal(coreProjectLaunchStatusLabel(project, request), "Starting");
   assert.equal(coreProjectLocationLabel(project, request), "Starting your agent");
+});
+
+test("relocation requests stay out of initial agent creation presentation", () => {
+  const initialRequest: CoreAgentCreationRequestSummary = {
+    id: "agent_creation_request_initial",
+    project_id: "project_1",
+    display_name: "Oslo Agent",
+    status: "running",
+    agent_runtime_id: "runtime_1",
+    failure_message: null,
+    created_at: "2026-05-25T12:00:00Z",
+    updated_at: "2026-05-25T12:01:00Z",
+  };
+  const relocationRequest: CoreAgentCreationRequestSummary = {
+    ...initialRequest,
+    id: "agent_creation_request_relocation",
+    is_relocation: true,
+    status: "failed",
+    failure_message: "operator-only relocation failed",
+    updated_at: "2026-07-25T14:00:00Z",
+  };
+  const project: CoreVisibleProject = {
+    project: {
+      id: "project_1",
+      display_name: "Oslo Agent",
+      created_at: "2026-05-25T12:00:00Z",
+      updated_at: "2026-07-25T14:00:00Z",
+    },
+    runtime: null,
+  };
+
+  assert.deepEqual(
+    coreInitialAgentCreationRequests([relocationRequest, initialRequest]),
+    [initialRequest]
+  );
+  assert.equal(
+    coreAgentCreationRequestForProject(project, [relocationRequest, initialRequest]),
+    initialRequest
+  );
 });
 
 test("loadCoreSourceHostRelayEndpoint reads relay routing through service auth", async () => {

@@ -21,13 +21,16 @@ import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
+import type { CoreRuntimeStatus } from "@/lib/core-client";
 import { dashboardChatMachineIdFromPath } from "@/lib/dashboard-chat-route";
+import { dashboardMachineStatusPresentation } from "@/lib/dashboard-machine-status";
 import { cn } from "@/lib/utils";
 import "@/styles/ocean-shell.css";
 
 type MachineNavItem = {
   id: string;
   ownerLabel: string;
+  runtimeStatus: CoreRuntimeStatus;
   siteUrl?: string;
 };
 
@@ -117,6 +120,10 @@ function MachineSwitcher({
   showNewAgent: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const displayedMachine = activeMachine ?? machines[0] ?? null;
+  const displayedMachineStatus = dashboardMachineStatusPresentation(
+    displayedMachine?.runtimeStatus ?? "unknown"
+  );
 
   if (machines.length === 0 && showNewAgent) {
     return (
@@ -134,6 +141,11 @@ function MachineSwitcher({
       <button
         type="button"
         className="ocean-machine-switcher__button"
+        aria-label={
+          creatingNewAgent
+            ? undefined
+            : `${displayedMachine?.ownerLabel ?? "Agents"}, ${displayedMachineStatus.label}`
+        }
         aria-expanded={open}
         aria-haspopup="menu"
         onClick={() => setOpen((value) => !value)}
@@ -141,12 +153,20 @@ function MachineSwitcher({
         {creatingNewAgent ? (
           <PlusIcon className="size-4" aria-hidden />
         ) : (
-          <span className="ocean-machine-switcher__dot" aria-hidden />
+          <>
+            <span
+              className={cn(
+                "ocean-machine-switcher__dot",
+                displayedMachineStatus.className
+              )}
+              aria-hidden
+            />
+          </>
         )}
         <span className="ocean-machine-switcher__label">
           {creatingNewAgent
             ? "New agent"
-            : activeMachine?.ownerLabel ?? machines[0]?.ownerLabel ?? "Agents"}
+            : displayedMachine?.ownerLabel ?? "Agents"}
         </span>
         <ChevronRightIcon className={cn("ocean-machine-switcher__chevron", open && "is-open")} />
       </button>

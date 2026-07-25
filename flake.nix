@@ -3,11 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
-    # finite-lat-3 is the blank-slate NixOS 26.05 qualification host. Keep its
-    # platform pin independent until the lat1 closure upgrade is accepted.
+    # finite-lat-3 qualified this NixOS 26.05 platform pin. finite-lat-1 uses
+    # the same pin for its platform-only upgrade while retaining its existing
+    # disk layout and stateVersion.
     nixpkgs-lat3.url = "github:nixos/nixpkgs/nixos-26.05";
-    # Kata moves quickly and the 25.11 package is materially behind. Keep the
-    # host OS stable while pinning the microVM runtime toolchain independently.
+    # Kata moves quickly and the stable package was materially behind when this
+    # pin was established. Keep the host OS on a qualified release while
+    # pinning the microVM runtime toolchain independently.
     nixpkgs-kata.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay.url = "github:oxalica/rust-overlay";
@@ -148,7 +150,7 @@
       #   nixos-rebuild switch --target-host root@finite-lat-1 \
       #     --flake github:finitecomputer/finite-mono/<tag-or-rev>#finite-lat-1
       # See infra/nixos/README.md and finite-fable/single-server-plan.md.
-      nixosConfigurations.finite-lat-1 = nixpkgs.lib.nixosSystem {
+      nixosConfigurations.finite-lat-1 = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
         specialArgs = runnerSpecialArgs;
         modules = [

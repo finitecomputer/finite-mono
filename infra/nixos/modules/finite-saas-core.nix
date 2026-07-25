@@ -3,7 +3,27 @@
 # routes finite.computer/internal/finite-private/* and the two API-key
 # self-service usage/reset paths here. All other /api/core routes stay off the
 # public Core edge.
-{ finitePackages, ... }:
+{ finitePackages, pkgs, ... }:
+let
+  waitForHealth = pkgs.writeShellScript "wait-for-finite-saas-core-health" ''
+    deadline=$((SECONDS + 60))
+    while (( SECONDS < deadline )); do
+      if ${pkgs.curl}/bin/curl \
+        --fail \
+        --max-time 1 \
+        --output /dev/null \
+        --silent \
+        http://127.0.0.1:4200/healthz
+      then
+        exit 0
+      fi
+      ${pkgs.coreutils}/bin/sleep 1
+    done
+
+    echo "finite-saas-core did not become healthy within 60 seconds" >&2
+    exit 1
+  '';
+in
 {
   environment.systemPackages = [ finitePackages.finite-saas-core ];
 
@@ -56,6 +76,10 @@
 
     serviceConfig = {
       ExecStart = "${finitePackages.finite-saas-core}/bin/finite-saas-core";
+      # Type=simple considers the process started before its HTTP socket is
+      # ready. ExecStartPost participates in systemd ordering, so dependents
+      # wait for a successful health check instead of racing Core at deploy.
+      ExecStartPost = [ "${waitForHealth}" ];
       DynamicUser = true;
       StateDirectory = "finite-saas-core"; # relay state (was PVC finite-saas-core-relay-state)
       # Operator-created, root:root 0600. Variable NAMES only (values come
@@ -73,6 +97,7 @@
       EnvironmentFile = "/etc/finite/core.env";
       Restart = "on-failure";
       RestartSec = 2;
+      TimeoutStartSec = "75s";
       NoNewPrivileges = true;
       PrivateTmp = true;
       ProtectSystem = "strict";

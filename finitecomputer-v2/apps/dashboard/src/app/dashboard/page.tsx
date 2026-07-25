@@ -38,6 +38,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   coreAgentCreationRequestForProject,
+  coreInitialAgentCreationRequests,
   coreProductProjects,
   coreProjectLocationLabel,
   coreProjectLaunchStatusLabel,
@@ -51,6 +52,7 @@ import {
   type CoreMeResult,
   type CoreVisibleProject,
 } from "@/lib/core-client";
+import { runtimePrismState } from "@/lib/runtime-presentation";
 import {
   BILLING_SYNC_MAX_POLL_INTERVAL_MS,
   BILLING_SYNC_POLL_INTERVAL_MS,
@@ -137,10 +139,12 @@ export default async function DashboardPage({
     );
     const coreProjects = coreProductProjects(core.me?.projects ?? []);
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
-    const requestedAgentCreationRequests = agentCreationRequests.filter(
+    const initialAgentCreationRequests =
+      coreInitialAgentCreationRequests(agentCreationRequests);
+    const requestedAgentCreationRequests = initialAgentCreationRequests.filter(
       (request) => request.status === "requested" || request.status === "launching"
     );
-    const failedAgentCreationRequests = agentCreationRequests.filter(
+    const failedAgentCreationRequests = initialAgentCreationRequests.filter(
       (request) => request.status === "failed"
     );
     const returnProject =
@@ -758,11 +762,7 @@ function CoreProjectCard({
   const chatHref = overviewHref ? `${overviewHref}/chat` : null;
   const statusLabel = coreProjectLaunchStatusLabel(project, request);
   const runtimeStatus = project.runtime?.runtime_status ?? "unknown";
-  const heroState = runtimeStatus === "online"
-    ? "happy"
-    : runtimeStatus === "stale"
-      ? "working"
-      : "stuck";
+  const heroState = runtimePrismState(runtimeStatus);
   const description = request?.status === "failed"
     ? "We could not start this agent. Ask a team member to retry it."
     : statusLabel === "Online"

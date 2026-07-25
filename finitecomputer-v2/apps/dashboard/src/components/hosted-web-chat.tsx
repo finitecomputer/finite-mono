@@ -63,6 +63,8 @@ import type {
 } from "@/lib/hosted-web-device";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
+import type { CoreRuntimeStatus } from "@/lib/core-client";
+import { runtimeCanPresentActivity } from "@/lib/runtime-presentation";
 import {
   AUDIO_RECORDING_BITS_PER_SECOND,
   audioRecordingErrorMessage,
@@ -112,10 +114,12 @@ export function HostedWebChat({
   initialDraft,
   machineId,
   machineLabel,
+  runtimeStatus,
 }: {
   initialDraft?: string;
   machineId: string;
   machineLabel: string;
+  runtimeStatus: CoreRuntimeStatus;
 }) {
   const {
     state,
@@ -751,7 +755,9 @@ export function HostedWebChat({
   const connected = ownerClaimed
     && selectedRoom?.state === "Connected"
     && Boolean(selectedTopic && selectedChat);
-  const activityLabel = sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply);
+  const activityLabel = runtimeCanPresentActivity(runtimeStatus)
+    ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
+    : null;
   const latestTranscriptItem = transcript[transcript.length - 1];
   const activeToolRollupId = activityLabel && latestTranscriptItem?.type === "tools"
     ? latestTranscriptItem.id

@@ -27,6 +27,7 @@ import {
   coreProjectSupportsHostedStop,
   type CoreRuntimeStatus,
 } from "@/lib/core-client";
+import { runtimePrismState } from "@/lib/runtime-presentation";
 
 type RelayOverviewState = {
   state: "connected" | "stale" | "missing" | "unavailable";
@@ -78,6 +79,7 @@ async function ImportedMachineOverview({
     access.coreProject.active_runtime_control?.kind === "destroy"
       ? access.coreProject.active_runtime_control
       : null;
+  const runtimeStatus = access.coreProject.runtime?.runtime_status ?? "unknown";
   const overview = activeRetirement
     ? {
         state: "stale" as const,
@@ -85,8 +87,8 @@ async function ImportedMachineOverview({
           ? "Retirement is retrying safely. Your agent data remains retained."
           : "Your agent is being retired safely.",
       }
-    : coreRuntimeOverview(access.coreProject.runtime?.runtime_status ?? "unknown");
-  const prismState = prismStateForRelay(overview);
+    : coreRuntimeOverview(runtimeStatus);
+  const prismState = activeRetirement ? "working" : runtimePrismState(runtimeStatus);
   const canRestartRuntime = coreProjectSupportsHostedRestart(access.coreProject);
   const canStopRuntime = coreProjectSupportsHostedStop(access.coreProject);
   // Chat recovery remains operator maintenance. Retirement is owner-facing
@@ -235,8 +237,4 @@ function coreRuntimeOverview(status: CoreRuntimeStatus): RelayOverviewState {
     state: "unavailable",
     description: "Your agent is starting.",
   };
-}
-
-function prismStateForRelay(relay: RelayOverviewState) {
-  return relay.state === "connected" ? "happy" : relay.state === "stale" ? "working" : "stuck";
 }
