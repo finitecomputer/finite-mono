@@ -5,6 +5,17 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
     struct ContentState: Equatable {
         let rows: [ChatTimelineRow]
         let messagesById: [String: ChatMessage]
+
+        var messageIDs: [String] {
+            rows.flatMap { row -> [String] in
+                switch row {
+                case .messageGroup(let group):
+                    group.messages.map(\.messageId)
+                case .activity:
+                    []
+                }
+            }
+        }
     }
 
     let roomID: String
@@ -140,7 +151,15 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
             oldIDs: coordinator.currentIDs,
             newIDs: newIDs
         )
-        let anchor = shouldPinToBottom ? nil : coordinator.captureTopAnchor()
+        let isPrepending = coordinator.lastContentState.map {
+            MessageCollectionLayout.isStrictPrepend(
+                oldIDs: $0.messageIDs,
+                newIDs: contentState.messageIDs
+            )
+        } ?? false
+        let anchor = shouldPinToBottom
+            ? nil
+            : coordinator.captureTopAnchor(edge: isPrepending ? .bottom : .top)
         let contentChanged = coordinator.lastContentState != contentState
         coordinator.lastContentState = contentState
 
@@ -346,7 +365,7 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
             ChatTranscriptScrollPositionStore.shared.set(position, for: parent.roomID)
         }
 
-        func captureTopAnchor() -> ScrollAnchor? {
+        func captureTopAnchor(edge: ScrollAnchorEdge = .top) -> ScrollAnchor? {
             guard let collectionView,
                   let dataSource,
                   let indexPath = collectionView.indexPathsForVisibleItems
@@ -356,9 +375,17 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
                   let attributes = collectionView.layoutAttributesForItem(at: indexPath)
             else { return nil }
 
+            let itemPosition: CGFloat
+            switch edge {
+            case .top:
+                itemPosition = attributes.frame.minY
+            case .bottom:
+                itemPosition = attributes.frame.maxY
+            }
             return ScrollAnchor(
                 itemID: itemID,
-                distanceFromContentOffset: attributes.frame.minY - collectionView.contentOffset.y
+                distanceFromContentOffset: itemPosition - collectionView.contentOffset.y,
+                edge: edge
             )
         }
 
@@ -383,9 +410,11 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
                 minOffsetY,
                 collectionView.contentSize.height - collectionView.bounds.height + collectionView.contentInset.bottom
             )
-            let targetY = min(
-                max(attributes.frame.minY - anchor.distanceFromContentOffset, minOffsetY),
-                maxOffsetY
+            let targetY = MessageCollectionLayout.contentOffsetY(
+                preserving: anchor,
+                itemFrame: attributes.frame,
+                minOffsetY: minOffsetY,
+                maxOffsetY: maxOffsetY
             )
             collectionView.setContentOffset(CGPoint(x: 0, y: targetY), animated: false)
             return true
@@ -838,9 +867,15 @@ private final class BoundsAwareCollectionView: UICollectionView {
     }
 }
 
+enum ScrollAnchorEdge {
+    case top
+    case bottom
+}
+
 struct ScrollAnchor {
     let itemID: String
     let distanceFromContentOffset: CGFloat
+    var edge: ScrollAnchorEdge = .top
 }
 
 private enum SavedChatTranscriptPosition {

@@ -10,11 +10,12 @@ struct ChatTimelineMessageGroup: Identifiable, Equatable {
     var messages: [ChatMessage]
 
     var id: String {
-        guard let firstMessageId = messages.first?.messageId else {
+        guard let lastMessageId = messages.last?.messageId else {
             return "\(senderAccountId)/\(senderDeviceId)"
         }
-        let lastMessageId = messages.last?.messageId ?? firstMessageId
-        return "\(firstMessageId)-\(lastMessageId)-\(messages.count)"
+        // Older pages extend a group at its leading edge. Keying the row by
+        // its trailing message keeps the existing row stable while prepending.
+        return lastMessageId
     }
 }
 

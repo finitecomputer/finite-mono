@@ -97,6 +97,30 @@ enum MessageCollectionLayout {
         return .structural
     }
 
+    static func isStrictPrepend(oldIDs: [String], newIDs: [String]) -> Bool {
+        guard !oldIDs.isEmpty, newIDs.count > oldIDs.count else { return false }
+        return Array(newIDs.suffix(oldIDs.count)) == oldIDs
+    }
+
+    static func contentOffsetY(
+        preserving anchor: ScrollAnchor,
+        itemFrame: CGRect,
+        minOffsetY: CGFloat,
+        maxOffsetY: CGFloat
+    ) -> CGFloat {
+        let itemPosition: CGFloat
+        switch anchor.edge {
+        case .top:
+            itemPosition = itemFrame.minY
+        case .bottom:
+            itemPosition = itemFrame.maxY
+        }
+        return min(
+            max(itemPosition - anchor.distanceFromContentOffset, minOffsetY),
+            maxOffsetY
+        )
+    }
+
     static func isNearBottom(
         contentOffsetY: CGFloat,
         boundsHeight: CGFloat,

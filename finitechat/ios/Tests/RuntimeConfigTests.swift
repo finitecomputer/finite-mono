@@ -941,13 +941,25 @@ final class ChatTimelineActivityTests: XCTestCase {
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(
             ChatTimeline.rowID(containingMessageID: "message-1", rows: rows),
-            "group-message-1-message-2-2"
+            "group-message-2"
         )
         XCTAssertEqual(
             ChatTimeline.rowID(containingMessageID: "message-2", rows: rows),
-            "group-message-1-message-2-2"
+            "group-message-2"
         )
         XCTAssertNil(ChatTimeline.rowID(containingMessageID: "missing-message", rows: rows))
+    }
+
+    func testGroupedMessageRowIdentitySurvivesPrependingIntoTheSameGroup() {
+        let second = chatMessage(id: "message-2", seq: 2, text: "second")
+        let third = chatMessage(id: "message-3", seq: 3, text: "third")
+        let originalRows = ChatTimeline.rows(messages: [second, third])
+
+        let first = chatMessage(id: "message-1", seq: 1, text: "first")
+        let prependedRows = ChatTimeline.rows(messages: [first, second, third])
+
+        XCTAssertEqual(originalRows.map(\.id), prependedRows.map(\.id))
+        XCTAssertEqual(originalRows.first?.id, "group-message-3")
     }
 
     func testMessageGroupUsesCachedProfilePicture() {
@@ -4112,6 +4124,44 @@ final class MessageCollectionLayoutTests: XCTestCase {
             ),
             .reconfigureOnly
         )
+    }
+
+    func testStrictPrependRequiresTheEntireOldSequenceAsTheNewSuffix() {
+        XCTAssertTrue(
+            MessageCollectionLayout.isStrictPrepend(
+                oldIDs: ["message-2", "message-3"],
+                newIDs: ["message-0", "message-1", "message-2", "message-3"]
+            )
+        )
+        XCTAssertFalse(
+            MessageCollectionLayout.isStrictPrepend(
+                oldIDs: ["message-2", "message-3"],
+                newIDs: ["message-2", "message-3", "message-4"]
+            )
+        )
+        XCTAssertFalse(
+            MessageCollectionLayout.isStrictPrepend(
+                oldIDs: [],
+                newIDs: ["message-1"]
+            )
+        )
+    }
+
+    func testPrependAnchorPreservesTheVisibleTrailingEdge() {
+        let anchor = ScrollAnchor(
+            itemID: "group-message-3",
+            distanceFromContentOffset: 90,
+            edge: .bottom
+        )
+
+        let offset = MessageCollectionLayout.contentOffsetY(
+            preserving: anchor,
+            itemFrame: CGRect(x: 0, y: 420, width: 320, height: 180),
+            minOffsetY: -60,
+            maxOffsetY: 900
+        )
+
+        XCTAssertEqual(offset, 510)
     }
 }
 
