@@ -29,6 +29,7 @@ export default async function DashboardLayout({
         {
           id: runtimeId,
           ownerLabel: coreProjectLabel(project),
+          runtimeStatus: project.runtime?.runtime_status ?? "unknown",
           siteUrl: coreProjectPrimaryUrl(project) ?? undefined,
         },
       ];
