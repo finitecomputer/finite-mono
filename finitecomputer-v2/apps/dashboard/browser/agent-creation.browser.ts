@@ -23,6 +23,7 @@ type AgentCreationRequest = {
   project_id: string;
   display_name: string;
   profile_picture_url: string | null;
+  is_relocation: boolean;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   agent_runtime_id: string | null;
   failure_message: string | null;
@@ -517,6 +518,37 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await expectVisibleText(page, "Runner capacity exhausted");
       await page.getByRole("button", { name: "Start over" }).click();
       await waitFor(() => core.state.cancelPosts.includes("agent_request_failed"));
+    });
+
+    core.reset({
+      projects: [
+        visibleProject(
+          "project_relocation_failed",
+          "Relocated Oslo Bot",
+          hostedDevice.runtimeStatusUrl
+        ),
+      ],
+      requests: [
+        agentCreationRequest({
+          id: "agent_request_relocation_failed",
+          projectId: "project_relocation_failed",
+          displayName: "Relocated Oslo Bot",
+          status: "failed",
+          failureMessage: "operator-only relocation failed",
+          agentRuntimeId: "runtime_completed-oslo-bot",
+          isRelocation: true,
+        }),
+      ],
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await expectVisibleText(page, "Relocated Oslo Bot");
+      assert.equal(
+        await page.getByText("Agent creation needs a retry", { exact: true }).count(),
+        0
+      );
+      assert.equal(await page.getByText("operator-only relocation failed", { exact: true }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "Start over" }).count(), 0);
     });
 
     core.reset({
@@ -2782,6 +2814,7 @@ function agentCreationRequest({
   failureMessage = null,
   createdAt = new Date().toISOString(),
   agentRuntimeId = null,
+  isRelocation = false,
 }: {
   id: string;
   projectId: string;
@@ -2790,12 +2823,14 @@ function agentCreationRequest({
   failureMessage?: string | null;
   createdAt?: string;
   agentRuntimeId?: string | null;
+  isRelocation?: boolean;
 }): AgentCreationRequest {
   return {
     id,
     project_id: projectId,
     display_name: displayName,
     profile_picture_url: null,
+    is_relocation: isRelocation,
     status,
     agent_runtime_id: agentRuntimeId,
     failure_message: failureMessage,
