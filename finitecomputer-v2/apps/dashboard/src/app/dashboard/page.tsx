@@ -280,6 +280,7 @@ export default async function DashboardPage({
         ) : null}
         {showCreateAgent ? (
           <CoreAgentCreationPanel
+            allowConfidentialHosting={viewer.isAdmin}
             error={agentCreationError}
             draft={draft}
             returnMachineId={returnProject?.runtime?.id ?? null}
@@ -881,11 +882,13 @@ function CoreAgentCreationFailedPanel({
 }
 
 function CoreAgentCreationPanel({
+  allowConfidentialHosting,
   error,
   draft,
   returnMachineId,
   requiresAccess,
 }: {
+  allowConfidentialHosting: boolean;
   error: string | null;
   draft: AgentOnboardingDraft | null;
   returnMachineId: string | null;
@@ -908,6 +911,7 @@ function CoreAgentCreationPanel({
       </div>
 
       <CoreAgentCreationForm
+        allowConfidentialHosting={allowConfidentialHosting}
         error={error}
         idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
         initialName={draft?.displayName}

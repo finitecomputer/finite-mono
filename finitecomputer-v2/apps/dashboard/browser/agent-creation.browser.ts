@@ -258,7 +258,11 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     hostedDevice.url,
     brain.url,
     sites.apiUrl,
-    { stripeConfigured: true, distDir: ".next-browser-stripe-test" }
+    {
+      admin: true,
+      stripeConfigured: true,
+      distDir: ".next-browser-stripe-test",
+    }
   );
   const paidDashboardOutput = collectOutput(paidDashboard);
   let browser: Browser | null = null;
@@ -307,6 +311,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         "Profile must not submit agent creation before the customer chooses Access"
       );
       await page.getByRole("button", { name: "Back" }).click();
+      await page.getByRole("radio", { name: /Confidential/u }).waitFor({
+        state: "visible",
+      });
       await page.getByRole("radio", { name: /Confidential/u }).check();
       await page.getByRole("button", { name: "Continue" }).click();
       await expectVisibleText(
@@ -333,6 +340,11 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         );
       });
       await page.getByRole("button", { name: "Account menu" }).waitFor({ state: "visible" });
+      assert.equal(
+        await page.getByRole("radio", { name: /Confidential/u }).count(),
+        0,
+        "Confidential onboarding must remain hidden from non-admin customers"
+      );
       await agentName.fill("Oslo Bot");
       await page.locator('#coreAgentPicture').setInputFiles({
         name: "oslo-bot.png",
@@ -1604,8 +1616,18 @@ function startDashboard(
   hostedDeviceUrl: string,
   brainUrl: string,
   sitesUrl: string,
-  options: { stripeConfigured?: boolean; distDir?: string } = {}
+  options: {
+    admin?: boolean;
+    stripeConfigured?: boolean;
+    distDir?: string;
+  } = {}
 ) {
+  const adminOrganizationId = "org_browser_admin";
+  const devAccessToken = options.admin
+    ? `fixture.${Buffer.from(
+        JSON.stringify({ org_id: adminOrganizationId })
+      ).toString("base64url")}.signature`
+    : "fixture-browser-access-token";
   return spawn(
     process.execPath,
     ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", String(port)],
@@ -1625,7 +1647,8 @@ function startDashboard(
         FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1",
         FC_DASHBOARD_DEV_EMAIL: "browser@finite.vip",
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_browser",
-        FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "fixture-browser-access-token",
+        FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: devAccessToken,
+        FC_WORKOS_OPERATOR_ORG_ID: options.admin ? adminOrganizationId : "",
         FC_DASHBOARD_RUNTIME_MODE: options.stripeConfigured ? "customer" : "canary",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
         FC_WORKOS_AUTH_ENABLED: "0",
