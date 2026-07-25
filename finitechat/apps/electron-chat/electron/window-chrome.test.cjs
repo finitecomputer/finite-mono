@@ -1,8 +1,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  electronDashboardChromeCss,
   fullBleedWindowOptions,
-  hiddenElectronDashboardBrandCss,
   navigationActionForUrl,
   navigationToolbarBounds,
   navigationToolbarHeight,
@@ -19,16 +19,39 @@ test("macOS windows use a full-bleed hidden title bar", () => {
 });
 
 test("Electron dashboard CSS hides only its two wordmark placements", () => {
-  assert.match(hiddenElectronDashboardBrandCss, /\.ocean-app-header__brand \.ocean-brand/u);
-  assert.match(hiddenElectronDashboardBrandCss, /\.finite-chat__brand \.ocean-brand/u);
-  assert.doesNotMatch(hiddenElectronDashboardBrandCss, /display:\s*none/u);
-  assert.match(hiddenElectronDashboardBrandCss, /\.ocean-app-header,\s*.finite-chat__sidebar-top/u);
-  assert.match(hiddenElectronDashboardBrandCss, /app-region:\s*drag/u);
+  const css = electronDashboardChromeCss("darwin");
+  assert.match(css, /\.ocean-app-header__brand \.ocean-brand/u);
+  assert.match(css, /\.finite-chat__brand \.ocean-brand/u);
+  assert.doesNotMatch(css, /display:\s*none/u);
+});
+
+test("macOS dashboard CSS reserves traffic-light space and exposes draggable chrome", () => {
+  const css = electronDashboardChromeCss("darwin");
+  assert.match(css, /\.finite-chat__topbar/u);
+  assert.match(css, /app-region:\s*drag/u);
   assert.match(
-    hiddenElectronDashboardBrandCss,
-    /\.ocean-app-header :where\(a, button, input, select, textarea, \[role="button"\]\)/u
+    css,
+    /\.finite-chat__desktop-collapse-button,\s*.finite-chat__mobile-collapse-button/u
   );
-  assert.match(hiddenElectronDashboardBrandCss, /app-region:\s*no-drag/u);
+  assert.match(css, /\.finite-chat__topbar-actions > button/u);
+  assert.match(css, /app-region:\s*no-drag/u);
+  assert.match(
+    css,
+    /\.finite-agent-shell\.is-sidebar-collapsed \.finite-chat__desktop-collapse-button/u
+  );
+  assert.match(css, /left:\s*72px/u);
+  assert.match(
+    css,
+    /\.finite-agent-shell\.is-sidebar-collapsed \.finite-chat__topbar/u
+  );
+  assert.match(css, /padding-left:\s*58px/u);
+});
+
+test("non-macOS dashboard CSS does not alter native window chrome", () => {
+  const css = electronDashboardChromeCss("win32");
+  assert.match(css, /\.finite-chat__brand \.ocean-brand/u);
+  assert.doesNotMatch(css, /app-region/u);
+  assert.doesNotMatch(css, /is-sidebar-collapsed/u);
 });
 
 test("navigation toolbar stays centered without covering page or window controls", () => {

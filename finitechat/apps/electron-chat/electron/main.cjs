@@ -57,8 +57,8 @@ const {
   shouldReplaceFailedDashboardDocument,
 } = require("./dashboard-load-error.cjs");
 const {
+  electronDashboardChromeCss,
   fullBleedWindowOptions,
-  hiddenElectronDashboardBrandCss,
   navigationActionForUrl,
   navigationToolbarBounds,
 } = require("./window-chrome.cjs");
@@ -199,10 +199,11 @@ function installNavigationToolbar(window) {
   void toolbar.webContents.loadFile(path.join(__dirname, "navigation-toolbar.html"));
 }
 
-function hideDashboardWordmark(window) {
+function installDashboardChrome(window) {
+  const dashboardChromeCss = electronDashboardChromeCss();
   const apply = () => {
     if (!window.isDestroyed()) {
-      void window.webContents.insertCSS(hiddenElectronDashboardBrandCss).catch(() => {
+      void window.webContents.insertCSS(dashboardChromeCss).catch(() => {
         // Navigation or shutdown may dispose the renderer before CSS is installed.
       });
     }
@@ -284,7 +285,7 @@ function createDashboardWindow(targetUrl = dashboardStartUrl) {
       webSecurity: true,
     },
   });
-  hideDashboardWordmark(mainWindow);
+  installDashboardChrome(mainWindow);
 
   showWindowWhenReady(mainWindow);
   mainWindow.on("closed", () => {

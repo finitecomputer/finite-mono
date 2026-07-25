@@ -1,24 +1,51 @@
 const navigationToolbarHeight = 44;
 const navigationToolbarWidth = 62;
 const navigationCommandScheme = "finitechat-navigation:";
-const hiddenElectronDashboardBrandCss = `
-  .ocean-app-header__brand .ocean-brand,
-  .finite-chat__brand .ocean-brand {
-    visibility: hidden !important;
-  }
+const macTrafficLightInset = 14;
+const macTrafficLightSafeEdge = 72;
 
-  .ocean-app-header,
-  .finite-chat__sidebar-top {
-    -webkit-app-region: drag;
-    app-region: drag;
-  }
+function electronDashboardChromeCss(platform = process.platform) {
+  const macWindowChrome = platform === "darwin"
+    ? `
+      .ocean-app-header,
+      .finite-chat__sidebar-top,
+      .finite-chat__topbar {
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
 
-  .ocean-app-header :where(a, button, input, select, textarea, [role="button"]),
-  .finite-chat__sidebar-top :where(a, button, input, select, textarea, [role="button"]) {
-    -webkit-app-region: no-drag;
-    app-region: no-drag;
-  }
-`;
+      .ocean-app-header :where(a, button, input, select, textarea, [role="button"]),
+      .finite-chat__desktop-collapse-button,
+      .finite-chat__mobile-collapse-button,
+      .finite-chat__sidebar-toggle,
+      .finite-chat__rename-button,
+      .finite-chat__topbar-actions > button {
+        -webkit-app-region: no-drag;
+        app-region: no-drag;
+      }
+
+      .finite-agent-shell.is-sidebar-collapsed .finite-chat__desktop-collapse-button {
+        position: fixed;
+        top: 14px;
+        left: ${macTrafficLightSafeEdge}px;
+        z-index: 100;
+      }
+
+      .finite-agent-shell.is-sidebar-collapsed .finite-chat__topbar {
+        padding-left: 58px;
+      }
+    `
+    : "";
+
+  return `
+    .ocean-app-header__brand .ocean-brand,
+    .finite-chat__brand .ocean-brand {
+      visibility: hidden !important;
+    }
+
+    ${macWindowChrome}
+  `;
+}
 
 function fullBleedWindowOptions(platform = process.platform) {
   if (platform !== "darwin") {
@@ -26,7 +53,7 @@ function fullBleedWindowOptions(platform = process.platform) {
   }
   return {
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 14 },
+    trafficLightPosition: { x: macTrafficLightInset, y: macTrafficLightInset },
   };
 }
 
@@ -66,8 +93,8 @@ function navigationActionForUrl(value) {
 }
 
 module.exports = {
+  electronDashboardChromeCss,
   fullBleedWindowOptions,
-  hiddenElectronDashboardBrandCss,
   navigationActionForUrl,
   navigationToolbarBounds,
   navigationToolbarHeight,
