@@ -345,16 +345,21 @@ Items 1 and 2 are spent. A further 25% is not available from item 5, which
 removes nothing. Item 3 is the only place a large number could still be
 hiding, and it should be measured before it is promised.
 
-## Observed, not caused: one timing-sensitive test
+## Observed, not caused: `finite-saas-runner` is flaky on main
 
-`kata::tests::kata_upgrade_retry_recovers_crash_after_canonical_moved_to_rollback`
-in `finite-saas-runner` failed once in roughly six full-workspace runs and
-passed 6/6 in isolation. `finite-saas-runner` is untouched by this work (empty
-diff against `origin/main`), the test uses no Core store, and its launcher
-polls readiness against `readiness_timeout` with `Instant::elapsed`. It is a
-pre-existing timing sensitivity that shows up when a full parallel run
-saturates the machine, not a regression from these changes. Worth a deflake
-before it erodes trust in CI.
+Under a full parallel workspace run, `finite-saas-runner` fails intermittently:
+one `kata::` upgrade-retry test and four `phala::` launcher tests, in varying
+combinations. All pass 3/3 in isolation.
+
+This is **pre-existing and unrelated to this work**. Verified by running the
+crate four times in a clean worktree at unmodified `origin/main`: two runs
+failed, with the same 1-failure and 4-failure signatures. This branch does not
+touch the crate (empty diff against `origin/main`).
+
+The tests spin up local HTTP doubles and poll against `readiness_timeout`
+using `Instant::elapsed`, so a saturated machine trips them. Worth a deflake:
+it will produce spurious CI failures on unrelated PRs and erode trust in the
+gate.
 
 ## Method note
 
