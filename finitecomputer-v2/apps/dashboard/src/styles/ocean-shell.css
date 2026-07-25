@@ -996,6 +996,12 @@ button.ocean-pill-button {
   pointer-events: none;
 }
 
+.ocean-status-card[data-cube-state="off"]::before {
+  filter: blur(40px) grayscale(1);
+  opacity: 0.42;
+  animation: none;
+}
+
 .ocean-status-card > * {
   position: relative;
   z-index: 1;
@@ -2171,6 +2177,48 @@ button.ocean-pill-button {
   user-select: none;
   perspective: 1100px;
   perspective-origin: 50% 42%;
+}
+
+.status-prism-scene--happy {
+  --cube-front: oklch(0.74 0.14 150 / 62%);
+  --cube-side: oklch(0.6 0.13 152 / 50%);
+  --cube-top: oklch(0.9 0.08 145 / 70%);
+  --cube-glow-core: oklch(0.75 0.16 150 / 50%);
+  --cube-glow-rim: oklch(0.94 0.05 145 / 26%);
+  --cube-shadow-color: oklch(0.48 0.12 155 / 38%);
+}
+
+.status-prism-scene--working {
+  --cube-front: oklch(0.8 0.14 82 / 64%);
+  --cube-side: oklch(0.67 0.13 72 / 52%);
+  --cube-top: oklch(0.94 0.08 92 / 72%);
+  --cube-glow-core: oklch(0.82 0.16 82 / 50%);
+  --cube-glow-rim: oklch(0.96 0.05 92 / 28%);
+  --cube-shadow-color: oklch(0.53 0.12 72 / 38%);
+}
+
+.status-prism-scene--stuck {
+  --cube-front: oklch(0.68 0.18 24 / 62%);
+  --cube-side: oklch(0.56 0.17 22 / 50%);
+  --cube-top: oklch(0.88 0.08 35 / 70%);
+  --cube-glow-core: oklch(0.7 0.2 24 / 48%);
+  --cube-glow-rim: oklch(0.93 0.06 35 / 24%);
+  --cube-shadow-color: oklch(0.45 0.15 20 / 38%);
+}
+
+.status-prism-scene--off {
+  --cube-front: oklch(0.64 0.02 255 / 46%);
+  --cube-side: oklch(0.52 0.02 255 / 38%);
+  --cube-top: oklch(0.78 0.015 255 / 48%);
+  --cube-glow-core: oklch(0.58 0.025 255 / 24%);
+  --cube-glow-rim: oklch(0.82 0.015 255 / 16%);
+  --cube-shadow-color: oklch(0.4 0.02 255 / 28%);
+}
+
+.status-prism-scene--off .status-prism-caustic,
+.status-prism-scene--off .status-cube-orbit,
+.status-prism-scene--off .status-cube-spin {
+  animation: none;
 }
 
 .status-prism-scene--sm {

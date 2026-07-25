@@ -30,6 +30,7 @@ export default async function HostedWebChatPage({
       initialDraft={initialDraft(query.prompt)}
       machineId={access.machineId}
       machineLabel={access.displayName}
+      runtimeStatus={access.coreProject.runtime?.runtime_status ?? "unknown"}
     />
   );
 }

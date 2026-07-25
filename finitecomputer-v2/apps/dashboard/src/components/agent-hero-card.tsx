@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import { StatusPrism } from "@/components/status-prism";
+import { StatusPrism, type CubeState } from "@/components/status-prism";
 
 export function AgentHeroCard({
   actions,
@@ -11,7 +11,7 @@ export function AgentHeroCard({
   actions: ReactNode;
   description: string;
   name: string;
-  state: "happy" | "working" | "stuck";
+  state: CubeState;
 }) {
   return (
     <section className="ocean-status-card" data-cube-state={state}>
