@@ -35,8 +35,8 @@ export function MarketingHome() {
         </div>
 
         <div className={styles.actions}>
-          <a href="/login?returnTo=/dashboard" className={styles.button}>
-            Sign in
+          <a href="/signup?returnTo=/dashboard" className={styles.button}>
+            Sign up
           </a>
           <a href="/signup?returnTo=/dashboard" className={styles.secondaryButton}>
             I have a Launch Code
