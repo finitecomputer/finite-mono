@@ -655,7 +655,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .waitFor({ state: "visible" });
 
       const machineSwitcher = page.getByRole("button", {
-        name: "Completed Oslo Bot",
+        name: "Completed Oslo Bot, Online",
         exact: true,
       });
       await waitFor(
@@ -679,7 +679,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
 
       const secondMachineSwitcher = page.getByRole("button", {
-        name: "Second Oslo Bot",
+        name: "Second Oslo Bot, Online",
         exact: true,
       });
       await secondMachineSwitcher.waitFor({ state: "visible" });

@@ -141,6 +141,11 @@ function MachineSwitcher({
       <button
         type="button"
         className="ocean-machine-switcher__button"
+        aria-label={
+          creatingNewAgent
+            ? undefined
+            : `${displayedMachine?.ownerLabel ?? "Agents"}, ${displayedMachineStatus.label}`
+        }
         aria-expanded={open}
         aria-haspopup="menu"
         onClick={() => setOpen((value) => !value)}
@@ -156,7 +161,6 @@ function MachineSwitcher({
               )}
               aria-hidden
             />
-            <span className="sr-only">{displayedMachineStatus.label}</span>
           </>
         )}
         <span className="ocean-machine-switcher__label">
