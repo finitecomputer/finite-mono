@@ -90,6 +90,7 @@ export type CoreAgentCreationRequestSummary = {
   project_id: string;
   display_name: string;
   profile_picture_url?: string | null;
+  is_relocation?: boolean;
   status: "requested" | "launching" | "running" | "failed" | "cancelled";
   agent_runtime_id?: string | null;
   failure_message?: string | null;
@@ -1364,8 +1365,16 @@ export function coreAgentCreationRequestForProject(
   requests: CoreAgentCreationRequestSummary[]
 ) {
   return (
-    requests.find((request) => request.project_id === project.project.id) ?? null
+    coreInitialAgentCreationRequests(requests).find(
+      (request) => request.project_id === project.project.id
+    ) ?? null
   );
+}
+
+export function coreInitialAgentCreationRequests(
+  requests: CoreAgentCreationRequestSummary[]
+) {
+  return requests.filter((request) => !request.is_relocation);
 }
 
 export function coreProjectLaunchStatusLabel(

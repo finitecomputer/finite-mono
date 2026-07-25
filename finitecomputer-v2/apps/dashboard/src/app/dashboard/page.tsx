@@ -38,6 +38,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   coreAgentCreationRequestForProject,
+  coreInitialAgentCreationRequests,
   coreProductProjects,
   coreProjectLocationLabel,
   coreProjectLaunchStatusLabel,
@@ -138,10 +139,12 @@ export default async function DashboardPage({
     );
     const coreProjects = coreProductProjects(core.me?.projects ?? []);
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
-    const requestedAgentCreationRequests = agentCreationRequests.filter(
+    const initialAgentCreationRequests =
+      coreInitialAgentCreationRequests(agentCreationRequests);
+    const requestedAgentCreationRequests = initialAgentCreationRequests.filter(
       (request) => request.status === "requested" || request.status === "launching"
     );
-    const failedAgentCreationRequests = agentCreationRequests.filter(
+    const failedAgentCreationRequests = initialAgentCreationRequests.filter(
       (request) => request.status === "failed"
     );
     const returnProject =
