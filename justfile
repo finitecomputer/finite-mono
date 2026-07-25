@@ -80,6 +80,11 @@ stripe-price-contract:
 hosted-recovery-contract:
     infra/scripts/test-hosted-web-chat-restore
 
+# Values-free file/mode/name contract for rebuilding lat1 secret inputs.
+lat1-secret-bootstrap-contract:
+    python3 -m json.tool infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json >/dev/null
+    python3 -m unittest scripts.tests.test_check_lat1_secret_bootstrap
+
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity
