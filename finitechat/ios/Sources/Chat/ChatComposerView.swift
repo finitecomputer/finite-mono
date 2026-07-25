@@ -22,10 +22,12 @@ struct Composer: View {
     var sendAccessibilityIdentifier = "SendButton"
     var outerHorizontalPadding: CGFloat = 16
     var surfaceRadius: CGFloat = 28
+    var collapsesWhenIdle = false
     var onStartVoiceRecording: (() -> Void)?
     var onSelectPhotos: (() -> Void)?
     var onAttach: (() -> Void)?
     var onCreatePoll: (() -> Void)?
+    @State private var keepsExpanded = false
 
     var body: some View {
         VStack(spacing: 8) {
@@ -53,75 +55,7 @@ struct Composer: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                TextField(
-                    placeholder,
-                    text: $text,
-                    prompt: Text(placeholder),
-                    axis: .vertical
-                )
-                .textFieldStyle(.plain)
-                .lineLimit(1 ... 6)
-                .focused(isInputFocused)
-                .onChange(of: text) { _, _ in
-                    FinitePerformance.recordComposerEdit()
-                }
-                .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
-                .frame(minHeight: 52)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-
-                HStack(spacing: 12) {
-                    if showsAttachmentMenu {
-                        attachmentMenu
-                            .disabled(isSending)
-                    }
-
-                    Spacer()
-
-                    if stagedAttachments.isEmpty, let onStartVoiceRecording {
-                        Button {
-                            onStartVoiceRecording()
-                        } label: {
-                            Image(systemName: "mic")
-                                .font(.title3.weight(.regular))
-                                .frame(width: 34, height: 34)
-                                .contentShape(Circle())
-                        }
-                        .disabled(isSending)
-                        .accessibilityLabel("Record voice message")
-                        .accessibilityIdentifier("VoiceRecordButton")
-                    }
-
-                    if showsSendButton {
-                        Button {
-                            onSend()
-                        } label: {
-                            if isSending {
-                                ProgressView()
-                                    .tint(.white)
-                                    .frame(width: 34, height: 34)
-                                    .background(Circle().fill(Color.accentColor))
-                            } else {
-                                Image(systemName: "arrow.up")
-                                    .font(.body.weight(.bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 34, height: 34)
-                                    .background(Circle().fill(Color.accentColor))
-                            }
-                        }
-                        .disabled(sendDisabled)
-                        .accessibilityLabel(sendAccessibilityLabel)
-                        .accessibilityIdentifier(sendAccessibilityIdentifier)
-                        .transition(.scale.combined(with: .opacity))
-                    }
-                }
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 10)
-            }
-            .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-            .modifier(ChatComposerSurface(radius: surfaceRadius))
+            composerSurface
         }
         .padding(.horizontal, outerHorizontalPadding)
         .padding(.top, 8)
@@ -129,6 +63,135 @@ struct Composer: View {
         .background(Color.clear)
         .animation(.easeInOut(duration: 0.16), value: stagedAttachments.isEmpty)
         .animation(.snappy(duration: 0.18), value: showsSendButton)
+        .animation(.snappy(duration: 0.22), value: isCompact)
+        .onChange(of: isInputFocused.wrappedValue) { _, isFocused in
+            if isFocused {
+                keepsExpanded = true
+            } else if canCollapse {
+                keepsExpanded = false
+            }
+        }
+        .onChange(of: canCollapse) { _, canCollapse in
+            if canCollapse, !isInputFocused.wrappedValue {
+                keepsExpanded = false
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var composerSurface: some View {
+        if isCompact {
+            HStack(spacing: 10) {
+                attachmentControl
+                compactMessageButton
+                voiceControl
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 54)
+            .modifier(ChatComposerSurface(radius: surfaceRadius))
+            .transition(.opacity)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                messageField
+
+                HStack(spacing: 12) {
+                    attachmentControl
+                    Spacer()
+                    voiceControl
+                    sendControl
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
+            }
+            .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+            .modifier(ChatComposerSurface(radius: surfaceRadius))
+            .transition(.opacity)
+        }
+    }
+
+    private var messageField: some View {
+        TextField(
+            placeholder,
+            text: $text,
+            prompt: Text(placeholder),
+            axis: .vertical
+        )
+        .textFieldStyle(.plain)
+        .lineLimit(1 ... 6)
+        .focused(isInputFocused)
+        .onChange(of: text) { _, _ in
+            FinitePerformance.recordComposerEdit()
+        }
+        .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    private var compactMessageButton: some View {
+        Button(action: expandAndFocus) {
+            Text(placeholder)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(placeholder)
+        .accessibilityHint("Opens the message composer")
+        .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
+    }
+
+    @ViewBuilder
+    private var attachmentControl: some View {
+        if showsAttachmentMenu {
+            attachmentMenu
+                .disabled(isSending)
+        }
+    }
+
+    @ViewBuilder
+    private var voiceControl: some View {
+        if stagedAttachments.isEmpty, let onStartVoiceRecording {
+            Button {
+                onStartVoiceRecording()
+            } label: {
+                Image(systemName: "mic")
+                    .font(.title3.weight(.regular))
+                    .frame(width: 34, height: 34)
+                    .contentShape(Circle())
+            }
+            .disabled(isSending)
+            .accessibilityLabel("Record voice message")
+            .accessibilityIdentifier("VoiceRecordButton")
+        }
+    }
+
+    @ViewBuilder
+    private var sendControl: some View {
+        if showsSendButton {
+            Button {
+                onSend()
+            } label: {
+                if isSending {
+                    ProgressView()
+                        .tint(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(Color.accentColor))
+                } else {
+                    Image(systemName: "arrow.up")
+                        .font(.body.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(Color.accentColor))
+                }
+            }
+            .disabled(sendDisabled)
+            .accessibilityLabel(sendAccessibilityLabel)
+            .accessibilityIdentifier(sendAccessibilityIdentifier)
+            .transition(.scale.combined(with: .opacity))
+        }
     }
 
     @ViewBuilder
@@ -183,6 +246,25 @@ struct Composer: View {
 
     private var showsSendButton: Bool {
         !stagedAttachments.isEmpty || canSubmit
+    }
+
+    private var isCompact: Bool {
+        collapsesWhenIdle
+            && !keepsExpanded
+            && !isInputFocused.wrappedValue
+            && canCollapse
+    }
+
+    private var canCollapse: Bool {
+        text.isEmpty && replyTarget == nil && stagedAttachments.isEmpty
+    }
+
+    private func expandAndFocus() {
+        keepsExpanded = true
+        Task { @MainActor in
+            await Task.yield()
+            isInputFocused.wrappedValue = true
+        }
     }
 
     private var remainingPhotoSelectionCount: Int {
@@ -254,6 +336,7 @@ struct RoomComposer: View {
             onSend: send,
             outerHorizontalPadding: outerHorizontalPadding,
             surfaceRadius: surfaceRadius,
+            collapsesWhenIdle: true,
             onStartVoiceRecording: onStartVoiceRecording,
             onAttach: onAttach,
             onCreatePoll: onCreatePoll

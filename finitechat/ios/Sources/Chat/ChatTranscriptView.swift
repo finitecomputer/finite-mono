@@ -639,14 +639,10 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
 
 final class ChatTranscriptHostController: UIViewController {
     fileprivate let collectionView: BoundsAwareCollectionView
-    private let topSafeZoneFadeView = EdgeBlurFadeView(direction: .top)
-    private let bottomSafeZoneFadeView = EdgeBlurFadeView(direction: .bottom)
     private let jumpButtonChromeView = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
     private let jumpButton = UIButton(type: .system)
     private var lastReportedBottomViewportInset: CGFloat = 0
     private var jumpButtonBottomConstraint: NSLayoutConstraint?
-    private var bottomFadeHeightConstraint: NSLayoutConstraint?
-    private var topFadeHeightConstraint: NSLayoutConstraint?
     private var isJumpButtonVisible = false
 
     var onViewportGeometryChange: (() -> Void)?
@@ -684,15 +680,7 @@ final class ChatTranscriptHostController: UIViewController {
             collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        configureTopFade()
-        configureBottomFade()
         configureJumpButton()
-        bringChromeToFront()
-    }
-
-    private func bringChromeToFront() {
-        view.bringSubviewToFront(topSafeZoneFadeView)
-        view.bringSubviewToFront(bottomSafeZoneFadeView)
         view.bringSubviewToFront(jumpButtonChromeView)
     }
 
@@ -710,14 +698,11 @@ final class ChatTranscriptHostController: UIViewController {
 
     override func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
-        updateTopFadeLayout()
         onViewportGeometryChange?()
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        updateTopFadeLayout()
-        updateBottomFadeLayout()
         updateJumpButtonBottomConstraint()
         let bottomViewportInset = self.bottomViewportInset
         guard abs(bottomViewportInset - lastReportedBottomViewportInset) > 0.5 else { return }
@@ -754,47 +739,6 @@ final class ChatTranscriptHostController: UIViewController {
             updates()
             jumpButtonChromeView.isHidden = !visible
         }
-    }
-
-    private func configureTopFade() {
-        topSafeZoneFadeView.translatesAutoresizingMaskIntoConstraints = false
-        view.insertSubview(topSafeZoneFadeView, aboveSubview: collectionView)
-        topFadeHeightConstraint = topSafeZoneFadeView.heightAnchor.constraint(equalToConstant: 0)
-        NSLayoutConstraint.activate([
-            topSafeZoneFadeView.topAnchor.constraint(equalTo: view.topAnchor),
-            topSafeZoneFadeView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            topSafeZoneFadeView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            topFadeHeightConstraint,
-        ].compactMap { $0 })
-        updateTopFadeLayout()
-    }
-
-    private func updateTopFadeLayout() {
-        let fadeHeight = MessageCollectionLayout.chatTopFadeHeight(
-            safeAreaTop: view.safeAreaInsets.top
-        )
-        topFadeHeightConstraint?.constant = fadeHeight
-        topSafeZoneFadeView.preferredHeight = fadeHeight
-    }
-
-    private func configureBottomFade() {
-        bottomSafeZoneFadeView.translatesAutoresizingMaskIntoConstraints = false
-        view.insertSubview(bottomSafeZoneFadeView, aboveSubview: collectionView)
-        bottomFadeHeightConstraint = bottomSafeZoneFadeView.heightAnchor.constraint(equalToConstant: 0)
-        NSLayoutConstraint.activate([
-            bottomSafeZoneFadeView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            bottomSafeZoneFadeView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            bottomSafeZoneFadeView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            bottomFadeHeightConstraint,
-        ].compactMap { $0 })
-        updateBottomFadeLayout()
-    }
-
-    private func updateBottomFadeLayout() {
-        bottomFadeHeightConstraint?.constant = MessageCollectionLayout.safeZoneFadeHeight(
-            safeAreaBottom: view.safeAreaInsets.bottom
-        )
-        bottomSafeZoneFadeView.preferredHeight = bottomFadeHeightConstraint?.constant ?? 0
     }
 
     private func configureJumpButton() {

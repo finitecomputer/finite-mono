@@ -3973,34 +3973,6 @@ final class MessageCollectionLayoutTests: XCTestCase {
         XCTAssertEqual(inset.bottom, 76)
     }
 
-    func testGroupCreateFadeHeightReachesFloatingButton() {
-        let chrome = MessageCollectionLayout.GroupCreateChrome.self
-        let expected = chrome.dockTopPadding
-            + chrome.buttonHeight
-            + chrome.dockBottomPadding
-            + chrome.fadeLiftAboveButton
-        XCTAssertEqual(
-            MessageCollectionLayout.groupCreateFadeHeight(safeAreaBottom: 34),
-            34 + expected
-        )
-    }
-
-    func testSafeZoneFadeHeightReachesComposerIcons() {
-        let chrome = MessageCollectionLayout.ComposerChrome.self
-        let expected = chrome.dockBottomPadding
-            + chrome.iconRowBottomPadding
-            + chrome.iconRowHeight
-            + chrome.fadeLiftAboveIcons
-        XCTAssertEqual(
-            MessageCollectionLayout.safeZoneFadeHeight(safeAreaBottom: 34),
-            34 + expected
-        )
-        XCTAssertEqual(
-            MessageCollectionLayout.safeZoneFadeHeight(safeAreaBottom: 0),
-            expected
-        )
-    }
-
     func testBottomPinSurvivesKeyboardGeometryTransition() {
         XCTAssertTrue(
             MessageCollectionLayout.shouldPinToBottom(
