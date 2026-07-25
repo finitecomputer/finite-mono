@@ -10419,6 +10419,60 @@ mod tests {
         .await;
     }
 
+    /// Timestamp reads do not depend on the database server's timezone.
+    ///
+    /// A bare `col::text` renders Postgres's display format in the SERVER's
+    /// zone, so the same row read on a UTC box and an Asia/Kolkata box produced
+    /// different strings -- and neither was RFC3339. `core_rfc3339` pins the
+    /// rendering to UTC. This drives the session timezone directly so the
+    /// guarantee is checked rather than assumed from wherever CI happens to run.
+    #[tokio::test]
+    async fn postgres_timestamp_reads_are_independent_of_server_timezone() {
+        with_isolated_postgres(|db| async move {
+            let written = "2026-05-25T12:00:00Z";
+            db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                id: "artifact-tz".to_string(),
+                kind: crate::RuntimeArtifactKind::OciImage,
+                reference: format!(
+                    "ghcr.io/finitecomputer/agent-runtime:tz@sha256:{}",
+                    "c".repeat(64)
+                ),
+                version_label: "tz".to_string(),
+                source_git_sha: None,
+                finitec_version: None,
+                hermes_source_ref: None,
+                finite_platform_plugin_ref: None,
+                state_schema_version: "state-v1".to_string(),
+                base_image: None,
+                recover_known_good_chat: false,
+                promoted: false,
+                now: Some(written.to_string()),
+            })
+            .await
+            .unwrap();
+
+            for zone in ["UTC", "America/Chicago", "Asia/Kolkata"] {
+                let client = db.store.connection().await.unwrap();
+                client
+                    .batch_execute(&format!("SET TIME ZONE '{zone}'"))
+                    .await
+                    .unwrap();
+                let artifact = select_runtime_artifact(&**client, "artifact-tz")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    artifact.created_at, written,
+                    "read under TimeZone={zone} must match what was written"
+                );
+                // And Core must be able to read its own output back.
+                crate::parse_time(&artifact.created_at)
+                    .unwrap_or_else(|_| panic!("unparsable under TimeZone={zone}"));
+            }
+        })
+        .await;
+    }
+
     /// Artifact selection orders by the TIMESTAMPTZ column, not its rendered
     /// text.
     ///
