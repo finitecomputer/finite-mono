@@ -28,19 +28,22 @@ struct ChatDestination: Hashable, Identifiable {
 
 func findReusableEmptyHomeChatDestination(
     roomID: String,
-    topics: [AppTopicSummary]
+    topics: [AppTopicSummary],
+    locallyCreatedChatIDs: Set<String>
 ) -> ChatDestination? {
     findReusableEmptyChatDestination(
         roomID: roomID,
         topicID: "home",
-        topics: topics
+        topics: topics,
+        locallyCreatedChatIDs: locallyCreatedChatIDs
     )
 }
 
 func findReusableEmptyChatDestination(
     roomID: String,
     topicID: String,
-    topics: [AppTopicSummary]
+    topics: [AppTopicSummary],
+    locallyCreatedChatIDs: Set<String>
 ) -> ChatDestination? {
     guard let topic = topics.first(where: {
         $0.roomId == roomID && $0.topicId == topicID && !$0.archived
@@ -48,7 +51,11 @@ func findReusableEmptyChatDestination(
         return nil
     }
     guard let chat = topic.chats
-        .filter({ !$0.archived && $0.messageCount == 0 })
+        .filter({
+            !$0.archived
+                && $0.messageCount == 0
+                && locallyCreatedChatIDs.contains($0.chatId)
+        })
         .max(by: { left, right in
             if left.updatedSeq != right.updatedSeq {
                 return left.updatedSeq < right.updatedSeq
@@ -122,6 +129,7 @@ struct ContentView: View {
     @State private var showsSettings = false
     @State private var showsAgentPicker = false
     @State private var pendingHomeSubmission: PendingHomeSubmission?
+    @State private var locallyCreatedEmptyChatIDs: Set<String> = []
     @FocusState private var focusedComposer: ComposerFocusTarget?
 
     var body: some View {
@@ -316,6 +324,9 @@ struct ContentView: View {
                 completion(false)
                 return
             }
+            if launchAction != nil {
+                locallyCreatedEmptyChatIDs.insert(destination.chatID)
+            }
             finishHomeNavigation(
                 to: destination,
                 text: text,
@@ -350,7 +361,8 @@ struct ContentView: View {
         guard let roomID = model.pairedAgent?.roomId else { return nil }
         return findReusableEmptyHomeChatDestination(
             roomID: roomID,
-            topics: model.topics(for: roomID)
+            topics: model.topics(for: roomID),
+            locallyCreatedChatIDs: locallyCreatedEmptyChatIDs
         )
     }
 
@@ -370,6 +382,9 @@ struct ContentView: View {
             {
                 completion(false)
                 return
+            }
+            if launchAction == nil {
+                locallyCreatedEmptyChatIDs.remove(destination.chatID)
             }
             finishHomeNavigation(
                 to: destination,
@@ -470,6 +485,7 @@ struct ContentView: View {
                     completion(false)
                     return
                 }
+                locallyCreatedEmptyChatIDs.insert(destination.chatID)
                 path = [destination]
                 completion(true)
             },
@@ -489,7 +505,8 @@ struct ContentView: View {
         if let existing = findReusableEmptyChatDestination(
             roomID: group.roomID,
             topicID: group.id,
-            topics: model.topics(for: group.roomID)
+            topics: model.topics(for: group.roomID),
+            locallyCreatedChatIDs: locallyCreatedEmptyChatIDs
         ) {
             let opened = model.openChat(
                 roomID: existing.roomID,
@@ -514,6 +531,7 @@ struct ContentView: View {
                     completion(false)
                     return
                 }
+                locallyCreatedEmptyChatIDs.insert(destination.chatID)
                 path = [destination]
                 dismissDrawer()
                 completion(true)

@@ -5742,44 +5742,15 @@ impl AppRuntimeState {
         };
         bootstrap.validate_limits().map_err(client_error)?;
 
-        let mut room_events = stored_events
+        let room_events = stored_events
             .iter()
             .filter(|event| event.room_id == room_id)
             .filter(|event| !is_device_link_control_event(&event.plaintext))
             .cloned()
             .collect::<Vec<_>>();
-        room_events.sort_by(|left, right| {
-            right
-                .seq
-                .cmp(&left.seq)
-                .then_with(|| right.message_id.cmp(&left.message_id))
-        });
-        let mut foundation_ids = BTreeSet::new();
-        let mut foundation_kinds = BTreeSet::new();
-        if let Some(selection) = bootstrap.canonical_selection.as_ref() {
-            for event in &room_events {
-                let Some(kind) = device_link_foundation_kind(event, selection) else {
-                    continue;
-                };
-                if foundation_kinds.insert(kind) {
-                    foundation_ids.insert(event.message_id.clone());
-                }
-            }
-        }
-        let mut candidates = room_events
-            .iter()
-            .filter(|event| foundation_ids.contains(&event.message_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            left.seq
-                .cmp(&right.seq)
-                .then_with(|| left.message_id.cmp(&right.message_id))
-        });
-        candidates.extend(
-            room_events
-                .into_iter()
-                .filter(|event| !foundation_ids.contains(&event.message_id)),
+        let candidates = device_link_bootstrap_history_candidates(
+            room_events,
+            bootstrap.canonical_selection.as_ref(),
         );
         for event in candidates {
             if bootstrap.history.len() >= MAX_DEVICE_LINK_BOOTSTRAP_EVENTS as usize {
@@ -9026,44 +8997,233 @@ fn is_device_link_control_event(plaintext: &[u8]) -> bool {
             .is_some()
 }
 
-/// Returns one stable category for each projection foundation needed by the
-/// selected route. Callers walk newest-first, retaining the latest metadata,
-/// the selected segment's start, its latest title, and its archive state.
-fn device_link_foundation_kind(
-    event: &StoredAppEvent,
-    selection: &DeviceLinkBootstrapSelectionV1,
-) -> Option<u8> {
-    let app_event = serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext).ok()?;
-    if app_event.validate_limits().is_err()
-        || app_event.conversation_id.as_deref() != Some(selection.topic_id.as_str())
-    {
-        return None;
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum DeviceLinkFoundationKey {
+    SelectedTopicMetadata,
+    SelectedChatSegment,
+    SelectedChatRename,
+    SelectedChatArchive,
+    TopicMetadata(String),
+    TopicArchive(String),
+    TopicLatestSegment(String),
+    TopicLatestMessage(String),
+}
+
+impl DeviceLinkFoundationKey {
+    fn is_selected_route(&self) -> bool {
+        matches!(
+            self,
+            Self::SelectedTopicMetadata
+                | Self::SelectedChatSegment
+                | Self::SelectedChatRename
+                | Self::SelectedChatArchive
+        )
     }
-    match app_event.kind {
+}
+
+/// Order device-link history so the bounded bootstrap cannot be monopolized by
+/// one busy topic. The selected route remains first, then every topic gets one
+/// structural representative. Current archive state and the latest segment for
+/// each topic follow before ordinary recent history fills the remaining space.
+fn device_link_bootstrap_history_candidates(
+    mut room_events: Vec<StoredAppEvent>,
+    selection: Option<&DeviceLinkBootstrapSelectionV1>,
+) -> Vec<StoredAppEvent> {
+    room_events.sort_by(|left, right| {
+        right
+            .seq
+            .cmp(&left.seq)
+            .then_with(|| right.message_id.cmp(&left.message_id))
+    });
+
+    let mut foundations = BTreeMap::<DeviceLinkFoundationKey, &StoredAppEvent>::new();
+    for event in &room_events {
+        for key in device_link_foundation_keys(event, selection) {
+            foundations.entry(key).or_insert(event);
+        }
+    }
+
+    let mut selected = foundations
+        .iter()
+        .filter(|(key, _)| key.is_selected_route())
+        .map(|(_, event)| *event)
+        .collect::<Vec<_>>();
+    sort_events_newest_first(&mut selected);
+
+    let mut topic_representatives = BTreeMap::<String, (u8, &StoredAppEvent)>::new();
+    for (key, event) in &foundations {
+        let (topic_id, preference) = match key {
+            DeviceLinkFoundationKey::TopicMetadata(topic_id) => (topic_id, 0),
+            DeviceLinkFoundationKey::TopicLatestSegment(topic_id) => (topic_id, 1),
+            DeviceLinkFoundationKey::TopicLatestMessage(topic_id) => (topic_id, 2),
+            DeviceLinkFoundationKey::TopicArchive(topic_id) => (topic_id, 3),
+            DeviceLinkFoundationKey::SelectedTopicMetadata
+            | DeviceLinkFoundationKey::SelectedChatSegment
+            | DeviceLinkFoundationKey::SelectedChatRename
+            | DeviceLinkFoundationKey::SelectedChatArchive => continue,
+        };
+        let replace =
+            topic_representatives
+                .get(topic_id)
+                .is_none_or(|(current_preference, current)| {
+                    preference < *current_preference
+                        || (preference == *current_preference
+                            && event_order_newest_first(event, current).is_lt())
+                });
+        if replace {
+            topic_representatives.insert(topic_id.clone(), (preference, event));
+        }
+    }
+    let mut topic_representatives = topic_representatives
+        .into_values()
+        .map(|(_, event)| event)
+        .collect::<Vec<_>>();
+    sort_events_newest_first(&mut topic_representatives);
+
+    let mut latest_create_seq = BTreeMap::<String, u64>::new();
+    for event in &room_events {
+        let Ok(app_event) = serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext)
+        else {
+            continue;
+        };
+        if app_event.validate_limits().is_err()
+            || app_event.kind != DurableAppEventKind::ConversationCreate
+        {
+            continue;
+        }
+        if let Some(topic_id) = app_event.conversation_id {
+            latest_create_seq.entry(topic_id).or_insert(event.seq);
+        }
+    }
+    let mut current_archives = foundations
+        .iter()
+        .filter_map(|(key, event)| {
+            let DeviceLinkFoundationKey::TopicArchive(topic_id) = key else {
+                return None;
+            };
+            (latest_create_seq
+                .get(topic_id)
+                .is_none_or(|create_seq| event.seq > *create_seq))
+            .then_some(*event)
+        })
+        .collect::<Vec<_>>();
+    sort_events_newest_first(&mut current_archives);
+
+    let mut latest_segments = foundations
+        .iter()
+        .filter_map(|(key, event)| {
+            matches!(key, DeviceLinkFoundationKey::TopicLatestSegment(_)).then_some(*event)
+        })
+        .collect::<Vec<_>>();
+    sort_events_newest_first(&mut latest_segments);
+
+    let mut foundation_ids = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for event in selected
+        .into_iter()
+        .chain(topic_representatives)
+        .chain(current_archives)
+        .chain(latest_segments)
+    {
+        if foundation_ids.insert(event.message_id.clone()) {
+            candidates.push(event.clone());
+        }
+    }
+    candidates.extend(
+        room_events
+            .into_iter()
+            .filter(|event| !foundation_ids.contains(&event.message_id)),
+    );
+    candidates
+}
+
+fn event_order_newest_first(left: &StoredAppEvent, right: &StoredAppEvent) -> std::cmp::Ordering {
+    right
+        .seq
+        .cmp(&left.seq)
+        .then_with(|| right.message_id.cmp(&left.message_id))
+}
+
+fn sort_events_newest_first(events: &mut Vec<&StoredAppEvent>) {
+    events.sort_by(|left, right| event_order_newest_first(left, right));
+}
+
+/// Returns stable projection categories for a history event. Callers walk
+/// newest-first, so each category retains its latest event.
+fn device_link_foundation_keys(
+    event: &StoredAppEvent,
+    selection: Option<&DeviceLinkBootstrapSelectionV1>,
+) -> Vec<DeviceLinkFoundationKey> {
+    let Ok(app_event) = serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext)
+    else {
+        return Vec::new();
+    };
+    if app_event.validate_limits().is_err() {
+        return Vec::new();
+    }
+
+    let topic_id = app_event.conversation_id.clone().or_else(|| {
+        conversation_id_from_decoded_event(&decoded_typed_application_event(app_event.clone()))
+    });
+    let selected_topic = selection
+        .zip(topic_id.as_deref())
+        .is_some_and(|(selection, topic_id)| selection.topic_id == topic_id);
+    let mut keys = Vec::new();
+    match &app_event.kind {
         DurableAppEventKind::ConversationCreate | DurableAppEventKind::ConversationUpdate => {
-            Some(0)
+            if let Some(topic_id) = topic_id {
+                keys.push(DeviceLinkFoundationKey::TopicMetadata(topic_id));
+                if selected_topic {
+                    keys.push(DeviceLinkFoundationKey::SelectedTopicMetadata);
+                }
+            }
+        }
+        DurableAppEventKind::ConversationArchive => {
+            if let Some(topic_id) = topic_id {
+                keys.push(DeviceLinkFoundationKey::TopicArchive(topic_id));
+            }
         }
         DurableAppEventKind::ConversationSegmentStart => {
-            let segment =
-                serde_json::from_slice::<ConversationSegmentStartV1>(&app_event.payload).ok()?;
-            (segment.segment_id == selection.chat_id).then_some(1)
+            if let (Some(topic_id), Ok(segment)) = (
+                topic_id,
+                serde_json::from_slice::<ConversationSegmentStartV1>(&app_event.payload),
+            ) {
+                keys.push(DeviceLinkFoundationKey::TopicLatestSegment(topic_id));
+                if selection.is_some_and(|selection| {
+                    selected_topic && segment.segment_id == selection.chat_id
+                }) {
+                    keys.push(DeviceLinkFoundationKey::SelectedChatSegment);
+                }
+            }
+        }
+        DurableAppEventKind::ChatMessage => {
+            if let Some(topic_id) = topic_id {
+                keys.push(DeviceLinkFoundationKey::TopicLatestMessage(topic_id));
+            }
         }
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_CHAT_ARCHIVE_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING
-                && app_event.segment_id.as_deref() == Some(selection.chat_id.as_str()) =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING
+                && selection.is_some_and(|selection| {
+                    selected_topic
+                        && app_event.segment_id.as_deref() == Some(selection.chat_id.as_str())
+                }) =>
         {
-            Some(3)
+            keys.push(DeviceLinkFoundationKey::SelectedChatArchive);
         }
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_CHAT_RENAME_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING
-                && app_event.segment_id.as_deref() == Some(selection.chat_id.as_str()) =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING
+                && selection.is_some_and(|selection| {
+                    selected_topic
+                        && app_event.segment_id.as_deref() == Some(selection.chat_id.as_str())
+                }) =>
         {
-            Some(2)
+            keys.push(DeviceLinkFoundationKey::SelectedChatRename);
         }
-        _ => None,
+        _ => {}
     }
+    keys
 }
 
 fn device_link_bootstrap_profile_from_app(
@@ -11411,6 +11571,125 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn device_link_bootstrap_reserves_foundations_for_topics_outside_busy_home() {
+        let sender = DeviceRef {
+            account_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            device_id: "agent".to_owned(),
+        };
+        let selection = DeviceLinkBootstrapSelectionV1 {
+            room_id: "room-main".to_owned(),
+            topic_id: HOME_TOPIC_ID.to_owned(),
+            chat_id: "home-selected".to_owned(),
+        };
+        let metadata = |title: &str| ConversationMetadataV1 {
+            title: Some(title.to_owned()),
+            description: None,
+            external_topic: None,
+            skill_binding: None,
+        };
+        let stored = |seq: u64, message_id: &str, plaintext: Vec<u8>| StoredAppEvent {
+            room_id: "room-main".to_owned(),
+            seq,
+            message_id: message_id.to_owned(),
+            sender: sender.clone(),
+            plaintext,
+            timestamp_unix_seconds: NOW.saturating_add(seq),
+        };
+
+        let mut events = vec![
+            stored(
+                1,
+                "other-topic-create",
+                encode_application_event(
+                    DurableAppEventKind::ConversationCreate,
+                    Some("other-topic".to_owned()),
+                    &serde_json::to_vec(&metadata("Other topic")).unwrap(),
+                )
+                .unwrap(),
+            ),
+            stored(
+                2,
+                "other-topic-segment",
+                encode_application_event(
+                    DurableAppEventKind::ConversationSegmentStart,
+                    Some("other-topic".to_owned()),
+                    &serde_json::to_vec(&ConversationSegmentStartV1 {
+                        segment_id: "other-chat".to_owned(),
+                        reason: None,
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+            ),
+            stored(
+                3,
+                "other-topic-message",
+                encode_application_event_with_segment(
+                    DurableAppEventKind::ChatMessage,
+                    Some("other-topic".to_owned()),
+                    Some("other-chat".to_owned()),
+                    &encode_text_message_payload("other topic message", None).unwrap(),
+                )
+                .unwrap(),
+            ),
+            stored(
+                4,
+                "home-topic-create",
+                encode_application_event(
+                    DurableAppEventKind::ConversationCreate,
+                    Some(HOME_TOPIC_ID.to_owned()),
+                    &serde_json::to_vec(&metadata(HOME_TOPIC_TITLE)).unwrap(),
+                )
+                .unwrap(),
+            ),
+            stored(
+                5,
+                "home-selected-segment",
+                encode_application_event(
+                    DurableAppEventKind::ConversationSegmentStart,
+                    Some(HOME_TOPIC_ID.to_owned()),
+                    &serde_json::to_vec(&ConversationSegmentStartV1 {
+                        segment_id: selection.chat_id.clone(),
+                        reason: None,
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+            ),
+        ];
+        events.extend((0..70).map(|index| {
+            let seq = 6 + index;
+            stored(
+                seq,
+                &format!("home-message-{index}"),
+                encode_application_event_with_segment(
+                    DurableAppEventKind::ChatMessage,
+                    Some(HOME_TOPIC_ID.to_owned()),
+                    Some(selection.chat_id.clone()),
+                    &encode_text_message_payload(&format!("home message {index}"), None).unwrap(),
+                )
+                .unwrap(),
+            )
+        }));
+
+        let bounded = device_link_bootstrap_history_candidates(events, Some(&selection))
+            .into_iter()
+            .take(MAX_DEVICE_LINK_BOOTSTRAP_EVENTS as usize)
+            .map(|event| event.message_id)
+            .collect::<BTreeSet<_>>();
+
+        assert!(bounded.contains("home-topic-create"));
+        assert!(bounded.contains("home-selected-segment"));
+        assert!(bounded.contains("other-topic-create"));
+        assert!(bounded.contains("other-topic-segment"));
+        assert!(
+            !bounded.contains("other-topic-message"),
+            "topic coverage should reserve structure before spending the bound on transcript fill"
+        );
+    }
 
     #[test]
     #[ignore = "timing harness; run explicitly in release mode"]

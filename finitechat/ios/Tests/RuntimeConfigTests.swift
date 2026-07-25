@@ -199,12 +199,50 @@ final class RuntimeConfigTests: XCTestCase {
                         ),
                     ]
                 ),
-            ]
+            ],
+            locallyCreatedChatIDs: ["empty-older"]
         )
 
         XCTAssertEqual(destination?.roomID, "room-main")
         XCTAssertEqual(destination?.topicID, "home")
-        XCTAssertEqual(destination?.chatID, "empty-newer")
+        XCTAssertEqual(destination?.chatID, "empty-older")
+    }
+
+    func testReusableEmptyHomeChatRejectsApparentlyEmptyLinkedHistory() {
+        let destination = findReusableEmptyHomeChatDestination(
+            roomID: "room-main",
+            topics: [
+                AppTopicSummary(
+                    roomId: "room-main",
+                    topicId: "home",
+                    title: "Home",
+                    description: nil,
+                    lastMessagePreview: "",
+                    unreadCount: 0,
+                    messageCount: 0,
+                    createdSeq: 1,
+                    updatedSeq: 10,
+                    archived: false,
+                    activeChatId: "linked-chat",
+                    chats: [
+                        AppChatSummary(
+                            chatId: "linked-chat",
+                            title: "New chat",
+                            lastMessagePreview: "",
+                            unreadCount: 0,
+                            messageCount: 0,
+                            startedSeq: 10,
+                            updatedSeq: 10,
+                            active: true,
+                            archived: false
+                        ),
+                    ]
+                ),
+            ],
+            locallyCreatedChatIDs: []
+        )
+
+        XCTAssertNil(destination)
     }
 
     func testLocalDeviceLinkUsesElectronCompatibleDashboardOverride() throws {
