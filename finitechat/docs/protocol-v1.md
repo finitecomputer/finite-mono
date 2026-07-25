@@ -402,12 +402,14 @@ message, not by making the server authoritative over old plaintext or hidden
 key access. A product that promises retained history must implement and test
 one of those paths before treating Device-store loss as recoverable.
 
-Finite's single-agent clients use the explicit member-to-member path. A
-same-account member answers `finitechat.device-link.bootstrap-request.v2` with
-bounded `finitechat.device-link.bootstrap.v2` chunks for the exact paired
-agent Room. Every chunk repeats one manifest: source transfer id, target,
-Room metadata, canonical selection, chunk count, total event count, and the
-SHA-256 digest of the canonical `(seq, message_id)`-ordered plaintext stream.
+Finite's linked clients use the explicit member-to-member path. A same-account
+member answers `finitechat.device-link.bootstrap-request.v2` with bounded
+`finitechat.device-link.bootstrap.v2` chunks for each exact provisional Room.
+This is the paired agent Room on a single-agent client and every linked Room
+still missing authoritative metadata on Electron. Every chunk repeats one
+manifest: source transfer id, target, Room metadata, canonical selection,
+chunk count, total event count, and the SHA-256 digest of the canonical
+`(seq, message_id)`-ordered plaintext stream.
 
 Before export, the source pages the server-visible Room log and proves that
 every application entry through the scan cutoff has a corresponding encrypted

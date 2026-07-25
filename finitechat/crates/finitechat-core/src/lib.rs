@@ -2927,23 +2927,12 @@ impl AppRuntimeState {
 
     fn request_missing_link_device_bootstraps(&mut self) -> Result<(), FiniteChatCoreError> {
         let owner = self.core.device.device_ref().clone();
-        let has_agent_room = self
-            .app
-            .rooms
-            .iter()
-            .any(|room| room.state == AppRoomState::Connected && room.is_agent_chat);
         let room_ids = self
             .app
             .rooms
             .iter()
             .filter(|room| room.state == AppRoomState::Connected)
-            .filter(|room| {
-                if has_agent_room {
-                    room.is_agent_chat && room.display_name == room.room_id
-                } else {
-                    true
-                }
-            })
+            .filter(|room| room.display_name == room.room_id)
             .map(|room| room.room_id.clone())
             .collect::<Vec<_>>();
         for room_id in room_ids {

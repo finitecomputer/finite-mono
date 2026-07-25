@@ -36,6 +36,10 @@ automatically through `/api/device-links/account-binding`,
 `/api/device-links/approve`, and `/api/device-links/status`. The account secret
 is claimed over the encrypted device-link channel and committed to macOS secure
 storage before the local daemon starts; there is no separate approval page.
+For each linked Room still missing authoritative local metadata, the daemon's
+shared Rust runtime accepts either a complete, verified, multi-chunk history
+transfer or no history. Electron initially renders a bounded transcript window
+and pages older messages from that committed local history.
 
 ## Install `finitechat`
 
