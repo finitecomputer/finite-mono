@@ -121,7 +121,6 @@ struct ContentView: View {
     @State private var showsDrawer = false
     @State private var showsSettings = false
     @State private var showsAgentPicker = false
-    @State private var homeComposerFocusRequest = 0
     @State private var pendingHomeSubmission: PendingHomeSubmission?
 
     var body: some View {
@@ -153,7 +152,6 @@ struct ContentView: View {
             FocusedHomeView(
                 agentName: model.pairedAgent?.displayName,
                 recentChats: recentChats,
-                focusRequest: homeComposerFocusRequest,
                 startChat: startHomeChat,
                 openChat: open,
                 chooseAgent: {
@@ -450,9 +448,6 @@ struct ContentView: View {
     private func startNewChatFromDrawer() {
         path.removeAll()
         dismissDrawer()
-        Task { @MainActor in
-            homeComposerFocusRequest += 1
-        }
     }
 
     private func createTopicFromDrawer(
@@ -597,7 +592,6 @@ struct FocusedHomeView: View {
     @Environment(\.finiteTokens) private var tokens
     let agentName: String?
     let recentChats: [ChatDestination]
-    var focusRequest = 0
     let startChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
     let openChat: (ChatDestination) -> Void
     let chooseAgent: () -> Void
@@ -672,10 +666,6 @@ struct FocusedHomeView: View {
         .background(Color(.systemBackground))
         .navigationTitle("Home")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: focusRequest) {
-            guard focusRequest > 0 else { return }
-            isComposerFocused = true
-        }
     }
 }
 

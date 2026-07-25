@@ -199,6 +199,7 @@ struct RoomThreadView: View {
             FiniteSiteBrowserView(url: item.url, identity: model.nostrIdentity)
         }
         .onDisappear {
+            composerFocused = false
             model.setTyping(roomID: roomID, isTyping: false)
             dismissFocusedMessage(animated: false)
             voiceRecorder.cancelRecording()
