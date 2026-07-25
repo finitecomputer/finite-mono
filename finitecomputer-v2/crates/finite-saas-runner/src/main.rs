@@ -9,6 +9,7 @@ use finite_saas_runner::{
     DockerLauncher, EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig,
     KataLauncher, KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource,
     RunOnceOutcome, RuntimeLauncher, SpecializationBundleRuntimeDefaults,
+    durable_state_manifest_sha256,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -45,6 +46,12 @@ enum Command {
     /// Print only the non-secret Phala workspace id and slug needed to fence preflight.
     #[command(name = "phala-workspace-identity")]
     PhalaWorkspaceIdentity,
+    /// Hash a stopped Runtime durable directory for a cold relocation request.
+    #[command(name = "state-manifest")]
+    StateManifest {
+        #[arg(long)]
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -54,6 +61,10 @@ fn main() -> Result<()> {
         Command::Serve => serve(),
         Command::PhalaPreflight => phala_preflight(),
         Command::PhalaWorkspaceIdentity => phala_workspace_identity(),
+        Command::StateManifest { path } => {
+            println!("{}", durable_state_manifest_sha256(&path)?);
+            Ok(())
+        }
     }
 }
 

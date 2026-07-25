@@ -35,7 +35,9 @@ mod phala_inventory;
 pub mod retirement;
 
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
-pub use kata::{KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig};
+pub use kata::{
+    KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig, durable_state_manifest_sha256,
+};
 pub use phala::{PhalaConfig, PhalaLauncher};
 
 const DEFAULT_RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -538,7 +540,16 @@ where
                 );
                 let launch_result = match launch_result {
                     Ok(_) => match self.wait_for_launch_readiness(&facts.source_machine_id) {
-                        Ok(()) => match self.bind_agent_identity(&lease, &facts) {
+                        Ok(()) => match if lease.request.relocation.is_some() {
+                            // The relocation launch already proved that the
+                            // restored state exposes the existing Agent
+                            // Principal. Rebinding it after Core switches the
+                            // Runtime host would add a fallible post-commit
+                            // step to the relocation boundary.
+                            Ok(())
+                        } else {
+                            self.bind_agent_identity(&lease, &facts)
+                        } {
                             Ok(()) => self.queue.complete_agent_creation(
                                 &request_id,
                                 CompleteAgentCreationRequestInput {
@@ -6416,6 +6427,8 @@ mod tests {
                 placement: None,
                 desired_runtime_artifact_id: None,
                 runtime_spec: None,
+                target_source_host_id: None,
+                relocation: None,
                 profile_picture_url: None,
                 status: AgentCreationRequestStatus::Launching,
                 requested_launch_code: Some("launch_code_record_123".to_string()),

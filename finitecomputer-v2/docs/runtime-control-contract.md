@@ -120,8 +120,10 @@ It keeps chat identity, Hermes memory, workspace files, skills, and user data
 intact. Other adapters continue to advertise it as false.
 
 This operation deliberately fails when canonical compute is absent. Restoring
-an off-host Recovery Snapshot or generically relaunching missing compute is a
-separate recovery contract and remains proposed work.
+an off-host Recovery Snapshot remains a separate recovery contract. The narrow
+operator-only cold-relocation contract below can launch an exact stopped Kata
+Runtime from separately staged, manifest-bound durable state; it is not a
+generic missing-compute repair.
 
 If recovery still does not restore the runtime, the next escalation is a deeper
 image or data migration, not dashboard feature state.
@@ -130,6 +132,30 @@ image or data migration, not dashboard feature state.
 
 `stop` asks the provider to stop compute while preserving durable mounted state.
 Core records the runtime as `offline` after the provider command succeeds.
+
+### Operator-only Cold Relocation
+
+Cold relocation moves one exact, stopped Kata Runtime between Finite-owned
+Runner hosts. It is a specialized Agent Creation transaction, not a dashboard
+control: Core requires the current Runtime binding, a successful stop receipt,
+an exact target host, the retained Agent Principal, and a SHA-256 manifest
+computed over the stopped durable tree.
+
+The operator stages that tree separately. Only the named target Runner can
+lease the request. Before launch it verifies RuntimeSpec and path bindings, an
+absent target compute handle, the complete durable-state manifest, and a
+regular identity file. After launch it requires the runtime to expose the same
+Agent Principal before Core changes the source binding. Normal Runner secret
+resolution supplies fresh target-host credentials; secrets are not copied from
+the old compute environment.
+
+A failed pre-commit relocation removes target compute but preserves Core's
+existing Runtime/link and both durable trees. The stopped source remains the
+rollback boundary and must not be started concurrently. This contract does not
+delete source state, select a winner after both copies have changed, restore an
+off-host Recovery Set, or make relocation a fleet scheduler. The exact operator
+procedure is
+[`infra/runbooks/runtime-cold-relocation.md`](../../infra/runbooks/runtime-cold-relocation.md).
 
 ### Runtime Retirement
 
@@ -233,8 +259,9 @@ Current debt:
 - the first-class image still uses the Finite Chat owned entrypoint and gateway
   launcher. That is the right product shape for this release.
 - recover-known-good is currently Kata-only and requires canonical compute. It
-  is not an off-host restore or generic relaunch mechanism; those remain a
-  separate Recovery Set and lifecycle project.
+  is not an off-host restore. Operator-only stopped Kata relocation now has an
+  exact host/state/identity-fenced path, but generic missing-compute recovery
+  and Recovery Set restore remain separate lifecycle work.
 - v2 does not currently configure independent Agent Runtime backup. The
   optional entrypoint Restic path now includes the complete `/data` root,
   including `/data/workspace`, but it does not yet provide the required
@@ -266,8 +293,10 @@ The runtime-control path is accepted only when all of these pass:
   Principal contact, Hosted Web chat, image replacement with preserved `/data`,
   independent service restart healing, and Finite Private.
 - Kata proves the same image and Provider Durable Volume restart for the first
-  slice. Runtime Retirement and full Recovery Snapshot restore onto empty
-  replacement compute remain post-MVP recovery gates.
+  slice. Cold relocation additionally proves stopped source/target manifests,
+  exact-host leasing, unchanged Agent Principal, and failure preservation.
+  Runtime Retirement and full Recovery Snapshot restore onto empty replacement
+  compute remain post-MVP recovery gates.
 - Phala proves the same thin Runner contract plus its claimed confidential
   evidence. Recovery Snapshot format and off-host restore remain a recorded
   post-first-slice TODO; normal lifecycle operations must preserve Provider

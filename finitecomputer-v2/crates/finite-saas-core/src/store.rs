@@ -7,13 +7,13 @@ use crate::{
     AdminArchiveUnrecoverableRuntimeInput, AdminIssueFinitePrivateFriendKeyInput,
     AdminIssuedFinitePrivateKey, AdminResetFinitePrivateUsageWindowInput,
     AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
-    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRetireExactInput,
-    AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput, AgentCreationConfiguration,
-    AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus,
-    AgentRuntime, ApproveFinitePrivateGrantInput, ArchiveImportedProjectInput, BillingClass,
-    BillingOverview, BillingSubscriptionStatus, BrainAgentAccount, BridgeCoreState,
-    CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
-    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
+    AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
+    AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
+    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput,
+    ArchiveImportedProjectInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
+    BrainAgentAccount, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
+    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
     CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
     FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
@@ -36,11 +36,12 @@ use crate::{
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeRelayCredential, RuntimeRetirementSnapshot,
-    RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecIdentity,
-    RuntimeStatusSnapshot, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
-    SettleFinitePrivateReservationResult, SourceHostRelayEndpoint, StoreErrorDetail,
-    SyncStripeSubscriptionInput, UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
+    RuntimePlacement, RuntimeRelayCredential, RuntimeRelocationEnvelope, RuntimeRelocationV1,
+    RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
+    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
+    SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
+    SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
+    UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
     UpsertSourceHostRelayEndpointInput, agent_creation_entitlement_id_for,
     append_provider_operation_transition, bound_runtime_capabilities_to_artifact,
     build_runtime_spec_v1, canonical_agent_email, chat_identity_id_for_user, current_time_iso,
@@ -62,8 +63,9 @@ use crate::{
     runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_secret_references,
     runtime_spec_v1, runtime_upgrade_contact_endpoint,
     runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
-    source_import_key, trim_to_option, validate_runtime_capabilities_artifact_policy,
-    validate_runtime_capabilities_policy, validate_runtime_retirement_snapshot_receipt,
+    source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
+    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
+    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
     validate_runtime_spec_binding, validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
@@ -689,6 +691,16 @@ impl CoreStore {
         match self {
             Self::Memory(store) => store.admin_request_runtime_retire_exact(input).await,
             Self::Postgres(store) => store.admin_request_runtime_retire_exact(input).await,
+        }
+    }
+
+    pub async fn admin_request_runtime_relocate_exact(
+        &self,
+        input: AdminRuntimeRelocateExactInput,
+    ) -> CoreResult<AgentCreationRequest> {
+        match self {
+            Self::Memory(store) => store.admin_request_runtime_relocate_exact(input).await,
+            Self::Postgres(store) => store.admin_request_runtime_relocate_exact(input).await,
         }
     }
 
@@ -1342,6 +1354,14 @@ impl MemoryCoreStore {
         state.admin_request_runtime_retire_exact(input)
     }
 
+    pub async fn admin_request_runtime_relocate_exact(
+        &self,
+        input: AdminRuntimeRelocateExactInput,
+    ) -> CoreResult<AgentCreationRequest> {
+        let mut state = self.state.lock().await;
+        state.admin_request_runtime_relocate_exact(input)
+    }
+
     pub async fn runtime_control_request(
         &self,
         request_id: &str,
@@ -1652,6 +1672,17 @@ impl PostgresCoreStore {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         let result = postgres_admin_request_runtime_retire_exact(&*tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(result)
+    }
+
+    pub async fn admin_request_runtime_relocate_exact(
+        &self,
+        input: AdminRuntimeRelocateExactInput,
+    ) -> CoreResult<AgentCreationRequest> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result = postgres_admin_request_runtime_relocate_exact(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(result)
     }
@@ -2710,6 +2741,8 @@ where
         placement: Some(placement),
         desired_runtime_artifact_id: None,
         runtime_spec: None,
+        target_source_host_id: None,
+        relocation: None,
         profile_picture_url,
         status: AgentCreationRequestStatus::Requested,
         requested_launch_code: locked_launch_code.map(|locked| locked.record.id),
@@ -3286,6 +3319,10 @@ where
                         OR target_source_host_id = $5
                       )
                   AND (
+                        relocation_spec IS NULL
+                        OR ($5::text IS NOT NULL AND target_source_host_id = $5)
+                      )
+                  AND (
                         $6::text[] IS NULL
                         OR runner_class = ANY($6::text[])
                       )
@@ -3306,7 +3343,7 @@ where
                        request.project_id, request.idempotency_key, request.display_name,
                        request.runner_class, request.hosting_tier,
                        request.placement_runner_class, request.runtime_resource_class,
-                       request.desired_runtime_artifact_id, request.runtime_spec,
+                       request.desired_runtime_artifact_id, request.runtime_spec, request.target_source_host_id, request.relocation_spec,
                        request.profile_picture_url,
                        request.status, request.requested_launch_code, request.agent_runtime_id,
                        request.runner_id, request.lease_token, request.lease_expires_at::text,
@@ -3560,11 +3597,26 @@ where
             .map(Ok)
             .unwrap_or_else(new_agent_runtime_id)?
     };
+    let runtime_by_id = select_agent_runtime(client, &runtime_id).await?;
+    validate_runtime_relocation_registration(
+        &request,
+        runtime_by_id.as_ref(),
+        &source_host_id,
+        &source_machine_id,
+    )?;
+    if request.relocation.is_some() {
+        // Relocation registration is deliberately non-mutating. Completion
+        // below is the single transaction that replaces the source binding.
+        return Ok(AgentCreationLease {
+            project,
+            request,
+            provider_operation,
+            in_flight_capacity_reservation: None,
+        });
+    }
     let existing_runtime = match runtime_by_source {
         Some(runtime) => Some(runtime),
-        None => select_agent_runtime(client, &runtime_id)
-            .await?
-            .filter(|runtime| runtime.source_import_key == source_import_key),
+        None => runtime_by_id.filter(|runtime| runtime.source_import_key == source_import_key),
     };
     let (provider_runtime_handle, provider_runtime_handle_history) = merge_provider_runtime_handle(
         existing_runtime.as_ref(),
@@ -3683,6 +3735,12 @@ where
     let project = select_project(client, &request.project_id)
         .await?
         .ok_or_else(|| missing_request_project_error(&request))?;
+    validate_runtime_relocation_registration(
+        &request,
+        existing_runtime.as_ref(),
+        &source_host_id,
+        &source_machine_id,
+    )?;
     let source_import_key = source_import_key(&source_host_id, &source_machine_id);
     ensure_runtime_source_available(client, &source_import_key, &project.id).await?;
     let runtime_by_source =
@@ -3783,6 +3841,34 @@ where
         provider_operation.clone()
     };
     upsert_agent_runtime_row(client, &runtime).await?;
+    if let Some(relocation) = request
+        .relocation
+        .as_ref()
+        .map(RuntimeRelocationEnvelope::v1)
+    {
+        let updated = client
+            .execute(
+                "UPDATE agent_runtimes
+                 SET source_host_id = $2,
+                     source_machine_id = $3,
+                     source_import_key = $4
+                 WHERE id = $1
+                   AND source_machine_id = $3
+                   AND source_host_id IN ($5, $2)",
+                &[
+                    &runtime.id,
+                    &runtime.source_host_id,
+                    &runtime.source_machine_id,
+                    &runtime.source_import_key,
+                    &relocation.source_host_id,
+                ],
+            )
+            .await
+            .map_err(store_error)?;
+        if updated != 1 {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+    }
     activate_project_runtime_link(client, &project.id, &runtime_id, &now).await?;
     let request =
         update_agent_creation_completed(client, &input.request_id, &runtime_id, &now).await?;
@@ -3814,6 +3900,7 @@ where
     } else {
         verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
     }
+    let is_relocation = request.relocation.is_some();
     if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
         let key_id = trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
         let key_row = client
@@ -3839,14 +3926,19 @@ where
         )
         .await?;
     }
-    if let Some(runtime_id) = request.agent_runtime_id.as_deref() {
+    if !is_relocation && let Some(runtime_id) = request.agent_runtime_id.as_deref() {
         delete_runtime_rows(client, runtime_id).await?;
     }
+    let agent_runtime_id = if is_relocation {
+        request.agent_runtime_id.clone()
+    } else {
+        None
+    };
     let row = client
         .query_one(
             "UPDATE agent_creation_requests
              SET status = 'failed',
-                 agent_runtime_id = NULL,
+                 agent_runtime_id = $4,
                  lease_token = NULL,
                  lease_expires_at = NULL,
                  failure_message = $2,
@@ -3854,12 +3946,12 @@ where
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
                        display_name, runner_class, hosting_tier, placement_runner_class,
-                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
-            &[&input.request_id, &failure_message, &now],
+            &[&input.request_id, &failure_message, &now, &agent_runtime_id],
         )
         .await
         .map_err(store_error)?;
@@ -3875,6 +3967,7 @@ where
 {
     let now = input.now.unwrap_or(current_time_iso()?);
     let request = locked_agent_creation_request(client, &input.request_id).await?;
+    let is_relocation = request.relocation.is_some();
     if request.status == AgentCreationRequestStatus::Running {
         return Err(CoreError::AgentCreationRequestNotCancellable);
     }
@@ -3888,47 +3981,54 @@ where
     // request. Revoke a project-scoped launch key even when a crashed runner
     // never named it in its failure acknowledgment. Ambiguous/post-mutation
     // operations returned above without touching keys or Runtime facts.
-    let key_rows = client
-        .query(
-            "SELECT id FROM finite_private_api_keys
-             WHERE project_id = $1 AND status = 'active'
-             FOR UPDATE",
-            &[&request.project_id],
-        )
-        .await
-        .map_err(store_error)?;
-    for key_id in key_rows.into_iter().map(|row| row.get::<_, String>("id")) {
-        postgres_revoke_finite_private_api_key(
-            client,
-            RevokeFinitePrivateApiKeyInput {
-                key_id,
-                now: Some(now.clone()),
-            },
-        )
-        .await?;
+    if !is_relocation {
+        let key_rows = client
+            .query(
+                "SELECT id FROM finite_private_api_keys
+                 WHERE project_id = $1 AND status = 'active'
+                 FOR UPDATE",
+                &[&request.project_id],
+            )
+            .await
+            .map_err(store_error)?;
+        for key_id in key_rows.into_iter().map(|row| row.get::<_, String>("id")) {
+            postgres_revoke_finite_private_api_key(
+                client,
+                RevokeFinitePrivateApiKeyInput {
+                    key_id,
+                    now: Some(now.clone()),
+                },
+            )
+            .await?;
+        }
     }
-    if let Some(runtime_id) = request.agent_runtime_id.as_deref() {
+    if !is_relocation && let Some(runtime_id) = request.agent_runtime_id.as_deref() {
         delete_runtime_rows(client, runtime_id).await?;
     }
+    let agent_runtime_id = if is_relocation {
+        request.agent_runtime_id.clone()
+    } else {
+        None
+    };
     let row = client
         .query_one(
             "UPDATE agent_creation_requests
              SET status = 'cancelled',
-                 agent_runtime_id = NULL,
+                 agent_runtime_id = $2,
                  runner_id = NULL,
                  lease_token = NULL,
                  lease_expires_at = NULL,
                  failure_message = NULL,
-                 updated_at = $2::text::timestamptz
+                 updated_at = $3::text::timestamptz
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
                        display_name, runner_class, hosting_tier, placement_runner_class,
-                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
                        created_at::text, updated_at::text",
-            &[&input.request_id, &now],
+            &[&input.request_id, &agent_runtime_id, &now],
         )
         .await
         .map_err(store_error)?;
@@ -3980,9 +4080,16 @@ where
     let agent_runtime_id = match (source_host_id.as_deref(), source_machine_id.as_deref()) {
         (Some(source_host_id), Some(source_machine_id)) => {
             let key = source_import_key(source_host_id, source_machine_id);
-            select_agent_runtime_by_source_import_key(client, &key)
+            let by_source = select_agent_runtime_by_source_import_key(client, &key)
                 .await?
-                .map(|runtime| runtime.id)
+                .map(|runtime| runtime.id);
+            if by_source.is_some() {
+                by_source
+            } else if request.relocation.is_some() {
+                request.agent_runtime_id.clone()
+            } else {
+                None
+            }
         }
         _ => match request.agent_runtime_id.clone() {
             Some(runtime_id) if select_agent_runtime(client, &runtime_id).await?.is_some() => {
@@ -4326,7 +4433,7 @@ where
                     request.project_id, request.idempotency_key, request.display_name,
                     request.runner_class, request.hosting_tier,
                     request.placement_runner_class, request.runtime_resource_class,
-                    request.desired_runtime_artifact_id, request.runtime_spec,
+                    request.desired_runtime_artifact_id, request.runtime_spec, request.target_source_host_id, request.relocation_spec,
                     request.profile_picture_url,
                     request.status, request.requested_launch_code, request.agent_runtime_id,
                     request.runner_id, request.lease_token, request.lease_expires_at::text,
@@ -4460,6 +4567,7 @@ fn agent_creation_request_from_row(row: &Row) -> CoreResult<AgentCreationRequest
     let status: String = row.get("status");
     let runner_class: String = row.get("runner_class");
     let runtime_spec = optional_json_column(row, "runtime_spec")?;
+    let relocation = optional_json_column(row, "relocation_spec")?;
     Ok(AgentCreationRequest {
         id: row.get("id"),
         customer_org_id: row.get("customer_org_id"),
@@ -4478,6 +4586,11 @@ fn agent_creation_request_from_row(row: &Row) -> CoreResult<AgentCreationRequest
         )?,
         desired_runtime_artifact_id: row.get("desired_runtime_artifact_id"),
         runtime_spec: runtime_spec
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(json_error)?,
+        target_source_host_id: row.get("target_source_host_id"),
+        relocation: relocation
             .map(serde_json::from_value)
             .transpose()
             .map_err(json_error)?,
@@ -4681,7 +4794,7 @@ where
         .query_opt(
             "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
                     display_name, runner_class, hosting_tier, placement_runner_class,
-                    runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                    runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                     profile_picture_url,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, lease_expires_at::text, failure_message,
@@ -4707,7 +4820,7 @@ where
         .query_opt(
             "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
                     display_name, runner_class, hosting_tier, placement_runner_class,
-                    runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                    runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                     profile_picture_url,
                     status, requested_launch_code, agent_runtime_id,
                     runner_id, lease_token, lease_expires_at::text, failure_message,
@@ -5189,18 +5302,27 @@ where
         .map(serde_json::to_value)
         .transpose()
         .map_err(json_error)?;
+    let relocation = request
+        .relocation
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(json_error)?;
     client
         .execute(
             "INSERT INTO agent_creation_requests (
                id, customer_org_id, owner_user_id, project_id, idempotency_key, display_name,
                runner_class, hosting_tier, placement_runner_class, runtime_resource_class,
-               desired_runtime_artifact_id, runtime_spec, profile_picture_url, status, requested_launch_code,
+               desired_runtime_artifact_id, runtime_spec, target_source_host_id,
+               relocation_spec,
+               profile_picture_url, status, requested_launch_code,
                agent_runtime_id, runner_id, lease_token,
                lease_expires_at, failure_message, created_at, updated_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
-                     $13, $14, $15, $16, $17, $18, $19::text::timestamptz, $20,
-                     $21::text::timestamptz, $22::text::timestamptz)
+                     $13, $14::jsonb, $15, $16, $17, $18, $19, $20,
+                     $21::text::timestamptz, $22, $23::text::timestamptz,
+                     $24::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                status = EXCLUDED.status,
                display_name = EXCLUDED.display_name,
@@ -5210,6 +5332,8 @@ where
                runtime_resource_class = EXCLUDED.runtime_resource_class,
                desired_runtime_artifact_id = EXCLUDED.desired_runtime_artifact_id,
                runtime_spec = EXCLUDED.runtime_spec,
+               target_source_host_id = EXCLUDED.target_source_host_id,
+               relocation_spec = EXCLUDED.relocation_spec,
                profile_picture_url = EXCLUDED.profile_picture_url,
                agent_runtime_id = EXCLUDED.agent_runtime_id,
                runner_id = EXCLUDED.runner_id,
@@ -5230,6 +5354,8 @@ where
                 &runtime_resource_class,
                 &request.desired_runtime_artifact_id,
                 &runtime_spec,
+                &request.target_source_host_id,
+                &relocation,
                 &request.profile_picture_url,
                 &request.status.as_str(),
                 &request.requested_launch_code,
@@ -5903,7 +6029,7 @@ where
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
                        display_name, runner_class, hosting_tier, placement_runner_class,
-                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
@@ -5936,7 +6062,7 @@ where
              WHERE id = $1
              RETURNING id, customer_org_id, owner_user_id, project_id, idempotency_key,
                        display_name, runner_class, hosting_tier, placement_runner_class,
-                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                       runtime_resource_class, desired_runtime_artifact_id, runtime_spec, target_source_host_id, relocation_spec,
                        profile_picture_url,
                        status, requested_launch_code, agent_runtime_id,
                        runner_id, lease_token, lease_expires_at::text, failure_message,
@@ -6537,6 +6663,235 @@ where
         Some(&expected),
     )
     .await
+}
+
+async fn postgres_admin_request_runtime_relocate_exact<C>(
+    client: &C,
+    input: AdminRuntimeRelocateExactInput,
+) -> CoreResult<AgentCreationRequest>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+        .ok_or(CoreError::MissingVerifiedEmail)?;
+    let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
+    if admin_workos_user_id.is_empty() {
+        return Err(CoreError::MissingWorkosUserId);
+    }
+    let _admin_user =
+        ensure_grandfathered_linked_user(client, &admin_email, &admin_workos_user_id, &now).await?;
+    let project = select_project(client, &input.project_id)
+        .await?
+        .ok_or(CoreError::ProjectNotFound)?;
+    let runtime = postgres_active_runtime_for_project(client, &project.id)
+        .await?
+        .ok_or(CoreError::ProjectRuntimeNotFound)?;
+    if runtime.id != input.expected_agent_runtime_id
+        || runtime.source_host_id != input.expected_source_host_id
+        || runtime.source_machine_id != input.expected_source_machine_id
+    {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+    if placement.runner_class != crate::RunnerClass::Kata
+        || runtime.host_facts.runtime_status != RuntimeSummaryStatus::Offline
+    {
+        return Err(CoreError::RuntimeControlUnsupported);
+    }
+    let target_source_host_id = normalize_source_host_id(&input.target_source_host_id)?;
+    if target_source_host_id == runtime.source_host_id {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    let expected_agent_npub = input.expected_agent_npub.trim().to_string();
+    let manifest = input
+        .durable_state_manifest_sha256
+        .trim()
+        .to_ascii_lowercase();
+    if !valid_agent_npub(&expected_agent_npub) || !valid_sha256_hex(&manifest) {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    if client
+        .query_opt(
+            "SELECT 1
+             FROM runtime_control_requests
+             WHERE agent_runtime_id = $1 AND status IN ('requested', 'running')
+             LIMIT 1",
+            &[&runtime.id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
+    if client
+        .query_opt(
+            "SELECT 1
+             FROM runtime_control_requests
+             WHERE agent_runtime_id = $1
+               AND source_host_id = $2
+               AND source_machine_id = $3
+               AND kind = 'stop'
+               AND status = 'succeeded'
+             LIMIT 1",
+            &[
+                &runtime.id,
+                &runtime.source_host_id,
+                &runtime.source_machine_id,
+            ],
+        )
+        .await
+        .map_err(store_error)?
+        .is_none()
+    {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
+    if client
+        .query_opt(
+            "SELECT 1
+             FROM runtime_retirement_snapshots AS snapshot
+             JOIN runtime_control_requests AS control ON control.id = snapshot.request_id
+             WHERE control.agent_runtime_id = $1
+             LIMIT 1",
+            &[&runtime.id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeRetirementSnapshotConflict);
+    }
+    let relocation = RuntimeRelocationEnvelope::V1(RuntimeRelocationV1 {
+        source_host_id: runtime.source_host_id.clone(),
+        source_machine_id: runtime.source_machine_id.clone(),
+        target_source_host_id: target_source_host_id.clone(),
+        expected_agent_npub,
+        durable_state_manifest_sha256: manifest,
+    });
+    let active_sql = "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
+               display_name, runner_class, hosting_tier, placement_runner_class,
+               runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+               target_source_host_id, relocation_spec, profile_picture_url,
+               status, requested_launch_code, agent_runtime_id,
+               runner_id, lease_token, lease_expires_at::text, failure_message,
+               created_at::text, updated_at::text
+         FROM agent_creation_requests
+         WHERE agent_runtime_id = $1
+           AND relocation_spec IS NOT NULL
+           AND status IN ('requested', 'launching')
+         ORDER BY created_at, id
+         LIMIT 1
+         FOR UPDATE";
+    if let Some(row) = client
+        .query_opt(active_sql, &[&runtime.id])
+        .await
+        .map_err(store_error)?
+    {
+        let existing = agent_creation_request_from_row(&row)?;
+        if existing.relocation.as_ref() == Some(&relocation)
+            && existing.target_source_host_id.as_deref() == Some(target_source_host_id.as_str())
+        {
+            return Ok(existing);
+        }
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
+    let current_row = client
+        .query_opt(
+            "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
+                    display_name, runner_class, hosting_tier, placement_runner_class,
+                    runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
+                    target_source_host_id, relocation_spec, profile_picture_url,
+                    status, requested_launch_code, agent_runtime_id,
+                    runner_id, lease_token, lease_expires_at::text, failure_message,
+                    created_at::text, updated_at::text
+             FROM agent_creation_requests
+             WHERE agent_runtime_id = $1
+               AND status = 'running'
+               AND runtime_spec IS NOT NULL
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            &[&runtime.id],
+        )
+        .await
+        .map_err(store_error)?
+        .ok_or(CoreError::RuntimeSpecMismatch)?;
+    let current_creation = agent_creation_request_from_row(&current_row)?;
+    let artifact_id = runtime
+        .runtime_artifact_id
+        .as_deref()
+        .ok_or(CoreError::MissingRuntimeArtifactId)?;
+    let artifact = select_runtime_artifact(client, artifact_id)
+        .await?
+        .ok_or(CoreError::RuntimeArtifactNotFound)?;
+    let request_id = new_agent_creation_request_id()?;
+    let runtime_spec = runtime_operation_spec_v1(
+        current_creation
+            .runtime_spec
+            .as_ref()
+            .ok_or(CoreError::RuntimeSpecMismatch)?,
+        RuntimeSpecIdentity {
+            operation_id: &request_id,
+            project_id: &project.id,
+            agent_runtime_id: &runtime.id,
+            placement,
+        },
+        &artifact,
+        &artifact,
+        RuntimeBootIntent::Normal,
+        None,
+    )?;
+    let idempotency_key = format!(
+        "cold-relocate:{}:{}:{}",
+        runtime.id, target_source_host_id, request_id
+    );
+    let request = AgentCreationRequest {
+        id: request_id,
+        customer_org_id: project.customer_org_id.clone(),
+        owner_user_id: project.owner_user_id.clone(),
+        project_id: project.id.clone(),
+        idempotency_key,
+        display_name: project.display_name.clone(),
+        runner_class: placement.runner_class,
+        hosting_tier: project.hosting_tier,
+        placement: Some(placement),
+        desired_runtime_artifact_id: Some(artifact.id),
+        runtime_spec: Some(runtime_spec),
+        target_source_host_id: Some(target_source_host_id),
+        relocation: Some(relocation),
+        profile_picture_url: current_creation.profile_picture_url,
+        status: AgentCreationRequestStatus::Requested,
+        requested_launch_code: None,
+        agent_runtime_id: Some(runtime.id.clone()),
+        runner_id: None,
+        lease_token: None,
+        lease_expires_at: None,
+        failure_message: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    upsert_agent_creation_request_row(client, &request).await?;
+    insert_finite_private_admin_audit_event(
+        client,
+        FinitePrivateAdminAuditInsert {
+            action: "runtime.admin_cold_relocate",
+            target_type: "agent_runtime",
+            target_id: &runtime.id,
+            grant_id: None,
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "projectId": project.id,
+                "agentCreationRequestId": request.id,
+                "sourceHostId": runtime.source_host_id,
+                "sourceMachineId": runtime.source_machine_id,
+                "targetSourceHostId": request.target_source_host_id,
+            }),
+            now: &now,
+        },
+    )
+    .await?;
+    Ok(request)
 }
 
 /// Partitioned claim: a runner leases only requests routable to it. When the
@@ -9455,8 +9810,8 @@ fn json_error(error: serde_json::Error) -> CoreError {
 mod tests {
     use super::*;
     use crate::{
-        FinitePrivateApiKeyStatus, RunnerClass, RunnerLeaseCapacity, RuntimeArtifactKind,
-        RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
+        FinitePrivateApiKeyStatus, RUNTIME_RELOCATION_SCHEMA, RunnerClass, RunnerLeaseCapacity,
+        RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     };
     use futures_util::FutureExt;
     use std::collections::BTreeSet;
@@ -10344,6 +10699,445 @@ mod tests {
                 .unwrap()
                 .get(0);
             assert_eq!(audit_count, 1);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_cold_relocation_migration_reapplies_and_preserves_primary_creation_fence() {
+        with_isolated_postgres(|store| async move {
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            raw.batch_execute(include_str!(
+                "../migrations/0016_runtime_cold_relocation.sql"
+            ))
+            .await
+            .unwrap();
+            raw.batch_execute(include_str!(
+                "../migrations/0016_runtime_cold_relocation.sql"
+            ))
+            .await
+            .unwrap();
+
+            let relocation_column_count: i64 = raw
+                .query_one(
+                    "SELECT count(*)
+                     FROM information_schema.columns
+                     WHERE table_schema = 'public'
+                       AND table_name = 'agent_creation_requests'
+                       AND column_name = 'relocation_spec'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(relocation_column_count, 1);
+
+            let indexes = raw
+                .query(
+                    "SELECT indexname, indexdef
+                     FROM pg_indexes
+                     WHERE schemaname = 'public'
+                       AND tablename = 'agent_creation_requests'
+                       AND indexname IN (
+                         'agent_creation_requests_one_primary_creation_per_project',
+                         'agent_creation_requests_one_active_relocation_per_runtime'
+                       )
+                     ORDER BY indexname",
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(indexes.len(), 2);
+            let definitions = indexes
+                .iter()
+                .map(|row| row.get::<_, String>("indexdef"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(definitions.contains("(project_id) WHERE (relocation_spec IS NULL)"));
+            assert!(definitions.contains("(agent_runtime_id) WHERE"));
+            assert!(definitions.contains("relocation_spec IS NOT NULL"));
+
+            let old_project_unique_constraint: i64 = raw
+                .query_one(
+                    "SELECT count(*)
+                     FROM pg_constraint
+                     WHERE conrelid = 'agent_creation_requests'::regclass
+                       AND conname = 'agent_creation_requests_project_id_key'",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(old_project_unique_constraint, 0);
+
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_cold_relocation_routes_exactly_and_register_failure_keeps_source() {
+        with_isolated_postgres(|store| async move {
+            let run = "cold-relocate";
+            let source_host = "relocate-source";
+            let target_host = "relocate-target";
+            let machine = "finite-kata-relocate";
+            let email = format!("{run}@finite.vip");
+            let workos = format!("workos-{run}");
+            let launch_code = issue_test_launch_code(&store, "2026-07-25T12:00:00Z").await;
+
+            store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "artifact-relocate-v1".to_string(),
+                    kind: RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:relocate-v1@sha256:{}",
+                        "4".repeat(64)
+                    ),
+                    version_label: "relocate-v1".to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: email.clone(),
+                        workos_user_id: workos.clone(),
+                        display_name: "Relocation Canary".to_string(),
+                        launch_code,
+                        idempotency_key: format!("{run}-create"),
+                        now: None,
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement::for_hosting_tier(
+                            HostingTier::Standard,
+                        )),
+                        requested_hosting_tier: None,
+                        profile_picture_url: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let creation = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{source_host}"),
+                    source_host_id: Some(source_host.to_string()),
+                    lease_token: "create-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let completed = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: creation.request.id,
+                    runner_id: format!("runner-{source_host}"),
+                    lease_token: "create-lease".to_string(),
+                    source_host_id: source_host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4201/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Relocation Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(source_host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let project_id = completed.project.id;
+            let runtime_id = completed.request.agent_runtime_id.unwrap();
+
+            let stop = store
+                .request_runtime_stop(RequestRuntimeStopInput {
+                    verified_email: email,
+                    workos_user_id: workos,
+                    project_id: project_id.clone(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let stop_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-{source_host}"),
+                    lease_token: "stop-lease".to_string(),
+                    lease_seconds: Some(300),
+                    source_host_id: Some(source_host.to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stop_lease.request.id, stop.id);
+            store
+                .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    request_id: stop.id,
+                    runner_id: format!("runner-{source_host}"),
+                    lease_token: "stop-lease".to_string(),
+                    runtime_artifact_id: None,
+                    state_schema_version: None,
+                    runtime_capabilities: None,
+                    runtime_host: None,
+                    published_app_urls: None,
+                    retirement_snapshot: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            let relocation = store
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-relocate-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: source_host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_source_host_id: target_host.to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "b".repeat(64),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                        runner_id: format!("runner-{source_host}"),
+                        source_host_id: Some(source_host.to_string()),
+                        lease_token: "wrong-host".to_string(),
+                        lease_seconds: Some(300),
+                        runner_capacity: Some(RunnerLeaseCapacity {
+                            runner_classes: vec![RunnerClass::Kata],
+                            ..RunnerLeaseCapacity::default()
+                        }),
+                        now: None,
+                    })
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let relocation_lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{target_host}"),
+                    source_host_id: Some(target_host.to_string()),
+                    lease_token: "relocation-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(relocation_lease.request.id, relocation.id);
+
+            store
+                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                    request_id: relocation.id.clone(),
+                    runner_id: format!("runner-{target_host}"),
+                    lease_token: "relocation-lease".to_string(),
+                    source_host_id: target_host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4202/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    runtime_relay_token_hash: "relocation-relay-token-hash".to_string(),
+                    display_name: Some("Relocation Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(target_host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: relocation.id.clone(),
+                    runner_id: format!("runner-{target_host}"),
+                    lease_token: "relocation-lease".to_string(),
+                    failure_message: "synthetic post-register failure".to_string(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let preserved = store
+                .admin_runtime_overviews()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.agent_runtime_id == runtime_id)
+                .unwrap();
+            assert_eq!(preserved.source_host_id, source_host);
+            assert_eq!(preserved.runtime_status, RuntimeSummaryStatus::Offline);
+
+            // A failed attempt must not consume the Project's original
+            // creation-row uniqueness or prevent an exact retry.
+            let retry = store
+                .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                    admin_verified_email: "relocate-admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-relocate-admin".to_string(),
+                    project_id: project_id.clone(),
+                    expected_agent_runtime_id: runtime_id.clone(),
+                    expected_source_host_id: source_host.to_string(),
+                    expected_source_machine_id: machine.to_string(),
+                    target_source_host_id: target_host.to_string(),
+                    expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                    durable_state_manifest_sha256: "b".repeat(64),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_ne!(retry.id, relocation.id);
+            store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: format!("runner-{target_host}"),
+                    source_host_id: Some(target_host.to_string()),
+                    lease_token: "relocation-retry-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            store
+                .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                    request_id: retry.id.clone(),
+                    runner_id: format!("runner-{target_host}"),
+                    lease_token: "relocation-retry-lease".to_string(),
+                    source_host_id: target_host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4202/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    runtime_relay_token_hash: "relocation-retry-relay-token-hash".to_string(),
+                    display_name: Some("Relocation Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(target_host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let completed_retry = store
+                .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                    request_id: retry.id.clone(),
+                    runner_id: format!("runner-{target_host}"),
+                    lease_token: "relocation-retry-lease".to_string(),
+                    source_host_id: target_host.to_string(),
+                    source_machine_id: machine.to_string(),
+                    runtime_artifact_id: Some("artifact-relocate-v1".to_string()),
+                    state_schema_version: Some("state-v1".to_string()),
+                    provider_runtime_handle: None,
+                    contact_endpoint: Some("http://127.0.0.1:4202/contact".to_string()),
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    display_name: Some("Relocation Canary".to_string()),
+                    hostname: None,
+                    runtime_host: Some(target_host.to_string()),
+                    runtime_status: Some(RuntimeSummaryStatus::Online),
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                completed_retry.request.status,
+                AgentCreationRequestStatus::Running
+            );
+
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let runtime = raw
+                .query_one(
+                    "SELECT source_host_id, source_machine_id, host_facts->>'runtime_status' AS status
+                     FROM agent_runtimes WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(runtime.get::<_, String>("source_host_id"), target_host);
+            assert_eq!(runtime.get::<_, String>("source_machine_id"), machine);
+            assert_eq!(runtime.get::<_, String>("status"), "online");
+            let request = raw
+                .query_one(
+                    "SELECT status, agent_runtime_id, relocation_spec->>'schema' AS schema
+                     FROM agent_creation_requests WHERE id = $1",
+                    &[&relocation.id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(request.get::<_, String>("status"), "failed");
+            assert_eq!(
+                request.get::<_, Option<String>>("agent_runtime_id").as_deref(),
+                Some(runtime_id.as_str())
+            );
+            assert_eq!(
+                request.get::<_, Option<String>>("schema").as_deref(),
+                Some(RUNTIME_RELOCATION_SCHEMA)
+            );
+            let retry_status: String = raw
+                .query_one(
+                    "SELECT status FROM agent_creation_requests WHERE id = $1",
+                    &[&retry.id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(retry_status, "running");
+
             drop(raw);
             connection.abort();
         })
