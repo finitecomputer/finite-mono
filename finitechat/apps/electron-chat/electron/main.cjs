@@ -4,6 +4,7 @@ const os = require("node:os");
 const { spawn } = require("node:child_process");
 const {
   app,
+  autoUpdater,
   BrowserWindow,
   ipcMain,
   protocol,
@@ -13,6 +14,7 @@ const {
   systemPreferences,
   WebContentsView,
 } = require("electron");
+const { createAppUpdater } = require("./app-updater.cjs");
 const {
   attachmentActionUsesBinaryTransport,
   forwardAttachmentUpload,
@@ -101,6 +103,7 @@ const exposeLocalChatBridge = shouldExposeLocalChatBridge({
   isPackaged: app.isPackaged,
   disabledInDevelopment: process.env.FINITECHAT_DISABLE_LOCAL_CHAT_BRIDGE === "1",
 });
+const releaseAppUpdater = createAppUpdater({ app, autoUpdater });
 
 if (process.env.FINITECHAT_USER_DATA_DIR) {
   fs.mkdirSync(process.env.FINITECHAT_USER_DATA_DIR, { recursive: true, mode: 0o700 });
@@ -1415,6 +1418,7 @@ if (!gotLock) {
     configureSessionSecurity();
     registerAttachmentMediaProtocol();
     createAuthWindow();
+    releaseAppUpdater.start();
   });
 
   app.on("activate", () => {
