@@ -923,8 +923,23 @@ button.ocean-pill-button {
   height: 8px;
   flex-shrink: 0;
   border-radius: 50%;
+  background: var(--status-neutral-fg);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--status-neutral-fg), transparent 86%);
+}
+
+.ocean-machine-switcher__dot.is-online {
   background: var(--success);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--success), transparent 86%);
+}
+
+.ocean-machine-switcher__dot.is-offline {
+  background: var(--danger-text);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger-text), transparent 86%);
+}
+
+.ocean-machine-switcher__dot.is-stale {
+  background: var(--warning-dot);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning-dot), transparent 86%);
 }
 
 .ocean-machine-switcher__label {
