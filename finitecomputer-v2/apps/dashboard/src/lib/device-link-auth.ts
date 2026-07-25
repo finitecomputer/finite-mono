@@ -12,16 +12,16 @@ import {
 import { DeviceLinkError } from "@/lib/device-link";
 
 const MAX_BEARER_TOKEN_BYTES = 16 * 1024;
-const WORKOS_ISSUERS = [
-  "https://api.workos.com",
-  "https://api.workos.com/",
-] as const;
 const remoteKeySets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 type VerifiedBearer = {
   subject: string;
   organizationId: string | null;
 };
+
+class InvalidBoundBearerClaimsError extends Error {
+  readonly code = "INVALID_BOUND_CLAIMS";
+}
 
 type DeviceLinkBearerDependencies = {
   verify: (token: string, clientId: string) => Promise<VerifiedBearer>;
@@ -61,11 +61,19 @@ export async function getDeviceLinkAccountAuthContext(
   const clientId = requiredWorkosValue("FC_WORKOS_IOS_CLIENT_ID", env);
   const apiKey = requiredWorkosValue("WORKOS_API_KEY", env);
 
+  let verified: VerifiedBearer;
   try {
-    const verified = await dependencies.verify(token, clientId);
+    verified = await dependencies.verify(token, clientId);
+  } catch (error) {
+    reportBearerRejection("verification", error);
+    throw new DeviceLinkError("Sign in again to use this Device.", 401);
+  }
+
+  try {
     const user = await dependencies.getUser(verified.subject, apiKey);
     if (user.id !== verified.subject) {
-      throw new Error("WorkOS user mismatch");
+      reportBearerRejection("user_mismatch");
+      throw new DeviceLinkError("Sign in again to use this Device.", 401);
     }
     return {
       email: user.email,
@@ -74,7 +82,11 @@ export async function getDeviceLinkAccountAuthContext(
       organizationId: verified.organizationId,
       source: "workos",
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof DeviceLinkError) {
+      throw error;
+    }
+    reportBearerRejection("user_lookup", error);
     throw new DeviceLinkError("Sign in again to use this Device.", 401);
   }
 }
@@ -86,7 +98,6 @@ export async function verifyDeviceLinkBearerToken(
 ): Promise<VerifiedBearer> {
   const { payload } = await jwtVerify(token, key, {
     algorithms: ["RS256"],
-    issuer: [...WORKOS_ISSUERS],
     requiredClaims: ["iss", "sub", "sid", "jti", "exp", "iat"],
   });
   return verifiedBearerClaims(payload, clientId);
@@ -105,7 +116,7 @@ export function verifiedBearerClaims(
     typeof payload.jti !== "string" ||
     !payload.jti
   ) {
-    throw new Error("Invalid WorkOS access token");
+    throw new InvalidBoundBearerClaimsError("Invalid WorkOS access token");
   }
   return {
     subject: payload.sub,
@@ -130,6 +141,41 @@ export function parseBearerToken(value: string) {
     throw new DeviceLinkError("Sign in again to use this Device.", 401);
   }
   return match[1];
+}
+
+function reportBearerRejection(
+  stage: "verification" | "user_lookup" | "user_mismatch",
+  error?: unknown
+) {
+  const code =
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    /^[A-Z0-9_]{1,64}$/u.test(error.code)
+      ? error.code
+      : "UNCLASSIFIED";
+  const claim =
+    error !== null &&
+    typeof error === "object" &&
+    "claim" in error &&
+    typeof error.claim === "string" &&
+    ["iss", "sub", "sid", "jti", "exp", "iat"].includes(error.claim)
+      ? error.claim
+      : "none";
+  const status =
+    error !== null &&
+    typeof error === "object" &&
+    "status" in error &&
+    typeof error.status === "number" &&
+    Number.isInteger(error.status) &&
+    error.status >= 400 &&
+    error.status <= 599
+      ? String(error.status)
+      : "none";
+  console.warn(
+    `[device-link-auth] bearer rejected stage=${stage} code=${code} claim=${claim} status=${status}`
+  );
 }
 
 function remoteKeySet(clientId: string) {

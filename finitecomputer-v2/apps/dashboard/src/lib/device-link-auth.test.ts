@@ -126,6 +126,31 @@ test("native device-link bearer verification checks signature and expiry", async
   );
 });
 
+test("native bearer accepts a signed WorkOS custom issuer", async () => {
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const publicJwk = await exportJWK(publicKey);
+  publicJwk.kid = "test-key";
+  publicJwk.alg = "RS256";
+  const keys = createLocalJWKSet({ keys: [publicJwk] });
+  const now = Math.floor(Date.now() / 1000);
+  const token = await new SignJWT({
+    client_id: CLIENT_ID,
+    sid: SESSION_ID,
+    jti: "jwt_custom_issuer",
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer("https://auth.example.com")
+    .setSubject(USER_ID)
+    .setIssuedAt(now)
+    .setExpirationTime(now + 60)
+    .sign(privateKey);
+
+  assert.deepEqual(await verifyDeviceLinkBearerToken(token, CLIENT_ID, keys), {
+    subject: USER_ID,
+    organizationId: null,
+  });
+});
+
 test("native bearer context resolves the verified WorkOS user", async () => {
   const request = new Request(
     "https://finite.computer/api/device-links/approve",
