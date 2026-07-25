@@ -950,19 +950,13 @@ final class AppModel: ObservableObject, AppReconciler {
                 }.value
                 stage = .waitingForAgent
                 self.appendAccountLinkProgress(stage)
-                try await Task.detached(priority: .utility) {
-                    if let authKit {
-                        try link.waitUntilReadyWithAuthkit(authkit: authKit)
-                    } else {
-                        try link.waitUntilReady(accessToken: nil)
-                    }
-                }.value
                 stage = .startingRuntime
                 self.appendAccountLinkProgress(stage)
                 self.startFromForeground()
                 self.accountLinkPhase = .ready
                 Self.accountLinkLogger.notice("succeeded")
                 self.appendDiagnostic(category: "account_link", event: "succeeded")
+                self.finishAccountLinkInBackground(link: link, authKit: authKit)
             } catch let error as WebAuthenticationPresentationError
                 where error == .canceled
             {
@@ -1008,6 +1002,35 @@ final class AppModel: ObservableObject, AppReconciler {
                     category: "account_link",
                     event: "failed",
                     details: details
+                )
+            }
+        }
+    }
+
+    private func finishAccountLinkInBackground(
+        link: NativeDeviceLinkSession,
+        authKit: NativeAuthKitSession?
+    ) {
+        appendDiagnostic(category: "account_link", event: "finalization.requested")
+        Task { [weak self, link, authKit] in
+            do {
+                try await Task.detached(priority: .utility) {
+                    if let authKit {
+                        try link.waitUntilReadyWithAuthkit(authkit: authKit)
+                    } else {
+                        try link.waitUntilReady(accessToken: nil)
+                    }
+                }.value
+                self?.appendDiagnostic(
+                    category: "account_link",
+                    event: "finalization.succeeded"
+                )
+            } catch {
+                guard let self else { return }
+                self.appendDiagnostic(
+                    category: "account_link",
+                    event: "finalization.failed",
+                    details: self.diagnosticErrorDetails(error)
                 )
             }
         }
@@ -2334,6 +2357,10 @@ final class AppModel: ObservableObject, AppReconciler {
 
     private func appendStateDiagnostic(_ state: AppState, event: String) {
         let outboundMessages = state.messages.compactMap(\.outboundDelivery)
+        let projectedChats = state.topics.flatMap(\.chats)
+        let projectedHistoryMessages = projectedChats.reduce(UInt64(0)) {
+            $0 + UInt64($1.messageCount)
+        }
         var undelivered = 0
         var delivered = 0
         var failed = 0
@@ -2360,6 +2387,9 @@ final class AppModel: ObservableObject, AppReconciler {
                 "unavailable_rooms": "\(roomStates[.unavailableOnDevice] ?? 0)",
                 "selected_room": state.selectedRoomId.map(Self.redactedDiagnosticValue) ?? "none",
                 "messages": "\(state.messages.count)",
+                "topics": "\(state.topics.count)",
+                "chats": "\(projectedChats.count)",
+                "history_messages": "\(projectedHistoryMessages)",
                 "outbound": "\(outboundMessages.count)",
                 "undelivered": "\(undelivered)",
                 "delivered": "\(delivered)",

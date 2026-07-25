@@ -86,6 +86,9 @@ const DEVICE_LINK_HTTP_TIMEOUT_SECS: u64 = 10;
 const MAX_DEVICE_LINK_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_DEVICE_LINK_HTTP_RESPONSE_BYTES: u64 = 64 * 1024;
 const MAX_DEVICE_LINK_REQUEST_BYTES: usize = 4 * 1024;
+const DEVICE_LINK_HISTORY_SYNC_DEADLINE: Duration = Duration::from_secs(30 * 60);
+const DEVICE_LINK_HISTORY_SYNC_RETRY_DELAY: Duration = Duration::from_millis(250);
+const DEVICE_LINK_HISTORY_SYNC_MAX_CONSECUTIVE_FAILURES: u32 = 3;
 const DEVICE_LINK_RECONCILE_FANOUT_DOMAIN: &[u8] = b"finitechat.hosted-device-link-reconcile.v1";
 const AGENT_BINDING_VERSION: u16 = 1;
 const AGENT_BINDING_NONCE_BYTES: usize = 12;
@@ -128,11 +131,26 @@ struct HostedDeviceState {
     identity_authority: Option<HostedIdentityAuthorityConfig>,
     runtimes: Arc<Mutex<HashMap<String, Arc<FiniteChatRuntime>>>>,
     device_links: Arc<Mutex<()>>,
+    device_link_history_syncs: Arc<Mutex<HashMap<String, DeviceLinkHistorySync>>>,
     agent_binding_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     fail_final_agent_binding_persists: Arc<AtomicUsize>,
     fail_profile_bootstrap_room_creates_after_server_acceptance: Arc<AtomicUsize>,
     fail_profile_bootstrap_submits_after_device_save: Arc<AtomicUsize>,
     fixed_device_link_now_unix_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DeviceLinkHistorySyncPhase {
+    Running,
+    Ready,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DeviceLinkHistorySync {
+    phase: DeviceLinkHistorySyncPhase,
+    room_count: u32,
+    active_room_count: u32,
 }
 
 impl HostedDeviceState {
@@ -420,6 +438,7 @@ fn app_with_test_options(
         identity_authority,
         runtimes: Arc::new(Mutex::new(HashMap::new())),
         device_links: Arc::new(Mutex::new(())),
+        device_link_history_syncs: Arc::new(Mutex::new(HashMap::new())),
         agent_binding_locks: Arc::new(Mutex::new(HashMap::new())),
         fail_final_agent_binding_persists: Arc::new(AtomicUsize::new(
             fail_final_agent_binding_persists,
@@ -934,11 +953,11 @@ fn reconcile_device_link(
                     "pairing service did not retain the response".to_owned(),
                 ));
             }
-            fanout_device_link(&runtime, &pending)
+            fanout_device_link(state, &runtime, &pending)
         }
         HttpPairingSessionState::ResponsePublished | HttpPairingSessionState::Completed => {
             verify_published_pairing_response(state, user_id, &pending, &session)?;
-            fanout_device_link(&runtime, &pending)
+            fanout_device_link(state, &runtime, &pending)
         }
         HttpPairingSessionState::Expired => Ok(device_link_response(
             &pending,
@@ -950,24 +969,125 @@ fn reconcile_device_link(
 }
 
 fn fanout_device_link(
-    runtime: &FiniteChatRuntime,
+    state: &HostedDeviceState,
+    runtime: &Arc<FiniteChatRuntime>,
     pending: &PendingDeviceLinkV1,
 ) -> Result<DeviceLinkResponse, HostedDeviceError> {
-    let report = runtime
-        .link_device_and_wait(pending.fanout_id.clone(), pending.target_device_id.clone())?;
-    let status = if report.fanout_complete && report.room_count == report.active_room_count {
-        DeviceLinkStatusKind::Ready
-    } else if report.room_count == 0 && !report.fanout_complete {
-        DeviceLinkStatusKind::AwaitingKeyPackage
-    } else {
-        DeviceLinkStatusKind::JoiningRooms
+    let progress = start_or_observe_device_link_history_sync(state, runtime, pending)?;
+    let status = match progress.phase {
+        DeviceLinkHistorySyncPhase::Ready => DeviceLinkStatusKind::Ready,
+        DeviceLinkHistorySyncPhase::Running | DeviceLinkHistorySyncPhase::Failed
+            if progress.room_count == 0 =>
+        {
+            DeviceLinkStatusKind::AwaitingKeyPackage
+        }
+        DeviceLinkHistorySyncPhase::Running | DeviceLinkHistorySyncPhase::Failed => {
+            DeviceLinkStatusKind::JoiningRooms
+        }
     };
     Ok(device_link_response(
         pending,
         status,
-        report.room_count,
-        report.active_room_count,
+        progress.room_count,
+        progress.active_room_count,
     ))
+}
+
+fn start_or_observe_device_link_history_sync(
+    state: &HostedDeviceState,
+    runtime: &Arc<FiniteChatRuntime>,
+    pending: &PendingDeviceLinkV1,
+) -> Result<DeviceLinkHistorySync, HostedDeviceError> {
+    let mut syncs = state
+        .device_link_history_syncs
+        .lock()
+        .map_err(|_| HostedDeviceError::LockPoisoned)?;
+    if let Some(progress) = syncs.get(&pending.fanout_id) {
+        return Ok(progress.clone());
+    }
+
+    let initial = DeviceLinkHistorySync {
+        phase: DeviceLinkHistorySyncPhase::Running,
+        room_count: 0,
+        active_room_count: 0,
+    };
+    syncs.insert(pending.fanout_id.clone(), initial.clone());
+    drop(syncs);
+
+    let syncs = Arc::clone(&state.device_link_history_syncs);
+    let runtime = Arc::clone(runtime);
+    let fanout_id = pending.fanout_id.clone();
+    let target_device_id = pending.target_device_id.clone();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + DEVICE_LINK_HISTORY_SYNC_DEADLINE;
+        let mut consecutive_failures = 0u32;
+        loop {
+            match runtime.link_device_and_wait(fanout_id.clone(), target_device_id.clone()) {
+                Ok(report) => {
+                    consecutive_failures = 0;
+                    // `fanout_complete` means every Welcome and encrypted
+                    // bootstrap was durably emitted. Target activation is a
+                    // separate, target-owned convergence step and must not
+                    // cause the source to re-export complete history.
+                    let ready = report.fanout_complete;
+                    let progress = DeviceLinkHistorySync {
+                        phase: if ready {
+                            DeviceLinkHistorySyncPhase::Ready
+                        } else {
+                            DeviceLinkHistorySyncPhase::Running
+                        },
+                        room_count: report.room_count,
+                        active_room_count: report.active_room_count,
+                    };
+                    if let Ok(mut syncs) = syncs.lock() {
+                        syncs.insert(fanout_id.clone(), progress);
+                    } else {
+                        return;
+                    }
+                    if ready {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    eprintln!(
+                        "finitechat hosted device-link history sync attempt {consecutive_failures} failed for {fanout_id}: {error}"
+                    );
+                    if consecutive_failures < DEVICE_LINK_HISTORY_SYNC_MAX_CONSECUTIVE_FAILURES
+                        && Instant::now() < deadline
+                    {
+                        std::thread::sleep(DEVICE_LINK_HISTORY_SYNC_RETRY_DELAY);
+                        continue;
+                    }
+                    set_device_link_history_sync_failed(&syncs, fanout_id);
+                    return;
+                }
+            }
+            if Instant::now() >= deadline {
+                set_device_link_history_sync_failed(&syncs, fanout_id);
+                return;
+            }
+            std::thread::sleep(DEVICE_LINK_HISTORY_SYNC_RETRY_DELAY);
+        }
+    });
+
+    Ok(initial)
+}
+
+fn set_device_link_history_sync_failed(
+    syncs: &Arc<Mutex<HashMap<String, DeviceLinkHistorySync>>>,
+    fanout_id: String,
+) {
+    if let Ok(mut syncs) = syncs.lock() {
+        syncs.insert(
+            fanout_id,
+            DeviceLinkHistorySync {
+                phase: DeviceLinkHistorySyncPhase::Failed,
+                room_count: 0,
+                active_room_count: 0,
+            },
+        );
+    }
 }
 
 fn verify_published_pairing_response(

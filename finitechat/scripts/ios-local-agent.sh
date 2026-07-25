@@ -23,7 +23,9 @@ dev_access_token="$(openssl rand -hex 32)"
 cookie_password="$(openssl rand -hex 32)"
 workos_user_id="user_ios_local"
 workos_email="ios-local@finite.invalid"
-ios_device_id="ios-local-$(openssl rand -hex 6)"
+ios_device_id="${FINITECHAT_IOS_LOCAL_DEVICE_ID:-ios-local-$(openssl rand -hex 6)}"
+stress_message_count="${FINITECHAT_IOS_LOCAL_STRESS_MESSAGE_COUNT:-0}"
+stress_chat_count="${FINITECHAT_IOS_LOCAL_STRESS_CHAT_COUNT:-81}"
 cargo_target_dir="${finitechat_root}/target"
 hermes_pid=""
 hosted_pid=""
@@ -74,7 +76,35 @@ wait_for_url() {
   return 1
 }
 
+require_port_available() {
+  local name="$1"
+  local port="$2"
+  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+    exec 3>&-
+    exec 3<&-
+    echo "${name} port ${port} is already in use." >&2
+    echo "Stop the previous local-agent stack or choose a different FINITECHAT_IOS_LOCAL_*_PORT." >&2
+    return 1
+  fi
+}
+
+require_port_available "chat server" "${chat_port}"
+require_port_available "hosted device" "${hosted_port}"
+require_port_available "dashboard" "${dashboard_port}"
+
 mkdir -p "${state_root}" "${hermes_state}" "${hosted_state}"
+# These files describe running processes, not durable chat state. Leaving them
+# behind after a previous run can make the launcher observe an old "ready"
+# marker before the rebuilt server has actually bound its port.
+for marker in \
+  "${hermes_state}/ready.json" \
+  "${hermes_state}/service-ready.json" \
+  "${hermes_state}/server.pid" \
+  "${hermes_state}/service.pid"
+do
+  rm -f "${marker}"
+done
+printf '%s\n' "${ios_device_id}" >"${state_root}/ios-device-id.txt"
 
 if [[ ! -x "${dashboard_root}/node_modules/.bin/next" ]]; then
   echo "Preparing dashboard dependencies..."
@@ -91,6 +121,9 @@ echo "Building local chat services..."
 echo "Starting Local Agent and the chat server..."
 (
   cd "${finitechat_root}"
+  if [[ "${stress_message_count}" != "0" && -z "${OPENROUTER_API_KEY:-}" ]]; then
+    export OPENROUTER_API_KEY="local-stress-seeding-pauses-agent-replies"
+  fi
   CARGO_TARGET_DIR="${cargo_target_dir}" \
   FINITECHAT_HERMES_STATE_ROOT="${hermes_state}" \
   FINITECHAT_HERMES_PORT="${chat_port}" \
@@ -173,25 +206,49 @@ home_channel_payload="$(jq -cn \
   --arg room_id "${canonical_room_id}" \
   '{room_id: $room_id}')"
 home_channel_ready=0
-for _ in {1..120}; do
-  status="$(curl -sS -o "${state_root}/home-channel.json" -w '%{http_code}' \
-    -H "content-type: application/json" \
-    -d "${home_channel_payload}" \
-    "${hermes_service_url}/v1/hermes/home-channel-set")"
-  if [[ "${status}" == "200" ]] \
-    && jq -e --arg room_id "${canonical_room_id}" \
-      '.home_channel.room_id == $room_id' \
-      "${state_root}/home-channel.json" >/dev/null
-  then
-    home_channel_ready=1
-    break
-  fi
-  sleep 0.25
-done
+persisted_home_channel="${hermes_state}/agent-home/hermes-home-channel.json"
+if [[ -s "${persisted_home_channel}" ]] \
+  && jq -e --arg room_id "${canonical_room_id}" \
+    '.room_id == $room_id' "${persisted_home_channel}" >/dev/null
+then
+  jq -cn --arg room_id "${canonical_room_id}" \
+    '{home_channel: {room_id: $room_id}}' >"${state_root}/home-channel.json"
+  home_channel_ready=1
+else
+  for _ in {1..120}; do
+    status="$(curl --max-time 5 -sS -o "${state_root}/home-channel.json" -w '%{http_code}' \
+      -H "content-type: application/json" \
+      -d "${home_channel_payload}" \
+      "${hermes_service_url}/v1/hermes/home-channel-set" || true)"
+    if [[ "${status}" == "200" ]] \
+      && jq -e --arg room_id "${canonical_room_id}" \
+        '.home_channel.room_id == $room_id' \
+        "${state_root}/home-channel.json" >/dev/null
+    then
+      home_channel_ready=1
+      break
+    fi
+    sleep 0.25
+  done
+fi
 if [[ "${home_channel_ready}" != "1" ]]; then
   echo "Local Agent did not accept its canonical chat as the Hermes home channel." >&2
   echo "See ${state_root}/hermes.log and ${state_root}/home-channel.json." >&2
   exit 1
+fi
+
+if [[ "${stress_message_count}" != "0" ]]; then
+  echo "Pausing Hermes replies while seeding ${stress_message_count} synthetic messages..."
+  kill "${hermes_pid}"
+  wait "${hermes_pid}" 2>/dev/null || true
+  hermes_pid="$(<"${hermes_state}/server.pid")"
+  FINITECHAT_STRESS_HOSTED_URL="${hosted_url}" \
+  FINITECHAT_STRESS_HOSTED_API_TOKEN="${hosted_token}" \
+  FINITECHAT_STRESS_WORKOS_USER_ID="${workos_user_id}" \
+  FINITECHAT_STRESS_ROOM_ID="${canonical_room_id}" \
+  FINITECHAT_STRESS_MESSAGE_COUNT="${stress_message_count}" \
+  FINITECHAT_STRESS_CHAT_COUNT="${stress_chat_count}" \
+    node "${finitechat_root}/scripts/seed-local-chat-stress.mjs"
 fi
 
 echo "Starting the local dashboard..."

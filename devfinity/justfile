@@ -5,6 +5,7 @@ default:
     just --list-submodules --list
 
 # Runs the real web dashboard against a durable, deterministic local chat fixture.
+
 # No provider credentials, Apple Container, or Agent Runtime are required.
 web-design:
     cd ../finitecomputer-v2/apps/dashboard && npm run design
@@ -31,6 +32,7 @@ inference-key:
     printf '%s\n' "${finite_private_key}" | (cd .. && cargo run --quiet -p devfinity -- inference-key)
 
 # Starts an isolated, fresh services-only stack, runs its smoke test, and tears it down.
+
 # This portable profile is the Linux CI gate; it does not claim to launch an Agent Runtime.
 smoke:
     cd .. && cargo run -p devfinity -- --state-dir .local-state/dfs up --services-only --fresh --headless -- scripts/devfinity-smoke
@@ -40,9 +42,18 @@ saas-smoke:
     cd .. && cargo run -p devfinity -- up --headless -- scripts/devfinity-saas-smoke
 
 # Starts the local encrypted-chat stack, pairs the iOS app, and launches Simulator.
+
 # The pinned dev shell provides Rust's Apple targets; Xcode remains a host dependency.
 ios-local-agent:
     cd .. && finitechat/scripts/ios-local-agent.sh
+
+# Same authority-free pairing stack, preloaded beyond the old sync window.
+ios-local-agent-stress:
+    cd .. && FINITECHAT_IOS_LOCAL_STRESS_MESSAGE_COUNT=5200 FINITECHAT_IOS_LOCAL_STRESS_CHAT_COUNT=81 finitechat/scripts/ios-local-agent.sh
+
+# Launches a clean Electron Device against either local-agent profile.
+electron-local-agent:
+    cd .. && finitechat/scripts/electron-local-agent.sh
 
 # Starts the headless stack, runs the ignored Rust smoke test, and tears the stack down
 rust-smoke:

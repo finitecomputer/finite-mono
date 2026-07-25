@@ -113,7 +113,10 @@ else
   echo "$!" >"${server_pid_file}"
 fi
 
-for _ in {1..80}; do
+# Replaying a deliberately large local history can take materially longer than
+# a fresh server start. Keep the bound finite, but allow the real process to
+# finish restoring before declaring the local fixture broken.
+for _ in {1..600}; do
   if curl -fsS "${server_url}/health" >/dev/null 2>&1; then
     break
   fi
@@ -155,7 +158,7 @@ else
   echo "$!" >"${service_pid_file}"
 fi
 
-for _ in {1..80}; do
+for _ in {1..600}; do
   if curl -fsS "${service_url}/readyz" >/dev/null 2>&1; then
     break
   fi

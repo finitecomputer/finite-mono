@@ -16,14 +16,14 @@ use finitechat_blob::{
 };
 use finitechat_client::{
     AppliedLogEntry, ClientError, ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig,
-    HttpRuntimeDelivery, HttpRuntimeDeliveryError, PreparedCommit, ReqwestHttpRuntimeTransport,
-    ReqwestHttpRuntimeTransportError, RuntimeDelivery, RuntimeLinkFanoutOptions,
-    RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore, SqliteClientStoreOptions,
-    StoredAppEvent, StoredAppMessage, StoredAppProfile, StoredAppRoom, StoredAppRoomState,
-    StoredAppState, StoredChatArchiveState, StoredOutboundLocalState, StoredOutboundMessage,
-    StoredOutboundServerDeliveryState, StoredPairedAgent, generate_account_secret,
-    run_link_fanout_tick, run_room_server_sync_setup_tick, run_room_sync_tick,
-    run_runtime_sync_setup_tick,
+    HttpRuntimeDelivery, HttpRuntimeDeliveryError, LinkFanoutRoomStatus, PreparedCommit,
+    ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError, RuntimeDelivery,
+    RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore,
+    SqliteClientStoreOptions, StoredAppEvent, StoredAppMessage, StoredAppProfile, StoredAppRoom,
+    StoredAppRoomState, StoredAppState, StoredChatArchiveState, StoredOutboundLocalState,
+    StoredOutboundMessage, StoredOutboundServerDeliveryState, StoredPairedAgent,
+    generate_account_secret, run_link_fanout_tick, run_room_server_sync_setup_tick,
+    run_room_sync_tick, run_runtime_sync_setup_tick,
 };
 use finitechat_hermes::{
     HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1,
@@ -71,8 +71,10 @@ const ATTACHMENT_CACHE_DIR: &str = "attachments";
 const LOCAL_ROOM_CONNECTED_TEXT: &str = "Connected";
 const LOCAL_ROOM_UNAVAILABLE_STATUS: &str = "room is not available on this device";
 const LOCAL_ROOM_UNAVAILABLE_TEXT: &str = "Unavailable on this device";
-const MAX_APP_MESSAGES: usize = 5_000;
-const MAX_APP_MESSAGES_U32: u32 = 5_000;
+// The transcript shown in AppState remains paged, but the encrypted local
+// projection retains every message. This is an addressability bound only.
+const MAX_APP_MESSAGES: usize = u32::MAX as usize;
+const MAX_APP_MESSAGES_U32: u32 = u32::MAX;
 const MAX_APP_CHAT_ARCHIVES: usize = 5_000;
 const MAX_APP_CHAT_TITLES: usize = 5_000;
 const DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE: u32 = 256;
@@ -5650,6 +5652,7 @@ impl AppRuntimeState {
             .into_iter()
             .find(|fanout| fanout.fanout_id == fanout_id);
         let mut delivery = self.core.home_delivery();
+        self.resume_interrupted_link_fanout_commits(&fanout_id, &mut delivery)?;
         match existing {
             Some(existing) if existing.target_device != target => {
                 return Err(FiniteChatCoreError::Client {
@@ -5710,6 +5713,49 @@ impl AppRuntimeState {
             room_count,
             active_room_count,
         })
+    }
+
+    fn resume_interrupted_link_fanout_commits<D: RuntimeDelivery>(
+        &mut self,
+        requested_fanout_id: &str,
+        delivery: &mut D,
+    ) -> Result<(), FiniteChatCoreError>
+    where
+        D::Error: std::fmt::Display,
+    {
+        let state = self.core.device.export_state().map_err(client_error)?;
+        let interrupted = state
+            .link_fanouts
+            .iter()
+            .filter(|fanout| fanout.fanout_id != requested_fanout_id)
+            .filter(|fanout| {
+                fanout.rooms.iter().any(|room| {
+                    matches!(room.status, LinkFanoutRoomStatus::Prepared { .. })
+                        && self
+                            .core
+                            .device
+                            .has_pending_commit(&room.plan.room_id)
+                            .unwrap_or(false)
+                })
+            })
+            .map(|fanout| fanout.fanout_id.clone())
+            .take(4)
+            .collect::<Vec<_>>();
+        for fanout_id in interrupted {
+            run_link_fanout_tick(
+                &mut self.core.store,
+                &mut self.core.device,
+                delivery,
+                &fanout_id,
+                &RuntimeLinkFanoutOptions {
+                    max_discovery_pages_per_tick: 1,
+                    max_commit_rooms_per_tick: 1,
+                    max_completion_sync_pages_per_room: DEFAULT_MAX_SYNC_PAGES_PER_ROOM,
+                },
+            )
+            .map_err(runtime_error)?;
+        }
+        Ok(())
     }
 
     fn emit_link_device_bootstraps(
@@ -11820,7 +11866,7 @@ mod tests {
     #[test]
     #[ignore = "timing harness; run explicitly in release mode"]
     fn app_runtime_idle_tick_with_full_projection_history() {
-        const HISTORY_ITEMS: usize = MAX_APP_MESSAGES;
+        const HISTORY_ITEMS: usize = 5_000;
         const SAMPLES: usize = 10;
 
         let dir = tempfile::tempdir().unwrap();
@@ -13906,7 +13952,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_projection_evicts_by_local_arrival_not_cross_room_sequence() {
+    fn chat_projection_retains_complete_history_across_rooms() {
         let owner = DeviceRef {
             account_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_owned(),
@@ -13932,7 +13978,7 @@ mod tests {
         };
         let mut projection = ChatProjectionState::default();
         projection.append_messages(
-            (0..MAX_APP_MESSAGES)
+            (0..5_000)
                 .map(|index| {
                     project(
                         "mature-room",
@@ -13954,17 +14000,14 @@ mod tests {
             "a fresh message must not be evicted merely because its room-local sequence is low"
         );
         assert!(
-            !projection.message_exists("mature-room", "mature-message-0"),
-            "the oldest locally retained message should be evicted"
+            projection.message_exists("mature-room", "mature-message-0"),
+            "complete local history must not evict the oldest message"
         );
         assert!(
-            projection.message_exists(
-                "mature-room",
-                &format!("mature-message-{}", MAX_APP_MESSAGES - 1)
-            ),
+            projection.message_exists("mature-room", &format!("mature-message-{}", 5_000 - 1)),
             "the newest mature-room message should remain"
         );
-        assert_eq!(projection.messages.len(), MAX_APP_MESSAGES);
+        assert_eq!(projection.messages.len(), 5_001);
     }
 
     #[test]

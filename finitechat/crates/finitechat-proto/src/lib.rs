@@ -100,7 +100,10 @@ pub const DEVICE_LINK_BOOTSTRAP_VERSION_V2: u16 = 2;
 /// Every transfer is finite and every individual envelope remains bounded.
 /// A transfer above this explicit ceiling fails without exposing partial data.
 pub const MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS: u32 = 65_536;
-pub const MAX_DEVICE_LINK_BOOTSTRAP_EVENTS: u32 = 64;
+// The payload byte ceiling remains the primary memory and transport bound.
+// A higher item ceiling avoids turning ordinary long histories into hundreds
+// of individually encrypted, persisted, and uploaded bootstrap envelopes.
+pub const MAX_DEVICE_LINK_BOOTSTRAP_EVENTS: u32 = 1_024;
 pub const MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS: u64 =
     MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS as u64 * MAX_DEVICE_LINK_BOOTSTRAP_EVENTS as u64;
 pub const MAX_DEVICE_LINK_BOOTSTRAP_PROFILES: u32 = MAX_ACCOUNT_DEVICES_PER_ROOM;

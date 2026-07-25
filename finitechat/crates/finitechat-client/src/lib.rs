@@ -118,7 +118,9 @@ const MAX_APP_PROFILE_PICTURE_BYTES: u32 = 2 * 1024;
 const MAX_APP_PROFILE_METADATA_PLAINTEXT_BYTES: u32 = 8192;
 const MAX_APP_PROFILE_METADATA_CIPHERTEXT_BYTES: u32 =
     MAX_APP_PROFILE_METADATA_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
-const MAX_STORED_APP_MESSAGES: u32 = 5_000;
+// Message retention is complete. This is the API's addressability bound, not
+// a product history window; callers must not silently prune durable history.
+const MAX_STORED_APP_MESSAGES: u32 = u32::MAX;
 const MAX_STORED_APP_OUTBOX_MESSAGES: u32 = 512;
 const MAX_STORED_APP_PROFILES: u32 = 4_096;
 const MAX_STORED_APP_REVOKED_DEVICES: u32 = 64;
@@ -9784,6 +9786,8 @@ mod tests {
 
     #[test]
     fn production_combined_save_retains_events_beyond_transcript_cache_limit() {
+        const FORMER_TRANSCRIPT_CACHE_LIMIT: u32 = 5_000;
+
         let dir = tempfile::tempdir().unwrap();
         let secret = NostrSecretKey::from_bytes([16; NOSTR_SECRET_KEY_BYTES]).unwrap();
         let device_id = "retention-phone";
@@ -9800,7 +9804,7 @@ mod tests {
         let mut store =
             SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
         store.save_device_state(&device).unwrap();
-        let events = (0..MAX_STORED_APP_MESSAGES + 1)
+        let events = (0..FORMER_TRANSCRIPT_CACHE_LIMIT + 1)
             .map(|index| {
                 app_event(
                     &owner,
@@ -9818,19 +9822,19 @@ mod tests {
             .load_app_events_for_room_page(
                 &owner,
                 "room-store",
-                u64::from(MAX_STORED_APP_MESSAGES) + 1,
+                u64::from(FORMER_TRANSCRIPT_CACHE_LIMIT) + 1,
                 0,
                 "",
-                MAX_STORED_APP_MESSAGES,
+                FORMER_TRANSCRIPT_CACHE_LIMIT,
             )
             .unwrap();
-        assert_eq!(first_page.len(), MAX_STORED_APP_MESSAGES as usize);
+        assert_eq!(first_page.len(), FORMER_TRANSCRIPT_CACHE_LIMIT as usize);
         let last = first_page.last().unwrap();
         let second_page = store
             .load_app_events_for_room_page(
                 &owner,
                 "room-store",
-                u64::from(MAX_STORED_APP_MESSAGES) + 1,
+                u64::from(FORMER_TRANSCRIPT_CACHE_LIMIT) + 1,
                 last.seq,
                 &last.message_id,
                 1,
@@ -9838,6 +9842,48 @@ mod tests {
             .unwrap();
         assert_eq!(second_page.len(), 1);
         assert_eq!(second_page[0].message_id, "event-05000");
+    }
+
+    #[test]
+    fn production_combined_save_retains_messages_beyond_former_cache_limit() {
+        const MESSAGE_COUNT: u32 = 5_201;
+
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([18; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "complete-history-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let mut store =
+            SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
+        let messages = (0..MESSAGE_COUNT)
+            .map(|index| {
+                app_message(
+                    &owner,
+                    u64::from(index) + 1,
+                    &format!("message-{index:05}"),
+                    "retained",
+                )
+            })
+            .collect::<Vec<_>>();
+
+        store
+            .save_device_state_and_app_messages_and_events(&device, &messages, &[])
+            .unwrap();
+
+        let loaded = store
+            .load_app_messages(&owner, MAX_STORED_APP_MESSAGES)
+            .unwrap();
+        assert_eq!(loaded.len(), MESSAGE_COUNT as usize);
+        assert_eq!(loaded.first().unwrap().message_id, "message-00000");
+        assert_eq!(loaded.last().unwrap().message_id, "message-05200");
     }
 
     #[test]

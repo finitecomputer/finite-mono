@@ -227,9 +227,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             if configured_home
             else None
         )
-        return self.module.FiniteChatAdapter(
-            PlatformConfig(extra=extra, home_channel=home_channel)
-        )
+        return self.module.FiniteChatAdapter(PlatformConfig(extra=extra, home_channel=home_channel))
 
     def test_register_exposes_finitechat_platform_contract(self):
         ctx = MockPluginContext()

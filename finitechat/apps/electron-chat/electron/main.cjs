@@ -1171,7 +1171,12 @@ async function dashboardDeviceLinkRequest(pathname, request) {
   return parseDeviceLinkPublicResponse(value, expected);
 }
 
-async function waitForDeviceLinkReady(request, initial = null, generation = null) {
+async function waitForDeviceLinkReady(
+  request,
+  initial = null,
+  generation = null,
+  reportProgress = true
+) {
   const expected = parseDeviceLinkPublicRequest(request);
   let current = initial ? parseDeviceLinkPublicResponse(initial, expected) : null;
   while (true) {
@@ -1189,9 +1194,11 @@ async function waitForDeviceLinkReady(request, initial = null, generation = null
     ) {
       throw new Error("This desktop's automatic Device setup expired. Restart Finite and try again.");
     }
-    deviceLinkStatus({
-      status: current.status === "joining_rooms" ? "joining_rooms" : "linking",
-    });
+    if (reportProgress) {
+      deviceLinkStatus({
+        status: current.status === "joining_rooms" ? "joining_rooms" : "linking",
+      });
+    }
     await delay(deviceLinkPollIntervalMs);
     if (generation !== null) assertLocalDeviceGeneration(generation);
     current = null;
@@ -1235,10 +1242,7 @@ async function createAndApproveDeviceLink(generation) {
     }
     link.acceptSourceDescriptor(approved.source_descriptor);
     assertLocalDeviceGeneration(generation);
-    await Promise.all([
-      link.completion,
-      waitForDeviceLinkReady(request, approved, generation),
-    ]);
+    await link.completion;
     assertLocalDeviceGeneration(generation);
     return { request, approved };
   } catch (error) {
@@ -1300,8 +1304,14 @@ async function ensureLocalDeviceNow(generation) {
   await startDaemon();
   assertLocalDeviceGeneration(generation);
   if (pending) {
-    await waitForDeviceLinkReady(pending, initial, generation);
-    clearPendingDeviceLink(pending);
+    void waitForDeviceLinkReady(pending, initial, generation, false)
+      .then(() => clearPendingDeviceLink(pending))
+      .catch((error) => {
+        console.error(
+          "Finite Chat background Device convergence did not finish during the pairing window:",
+          error
+        );
+      });
   }
   const state = await requestDaemonState();
   assertLocalDeviceGeneration(generation);
