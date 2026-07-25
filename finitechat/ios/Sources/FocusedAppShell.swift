@@ -604,52 +604,51 @@ struct FocusedHomeView: View {
     @FocusState private var isComposerFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: tokens.sectionSpacing) {
-                    Spacer(minLength: tokens.homeHeroTopSpacing)
+        ScrollView {
+            VStack(spacing: tokens.sectionSpacing) {
+                Spacer(minLength: tokens.homeHeroTopSpacing)
 
-                    VStack(spacing: 16) {
-                        FiniteLogoMark()
-                            .fill(.tint)
-                            .frame(
-                                width: tokens.homeHeroMarkSize,
-                                height: tokens.homeHeroMarkSize
-                            )
-                            .accessibilityLabel("Finite logo")
-
-                        Text("It’s time to build")
-                            .font(.title2.weight(.semibold))
-
-                        if let agentName {
-                            Text("with \(agentName)")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-
-                    if agentName == nil {
-                        Button(action: chooseAgent) {
-                            Label("Choose an agent", systemImage: "sparkles")
-                        }
-                        .buttonStyle(.glassProminent)
-                        .controlSize(.large)
-                    } else if !recentChats.isEmpty {
-                        RecentChatBadges(
-                            chats: recentChats,
-                            spacing: tokens.recentBadgeSpacing,
-                            openChat: openChat
+                VStack(spacing: 16) {
+                    FiniteLogoMark()
+                        .fill(.tint)
+                        .frame(
+                            width: tokens.homeHeroMarkSize,
+                            height: tokens.homeHeroMarkSize
                         )
+                        .accessibilityLabel("Finite logo")
+
+                    Text("It’s time to build")
+                        .font(.title2.weight(.semibold))
+
+                    if let agentName {
+                        Text("with \(agentName)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                     }
-
-                    Spacer(minLength: 72)
                 }
-                .padding(.horizontal, tokens.pagePadding)
-                .padding(.bottom, tokens.sectionSpacing)
-            }
-            .scrollDismissesKeyboard(.interactively)
+                .frame(maxWidth: .infinity)
 
+                if agentName == nil {
+                    Button(action: chooseAgent) {
+                        Label("Choose an agent", systemImage: "sparkles")
+                    }
+                    .buttonStyle(.glassProminent)
+                    .controlSize(.large)
+                } else if !recentChats.isEmpty {
+                    RecentChatBadges(
+                        chats: recentChats,
+                        spacing: tokens.recentBadgeSpacing,
+                        openChat: openChat
+                    )
+                }
+
+                Spacer(minLength: 72)
+            }
+            .padding(.horizontal, tokens.pagePadding)
+            .padding(.bottom, tokens.sectionSpacing)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             if agentName != nil {
                 NewChatComposer(
                     isInputFocused: $isComposerFocused,

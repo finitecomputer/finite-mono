@@ -3989,32 +3989,6 @@ final class MessageCollectionLayoutTests: XCTestCase {
         )
     }
 
-    func testBottomViewportInsetUsesOccupiedKeyboardOrAccessoryHeight() {
-        XCTAssertEqual(
-            MessageCollectionLayout.bottomViewportInset(
-                keyboardInset: 330,
-                accessoryHeight: 58,
-                safeAreaBottom: 34
-            ),
-            388
-        )
-        XCTAssertEqual(
-            MessageCollectionLayout.bottomViewportInset(
-                keyboardInset: -12,
-                accessoryHeight: 58
-            ),
-            58
-        )
-        XCTAssertEqual(
-            MessageCollectionLayout.bottomViewportInset(
-                keyboardInset: 34,
-                accessoryHeight: 58,
-                safeAreaBottom: 34
-            ),
-            58
-        )
-    }
-
     func testBottomPinSurvivesKeyboardGeometryTransition() {
         XCTAssertTrue(
             MessageCollectionLayout.shouldPinToBottom(

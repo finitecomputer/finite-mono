@@ -63,11 +63,6 @@ struct Composer: View {
                 .textFieldStyle(.plain)
                 .lineLimit(1 ... 6)
                 .focused(isInputFocused)
-                .submitLabel(.send)
-                .onSubmit {
-                    guard showsSendButton, !sendDisabled else { return }
-                    onSend()
-                }
                 .onChange(of: text) { _, _ in
                     FinitePerformance.recordComposerEdit()
                 }

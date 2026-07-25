@@ -46,20 +46,6 @@ enum MessageCollectionLayout {
             + ComposerChrome.fadeLiftAboveIcons
     }
 
-    static func bottomViewportInset(
-        keyboardInset: CGFloat,
-        accessoryHeight: CGFloat,
-        safeAreaBottom: CGFloat = 0
-    ) -> CGFloat {
-        let keyboard = max(0, keyboardInset)
-        let accessory = max(0, accessoryHeight)
-        let keyboardVisible = keyboard > safeAreaBottom + 20
-        if keyboardVisible {
-            return keyboard + accessory
-        }
-        return accessory
-    }
-
     static func shouldPinToBottom(
         isNearBottom: Bool,
         followsBottom: Bool,

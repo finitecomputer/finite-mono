@@ -215,9 +215,7 @@ struct RoomThreadView: View {
     private func messageSurface(room: AppRoomSummary) -> some View {
         switch room.state {
         case .connected:
-            transcriptView(room: room) {
-                composerAccessory
-            }
+            transcriptView(room: room)
         case .waitingForApproval:
             PendingRoomView(room: room, model: model)
         case .joining:
@@ -228,10 +226,7 @@ struct RoomThreadView: View {
         }
     }
 
-    private func transcriptView<AccessoryContent: View>(
-        room: AppRoomSummary,
-        @ViewBuilder accessoryContent: () -> AccessoryContent
-    ) -> some View {
+    private func transcriptView(room: AppRoomSummary) -> some View {
         ChatTranscriptView(
             roomID: room.roomId,
             rows: transcriptRows,
@@ -257,7 +252,6 @@ struct RoomThreadView: View {
             onOpenURL: { url in
                 handleOpenURL(url)
             },
-            accessoryContent: accessoryContent(),
             canLoadOlder: room.canLoadOlder,
             onLoadOlderMessages: { beforeMessageID in
                 model.loadOlderMessages(roomID: room.roomId, beforeMessageID: beforeMessageID)
@@ -266,7 +260,10 @@ struct RoomThreadView: View {
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
-        .ignoresSafeArea(edges: [.top, .bottom])
+        .ignoresSafeArea(edges: .top)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            composerAccessory
+        }
         .accessibilityLabel("Messages")
     }
 
