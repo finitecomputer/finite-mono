@@ -1,9 +1,115 @@
 import XCTest
+import AuthenticationServices
 import CoreGraphics
 import UIKit
 @testable import FiniteChat
 
 final class RuntimeConfigTests: XCTestCase {
+    @MainActor
+    func testCanceledWebAuthenticationReturnsToReadyWithoutShowingAnError() async throws {
+        let presenter = StubWebAuthenticationPresenter(result: .failure(.canceled))
+        let model = AppModel(
+            config: RuntimeConfig(
+                serverURL: RuntimeConfig.defaultServerURL,
+                dashboardURL: RuntimeConfig.defaultDashboardURL,
+                deviceID: "ios-auth-cancel",
+                workosClientID: "client_test_cancel"
+            ),
+            applicationSupportURL: try temporarySupportURL(),
+            requiresNostrLogin: true,
+            nostrIdentityStore: MemoryNostrIdentityStore(),
+            webAuthenticationPresenter: presenter,
+            startsUpdateLoop: false
+        )
+
+        model.beginAccountLink()
+
+        try await waitUntil {
+            presenter.authenticationCount == 1
+                && model.accountLinkPhase == .ready
+        }
+        XCTAssertTrue(model.requiresNostrLogin)
+        XCTAssertNil(model.developerErrorText)
+        XCTAssertEqual(model.developerDiagnostics.last?.category, "account_link")
+        XCTAssertEqual(model.developerDiagnostics.last?.event, "canceled")
+        XCTAssertEqual(
+            model.developerDiagnostics.last?.details["stage"],
+            "presenting_authentication"
+        )
+    }
+
+    @MainActor
+    func testWebAuthenticationFailureIsRetryableAndNamesTheFailedBoundary() async throws {
+        let presenter = StubWebAuthenticationPresenter(result: .failure(.failed))
+        let model = AppModel(
+            config: RuntimeConfig(
+                serverURL: RuntimeConfig.defaultServerURL,
+                dashboardURL: RuntimeConfig.defaultDashboardURL,
+                deviceID: "ios-auth-failure",
+                workosClientID: "client_test_failure"
+            ),
+            applicationSupportURL: try temporarySupportURL(),
+            requiresNostrLogin: true,
+            nostrIdentityStore: MemoryNostrIdentityStore(),
+            webAuthenticationPresenter: presenter,
+            startsUpdateLoop: false
+        )
+
+        model.beginAccountLink()
+        try await waitUntil {
+            presenter.authenticationCount == 1
+                && model.accountLinkPhase == .ready
+        }
+
+        XCTAssertEqual(
+            model.developerErrorText,
+            "Sign in could not return to Finite. Please try again."
+        )
+        XCTAssertEqual(model.developerDiagnostics.last?.event, "failed")
+        XCTAssertEqual(
+            model.developerDiagnostics.last?.details["stage"],
+            "presenting_authentication"
+        )
+
+        model.beginAccountLink()
+        try await waitUntil {
+            presenter.authenticationCount == 2
+                && model.accountLinkPhase == .ready
+        }
+        XCTAssertEqual(
+            model.developerErrorText,
+            "Sign in could not return to Finite. Please try again."
+        )
+    }
+
+    func testWebAuthenticationSystemErrorsAreClassifiedWithoutStringMatching() {
+        let canceled = NSError(
+            domain: ASWebAuthenticationSessionError.errorDomain,
+            code: ASWebAuthenticationSessionError.Code.canceledLogin.rawValue
+        )
+        let invalidContext = NSError(
+            domain: ASWebAuthenticationSessionError.errorDomain,
+            code: ASWebAuthenticationSessionError.Code.presentationContextInvalid.rawValue
+        )
+        let unrelated = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorTimedOut
+        )
+
+        XCTAssertEqual(
+            NativeWebAuthenticationPresenter.presentationError(for: canceled),
+            .canceled
+        )
+        XCTAssertEqual(
+            NativeWebAuthenticationPresenter.presentationError(for: invalidContext),
+            .invalidPresentationContext
+        )
+        XCTAssertEqual(
+            NativeWebAuthenticationPresenter.presentationError(for: unrelated),
+            .failed
+        )
+    }
+
     func testReusableEmptyHomeChatPrefersTheMostRecentlyUpdatedCandidate() {
         let destination = findReusableEmptyHomeChatDestination(
             roomID: "room-main",
@@ -4138,6 +4244,33 @@ final class VoiceMessageTests: XCTestCase {
         )
         XCTAssertEqual(voiceRecordingCaption(nil), "")
     }
+}
+
+@MainActor
+private final class StubWebAuthenticationPresenter: WebAuthenticationPresenting {
+    enum Result {
+        case callback(URL)
+        case failure(WebAuthenticationPresentationError)
+    }
+
+    private let result: Result
+    private(set) var authenticationCount = 0
+
+    init(result: Result) {
+        self.result = result
+    }
+
+    func authenticate(url: URL) async throws -> URL {
+        authenticationCount += 1
+        switch result {
+        case .callback(let callback):
+            return callback
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func cancel() {}
 }
 
 private func waitUntil(

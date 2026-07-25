@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use workos::user_management::AuthenticateWithCodeParams;
-use workos::{AuthKitAuthorizationUrlParams, PublicClient, SecretString};
+use workos::{AuthKitAuthorizationUrlParams, Error as WorkOSError, PublicClient, SecretString};
 
 use crate::FiniteChatCoreError;
 
@@ -40,6 +40,7 @@ impl NativeAuthKitSession {
         let authorization = client
             .authkit_authorization_url(AuthKitAuthorizationUrlParams {
                 redirect_uri: AUTHKIT_REDIRECT_URI.to_owned(),
+                provider: Some("authkit".to_owned()),
                 ..Default::default()
             })
             .map_err(|_| authkit_error("could not start secure sign in"))?;
@@ -92,7 +93,7 @@ impl NativeAuthKitSession {
                     .user_management()
                     .authenticate_with_code(params),
             )
-            .map_err(|_| authkit_error("secure sign in was rejected"))?;
+            .map_err(authkit_exchange_error)?;
         validate_access_token(response.access_token.expose())?;
 
         let mut state = self
@@ -154,14 +155,17 @@ fn parse_callback(callback_url: &str, expected_state: &str) -> Result<String, Fi
             return Err(authkit_error("secure sign in returned an invalid callback"));
         }
     }
-    if error.is_some() {
-        return Err(authkit_error("secure sign in was canceled"));
-    }
     let state = state
         .filter(|value| !value.is_empty())
         .ok_or_else(|| authkit_error("secure sign in returned an invalid callback"))?;
     if state != expected_state {
         return Err(authkit_error("secure sign in returned an invalid callback"));
+    }
+    if code.is_some() && error.is_some() {
+        return Err(authkit_error("secure sign in returned an invalid callback"));
+    }
+    if let Some(error) = error {
+        return Err(authkit_authorization_error(&error));
     }
     let code = code.filter(|value| {
         !value.is_empty()
@@ -193,6 +197,49 @@ fn validate_access_token(value: &str) -> Result<(), FiniteChatCoreError> {
     } else {
         Ok(())
     }
+}
+
+fn authkit_authorization_error(code: &str) -> FiniteChatCoreError {
+    match code {
+        "access_denied" => authkit_error("secure sign in was denied"),
+        "server_error" | "temporarily_unavailable" => {
+            authkit_error("secure sign in is temporarily unavailable")
+        }
+        code if is_safe_authkit_error_code(code) => {
+            authkit_error(format!("secure sign in could not be completed ({code})"))
+        }
+        _ => authkit_error("secure sign in could not be completed"),
+    }
+}
+
+fn authkit_exchange_error(error: WorkOSError) -> FiniteChatCoreError {
+    match error {
+        WorkOSError::Network(error) if error.is_retryable() => {
+            authkit_error("secure sign in is temporarily unavailable")
+        }
+        WorkOSError::Api(error) if error.status == 429 || error.status >= 500 => {
+            authkit_error("secure sign in is temporarily unavailable")
+        }
+        WorkOSError::Api(error) => match error.code.as_deref() {
+            Some("invalid_grant" | "authorization_code_expired") => {
+                authkit_error("secure sign in expired")
+            }
+            Some(code) if is_safe_authkit_error_code(code) => {
+                authkit_error(format!("secure sign in was rejected ({code})"))
+            }
+            _ => authkit_error("secure sign in was rejected"),
+        },
+        WorkOSError::Decode(_) => authkit_error("secure sign in returned an invalid session"),
+        _ => authkit_error("could not finish secure sign in"),
+    }
+}
+
+fn is_safe_authkit_error_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
 fn authkit_error(reason: impl Into<String>) -> FiniteChatCoreError {
@@ -228,6 +275,10 @@ mod tests {
         assert_eq!(
             query.get("response_type").map(|value| value.as_ref()),
             Some("code")
+        );
+        assert_eq!(
+            query.get("provider").map(|value| value.as_ref()),
+            Some("authkit")
         );
         assert_eq!(
             query
@@ -287,7 +338,54 @@ mod tests {
                 "https://finite.computer/auth/ios/callback?error=access_denied&state=expected",
                 "expected"
             )
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .contains("was denied")
+        );
+        assert!(
+            parse_callback(
+                "https://finite.computer/auth/ios/callback?error=access_denied&state=wrong",
+                "expected"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("invalid callback")
+        );
+        assert!(
+            parse_callback(
+                "https://finite.computer/auth/ios/callback?code=abc&error=access_denied&state=expected",
+                "expected"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("invalid callback")
+        );
+        assert!(
+            parse_callback(
+                "https://finite.computer/auth/ios/callback?error=temporarily_unavailable&state=expected",
+                "expected"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("temporarily unavailable")
+        );
+        assert!(
+            parse_callback(
+                "https://finite.computer/auth/ios/callback?error=organization_invalid&state=expected",
+                "expected"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("organization_invalid")
+        );
+        assert!(
+            parse_callback(
+                "https://finite.computer/auth/ios/callback?error=%0Asecret&state=expected",
+                "expected"
+            )
+            .unwrap_err()
+            .to_string()
+            .ends_with("could not be completed")
         );
     }
 

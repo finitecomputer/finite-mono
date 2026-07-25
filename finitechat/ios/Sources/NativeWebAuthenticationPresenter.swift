@@ -7,9 +7,12 @@ protocol WebAuthenticationPresenting: AnyObject {
     func cancel()
 }
 
-enum WebAuthenticationPresentationError: Error {
+enum WebAuthenticationPresentationError: Error, Equatable {
+    case canceled
     case couldNotStart
     case missingCallback
+    case invalidPresentationContext
+    case failed
 }
 
 @MainActor
@@ -29,7 +32,9 @@ final class NativeWebAuthenticationPresenter: NSObject, WebAuthenticationPresent
                 Task { @MainActor in
                     self?.session = nil
                     if let error {
-                        continuation.resume(throwing: error)
+                        continuation.resume(
+                            throwing: Self.presentationError(for: error)
+                        )
                     } else if let callbackURL {
                         continuation.resume(returning: callbackURL)
                     } else {
@@ -48,6 +53,28 @@ final class NativeWebAuthenticationPresenter: NSObject, WebAuthenticationPresent
                     throwing: WebAuthenticationPresentationError.couldNotStart
                 )
             }
+        }
+    }
+
+    nonisolated static func presentationError(
+        for error: Error
+    ) -> WebAuthenticationPresentationError {
+        let error = error as NSError
+        guard error.domain == ASWebAuthenticationSessionError.errorDomain,
+              let code = ASWebAuthenticationSessionError.Code(
+                rawValue: error.code
+              )
+        else {
+            return .failed
+        }
+
+        switch code {
+        case .canceledLogin:
+            return .canceled
+        case .presentationContextNotProvided, .presentationContextInvalid:
+            return .invalidPresentationContext
+        @unknown default:
+            return .failed
         }
     }
 

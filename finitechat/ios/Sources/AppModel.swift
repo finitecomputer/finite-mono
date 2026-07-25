@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -15,6 +16,19 @@ private enum AppAccountLinkError: LocalizedError {
             "AuthKit returned an invalid authorization URL"
         }
     }
+}
+
+private enum AccountLinkStage: String {
+    case startingAuthentication = "starting_authentication"
+    case presentingAuthentication = "presenting_authentication"
+    case exchangingAuthentication = "exchanging_authentication"
+    case creatingDeviceLink = "creating_device_link"
+    case approvingDeviceLink = "approving_device_link"
+    case claimingAccount = "claiming_account"
+    case storingAccount = "storing_account"
+    case acknowledgingAccount = "acknowledging_account"
+    case waitingForAgent = "waiting_for_agent"
+    case startingRuntime = "starting_runtime"
 }
 
 struct RuntimeConfig: Codable, Equatable {
@@ -515,6 +529,10 @@ private struct DiagnosticActionSummary {
 final class AppModel: ObservableObject, AppReconciler {
     private static let developerDiagnosticsLimit = 200
     private static let optimisticSequenceBase = UInt64.max - 1_000_000
+    private static let accountLinkLogger = Logger(
+        subsystem: "computer.finite.finitechat",
+        category: "AccountLink"
+    )
 #if DEBUG
     private static let debugDiagnosticsQueue = DispatchQueue(
         label: "computer.finite.finitechat.debug-diagnostics",
@@ -833,6 +851,8 @@ final class AppModel: ObservableObject, AppReconciler {
         guard requiresNostrLogin, accountLinkPhase == .ready else { return }
         errorText = nil
         accountLinkPhase = .authenticating
+        Self.accountLinkLogger.notice("requested")
+        appendDiagnostic(category: "account_link", event: "requested")
         let serverURL = serverURL
         let dashboardURL = dashboardURL
         let deviceID = deviceID
@@ -849,6 +869,7 @@ final class AppModel: ObservableObject, AppReconciler {
         }
         accountLinkTask?.cancel()
         accountLinkTask = Task { [weak self] in
+            var stage = AccountLinkStage.startingAuthentication
             do {
                 guard let self else { return }
                 let authKit: NativeAuthKitSession?
@@ -864,9 +885,13 @@ final class AppModel: ObservableObject, AppReconciler {
                     ) else {
                         throw AppAccountLinkError.invalidAuthorizationURL
                     }
+                    stage = .presentingAuthentication
+                    self.appendAccountLinkProgress(stage)
                     let callbackURL = try await self.webAuthenticationPresenter.authenticate(
                         url: authorizationURL
                     )
+                    stage = .exchangingAuthentication
+                    self.appendAccountLinkProgress(stage)
                     try await Task.detached(priority: .userInitiated) {
                         try session.complete(callbackUrl: callbackURL.absoluteString)
                     }.value
@@ -875,6 +900,8 @@ final class AppModel: ObservableObject, AppReconciler {
                     authKit = nil
                 }
                 guard !Task.isCancelled else { return }
+                stage = .creatingDeviceLink
+                self.appendAccountLinkProgress(stage)
                 let link = try await Task.detached(priority: .userInitiated) {
                     try NativeDeviceLinkSession.create(
                         serverUrl: serverURL,
@@ -886,6 +913,8 @@ final class AppModel: ObservableObject, AppReconciler {
                     link.release()
                     return
                 }
+                stage = .approvingDeviceLink
+                self.appendAccountLinkProgress(stage)
                 if let authKit {
                     try await Task.detached(priority: .userInitiated) {
                         try link.approveWithAuthkit(authkit: authKit)
@@ -900,9 +929,13 @@ final class AppModel: ObservableObject, AppReconciler {
                     return
                 }
                 self.accountLinkPhase = .waiting
+                stage = .claimingAccount
+                self.appendAccountLinkProgress(stage)
                 let accountSecret = try await Task.detached(priority: .userInitiated) {
                     try link.claimAccountSecret()
                 }.value
+                stage = .storingAccount
+                self.appendAccountLinkProgress(stage)
                 let material = try nostrIdentityFromAccountSecretHex(
                     accountSecretHex: accountSecret
                 )
@@ -910,26 +943,91 @@ final class AppModel: ObservableObject, AppReconciler {
                     AppNostrIdentity(material: material),
                     resetStore: true
                 )
+                stage = .acknowledgingAccount
+                self.appendAccountLinkProgress(stage)
                 try await Task.detached(priority: .utility) {
                     try link.acknowledgeStored()
+                }.value
+                stage = .waitingForAgent
+                self.appendAccountLinkProgress(stage)
+                try await Task.detached(priority: .utility) {
                     if let authKit {
                         try link.waitUntilReadyWithAuthkit(authkit: authKit)
                     } else {
                         try link.waitUntilReady(accessToken: nil)
                     }
                 }.value
+                stage = .startingRuntime
+                self.appendAccountLinkProgress(stage)
                 self.startFromForeground()
                 self.accountLinkPhase = .ready
+                Self.accountLinkLogger.notice("succeeded")
+                self.appendDiagnostic(category: "account_link", event: "succeeded")
+            } catch let error as WebAuthenticationPresentationError
+                where error == .canceled
+            {
+                self?.accountLinkPhase = .ready
+                self?.errorText = nil
+                Self.accountLinkLogger.notice(
+                    "canceled stage=\(stage.rawValue, privacy: .public)"
+                )
+                self?.appendDiagnostic(
+                    category: "account_link",
+                    event: "canceled",
+                    details: ["stage": stage.rawValue]
+                )
             } catch is CancellationError {
                 self?.accountLinkPhase = .ready
+                self?.errorText = nil
+                Self.accountLinkLogger.notice(
+                    "task canceled stage=\(stage.rawValue, privacy: .public)"
+                )
+                self?.appendDiagnostic(
+                    category: "account_link",
+                    event: "canceled",
+                    details: ["stage": stage.rawValue]
+                )
             } catch {
                 self?.accountLinkPhase = .ready
-                self?.errorText = Self.accountLinkErrorText(error)
+                self?.errorText = Self.accountLinkErrorText(error, stage: stage)
+                var details = self?.diagnosticErrorDetails(error) ?? [:]
+                details["stage"] = stage.rawValue
+                if stage == .exchangingAuthentication {
+                    let reason = Self.redactedDiagnosticValue(
+                        String(describing: error)
+                    )
+                    Self.accountLinkLogger.error(
+                        "failed stage=\(stage.rawValue, privacy: .public) type=\(String(describing: type(of: error)), privacy: .public) reason=\(reason, privacy: .public)"
+                    )
+                } else {
+                    Self.accountLinkLogger.error(
+                        "failed stage=\(stage.rawValue, privacy: .public) type=\(String(describing: type(of: error)), privacy: .public)"
+                    )
+                }
+                self?.appendDiagnostic(
+                    category: "account_link",
+                    event: "failed",
+                    details: details
+                )
             }
         }
     }
 
-    private static func accountLinkErrorText(_ error: Error) -> String {
+    private func appendAccountLinkProgress(_ stage: AccountLinkStage) {
+        Self.accountLinkLogger.info(
+            "progress stage=\(stage.rawValue, privacy: .public)"
+        )
+        appendDiagnostic(
+            category: "account_link",
+            event: "progress",
+            details: ["stage": stage.rawValue]
+        )
+    }
+
+    private static func accountLinkErrorText(
+        _ error: Error,
+        stage: AccountLinkStage
+    ) -> String {
         if let linkError = error as? AppAccountLinkError {
             switch linkError {
             case .authKitNotConfigured:
@@ -938,14 +1036,43 @@ final class AppModel: ObservableObject, AppReconciler {
                 return "Secure sign in could not start. Please try again."
             }
         }
-        let description = String(describing: error)
-        if description.localizedCaseInsensitiveContains("canceled") {
-            return "Sign in was canceled."
+        if let presentationError = error as? WebAuthenticationPresentationError {
+            switch presentationError {
+            case .canceled:
+                return ""
+            case .couldNotStart:
+                return "Secure sign in could not open. Please try again."
+            case .missingCallback:
+                return "Sign in did not return a valid response. Please try again."
+            case .invalidPresentationContext:
+                return "Secure sign in could not be presented. Please try again."
+            case .failed:
+                return "Sign in could not return to Finite. Please try again."
+            }
         }
-        if description.contains("expired") {
+        let description = String(describing: error)
+        if description.localizedCaseInsensitiveContains("was denied") {
+            return "Sign in was denied."
+        }
+        if description.localizedCaseInsensitiveContains("expired") {
             return "That secure link expired. Start a new one."
         }
-        return "This iPhone could not finish linking. Please try again."
+        if description.localizedCaseInsensitiveContains("temporarily unavailable") {
+            return "Secure sign in is temporarily unavailable. Try again in a moment."
+        }
+        switch stage {
+        case .startingAuthentication:
+            return "Secure sign in could not start. Please try again."
+        case .presentingAuthentication:
+            return "Sign in could not return to Finite. Please try again."
+        case .exchangingAuthentication:
+            return "Finite could not verify that sign in. Please try again."
+        case .creatingDeviceLink, .approvingDeviceLink:
+            return "You’re signed in, but this iPhone could not start linking. Please try again."
+        case .claimingAccount, .storingAccount, .acknowledgingAccount,
+             .waitingForAgent, .startingRuntime:
+            return "This iPhone could not finish linking to your agent. Please try again."
+        }
     }
 
     @discardableResult
