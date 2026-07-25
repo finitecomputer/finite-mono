@@ -31,6 +31,12 @@ and packages no local web renderer. A sandboxed, versioned preload connects that
 dashboard to the bundled local daemon, which keeps encrypted chat state and
 account material on the Mac.
 
+Developer ID release builds check the `finitechat-latest` GitHub release for a
+new signed app shortly after launch and every six hours while running. An
+available update downloads in the background and is applied by Electron's
+built-in macOS updater after Finite Chat exits, so the next launch uses the new
+version. Development and ad-hoc-signed builds do not contact the update feed.
+
 After dashboard sign-in, Electron links a distinct, revocable Device
 automatically through `/api/device-links/account-binding`,
 `/api/device-links/approve`, and `/api/device-links/status`. The account secret
