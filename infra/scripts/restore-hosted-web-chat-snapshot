@@ -18,22 +18,27 @@ target_dir=${2%/}
 [ -f "$source_dir/format" ] || { echo "restore refused: format marker missing" >&2; exit 66; }
 format=$(cat "$source_dir/format")
 [ "$format" != finite.hosted-web-chat-recovery-snapshot.v1 ] || {
-  echo "restore refused: v1 predates Brain and Finite Identity; create or select a complete v2 snapshot" >&2
+  echo "restore refused: v1 predates Brain, Finite Identity, and Sites; create or select a complete v3 snapshot" >&2
   exit 66
 }
-[ "$format" = finite.hosted-web-chat-recovery-snapshot.v2 ] || {
+[ "$format" != finite.hosted-web-chat-recovery-snapshot.v2 ] || {
+  echo "restore refused: v2 predates Sites; create or select a complete v3 snapshot" >&2
+  exit 66
+}
+[ "$format" = finite.hosted-web-chat-recovery-snapshot.v3 ] || {
   echo "restore refused: unsupported snapshot format $format" >&2
   exit 66
 }
 [ -f "$source_dir/manifest.sha256" ] || { echo "restore refused: manifest missing" >&2; exit 66; }
 [ -f "$source_dir/recovery-set.tsv" ] || { echo "restore refused: Recovery Set manifest missing" >&2; exit 66; }
 
-expected_recovery_set='finite.hosted-web-chat-recovery-snapshot.v2
+expected_recovery_set='finite.hosted-web-chat-recovery-snapshot.v3
 hosted-device	directory	hosted-device
 finite-chat	sqlite	finite-chat/server.sqlite3
 saas-core	postgres-custom-dump	saas-core/finite_core.dump
 finite-brain	sqlite	finite-brain/finite-brain.sqlite3
-finite-identity	sqlite	finite-identity/identity.db'
+finite-identity	sqlite	finite-identity/identity.db
+finite-sites	directory	finite-sites'
 [ "$(cat "$source_dir/recovery-set.tsv")" = "$expected_recovery_set" ] || {
   echo "restore refused: Recovery Set component/artifact manifest is inconsistent" >&2
   exit 66
@@ -44,39 +49,45 @@ for required in \
   finite-chat/server.sqlite3 \
   saas-core/finite_core.dump \
   finite-brain/finite-brain.sqlite3 \
-  finite-identity/identity.db; do
+  finite-identity/identity.db \
+  finite-sites/registry.db \
+  finite-sites-symlinks.bin; do
   [ -f "$source_dir/$required" ] || {
     echo "restore refused: required Recovery Set artifact missing: $required" >&2
     exit 66
   }
-  awk -v required="$required" '$2 == required { found = 1 } END { exit !found }' \
-    "$source_dir/manifest.sha256" || {
-      echo "restore refused: required artifact absent from integrity manifest: $required" >&2
-      exit 66
-    }
 done
-awk '
-  NF != 2 { exit 1 }
-  $2 ~ /^\// || $2 ~ /(^|\/)\.\.($|\/)/ { exit 1 }
-  $2 !~ /^(format|recovery-set\.tsv|hosted-device\/|finite-chat\/|saas-core\/|finite-brain\/|finite-identity\/)/ { exit 1 }
-' "$source_dir/manifest.sha256" || {
-  echo "restore refused: integrity manifest contains an unsafe or unknown artifact path" >&2
-  exit 66
-}
 
-if [ -n "$(find "$source_dir" -type l -print -quit)" ]; then
-  echo "restore refused: Recovery Set contains a symlink" >&2
+if [ -n "$(find "$source_dir" -type l ! -path "$source_dir/finite-sites/*" -print -quit)" ]; then
+  echo "restore refused: Recovery Set contains a symlink outside Finite Sites" >&2
   exit 66
 fi
-if [ -n "$(find "$source_dir" ! -type d ! -type f -print -quit)" ]; then
+if [ -n "$(find "$source_dir" ! -type d ! -type f ! -type l -print -quit)" ]; then
   echo "restore refused: Recovery Set contains an unsupported filesystem entry" >&2
   exit 66
 fi
-if ! diff -u \
-  <(awk '{ print $2 }' "$source_dir/manifest.sha256" | LC_ALL=C sort) \
-  <(cd "$source_dir" && find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity -type f -print | LC_ALL=C sort) \
-  >/dev/null; then
-  echo "restore refused: integrity manifest is not an exact Recovery Set file inventory" >&2
+if ! cmp --silent \
+  "$source_dir/finite-sites-symlinks.bin" \
+  <(
+    cd "$source_dir/finite-sites"
+    while IFS= read -r -d '' link; do
+      printf '%s\0' "${link#./}"
+      readlink --zero -- "$link"
+    done < <(find . -type l -print0 | LC_ALL=C sort -z)
+  ); then
+  echo "restore refused: Finite Sites symlink inventory does not match" >&2
+  exit 66
+fi
+if ! cmp --silent \
+  "$source_dir/manifest.sha256" \
+  <(
+    cd "$source_dir"
+    find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites \
+      -type f -print0 \
+      | LC_ALL=C sort -z \
+      | xargs -0 sha256sum
+  ); then
+  echo "restore refused: integrity manifest does not exactly match the safe Recovery Set inventory" >&2
   exit 66
 fi
 
@@ -175,6 +186,10 @@ pg_restore --list "$source_dir/saas-core/finite_core.dump" >/dev/null
   echo "restore refused: Finite Identity SQLite integrity failed" >&2
   exit 67
 }
+[ "$(sqlite3 "$source_dir/finite-sites/registry.db" 'PRAGMA integrity_check;')" = ok ] || {
+  echo "restore refused: Finite Sites SQLite integrity failed" >&2
+  exit 67
+}
 
 if [ -e "$target_dir" ] && [ -n "$(find "$target_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
   echo "restore refused: target is not empty" >&2
@@ -200,8 +215,14 @@ cp -a \
   "$source_dir/saas-core" \
   "$source_dir/finite-brain" \
   "$source_dir/finite-identity" \
+  "$source_dir/finite-sites" \
   "$staging/"
-cp -a "$source_dir/format" "$source_dir/recovery-set.tsv" "$source_dir/manifest.sha256" "$staging/"
+cp -a \
+  "$source_dir/format" \
+  "$source_dir/recovery-set.tsv" \
+  "$source_dir/manifest.sha256" \
+  "$source_dir/finite-sites-symlinks.bin" \
+  "$staging/"
 (cd "$staging" && sha256sum --check manifest.sha256)
 [ "${FINITE_RESTORE_FAIL_AFTER_STAGE:-0}" != 1 ] || {
   echo "restore stopped after verified staging by requested failure injection" >&2

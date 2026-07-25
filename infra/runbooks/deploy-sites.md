@@ -34,10 +34,11 @@ by copying a release tarball onto the box.
 - ssh access from the Mac to `ubuntu@finite-lat-2`, with agent forwarding for
   root access from lat2 to `64.34.82.77`. Lat2 is the only production
   build/driver host; do not evaluate or build on the Mac, clawland, or lat1.
-- A fresh Postgres/state safety net exists. FLAG: the Hosted Web Chat recovery
-  snapshot does **not** cover `/var/lib/finite-sites`; Sites still needs its own
-  service-consistent off-host recovery set and restore proof. Do not treat the
-  configured chat Borg repository as Sites protection.
+- A fresh v3 coordinated recovery snapshot exists and its Borg archive has
+  passed the empty-target drill in
+  [hosted-web-chat-recovery.md](hosted-web-chat-recovery.md). v1 and v2
+  snapshots do **not** cover `/var/lib/finite-sites`; do not treat an older
+  configured archive as Sites protection.
 
 ### STEPS
 
