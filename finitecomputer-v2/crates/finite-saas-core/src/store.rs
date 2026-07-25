@@ -3452,7 +3452,11 @@ where
                     core_rfc3339(created_at) AS created_at, core_rfc3339(promoted_at) AS promoted_at, core_rfc3339(retired_at) AS retired_at
              FROM runtime_artifacts
              WHERE promoted_at IS NOT NULL AND retired_at IS NULL AND kind = 'oci_image'
-             ORDER BY promoted_at DESC, created_at DESC, id DESC
+             -- Qualified: a bare name here would bind the rendered-text output
+             -- column and sort lexicographically, which is not chronological
+             -- once fractional seconds vary.
+             ORDER BY runtime_artifacts.promoted_at DESC,
+                      runtime_artifacts.created_at DESC, id DESC
              LIMIT 1",
             &[],
         )
@@ -3522,7 +3526,7 @@ where
                     revoked_by_workos_user_id, created_by_workos_user_id,
                     core_rfc3339(created_at) AS created_at
                FROM launch_code_batches
-              ORDER BY created_at DESC, id DESC",
+              ORDER BY launch_code_batches.created_at DESC, id DESC",
             &[],
         )
         .await
@@ -10514,6 +10518,58 @@ mod tests {
             );
             drop(raw);
             connection.abort();
+        })
+        .await;
+    }
+
+    /// Artifact selection orders by the TIMESTAMPTZ column, not its rendered
+    /// text.
+    ///
+    /// `SELECT core_rfc3339(promoted_at) AS promoted_at ... ORDER BY
+    /// promoted_at` binds the output column in Postgres, so a bare name sorts
+    /// lexicographically. RFC3339 only sorts correctly as text at a FIXED
+    /// precision, and `current_time_iso` trims trailing zeros, so a whole
+    /// second ("…:02Z") sorts after a fractional one ("…:02.5Z") -- 'Z' > '.'.
+    /// That would launch new agents on the older artifact.
+    #[tokio::test]
+    async fn postgres_launchable_artifact_orders_by_instant_not_rendered_text() {
+        with_isolated_postgres(|db| async move {
+            // Same second, differing fractional precision. Lexicographically
+            // "…:02Z" > "…:02.500000Z"; chronologically it is earlier.
+            for (id, promoted) in [
+                ("artifact-frac", "2030-01-01T00:00:02.5Z"),
+                ("artifact-whole", "2030-01-01T00:00:02Z"),
+            ] {
+                db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: id.to_string(),
+                    kind: crate::RuntimeArtifactKind::OciImage,
+                    reference: format!(
+                        "ghcr.io/finitecomputer/agent-runtime:{id}@sha256:{}",
+                        "a".repeat(64)
+                    ),
+                    version_label: id.to_string(),
+                    source_git_sha: None,
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "state-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    promoted: true,
+                    now: Some(promoted.to_string()),
+                })
+                .await
+                .unwrap();
+            }
+
+            let client = db.store.connection().await.unwrap();
+            let latest = select_latest_launchable_runtime_artifact(&**client)
+                .await
+                .unwrap();
+            assert_eq!(
+                latest.id, "artifact-frac",
+                "the later instant must win, even though it sorts earlier as text"
+            );
         })
         .await;
     }
