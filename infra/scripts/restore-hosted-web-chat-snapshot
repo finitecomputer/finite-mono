@@ -15,6 +15,11 @@ usage() {
 source_dir=${1%/}
 target_dir=${2%/}
 [ -n "$source_dir" ] && [ -n "$target_dir" ] && [ "$target_dir" != / ] || usage
+[ -d "$source_dir" ] || { echo "restore refused: snapshot directory missing" >&2; exit 66; }
+source_dir=$(readlink -e -- "$source_dir") || {
+  echo "restore refused: snapshot directory cannot be resolved" >&2
+  exit 66
+}
 [ -f "$source_dir/format" ] || { echo "restore refused: format marker missing" >&2; exit 66; }
 format=$(cat "$source_dir/format")
 [ "$format" != finite.hosted-web-chat-recovery-snapshot.v1 ] || {

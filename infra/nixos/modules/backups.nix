@@ -195,6 +195,7 @@ in
         set -euo pipefail
         latest=${snapshotRoot}/latest
         test -L "$latest"
+        latest=$(readlink -e -- "$latest")
         age=$(( $(date +%s) - $(stat -Lc %Y "$latest") ))
         if [ "$age" -gt 604800 ]; then
           echo "Hosted Recovery Snapshot is stale ($age seconds); deploy or run finite-hosted-web-chat-snapshot.service" >&2
@@ -353,6 +354,7 @@ in
       preHook = ''
         latest=${snapshotRoot}/latest
         test -L "$latest"
+        latest=$(${pkgs.coreutils}/bin/readlink -e -- "$latest")
         test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v3
         expected_recovery_set=$(
           printf '%s\n' \

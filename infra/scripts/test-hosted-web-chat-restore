@@ -91,6 +91,10 @@ printf '%s\n' \
 
 target="$scratch/restored"
 FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$target" >/dev/null
+ln -s snapshot "$scratch/latest"
+symlink_target="$scratch/restored-from-latest"
+FINITE_RESTORE_ISOLATED=1 "$restore" "$scratch/latest" "$symlink_target" >/dev/null
+test -f "$symlink_target/finite-sites/registry.db"
 for required in \
   hosted-device/users/user-a/chat/client.sqlite3 \
   hosted-device/users/user-a/finite-home/identity/identity.json \
