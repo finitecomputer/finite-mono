@@ -262,6 +262,8 @@ actually has the value, that the value still works, or that the Postgres role
 password matches `FC_CORE_DATABASE_URL`; those require an encrypted custody
 record and an isolated restore/authentication drill. Do not add values,
 fingerprints, or password-derived hashes to the public contract.
+The complete custody and operator-copy gate is
+[`../runbooks/lat1-catastrophic-recovery-copy.md`](../runbooks/lat1-catastrophic-recovery-copy.md).
 
 Finite Brain reads only `/etc/finite/identity-operator.env` and
 `/etc/finite/brain-authority.env`; the Product Client and Agent Runtime never

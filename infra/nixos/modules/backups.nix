@@ -335,6 +335,14 @@ in
       paths = [
         snapshotRoot
         identityBackupRoot
+        # Encrypted bootstrap escrow. These small, static roots make the
+        # existing off-host archive sufficient to reconstruct service
+        # credentials after total host loss. The transport key, passphrase,
+        # and exported repokey must also exist under independent operator
+        # custody; a key stored only inside its own repository is circular.
+        "/etc/finite"
+        "/etc/finite-saas"
+        borgSecretRoot
       ];
       repo = cfg.borgRepository;
       archiveBaseName = "finite-lat-1-hosted-web-chat";
