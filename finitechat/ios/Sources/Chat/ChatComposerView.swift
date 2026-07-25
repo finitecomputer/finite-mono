@@ -62,7 +62,6 @@ struct Composer: View {
         .background(Color.clear)
         .animation(.easeInOut(duration: 0.16), value: stagedAttachments.isEmpty)
         .animation(.snappy(duration: 0.18), value: showsSendButton)
-        .animation(.snappy(duration: 0.22), value: isExpanded)
     }
 
     private var composerSurface: some View {

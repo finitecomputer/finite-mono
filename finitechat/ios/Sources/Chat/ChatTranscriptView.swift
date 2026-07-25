@@ -50,11 +50,11 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
         collectionView.keyboardDismissMode = .interactive
         collectionView.delegate = context.coordinator
         collectionView.showsVerticalScrollIndicator = true
-        collectionView.onBoundsSizeChange = { [weak coordinator = context.coordinator] _ in
-            coordinator?.handleViewportGeometryChange()
+        collectionView.onBoundsSizeChange = { [weak viewController] _ in
+            viewController?.scheduleViewportGeometryChange()
         }
-        collectionView.onContentSizeChange = { [weak coordinator = context.coordinator] _ in
-            coordinator?.handleContentSizeChange()
+        collectionView.onContentSizeChange = { [weak viewController] _ in
+            viewController?.scheduleViewportGeometryChange()
         }
         let longPressGesture = UILongPressGestureRecognizer(
             target: context.coordinator,
@@ -270,10 +270,12 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
             return true
         }
 
-        func scrollToBottom(animated: Bool) {
+        func scrollToBottom(animated: Bool, forceLayout: Bool = true) {
             guard let collectionView else { return }
+            if forceLayout {
+                collectionView.layoutIfNeeded()
+            }
             applyEffectiveInsetsIfNeeded()
-            collectionView.layoutIfNeeded()
             collectionView.setContentOffset(
                 MessageCollectionLayout.bottomContentOffset(
                     contentHeight: collectionView.contentSize.height,
@@ -300,6 +302,11 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
         }
 
         func handleViewportGeometryChange() {
+            let performanceInterval = FinitePerformance.begin(
+                "Update transcript viewport",
+                warningBudgetMilliseconds: 8.33
+            )
+            defer { FinitePerformance.end(performanceInterval) }
             let wasNearBottom = isNearBottom()
             let shouldPinToBottom = MessageCollectionLayout.shouldPinToBottom(
                 isNearBottom: wasNearBottom,
@@ -325,24 +332,7 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
             }
 
             guard shouldPinToBottom else { return }
-            scrollToBottom(animated: false)
-        }
-
-        func handleContentSizeChange() {
-            _ = applyEffectiveInsetsIfNeeded()
-
-            if pendingInitialScrollPosition != nil {
-                handleViewportGeometryChange()
-                return
-            }
-
-            let shouldPinToBottom = MessageCollectionLayout.shouldPinToBottom(
-                isNearBottom: isNearBottom(),
-                followsBottom: parent.followsBottom,
-                isHoldingInitialBottomPin: isHoldingInitialBottomPin
-            )
-            guard shouldPinToBottom else { return }
-            scrollToBottom(animated: false)
+            scrollToBottom(animated: false, forceLayout: false)
         }
 
         func markInitialRowsApplied() {
@@ -597,7 +587,6 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
         @discardableResult
         private func applyEffectiveInsetsIfNeeded() -> Bool {
             guard let collectionView, let viewController else { return false }
-            collectionView.layoutIfNeeded()
 
             let topChromeInset = max(
                 0,
@@ -644,6 +633,7 @@ final class ChatTranscriptHostController: UIViewController {
     private var lastReportedBottomViewportInset: CGFloat = 0
     private var jumpButtonBottomConstraint: NSLayoutConstraint?
     private var isJumpButtonVisible = false
+    private var viewportGeometryChangeScheduled = false
 
     var onViewportGeometryChange: (() -> Void)?
     var onWillDisappear: (() -> Void)?
@@ -686,9 +676,7 @@ final class ChatTranscriptHostController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        DispatchQueue.main.async { [weak self] in
-            self?.onViewportGeometryChange?()
-        }
+        scheduleViewportGeometryChange()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -698,7 +686,7 @@ final class ChatTranscriptHostController: UIViewController {
 
     override func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
-        onViewportGeometryChange?()
+        scheduleViewportGeometryChange()
     }
 
     override func viewDidLayoutSubviews() {
@@ -707,7 +695,17 @@ final class ChatTranscriptHostController: UIViewController {
         let bottomViewportInset = self.bottomViewportInset
         guard abs(bottomViewportInset - lastReportedBottomViewportInset) > 0.5 else { return }
         lastReportedBottomViewportInset = bottomViewportInset
-        onViewportGeometryChange?()
+        scheduleViewportGeometryChange()
+    }
+
+    func scheduleViewportGeometryChange() {
+        guard !viewportGeometryChangeScheduled else { return }
+        viewportGeometryChangeScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.viewportGeometryChangeScheduled = false
+            self.onViewportGeometryChange?()
+        }
     }
 
     func setJumpButtonVisible(_ visible: Bool, animated: Bool) {
