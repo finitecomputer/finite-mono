@@ -27,7 +27,6 @@ struct Composer: View {
     var onSelectPhotos: (() -> Void)?
     var onAttach: (() -> Void)?
     var onCreatePoll: (() -> Void)?
-    @State private var keepsExpanded = false
 
     var body: some View {
         VStack(spacing: 8) {
@@ -63,39 +62,14 @@ struct Composer: View {
         .background(Color.clear)
         .animation(.easeInOut(duration: 0.16), value: stagedAttachments.isEmpty)
         .animation(.snappy(duration: 0.18), value: showsSendButton)
-        .animation(.snappy(duration: 0.22), value: isCompact)
-        .onChange(of: isInputFocused.wrappedValue) { _, isFocused in
-            if isFocused {
-                keepsExpanded = true
-            } else if canCollapse {
-                keepsExpanded = false
-            }
-        }
-        .onChange(of: canCollapse) { _, canCollapse in
-            if canCollapse, !isInputFocused.wrappedValue {
-                keepsExpanded = false
-            }
-        }
+        .animation(.snappy(duration: 0.22), value: isExpanded)
     }
 
-    @ViewBuilder
     private var composerSurface: some View {
-        if isCompact {
-            HStack(spacing: 10) {
-                attachmentControl
-                compactMessageButton
-                voiceControl
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, minHeight: 54)
-            .modifier(ChatComposerSurface(radius: surfaceRadius))
-            .transition(.opacity)
-        } else {
-            VStack(alignment: .leading, spacing: 10) {
-                messageField
+        VStack(alignment: .leading, spacing: isExpanded ? 10 : 0) {
+            messageField
 
+            if isExpanded {
                 HStack(spacing: 12) {
                     attachmentControl
                     Spacer()
@@ -105,10 +79,26 @@ struct Composer: View {
                 .foregroundStyle(.primary)
                 .padding(.horizontal, 14)
                 .padding(.bottom, 10)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-            .modifier(ChatComposerSurface(radius: surfaceRadius))
-            .transition(.opacity)
+        }
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isExpanded ? 92 : 54,
+            alignment: .topLeading
+        )
+        .modifier(ChatComposerSurface(radius: surfaceRadius))
+        .overlay {
+            if !isExpanded {
+                HStack(spacing: 10) {
+                    attachmentControl
+                    Spacer()
+                    voiceControl
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 14)
+                .transition(.opacity)
+            }
         }
     }
 
@@ -120,27 +110,19 @@ struct Composer: View {
             axis: .vertical
         )
         .textFieldStyle(.plain)
-        .lineLimit(1 ... 6)
+        .lineLimit(1 ... (isExpanded ? 6 : 1))
         .focused(isInputFocused)
         .onChange(of: text) { _, _ in
             FinitePerformance.recordComposerEdit()
         }
         .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
-        .frame(maxWidth: .infinity, minHeight: 52)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-    }
-
-    private var compactMessageButton: some View {
-        Button(action: expandAndFocus) {
-            Text(placeholder)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(placeholder)
-        .accessibilityHint("Opens the message composer")
-        .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isExpanded ? 52 : 34
+        )
+        .padding(.leading, isExpanded ? 16 : 58)
+        .padding(.trailing, isExpanded ? 16 : 58)
+        .padding(.vertical, isExpanded ? 8 : 10)
     }
 
     @ViewBuilder
@@ -248,23 +230,14 @@ struct Composer: View {
         !stagedAttachments.isEmpty || canSubmit
     }
 
-    private var isCompact: Bool {
-        collapsesWhenIdle
-            && !keepsExpanded
-            && !isInputFocused.wrappedValue
-            && canCollapse
-    }
-
-    private var canCollapse: Bool {
-        text.isEmpty && replyTarget == nil && stagedAttachments.isEmpty
-    }
-
-    private func expandAndFocus() {
-        keepsExpanded = true
-        Task { @MainActor in
-            await Task.yield()
-            isInputFocused.wrappedValue = true
-        }
+    private var isExpanded: Bool {
+        ComposerPresentation.isExpanded(
+            collapsesWhenIdle: collapsesWhenIdle,
+            isFocused: isInputFocused.wrappedValue,
+            hasText: !text.isEmpty,
+            hasReply: replyTarget != nil,
+            hasAttachments: !stagedAttachments.isEmpty
+        )
     }
 
     private var remainingPhotoSelectionCount: Int {
@@ -444,6 +417,18 @@ struct NewChatComposer: View {
 
 enum ComposerAccessibility {
     static let messageField = "ComposerMessageField"
+}
+
+enum ComposerPresentation {
+    static func isExpanded(
+        collapsesWhenIdle: Bool,
+        isFocused: Bool,
+        hasText: Bool,
+        hasReply: Bool,
+        hasAttachments: Bool
+    ) -> Bool {
+        !collapsesWhenIdle || isFocused || hasText || hasReply || hasAttachments
+    }
 }
 
 private struct ChatComposerSurface: ViewModifier {

@@ -4143,6 +4143,53 @@ final class ChatComposerAccessibilityTests: XCTestCase {
     }
 }
 
+final class ComposerPresentationTests: XCTestCase {
+    func testIdleRoomComposerCollapses() {
+        XCTAssertFalse(
+            ComposerPresentation.isExpanded(
+                collapsesWhenIdle: true,
+                isFocused: false,
+                hasText: false,
+                hasReply: false,
+                hasAttachments: false
+            )
+        )
+    }
+
+    func testComposerExpandsForEveryMeaningfulInteractionState() {
+        let expandedStates = [
+            (isFocused: true, hasText: false, hasReply: false, hasAttachments: false),
+            (isFocused: false, hasText: true, hasReply: false, hasAttachments: false),
+            (isFocused: false, hasText: false, hasReply: true, hasAttachments: false),
+            (isFocused: false, hasText: false, hasReply: false, hasAttachments: true),
+        ]
+
+        for state in expandedStates {
+            XCTAssertTrue(
+                ComposerPresentation.isExpanded(
+                    collapsesWhenIdle: true,
+                    isFocused: state.isFocused,
+                    hasText: state.hasText,
+                    hasReply: state.hasReply,
+                    hasAttachments: state.hasAttachments
+                )
+            )
+        }
+    }
+
+    func testHomeComposerNeverCollapses() {
+        XCTAssertTrue(
+            ComposerPresentation.isExpanded(
+                collapsesWhenIdle: false,
+                isFocused: false,
+                hasText: false,
+                hasReply: false,
+                hasAttachments: false
+            )
+        )
+    }
+}
+
 final class StagedComposerAttachmentTests: XCTestCase {
     func testFileURLStagesOutboundAttachmentMetadataAndBytes() throws {
         let directory = try temporaryDirectory()
