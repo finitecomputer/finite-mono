@@ -21,12 +21,22 @@ name is not authority to select a Runtime.
   machine. Capture its Runtime ID, durable state ID, artifact, state schema,
   and Agent Principal (`npub`).
 - The target Runner uses a different `source_host_id`, supports the same
-  artifact/schema, has enough space, and has no compute or durable directory
-  for this Runtime.
+  artifact/schema, advertises the same persisted Runtime capabilities, has
+  enough space, and has no compute or durable directory for this Runtime.
+  In particular, a Runtime with `runtime_retirement=true` may move only to a
+  Runner with its dedicated restricted retirement Borg recovery set configured
+  and tested. Do not silently downgrade the persisted capability or copy a
+  broad host-backup credential to satisfy this check.
+- Name the recovery boundary for writes made after the move. A bounded canary
+  drill may use the stopped source archive plus a clearly labelled
+  post-relocation best-effort archive. Before normal use, the target must have
+  scheduled off-host coverage for its canonical durable root.
 - There are no pending/running controls or retirement snapshot for the Runtime.
 - The normal typed `stop` request has succeeded. Do not substitute
   `nerdctl stop`; Core must also record the Runtime offline.
-- Both Runner timers are drained while staging and reviewing the request.
+- Both Runner timers are drained while staging and reviewing the request, and
+  no untargeted ordinary creation request is claimable before the target
+  Runner is allowed one lease attempt.
 
 Abort on any mismatch. Do not delete, rename, or modify source state as part of
 this procedure.
@@ -134,7 +144,7 @@ The target Runner fails closed unless:
 - RuntimeSpec, Runtime ID, durable state ID, machine name, and target path all
   agree;
 - the staged tree still matches the approved manifest;
-- `agent/identity.json` is a regular file;
+- `agent/identity/identity.json` is a regular file;
 - target compute is absent before launch; and
 - the launched `/contact` endpoint exposes `EXPECTED_AGENT_NPUB`.
 
@@ -153,6 +163,10 @@ state is never used as the secret transport.
   for the canary are present.
 - Source compute remains stopped and source durable state still exists.
 - No source Runner work was allowed to restart the old binding.
+- The target Runner is still drained after its bounded lease attempt.
+- The target has a named recovery archive for post-relocation writes, or the
+  canary remains inside the explicitly bounded observation window while
+  scheduled off-host coverage is completed.
 
 Observe the canary before broad use. Record request ID, both manifests, exact
 source/target bindings, Borg archive name, timestamps, and verification result;
@@ -160,9 +174,13 @@ record no secret values.
 
 ## ROLLBACK
 
-Before Core switches the binding, a failed request removes only target compute;
-it preserves the existing Core Runtime/link and both durable trees. Fix or
-discard the target staging directory only after diagnosing the failure.
+Before Core switches the binding, a failed request must remove target compute;
+it preserves the existing Core Runtime/link and both durable trees. Verify
+compute is actually absent rather than assuming cleanup succeeded. A booted
+target may have changed the staged manifest even when Core rejected the final
+registration. Preserve that tree under a request-specific, non-canonical name,
+then restage the absent canonical path from the stopped source only after
+diagnosing the failure.
 
 After Core switches the binding, do not manually start source compute: that
 would create two writers. Stop the target through Core first. A reverse
