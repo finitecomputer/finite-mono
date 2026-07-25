@@ -10,6 +10,11 @@ import {
   SquareIcon,
 } from "lucide-react";
 
+import {
+  FiniteLoader,
+  type FiniteLoaderVariant,
+} from "@/components/finite-loader";
+import { Button } from "@/components/ui/button";
 import { CONTROL_PRIMITIVES, OCEAN_TOKENS, SHADCN_TOKENS } from "@/lib/design-tokens";
 import { statusBadgeToneClass, type StatusBadgeState } from "@/lib/status-badge-tone";
 import { cn } from "@/lib/utils";
@@ -17,6 +22,21 @@ import { cn } from "@/lib/utils";
 import { StickerBlock, StickerRow } from "./sticker-sheet-section";
 
 const STATUS_SAMPLES: StatusBadgeState[] = ["pending", "in_progress", "complete", "blocked"];
+const LOADER_VARIANTS: { label: string; value: FiniteLoaderVariant }[] = [
+  { label: "Lines top → bottom", value: "line-cycle" },
+  { label: "Wipe left → right", value: "wipe-right" },
+  { label: "Grow from middle", value: "grow-middle" },
+  { label: "Slide up", value: "rise" },
+  { label: "Slide left", value: "left" },
+  { label: "Slide right", value: "right" },
+  { label: "Alternating slide", value: "split" },
+  { label: "Lights up", value: "scan-up" },
+  { label: "Lights down", value: "scan-down" },
+  { label: "Center out", value: "center-out" },
+  { label: "Edges in", value: "edges-in" },
+  { label: "Odd / even", value: "alternate" },
+  { label: "Signal", value: "signal" },
+];
 
 function TokenSwatches({ tokens }: { tokens: typeof OCEAN_TOKENS }) {
   return (
@@ -63,6 +83,32 @@ export function StickerSheetDesignSystem() {
               {status.replace("_", " ")}
             </span>
           ))}
+        </StickerRow>
+      </StickerBlock>
+
+      <StickerBlock title="Finite loading sequences">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {LOADER_VARIANTS.map((variant) => (
+            <div
+              className="flex min-h-40 flex-col items-center justify-center gap-4 rounded-xl border border-border bg-card p-5"
+              key={variant.value}
+            >
+              <FiniteLoader
+                label={`${variant.label} loading animation`}
+                size={76}
+                variant={variant.value}
+              />
+              <span className="type-caption text-muted-foreground">{variant.label}</span>
+            </div>
+          ))}
+        </div>
+      </StickerBlock>
+
+      <StickerBlock title="Application button sizes">
+        <StickerRow>
+          <Button size="default">Default</Button>
+          <Button size="lg">Large</Button>
+          <Button size="xl">Extra large</Button>
         </StickerRow>
       </StickerBlock>
 

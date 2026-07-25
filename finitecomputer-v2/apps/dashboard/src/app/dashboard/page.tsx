@@ -7,7 +7,6 @@ import {
   BanIcon,
   CreditCardIcon,
   KeyRoundIcon,
-  Loader2Icon,
   MessageSquareIcon,
   PlusIcon,
   RotateCcwIcon,
@@ -25,14 +24,17 @@ import {
   revokeFinitePrivateGrantAction,
   rotateFinitePrivateApiKeyAction,
 } from "@/app/actions";
+import { AgentOnboardingStageSync } from "@/components/agent-onboarding-progress";
 import { CoreAgentCreationForm } from "@/components/core-agent-creation-form";
 import { AgentHeroCard } from "@/components/agent-hero-card";
+import { FiniteLoader } from "@/components/finite-loader";
 import { FormActionButton } from "@/components/form-action-button";
 import {
   FinitePrivateUsagePanel,
   FinitePrivateUsageUnavailablePanel,
 } from "@/components/finite-private-usage-panel";
 import { PendingRefresh } from "@/components/pending-refresh";
+import { StatusPrism } from "@/components/status-prism";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -156,20 +158,18 @@ export default async function DashboardPage({
     const trackedCreationRequest = trackedCreationRequestId
       ? agentCreationRequests.find((request) => request.id === trackedCreationRequestId) ?? null
       : null;
-    const trackedProjectHref = trackedCreationRequest
+    const trackedProject = trackedCreationRequest
       ? coreProjects
-          .filter((project) => project.project.id === trackedCreationRequest.project_id)
-          .map((project) => coreProjectOverviewHref(project))
-          .find((href): href is string => Boolean(href)) ?? null
+          .find((project) => project.project.id === trackedCreationRequest.project_id) ?? null
       : null;
-
-    if (
+    const trackedProjectHref = trackedProject
+      ? coreProjectOverviewHref(trackedProject)
+      : null;
+    const showAgentReady = Boolean(
       isNewAgentFlow &&
       trackedCreationRequest?.status === "running" &&
       trackedProjectHref
-    ) {
-      redirect(trackedProjectHref);
-    }
+    );
 
     const pendingAgentCreationRequests =
       trackedCreationRequest?.status === "running" && !trackedProjectHref
@@ -217,6 +217,7 @@ export default async function DashboardPage({
       Boolean(core.account.email) &&
       (coreProjects.length === 0 || isNewAgentFlow) &&
       !billingSyncPending &&
+      !showAgentReady &&
       (creationAuthorizationRetry ||
         (pendingAgentCreationRequests.length === 0 &&
           failedAgentCreationRequests.length === 0));
@@ -236,12 +237,28 @@ export default async function DashboardPage({
       pendingAgentCreationRequests.length === 0 &&
       failedAgentCreationRequests.length === 0 &&
       !showCreateAgent &&
+      !showAgentReady &&
       !showBillingSyncState;
 
     return (
-      <div className="ocean-page-stack">
+      <div
+        className={
+          isNewAgentFlow
+            ? "ocean-page-stack w-full max-w-3xl"
+            : "ocean-page-stack"
+        }
+      >
         <PendingRefresh enabled={hasPendingAgentCreation} />
-        {isNewAgentFlow && returnAgentHref && returnAgentLabel ? (
+        {showAgentReady && trackedProjectHref && trackedCreationRequest ? (
+          <CoreAgentReadyPanel
+            chatHref={`${trackedProjectHref}/chat`}
+            name={trackedCreationRequest.display_name}
+          />
+        ) : null}
+        {isNewAgentFlow &&
+        !showAgentReady &&
+        returnAgentHref &&
+        returnAgentLabel ? (
           <ExistingAgentReturnPanel
             label={returnAgentLabel}
             overviewHref={returnAgentHref}
@@ -287,6 +304,7 @@ export default async function DashboardPage({
             allowConfidentialHosting={viewer.isAdmin}
             error={agentCreationError}
             draft={draft}
+            immersive={isNewAgentFlow}
             returnMachineId={returnProject?.runtime?.id ?? null}
             requiresAccess={agentCreationRequiresAccess({
               runtimeMode: process.env.FC_DASHBOARD_RUNTIME_MODE,
@@ -379,6 +397,38 @@ function AccountBillingPanel({
           </form>
         ) : null}
       </div>
+    </section>
+  );
+}
+
+function CoreAgentReadyPanel({
+  chatHref,
+  name,
+}: {
+  chatHref: string;
+  name: string;
+}) {
+  return (
+    <section
+      className="grid min-h-[32rem] w-full justify-items-center gap-7 text-center"
+      aria-labelledby="agent-ready-title"
+    >
+      <AgentOnboardingStageSync stage="ready" />
+      <StatusPrism state="happy" className="cursor-default" />
+      <div className="grid gap-2">
+        <h1
+          id="agent-ready-title"
+          className="font-sans text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl"
+        >
+          {name} is online.
+        </h1>
+        <p className="type-body-lg text-muted-foreground">
+          Go introduce yourself to your new Finite Agent.
+        </p>
+      </div>
+      <Button asChild size="xl">
+        <a href={chatHref}>Meet {name}</a>
+      </Button>
     </section>
   );
 }
@@ -817,7 +867,7 @@ function CoreAgentCreationStatusPanel({
   return (
     <section className="ocean-utility-card">
       <div className="ocean-agent-spinup" role="status" aria-live="polite">
-        <Loader2Icon className="size-5 animate-spin" aria-hidden />
+        <FiniteLoader label={title} size={38} variant="center-out" />
         <div>
           <strong>{title}</strong>
           <span>{description}</span>
@@ -885,16 +935,36 @@ function CoreAgentCreationPanel({
   allowConfidentialHosting,
   error,
   draft,
+  immersive,
   returnMachineId,
   requiresAccess,
 }: {
   allowConfidentialHosting: boolean;
   error: string | null;
   draft: AgentOnboardingDraft | null;
+  immersive: boolean;
   returnMachineId: string | null;
   requiresAccess: boolean;
 }) {
   const idempotencyKey = randomUUID();
+  const form = (
+    <CoreAgentCreationForm
+      allowConfidentialHosting={allowConfidentialHosting}
+      error={error}
+      idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
+      immersive={immersive}
+      initialName={draft?.displayName}
+      initialPictureUrl={draft?.profilePictureUrl}
+      initialHostingTier={draft?.hostingTier}
+      returnMachineId={returnMachineId}
+      requiresAccess={requiresAccess}
+      stripeConfigured={stripeCheckoutAvailable()}
+    />
+  );
+
+  if (immersive) {
+    return form;
+  }
 
   return (
     <section className="ocean-utility-card">
@@ -909,18 +979,7 @@ function CoreAgentCreationPanel({
           </p>
         </div>
       </div>
-
-      <CoreAgentCreationForm
-        allowConfidentialHosting={allowConfidentialHosting}
-        error={error}
-        idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
-        initialName={draft?.displayName}
-        initialPictureUrl={draft?.profilePictureUrl}
-        initialHostingTier={draft?.hostingTier}
-        returnMachineId={returnMachineId}
-        requiresAccess={requiresAccess}
-        stripeConfigured={stripeCheckoutAvailable()}
-      />
+      {form}
     </section>
   );
 }
@@ -935,7 +994,11 @@ function BillingSyncWaitPanel({ deadlineAtMs }: { deadlineAtMs: number }) {
         deadlineAtMs={deadlineAtMs}
       />
       <div className="ocean-agent-spinup" role="status" aria-live="polite">
-        <Loader2Icon className="size-5 animate-spin" aria-hidden />
+        <FiniteLoader
+          label="Confirming your payment"
+          size={38}
+          variant="center-out"
+        />
         <div>
           <strong>Confirming your payment</strong>
           <span>
