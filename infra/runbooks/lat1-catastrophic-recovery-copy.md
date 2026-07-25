@@ -61,12 +61,16 @@ values, fingerprints, or password-derived hashes.
 As of the 2026-07-25 read-only audit, the operator Mac has mode-0600 copies of
 the lat1 Borg passphrase and exported repokey. The operator then proved an
 interactive, password-authenticated SSH login from the Mac to the rsync.net
-account and listed the account root containing the `finitecomputer` directory.
-That closes independent transport access. The Mac's ordinary SSH identities
-still cannot authenticate and no independent local copy of the noninteractive
+account and listed both the account root and the exact
+`finitecomputer/finite-lat-1` Borg repository structure (`config`, `data`,
+`index`, `integrity`, `nonce`, and `transactions`). That closes independent
+transport and repository-file access. The Mac's ordinary SSH identities still
+cannot authenticate and no independent local copy of the noninteractive
 repository transport key has been proved. A Borg repository listing using the
-independently held passphrase and repokey, followed by an empty-target restore,
-remain separate recovery proofs.
+independently held passphrase, followed by an empty-target restore, remain
+separate cryptographic and recovery proofs. The exported repokey is the
+break-glass key recovery copy, not a prerequisite for an ordinary list while
+the repository's encrypted key material is intact.
 
 ## Pre-RAID creation gate
 
