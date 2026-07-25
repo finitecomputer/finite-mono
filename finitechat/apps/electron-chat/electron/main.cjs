@@ -11,6 +11,7 @@ const {
   session,
   shell,
   systemPreferences,
+  WebContentsView,
 } = require("electron");
 const {
   attachmentActionUsesBinaryTransport,
@@ -51,6 +52,12 @@ const {
   startDaemonRuntime,
   validDeviceId,
 } = require("./daemon-process.cjs");
+const {
+  fullBleedWindowOptions,
+  hiddenElectronDashboardBrandCss,
+  navigationActionForUrl,
+  navigationToolbarBounds,
+} = require("./window-chrome.cjs");
 
 let mainWindow = null;
 let authWindow = null;
@@ -110,6 +117,7 @@ protocol.registerSchemesAsPrivileged([
 
 function commonWindowOptions() {
   return {
+    ...fullBleedWindowOptions(),
     width: 1280,
     height: 860,
     minWidth: 900,
@@ -118,6 +126,84 @@ function commonWindowOptions() {
     show: false,
     title: "Finite",
   };
+}
+
+function installNavigationToolbar(window) {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  const toolbar = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  toolbar.setBackgroundColor("#00000000");
+  window.contentView.addChildView(toolbar);
+
+  const layout = () => {
+    if (!window.isDestroyed()) {
+      toolbar.setBounds(navigationToolbarBounds(window.getContentBounds()));
+    }
+  };
+  const update = () => {
+    if (window.isDestroyed() || toolbar.webContents.isDestroyed()) {
+      return;
+    }
+    const history = window.webContents.navigationHistory;
+    const state = {
+      canGoBack: history.canGoBack(),
+      canGoForward: history.canGoForward(),
+    };
+    void toolbar.webContents
+      .executeJavaScript(`globalThis.setNavigationState?.(${JSON.stringify(state)})`)
+      .catch(() => {
+        // The toolbar may close between the navigation event and this update.
+      });
+  };
+  const navigate = (action) => {
+    const history = window.webContents.navigationHistory;
+    if (action === "back" && history.canGoBack()) {
+      history.goBack();
+    } else if (action === "forward" && history.canGoForward()) {
+      history.goForward();
+    }
+  };
+
+  toolbar.webContents.on("will-navigate", (event) => {
+    event.preventDefault();
+    const action = navigationActionForUrl(event.url);
+    if (action) {
+      navigate(action);
+    }
+  });
+  toolbar.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  toolbar.webContents.on("did-finish-load", update);
+  window.webContents.on("did-navigate", update);
+  window.webContents.on("did-navigate-in-page", update);
+  window.webContents.on("did-stop-loading", update);
+  window.on("resize", layout);
+  window.on("closed", () => {
+    if (!toolbar.webContents.isDestroyed()) {
+      toolbar.webContents.close();
+    }
+  });
+
+  layout();
+  void toolbar.webContents.loadFile(path.join(__dirname, "navigation-toolbar.html"));
+}
+
+function hideDashboardWordmark(window) {
+  const apply = () => {
+    if (!window.isDestroyed()) {
+      void window.webContents.insertCSS(hiddenElectronDashboardBrandCss).catch(() => {
+        // Navigation or shutdown may dispose the renderer before CSS is installed.
+      });
+    }
+  };
+  window.webContents.on("dom-ready", apply);
 }
 
 function showWindowWhenReady(window) {
@@ -173,6 +259,7 @@ function createDashboardWindow(targetUrl = dashboardStartUrl) {
       webSecurity: true,
     },
   });
+  hideDashboardWordmark(mainWindow);
 
   showWindowWhenReady(mainWindow);
   mainWindow.on("closed", () => {
@@ -258,6 +345,7 @@ function createAuthWindow(targetUrl = dashboardStartUrl) {
       webSecurity: true,
     },
   });
+  installNavigationToolbar(authWindow);
   showWindowWhenReady(authWindow);
   authWindow.on("closed", () => {
     authWindow = null;
