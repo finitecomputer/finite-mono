@@ -3109,10 +3109,10 @@ impl AppRuntimeState {
                 reason: format!("room '{room_id}' is not ready to create topics"),
             });
         }
+        let title = normalize_bounded_non_empty_string("topic title", &title, MAX_OBJECT_ID_BYTES)?;
         let topic_id = self.core.generate_object_id("topic")?;
-        let trimmed = title.trim();
         let metadata = ConversationMetadataV1 {
-            title: (!trimmed.is_empty()).then(|| trimmed.to_owned()),
+            title: Some(title),
             description: None,
             external_topic: None,
             skill_binding: None,
@@ -9007,6 +9007,7 @@ enum DeviceLinkFoundationKey {
     TopicArchive(String),
     TopicLatestSegment(String),
     TopicLatestMessage(String),
+    ChatRename(String, String),
 }
 
 impl DeviceLinkFoundationKey {
@@ -9057,6 +9058,7 @@ fn device_link_bootstrap_history_candidates(
             DeviceLinkFoundationKey::TopicLatestSegment(topic_id) => (topic_id, 1),
             DeviceLinkFoundationKey::TopicLatestMessage(topic_id) => (topic_id, 2),
             DeviceLinkFoundationKey::TopicArchive(topic_id) => (topic_id, 3),
+            DeviceLinkFoundationKey::ChatRename(_, _) => continue,
             DeviceLinkFoundationKey::SelectedTopicMetadata
             | DeviceLinkFoundationKey::SelectedChatSegment
             | DeviceLinkFoundationKey::SelectedChatRename
@@ -9117,6 +9119,14 @@ fn device_link_bootstrap_history_candidates(
         .collect::<Vec<_>>();
     sort_events_newest_first(&mut latest_segments);
 
+    let mut latest_chat_renames = foundations
+        .iter()
+        .filter_map(|(key, event)| {
+            matches!(key, DeviceLinkFoundationKey::ChatRename(_, _)).then_some(*event)
+        })
+        .collect::<Vec<_>>();
+    sort_events_newest_first(&mut latest_chat_renames);
+
     let mut foundation_ids = BTreeSet::new();
     let mut candidates = Vec::new();
     for event in selected
@@ -9124,6 +9134,7 @@ fn device_link_bootstrap_history_candidates(
         .chain(topic_representatives)
         .chain(current_archives)
         .chain(latest_segments)
+        .chain(latest_chat_renames)
     {
         if foundation_ids.insert(event.message_id.clone()) {
             candidates.push(event.clone());
@@ -9213,13 +9224,26 @@ fn device_link_foundation_keys(
         }
         DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_CHAT_RENAME_EVENT_V1
-                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING
-                && selection.is_some_and(|selection| {
-                    selected_topic
-                        && app_event.segment_id.as_deref() == Some(selection.chat_id.as_str())
-                }) =>
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
         {
-            keys.push(DeviceLinkFoundationKey::SelectedChatRename);
+            if let Ok(rename) = serde_json::from_slice::<ChatRenameV1>(&app_event.payload) {
+                if app_event.conversation_id.as_deref() != Some(rename.topic_id.as_str())
+                    || app_event.segment_id.as_deref() != Some(rename.chat_id.as_str())
+                {
+                    return keys;
+                }
+                keys.push(DeviceLinkFoundationKey::ChatRename(
+                    rename.topic_id.clone(),
+                    rename.chat_id.clone(),
+                ));
+                if selection.is_some_and(|selection| {
+                    selected_topic
+                        && rename.topic_id == selection.topic_id
+                        && rename.chat_id == selection.chat_id
+                }) {
+                    keys.push(DeviceLinkFoundationKey::SelectedChatRename);
+                }
+            }
         }
         _ => {}
     }
@@ -10335,7 +10359,7 @@ impl ChatProjectionState {
         let should_replace = self
             .chat_titles
             .get(&key)
-            .is_none_or(|existing| accepted_seq >= existing.accepted_seq);
+            .is_none_or(|existing| accepted_seq > existing.accepted_seq);
         if should_replace {
             self.chat_titles.insert(
                 key,
@@ -10372,7 +10396,7 @@ impl ChatProjectionState {
                         ChatArchiveProjectionSource::CanonicalEvent,
                         ChatArchiveProjectionSource::CacheFallback,
                     ) => false,
-                    _ => accepted_seq >= existing.accepted_seq,
+                    _ => accepted_seq > existing.accepted_seq,
                 });
         if should_replace {
             self.chat_archives.insert(
@@ -11572,6 +11596,23 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
+    fn next_permutation(values: &mut [usize]) -> bool {
+        let Some(pivot) = (1..values.len())
+            .rev()
+            .find(|&index| values[index - 1] < values[index])
+            .map(|index| index - 1)
+        else {
+            return false;
+        };
+        let successor = (pivot + 1..values.len())
+            .rev()
+            .find(|&index| values[pivot] < values[index])
+            .expect("a permutation pivot always has a successor");
+        values.swap(pivot, successor);
+        values[pivot + 1..].reverse();
+        true
+    }
+
     #[test]
     fn device_link_bootstrap_reserves_foundations_for_topics_outside_busy_home() {
         let sender = DeviceRef {
@@ -11637,6 +11678,25 @@ mod tests {
             ),
             stored(
                 4,
+                "other-chat-rename",
+                encode_application_event_with_segment(
+                    DurableAppEventKind::Namespaced {
+                        name: FINITECHAT_CHAT_RENAME_EVENT_V1.to_owned(),
+                        policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
+                    },
+                    Some("other-topic".to_owned()),
+                    Some("other-chat".to_owned()),
+                    &serde_json::to_vec(&ChatRenameV1 {
+                        topic_id: "other-topic".to_owned(),
+                        chat_id: "other-chat".to_owned(),
+                        title: "Named other chat".to_owned(),
+                    })
+                    .unwrap(),
+                )
+                .unwrap(),
+            ),
+            stored(
+                5,
                 "home-topic-create",
                 encode_application_event(
                     DurableAppEventKind::ConversationCreate,
@@ -11646,7 +11706,7 @@ mod tests {
                 .unwrap(),
             ),
             stored(
-                5,
+                6,
                 "home-selected-segment",
                 encode_application_event(
                     DurableAppEventKind::ConversationSegmentStart,
@@ -11661,7 +11721,7 @@ mod tests {
             ),
         ];
         events.extend((0..70).map(|index| {
-            let seq = 6 + index;
+            let seq = 7 + index;
             stored(
                 seq,
                 &format!("home-message-{index}"),
@@ -11685,6 +11745,7 @@ mod tests {
         assert!(bounded.contains("home-selected-segment"));
         assert!(bounded.contains("other-topic-create"));
         assert!(bounded.contains("other-topic-segment"));
+        assert!(bounded.contains("other-chat-rename"));
         assert!(
             !bounded.contains("other-topic-message"),
             "topic coverage should reserve structure before spending the bound on transcript fill"
@@ -12597,6 +12658,73 @@ mod tests {
     }
 
     #[test]
+    fn topic_and_named_chat_mutations_reject_invalid_inputs_without_projection_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let app = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "alice-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let before = app
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Mutation Guard Room".to_owned(),
+            })
+            .unwrap();
+        let room_id = before.selected_room_id.clone().unwrap();
+        let home_chat_id = before.selected_chat_id.clone().unwrap();
+
+        let empty_topic = app
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "   ".to_owned(),
+            })
+            .expect_err("empty topic titles must fail before generating durable state");
+        assert!(
+            empty_topic
+                .to_string()
+                .contains("topic title must not be empty")
+        );
+
+        app.dispatch_and_wait(AppAction::StartTopicChat {
+            room_id: room_id.clone(),
+            topic_id: "missing-topic".to_owned(),
+            reason: None,
+        })
+        .expect_err("a chat cannot be started under a missing topic");
+        app.dispatch_and_wait(AppAction::RenameChat {
+            room_id: room_id.clone(),
+            topic_id: HOME_TOPIC_ID.to_owned(),
+            chat_id: "missing-chat".to_owned(),
+            title: "Impossible rename".to_owned(),
+        })
+        .expect_err("a missing chat cannot acquire projection metadata");
+        app.dispatch_and_wait(AppAction::SetChatArchived {
+            room_id: room_id.clone(),
+            topic_id: HOME_TOPIC_ID.to_owned(),
+            chat_id: "missing-chat".to_owned(),
+            archived: true,
+        })
+        .expect_err("a missing chat cannot acquire archive metadata");
+        app.dispatch_and_wait(AppAction::RenameChat {
+            room_id: room_id.clone(),
+            topic_id: HOME_TOPIC_ID.to_owned(),
+            chat_id: home_chat_id,
+            title: "   ".to_owned(),
+        })
+        .expect_err("empty chat titles are rejected");
+
+        let after = app.state().unwrap();
+        assert_eq!(after.topics, before.topics);
+        assert_eq!(after.selected_room_id, before.selected_room_id);
+        assert_eq!(after.selected_topic_id, before.selected_topic_id);
+        assert_eq!(after.selected_chat_id, before.selected_chat_id);
+    }
+
+    #[test]
     fn app_runtime_chat_rename_replays_and_syncs_to_another_device() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
@@ -12789,6 +12917,112 @@ mod tests {
         let after_confused_cache = projection.stored_chat_archives();
         assert_eq!(after_confused_cache[0].accepted_seq, 40);
         assert!(!after_confused_cache[0].archived);
+    }
+
+    #[test]
+    fn named_chat_rename_and_archive_converge_across_every_observation_order() {
+        #[derive(Clone, Copy)]
+        enum Operation {
+            Rename {
+                accepted_seq: u64,
+                title: &'static str,
+            },
+            Archive {
+                accepted_seq: u64,
+                archived: bool,
+            },
+        }
+
+        let operations = [
+            Operation::Rename {
+                accepted_seq: 10,
+                title: "Initial name",
+            },
+            Operation::Archive {
+                accepted_seq: 15,
+                archived: true,
+            },
+            Operation::Rename {
+                accepted_seq: 20,
+                title: "Canonical name",
+            },
+            Operation::Archive {
+                accepted_seq: 25,
+                archived: false,
+            },
+        ];
+        let mut order = [0, 1, 2, 3];
+        let mut checked = 0_u32;
+
+        loop {
+            let mut projection = ChatProjectionState::default();
+            for index in order {
+                let operation = operations[index];
+                for _ in 0..2 {
+                    match operation {
+                        Operation::Rename {
+                            accepted_seq,
+                            title,
+                        } => projection.apply_chat_rename(
+                            "room-main",
+                            accepted_seq,
+                            ChatRenameV1 {
+                                topic_id: "topic-main".to_owned(),
+                                chat_id: "chat-main".to_owned(),
+                                title: title.to_owned(),
+                            },
+                        ),
+                        Operation::Archive {
+                            accepted_seq,
+                            archived,
+                        } => {
+                            let _ = projection.apply_chat_archive(
+                                "room-main",
+                                accepted_seq,
+                                ChatArchiveV1 {
+                                    topic_id: "topic-main".to_owned(),
+                                    chat_id: "chat-main".to_owned(),
+                                    archived,
+                                },
+                                ChatArchiveProjectionSource::CanonicalEvent,
+                            );
+                        }
+                    }
+                }
+            }
+
+            let title = projection
+                .chat_titles
+                .get(&(
+                    "room-main".to_owned(),
+                    "topic-main".to_owned(),
+                    "chat-main".to_owned(),
+                ))
+                .expect("latest title is retained");
+            assert_eq!(title.accepted_seq, 20, "observation order {order:?}");
+            assert_eq!(title.title, "Canonical name", "observation order {order:?}");
+            let archive = projection
+                .chat_archives
+                .get(&(
+                    "room-main".to_owned(),
+                    "topic-main".to_owned(),
+                    "chat-main".to_owned(),
+                ))
+                .expect("latest archive state is retained");
+            assert_eq!(archive.accepted_seq, 25, "observation order {order:?}");
+            assert!(!archive.archived, "observation order {order:?}");
+            assert_eq!(
+                archive.source,
+                ChatArchiveProjectionSource::CanonicalEvent,
+                "observation order {order:?}"
+            );
+            checked += 1;
+            if !next_permutation(&mut order) {
+                break;
+            }
+        }
+
+        assert_eq!(checked, 24);
     }
 
     #[test]
@@ -13018,6 +13252,231 @@ mod tests {
                 .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
                 .is_some_and(|chat| !chat.archived),
             "cold replay must recover the latest archive state without a live server"
+        );
+    }
+
+    #[test]
+    fn late_same_account_device_converges_topics_named_chats_and_archives_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let hosted = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("hosted").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let agent = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let created = hosted
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Convergence Room".to_owned(),
+            })
+            .unwrap();
+        let room_id = created.selected_room_id.unwrap();
+        add_runtime_member_named(&hosted, &agent, &room_id, "Agent");
+
+        let build = hosted
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Build".to_owned(),
+            })
+            .unwrap();
+        let build_topic_id = build.selected_topic_id.unwrap();
+        let first_build_chat_id = build.selected_chat_id.unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::SendChatMessage {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                text: "First build context".to_owned(),
+            })
+            .unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::RenameChat {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                title: "Pinned build chat".to_owned(),
+            })
+            .unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::SetChatArchived {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                archived: true,
+            })
+            .unwrap();
+
+        let second_build = hosted
+            .dispatch_and_wait(AppAction::StartTopicChat {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                reason: Some("new_context".to_owned()),
+            })
+            .unwrap();
+        let second_build_chat_id = second_build.selected_chat_id.unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::SendChatMessage {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: second_build_chat_id.clone(),
+                text: "Second build context".to_owned(),
+            })
+            .unwrap();
+
+        let operations = hosted
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Operations".to_owned(),
+            })
+            .unwrap();
+        let operations_topic_id = operations.selected_topic_id.unwrap();
+        let operations_chat_id = operations.selected_chat_id.unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::RenameChat {
+                room_id: room_id.clone(),
+                topic_id: operations_topic_id.clone(),
+                chat_id: operations_chat_id.clone(),
+                title: "Production operations".to_owned(),
+            })
+            .unwrap();
+
+        let hosted_identity = hosted.state().unwrap().identity;
+        let account_secret_hex = hosted_identity.account_secret_hex;
+        let linked_dir = dir.path().join("linked-ios");
+        let linked = FiniteChatRuntime::open(OpenOptions {
+            data_dir: linked_dir.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "linked-ios".to_owned(),
+            account_secret_hex: Some(account_secret_hex.clone()),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        linked
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("late Device publishes KeyPackages");
+        hosted
+            .link_device_and_wait("topic-hardening-link".to_owned(), "linked-ios".to_owned())
+            .expect("same-account Device fanout succeeds");
+        let linked_state = linked
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("late Device activates and imports its bounded bootstrap");
+
+        let linked_build = linked_state
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == build_topic_id)
+            .expect("late Device receives the Build topic");
+        assert_eq!(linked_build.title, "Build");
+        assert_eq!(linked_build.chats.len(), 2);
+        let linked_first_build = linked_build
+            .chats
+            .iter()
+            .find(|chat| chat.chat_id == first_build_chat_id)
+            .expect("late Device receives the first Build chat");
+        assert_eq!(linked_first_build.title, "Pinned build chat");
+        assert!(linked_first_build.archived);
+        assert!(
+            linked_build
+                .chats
+                .iter()
+                .any(|chat| chat.chat_id == second_build_chat_id),
+            "late Device receives the newer Build chat boundary"
+        );
+        let linked_operations = linked_state
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == operations_topic_id)
+            .expect("late Device receives the Operations topic");
+        assert_eq!(linked_operations.title, "Operations");
+        assert!(linked_operations.chats.iter().any(
+            |chat| chat.chat_id == operations_chat_id && chat.title == "Production operations"
+        ));
+
+        linked
+            .dispatch_and_wait(AppAction::SetChatArchived {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                archived: false,
+            })
+            .unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::RenameChat {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                title: "Final build chat".to_owned(),
+            })
+            .unwrap();
+
+        let hosted_converged = hosted.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        let linked_converged = linked.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        let agent_converged = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        for (device, state) in [
+            ("hosted", &hosted_converged),
+            ("linked", &linked_converged),
+            ("agent", &agent_converged),
+        ] {
+            let chat = state
+                .topics
+                .iter()
+                .find(|topic| topic.topic_id == build_topic_id)
+                .and_then(|topic| {
+                    topic
+                        .chats
+                        .iter()
+                        .find(|chat| chat.chat_id == first_build_chat_id)
+                })
+                .unwrap_or_else(|| panic!("{device} must retain the first Build chat"));
+            assert_eq!(chat.title, "Final build chat", "{device} title");
+            assert!(!chat.archived, "{device} archive state");
+        }
+
+        drop(linked);
+        let reopened = FiniteChatRuntime::open(OpenOptions {
+            data_dir: linked_dir.to_string_lossy().into_owned(),
+            server_url: unavailable_http_server_url(),
+            device_id: "linked-ios".to_owned(),
+            account_secret_hex: Some(account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        let reopened_state = reopened.state().unwrap();
+        let reopened_chat = reopened_state
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == build_topic_id)
+            .and_then(|topic| {
+                topic
+                    .chats
+                    .iter()
+                    .find(|chat| chat.chat_id == first_build_chat_id)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "late Device cold restart retains named chat state; topics={:#?}",
+                    reopened_state.topics
+                )
+            });
+        assert_eq!(reopened_chat.title, "Final build chat");
+        assert!(!reopened_chat.archived);
+        assert!(
+            reopened_state
+                .topics
+                .iter()
+                .any(|topic| topic.topic_id == operations_topic_id),
+            "late Device cold restart retains sibling topics"
         );
     }
 

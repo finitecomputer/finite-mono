@@ -65,6 +65,9 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   in profiles or performance sketches.
 - Treat cache invalidation as a protocol decision. Any derived cache must name
   its source of truth, invalidation trigger, and stale-read behavior.
+- Give independently ordered projection fields independent sequence authority.
+  A late bootstrap, cache replay, exact duplicate, or restart must not let an
+  older metadata, archive, or active-segment event regress a newer value.
 - Audit every dependency addition before adding it. Prefer the standard library,
   existing workspace dependencies, or a small Rust crate over shell/Python
   tooling. New scripts should be Rust binaries or tests unless a non-Rust tool

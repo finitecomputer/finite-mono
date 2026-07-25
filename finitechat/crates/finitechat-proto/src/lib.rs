@@ -788,8 +788,18 @@ pub struct ConversationProjectionEntry {
     pub conversation_id: ConversationId,
     pub created_seq: Seq,
     pub updated_seq: Seq,
+    /// Ordering authority for the current metadata value. This is separate
+    /// from `updated_seq` because an older create/update may be learned after a
+    /// newer message during bounded bootstrap replay.
+    pub metadata_seq: Option<Seq>,
+    /// Ordering authority for the current topic archive value. A later
+    /// `conversation.create` restores the topic; older creates must not.
+    pub archive_seq: Option<Seq>,
     pub archived: bool,
     pub metadata: Option<ConversationMetadataV1>,
+    /// Ordering authority for `active_segment_id`. Segments may be learned out
+    /// of storage insertion order, but the server-latest segment stays active.
+    pub active_segment_seq: Option<Seq>,
     pub active_segment_id: Option<ConversationSegmentId>,
     pub segments: Vec<ConversationSegmentProjectionRecord>,
 }
@@ -1488,14 +1498,33 @@ impl ConversationProjection {
             DurableAppEventKind::ConversationCreate => {
                 let conversation_id = required_conversation_id(&context, &event.kind)?;
                 let metadata = parse_conversation_metadata(&event.payload)?;
+                let existed = self.get(context.room_id, conversation_id).is_some();
                 self.ensure_entry(context.room_id, conversation_id, context.accepted_seq)?;
                 let entry = self
                     .entry_mut(context.room_id, conversation_id)
                     .expect("conversation was ensured before update");
-                entry.updated_seq = context.accepted_seq;
-                entry.archived = false;
-                entry.metadata = Some(metadata);
-                Ok(ConversationProjectionDecision::Created)
+                entry.created_seq = entry.created_seq.min(context.accepted_seq);
+                entry.updated_seq = entry.updated_seq.max(context.accepted_seq);
+                if entry
+                    .metadata_seq
+                    .is_none_or(|accepted_seq| context.accepted_seq > accepted_seq)
+                {
+                    entry.metadata_seq = Some(context.accepted_seq);
+                    entry.metadata = Some(metadata);
+                }
+                if entry
+                    .archive_seq
+                    .is_none_or(|accepted_seq| context.accepted_seq > accepted_seq)
+                {
+                    entry.archive_seq = Some(context.accepted_seq);
+                    entry.archived = false;
+                }
+                debug_assert_conversation_entry(entry);
+                if existed {
+                    Ok(ConversationProjectionDecision::Updated)
+                } else {
+                    Ok(ConversationProjectionDecision::Created)
+                }
             }
             DurableAppEventKind::ConversationUpdate => {
                 let conversation_id = required_conversation_id(&context, &event.kind)?;
@@ -1504,8 +1533,16 @@ impl ConversationProjection {
                 let entry = self
                     .entry_mut(context.room_id, conversation_id)
                     .expect("conversation was ensured before update");
-                entry.updated_seq = context.accepted_seq;
-                entry.metadata = Some(metadata);
+                entry.created_seq = entry.created_seq.min(context.accepted_seq);
+                entry.updated_seq = entry.updated_seq.max(context.accepted_seq);
+                if entry
+                    .metadata_seq
+                    .is_none_or(|accepted_seq| context.accepted_seq > accepted_seq)
+                {
+                    entry.metadata_seq = Some(context.accepted_seq);
+                    entry.metadata = Some(metadata);
+                }
+                debug_assert_conversation_entry(entry);
                 Ok(ConversationProjectionDecision::Updated)
             }
             DurableAppEventKind::ConversationArchive => {
@@ -1514,8 +1551,16 @@ impl ConversationProjection {
                 let entry = self
                     .entry_mut(context.room_id, conversation_id)
                     .expect("conversation was ensured before archive");
-                entry.updated_seq = context.accepted_seq;
-                entry.archived = true;
+                entry.created_seq = entry.created_seq.min(context.accepted_seq);
+                entry.updated_seq = entry.updated_seq.max(context.accepted_seq);
+                if entry
+                    .archive_seq
+                    .is_none_or(|accepted_seq| context.accepted_seq > accepted_seq)
+                {
+                    entry.archive_seq = Some(context.accepted_seq);
+                    entry.archived = true;
+                }
+                debug_assert_conversation_entry(entry);
                 Ok(ConversationProjectionDecision::Archived)
             }
             DurableAppEventKind::ConversationSegmentStart => {
@@ -1525,29 +1570,49 @@ impl ConversationProjection {
                 let entry = self
                     .entry_mut(context.room_id, conversation_id)
                     .expect("conversation was ensured before segment");
+                entry.created_seq = entry.created_seq.min(context.accepted_seq);
+                entry.updated_seq = entry.updated_seq.max(context.accepted_seq);
+                if let Some(existing) = entry
+                    .segments
+                    .iter()
+                    .find(|record| record.segment_id == segment.segment_id)
+                {
+                    if existing.started_seq == context.accepted_seq {
+                        debug_assert_conversation_entry(entry);
+                        return Ok(ConversationProjectionDecision::Ignored);
+                    }
+                    return Err(ConversationProjectionError::DuplicateSegment {
+                        segment_id: segment.segment_id,
+                    });
+                }
                 validate_item_count(
                     "conversation.segments",
                     entry.segments.len() + 1,
                     MAX_CONVERSATION_SEGMENTS_PER_CONVERSATION,
                 )?;
-                if entry
-                    .segments
-                    .iter()
-                    .any(|record| record.segment_id == segment.segment_id)
-                {
-                    return Err(ConversationProjectionError::DuplicateSegment {
-                        segment_id: segment.segment_id,
-                    });
-                }
                 entry.segments.push(ConversationSegmentProjectionRecord {
                     segment_id: segment.segment_id.clone(),
                     started_seq: context.accepted_seq,
                 });
-                entry.active_segment_id = Some(segment.segment_id);
-                entry.updated_seq = context.accepted_seq;
+                entry.segments.sort_by(|left, right| {
+                    left.started_seq
+                        .cmp(&right.started_seq)
+                        .then_with(|| left.segment_id.cmp(&right.segment_id))
+                });
+                let should_activate = entry.active_segment_seq.is_none_or(|accepted_seq| {
+                    context.accepted_seq > accepted_seq
+                        || (context.accepted_seq == accepted_seq
+                            && entry.active_segment_id.as_deref()
+                                < Some(segment.segment_id.as_str()))
+                });
+                if should_activate {
+                    entry.active_segment_seq = Some(context.accepted_seq);
+                    entry.active_segment_id = Some(segment.segment_id);
+                }
                 assert!(
                     entry.segments.len() <= MAX_CONVERSATION_SEGMENTS_PER_CONVERSATION as usize
                 );
+                debug_assert_conversation_entry(entry);
                 Ok(ConversationProjectionDecision::SegmentStarted)
             }
             DurableAppEventKind::ChatMessage => {
@@ -1557,7 +1622,9 @@ impl ConversationProjection {
                     let entry = self
                         .entry_mut(context.room_id, conversation_id)
                         .expect("conversation was ensured before message");
-                    entry.updated_seq = context.accepted_seq;
+                    entry.created_seq = entry.created_seq.min(context.accepted_seq);
+                    entry.updated_seq = entry.updated_seq.max(context.accepted_seq);
+                    debug_assert_conversation_entry(entry);
                     if existed {
                         Ok(ConversationProjectionDecision::Updated)
                     } else {
@@ -1623,13 +1690,20 @@ impl ConversationProjection {
                 conversation_id: conversation_id.to_string(),
                 created_seq: accepted_seq,
                 updated_seq: accepted_seq,
+                metadata_seq: None,
+                archive_seq: None,
                 archived: false,
                 metadata: None,
+                active_segment_seq: None,
                 active_segment_id: None,
                 segments: Vec::new(),
             },
         );
         assert!(self.entries.len() <= MAX_CONVERSATION_PROJECTION_ENTRIES as usize);
+        debug_assert_conversation_entry(
+            self.get(room_id, conversation_id)
+                .expect("conversation projection entry was just inserted"),
+        );
         Ok(())
     }
 
@@ -1641,6 +1715,39 @@ impl ConversationProjection {
         let key = conversation_projection_key(room_id, conversation_id).ok()?;
         self.entries.get_mut(&key)
     }
+}
+
+fn debug_assert_conversation_entry(entry: &ConversationProjectionEntry) {
+    debug_assert!(entry.created_seq <= entry.updated_seq);
+    debug_assert!(
+        entry
+            .metadata_seq
+            .is_none_or(|accepted_seq| accepted_seq <= entry.updated_seq)
+    );
+    debug_assert!(
+        entry
+            .archive_seq
+            .is_none_or(|accepted_seq| accepted_seq <= entry.updated_seq)
+    );
+    debug_assert_eq!(
+        entry.active_segment_id.is_some(),
+        entry.active_segment_seq.is_some()
+    );
+    debug_assert!(
+        entry
+            .active_segment_seq
+            .is_none_or(|accepted_seq| accepted_seq <= entry.updated_seq)
+    );
+    debug_assert!(entry.segments.windows(2).all(|pair| {
+        pair[0].started_seq < pair[1].started_seq
+            || (pair[0].started_seq == pair[1].started_seq
+                && pair[0].segment_id < pair[1].segment_id)
+    }));
+    debug_assert!(entry.active_segment_id.as_deref().is_none_or(|active_id| {
+        entry.segments.iter().any(|record| {
+            record.segment_id == active_id && Some(record.started_seq) == entry.active_segment_seq
+        })
+    }));
 }
 
 impl RuntimeCommandTargetV1 {
@@ -5881,6 +5988,184 @@ mod tests {
     }
 
     #[test]
+    fn topic_metadata_and_archive_converge_across_every_observation_order() {
+        let events = [
+            (
+                1,
+                application_event(
+                    DurableAppEventKind::ConversationCreate,
+                    Some("topic_agent"),
+                    br#"{"title":"Created"}"#,
+                ),
+            ),
+            (
+                2,
+                application_event(
+                    DurableAppEventKind::ConversationUpdate,
+                    Some("topic_agent"),
+                    br#"{"title":"Renamed"}"#,
+                ),
+            ),
+            (
+                3,
+                application_event(
+                    DurableAppEventKind::ConversationArchive,
+                    Some("topic_agent"),
+                    b"{}",
+                ),
+            ),
+            (
+                4,
+                application_event(
+                    DurableAppEventKind::ChatMessage,
+                    Some("topic_agent"),
+                    b"message",
+                ),
+            ),
+            (
+                5,
+                application_event(
+                    DurableAppEventKind::ConversationCreate,
+                    Some("topic_agent"),
+                    br#"{"title":"Restored"}"#,
+                ),
+            ),
+        ];
+        let mut order = [0, 1, 2, 3, 4];
+        let mut checked = 0_u32;
+
+        loop {
+            let mut projection = ConversationProjection::default();
+            for index in order {
+                let (accepted_seq, event) = &events[index];
+                projection
+                    .apply_event(
+                        conversation_context("room_1", *accepted_seq, Some("topic_agent")),
+                        event,
+                    )
+                    .unwrap();
+                projection
+                    .apply_event(
+                        conversation_context("room_1", *accepted_seq, Some("topic_agent")),
+                        event,
+                    )
+                    .unwrap();
+            }
+
+            let topic = projection.get("room_1", "topic_agent").unwrap();
+            assert_eq!(topic.created_seq, 1, "observation order {order:?}");
+            assert_eq!(topic.updated_seq, 5, "observation order {order:?}");
+            assert_eq!(topic.metadata_seq, Some(5), "observation order {order:?}");
+            assert_eq!(topic.archive_seq, Some(5), "observation order {order:?}");
+            assert!(!topic.archived, "observation order {order:?}");
+            assert_eq!(
+                topic.metadata.as_ref().unwrap().title.as_deref(),
+                Some("Restored"),
+                "observation order {order:?}"
+            );
+            checked += 1;
+            if !next_permutation(&mut order) {
+                break;
+            }
+        }
+
+        assert_eq!(checked, 120);
+    }
+
+    #[test]
+    fn named_chat_boundaries_converge_across_every_observation_order() {
+        let events = [
+            (
+                1,
+                application_event(
+                    DurableAppEventKind::ConversationCreate,
+                    Some("topic_agent"),
+                    br#"{"title":"Agent"}"#,
+                ),
+            ),
+            (
+                2,
+                application_event(
+                    DurableAppEventKind::ConversationSegmentStart,
+                    Some("topic_agent"),
+                    br#"{"segment_id":"chat_first"}"#,
+                ),
+            ),
+            (
+                3,
+                application_event(
+                    DurableAppEventKind::ChatMessage,
+                    Some("topic_agent"),
+                    b"first chat message",
+                ),
+            ),
+            (
+                4,
+                application_event(
+                    DurableAppEventKind::ConversationSegmentStart,
+                    Some("topic_agent"),
+                    br#"{"segment_id":"chat_second"}"#,
+                ),
+            ),
+        ];
+        let mut order = [0, 1, 2, 3];
+        let mut checked = 0_u32;
+
+        loop {
+            let mut projection = ConversationProjection::default();
+            for index in order {
+                let (accepted_seq, event) = &events[index];
+                projection
+                    .apply_event(
+                        conversation_context("room_1", *accepted_seq, Some("topic_agent")),
+                        event,
+                    )
+                    .unwrap();
+                projection
+                    .apply_event(
+                        conversation_context("room_1", *accepted_seq, Some("topic_agent")),
+                        event,
+                    )
+                    .unwrap();
+            }
+
+            let topic = projection.get("room_1", "topic_agent").unwrap();
+            assert_eq!(topic.created_seq, 1, "observation order {order:?}");
+            assert_eq!(topic.updated_seq, 4, "observation order {order:?}");
+            assert_eq!(
+                topic.active_segment_seq,
+                Some(4),
+                "observation order {order:?}"
+            );
+            assert_eq!(
+                topic.active_segment_id.as_deref(),
+                Some("chat_second"),
+                "observation order {order:?}"
+            );
+            assert_eq!(
+                topic.segments,
+                vec![
+                    ConversationSegmentProjectionRecord {
+                        segment_id: "chat_first".to_owned(),
+                        started_seq: 2,
+                    },
+                    ConversationSegmentProjectionRecord {
+                        segment_id: "chat_second".to_owned(),
+                        started_seq: 4,
+                    },
+                ],
+                "observation order {order:?}"
+            );
+            checked += 1;
+            if !next_permutation(&mut order) {
+                break;
+            }
+        }
+
+        assert_eq!(checked, 24);
+    }
+
+    #[test]
     fn hosted_web_mode_is_not_labeled_e2ee() {
         let disclosure =
             ProductTrustDisclosureV1::for_mode(ProductTrustModeV1::HostedTrustedServerClient);
@@ -6221,6 +6506,23 @@ mod tests {
     fn conversation_metadata_payload(metadata: ConversationMetadataV1) -> Vec<u8> {
         metadata.validate_limits().unwrap();
         serde_json::to_vec(&metadata).unwrap()
+    }
+
+    fn next_permutation(values: &mut [usize]) -> bool {
+        let Some(pivot) = (1..values.len())
+            .rev()
+            .find(|&index| values[index - 1] < values[index])
+            .map(|index| index - 1)
+        else {
+            return false;
+        };
+        let successor = (pivot + 1..values.len())
+            .rev()
+            .find(|&index| values[pivot] < values[index])
+            .expect("a permutation pivot always has a successor");
+        values.swap(pivot, successor);
+        values[pivot + 1..].reverse();
+        true
     }
 
     fn application_event(
