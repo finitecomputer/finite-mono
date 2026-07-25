@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import build_session_key
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource, build_session_context, build_session_context_prompt
@@ -159,6 +159,11 @@ class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
             PlatformConfig(
                 enabled=True,
                 typing_indicator=False,
+                home_channel=HomeChannel(
+                    platform=module._finite_platform(),
+                    chat_id="room-agent-1",
+                    name="Finite Chat",
+                ),
                 extra={
                     "home": "/tmp/finite-agent-home",
                     "finitechat_bin": "/bin/echo",

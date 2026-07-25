@@ -2,6 +2,11 @@
 
 Status: active implementation plan.
 
+The iOS product scope in Phase 5 was hard-cut by
+[ADR 0013](adr/0013-ios-single-agent-client.md). Room membership, invite
+codes, npub admission, and the broader Electron surface remain core/desktop
+concerns; they are not iOS navigation or onboarding features.
+
 ## Goal
 
 Build a desktop Finite Chat client that proves the room/topic/chat product
@@ -39,10 +44,8 @@ product language.
 - Electron and iOS render Rust-projected state; they do not own sync, room
   admission, retries, send eligibility, topic semantics, or runtime command
   policy.
-- Adding people is a Room membership operation. Pasting an invite code joins a
-  Room through invite-session admission; pasting an npub performs an MLS add
-  using that account's published KeyPackage. It is not a pending notification
-  channel.
+- In the core and desktop product, adding an account is a Room membership
+  operation. The focused iOS client does not expose this operation.
 
 ## Musts
 
@@ -186,31 +189,30 @@ Acceptance:
 
 ## Phase 5: Promote To iOS
 
-Use the Electron-proven room/topic model to reshape the iOS app.
+Use the smallest Electron-proven room/topic/chat slice for one human paired
+with one agent. This phase is governed by ADR 0013.
 
 Scope:
 
-- Replace the generic chat-list product surface with the same Room/Topic/Chat
-  hierarchy as Electron.
-- Use the top-left hamburger menu as the iOS sidebar: Rooms are membership
-  contexts, Topics are headers, Chats are rows.
-- The initial home screen composer sends into a new Chat in the Home Topic with
-  the default agent Room.
-- Support invite-code agent connect, Home chat, new Topic, new Chat in Topic,
-  and shared multi-device sync.
-- Defer people/contact lists until Electron and iOS share the same core
-  multiplayer surface.
+- Pair exactly one agent through the native WorkOS/device-link flow; switching
+  the paired agent belongs in Settings.
+- The Home composer starts a new Chat in the paired agent Room's `home` Topic.
+- Show the three most recent Chats as compact Home badges.
+- Use an overlay sidebar for the paired agent's topic-grouped Chat history.
+- Retain the native transcript, composer, media, encryption, and Rust runtime
+  architecture.
+- Do not expose Rooms, People, profiles, QR/scan, invite/PIN, npub lookup,
+  manual nsec entry, member management, or topic creation in iOS.
 - Keep SwiftUI as a renderer and OS-capability bridge.
 
 Acceptance:
 
-- iOS uses the same topic/chat state and action names as Electron.
-- Electron and iOS logged in with the same nsec show the same Topics, Chats,
-  messages, and room members while presenting one user account with distinct
-  devices.
-- Product harness proves invite join, Home chat send, topic create, chat create,
-  open/send, and sync on iOS Simulator and then physical device.
-- No Electron-only topic semantics remain.
+- iOS uses the retained Rust topic/chat state and action names.
+- A native account link yields one paired agent without a second manual
+  identity or invite flow.
+- Product tests prove Home `/new`, recent-chat navigation, sidebar navigation,
+  open/send, relaunch, and sync on Simulator and then physical device.
+- Broader Electron room and membership actions remain absent from AppModel.
 
 ## Phase 6: Hosted Web Bridge And TEE Candidate
 

@@ -171,7 +171,28 @@
         "nixos-images": "nixos-images",
         "nixpkgs": "nixpkgs",
         "nixpkgs-kata": "nixpkgs-kata",
-        "nixpkgs-lat3": "nixpkgs-lat3"
+        "nixpkgs-lat3": "nixpkgs-lat3",
+        "rust-overlay": "rust-overlay"
+      }
+    },
+    "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1784870759,
+        "narHash": "sha256-ZaS89rj5u6pygXKDRfCzPMGm7isJxLsSeIAR5EaSyu8=",
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "471286a5fadc690e2408ad854eb32325f5e74da7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "type": "github"
       }
     },
     "systems": {

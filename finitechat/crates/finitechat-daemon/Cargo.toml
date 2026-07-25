@@ -18,11 +18,13 @@ finitechat-http = { path = "../finitechat-http" }
 futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+nostr.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 finitechat-server = { path = "../finitechat-server" }

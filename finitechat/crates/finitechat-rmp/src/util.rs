@@ -30,6 +30,33 @@ pub fn run_capture(mut cmd: Command) -> Result<Output, CliError> {
     Ok(out)
 }
 
+pub fn sanitize_apple_toolchain_environment(cmd: &mut Command) {
+    for key in [
+        "AR",
+        "AS",
+        "CC",
+        "CXX",
+        "LD",
+        "LIBRARY_PATH",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "NIX_BINTOOLS",
+        "NIX_CC",
+        "NIX_CFLAGS_COMPILE",
+        "NIX_ENFORCE_NO_NATIVE",
+        "NIX_LDFLAGS",
+        "NM",
+        "OBJCOPY",
+        "OBJDUMP",
+        "RANLIB",
+        "RUSTC_WRAPPER",
+        "SDKROOT",
+        "SIZE",
+        "STRIP",
+    ] {
+        cmd.env_remove(key);
+    }
+}
+
 pub fn discover_xcode_dev_dir() -> Result<PathBuf, CliError> {
     if let Ok(v) = std::env::var("DEVELOPER_DIR") {
         let p = PathBuf::from(v);

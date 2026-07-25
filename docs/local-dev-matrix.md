@@ -24,7 +24,7 @@ verification note says otherwise.
 | Legacy dashboard archaeology | external legacy `finitecomputer` checkout | legacy repo runbooks only | Migration reference only. It is not the v2 product or current web-design path; new design work starts with `just dev web-design` above. |
 | Legacy hosted platform/runtime/control plane | `finitecomputer` | `nix develop`, Cargo commands, root `just` recipes | box1/TRF/smoke and migration bridge lane. Most operator and deployment paths require host secrets or SSH. |
 | Native encrypted chat protocol/server | `finitechat` | `cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3` | Local server and simulator are explicit dev overrides. Production default is `https://chat.finite.computer`. |
-| iOS app build or simulator work | `finitechat` | `ios/ci_scripts/ci_post_clone.sh`, `cargo run -p finitechat-rmp -- run ios` | Requires Xcode. Physical phone work also needs a paired phone and signing team. |
+| iOS app build or local Hermes simulator work | repository root | `just dev ios-local-agent` | The pinned dev shell includes Rust's Apple targets and launches the encrypted local chat stack, automatic Device Link, Hermes, and Simulator. Requires Xcode; physical phone work also needs a paired phone and signing team. |
 | Hermes chat bridge canary | `finitechat` | `cp .env.example .env`, set provider key, run `scripts/hermes-phone-canary.py ...` | Real-Hermes proof is stricter than echo/adapter smokes. |
 | FiniteBrain brain, Product Client, or `fbrain` CLI work | `finite-brain` | `cargo test --workspace`, local `finite-brain-app`, Product Client at `/client` | Trusted-client knowledge surface. Keeps Brain/Folder policy in `finite-brain`; generic Nostr primitives stay in `finite-nostr`. |
 | Search/extract service work | `finite-search` | `scripts/check-static.sh`, SSH tunnel to `lat2`, service smoke scripts | Current proof is remote-host oriented. A no-SSH local stack is not yet the primary path. |
@@ -228,13 +228,16 @@ Documented tools:
 - `.env.example` for Hermes model keys, physical-device IDs, remote Docker, and
   restic/Tinfoil canary settings.
 
-Local server and simulator:
+Blessed local iOS product loop:
 
 ```bash
-cd finitechat
-cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3
-FINITECHAT_SERVER_URL=http://127.0.0.1:8787 cargo run -p finitechat-rmp -- run ios
+just dev ios-local-agent
 ```
+
+This loop uses only loopback HTTP origins, so the native app skips hosted
+WorkOS/AASA authentication and uses the bounded development Device Link.
+Direct `finitechat-server` and `finitechat-rmp run ios` commands remain
+low-level troubleshooting tools rather than alternate setup paths.
 
 Agent CLI and Hermes onboarding:
 

@@ -8,9 +8,9 @@ Finite Chat ships as its own App Store Connect app record.
 - Bundle ID: `computer.finite.finitechat`
 - SKU: `computer.finite.finitechat` or `finitechat-ios`
 - Primary language: English
-- Xcode project: `ios/FiniteChat.xcodeproj`
+- Xcode project: `finitechat/ios/FiniteChat.xcodeproj`
 - Scheme: `FiniteChat`
-- Signing team in `ios/project.yml`: `JBLHZ83X6T`
+- Signing team in `finitechat/ios/project.yml`: `JBLHZ83X6T`
 
 This keeps the App Store Connect record aligned with the repo, bundle ID,
 keychain/runtime naming, and product metadata.
@@ -46,26 +46,39 @@ record exists.
 
 Suggested first workflow:
 
-- Repository branch: `main` or the release branch used for Finite Chat builds
-- Project: `ios/FiniteChat.xcodeproj`
+- Primary repository: `https://github.com/finitecomputer/finite-mono.git`
+- Repository branch: the release branch used for Finite Chat builds, then
+  `main` after the accepted changes merge
+- Files and folders: `finitechat/**`, plus root Cargo/Nix/build inputs used by
+  the native bridge
+- Project: `finitechat/ios/FiniteChat.xcodeproj`
 - Scheme: `FiniteChat`
 - Actions:
   - Test on current iOS Simulator
   - Archive for iOS
-  - Distribute to internal TestFlight testers
+  - Prepare for `TestFlight (Internal Testing Only)`
+  - Distribute to the internal Finite team group
 
 The repo does not track generated iOS build artifacts. Xcode Cloud must run
-`ios/ci_scripts/ci_post_clone.sh`, which:
+`finitechat/ios/ci_scripts/ci_post_clone.sh`, which:
 
 1. Installs Rust, `protoc`, and XcodeGen if missing.
 2. Adds the iOS Rust targets.
 3. Runs `cargo run -q -p finitechat-rmp -- bindings swift --clean`.
-4. Regenerates `ios/FiniteChat.xcodeproj` from `ios/project.yml`.
+4. Regenerates `finitechat/ios/FiniteChat.xcodeproj` from
+   `finitechat/ios/project.yml`.
 
 Apple requires Xcode Cloud custom scripts to live in a `ci_scripts` directory at
 the same level as the Xcode project or workspace. Because the project path is
-`ios/FiniteChat.xcodeproj`, the script lives at
-`ios/ci_scripts/ci_post_clone.sh`.
+`finitechat/ios/FiniteChat.xcodeproj`, the script lives at
+`finitechat/ios/ci_scripts/ci_post_clone.sh`.
+
+The checked-in marketing version is `1.0`. Xcode Cloud assigns its own
+monotonically increasing integer build number and App Store Connect uses that
+number for distributed builds. Do not hand-edit the generated Xcode project.
+
+`finitechat/ios/TestFlight/WhatToTest.en-US.txt` supplies the internal beta
+notes that Xcode Cloud publishes with each build.
 
 ## Preflight Checks
 
@@ -75,12 +88,14 @@ For direct physical-device debug builds before TestFlight, use
 Before the first uploaded build:
 
 ```sh
-cargo test --workspace
-cargo run -q -p finitechat-rmp -- bindings swift --clean
-(cd ios && xcodegen generate)
+just ios-cloud-preflight
 cargo run -q -p finitechat-rmp -- test ios-simulator
-xcodebuild -project ios/FiniteChat.xcodeproj -scheme FiniteChat -configuration Release -sdk iphonesimulator build
 ```
+
+`just ios-cloud-preflight` enters the pinned repo environment, checks the Rust
+version and required tools, regenerates the bridge and project, verifies the
+Release bundle/version/production WorkOS settings, and performs an unsigned
+Release Simulator build. It neither signs nor uploads anything.
 
 Use `finitechat-rmp test ios-simulator` for simulator test preflight instead
 of an ad hoc `xcodebuild test` command. It erases the dedicated RMP simulator,
@@ -94,15 +109,17 @@ Also verify:
   distribute a build that depends on server changes until
   `https://chat.finite.computer/health` reports the expected finite-chat
   `source_commit` and `source_dirty: false`.
-- `CFBundleShortVersionString` and `CFBundleVersion` are bumped in
-  `ios/Info.plist`.
+- `MARKETING_VERSION` in `finitechat/ios/project.yml` matches the App Store
+  version. Xcode Cloud owns the distributed build number.
 - App icon assets are present in
-  `ios/Sources/Assets.xcassets/AppIcon.appiconset`.
-- Privacy permission copy in `ios/Info.plist` matches actual behavior.
+  `finitechat/ios/Sources/Assets.xcassets/AppIcon.appiconset`.
+- Privacy permission copy in `finitechat/ios/Info.plist` matches actual
+  behavior.
 - The default app server is `https://chat.finite.computer`; local server URLs
   are explicit development/test overrides only.
-- `ios/Info.plist` does not declare `NSLocalNetworkUsageDescription` or
-  `NSAllowsLocalNetworking` for TestFlight/App Store builds.
-- Review notes explain that Finite Chat uses end-to-end encryption, Nostr
-  identity material, camera QR scanning, microphone recording, speech
-  transcription, and optional photo-library saves initiated by the user.
+- `finitechat/ios/Info.plist` does not declare
+  `NSLocalNetworkUsageDescription` or `NSAllowsLocalNetworking` for
+  TestFlight/App Store builds.
+- Review notes explain that Finite Chat uses end-to-end encryption, a linked
+  account key stored in Keychain, microphone recording, speech transcription,
+  and optional photo-library saves initiated by the user.

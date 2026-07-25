@@ -320,18 +320,19 @@ final class VoiceRecorder: ObservableObject {
     }
 
     private nonisolated func convertToM4A(from inputURL: URL, to outputURL: URL) async -> Bool {
-        let asset = AVAsset(url: inputURL)
+        let asset = AVURLAsset(url: inputURL)
         guard let session = AVAssetExportSession(
             asset: asset,
             presetName: AVAssetExportPresetAppleM4A
         ) else {
             return false
         }
-        session.outputURL = outputURL
-        session.outputFileType = .m4a
-
-        await session.export()
-        return session.status == .completed
+        do {
+            try await session.export(to: outputURL, as: .m4a)
+            return true
+        } catch {
+            return false
+        }
     }
 }
 

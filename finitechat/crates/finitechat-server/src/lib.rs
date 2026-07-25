@@ -18,31 +18,31 @@ use finitechat_delivery::{
     MAX_HTTP_ID_BYTES, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 pub use finitechat_http::{
-    AckLinkPayloadRequest, AckLinkPayloadResponse, AckPushWakeRequest, AckPushWakeResponse,
-    AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
-    ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
-    ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
-    ClaimLinkPayloadRequest, ClaimLinkPayloadResponse, ClaimPushWakesRequest,
-    ClaimPushWakesResponse, ClaimWelcomesRequest, CreateLinkSessionRequest, DeviceLivenessRecord,
-    ErrorResponse, ExpireKeyPackageLeaseRequest, ExpireKeyPackageLeaseResponse,
-    ExpireLinkSessionRequest, ExpireLinkSessionResponse, FINITECHAT_SERVER_CONTRACT_VERSION,
-    FailPushWakeRequest, FailPushWakeResponse, FiniteAccountRoomCommitProjection,
-    GetDeviceLivenessRequest, GetDeviceLivenessResponse, GetEphemeralActivitiesRequest,
-    GetEphemeralActivitiesResponse, GetKeyPackageAvailabilityRequest,
-    GetKeyPackageAvailabilityResponse, GetLinkSessionRequest, GetNostrProfilesRequest,
-    GetNostrProfilesResponse, GroupSyncRequest, HealthResponse, HttpApplicationDeliveryEffect,
-    HttpClaimedWelcome, HttpKeyPackageClaim, HttpKeyPackageInventory, HttpLinkSessionRecord,
-    HttpLinkSessionState, InboxSyncRequest, KeyPackageAvailabilityEntry,
-    KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
+    AckPushWakeRequest, AckPushWakeResponse, AckWelcomeRequest, AckWelcomeResponse,
+    ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
+    BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
+    ClaimKeyPackagesRequest, ClaimPushWakesRequest, ClaimPushWakesResponse, ClaimWelcomesRequest,
+    CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
+    ExpireKeyPackageLeaseResponse, ExpirePairingSessionRequest, ExpirePairingSessionResponse,
+    FINITECHAT_SERVER_CONTRACT_VERSION, FailPushWakeRequest, FailPushWakeResponse,
+    FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest, GetDeviceLivenessResponse,
+    GetEphemeralActivitiesRequest, GetEphemeralActivitiesResponse,
+    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
+    GetNostrProfilesResponse, GetPairingSessionRequest, GroupSyncRequest, HealthResponse,
+    HttpApplicationDeliveryEffect, HttpClaimedWelcome, HttpKeyPackageClaim,
+    HttpKeyPackageInventory, HttpNipAbSourceDescriptorV1, HttpPairingEventRecord,
+    HttpPairingSessionRecord, HttpPairingSessionState, InboxSyncRequest,
+    KeyPackageAvailabilityEntry, KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileCacheEntry,
     NostrProfileRecord, ObserveDeviceLivenessRequest, PublishKeyPackageResponse,
-    PublishMessageRequest, PushTokenRecord, PushWakeDelivery, PushWakePayload,
+    PublishMessageRequest, PublishPairingCompleteRequest, PublishPairingOfferRequest,
+    PublishPairingResponseRequest, PushTokenRecord, PushWakeDelivery, PushWakePayload,
     PutNostrProfileRequest, PutNostrProfileResponse, RegisterPushTokenRequest,
-    RegisterPushTokenResponse, ReleaseLinkClaimRequest, ReleaseLinkClaimResponse,
-    RemovePushTokenRequest, RemovePushTokenResponse, ReportInvalidCommitRequest,
-    ReportInvalidCommitResponse, RevokeDeviceRequest, RevokeDeviceResponse, SaveAccountRoomRequest,
-    SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest, SyncWaitRequest, SyncWaitResponse,
-    UpdateRoomAdminsRequest, UpdateRoomAdminsResponse, UploadLinkPayloadRequest,
+    RegisterPushTokenResponse, RemovePushTokenRequest, RemovePushTokenResponse,
+    ReportInvalidCommitRequest, ReportInvalidCommitResponse, RevokeDeviceRequest,
+    RevokeDeviceResponse, SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent,
+    SyncStreamRequest, SyncWaitRequest, SyncWaitResponse, UpdateRoomAdminsRequest,
+    UpdateRoomAdminsResponse,
 };
 use finitechat_proto::{
     AccountRoomDevice, AccountRoomRecord, AppendApplicationEventRequest,
@@ -54,16 +54,16 @@ use finitechat_proto::{
 use finitechat_proto::{
     DeviceRef, LogEntryKind, MAX_ACCOUNT_DEVICES_PER_ROOM, MAX_ATTACHMENT_CIPHERTEXT_BYTES,
     MAX_DEVICE_LIVENESS_EXPIRY_MILLIS, MAX_EPHEMERAL_ACTIVITY_CACHE_ENTRIES_PER_ROUTE,
-    MAX_KEY_PACKAGES_PER_DEVICE, MAX_LINK_SESSION_PAYLOAD_BYTES, MAX_OBJECT_ID_BYTES,
-    MIN_SUPPORTED_PROTOCOL_VERSION, MembershipAddV1, MembershipDeltaV1, PROTOCOL_VERSION_V1,
-    RoomLogEntry, RoomProtocol, RoomStatus, WelcomeState, validate_bytes_len,
-    validate_bytes_non_empty, validate_string_bytes,
+    MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES, MIN_SUPPORTED_PROTOCOL_VERSION,
+    MembershipAddV1, MembershipDeltaV1, PROTOCOL_VERSION_V1, RoomLogEntry, RoomProtocol,
+    RoomStatus, WelcomeState, validate_bytes_len, validate_bytes_non_empty, validate_string_bytes,
 };
 use finitechat_transport::engine::KeyPackage;
 use finitechat_transport::transport::{
     Timestamp, TransportEnvelope, TransportMessage, TransportSource,
 };
 use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
+use nostr::{Event as NostrEvent, Kind as NostrKind, PublicKey as NostrPublicKey};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -71,6 +71,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const MAX_HTTP_ACCOUNT_ROOM_ID_BYTES: usize = 128;
+const PAIRING_PROTOCOL_VERSION: u16 = 1;
+const PAIRING_EVENT_KIND: u16 = 24_134;
+const PAIRING_SESSION_TTL_SECONDS: u64 = 120;
+const MAX_PAIRING_EVENT_BYTES: u32 = 96 * 1024;
+const MAX_PAIRING_EVENTS: usize = 8;
 const MAX_HTTP_BLOB_UPLOAD_BODY_BYTES: usize = MAX_ATTACHMENT_CIPHERTEXT_BYTES as usize;
 const MAX_KEY_PACKAGE_AVAILABILITY_BATCH: usize = MAX_HTTP_SYNC_PAGE_ENTRIES;
 const MAX_NOSTR_PROFILE_BATCH: usize = 64;
@@ -110,7 +115,7 @@ pub struct HttpServerState {
     key_package_claim_idempotency: Arc<Mutex<HashMap<String, KeyPackageClaimIdempotencyRecord>>>,
     key_package_inventory: Arc<Mutex<HashMap<HttpKeyPackageId, KeyPackageInventoryRecord>>>,
     revoked_devices: Arc<Mutex<BTreeSet<String>>>,
-    link_sessions: Arc<Mutex<BTreeMap<String, HttpLinkSessionRecord>>>,
+    pairing_sessions: Arc<Mutex<BTreeMap<String, HttpPairingSessionRecord>>>,
     account_rooms: Arc<Mutex<BTreeMap<String, BTreeMap<String, Value>>>>,
     room_memberships: Arc<Mutex<BTreeMap<String, HttpRoomMembershipProjection>>>,
     application_effects: Arc<Mutex<BTreeMap<String, HttpApplicationDeliveryEffect>>>,
@@ -173,7 +178,7 @@ impl HttpServerState {
             key_package_claim_idempotency: Arc::new(Mutex::new(HashMap::new())),
             key_package_inventory: Arc::new(Mutex::new(HashMap::new())),
             revoked_devices: Arc::new(Mutex::new(BTreeSet::new())),
-            link_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            pairing_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             account_rooms: Arc::new(Mutex::new(BTreeMap::new())),
             room_memberships: Arc::new(Mutex::new(BTreeMap::new())),
             application_effects: Arc::new(Mutex::new(BTreeMap::new())),
@@ -240,7 +245,7 @@ impl HttpServerState {
                 store.upsert_key_package_inventory(record)?;
             }
         }
-        let link_sessions = store.load_link_sessions()?;
+        let pairing_sessions = store.load_pairing_sessions()?;
         let account_rooms = store.load_account_room_directory()?;
         let room_memberships = store.load_room_memberships()?;
         let application_effects = store.load_application_effects()?;
@@ -255,7 +260,7 @@ impl HttpServerState {
             key_package_claim_idempotency: Arc::new(Mutex::new(key_package_claim_idempotency)),
             key_package_inventory: Arc::new(Mutex::new(key_package_inventory)),
             revoked_devices: Arc::new(Mutex::new(revoked_devices)),
-            link_sessions: Arc::new(Mutex::new(link_sessions)),
+            pairing_sessions: Arc::new(Mutex::new(pairing_sessions)),
             account_rooms: Arc::new(Mutex::new(account_rooms)),
             room_memberships: Arc::new(Mutex::new(room_memberships)),
             application_effects: Arc::new(Mutex::new(application_effects)),
@@ -873,238 +878,286 @@ impl HttpServerState {
         })
     }
 
-    fn create_link_session(
+    fn create_pairing_session(
         &self,
-        request: CreateLinkSessionRequest,
-    ) -> Result<HttpLinkSessionRecord, ServerHttpError> {
-        validate_link_session_id(&request.link_session_id)?;
-        validate_link_pairing_public_key(&request.pairing_public_key)?;
-        let mut sessions = self.link_sessions.lock().expect("HTTP link-session mutex");
-        if sessions.contains_key(&request.link_session_id) {
-            return Err(ServerHttpError::LinkSessionAlreadyExists {
-                link_session_id: request.link_session_id,
+        request: CreatePairingSessionRequest,
+    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
+        if request.version != PAIRING_PROTOCOL_VERSION {
+            return Err(pairing_invalid("unsupported pairing protocol version"));
+        }
+        validate_pairing_session_id(&request.pairing_session_id)?;
+        validate_pairing_device_id(&request.target_device_id)?;
+        let target_public_key = validate_pairing_public_key(&request.target_public_key)?;
+        let issued_at_unix_seconds = pairing_now();
+        let mut sessions = self
+            .pairing_sessions
+            .lock()
+            .expect("HTTP pairing-session mutex");
+        if sessions.contains_key(&request.pairing_session_id) {
+            return Err(ServerHttpError::PairingSessionAlreadyExists {
+                pairing_session_id: request.pairing_session_id,
             });
         }
-        let record = HttpLinkSessionRecord {
-            link_session_id: request.link_session_id,
-            pairing_public_key: request.pairing_public_key,
-            encrypted_payload: None,
-            state: HttpLinkSessionState::Created,
-            claim_token: None,
+        let record = HttpPairingSessionRecord {
+            version: PAIRING_PROTOCOL_VERSION,
+            pairing_session_id: request.pairing_session_id,
+            target_device_id: request.target_device_id,
+            target_public_key: target_public_key.to_hex(),
+            issued_at_unix_seconds,
+            expires_at_unix_seconds: issued_at_unix_seconds
+                .saturating_add(PAIRING_SESSION_TTL_SECONDS),
+            source_public_key: None,
+            events: Vec::new(),
+            state: HttpPairingSessionState::Created,
         };
-        sessions.insert(record.link_session_id.clone(), record.clone());
+        sessions.insert(record.pairing_session_id.clone(), record.clone());
         drop(sessions);
 
         if let Some(store) = &self.store {
-            store.upsert_link_session(&record)?;
+            store.upsert_pairing_session(&record)?;
         }
         Ok(record)
     }
 
-    fn get_link_session(
+    fn get_pairing_session(
         &self,
-        request: GetLinkSessionRequest,
-    ) -> Result<Option<HttpLinkSessionRecord>, ServerHttpError> {
-        validate_link_session_id(&request.link_session_id)?;
-        let sessions = self.link_sessions.lock().expect("HTTP link-session mutex");
-        Ok(sessions.get(&request.link_session_id).cloned())
+        request: GetPairingSessionRequest,
+    ) -> Result<Option<HttpPairingSessionRecord>, ServerHttpError> {
+        validate_pairing_session_id(&request.pairing_session_id)?;
+        let sessions = self
+            .pairing_sessions
+            .lock()
+            .expect("HTTP pairing-session mutex");
+        Ok(sessions.get(&request.pairing_session_id).cloned())
     }
 
-    fn upload_link_payload(
+    fn publish_pairing_offer(
         &self,
-        request: UploadLinkPayloadRequest,
-    ) -> Result<HttpLinkSessionRecord, ServerHttpError> {
-        validate_link_session_id(&request.link_session_id)?;
-        validate_link_payload(&request.encrypted_payload)?;
-        let mut sessions = self.link_sessions.lock().expect("HTTP link-session mutex");
-        let session = sessions.get_mut(&request.link_session_id).ok_or_else(|| {
-            ServerHttpError::LinkSessionNotFound {
-                link_session_id: request.link_session_id.clone(),
-            }
-        })?;
-        match session.state {
-            HttpLinkSessionState::Created => {
-                session.encrypted_payload = Some(request.encrypted_payload);
-                session.state = HttpLinkSessionState::PayloadUploaded;
-            }
-            HttpLinkSessionState::PayloadUploaded
-                if session.encrypted_payload.as_deref()
-                    == Some(request.encrypted_payload.as_slice()) => {}
-            HttpLinkSessionState::PayloadUploaded => {
-                return Err(ServerHttpError::LinkSessionConflict {
-                    link_session_id: request.link_session_id,
-                    reason: "encrypted payload differs from existing payload".to_owned(),
-                });
-            }
-            HttpLinkSessionState::Claimed
-            | HttpLinkSessionState::Delivered
-            | HttpLinkSessionState::Expired => {
-                return Err(ServerHttpError::LinkSessionClosed {
-                    link_session_id: request.link_session_id,
-                });
-            }
+        request: PublishPairingOfferRequest,
+    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
+        validate_pairing_session_id(&request.pairing_session_id)?;
+        let event = validate_pairing_event(&request.offer_event)?;
+        let mut sessions = self
+            .pairing_sessions
+            .lock()
+            .expect("HTTP pairing-session mutex");
+        let session = sessions
+            .get_mut(&request.pairing_session_id)
+            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
+                pairing_session_id: request.pairing_session_id.clone(),
+            })?;
+        ensure_pairing_session_open(session)?;
+        if session.state != HttpPairingSessionState::Expired
+            && session
+                .events
+                .first()
+                .is_some_and(|stored| stored.event == request.offer_event)
+        {
+            return Ok(session.clone());
         }
+        if session.state != HttpPairingSessionState::Created {
+            return Err(ServerHttpError::PairingSessionClosed {
+                pairing_session_id: request.pairing_session_id,
+            });
+        }
+        let target = NostrPublicKey::from_hex(&session.target_public_key)
+            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
+        if event.pubkey != target {
+            return Err(pairing_conflict(
+                &request.pairing_session_id,
+                "offer sender does not match the bound target",
+            ));
+        }
+        let source = pairing_recipient(&event)?;
+        if source == target {
+            return Err(pairing_conflict(
+                &request.pairing_session_id,
+                "source and target pairing keys must differ",
+            ));
+        }
+        session.source_public_key = Some(source.to_hex());
+        session.events.push(HttpPairingEventRecord {
+            seq: 1,
+            event: request.offer_event,
+        });
+        session.state = HttpPairingSessionState::OfferPublished;
         let record = session.clone();
-        drop(sessions);
-
-        if let Some(store) = &self.store {
-            store.upsert_link_session(&record)?;
+        if let Some(store) = &self.store
+            && let Err(error) = store.upsert_pairing_session(&record)
+        {
+            session.source_public_key = None;
+            session.events.clear();
+            session.state = HttpPairingSessionState::Created;
+            return Err(error.into());
         }
+        drop(sessions);
         Ok(record)
     }
 
-    fn claim_link_payload(
+    fn publish_pairing_response(
         &self,
-        request: ClaimLinkPayloadRequest,
-    ) -> Result<ClaimLinkPayloadResponse, ServerHttpError> {
-        validate_link_session_id(&request.link_session_id)?;
-        let mut sessions = self.link_sessions.lock().expect("HTTP link-session mutex");
-        let session = sessions.get_mut(&request.link_session_id).ok_or_else(|| {
-            ServerHttpError::LinkSessionNotFound {
-                link_session_id: request.link_session_id.clone(),
+        request: PublishPairingResponseRequest,
+    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
+        validate_pairing_session_id(&request.pairing_session_id)?;
+        let confirmation = validate_pairing_event(&request.source_confirmation_event)?;
+        let payload = validate_pairing_event(&request.payload_event)?;
+        if confirmation.id == payload.id {
+            return Err(pairing_conflict(
+                &request.pairing_session_id,
+                "pairing response events must be distinct",
+            ));
+        }
+        let mut sessions = self
+            .pairing_sessions
+            .lock()
+            .expect("HTTP pairing-session mutex");
+        let session = sessions
+            .get_mut(&request.pairing_session_id)
+            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
+                pairing_session_id: request.pairing_session_id.clone(),
+            })?;
+        if session.state != HttpPairingSessionState::Expired
+            && session
+                .events
+                .get(1)
+                .is_some_and(|stored| stored.event == request.source_confirmation_event)
+            && session
+                .events
+                .get(2)
+                .is_some_and(|stored| stored.event == request.payload_event)
+        {
+            return Ok(session.clone());
+        }
+        if session.state != HttpPairingSessionState::OfferPublished {
+            return Err(ServerHttpError::PairingSessionClosed {
+                pairing_session_id: request.pairing_session_id,
+            });
+        }
+        let source = session
+            .source_public_key
+            .as_deref()
+            .and_then(|value| NostrPublicKey::from_hex(value).ok())
+            .ok_or_else(|| pairing_corrupt("stored source public key is invalid"))?;
+        let target = NostrPublicKey::from_hex(&session.target_public_key)
+            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
+        for event in [&confirmation, &payload] {
+            if event.pubkey != source || pairing_recipient(event)? != target {
+                return Err(pairing_conflict(
+                    &request.pairing_session_id,
+                    "pairing response is not bound to this source and target",
+                ));
             }
-        })?;
-        let newly_claimed = match session.state {
-            HttpLinkSessionState::PayloadUploaded => true,
-            // The claim token is deterministic and the payload is encrypted to
-            // the linker's ephemeral pairing key. Replaying this exact claim
-            // lets a linker recover when the first successful HTTP response is
-            // lost without opening the payload to anyone new.
-            HttpLinkSessionState::Claimed => false,
-            _ => {
-                return Err(ServerHttpError::LinkSessionNotReady {
-                    link_session_id: request.link_session_id,
-                });
-            }
-        };
-        let encrypted_payload = session.encrypted_payload.clone().ok_or_else(|| {
-            ServerHttpError::LinkSessionNotReady {
-                link_session_id: request.link_session_id.clone(),
-            }
-        })?;
-        let claim_token = if newly_claimed {
-            let claim_token = link_session_claim_token(session);
-            session.state = HttpLinkSessionState::Claimed;
-            session.claim_token = Some(claim_token.clone());
-            claim_token
-        } else {
-            session
-                .claim_token
-                .clone()
-                .ok_or_else(|| ServerHttpError::LinkSessionNotReady {
-                    link_session_id: request.link_session_id.clone(),
-                })?
-        };
+        }
+        session.events.push(HttpPairingEventRecord {
+            seq: 2,
+            event: request.source_confirmation_event,
+        });
+        session.events.push(HttpPairingEventRecord {
+            seq: 3,
+            event: request.payload_event,
+        });
+        session.state = HttpPairingSessionState::ResponsePublished;
         let record = session.clone();
         if let Some(store) = &self.store
-            && let Err(error) = store.upsert_link_session(&record)
+            && let Err(error) = store.upsert_pairing_session(&record)
         {
-            if newly_claimed {
-                session.state = HttpLinkSessionState::PayloadUploaded;
-                session.claim_token = None;
-            }
+            session.events.truncate(1);
+            session.state = HttpPairingSessionState::OfferPublished;
             return Err(error.into());
         }
         drop(sessions);
-        Ok(ClaimLinkPayloadResponse {
-            encrypted_payload,
-            claim_token,
-        })
+        Ok(record)
     }
 
-    fn ack_link_payload(
+    fn publish_pairing_complete(
         &self,
-        request: AckLinkPayloadRequest,
-    ) -> Result<AckLinkPayloadResponse, ServerHttpError> {
-        validate_link_session_id(&request.link_session_id)?;
-        validate_link_claim_token(&request.claim_token)?;
-        let mut sessions = self.link_sessions.lock().expect("HTTP link-session mutex");
-        let session = sessions.get_mut(&request.link_session_id).ok_or_else(|| {
-            ServerHttpError::LinkSessionNotFound {
-                link_session_id: request.link_session_id.clone(),
-            }
-        })?;
-        if session.claim_token.as_deref() != Some(request.claim_token.as_str()) {
-            return Err(ServerHttpError::BadLinkSessionClaimToken {
-                link_session_id: request.link_session_id,
+        request: PublishPairingCompleteRequest,
+    ) -> Result<HttpPairingSessionRecord, ServerHttpError> {
+        validate_pairing_session_id(&request.pairing_session_id)?;
+        let complete = validate_pairing_event(&request.complete_event)?;
+        let mut sessions = self
+            .pairing_sessions
+            .lock()
+            .expect("HTTP pairing-session mutex");
+        let session = sessions
+            .get_mut(&request.pairing_session_id)
+            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
+                pairing_session_id: request.pairing_session_id.clone(),
+            })?;
+        ensure_pairing_session_open(session)?;
+        if session.state == HttpPairingSessionState::Completed
+            && session
+                .events
+                .get(3)
+                .is_some_and(|stored| stored.event == request.complete_event)
+        {
+            return Ok(session.clone());
+        }
+        if session.state != HttpPairingSessionState::ResponsePublished {
+            return Err(ServerHttpError::PairingSessionClosed {
+                pairing_session_id: request.pairing_session_id,
             });
         }
-        let newly_delivered = match session.state {
-            HttpLinkSessionState::Claimed => {
-                session.state = HttpLinkSessionState::Delivered;
-                true
-            }
-            HttpLinkSessionState::Delivered => false,
-            _ => {
-                return Err(ServerHttpError::LinkSessionNotReady {
-                    link_session_id: request.link_session_id,
-                });
-            }
-        };
+        let source = session
+            .source_public_key
+            .as_deref()
+            .and_then(|value| NostrPublicKey::from_hex(value).ok())
+            .ok_or_else(|| pairing_corrupt("stored source public key is invalid"))?;
+        let target = NostrPublicKey::from_hex(&session.target_public_key)
+            .map_err(|_| pairing_corrupt("stored target public key is invalid"))?;
+        if complete.pubkey != target || pairing_recipient(&complete)? != source {
+            return Err(pairing_conflict(
+                &request.pairing_session_id,
+                "completion is not bound to this source and target",
+            ));
+        }
+        session.events.push(HttpPairingEventRecord {
+            seq: 4,
+            event: request.complete_event,
+        });
+        session.state = HttpPairingSessionState::Completed;
         let record = session.clone();
         if let Some(store) = &self.store
-            && let Err(error) = store.upsert_link_session(&record)
+            && let Err(error) = store.upsert_pairing_session(&record)
         {
-            if newly_delivered {
-                session.state = HttpLinkSessionState::Claimed;
-            }
+            session.events.truncate(3);
+            session.state = HttpPairingSessionState::ResponsePublished;
             return Err(error.into());
         }
         drop(sessions);
-        Ok(AckLinkPayloadResponse { acked: true })
+        Ok(record)
     }
 
-    fn release_link_claim(
+    fn expire_pairing_session(
         &self,
-        request: ReleaseLinkClaimRequest,
-    ) -> Result<ReleaseLinkClaimResponse, ServerHttpError> {
-        validate_link_session_id(&request.link_session_id)?;
-        let mut sessions = self.link_sessions.lock().expect("HTTP link-session mutex");
-        let session = sessions.get_mut(&request.link_session_id).ok_or_else(|| {
-            ServerHttpError::LinkSessionNotFound {
-                link_session_id: request.link_session_id.clone(),
-            }
-        })?;
-        if session.state != HttpLinkSessionState::Claimed {
-            return Err(ServerHttpError::LinkSessionNotReady {
-                link_session_id: request.link_session_id,
+        request: ExpirePairingSessionRequest,
+    ) -> Result<ExpirePairingSessionResponse, ServerHttpError> {
+        validate_pairing_session_id(&request.pairing_session_id)?;
+        let mut sessions = self
+            .pairing_sessions
+            .lock()
+            .expect("HTTP pairing-session mutex");
+        let session = sessions
+            .get_mut(&request.pairing_session_id)
+            .ok_or_else(|| ServerHttpError::PairingSessionNotFound {
+                pairing_session_id: request.pairing_session_id.clone(),
+            })?;
+        if session.state == HttpPairingSessionState::Completed {
+            return Err(ServerHttpError::PairingSessionClosed {
+                pairing_session_id: request.pairing_session_id,
             });
         }
-        session.state = HttpLinkSessionState::PayloadUploaded;
-        session.claim_token = None;
+        let prior = session.state.clone();
+        session.state = HttpPairingSessionState::Expired;
         let record = session.clone();
+        if let Some(store) = &self.store
+            && let Err(error) = store.upsert_pairing_session(&record)
+        {
+            session.state = prior;
+            return Err(error.into());
+        }
         drop(sessions);
-
-        if let Some(store) = &self.store {
-            store.upsert_link_session(&record)?;
-        }
-        Ok(ReleaseLinkClaimResponse { released: true })
-    }
-
-    fn expire_link_session(
-        &self,
-        request: ExpireLinkSessionRequest,
-    ) -> Result<ExpireLinkSessionResponse, ServerHttpError> {
-        validate_link_session_id(&request.link_session_id)?;
-        let mut sessions = self.link_sessions.lock().expect("HTTP link-session mutex");
-        let session = sessions.get_mut(&request.link_session_id).ok_or_else(|| {
-            ServerHttpError::LinkSessionNotFound {
-                link_session_id: request.link_session_id.clone(),
-            }
-        })?;
-        if session.state == HttpLinkSessionState::Delivered {
-            return Err(ServerHttpError::LinkSessionClosed {
-                link_session_id: request.link_session_id,
-            });
-        }
-        session.state = HttpLinkSessionState::Expired;
-        let record = session.clone();
-        drop(sessions);
-
-        if let Some(store) = &self.store {
-            store.upsert_link_session(&record)?;
-        }
-        Ok(ExpireLinkSessionResponse { expired: true })
+        Ok(ExpirePairingSessionResponse { expired: true })
     }
 
     /// The /sync/wait predicate: any watched room advanced past its cursor.
@@ -2864,13 +2917,12 @@ pub fn http_router(state: HttpServerState) -> Router {
             "/key-packages/leases/expire",
             post(expire_key_package_lease),
         )
-        .route("/link-sessions", post(create_link_session))
-        .route("/link-sessions/get", post(get_link_session))
-        .route("/link-sessions/payload", post(upload_link_payload))
-        .route("/link-sessions/claim", post(claim_link_payload))
-        .route("/link-sessions/ack", post(ack_link_payload))
-        .route("/link-sessions/release", post(release_link_claim))
-        .route("/link-sessions/expire", post(expire_link_session))
+        .route("/pairing-sessions", post(create_pairing_session))
+        .route("/pairing-sessions/get", post(get_pairing_session))
+        .route("/pairing-sessions/offer", post(publish_pairing_offer))
+        .route("/pairing-sessions/response", post(publish_pairing_response))
+        .route("/pairing-sessions/complete", post(publish_pairing_complete))
+        .route("/pairing-sessions/expire", post(expire_pairing_session))
         .route("/account-rooms/bootstrap", post(bootstrap_account_room))
         .route("/account-rooms", post(save_account_room))
         .route("/account-rooms/list", post(list_account_rooms))
@@ -3189,59 +3241,51 @@ async fn expire_key_package_lease(
     Ok(Json(response))
 }
 
-async fn create_link_session(
+async fn create_pairing_session(
     State(state): State<HttpServerState>,
-    Json(request): Json<CreateLinkSessionRequest>,
-) -> Result<Json<HttpLinkSessionRecord>, ServerHttpError> {
-    let record = state.create_link_session(request)?;
+    Json(request): Json<CreatePairingSessionRequest>,
+) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
+    let record = state.create_pairing_session(request)?;
     Ok(Json(record))
 }
 
-async fn get_link_session(
+async fn get_pairing_session(
     State(state): State<HttpServerState>,
-    Json(request): Json<GetLinkSessionRequest>,
-) -> Result<Json<Option<HttpLinkSessionRecord>>, ServerHttpError> {
-    let record = state.get_link_session(request)?;
+    Json(request): Json<GetPairingSessionRequest>,
+) -> Result<Json<Option<HttpPairingSessionRecord>>, ServerHttpError> {
+    let record = state.get_pairing_session(request)?;
     Ok(Json(record))
 }
 
-async fn upload_link_payload(
+async fn publish_pairing_offer(
     State(state): State<HttpServerState>,
-    Json(request): Json<UploadLinkPayloadRequest>,
-) -> Result<Json<HttpLinkSessionRecord>, ServerHttpError> {
-    let record = state.upload_link_payload(request)?;
+    Json(request): Json<PublishPairingOfferRequest>,
+) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
+    let record = state.publish_pairing_offer(request)?;
     Ok(Json(record))
 }
 
-async fn claim_link_payload(
+async fn publish_pairing_response(
     State(state): State<HttpServerState>,
-    Json(request): Json<ClaimLinkPayloadRequest>,
-) -> Result<Json<ClaimLinkPayloadResponse>, ServerHttpError> {
-    let response = state.claim_link_payload(request)?;
-    Ok(Json(response))
+    Json(request): Json<PublishPairingResponseRequest>,
+) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
+    let record = state.publish_pairing_response(request)?;
+    Ok(Json(record))
 }
 
-async fn ack_link_payload(
+async fn publish_pairing_complete(
     State(state): State<HttpServerState>,
-    Json(request): Json<AckLinkPayloadRequest>,
-) -> Result<Json<AckLinkPayloadResponse>, ServerHttpError> {
-    let response = state.ack_link_payload(request)?;
-    Ok(Json(response))
+    Json(request): Json<PublishPairingCompleteRequest>,
+) -> Result<Json<HttpPairingSessionRecord>, ServerHttpError> {
+    let record = state.publish_pairing_complete(request)?;
+    Ok(Json(record))
 }
 
-async fn release_link_claim(
+async fn expire_pairing_session(
     State(state): State<HttpServerState>,
-    Json(request): Json<ReleaseLinkClaimRequest>,
-) -> Result<Json<ReleaseLinkClaimResponse>, ServerHttpError> {
-    let response = state.release_link_claim(request)?;
-    Ok(Json(response))
-}
-
-async fn expire_link_session(
-    State(state): State<HttpServerState>,
-    Json(request): Json<ExpireLinkSessionRequest>,
-) -> Result<Json<ExpireLinkSessionResponse>, ServerHttpError> {
-    let response = state.expire_link_session(request)?;
+    Json(request): Json<ExpirePairingSessionRequest>,
+) -> Result<Json<ExpirePairingSessionResponse>, ServerHttpError> {
+    let response = state.expire_pairing_session(request)?;
     Ok(Json(response))
 }
 
@@ -3730,8 +3774,8 @@ impl SqliteHttpDeliveryStore {
                 owner_json TEXT NOT NULL,
                 state_json TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS http_link_sessions (
-                link_session_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS http_pairing_sessions (
+                pairing_session_id TEXT PRIMARY KEY,
                 record_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS http_nostr_profiles (
@@ -4268,34 +4312,37 @@ impl SqliteHttpDeliveryStore {
         Ok(inventory)
     }
 
-    fn upsert_link_session(&self, record: &HttpLinkSessionRecord) -> Result<(), DurableStoreError> {
+    fn upsert_pairing_session(
+        &self,
+        record: &HttpPairingSessionRecord,
+    ) -> Result<(), DurableStoreError> {
         let conn = self.connection();
         conn.execute(
-            "INSERT INTO http_link_sessions (link_session_id, record_json)
+            "INSERT INTO http_pairing_sessions (pairing_session_id, record_json)
              VALUES (?1, ?2)
-             ON CONFLICT(link_session_id) DO UPDATE SET
+             ON CONFLICT(pairing_session_id) DO UPDATE SET
                 record_json = excluded.record_json",
-            params![record.link_session_id, serde_json::to_string(record)?],
+            params![record.pairing_session_id, serde_json::to_string(record)?],
         )?;
         Ok(())
     }
 
-    fn load_link_sessions(
+    fn load_pairing_sessions(
         &self,
-    ) -> Result<BTreeMap<String, HttpLinkSessionRecord>, DurableStoreError> {
+    ) -> Result<BTreeMap<String, HttpPairingSessionRecord>, DurableStoreError> {
         let conn = self.connection();
         let mut statement = conn.prepare(
-            "SELECT link_session_id, record_json
-             FROM http_link_sessions
-             ORDER BY link_session_id ASC",
+            "SELECT pairing_session_id, record_json
+             FROM http_pairing_sessions
+             ORDER BY pairing_session_id ASC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         let mut sessions = BTreeMap::new();
         for row in rows {
-            let (link_session_id, record_json) = row?;
-            sessions.insert(link_session_id, serde_json::from_str(&record_json)?);
+            let (pairing_session_id, record_json) = row?;
+            sessions.insert(pairing_session_id, serde_json::from_str(&record_json)?);
         }
         Ok(sessions)
     }
@@ -6055,42 +6102,111 @@ fn default_membership_complete() -> bool {
     true
 }
 
-fn validate_link_session_id(link_session_id: &str) -> Result<(), ServerHttpError> {
-    validate_string_bytes("link_session_id", link_session_id, MAX_OBJECT_ID_BYTES).map_err(
-        |error| ServerHttpError::InvalidLinkSessionRequest {
-            reason: error.to_string(),
-        },
-    )
+fn pairing_invalid(reason: impl Into<String>) -> ServerHttpError {
+    ServerHttpError::InvalidPairingSessionRequest {
+        reason: reason.into(),
+    }
 }
 
-fn validate_link_pairing_public_key(pairing_public_key: &str) -> Result<(), ServerHttpError> {
+fn pairing_corrupt(reason: impl Into<String>) -> ServerHttpError {
+    pairing_invalid(reason)
+}
+
+fn pairing_conflict(pairing_session_id: &str, reason: impl Into<String>) -> ServerHttpError {
+    ServerHttpError::PairingSessionConflict {
+        pairing_session_id: pairing_session_id.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn validate_pairing_session_id(pairing_session_id: &str) -> Result<(), ServerHttpError> {
     validate_string_bytes(
-        "pairing_public_key",
-        pairing_public_key,
+        "pairing_session_id",
+        pairing_session_id,
         MAX_OBJECT_ID_BYTES,
     )
-    .map_err(|error| ServerHttpError::InvalidLinkSessionRequest {
-        reason: error.to_string(),
-    })
+    .map_err(|error| pairing_invalid(error.to_string()))
 }
 
-fn validate_link_payload(payload: &[u8]) -> Result<(), ServerHttpError> {
-    validate_bytes_len(
-        "link_session.encrypted_payload",
-        payload.len(),
-        MAX_LINK_SESSION_PAYLOAD_BYTES,
+fn validate_pairing_device_id(target_device_id: &str) -> Result<(), ServerHttpError> {
+    validate_string_bytes(
+        "pairing_session.target_device_id",
+        target_device_id,
+        MAX_OBJECT_ID_BYTES,
     )
-    .map_err(|error| ServerHttpError::InvalidLinkSessionRequest {
-        reason: error.to_string(),
-    })
+    .map_err(|error| pairing_invalid(error.to_string()))
 }
 
-fn validate_link_claim_token(claim_token: &str) -> Result<(), ServerHttpError> {
-    validate_string_bytes("link_session.claim_token", claim_token, MAX_OBJECT_ID_BYTES).map_err(
-        |error| ServerHttpError::InvalidLinkSessionRequest {
-            reason: error.to_string(),
-        },
-    )
+fn validate_pairing_public_key(value: &str) -> Result<NostrPublicKey, ServerHttpError> {
+    validate_string_bytes("pairing_public_key", value, 64)
+        .map_err(|error| pairing_invalid(error.to_string()))?;
+    let key = NostrPublicKey::from_hex(value)
+        .map_err(|_| pairing_invalid("pairing public key must be canonical 32-byte hex"))?;
+    if key.to_hex() != value {
+        return Err(pairing_invalid(
+            "pairing public key must use canonical lowercase hex",
+        ));
+    }
+    Ok(key)
+}
+
+fn validate_pairing_event(bytes: &[u8]) -> Result<NostrEvent, ServerHttpError> {
+    validate_bytes_len("pairing_event", bytes.len(), MAX_PAIRING_EVENT_BYTES)
+        .map_err(|error| pairing_invalid(error.to_string()))?;
+    let event: NostrEvent =
+        serde_json::from_slice(bytes).map_err(|_| pairing_invalid("invalid Nostr event JSON"))?;
+    event
+        .verify()
+        .map_err(|_| pairing_invalid("invalid Nostr event signature"))?;
+    if event.kind != NostrKind::Custom(PAIRING_EVENT_KIND) {
+        return Err(pairing_invalid("unexpected Nostr event kind"));
+    }
+    if event.created_at.as_secs().abs_diff(pairing_now()) > PAIRING_SESSION_TTL_SECONDS {
+        return Err(pairing_invalid(
+            "pairing event timestamp is outside the allowed window",
+        ));
+    }
+    if event.content.is_empty() || event.content.len() > MAX_PAIRING_EVENT_BYTES as usize {
+        return Err(pairing_invalid(
+            "pairing event content is outside the allowed bounds",
+        ));
+    }
+    pairing_recipient(&event)?;
+    Ok(event)
+}
+
+fn pairing_recipient(event: &NostrEvent) -> Result<NostrPublicKey, ServerHttpError> {
+    let mut tags = event.tags.iter();
+    let values = tags
+        .next()
+        .ok_or_else(|| pairing_invalid("pairing event must have one recipient tag"))?
+        .as_slice();
+    if tags.next().is_some()
+        || values.len() != 2
+        || values.first().map(|value| value.as_str()) != Some("p")
+    {
+        return Err(pairing_invalid(
+            "pairing event must have exactly one canonical recipient tag",
+        ));
+    }
+    validate_pairing_public_key(values[1].as_str())
+}
+
+fn pairing_now() -> u64 {
+    nostr::Timestamp::now().as_secs()
+}
+
+fn ensure_pairing_session_open(session: &HttpPairingSessionRecord) -> Result<(), ServerHttpError> {
+    if session.version != PAIRING_PROTOCOL_VERSION
+        || session.events.len() > MAX_PAIRING_EVENTS
+        || session.state == HttpPairingSessionState::Expired
+        || pairing_now() > session.expires_at_unix_seconds
+    {
+        return Err(ServerHttpError::PairingSessionClosed {
+            pairing_session_id: session.pairing_session_id.clone(),
+        });
+    }
+    Ok(())
 }
 
 const MAX_SYNC_WAIT_MILLIS: u64 = 25_000;
@@ -6139,16 +6255,6 @@ fn validate_sync_room_id(room_id: &str) -> Result<(), ServerHttpError> {
             reason: error.to_string(),
         }
     })
-}
-
-fn link_session_claim_token(session: &HttpLinkSessionRecord) -> String {
-    lease_token_for(
-        &session.link_session_id,
-        &DeviceRef {
-            account_id: "link".to_owned(),
-            device_id: session.pairing_public_key.clone(),
-        },
-    )
 }
 
 fn validate_account_room_id(field: &'static str, value: &str) -> Result<(), ServerHttpError> {
@@ -6588,27 +6694,21 @@ pub enum ServerHttpError {
         fanout_id: String,
         room_id: GroupId,
     },
-    InvalidLinkSessionRequest {
+    InvalidPairingSessionRequest {
         reason: String,
     },
-    LinkSessionAlreadyExists {
-        link_session_id: String,
+    PairingSessionAlreadyExists {
+        pairing_session_id: String,
     },
-    LinkSessionNotFound {
-        link_session_id: String,
+    PairingSessionNotFound {
+        pairing_session_id: String,
     },
-    LinkSessionConflict {
-        link_session_id: String,
+    PairingSessionConflict {
+        pairing_session_id: String,
         reason: String,
     },
-    LinkSessionClosed {
-        link_session_id: String,
-    },
-    LinkSessionNotReady {
-        link_session_id: String,
-    },
-    BadLinkSessionClaimToken {
-        link_session_id: String,
+    PairingSessionClosed {
+        pairing_session_id: String,
     },
     InvalidSyncRequest {
         reason: String,
@@ -6871,43 +6971,33 @@ impl IntoResponse for ServerHttpError {
                 "fanout_room_not_found".to_owned(),
                 format!("fanout {fanout_id} has no room {room_id:?}"),
             ),
-            Self::InvalidLinkSessionRequest { reason } => (
+            Self::InvalidPairingSessionRequest { reason } => (
                 StatusCode::BAD_REQUEST,
-                "invalid_link_session_request".to_owned(),
+                "invalid_pairing_session_request".to_owned(),
                 reason,
             ),
-            Self::LinkSessionAlreadyExists { link_session_id } => (
+            Self::PairingSessionAlreadyExists { pairing_session_id } => (
                 StatusCode::CONFLICT,
-                "link_session_already_exists".to_owned(),
-                format!("link session {link_session_id} already exists"),
+                "pairing_session_already_exists".to_owned(),
+                format!("pairing session {pairing_session_id} already exists"),
             ),
-            Self::LinkSessionNotFound { link_session_id } => (
+            Self::PairingSessionNotFound { pairing_session_id } => (
                 StatusCode::NOT_FOUND,
-                "link_session_not_found".to_owned(),
-                format!("link session {link_session_id} was not found"),
+                "pairing_session_not_found".to_owned(),
+                format!("pairing session {pairing_session_id} was not found"),
             ),
-            Self::LinkSessionConflict {
-                link_session_id,
+            Self::PairingSessionConflict {
+                pairing_session_id,
                 reason,
             } => (
                 StatusCode::CONFLICT,
-                "link_session_conflict".to_owned(),
-                format!("link session {link_session_id} conflict: {reason}"),
+                "pairing_session_conflict".to_owned(),
+                format!("pairing session {pairing_session_id} conflict: {reason}"),
             ),
-            Self::LinkSessionClosed { link_session_id } => (
+            Self::PairingSessionClosed { pairing_session_id } => (
                 StatusCode::BAD_REQUEST,
-                "link_session_closed".to_owned(),
-                format!("link session {link_session_id} is closed"),
-            ),
-            Self::LinkSessionNotReady { link_session_id } => (
-                StatusCode::BAD_REQUEST,
-                "link_session_not_ready".to_owned(),
-                format!("link session {link_session_id} is not ready"),
-            ),
-            Self::BadLinkSessionClaimToken { link_session_id } => (
-                StatusCode::BAD_REQUEST,
-                "bad_link_session_claim_token".to_owned(),
-                format!("link session {link_session_id} claim token does not match"),
+                "pairing_session_closed".to_owned(),
+                format!("pairing session {pairing_session_id} is closed"),
             ),
             Self::InvalidSyncRequest { reason } => (
                 StatusCode::BAD_REQUEST,

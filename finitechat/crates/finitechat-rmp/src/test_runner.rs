@@ -16,7 +16,7 @@ use crate::run::{
     ensure_ios_simulator, ios_sim_target_for_host, read_xcode_project_name,
     terminate_ios_simulator_app,
 };
-use crate::util::{discover_xcode_dev_dir, run_capture};
+use crate::util::{discover_xcode_dev_dir, run_capture, sanitize_apple_toolchain_environment};
 
 pub fn test(root: &Path, json: bool, verbose: bool, args: TestArgs) -> Result<(), CliError> {
     match args.platform {
@@ -118,10 +118,8 @@ fn test_ios_simulator(
         format!("xcodebuild test ({xcode_scheme}, simulator={udid}, arch={xcode_arch})"),
     );
     let mut cmd = Command::new("/usr/bin/xcrun");
+    sanitize_apple_toolchain_environment(&mut cmd);
     cmd.env("DEVELOPER_DIR", &dev_dir)
-        .env_remove("LD")
-        .env_remove("CC")
-        .env_remove("CXX")
         .arg("xcodebuild")
         .arg("-project")
         .arg(&xcode_project_path)

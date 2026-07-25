@@ -93,7 +93,7 @@ lat1-secret-bootstrap-contract:
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity
-    cargo test --locked -p finitechat-hosted-device --test http device_link
+    cargo test --locked -p finitechat-hosted-device --test http
     cargo test --locked -p finitechat-daemon
     cd finitechat/apps/electron-chat && npm ci && npm run check
 
@@ -112,6 +112,11 @@ chat-electron-check:
 chat-electron-package:
     cargo build --locked --release -p finitechat-daemon
     cd finitechat/apps/electron-chat && npm ci && FINITECHAT_DAEMON_BINARY="{{justfile_directory()}}/target/release/finitechatd" npm run package:mac
+
+# Regenerate the native iOS bridge/project and prove the unsigned Release
+# configuration Xcode Cloud will archive.
+ios-cloud-preflight:
+    finitechat/scripts/ios-xcode-cloud-preflight.sh
 
 # Opt-in Stripe test-mode clock E2E. Credentials come from the caller's
 # environment and the harness never prints their values.

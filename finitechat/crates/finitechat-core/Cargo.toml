@@ -19,7 +19,9 @@ finitechat-http = { path = "../finitechat-http" }
 finitechat-mls = { path = "../finitechat-mls" }
 finitechat-proto = { path = "../finitechat-proto" }
 base64.workspace = true
+getrandom.workspace = true
 hex.workspace = true
+hkdf.workspace = true
 hypernote-mdx.workspace = true
 nostr.workspace = true
 reqwest.workspace = true
@@ -28,7 +30,10 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
 uniffi.workspace = true
+workos.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

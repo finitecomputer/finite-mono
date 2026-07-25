@@ -4,8 +4,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use finitechat_core::nip_ab::NIP_AB_SESSION_TTL_SECONDS;
 use finitechat_core::{FiniteChatRuntime, OpenOptions};
-use finitechat_daemon::device_link::{DeviceLinkBootstrapOptions, create_device_link_session};
+use finitechat_daemon::device_link::{
+    DeviceLinkBootstrapOptions, PairingSourceDescriptor, create_device_link_session,
+};
 use finitechat_daemon::{
     DEFAULT_BIND, DEFAULT_SERVER_URL, DaemonError, app_with_data_dir, read_startup_secrets,
     validate_loopback_bind,
@@ -42,7 +45,9 @@ enum Command {
         result_fd: i32,
         #[arg(long, default_value_t = 4)]
         confirm_fd: i32,
-        #[arg(long, default_value_t = 600)]
+        #[arg(long, default_value_t = 5)]
+        descriptor_fd: i32,
+        #[arg(long, default_value_t = NIP_AB_SESSION_TTL_SECONDS)]
         timeout_seconds: u64,
     },
 }
@@ -62,6 +67,7 @@ async fn run() -> Result<(), DaemonError> {
         device_id,
         result_fd,
         confirm_fd,
+        descriptor_fd,
         timeout_seconds,
     }) = args.command
     {
@@ -70,6 +76,7 @@ async fn run() -> Result<(), DaemonError> {
             device_id,
             result_fd,
             confirm_fd,
+            descriptor_fd,
             timeout_seconds,
         )
         .await;
@@ -127,9 +134,11 @@ async fn run_device_link(
     device_id: String,
     result_fd: i32,
     confirm_fd: i32,
+    descriptor_fd: i32,
     timeout_seconds: u64,
 ) -> Result<(), DaemonError> {
-    let (mut result_pipe, confirmation_pipe) = supervisor_pipes(result_fd, confirm_fd)?;
+    let (mut result_pipe, confirmation_pipe, descriptor_pipe) =
+        supervisor_pipes(result_fd, confirm_fd, descriptor_fd)?;
     let mut options = DeviceLinkBootstrapOptions::internal_alpha(server_url, device_id);
     options.timeout = Duration::from_secs(timeout_seconds);
     let session = create_device_link_session(options).await?;
@@ -138,7 +147,26 @@ async fn run_device_link(
         .flush()
         .map_err(|_| DaemonError::Task("device-link status pipe failed".to_owned()))?;
 
-    let claimed = session.wait_for_claim().await?;
+    let descriptor = tokio::task::spawn_blocking(move || {
+        let mut encoded = String::new();
+        let read = io::BufReader::new(descriptor_pipe).read_line(&mut encoded)?;
+        if read == 0 || encoded.len() > 4096 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid pairing descriptor",
+            ));
+        }
+        serde_json::from_str::<PairingSourceDescriptor>(encoded.trim())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid pairing descriptor"))
+    })
+    .await
+    .map_err(|_| DaemonError::Task("device-link descriptor pipe failed".to_owned()))?
+    .map_err(|_| DaemonError::Task("device-link descriptor pipe failed".to_owned()))?;
+    let claimed = session
+        .accept_source_descriptor(descriptor)
+        .await?
+        .wait_for_claim()
+        .await?;
     if claimed.write_secret_result(&mut result_pipe).is_err() {
         claimed.release().await;
         return Err(DaemonError::Task(
@@ -171,10 +199,17 @@ async fn run_device_link(
 fn supervisor_pipes(
     result_fd: i32,
     confirm_fd: i32,
-) -> Result<(std::fs::File, std::fs::File), DaemonError> {
+    descriptor_fd: i32,
+) -> Result<(std::fs::File, std::fs::File, std::fs::File), DaemonError> {
     use std::os::fd::FromRawFd;
 
-    if result_fd < 3 || confirm_fd < 3 || result_fd == confirm_fd {
+    if result_fd < 3
+        || confirm_fd < 3
+        || descriptor_fd < 3
+        || result_fd == confirm_fd
+        || result_fd == descriptor_fd
+        || confirm_fd == descriptor_fd
+    {
         return Err(DaemonError::Task(
             "invalid device-link supervisor pipes".to_owned(),
         ));
@@ -185,14 +220,36 @@ fn supervisor_pipes(
     // SAFETY: same ownership contract as `result_fd`; the descriptors are
     // validated as distinct above.
     let confirmation = unsafe { std::fs::File::from_raw_fd(confirm_fd) };
-    Ok((result, confirmation))
+    // SAFETY: same ownership contract as the other dedicated descriptors.
+    let descriptor = unsafe { std::fs::File::from_raw_fd(descriptor_fd) };
+    Ok((result, confirmation, descriptor))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_command_default_timeout_matches_the_nip_ab_window() {
+        let args =
+            Args::try_parse_from(["finitechatd", "link", "--device-id", "electron-test-device"])
+                .expect("valid link command");
+        let Some(Command::Link {
+            timeout_seconds, ..
+        }) = args.command
+        else {
+            panic!("expected link command");
+        };
+        assert_eq!(timeout_seconds, NIP_AB_SESSION_TTL_SECONDS);
+    }
 }
 
 #[cfg(not(unix))]
 fn supervisor_pipes(
     _result_fd: i32,
     _confirm_fd: i32,
-) -> Result<(std::fs::File, std::fs::File), DaemonError> {
+    _descriptor_fd: i32,
+) -> Result<(std::fs::File, std::fs::File, std::fs::File), DaemonError> {
     Err(DaemonError::Task(
         "device linking is unavailable on this alpha platform".to_owned(),
     ))

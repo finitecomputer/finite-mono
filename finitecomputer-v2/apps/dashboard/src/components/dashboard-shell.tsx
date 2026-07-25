@@ -355,7 +355,10 @@ function AgentAppSection({
   }, [pathname]);
 
   useEffect(() => {
-    const open = () => setMobileOpen(true);
+    const open = () => {
+      setCollapsed(false);
+      setMobileOpen(true);
+    };
     window.addEventListener("finite:open-agent-sidebar", open);
     return () => window.removeEventListener("finite:open-agent-sidebar", open);
   }, []);

@@ -2,6 +2,13 @@
 
 Status: Phase 1 through Phase 5 implemented; Phase 6 next
 
+Scope note (2026-07-23): this document records the full Rust runtime hard cut.
+Its scan/invite/PIN actions and historical simulator proof remain core and
+regression-test context, not current iOS product surfaces. The focused iOS
+client is defined by [ADR 0013](adr/0013-ios-single-agent-client.md) and exposes
+only account linking, one paired agent, Home/new Chat, Chat history, and the
+retained transcript/composer.
+
 Finite Chat should follow the same product architecture that worked in Pika:
 one Rust app runtime owns product state and policy, while native apps, CLI
 harnesses, and agent-facing smoke tests dispatch typed actions and render or

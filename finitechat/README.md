@@ -36,6 +36,10 @@ automatically through `/api/device-links/account-binding`,
 `/api/device-links/approve`, and `/api/device-links/status`. The account secret
 is claimed over the encrypted device-link channel and committed to macOS secure
 storage before the local daemon starts; there is no separate approval page.
+For each linked Room still missing authoritative local metadata, the daemon's
+shared Rust runtime accepts either a complete, verified, multi-chunk history
+transfer or no history. Electron initially renders a bounded transcript window
+and pages older messages from that committed local history.
 
 ## Install `finitechat`
 
@@ -212,6 +216,19 @@ The v1 product shape is a phone chat app for people and agents:
 - `integrations/hermes/finitechat` - Hermes platform plugin adapter.
 - `docs/adr` and `docs/protocol-v1.md` - current product/protocol decisions.
 
+### iOS Product Slice
+
+iOS is intentionally a single-agent client. A fresh install links an existing
+Finite account through the WorkOS-protected dashboard, lets the human choose
+one connected agent, and opens on Home. A Home submission creates a new Chat
+in the agent Room's `home` Topic and sends the first message through one
+idempotent Rust intent. Home shows the three most recent Chats; the retained
+chat screen exposes the full Topic/Chat list in an overlay drawer.
+
+There are no iOS room, people, group, scanner, profile, or manual-key-login
+products and no migration path from the pre-release app. See
+`docs/adr/0013-ios-single-agent-client.md`.
+
 ### Local Loop
 
 The production/default app server is `https://chat.finite.computer`. Local
@@ -241,30 +258,62 @@ FINITECHAT_PUBLIC_URL=https://chat.example.com \
 `--public-url URL` is the equivalent command-line option. The value must be a
 bare `http` or `https` origin, without a path, query, credentials, or fragment.
 
-Run the iOS simulator app against that server with an explicit override:
+For normal local iOS product and UX iteration, run the blessed Devfinity
+workflow from the monorepo root:
 
 ```sh
-FINITECHAT_SERVER_URL=http://127.0.0.1:8787 cargo run -p finitechat-rmp -- run ios
+just dev ios-local-agent
 ```
 
-To test the iOS app surface with a real local Hermes gateway, use the bundled
-runner instead of the plain server command. This is a low-level local runner,
-not the physical-phone canary gate:
+The command launches the app against loopback-only services, creates one
+`Local Agent` chat, and leaves the stack running until Control-C. In the app,
+tap **Continue with Finite**, then choose **Local Agent**. The development
+dashboard automatically approves the same bounded device-link request that
+Electron uses; there is no separate approval page. No deployment or production
+account is involved. Logs stay under
+`finitechat/.state/ios-local-agent/`.
+
+Because both configured origins are loopback HTTP URLs, the app intentionally
+skips hosted WorkOS AuthKit and its HTTPS/AASA callback. The bypass fails closed
+for mixed, non-loopback, and deployed origins, so hosted builds still require
+normal authentication.
+
+To audit interactive performance in the same local loop, enable the opt-in
+performance probes:
+
+```sh
+FINITECHAT_IOS_PERFORMANCE_PROBES=1 just dev ios-local-agent
+```
+
+The native app emits Instruments signpost intervals for Rust dispatch, runtime
+snapshot application, chat projection rebuilding, transcript-host updates, and
+composer measurement. The probes also log when composer input waits longer
+than one 60 Hz frame for the next main-queue turn or when a measured main-thread
+operation exceeds its budget. Message text and identifiers are never included.
+Use the simulator warnings for the fast local loop; use the SwiftUI and Time
+Profiler instruments on a Release build on a physical device before shipping.
+
+For low-level server or build troubleshooting, the primitives can still run
+independently. They do not create the complete local account-link fixture; use
+the Devfinity workflow above when the app needs to chat:
+
+```sh
+cargo run -p finitechat-server -- serve 127.0.0.1:8787 --sqlite .state/finitechat.sqlite3
+FINITECHAT_SERVER_URL=http://127.0.0.1:8787 \
+  cargo run -p finitechat-rmp -- run ios
+```
+
+To isolate the real Hermes gateway without the rest of the product loop, use
+the lower-level runner:
 
 ```sh
 scripts/hermes-real-gateway-demo.sh
 ```
 
-In another terminal, point the simulator app at the runner's local server:
-
-```sh
-FINITECHAT_SERVER_URL=http://127.0.0.1:18788 cargo run -p finitechat-rmp -- run ios
-```
-
-The Hermes runner needs a prepared Hermes checkout with a `.venv`; set
-`FINITECHAT_HERMES_REPO=/path/to/hermes-agent` if it is not in a sibling
-checkout. It also needs the model provider key used by the Hermes profile. The
-runner loads `.env` when present, or set
+The Hermes runner launches the same `hermes-agent==0.18.2` package pinned by
+CI and the runtime image through `uvx`; it does not discover ambient sibling
+checkouts. It also needs the model provider key used by the Hermes profile.
+The runner loads `.env` when present, or set
 `FINITECHAT_HERMES_ENV_FILE=/path/to/provider.env`.
 
 The product-shaped Hermes runtime ladder for local Apple Container, Kata, and
@@ -290,13 +339,14 @@ on later runs with that persisted agent. Physical-phone and remote-Docker
 scripts remain historical/manual experiments until rewritten against the same
 Agent Principal + Welcome-first contract; they are not promotion gates.
 
-The normal app flow is:
+The focused iOS app flow is:
 
-1. Sign in with an `nsec` or create a local Nostr identity.
-2. Use **People** to open an existing profile or **Scan** to scan/paste an
-   invite URL or `npub`.
-3. Chat from the room surface. Rust owns send state, retry state, delivery
-   projection, and attachment download decisions.
+1. Authenticate the Finite account and link this iPhone through the existing
+   automatic encrypted Device-link protocol.
+2. Choose one connected Agent Room. The choice can be changed in Settings.
+3. Start a chat from Home in the `home` Topic, reopen one of the three most
+   recent chats, or switch chats through the in-chat sidebar. Rust owns send
+   state, retry state, delivery projection, and attachment download decisions.
 
 ### Checks
 

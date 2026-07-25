@@ -288,12 +288,12 @@ export type HostedRuntimeCommandResponse = {
 };
 
 export type HostedDeviceLinkRequest = {
-  link_session_id: string;
+  pairing_session_id: string;
   target_device_id: string;
 };
 
 export type HostedDeviceLinkStatus =
-  | "awaiting_claim"
+  | "awaiting_offer"
   | "awaiting_key_package"
   | "joining_rooms"
   | "ready"
@@ -304,6 +304,12 @@ export type HostedDeviceLinkResponse = HostedDeviceLinkRequest & {
   expires_at_unix_seconds: number;
   room_count: number;
   active_room_count: number;
+  source_descriptor?: {
+    version: number;
+    source_public_key: string;
+    session_secret_hex: string;
+    expires_at_unix_seconds: number;
+  };
 };
 
 export type HostedDeviceReconcileRequest = {
@@ -640,7 +646,7 @@ function parseHostedDeviceLinkResponse(
   }
   const record = value as Record<string, unknown>;
   const statuses = new Set<HostedDeviceLinkStatus>([
-    "awaiting_claim",
+    "awaiting_offer",
     "awaiting_key_package",
     "joining_rooms",
     "ready",
@@ -650,8 +656,9 @@ function parseHostedDeviceLinkResponse(
   const expiresAt = record.expires_at_unix_seconds;
   const roomCount = record.room_count;
   const activeRoomCount = record.active_room_count;
+  const descriptor = parsePairingSourceDescriptor(record.source_descriptor);
   if (
-    record.link_session_id !== expected.link_session_id ||
+    record.pairing_session_id !== expected.pairing_session_id ||
     record.target_device_id !== expected.target_device_id ||
     typeof status !== "string" ||
     !statuses.has(status as HostedDeviceLinkStatus) ||
@@ -668,12 +675,41 @@ function parseHostedDeviceLinkResponse(
   // Project an exact allowlist. Even an accidentally expanded internal
   // response can never forward encrypted or signer material to the browser.
   return {
-    link_session_id: expected.link_session_id,
+    pairing_session_id: expected.pairing_session_id,
     target_device_id: expected.target_device_id,
     status: status as HostedDeviceLinkStatus,
     expires_at_unix_seconds: expiresAt as number,
     room_count: roomCount as number,
     active_room_count: activeRoomCount as number,
+    ...(descriptor ? { source_descriptor: descriptor } : {}),
+  };
+}
+
+function parsePairingSourceDescriptor(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Device-link service returned an invalid source descriptor.");
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.join(",") !==
+      "expires_at_unix_seconds,session_secret_hex,source_public_key,version" ||
+    record.version !== 1 ||
+    typeof record.source_public_key !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(record.source_public_key) ||
+    typeof record.session_secret_hex !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(record.session_secret_hex) ||
+    !Number.isSafeInteger(record.expires_at_unix_seconds) ||
+    (record.expires_at_unix_seconds as number) < 0
+  ) {
+    throw new Error("Device-link service returned an invalid source descriptor.");
+  }
+  return {
+    version: 1,
+    source_public_key: record.source_public_key,
+    session_secret_hex: record.session_secret_hex,
+    expires_at_unix_seconds: record.expires_at_unix_seconds as number,
   };
 }
 

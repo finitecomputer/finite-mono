@@ -1385,7 +1385,9 @@ dependencies = [
  "finitechat-mls",
  "finitechat-proto 0.1.0",
  "finitechat-server",
+ "getrandom 0.3.4",
  "hex",
+ "hkdf",
  "hypernote-mdx",
  "nostr",
  "reqwest",
@@ -1398,6 +1400,8 @@ dependencies = [
  "time",
  "tokio",
  "uniffi",
+ "workos",
+ "zeroize",
 ]
 
 [[package]]
@@ -1413,6 +1417,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "http-body-util",
+ "nostr",
  "reqwest",
  "serde",
  "serde_json",
@@ -1420,6 +1425,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
+ "zeroize",
 ]
 
 [[package]]
@@ -1488,6 +1494,7 @@ dependencies = [
  "tokio",
  "tower",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]
@@ -1567,6 +1574,7 @@ dependencies = [
  "finitechat-proto 0.1.0",
  "finitechat-transport",
  "futures-util",
+ "nostr",
  "p256",
  "reqwest",
  "rusqlite",
@@ -5449,6 +5457,31 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "workos"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c68db2602873133828bd152bdb0f8b07c4624dfa5b27a9fb056417347affb860"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "base64",
+ "bytes",
+ "futures-util",
+ "hex",
+ "hmac 0.12.1",
+ "http",
+ "rand 0.9.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "url",
 ]
 
 [[package]]

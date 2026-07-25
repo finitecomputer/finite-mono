@@ -311,19 +311,29 @@ test("device linking stays server-side and projects only public progress", async
       body: String(init?.body),
     });
     return Response.json({
-      link_session_id: "link-alpha",
+      pairing_session_id: "pairing-alpha",
       target_device_id: "electron-alpha",
-      status: observed.length === 1 ? "awaiting_claim" : "ready",
+      status: observed.length === 1 ? "awaiting_offer" : "ready",
       expires_at_unix_seconds: 1_800_000_600,
       room_count: 2,
       active_room_count: observed.length === 1 ? 0 : 2,
+      ...(observed.length === 1
+        ? {
+            source_descriptor: {
+              version: 1,
+              source_public_key: "a".repeat(64),
+              session_secret_hex: "b".repeat(64),
+              expires_at_unix_seconds: 1_800_000_120,
+            },
+          }
+        : {}),
       account_secret_hex: "must-never-cross-the-dashboard-boundary",
       encrypted_payload: [1, 2, 3],
     });
   }) as typeof fetch;
 
   const input = {
-    link_session_id: "link-alpha",
+    pairing_session_id: "pairing-alpha",
     target_device_id: "electron-alpha",
   };
   const approved = await hostedDeviceApproveLink(
@@ -339,10 +349,16 @@ test("device linking stays server-side and projects only public progress", async
 
   assert.deepEqual(approved, {
     ...input,
-    status: "awaiting_claim",
+    status: "awaiting_offer",
     expires_at_unix_seconds: 1_800_000_600,
     room_count: 2,
     active_room_count: 0,
+    source_descriptor: {
+      version: 1,
+      source_public_key: "a".repeat(64),
+      session_secret_hex: "b".repeat(64),
+      expires_at_unix_seconds: 1_800_000_120,
+    },
   });
   assert.equal(ready.status, "ready");
   assert.deepEqual(

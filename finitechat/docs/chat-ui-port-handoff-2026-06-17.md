@@ -3,6 +3,11 @@
 Date: 2026-06-17
 Audience: next Codex session or human continuing the FiniteChat iOS work
 
+> Historical handoff. Its navigation and onboarding descriptions are
+> superseded by `docs/adr/0013-ios-single-agent-client.md`. Retain its transcript
+> implementation notes, but do not recreate People, Scan, invite/PIN, profile
+> editing, group creation, or manual-key login on iOS.
+
 ## Read First
 
 Start with these files:
@@ -19,8 +24,7 @@ Start with these files:
 The governing architecture is RMP: Rust owns app state, networking,
 persistence, protocol decisions, retry policy, and user-visible state
 derivation. Swift renders projected state and performs bounded OS capability
-bridges such as file pickers, photo saving, previews, camera/QR scanning, and
-audio capture.
+bridges such as file pickers, photo saving, previews, and audio capture.
 
 ## Current Repo State
 
@@ -91,13 +95,10 @@ Rust-owned app/runtime state:
 
 iOS UI:
 
-- Home is now the default authenticated surface. It uses the real Finite mark
-  as vector SwiftUI geometry, a floating glass intention composer, and compact
-  suggestion chips for "Message someone" and "Chat with Agent" directly above
-  the composer so those suggestions can later become type/speech-driven.
-- Chats, People, Agents, and New use native SwiftUI `TabView` navigation. The
-  New tab is a real fourth tab item that routes to the Home surface rather than
-  a custom/fake tab bar or separate accessory.
+- Home is the authenticated root for the one paired agent. It uses the real
+  Finite mark, a native composer, and three compact recent-chat badges.
+- Chats remain grouped by Topic in the overlay drawer. There is no tab shell,
+  People browser, Scan flow, room directory, or independent New surface.
 - The app icon is now supplied by `Sources/Assets.xcassets/AppIcon.appiconset`
   and configured through XcodeGen's
   `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`.
@@ -119,11 +120,10 @@ iOS UI:
 
 Protocol/product flow:
 
-- user-facing flow starts on Home with an intention composer, then routes into
-  Message someone, Chat with Agent, Invite, Scan/Paste, PIN, and Chat;
+- user-facing flow starts on Home and creates `/new` inside the paired agent's
+  `home` Topic;
 - no user-facing manual sync, accept, or finalize action;
 - SSE hint loop is behind Rust `wait_for_update`;
-- server-backed Nostr profiles are the v1 profile source, with local cache;
 - server is the first-class full-service backer; Nostr relay compatibility is
   deferred.
 

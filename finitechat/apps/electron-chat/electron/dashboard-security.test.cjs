@@ -197,7 +197,7 @@ test("desktop chat bridge exposes an exact action allowlist", () => {
 
 test("device-link responses must match the exact public rendezvous", () => {
   const expected = {
-    link_session_id: "link-alpha",
+    pairing_session_id: "pairing-alpha",
     target_device_id: "electron-alpha",
   };
   assert.deepEqual(

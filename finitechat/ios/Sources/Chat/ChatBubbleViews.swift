@@ -301,13 +301,7 @@ private struct ChatMessageBubble: View {
                     .padding(.top, message.media.isEmpty ? 8 : 7)
                     .padding(.bottom, hasFooter ? 3 : 8)
                 } else if !bodyText.isEmpty {
-                    ChatRichTextView(
-                        astJson: message.richTextJson,
-                        fallbackText: bodyText,
-                        isMine: message.isMine,
-                        foregroundColor: foregroundColor,
-                        secondaryForegroundColor: secondaryForegroundColor
-                    )
+                    messageBody
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 12)
                         .padding(.top, message.media.isEmpty ? 8 : 7)
@@ -387,6 +381,24 @@ private struct ChatMessageBubble: View {
         .accessibilityIdentifier(accessibility.identifier)
         .onDisappear {
             messageFrameRegistry?.removeFrame(for: message.messageId)
+        }
+    }
+
+    @ViewBuilder
+    private var messageBody: some View {
+        if message.isMine {
+            Text(bodyText)
+                .font(.body)
+                .foregroundStyle(foregroundColor)
+                .textSelection(.enabled)
+        } else {
+            ChatRichTextView(
+                astJson: message.richTextJson,
+                fallbackText: bodyText,
+                isMine: false,
+                foregroundColor: foregroundColor,
+                secondaryForegroundColor: secondaryForegroundColor
+            )
         }
     }
 
@@ -1525,7 +1537,7 @@ private struct ChatRichTextView: View {
 
     private func inlineText(from children: [ChatRichTextAstNode]?) -> Text {
         (children ?? []).reduce(Text("")) { partial, node in
-            partial + inlineTextNode(node)
+            Text("\(partial)\(inlineTextNode(node))")
         }
     }
 

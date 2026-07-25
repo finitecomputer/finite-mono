@@ -118,7 +118,9 @@ const MAX_APP_PROFILE_PICTURE_BYTES: u32 = 2 * 1024;
 const MAX_APP_PROFILE_METADATA_PLAINTEXT_BYTES: u32 = 8192;
 const MAX_APP_PROFILE_METADATA_CIPHERTEXT_BYTES: u32 =
     MAX_APP_PROFILE_METADATA_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
-const MAX_STORED_APP_MESSAGES: u32 = 5_000;
+// Message retention is complete. This is the API's addressability bound, not
+// a product history window; callers must not silently prune durable history.
+const MAX_STORED_APP_MESSAGES: u32 = u32::MAX;
 const MAX_STORED_APP_OUTBOX_MESSAGES: u32 = 512;
 const MAX_STORED_APP_PROFILES: u32 = 4_096;
 const MAX_STORED_APP_REVOKED_DEVICES: u32 = 64;
@@ -519,6 +521,7 @@ pub struct StoredAppState {
     pub selected_room_id: Option<RoomId>,
     pub selected_topic_id: Option<String>,
     pub selected_chat_id: Option<String>,
+    pub paired_agent: Option<StoredPairedAgent>,
     pub revoked_devices: BTreeSet<DeviceRef>,
     pub chat_archives: Vec<StoredChatArchiveState>,
 }
@@ -551,6 +554,12 @@ impl StoredChatArchiveState {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPairedAgent {
+    pub agent_account_id: String,
+    pub canonical_room_id: RoomId,
+}
+
 impl StoredAppState {
     fn validate_limits(&self) -> Result<(), ClientError> {
         if let Some(room_id) = &self.selected_room_id {
@@ -563,6 +572,18 @@ impl StoredAppState {
         if let Some(chat_id) = &self.selected_chat_id {
             validate_bytes_non_empty("app_state.selected_chat_id", chat_id.len())?;
             validate_string_bytes("app_state.selected_chat_id", chat_id, MAX_OBJECT_ID_BYTES)?;
+        }
+        if let Some(paired_agent) = &self.paired_agent {
+            validate_bytes_non_empty(
+                "app_state.paired_agent.agent_account_id",
+                paired_agent.agent_account_id.len(),
+            )?;
+            validate_string_bytes(
+                "app_state.paired_agent.agent_account_id",
+                &paired_agent.agent_account_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+            validate_room_id(&paired_agent.canonical_room_id)?;
         }
         validate_item_count(
             "app_state.revoked_devices",
@@ -592,6 +613,8 @@ struct StoredAppStateMetadataV1 {
     selected_topic_id: Option<String>,
     #[serde(default)]
     selected_chat_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    paired_agent: Option<StoredPairedAgent>,
     revoked_devices: BTreeSet<DeviceRef>,
     #[serde(default)]
     chat_archives: Vec<StoredChatArchiveState>,
@@ -3076,7 +3099,6 @@ impl SqliteClientStore {
             save_app_messages_tx(tx, &encryption_key, &owner, messages)?;
             save_app_events_tx(tx, &encryption_key, &owner, events)?;
             prune_app_messages_tx(tx, &owner, MAX_STORED_APP_MESSAGES)?;
-            prune_app_events_tx(tx, &owner, MAX_STORED_APP_MESSAGES)?;
             Ok(())
         })
     }
@@ -3196,7 +3218,7 @@ impl SqliteClientStore {
             save_app_messages_tx(tx, &encryption_key, owner, messages)?;
             save_app_events_tx(tx, &encryption_key, owner, events)?;
             prune_app_messages_tx(tx, owner, max_items)?;
-            prune_app_events_tx(tx, owner, max_items)
+            Ok(())
         })
     }
 
@@ -3300,6 +3322,229 @@ impl SqliteClientStore {
             save_app_events_tx(tx, &encryption_key, owner, events)?;
             prune_app_events_tx(tx, owner, max_events)
         })
+    }
+
+    /// Persist canonical decrypted application events without pruning history.
+    ///
+    /// The in-memory transcript remains independently bounded. Durable event
+    /// retention is intentionally complete because an existing account Device
+    /// is the only party able to rewrap pre-join MLS history for a newly linked
+    /// Device.
+    pub fn import_app_events_atomically(
+        &mut self,
+        owner: &DeviceRef,
+        events: &[StoredAppEvent],
+    ) -> Result<(), ClientStoreError> {
+        let encryption_key = self.options.encryption_key.clone();
+        self.with_transaction(|tx| import_app_events_tx(tx, &encryption_key, owner, events))
+    }
+
+    pub fn max_app_event_seq_for_room(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+    ) -> Result<Option<u64>, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        let stored = self.conn.query_row(
+            r#"
+            SELECT MAX(seq)
+            FROM client_app_events
+            WHERE account_id = ?1 AND device_id = ?2 AND room_id = ?3
+            "#,
+            params![&owner.account_id, &owner.device_id, room_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        stored.map(sqlite_app_event_seq_to_u64).transpose()
+    }
+
+    pub fn has_app_event(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+        message_id: &str,
+    ) -> Result<bool, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        validate_bytes_non_empty("app_event.message_id", message_id.len())
+            .map_err(ClientError::from)?;
+        validate_string_bytes("app_event.message_id", message_id, MAX_OBJECT_ID_BYTES)
+            .map_err(ClientError::from)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM client_app_events
+                  WHERE account_id = ?1
+                    AND device_id = ?2
+                    AND room_id = ?3
+                    AND message_id = ?4
+                )
+                "#,
+                params![&owner.account_id, &owner.device_id, room_id, message_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ClientStoreError::from)
+    }
+
+    pub fn has_app_event_identity(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+        seq: u64,
+        message_id: &str,
+        sender: &DeviceRef,
+        timestamp_unix_seconds: u64,
+    ) -> Result<bool, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        validate_bytes_non_empty("app_event.message_id", message_id.len())
+            .map_err(ClientError::from)?;
+        validate_string_bytes("app_event.message_id", message_id, MAX_OBJECT_ID_BYTES)
+            .map_err(ClientError::from)?;
+        sender.validate_limits().map_err(ClientError::from)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM client_app_events
+                  WHERE account_id = ?1
+                    AND device_id = ?2
+                    AND room_id = ?3
+                    AND seq = ?4
+                    AND message_id = ?5
+                    AND sender_account_id = ?6
+                    AND sender_device_id = ?7
+                    AND timestamp_unix_seconds = ?8
+                )
+                "#,
+                params![
+                    &owner.account_id,
+                    &owner.device_id,
+                    room_id,
+                    sqlite_app_event_seq_from_u64(seq)?,
+                    message_id,
+                    &sender.account_id,
+                    &sender.device_id,
+                    sqlite_timestamp_from_u64(timestamp_unix_seconds)?,
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ClientStoreError::from)
+    }
+
+    /// Load one deterministic page from the durable room history snapshot.
+    ///
+    /// `through_seq` freezes the upper boundary before bootstrap control events
+    /// are appended. `(after_seq, after_message_id)` is an exclusive cursor so
+    /// equal-sequence imported events cannot be skipped.
+    pub fn load_app_events_for_room_page(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+        through_seq: u64,
+        after_seq: u64,
+        after_message_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredAppEvent>, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        validate_string_bytes(
+            "app_event_page.after_message_id",
+            after_message_id,
+            MAX_OBJECT_ID_BYTES,
+        )
+        .map_err(ClientError::from)?;
+        validate_app_event_limit(limit)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              room_id,
+              seq,
+              message_id,
+              sender_account_id,
+              sender_device_id,
+              nonce,
+              ciphertext,
+              timestamp_unix_seconds
+            FROM client_app_events
+            WHERE account_id = ?1
+              AND device_id = ?2
+              AND room_id = ?3
+              AND seq <= ?4
+              AND (seq > ?5 OR (seq = ?5 AND message_id > ?6))
+            ORDER BY seq ASC, message_id ASC
+            LIMIT ?7
+            "#,
+        )?;
+        let rows = stmt.query_map(
+            params![
+                &owner.account_id,
+                &owner.device_id,
+                room_id,
+                sqlite_app_event_seq_from_u64(through_seq)?,
+                sqlite_app_event_seq_from_u64(after_seq)?,
+                after_message_id,
+                i64::from(limit),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, RoomId>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, MessageId>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (
+                stored_room_id,
+                stored_seq,
+                message_id,
+                sender_account_id,
+                sender_device_id,
+                nonce,
+                ciphertext,
+                stored_timestamp_unix_seconds,
+            ) = row?;
+            let seq = sqlite_app_event_seq_to_u64(stored_seq)?;
+            let timestamp_unix_seconds = sqlite_timestamp_to_u64(stored_timestamp_unix_seconds)?;
+            let sender = DeviceRef {
+                account_id: sender_account_id,
+                device_id: sender_device_id,
+            };
+            let plaintext = decrypt_app_event_plaintext(
+                &self.options.encryption_key,
+                AppMessageIdentity {
+                    owner,
+                    room_id: &stored_room_id,
+                    seq,
+                    message_id: &message_id,
+                    sender: &sender,
+                },
+                &nonce,
+                &ciphertext,
+            )?;
+            let event = StoredAppEvent {
+                room_id: stored_room_id,
+                seq,
+                message_id,
+                sender,
+                plaintext,
+                timestamp_unix_seconds,
+            };
+            event.validate_limits()?;
+            events.push(event);
+        }
+        debug_assert!(events.len() <= limit as usize);
+        Ok(events)
     }
 
     pub fn load_app_outbox(
@@ -3465,6 +3710,7 @@ impl SqliteClientStore {
             selected_room_id: metadata.selected_room_id,
             selected_topic_id: metadata.selected_topic_id,
             selected_chat_id: metadata.selected_chat_id,
+            paired_agent: metadata.paired_agent,
             revoked_devices: metadata.revoked_devices,
             chat_archives: metadata.chat_archives,
         };
@@ -5075,6 +5321,14 @@ fn complete_link_fanout_room_from_sync<D: RuntimeDelivery>(
                     });
                     report.record_completed_room()?;
                 }
+                if !app_messages.is_empty() || !app_events.is_empty() {
+                    store.save_app_messages_and_events(
+                        device.device_ref(),
+                        &app_messages,
+                        &app_events,
+                        MAX_STORED_APP_MESSAGES,
+                    )?;
+                }
                 return Ok(());
             }
             let before_seq = device.last_applied_seq(room_id)?;
@@ -5334,6 +5588,8 @@ pub enum ClientStoreError {
     NegativeStoredAppEventSeq { seq: i64 },
     #[error("stored app event count cannot be represented in sqlite")]
     StoredAppEventCountOverflow,
+    #[error("stored app event {room_id}/{message_id} conflicts with canonical local history")]
+    StoredAppEventConflict { room_id: String, message_id: String },
     #[error("stored app timestamp {timestamp} cannot be represented in sqlite")]
     StoredAppTimestampOutOfRange { timestamp: u64 },
     #[error("stored app timestamp is negative: {timestamp}")]
@@ -6563,6 +6819,96 @@ fn save_app_events_tx(
     Ok(())
 }
 
+fn import_app_events_tx(
+    tx: &Transaction<'_>,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    events: &[StoredAppEvent],
+) -> Result<(), ClientStoreError> {
+    validate_app_message_owner(owner)?;
+    for event in events {
+        event.validate_limits()?;
+        let existing = tx
+            .query_row(
+                r#"
+                SELECT
+                  seq,
+                  sender_account_id,
+                  sender_device_id,
+                  timestamp_unix_seconds,
+                  nonce,
+                  ciphertext
+                FROM client_app_events
+                WHERE account_id = ?1
+                  AND device_id = ?2
+                  AND room_id = ?3
+                  AND message_id = ?4
+                "#,
+                params![
+                    &owner.account_id,
+                    &owner.device_id,
+                    &event.room_id,
+                    &event.message_id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            stored_seq,
+            sender_account_id,
+            sender_device_id,
+            stored_timestamp,
+            nonce,
+            ciphertext,
+        )) = existing
+        else {
+            continue;
+        };
+        let seq = sqlite_app_event_seq_to_u64(stored_seq)?;
+        let timestamp_unix_seconds = sqlite_timestamp_to_u64(stored_timestamp)?;
+        let sender = DeviceRef {
+            account_id: sender_account_id,
+            device_id: sender_device_id,
+        };
+        let plaintext = decrypt_app_event_plaintext(
+            encryption_key,
+            AppMessageIdentity {
+                owner,
+                room_id: &event.room_id,
+                seq,
+                message_id: &event.message_id,
+                sender: &sender,
+            },
+            &nonce,
+            &ciphertext,
+        )?;
+        let canonical = StoredAppEvent {
+            room_id: event.room_id.clone(),
+            seq,
+            message_id: event.message_id.clone(),
+            sender,
+            plaintext,
+            timestamp_unix_seconds,
+        };
+        if canonical != *event {
+            return Err(ClientStoreError::StoredAppEventConflict {
+                room_id: event.room_id.clone(),
+                message_id: event.message_id.clone(),
+            });
+        }
+    }
+    save_app_events_tx(tx, encryption_key, owner, events)
+}
+
 fn save_app_outbox_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -7199,6 +7545,7 @@ fn encrypt_app_state_metadata(
         selected_room_id: state.selected_room_id.clone(),
         selected_topic_id: state.selected_topic_id.clone(),
         selected_chat_id: state.selected_chat_id.clone(),
+        paired_agent: state.paired_agent.clone(),
         revoked_devices: state.revoked_devices.clone(),
         chat_archives: state.chat_archives.clone(),
     };
@@ -9438,6 +9785,176 @@ mod tests {
     }
 
     #[test]
+    fn production_combined_save_retains_events_beyond_transcript_cache_limit() {
+        const FORMER_TRANSCRIPT_CACHE_LIMIT: u32 = 5_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([16; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "retention-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let mut store =
+            SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
+        store.save_device_state(&device).unwrap();
+        let events = (0..FORMER_TRANSCRIPT_CACHE_LIMIT + 1)
+            .map(|index| {
+                app_event(
+                    &owner,
+                    u64::from(index) + 1,
+                    &format!("event-{index:05}"),
+                    "retained",
+                )
+            })
+            .collect::<Vec<_>>();
+        store
+            .save_device_state_and_app_messages_and_events(&device, &[], &events)
+            .unwrap();
+
+        let first_page = store
+            .load_app_events_for_room_page(
+                &owner,
+                "room-store",
+                u64::from(FORMER_TRANSCRIPT_CACHE_LIMIT) + 1,
+                0,
+                "",
+                FORMER_TRANSCRIPT_CACHE_LIMIT,
+            )
+            .unwrap();
+        assert_eq!(first_page.len(), FORMER_TRANSCRIPT_CACHE_LIMIT as usize);
+        let last = first_page.last().unwrap();
+        let second_page = store
+            .load_app_events_for_room_page(
+                &owner,
+                "room-store",
+                u64::from(FORMER_TRANSCRIPT_CACHE_LIMIT) + 1,
+                last.seq,
+                &last.message_id,
+                1,
+            )
+            .unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].message_id, "event-05000");
+    }
+
+    #[test]
+    fn production_combined_save_retains_messages_beyond_former_cache_limit() {
+        const MESSAGE_COUNT: u32 = 5_201;
+
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([18; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "complete-history-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let mut store =
+            SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
+        let messages = (0..MESSAGE_COUNT)
+            .map(|index| {
+                app_message(
+                    &owner,
+                    u64::from(index) + 1,
+                    &format!("message-{index:05}"),
+                    "retained",
+                )
+            })
+            .collect::<Vec<_>>();
+
+        store
+            .save_device_state_and_app_messages_and_events(&device, &messages, &[])
+            .unwrap();
+
+        let loaded = store
+            .load_app_messages(&owner, MAX_STORED_APP_MESSAGES)
+            .unwrap();
+        assert_eq!(loaded.len(), MESSAGE_COUNT as usize);
+        assert_eq!(loaded.first().unwrap().message_id, "message-00000");
+        assert_eq!(loaded.last().unwrap().message_id, "message-05200");
+    }
+
+    #[test]
+    fn atomic_event_import_replays_exact_duplicates_and_rolls_back_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([17; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "import-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let mut store =
+            SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
+        store.save_device_state(&device).unwrap();
+        let canonical = app_event(&owner, 1, "event-1", "canonical");
+        store
+            .import_app_events_atomically(&owner, std::slice::from_ref(&canonical))
+            .unwrap();
+        store
+            .import_app_events_atomically(&owner, std::slice::from_ref(&canonical))
+            .unwrap();
+        assert!(
+            store
+                .has_app_event_identity(
+                    &owner,
+                    &canonical.room_id,
+                    canonical.seq,
+                    &canonical.message_id,
+                    &canonical.sender,
+                    canonical.timestamp_unix_seconds,
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_app_event_identity(
+                    &owner,
+                    &canonical.room_id,
+                    canonical.seq + 1,
+                    &canonical.message_id,
+                    &canonical.sender,
+                    canonical.timestamp_unix_seconds,
+                )
+                .unwrap(),
+            "message ID alone must not certify mismatched canonical history"
+        );
+
+        let new_event = app_event(&owner, 2, "event-2", "new");
+        let conflicting = StoredAppEvent {
+            plaintext: b"conflicting".to_vec(),
+            ..canonical.clone()
+        };
+        assert!(matches!(
+            store.import_app_events_atomically(&owner, &[new_event.clone(), conflicting]),
+            Err(ClientStoreError::StoredAppEventConflict { .. })
+        ));
+        assert!(
+            !store
+                .has_app_event(&owner, "room-store", "event-2")
+                .unwrap()
+        );
+        assert_eq!(store.load_app_events(&owner, 10).unwrap(), vec![canonical]);
+    }
+
+    #[test]
     fn sqlite_client_store_persists_app_outbox_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let secret = NostrSecretKey::from_bytes([11; NOSTR_SECRET_KEY_BYTES]).unwrap();
@@ -9999,6 +10516,10 @@ mod tests {
             selected_room_id: Some("room-main".to_owned()),
             selected_topic_id: Some("home".to_owned()),
             selected_chat_id: Some("segment-main".to_owned()),
+            paired_agent: Some(StoredPairedAgent {
+                agent_account_id: "agent-account".to_owned(),
+                canonical_room_id: "room-agent".to_owned(),
+            }),
             revoked_devices: [DeviceRef {
                 account_id: owner.account_id.clone(),
                 device_id: "tablet".to_owned(),
@@ -10024,6 +10545,7 @@ mod tests {
             selected_room_id: None,
             selected_topic_id: None,
             selected_chat_id: None,
+            paired_agent: None,
             revoked_devices: BTreeSet::new(),
             chat_archives: Vec::new(),
         };
@@ -10033,7 +10555,11 @@ mod tests {
 
     #[test]
     fn sqlite_client_store_rejects_legacy_app_state_metadata_shapes() {
-        for case in ["missing selected room", "missing revoked devices"] {
+        for case in [
+            "missing selected room",
+            "missing paired agent",
+            "missing revoked devices",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let secret = NostrSecretKey::from_bytes([16; NOSTR_SECRET_KEY_BYTES]).unwrap();
             let device_id = "phone";
@@ -10055,6 +10581,10 @@ mod tests {
                 selected_room_id: Some("room-main".to_owned()),
                 selected_topic_id: Some("home".to_owned()),
                 selected_chat_id: Some("segment-main".to_owned()),
+                paired_agent: Some(StoredPairedAgent {
+                    agent_account_id: "agent-account".to_owned(),
+                    canonical_room_id: "room-agent".to_owned(),
+                }),
                 revoked_devices: [DeviceRef {
                     account_id: owner.account_id.clone(),
                     device_id: "tablet".to_owned(),
@@ -10068,6 +10598,9 @@ mod tests {
             match case {
                 "missing selected room" => {
                     metadata_object.remove("selected_room_id");
+                }
+                "missing paired agent" => {
+                    metadata_object.remove("paired_agent");
                 }
                 "missing revoked devices" => {
                     metadata_object.remove("revoked_devices");

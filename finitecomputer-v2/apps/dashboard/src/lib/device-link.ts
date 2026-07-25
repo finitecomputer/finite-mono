@@ -45,13 +45,16 @@ export function parseDeviceLinkRequest(value: unknown): HostedDeviceLinkRequest 
   const keys = Object.keys(record).sort();
   if (
     keys.length !== 2 ||
-    keys[0] !== "link_session_id" ||
+    keys[0] !== "pairing_session_id" ||
     keys[1] !== "target_device_id"
   ) {
     throw new DeviceLinkError("This device-link request is invalid.", 400);
   }
 
-  const linkSessionId = deviceLinkToken("link session", record.link_session_id);
+  const pairingSessionId = deviceLinkToken(
+    "pairing session",
+    record.pairing_session_id
+  );
   const targetDeviceId = deviceLinkToken("Device", record.target_device_id);
   if (targetDeviceId === "hosted-web") {
     throw new DeviceLinkError(
@@ -61,7 +64,7 @@ export function parseDeviceLinkRequest(value: unknown): HostedDeviceLinkRequest 
   }
 
   return {
-    link_session_id: linkSessionId,
+    pairing_session_id: pairingSessionId,
     target_device_id: targetDeviceId,
   };
 }

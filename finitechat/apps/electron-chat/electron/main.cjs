@@ -11,6 +11,7 @@ const {
   session,
   shell,
   systemPreferences,
+  WebContentsView,
 } = require("electron");
 const {
   attachmentActionUsesBinaryTransport,
@@ -51,6 +52,16 @@ const {
   startDaemonRuntime,
   validDeviceId,
 } = require("./daemon-process.cjs");
+const {
+  dashboardLoadErrorScript,
+  shouldReplaceFailedDashboardDocument,
+} = require("./dashboard-load-error.cjs");
+const {
+  electronDashboardChromeCss,
+  fullBleedWindowOptions,
+  navigationActionForUrl,
+  navigationToolbarBounds,
+} = require("./window-chrome.cjs");
 
 let mainWindow = null;
 let authWindow = null;
@@ -110,6 +121,7 @@ protocol.registerSchemesAsPrivileged([
 
 function commonWindowOptions() {
   return {
+    ...fullBleedWindowOptions(),
     width: 1280,
     height: 860,
     minWidth: 900,
@@ -118,6 +130,106 @@ function commonWindowOptions() {
     show: false,
     title: "Finite",
   };
+}
+
+function installNavigationToolbar(window) {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  const toolbar = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  toolbar.setBackgroundColor("#00000000");
+  window.contentView.addChildView(toolbar);
+
+  const layout = () => {
+    if (!window.isDestroyed()) {
+      toolbar.setBounds(navigationToolbarBounds(window.getContentBounds()));
+    }
+  };
+  const update = () => {
+    if (window.isDestroyed() || toolbar.webContents.isDestroyed()) {
+      return;
+    }
+    const history = window.webContents.navigationHistory;
+    const state = {
+      canGoBack: history.canGoBack(),
+      canGoForward: history.canGoForward(),
+    };
+    void toolbar.webContents
+      .executeJavaScript(`globalThis.setNavigationState?.(${JSON.stringify(state)})`)
+      .catch(() => {
+        // The toolbar may close between the navigation event and this update.
+      });
+  };
+  const navigate = (action) => {
+    const history = window.webContents.navigationHistory;
+    if (action === "back" && history.canGoBack()) {
+      history.goBack();
+    } else if (action === "forward" && history.canGoForward()) {
+      history.goForward();
+    }
+  };
+
+  toolbar.webContents.on("will-navigate", (event) => {
+    event.preventDefault();
+    const action = navigationActionForUrl(event.url);
+    if (action) {
+      navigate(action);
+    }
+  });
+  toolbar.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  toolbar.webContents.on("did-finish-load", update);
+  window.webContents.on("did-navigate", update);
+  window.webContents.on("did-navigate-in-page", update);
+  window.webContents.on("did-stop-loading", update);
+  window.on("resize", layout);
+  window.on("closed", () => {
+    if (!toolbar.webContents.isDestroyed()) {
+      toolbar.webContents.close();
+    }
+  });
+
+  layout();
+  void toolbar.webContents.loadFile(path.join(__dirname, "navigation-toolbar.html"));
+}
+
+function installDashboardChrome(window) {
+  const dashboardChromeCss = electronDashboardChromeCss();
+  const apply = () => {
+    if (!window.isDestroyed()) {
+      void window.webContents.insertCSS(dashboardChromeCss).catch(() => {
+        // Navigation or shutdown may dispose the renderer before CSS is installed.
+      });
+    }
+  };
+  window.webContents.on("dom-ready", apply);
+}
+
+function showDashboardLoadError(details) {
+  const window = mainWindow;
+  if (
+    !window
+    || window.isDestroyed()
+    || window.webContents.isDestroyed()
+    || !isDashboardDocumentUrl(details.url, defaultDashboardUrl)
+    || !shouldReplaceFailedDashboardDocument(details, {
+      currentUrl: window.webContents.getURL(),
+      dashboardWebContentsId: window.webContents.id,
+    })
+  ) {
+    return;
+  }
+  void window.webContents
+    .executeJavaScript(dashboardLoadErrorScript(dashboardFailureLogoDataUrl()))
+    .catch(() => {
+      // A newer navigation or shutdown may dispose the failed document first.
+    });
 }
 
 function showWindowWhenReady(window) {
@@ -173,6 +285,7 @@ function createDashboardWindow(targetUrl = dashboardStartUrl) {
       webSecurity: true,
     },
   });
+  installDashboardChrome(mainWindow);
 
   showWindowWhenReady(mainWindow);
   mainWindow.on("closed", () => {
@@ -207,6 +320,14 @@ function createDashboardWindow(targetUrl = dashboardStartUrl) {
     if (isAllowedUnprivilegedNavigation(url, defaultDashboardUrl)) {
       transitionToAuth(url);
     }
+  });
+  mainWindow.webContents.on("did-navigate", (_event, url, statusCode) => {
+    showDashboardLoadError({
+      resourceType: "mainFrame",
+      statusCode,
+      url,
+      webContentsId: mainWindow?.webContents.id,
+    });
   });
   mainWindow.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
     if (!isMainFrame || isDashboardDocumentUrl(url, defaultDashboardUrl)) return;
@@ -258,6 +379,7 @@ function createAuthWindow(targetUrl = dashboardStartUrl) {
       webSecurity: true,
     },
   });
+  installNavigationToolbar(authWindow);
   showWindowWhenReady(authWindow);
   authWindow.on("closed", () => {
     authWindow = null;
@@ -302,6 +424,23 @@ function createAuthWindow(targetUrl = dashboardStartUrl) {
 
 function repoRoot() {
   return path.resolve(__dirname, "../../../..");
+}
+
+function dashboardFailureLogoDataUrl() {
+  const packagedAsset = path.join(__dirname, "finite-logo.svg");
+  const sourceAsset = path.join(
+    repoRoot(),
+    "finitecomputer-v2",
+    "apps",
+    "dashboard",
+    "public",
+    "finite-logo.svg"
+  );
+  const asset = fs.existsSync(packagedAsset) ? packagedAsset : sourceAsset;
+  const svg = fs
+    .readFileSync(asset, "utf8")
+    .replaceAll('fill="white"', 'fill="#0A84FF"');
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 }
 
 function registerAttachmentMediaProtocol() {
@@ -508,12 +647,18 @@ function writeDesktopSettings(settings) {
 }
 
 function pendingDeviceLink() {
-  const candidate = readDesktopSettings().pendingDeviceLink;
+  const settings = readDesktopSettings();
+  const candidate = settings.pendingDeviceLink;
   if (!candidate) return null;
   try {
     return parseDeviceLinkPublicRequest(candidate);
   } catch {
-    throw new Error("Finite Chat desktop settings contain an invalid pending Device link");
+    // Pre-release link sessions cannot be resumed by the NIP-AB hard cut.
+    // Discard only the bounded pending rendezvous marker; cryptographic state,
+    // the WorkOS session, and any active account secret remain untouched.
+    delete settings.pendingDeviceLink;
+    writeDesktopSettings(settings);
+    return null;
   }
 }
 
@@ -529,7 +674,7 @@ function clearPendingDeviceLink(expected) {
   const current = parseDeviceLinkPublicRequest(settings.pendingDeviceLink);
   const requested = parseDeviceLinkPublicRequest(expected);
   if (
-    current.link_session_id !== requested.link_session_id
+    current.pairing_session_id !== requested.pairing_session_id
     || current.target_device_id !== requested.target_device_id
   ) {
     return;
@@ -1026,7 +1171,12 @@ async function dashboardDeviceLinkRequest(pathname, request) {
   return parseDeviceLinkPublicResponse(value, expected);
 }
 
-async function waitForDeviceLinkReady(request, initial = null, generation = null) {
+async function waitForDeviceLinkReady(
+  request,
+  initial = null,
+  generation = null,
+  reportProgress = true
+) {
   const expected = parseDeviceLinkPublicRequest(request);
   let current = initial ? parseDeviceLinkPublicResponse(initial, expected) : null;
   while (true) {
@@ -1044,9 +1194,11 @@ async function waitForDeviceLinkReady(request, initial = null, generation = null
     ) {
       throw new Error("This desktop's automatic Device setup expired. Restart Finite and try again.");
     }
-    deviceLinkStatus({
-      status: current.status === "joining_rooms" ? "joining_rooms" : "linking",
-    });
+    if (reportProgress) {
+      deviceLinkStatus({
+        status: current.status === "joining_rooms" ? "joining_rooms" : "linking",
+      });
+    }
     await delay(deviceLinkPollIntervalMs);
     if (generation !== null) assertLocalDeviceGeneration(generation);
     current = null;
@@ -1066,7 +1218,12 @@ async function createAndApproveDeviceLink(generation) {
     deviceId: daemonDeviceId(),
     cwd: app.isPackaged ? path.dirname(binaryPath) : repoRoot(),
     storeAccountSecret: async (accountSecret) => writeProvisionalAccountSecret(accountSecret),
-    promoteAccountSecret: async () => promoteProvisionalAccountSecret(),
+    promoteAccountSecret: async (expectedSecret) => {
+      promoteProvisionalAccountSecret();
+      if (readStoredAccountSecret() !== expectedSecret) {
+        throw new Error("Secure storage read-back did not match");
+      }
+    },
   });
   activeDeviceLink = link;
   try {
@@ -1080,6 +1237,10 @@ async function createAndApproveDeviceLink(generation) {
     const request = parseDeviceLinkPublicRequest(ready);
     storePendingDeviceLink(request);
     const approved = await dashboardDeviceLinkRequest("/api/device-links/approve", request);
+    if (!approved.source_descriptor) {
+      throw new Error("Finite Chat pairing approval omitted its source descriptor");
+    }
+    link.acceptSourceDescriptor(approved.source_descriptor);
     assertLocalDeviceGeneration(generation);
     await link.completion;
     assertLocalDeviceGeneration(generation);
@@ -1143,8 +1304,14 @@ async function ensureLocalDeviceNow(generation) {
   await startDaemon();
   assertLocalDeviceGeneration(generation);
   if (pending) {
-    await waitForDeviceLinkReady(pending, initial, generation);
-    clearPendingDeviceLink(pending);
+    void waitForDeviceLinkReady(pending, initial, generation, false)
+      .then(() => clearPendingDeviceLink(pending))
+      .catch((error) => {
+        console.error(
+          "Finite Chat background Device convergence did not finish during the pairing window:",
+          error
+        );
+      });
   }
   const state = await requestDaemonState();
   assertLocalDeviceGeneration(generation);

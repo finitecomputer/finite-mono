@@ -34,6 +34,7 @@ thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
 ureq.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 finite-brain-server.workspace = true

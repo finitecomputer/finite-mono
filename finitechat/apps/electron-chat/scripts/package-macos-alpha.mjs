@@ -45,6 +45,10 @@ fs.cpSync(path.join(appRoot, "electron"), path.join(packagedApp, "electron"), {
     return !source.endsWith(".test.cjs");
   },
 });
+fs.copyFileSync(
+  path.join(repoRoot, "finitecomputer-v2", "apps", "dashboard", "public", "finite-logo.svg"),
+  path.join(packagedApp, "electron", "finite-logo.svg")
+);
 fs.writeFileSync(
   path.join(packagedApp, "package.json"),
   `${JSON.stringify(

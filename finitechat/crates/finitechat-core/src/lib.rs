@@ -16,13 +16,14 @@ use finitechat_blob::{
 };
 use finitechat_client::{
     AppliedLogEntry, ClientError, ClientStoreError, FiniteChatDevice, FiniteChatDeviceConfig,
-    HttpRuntimeDelivery, HttpRuntimeDeliveryError, PreparedCommit, ReqwestHttpRuntimeTransport,
-    ReqwestHttpRuntimeTransportError, RuntimeDelivery, RuntimeLinkFanoutOptions,
-    RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore, SqliteClientStoreOptions,
-    StoredAppEvent, StoredAppMessage, StoredAppProfile, StoredAppRoom, StoredAppRoomState,
-    StoredAppState, StoredChatArchiveState, StoredOutboundLocalState, StoredOutboundMessage,
-    StoredOutboundServerDeliveryState, generate_account_secret, run_link_fanout_tick,
-    run_room_server_sync_setup_tick, run_room_sync_tick, run_runtime_sync_setup_tick,
+    HttpRuntimeDelivery, HttpRuntimeDeliveryError, LinkFanoutRoomStatus, PreparedCommit,
+    ReqwestHttpRuntimeTransport, ReqwestHttpRuntimeTransportError, RuntimeDelivery,
+    RuntimeLinkFanoutOptions, RuntimeSyncOptions, RuntimeWorkerError, SqliteClientStore,
+    SqliteClientStoreOptions, StoredAppEvent, StoredAppMessage, StoredAppProfile, StoredAppRoom,
+    StoredAppRoomState, StoredAppState, StoredChatArchiveState, StoredOutboundLocalState,
+    StoredOutboundMessage, StoredOutboundServerDeliveryState, StoredPairedAgent,
+    generate_account_secret, run_link_fanout_tick, run_room_server_sync_setup_tick,
+    run_room_sync_tick, run_runtime_sync_setup_tick,
 };
 use finitechat_hermes::{
     HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1,
@@ -38,18 +39,18 @@ use finitechat_proto::{
     AttachmentBlobReferenceV1, ChatArchiveV1, ChatReactionV1, ChatReceiptStateV1, ChatReceiptV1,
     ChatRenameV1, ClaimKeyPackageResult, ConversationMetadataV1, ConversationProjection,
     ConversationProjectionEntry, ConversationProjectionEventContext, ConversationSegmentStartV1,
-    CreateRoomRequest, DEVICE_LINK_BOOTSTRAP_VERSION_V1, DecryptedApplicationEventV1,
-    DecryptedEphemeralActivityV1, DeviceLinkBootstrapChatArchiveV1, DeviceLinkBootstrapEventV1,
-    DeviceLinkBootstrapProfileV1, DeviceLinkBootstrapRequestV1, DeviceLinkBootstrapRoomV1,
-    DeviceLinkBootstrapSelectionV1, DeviceLinkBootstrapV1, DeviceRef, DurableAppEventKind,
-    EphemeralActivityAccepted, EphemeralActivityActionV1, EphemeralActivityIngressContext,
-    EphemeralActivityProjection, EphemeralActivityProjectionEntry, EventAccepted,
-    FINITECHAT_ACTIVITY_KIND_THINKING, FINITECHAT_ACTIVITY_KIND_TYPING,
-    FINITECHAT_ACTIVITY_KIND_WORKING, FINITECHAT_CHAT_ARCHIVE_EVENT_V1,
-    FINITECHAT_CHAT_RENAME_EVENT_V1, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1,
-    FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1, GenericActivityKindV1,
-    ListAccountRoomsRequest, MAX_CHAT_TITLE_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_CHAT_ARCHIVES,
-    MAX_DEVICE_LINK_BOOTSTRAP_EVENTS, MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES,
+    CreateRoomRequest, DEVICE_LINK_BOOTSTRAP_VERSION_V2, DecryptedApplicationEventV1,
+    DecryptedEphemeralActivityV1, DeviceLinkBootstrapEventV2, DeviceLinkBootstrapProfileV2,
+    DeviceLinkBootstrapRequestV2, DeviceLinkBootstrapRoomV2, DeviceLinkBootstrapSelectionV2,
+    DeviceLinkBootstrapV2, DeviceRef, DurableAppEventKind, EphemeralActivityAccepted,
+    EphemeralActivityActionV1, EphemeralActivityIngressContext, EphemeralActivityProjection,
+    EphemeralActivityProjectionEntry, EventAccepted, FINITECHAT_ACTIVITY_KIND_THINKING,
+    FINITECHAT_ACTIVITY_KIND_TYPING, FINITECHAT_ACTIVITY_KIND_WORKING,
+    FINITECHAT_CHAT_ARCHIVE_EVENT_V1, FINITECHAT_CHAT_RENAME_EVENT_V1,
+    FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2, FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2,
+    GenericActivityKindV1, ListAccountRoomsRequest, LogEntryKind, MAX_CHAT_TITLE_BYTES,
+    MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS, MAX_DEVICE_LINK_BOOTSTRAP_EVENTS,
+    MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS,
     MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES, MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol,
     RuntimeActivityClearV1, RuntimeCommandRequestV1, RuntimeCommandResultV1,
     RuntimeStateSnapshotV1, SubmitCommitRequest, delivery_member_id_for_device, nprofile_decode,
@@ -61,17 +62,24 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{OffsetDateTime, UtcOffset};
 
-pub mod device_link;
+pub mod native_authkit;
+pub mod native_device_link;
+pub mod nip_ab;
 
 const CLIENT_STORE_FILE: &str = "client.sqlite3";
 const ATTACHMENT_CACHE_DIR: &str = "attachments";
 const LOCAL_ROOM_CONNECTED_TEXT: &str = "Connected";
 const LOCAL_ROOM_UNAVAILABLE_STATUS: &str = "room is not available on this device";
 const LOCAL_ROOM_UNAVAILABLE_TEXT: &str = "Unavailable on this device";
-const MAX_APP_MESSAGES: usize = 5_000;
-const MAX_APP_MESSAGES_U32: u32 = 5_000;
+// The transcript shown in AppState remains paged, but the encrypted local
+// projection retains every message. This is an addressability bound only.
+const MAX_APP_MESSAGES: usize = u32::MAX as usize;
+const MAX_APP_MESSAGES_U32: u32 = u32::MAX;
 const MAX_APP_CHAT_ARCHIVES: usize = 5_000;
 const MAX_APP_CHAT_TITLES: usize = 5_000;
+const DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE: u32 = 256;
+const MAX_PENDING_DEVICE_LINK_BOOTSTRAPS: usize = 32;
+const MAX_DEVICE_LINK_HISTORY_AUDIT_PAGES: u32 = 100_000;
 const DEFAULT_TRANSCRIPT_WINDOW: usize = 50;
 const MAX_TRANSCRIPT_PAGE_SIZE: u32 = 100;
 const MAX_OUTBOX_DRAIN_PER_TICK: usize = 16;
@@ -455,6 +463,12 @@ pub struct AppTopicSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct AppPairedAgent {
+    pub agent_account_id: String,
+    pub canonical_room_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct AppRoomDetailsState {
     pub room_id: String,
     pub display_name: String,
@@ -586,6 +600,7 @@ pub struct AppState {
     pub rev: u64,
     pub identity: Identity,
     pub rooms: Vec<AppRoomSummary>,
+    pub paired_agent: Option<AppPairedAgent>,
     pub selected_room_id: Option<String>,
     pub topics: Vec<AppTopicSummary>,
     pub selected_topic_id: Option<String>,
@@ -640,6 +655,13 @@ pub enum AppAction {
         room_id: String,
         topic_id: String,
         chat_id: String,
+    },
+    PairAgent {
+        room_id: String,
+    },
+    StartHomeChat {
+        text: Option<String>,
+        intent_key: String,
     },
     RenameChat {
         room_id: String,
@@ -965,11 +987,76 @@ struct AppRuntimeState {
     room_sync_failures: BTreeSet<String>,
     inbox_hint_after_seq: u64,
     requested_link_bootstrap_rooms: BTreeSet<String>,
+    pending_link_bootstraps: BTreeMap<DeviceLinkBootstrapTransferKey, PendingDeviceLinkBootstrap>,
+    poisoned_link_bootstraps: BTreeSet<DeviceLinkBootstrapTransferKey>,
     profile_chat_bootstrap_preparations: BTreeMap<String, AppProfileChatBootstrapPreparedCommit>,
     /// False only while a fresh Device is using the provisional first-room
     /// selection. A device-link bootstrap may replace that provisional route
     /// once; explicit navigation and an accepted bootstrap both lock it.
     selection_is_explicit_or_bootstrapped: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DeviceLinkBootstrapTransferKey {
+    room_id: String,
+    bootstrap_id: String,
+    sender: DeviceRef,
+}
+
+#[derive(Clone, Debug)]
+struct PendingDeviceLinkBootstrap {
+    target: DeviceRef,
+    room: DeviceLinkBootstrapRoomV2,
+    canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
+    profiles: Vec<DeviceLinkBootstrapProfileV2>,
+    chunk_count: u32,
+    total_history_events: u64,
+    history_sha256: String,
+    earliest_envelope_seq: u64,
+    chunks: BTreeMap<u32, Vec<DeviceLinkBootstrapEventV2>>,
+}
+
+struct AcceptedDeviceLinkBootstrap {
+    room_id: String,
+    canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
+}
+
+fn validated_device_link_bootstrap_history(
+    pending: &PendingDeviceLinkBootstrap,
+    room_id: &str,
+) -> Option<Vec<StoredAppEvent>> {
+    let mut digest = Sha256::new();
+    let mut seen = BTreeSet::new();
+    let mut imported = Vec::new();
+    for chunk_index in 0..pending.chunk_count {
+        let history = pending.chunks.get(&chunk_index)?;
+        for history in history {
+            if history.seq >= pending.earliest_envelope_seq
+                || !seen.insert(history.message_id.clone())
+                || is_device_link_control_event(&history.plaintext)
+            {
+                return None;
+            }
+            let event =
+                serde_json::from_slice::<DecryptedApplicationEventV1>(&history.plaintext).ok()?;
+            event.validate_limits().ok()?;
+            update_device_link_history_digest(&mut digest, history);
+            imported.push(StoredAppEvent {
+                room_id: room_id.to_owned(),
+                seq: history.seq,
+                message_id: history.message_id.clone(),
+                sender: history.sender.clone(),
+                plaintext: history.plaintext.clone(),
+                timestamp_unix_seconds: history.timestamp_unix_seconds,
+            });
+        }
+    }
+    if imported.len() as u64 != pending.total_history_events
+        || hex::encode(digest.finalize()) != pending.history_sha256
+    {
+        return None;
+    }
+    Some(imported)
 }
 
 struct SendAttachmentInput {
@@ -2088,15 +2175,39 @@ impl AppRuntimeState {
     fn new(mut core: CoreState) -> Result<Self, FiniteChatCoreError> {
         let identity = core.identity();
         let owner = core.device.device_ref().clone();
+        let stored_app_state = core.store.load_app_state(&owner).map_err(store_error)?;
+        let stored_rooms = core.store.load_app_rooms(&owner).map_err(store_error)?;
+        let known_room_ids = core.known_room_ids().into_iter().collect::<BTreeSet<_>>();
+        let authoritative_room_ids = stored_rooms
+            .iter()
+            .filter(|room| room.display_name != room.room_id)
+            .map(|room| room.room_id.clone())
+            .collect::<BTreeSet<_>>();
+        let provisional_room_ids = known_room_ids
+            .difference(&authoritative_room_ids)
+            .filter(|room_id| {
+                core.device.room_members(room_id).is_ok_and(|members| {
+                    members.iter().any(|member| {
+                        member.account_id == owner.account_id && member.device_id != owner.device_id
+                    })
+                })
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let stored_messages = core
             .store
             .load_app_messages(&owner, MAX_APP_MESSAGES_U32)
-            .map_err(store_error)?;
+            .map_err(store_error)?
+            .into_iter()
+            .filter(|message| !provisional_room_ids.contains(&message.room_id))
+            .collect::<Vec<_>>();
         let stored_events = core
             .store
             .load_app_events(&owner, MAX_APP_MESSAGES_U32)
-            .map_err(store_error)?;
-        let stored_app_state = core.store.load_app_state(&owner).map_err(store_error)?;
+            .map_err(store_error)?
+            .into_iter()
+            .filter(|event| !provisional_room_ids.contains(&event.room_id))
+            .collect::<Vec<_>>();
         let delivered_local_messages = stored_messages
             .iter()
             .filter(|message| message.sender == owner)
@@ -2128,8 +2239,6 @@ impl AppRuntimeState {
         let should_persist_chat_archive_repair =
             stored_app_state.chat_archives != chat_projection.stored_chat_archives();
         let all_messages = chat_projection.messages();
-        let stored_rooms = core.store.load_app_rooms(&owner).map_err(store_error)?;
-        let known_room_ids = core.known_room_ids().into_iter().collect::<BTreeSet<_>>();
         let mut persisted_room_ids = BTreeSet::new();
         let mut local_read_seq = BTreeMap::new();
         let mut rooms = Vec::new();
@@ -2182,6 +2291,10 @@ impl AppRuntimeState {
             app: AppState {
                 rev: 0,
                 identity,
+                paired_agent: stored_app_state.paired_agent.map(|paired| AppPairedAgent {
+                    agent_account_id: paired.agent_account_id,
+                    canonical_room_id: paired.canonical_room_id,
+                }),
                 selected_room_id,
                 topics: Vec::new(),
                 selected_topic_id: None,
@@ -2211,9 +2324,14 @@ impl AppRuntimeState {
             room_sync_failures: BTreeSet::new(),
             inbox_hint_after_seq: 0,
             requested_link_bootstrap_rooms: BTreeSet::new(),
+            pending_link_bootstraps: BTreeMap::new(),
+            poisoned_link_bootstraps: BTreeSet::new(),
             profile_chat_bootstrap_preparations: BTreeMap::new(),
             selection_is_explicit_or_bootstrapped,
         };
+        for room_id in &authoritative_room_ids {
+            state.replay_room_history_into_projection(room_id)?;
+        }
         state.sync_chat_projection();
         if let Some(room_id) = state.app.selected_room_id.clone() {
             state.app.selected_topic_id = stored_app_state.selected_topic_id.clone();
@@ -2292,6 +2410,10 @@ impl AppRuntimeState {
                 topic_id,
                 chat_id,
             } => self.open_chat(room_id, topic_id, chat_id)?,
+            AppAction::PairAgent { room_id } => self.pair_agent(room_id)?,
+            AppAction::StartHomeChat { text, intent_key } => {
+                self.start_home_chat(text, intent_key)?
+            }
             AppAction::RenameChat {
                 room_id,
                 topic_id,
@@ -2807,23 +2929,12 @@ impl AppRuntimeState {
 
     fn request_missing_link_device_bootstraps(&mut self) -> Result<(), FiniteChatCoreError> {
         let owner = self.core.device.device_ref().clone();
-        let has_agent_room = self
-            .app
-            .rooms
-            .iter()
-            .any(|room| room.state == AppRoomState::Connected && room.is_agent_chat);
         let room_ids = self
             .app
             .rooms
             .iter()
             .filter(|room| room.state == AppRoomState::Connected)
-            .filter(|room| {
-                if has_agent_room {
-                    room.is_agent_chat && room.display_name == room.room_id
-                } else {
-                    true
-                }
-            })
+            .filter(|room| room.display_name == room.room_id)
             .map(|room| room.room_id.clone())
             .collect::<Vec<_>>();
         for room_id in room_ids {
@@ -2842,8 +2953,8 @@ impl AppRuntimeState {
             if !has_other_account_device {
                 continue;
             }
-            let request = DeviceLinkBootstrapRequestV1 {
-                version: DEVICE_LINK_BOOTSTRAP_VERSION_V1,
+            let request = DeviceLinkBootstrapRequestV2 {
+                version: DEVICE_LINK_BOOTSTRAP_VERSION_V2,
                 request_id: self
                     .core
                     .generate_object_id("device-link-bootstrap-request")?,
@@ -3004,11 +3115,6 @@ impl AppRuntimeState {
             "chat-rename",
         )?;
         self.apply_projection_events(vec![event])?;
-        self.app.selected_room_id = Some(room_id);
-        self.app.selected_topic_id = Some(topic_id);
-        self.app.selected_chat_id = Some(chat_id);
-        self.persist_app_state()?;
-        self.sync_selected_room_messages();
         self.app.status = "chat renamed".to_owned();
         Ok(())
     }
@@ -3040,11 +3146,6 @@ impl AppRuntimeState {
             "chat-archive",
         )?;
         self.apply_projection_events(vec![event])?;
-        self.app.selected_room_id = Some(room_id);
-        self.app.selected_topic_id = Some(topic_id);
-        self.app.selected_chat_id = Some(chat_id);
-        self.persist_app_state()?;
-        self.sync_selected_room_messages();
         self.app.status = if archived {
             "chat archived".to_owned()
         } else {
@@ -3094,10 +3195,10 @@ impl AppRuntimeState {
                 reason: format!("room '{room_id}' is not ready to create topics"),
             });
         }
+        let title = normalize_bounded_non_empty_string("topic title", &title, MAX_OBJECT_ID_BYTES)?;
         let topic_id = self.core.generate_object_id("topic")?;
-        let trimmed = title.trim();
         let metadata = ConversationMetadataV1 {
-            title: (!trimmed.is_empty()).then(|| trimmed.to_owned()),
+            title: Some(title),
             description: None,
             external_topic: None,
             skill_binding: None,
@@ -3146,6 +3247,125 @@ impl AppRuntimeState {
         self.persist_app_state()?;
         self.sync_selected_room_messages();
         self.app.status = "chat created".to_owned();
+        Ok(())
+    }
+
+    fn pair_agent(&mut self, room_id: String) -> Result<(), FiniteChatCoreError> {
+        let room = self
+            .room(&room_id)
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: format!("agent room not found: {room_id}"),
+            })?;
+        if room.state != AppRoomState::Connected {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not an available agent"),
+            });
+        }
+        let owner_account_id = self.app.identity.account_id.clone();
+        let member_account_ids = self
+            .core
+            .device
+            .room_members(&room_id)
+            .map_err(client_error)?
+            .into_iter()
+            .map(|member| member.account_id)
+            .collect::<BTreeSet<_>>();
+        let agent_account_id = member_account_ids
+            .iter()
+            .find(|account_id| account_id.as_str() != owner_account_id)
+            .filter(|_| member_account_ids.len() == 2)
+            .filter(|account_id| {
+                self.profile_cache
+                    .get(*account_id)
+                    .is_some_and(|profile| profile.is_agent)
+            })
+            .cloned()
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not an available direct agent"),
+            })?;
+        if !self
+            .profile_chat_room_ids(&agent_account_id)
+            .iter()
+            .any(|candidate| candidate == &room_id)
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not the selected agent's direct room"),
+            });
+        }
+
+        self.ensure_home_topic(&room_id)?;
+        self.app.paired_agent = Some(AppPairedAgent {
+            agent_account_id,
+            canonical_room_id: room_id,
+        });
+        self.persist_app_state()?;
+        self.app.status = "agent paired".to_owned();
+        Ok(())
+    }
+
+    fn start_home_chat(
+        &mut self,
+        text: Option<String>,
+        intent_key: String,
+    ) -> Result<(), FiniteChatCoreError> {
+        let paired = self
+            .app
+            .paired_agent
+            .clone()
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: "choose an agent before starting a chat".to_owned(),
+            })?;
+        let room_id = paired.canonical_room_id;
+        let trimmed = text.as_deref().map(str::trim);
+        if trimmed.is_some_and(str::is_empty) {
+            return Err(FiniteChatCoreError::Client {
+                reason: "message must not be empty".to_owned(),
+            });
+        }
+        let room = self
+            .room(&room_id)
+            .ok_or_else(|| FiniteChatCoreError::Client {
+                reason: format!("agent room not found: {room_id}"),
+            })?;
+        if room.state != AppRoomState::Connected
+            || !self
+                .profile_chat_room_ids(&paired.agent_account_id)
+                .iter()
+                .any(|candidate| candidate == &room_id)
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: format!("room '{room_id}' is not an available agent"),
+            });
+        }
+
+        self.ensure_home_topic(&room_id)?;
+        self.start_topic_chat_intent(room_id.clone(), HOME_TOPIC_ID.to_owned(), None, intent_key)?;
+        let chat_id =
+            self.app
+                .selected_chat_id
+                .clone()
+                .ok_or_else(|| FiniteChatCoreError::Client {
+                    reason: "new home chat did not select a chat".to_owned(),
+                })?;
+        let Some(trimmed) = trimmed else {
+            self.app.status = "chat created".to_owned();
+            return Ok(());
+        };
+        if self.app.messages.iter().any(|message| {
+            message.room_id == room_id
+                && message.conversation_id.as_deref() == Some(HOME_TOPIC_ID)
+                && message.chat_id.as_deref() == Some(chat_id.as_str())
+        }) {
+            self.app.status = "chat started".to_owned();
+            return Ok(());
+        }
+        self.send_chat_message(
+            room_id,
+            HOME_TOPIC_ID.to_owned(),
+            chat_id,
+            trimmed.to_owned(),
+        )?;
+        self.app.status = "chat started".to_owned();
         Ok(())
     }
 
@@ -5432,6 +5652,7 @@ impl AppRuntimeState {
             .into_iter()
             .find(|fanout| fanout.fanout_id == fanout_id);
         let mut delivery = self.core.home_delivery();
+        self.resume_interrupted_link_fanout_commits(&fanout_id, &mut delivery)?;
         match existing {
             Some(existing) if existing.target_device != target => {
                 return Err(FiniteChatCoreError::Client {
@@ -5494,31 +5715,57 @@ impl AppRuntimeState {
         })
     }
 
+    fn resume_interrupted_link_fanout_commits<D: RuntimeDelivery>(
+        &mut self,
+        requested_fanout_id: &str,
+        delivery: &mut D,
+    ) -> Result<(), FiniteChatCoreError>
+    where
+        D::Error: std::fmt::Display,
+    {
+        let state = self.core.device.export_state().map_err(client_error)?;
+        let interrupted = state
+            .link_fanouts
+            .iter()
+            .filter(|fanout| fanout.fanout_id != requested_fanout_id)
+            .filter(|fanout| {
+                fanout.rooms.iter().any(|room| {
+                    matches!(room.status, LinkFanoutRoomStatus::Prepared { .. })
+                        && self
+                            .core
+                            .device
+                            .has_pending_commit(&room.plan.room_id)
+                            .unwrap_or(false)
+                })
+            })
+            .map(|fanout| fanout.fanout_id.clone())
+            .take(4)
+            .collect::<Vec<_>>();
+        for fanout_id in interrupted {
+            run_link_fanout_tick(
+                &mut self.core.store,
+                &mut self.core.device,
+                delivery,
+                &fanout_id,
+                &RuntimeLinkFanoutOptions {
+                    max_discovery_pages_per_tick: 1,
+                    max_commit_rooms_per_tick: 1,
+                    max_completion_sync_pages_per_room: DEFAULT_MAX_SYNC_PAGES_PER_ROOM,
+                },
+            )
+            .map_err(runtime_error)?;
+        }
+        Ok(())
+    }
+
     fn emit_link_device_bootstraps(
         &mut self,
         bootstrap_id: &str,
         target: &DeviceRef,
     ) -> Result<(), FiniteChatCoreError> {
-        let owner = self.core.device.device_ref().clone();
-        let stored_events = self
-            .core
-            .store
-            .load_app_events(&owner, MAX_APP_MESSAGES_U32)
-            .map_err(store_error)?;
-        let already_sent = stored_events
-            .iter()
-            .filter_map(device_link_bootstrap_from_stored_event)
-            .filter(|bootstrap| {
-                bootstrap.bootstrap_id == bootstrap_id && bootstrap.target == *target
-            })
-            .map(|bootstrap| bootstrap.room.room_id)
-            .collect::<BTreeSet<_>>();
         let canonical_selection = self.canonical_agent_bootstrap_selection();
         let room_ids = self.core.known_room_ids();
         for room_id in room_ids {
-            if already_sent.contains(&room_id) {
-                continue;
-            }
             let target_is_member = self
                 .core
                 .device
@@ -5534,7 +5781,6 @@ impl AppRuntimeState {
                 target,
                 &room_id,
                 canonical_selection.clone(),
-                &stored_events,
             )?;
         }
         Ok(())
@@ -5545,9 +5791,13 @@ impl AppRuntimeState {
         bootstrap_id: &str,
         target: &DeviceRef,
         room_id: &str,
-        canonical_selection: Option<DeviceLinkBootstrapSelectionV1>,
-        stored_events: &[StoredAppEvent],
+        canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
     ) -> Result<(), FiniteChatCoreError> {
+        let synced = self.core.sync_room_with_projection(room_id)?;
+        self.apply_projection_events(synced.events)?;
+        self.append_messages(synced.result.messages);
+        let owner = self.core.device.device_ref().clone();
+        self.certify_complete_local_room_history(room_id)?;
         let room = self
             .room(room_id)
             .cloned()
@@ -5572,112 +5822,250 @@ impl AppRuntimeState {
             .collect::<Vec<_>>();
         let canonical_selection =
             canonical_selection.filter(|selection| selection.room_id == room_id);
-        let bootstrap_room = DeviceLinkBootstrapRoomV1 {
+        let bootstrap_room = DeviceLinkBootstrapRoomV2 {
             room_id: room_id.to_owned(),
             display_name: room.display_name,
             picture: room.picture,
         };
-        let archive_chunk_size = (MAX_DEVICE_LINK_BOOTSTRAP_CHAT_ARCHIVES as usize).min(128);
-        for (chunk_index, chat_archives) in self
-            .chat_projection
-            .chat_archive_values_for_room(room_id)
-            .chunks(archive_chunk_size)
-            .enumerate()
-        {
-            let archive_bootstrap = DeviceLinkBootstrapV1 {
-                version: DEVICE_LINK_BOOTSTRAP_VERSION_V1,
-                bootstrap_id: format!("archive-{chunk_index}"),
-                target: target.clone(),
-                room: bootstrap_room.clone(),
-                canonical_selection: None,
-                profiles: Vec::new(),
-                chat_archives: chat_archives.to_vec(),
-                history: Vec::new(),
-            };
-            self.send_link_device_bootstrap(room_id, &archive_bootstrap)?;
-        }
-        let mut bootstrap = DeviceLinkBootstrapV1 {
-            version: DEVICE_LINK_BOOTSTRAP_VERSION_V1,
-            bootstrap_id: bootstrap_id.to_owned(),
-            target: target.clone(),
-            room: bootstrap_room,
-            canonical_selection,
-            profiles,
-            chat_archives: Vec::new(),
-            history: Vec::new(),
-        };
-        bootstrap.validate_limits().map_err(client_error)?;
+        let through_seq = self
+            .core
+            .store
+            .max_app_event_seq_for_room(&owner, room_id)
+            .map_err(store_error)?
+            .unwrap_or(0);
 
-        let mut room_events = stored_events
-            .iter()
-            .filter(|event| event.room_id == room_id)
-            .filter(|event| !is_device_link_control_event(&event.plaintext))
-            .cloned()
-            .collect::<Vec<_>>();
-        room_events.sort_by(|left, right| {
-            right
-                .seq
-                .cmp(&left.seq)
-                .then_with(|| right.message_id.cmp(&left.message_id))
-        });
-        let mut foundation_ids = BTreeSet::new();
-        let mut foundation_kinds = BTreeSet::new();
-        if let Some(selection) = bootstrap.canonical_selection.as_ref() {
-            for event in &room_events {
-                let Some(kind) = device_link_foundation_kind(event, selection) else {
-                    continue;
-                };
-                if foundation_kinds.insert(kind) {
-                    foundation_ids.insert(event.message_id.clone());
-                }
-            }
-        }
-        let mut candidates = room_events
-            .iter()
-            .filter(|event| foundation_ids.contains(&event.message_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            left.seq
-                .cmp(&right.seq)
-                .then_with(|| left.message_id.cmp(&right.message_id))
-        });
-        candidates.extend(
-            room_events
-                .into_iter()
-                .filter(|event| !foundation_ids.contains(&event.message_id)),
-        );
-        for event in candidates {
-            if bootstrap.history.len() >= MAX_DEVICE_LINK_BOOTSTRAP_EVENTS as usize {
+        // First pass freezes a deterministic manifest and records only bounded
+        // per-chunk counts. It never retains the room transcript in memory.
+        let mut digest = Sha256::new();
+        let mut total_history_events = 0_u64;
+        let mut chunk_counts = Vec::<u32>::new();
+        let mut current_chunk = Vec::<DeviceLinkBootstrapEventV2>::new();
+        let mut after_seq = 0_u64;
+        let mut after_message_id = String::new();
+        loop {
+            let page = self
+                .core
+                .store
+                .load_app_events_for_room_page(
+                    &owner,
+                    room_id,
+                    through_seq,
+                    after_seq,
+                    &after_message_id,
+                    DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE,
+                )
+                .map_err(store_error)?;
+            if page.is_empty() {
                 break;
             }
-            let history_event = DeviceLinkBootstrapEventV1 {
-                seq: event.seq,
-                message_id: event.message_id,
-                sender: event.sender,
-                plaintext: event.plaintext,
-                timestamp_unix_seconds: event.timestamp_unix_seconds,
-            };
-            history_event.validate_limits().map_err(client_error)?;
-            bootstrap.history.push(history_event);
-            let encoded = serde_json::to_vec(&bootstrap).map_err(client_error)?;
-            if encoded.len() > MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES as usize {
-                bootstrap.history.pop();
+            let page_len = page.len();
+            for stored in page {
+                after_seq = stored.seq;
+                after_message_id.clone_from(&stored.message_id);
+                if is_device_link_control_event(&stored.plaintext) {
+                    continue;
+                }
+                let history = device_link_history_event_from_stored(stored)?;
+                update_device_link_history_digest(&mut digest, &history);
+                total_history_events = total_history_events
+                    .checked_add(1)
+                    .ok_or_else(|| client_error("device-link history count overflow"))?;
+                if total_history_events > MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS {
+                    return Err(client_error(
+                        "device-link history exceeds the complete-transfer limit",
+                    ));
+                }
+                current_chunk.push(history);
+                let sizing = DeviceLinkBootstrapV2 {
+                    version: DEVICE_LINK_BOOTSTRAP_VERSION_V2,
+                    bootstrap_id: bootstrap_id.to_owned(),
+                    target: target.clone(),
+                    chunk_index: u32::MAX,
+                    chunk_count: u32::MAX,
+                    total_history_events: u64::MAX,
+                    history_sha256: "0".repeat(64),
+                    room: bootstrap_room.clone(),
+                    canonical_selection: canonical_selection.clone(),
+                    profiles: profiles.clone(),
+                    history: current_chunk.clone(),
+                };
+                let exceeds_count = current_chunk.len() > MAX_DEVICE_LINK_BOOTSTRAP_EVENTS as usize;
+                let exceeds_bytes = serde_json::to_vec(&sizing).map_err(client_error)?.len()
+                    > MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES as usize;
+                if exceeds_count || exceeds_bytes {
+                    let last = current_chunk
+                        .pop()
+                        .expect("candidate chunk contains the event just appended");
+                    if current_chunk.is_empty() {
+                        return Err(client_error(
+                            "one history event cannot fit a device-link bootstrap chunk",
+                        ));
+                    }
+                    chunk_counts.push(current_chunk.len() as u32);
+                    current_chunk.clear();
+                    current_chunk.push(last);
+                }
+            }
+            if page_len < DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE as usize {
+                break;
             }
         }
-        bootstrap.history.sort_by(|left, right| {
-            left.seq
-                .cmp(&right.seq)
-                .then_with(|| left.message_id.cmp(&right.message_id))
-        });
-        self.send_link_device_bootstrap(room_id, &bootstrap)?;
+        if !current_chunk.is_empty() {
+            chunk_counts.push(current_chunk.len() as u32);
+        } else if total_history_events == 0 {
+            chunk_counts.push(0);
+        }
+        if chunk_counts.len() > MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS as usize {
+            return Err(client_error(
+                "device-link history exceeds the complete-transfer chunk limit",
+            ));
+        }
+        let chunk_count = u32::try_from(chunk_counts.len())
+            .map_err(|_| client_error("device-link chunk count overflow"))?;
+        let history_sha256 = hex::encode(digest.finalize());
+
+        // Second pass emits the frozen snapshot. Individual chunks are bounded,
+        // while the transfer as a whole is complete or rejected by the target.
+        let mut next_chunk_index = 0_usize;
+        let mut emitted_history_events = 0_u64;
+        let mut chunk = Vec::new();
+        after_seq = 0;
+        after_message_id.clear();
+        loop {
+            let page = self
+                .core
+                .store
+                .load_app_events_for_room_page(
+                    &owner,
+                    room_id,
+                    through_seq,
+                    after_seq,
+                    &after_message_id,
+                    DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE,
+                )
+                .map_err(store_error)?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            for stored in page {
+                after_seq = stored.seq;
+                after_message_id.clone_from(&stored.message_id);
+                if is_device_link_control_event(&stored.plaintext) {
+                    continue;
+                }
+                chunk.push(device_link_history_event_from_stored(stored)?);
+                let expected = chunk_counts
+                    .get(next_chunk_index)
+                    .copied()
+                    .ok_or_else(|| client_error("device-link chunk plan exhausted early"))?;
+                if chunk.len() == expected as usize {
+                    let bootstrap = DeviceLinkBootstrapV2 {
+                        version: DEVICE_LINK_BOOTSTRAP_VERSION_V2,
+                        bootstrap_id: bootstrap_id.to_owned(),
+                        target: target.clone(),
+                        chunk_index: next_chunk_index as u32,
+                        chunk_count,
+                        total_history_events,
+                        history_sha256: history_sha256.clone(),
+                        room: bootstrap_room.clone(),
+                        canonical_selection: canonical_selection.clone(),
+                        profiles: profiles.clone(),
+                        history: std::mem::take(&mut chunk),
+                    };
+                    self.send_link_device_bootstrap(room_id, &bootstrap)?;
+                    emitted_history_events += u64::from(expected);
+                    next_chunk_index += 1;
+                }
+            }
+            if page_len < DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE as usize {
+                break;
+            }
+        }
+        if total_history_events == 0 {
+            let bootstrap = DeviceLinkBootstrapV2 {
+                version: DEVICE_LINK_BOOTSTRAP_VERSION_V2,
+                bootstrap_id: bootstrap_id.to_owned(),
+                target: target.clone(),
+                chunk_index: 0,
+                chunk_count: 1,
+                total_history_events: 0,
+                history_sha256,
+                room: bootstrap_room,
+                canonical_selection,
+                profiles,
+                history: Vec::new(),
+            };
+            self.send_link_device_bootstrap(room_id, &bootstrap)?;
+            next_chunk_index = 1;
+        }
+        if !chunk.is_empty()
+            || next_chunk_index != chunk_counts.len()
+            || emitted_history_events != total_history_events
+        {
+            return Err(client_error(
+                "device-link history changed while constructing its frozen transfer",
+            ));
+        }
         Ok(())
+    }
+
+    fn certify_complete_local_room_history(
+        &mut self,
+        room_id: &str,
+    ) -> Result<(), FiniteChatCoreError> {
+        let owner = self.core.device.device_ref().clone();
+        let room_server_url = self.core.room_server_url(room_id);
+        let mut delivery = self.core.delivery_for(&room_server_url);
+        let mut after_seq = 0_u64;
+        for page_index in 0..MAX_DEVICE_LINK_HISTORY_AUDIT_PAGES {
+            let page = delivery
+                .sync_events(room_id, &owner, after_seq)
+                .map_err(delivery_error)?;
+            if page.next_after_seq < after_seq {
+                return Err(client_error(
+                    "device-link source history audit cursor regressed",
+                ));
+            }
+            for entry in &page.entries {
+                if entry.kind == LogEntryKind::Application
+                    && !self
+                        .core
+                        .store
+                        .has_app_event_identity(
+                            &owner,
+                            room_id,
+                            entry.seq,
+                            &entry.message_id,
+                            &entry.sender,
+                            entry.timestamp_unix_seconds,
+                        )
+                        .map_err(store_error)?
+                {
+                    return Err(client_error(format!(
+                        "device-link source cannot certify local plaintext for application event {} at seq {} from {}",
+                        entry.message_id, entry.seq, entry.sender.device_id
+                    )));
+                }
+            }
+            if !page.has_more {
+                return Ok(());
+            }
+            if page.next_after_seq == after_seq {
+                return Err(client_error("device-link source history audit stalled"));
+            }
+            after_seq = page.next_after_seq;
+            debug_assert!(page_index < MAX_DEVICE_LINK_HISTORY_AUDIT_PAGES);
+        }
+        Err(client_error(
+            "device-link source history audit exceeded its bounded page limit",
+        ))
     }
 
     fn send_link_device_bootstrap(
         &mut self,
         room_id: &str,
-        bootstrap: &DeviceLinkBootstrapV1,
+        bootstrap: &DeviceLinkBootstrapV2,
     ) -> Result<(), FiniteChatCoreError> {
         bootstrap.validate_limits().map_err(client_error)?;
         let payload = serde_json::to_vec(bootstrap).map_err(client_error)?;
@@ -5694,7 +6082,7 @@ impl AppRuntimeState {
         Ok(())
     }
 
-    fn canonical_agent_bootstrap_selection(&self) -> Option<DeviceLinkBootstrapSelectionV1> {
+    fn canonical_agent_bootstrap_selection(&self) -> Option<DeviceLinkBootstrapSelectionV2> {
         let agent_room_ids = self
             .app
             .rooms
@@ -5724,7 +6112,7 @@ impl AppRuntimeState {
             self.default_chat_id_for_topic(&room_id, &topic_id)
         }?;
         self.chat_exists(&room_id, &topic_id, &chat_id)
-            .then_some(DeviceLinkBootstrapSelectionV1 {
+            .then_some(DeviceLinkBootstrapSelectionV2 {
                 room_id,
                 topic_id,
                 chat_id,
@@ -5806,18 +6194,24 @@ impl AppRuntimeState {
         let owner = self.core.device.device_ref().clone();
         let mut projection_events = Vec::new();
         let mut bootstrap_selection = None;
+        let mut completed_bootstrap_rooms = BTreeSet::new();
         let mut bootstrap_requests = Vec::new();
         for event in &events {
-            if let Some(bootstrap) = device_link_bootstrap_from_stored_event(event) {
-                let (imported, selection) = self.accept_link_device_bootstrap(event, bootstrap)?;
-                projection_events.extend(imported);
-                bootstrap_selection = bootstrap_selection.or(selection);
+            if let Some(bootstrap) = device_link_bootstrap_from_stored_event(event)
+                && let Some(accepted) = self.accept_link_device_bootstrap(event, bootstrap)?
+            {
+                completed_bootstrap_rooms.insert(accepted.room_id);
+                bootstrap_selection = bootstrap_selection.or(accepted.canonical_selection);
             }
             if let Some(request) = device_link_bootstrap_request_from_stored_event(event) {
                 bootstrap_requests.push((event.clone(), request));
             }
         }
-        projection_events.extend(events);
+        projection_events.extend(events.into_iter().filter(|event| {
+            is_device_link_control_event(&event.plaintext)
+                || completed_bootstrap_rooms.contains(&event.room_id)
+                || !self.room_is_provisional_for_device_link(&event.room_id)
+        }));
         let mut archive_state_changed = false;
         for event in projection_events {
             if let Ok(app_event) =
@@ -5850,22 +6244,95 @@ impl AppRuntimeState {
     fn accept_link_device_bootstrap(
         &mut self,
         envelope: &StoredAppEvent,
-        bootstrap: DeviceLinkBootstrapV1,
-    ) -> Result<(Vec<StoredAppEvent>, Option<DeviceLinkBootstrapSelectionV1>), FiniteChatCoreError>
-    {
+        bootstrap: DeviceLinkBootstrapV2,
+    ) -> Result<Option<AcceptedDeviceLinkBootstrap>, FiniteChatCoreError> {
         let owner = self.core.device.device_ref().clone();
         if envelope.sender.account_id != owner.account_id
             || bootstrap.target != owner
             || bootstrap.room.room_id != envelope.room_id
             || !self.core.has_room(&envelope.room_id)
         {
-            return Ok((Vec::new(), None));
+            return Ok(None);
         }
         let encoded = serde_json::to_vec(&bootstrap).map_err(client_error)?;
         if encoded.len() > MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES as usize {
-            return Ok((Vec::new(), None));
+            return Ok(None);
         }
-        let canonical_selection = bootstrap.canonical_selection.clone();
+
+        let key = DeviceLinkBootstrapTransferKey {
+            room_id: envelope.room_id.clone(),
+            bootstrap_id: bootstrap.bootstrap_id.clone(),
+            sender: envelope.sender.clone(),
+        };
+        if self.poisoned_link_bootstraps.contains(&key) {
+            return Ok(None);
+        }
+        if self.poisoned_link_bootstraps.len() >= MAX_PENDING_DEVICE_LINK_BOOTSTRAPS {
+            return Ok(None);
+        }
+        if !self.pending_link_bootstraps.contains_key(&key)
+            && self.pending_link_bootstraps.len() >= MAX_PENDING_DEVICE_LINK_BOOTSTRAPS
+        {
+            return Ok(None);
+        }
+        let pending = self
+            .pending_link_bootstraps
+            .entry(key.clone())
+            .or_insert_with(|| PendingDeviceLinkBootstrap {
+                target: bootstrap.target.clone(),
+                room: bootstrap.room.clone(),
+                canonical_selection: bootstrap.canonical_selection.clone(),
+                profiles: bootstrap.profiles.clone(),
+                chunk_count: bootstrap.chunk_count,
+                total_history_events: bootstrap.total_history_events,
+                history_sha256: bootstrap.history_sha256.clone(),
+                earliest_envelope_seq: envelope.seq,
+                chunks: BTreeMap::new(),
+            });
+        let manifest_matches = pending.target == bootstrap.target
+            && pending.room == bootstrap.room
+            && pending.canonical_selection == bootstrap.canonical_selection
+            && pending.profiles == bootstrap.profiles
+            && pending.chunk_count == bootstrap.chunk_count
+            && pending.total_history_events == bootstrap.total_history_events
+            && pending.history_sha256 == bootstrap.history_sha256;
+        if !manifest_matches {
+            self.pending_link_bootstraps.remove(&key);
+            self.poisoned_link_bootstraps.insert(key);
+            return Ok(None);
+        }
+        pending.earliest_envelope_seq = pending.earliest_envelope_seq.min(envelope.seq);
+        if let Some(existing) = pending.chunks.get(&bootstrap.chunk_index) {
+            if existing != &bootstrap.history {
+                self.pending_link_bootstraps.remove(&key);
+                self.poisoned_link_bootstraps.insert(key);
+            }
+            return Ok(None);
+        }
+        pending
+            .chunks
+            .insert(bootstrap.chunk_index, bootstrap.history);
+        if pending.chunks.len() != pending.chunk_count as usize {
+            return Ok(None);
+        }
+        let pending = self
+            .pending_link_bootstraps
+            .remove(&key)
+            .expect("complete bootstrap remains staged until validation");
+        let canonical_selection = pending.canonical_selection.clone();
+        let Some(imported) = validated_device_link_bootstrap_history(&pending, &envelope.room_id)
+        else {
+            return Ok(None);
+        };
+        self.core
+            .store
+            .import_app_events_atomically(&owner, &imported)
+            .map_err(store_error)?;
+        self.replay_room_history_into_projection(&pending.room.room_id)?;
+
+        // Metadata is intentionally applied only after the full history
+        // transaction and canonical replay succeed. Its durable room write is
+        // the visibility marker recovered on restart.
         let member_account_ids = self
             .core
             .device
@@ -5874,78 +6341,88 @@ impl AppRuntimeState {
             .into_iter()
             .map(|member| member.account_id)
             .collect::<BTreeSet<_>>();
-        for profile in bootstrap.profiles {
+        for profile in pending.profiles {
             if member_account_ids.contains(&profile.account_id) {
                 self.remember_profile_summary(app_profile_from_device_link_bootstrap(profile))?;
             }
         }
         self.upsert_room(
-            &bootstrap.room.room_id,
-            &bootstrap.room.display_name,
-            bootstrap.room.picture,
+            &pending.room.room_id,
+            &pending.room.display_name,
+            pending.room.picture,
             AppRoomState::Connected,
             "connected",
         );
-        self.persist_room_projection(&bootstrap.room.room_id)?;
+        self.persist_room_projection(&pending.room.room_id)?;
+        Ok(Some(AcceptedDeviceLinkBootstrap {
+            room_id: pending.room.room_id,
+            canonical_selection,
+        }))
+    }
 
+    fn room_is_provisional_for_device_link(&self, room_id: &str) -> bool {
+        let owner = self.core.device.device_ref();
+        self.room(room_id)
+            .is_some_and(|room| room.display_name == room.room_id)
+            && self.core.device.room_members(room_id).is_ok_and(|members| {
+                members.iter().any(|member| {
+                    member.account_id == owner.account_id && member.device_id != owner.device_id
+                })
+            })
+    }
+
+    fn replay_room_history_into_projection(
+        &mut self,
+        room_id: &str,
+    ) -> Result<(), FiniteChatCoreError> {
+        let owner = self.core.device.device_ref().clone();
+        let through_seq = self
+            .core
+            .store
+            .max_app_event_seq_for_room(&owner, room_id)
+            .map_err(store_error)?
+            .unwrap_or(0);
+        let mut after_seq = 0_u64;
+        let mut after_message_id = String::new();
         let mut archive_state_changed = false;
-        for archive in bootstrap.chat_archives {
-            if archive.accepted_seq > envelope.seq {
-                continue;
+        loop {
+            let page = self
+                .core
+                .store
+                .load_app_events_for_room_page(
+                    &owner,
+                    room_id,
+                    through_seq,
+                    after_seq,
+                    &after_message_id,
+                    DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE,
+                )
+                .map_err(store_error)?;
+            if page.is_empty() {
+                break;
             }
-            archive_state_changed |= self.chat_projection.apply_chat_archive(
-                &envelope.room_id,
-                archive.accepted_seq,
-                ChatArchiveV1 {
-                    topic_id: archive.topic_id,
-                    chat_id: archive.chat_id,
-                    archived: archive.archived,
-                },
-                ChatArchiveProjectionSource::CacheFallback,
-            );
+            let page_len = page.len();
+            for event in page {
+                after_seq = event.seq;
+                after_message_id.clone_from(&event.message_id);
+                if !is_device_link_control_event(&event.plaintext) {
+                    archive_state_changed |= self.chat_projection.apply_event(event, &owner);
+                }
+            }
+            if page_len < DEVICE_LINK_BOOTSTRAP_STORE_PAGE_SIZE as usize {
+                break;
+            }
         }
         if archive_state_changed {
             self.persist_app_state()?;
         }
-
-        let mut seen = BTreeSet::new();
-        let mut imported = Vec::new();
-        for history in bootstrap.history {
-            if !seen.insert(history.message_id.clone())
-                || is_device_link_control_event(&history.plaintext)
-            {
-                continue;
-            }
-            let Ok(event) =
-                serde_json::from_slice::<DecryptedApplicationEventV1>(&history.plaintext)
-            else {
-                continue;
-            };
-            if event.validate_limits().is_err() {
-                continue;
-            }
-            imported.push(StoredAppEvent {
-                room_id: envelope.room_id.clone(),
-                seq: history.seq,
-                message_id: history.message_id,
-                sender: history.sender,
-                plaintext: history.plaintext,
-                timestamp_unix_seconds: history.timestamp_unix_seconds,
-            });
-        }
-        if !imported.is_empty() {
-            self.core
-                .store
-                .save_app_events(&owner, &imported, MAX_APP_MESSAGES_U32)
-                .map_err(store_error)?;
-        }
-        Ok((imported, canonical_selection))
+        Ok(())
     }
 
     fn respond_to_link_device_bootstrap_request(
         &mut self,
         envelope: &StoredAppEvent,
-        request: DeviceLinkBootstrapRequestV1,
+        request: DeviceLinkBootstrapRequestV2,
     ) -> Result<(), FiniteChatCoreError> {
         let owner = self.core.device.device_ref().clone();
         if envelope.sender.account_id != owner.account_id
@@ -5967,34 +6444,17 @@ impl AppRuntimeState {
         if !requester_is_member || !has_authoritative_metadata {
             return Ok(());
         }
-        let stored_events = self
-            .core
-            .store
-            .load_app_events(&owner, MAX_APP_MESSAGES_U32)
-            .map_err(store_error)?;
-        let already_sent = stored_events
-            .iter()
-            .filter_map(device_link_bootstrap_from_stored_event)
-            .any(|bootstrap| {
-                bootstrap.bootstrap_id == request.request_id
-                    && bootstrap.target == request.requester
-                    && bootstrap.room.room_id == envelope.room_id
-            });
-        if already_sent {
-            return Ok(());
-        }
         self.emit_link_device_bootstrap_for_room(
             &request.request_id,
             &request.requester,
             &envelope.room_id,
             self.canonical_agent_bootstrap_selection(),
-            &stored_events,
         )
     }
 
     fn apply_link_device_bootstrap_selection(
         &mut self,
-        selection: DeviceLinkBootstrapSelectionV1,
+        selection: DeviceLinkBootstrapSelectionV2,
     ) -> Result<(), FiniteChatCoreError> {
         if self.selection_is_explicit_or_bootstrapped
             || !self.room_is_connected(&selection.room_id)
@@ -6373,6 +6833,14 @@ impl AppRuntimeState {
             selected_room_id: self.app.selected_room_id.clone(),
             selected_topic_id: self.app.selected_topic_id.clone(),
             selected_chat_id: self.app.selected_chat_id.clone(),
+            paired_agent: self
+                .app
+                .paired_agent
+                .as_ref()
+                .map(|paired| StoredPairedAgent {
+                    agent_account_id: paired.agent_account_id.clone(),
+                    canonical_room_id: paired.canonical_room_id.clone(),
+                }),
             revoked_devices: self.revoked_device_refs(),
             chat_archives: self.chat_projection.stored_chat_archives(),
         };
@@ -6443,6 +6911,7 @@ impl AppRuntimeState {
                     selected_room_id,
                     selected_topic_id: None,
                     selected_chat_id: None,
+                    paired_agent: None,
                     revoked_devices: BTreeSet::new(),
                     chat_archives: Vec::new(),
                 },
@@ -8014,11 +8483,7 @@ impl CoreState {
             timestamp_unix_seconds: request.timestamp_unix_seconds,
         };
         self.store
-            .save_app_events(
-                self.device.device_ref(),
-                std::slice::from_ref(&event),
-                MAX_APP_MESSAGES_U32,
-            )
+            .import_app_events_atomically(self.device.device_ref(), std::slice::from_ref(&event))
             .map_err(store_error)?;
         Ok(event)
     }
@@ -8077,11 +8542,7 @@ impl CoreState {
             timestamp_unix_seconds: request.timestamp_unix_seconds,
         };
         self.store
-            .save_app_events(
-                self.device.device_ref(),
-                std::slice::from_ref(&event),
-                MAX_APP_MESSAGES_U32,
-            )
+            .import_app_events_atomically(self.device.device_ref(), std::slice::from_ref(&event))
             .map_err(store_error)?;
         let mut projection = match self.sync_with_projection() {
             Ok(projection) => projection,
@@ -8145,11 +8606,7 @@ impl CoreState {
             timestamp_unix_seconds: request.timestamp_unix_seconds,
         };
         self.store
-            .save_app_events(
-                self.device.device_ref(),
-                std::slice::from_ref(&event),
-                MAX_APP_MESSAGES_U32,
-            )
+            .import_app_events_atomically(self.device.device_ref(), std::slice::from_ref(&event))
             .map_err(store_error)?;
         Ok(event)
     }
@@ -8205,11 +8662,7 @@ impl CoreState {
             timestamp_unix_seconds: request.timestamp_unix_seconds,
         };
         self.store
-            .save_app_events(
-                self.device.device_ref(),
-                std::slice::from_ref(&event),
-                MAX_APP_MESSAGES_U32,
-            )
+            .import_app_events_atomically(self.device.device_ref(), std::slice::from_ref(&event))
             .map_err(store_error)?;
         Ok(event)
     }
@@ -8826,14 +9279,14 @@ fn decoded_typed_application_event(event: DecryptedApplicationEventV1) -> Decode
 
 fn device_link_bootstrap_event_kind() -> DurableAppEventKind {
     DurableAppEventKind::Namespaced {
-        name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1.to_owned(),
+        name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2.to_owned(),
         policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
     }
 }
 
 fn device_link_bootstrap_request_event_kind() -> DurableAppEventKind {
     DurableAppEventKind::Namespaced {
-        name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1.to_owned(),
+        name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2.to_owned(),
         policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
     }
 }
@@ -8853,11 +9306,11 @@ fn typed_namespaced_payload(plaintext: &[u8], expected_name: &str) -> Option<Vec
 
 fn device_link_bootstrap_from_stored_event(
     event: &StoredAppEvent,
-) -> Option<DeviceLinkBootstrapV1> {
+) -> Option<DeviceLinkBootstrapV2> {
     let payload =
-        typed_namespaced_payload(&event.plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1)?;
-    let bootstrap = serde_json::from_slice::<DeviceLinkBootstrapV1>(&payload).ok()?;
-    (bootstrap.version == DEVICE_LINK_BOOTSTRAP_VERSION_V1
+        typed_namespaced_payload(&event.plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2)?;
+    let bootstrap = serde_json::from_slice::<DeviceLinkBootstrapV2>(&payload).ok()?;
+    (bootstrap.version == DEVICE_LINK_BOOTSTRAP_VERSION_V2
         && bootstrap.validate_limits().is_ok()
         && bootstrap.room.room_id == event.room_id)
         .then_some(bootstrap)
@@ -8865,68 +9318,56 @@ fn device_link_bootstrap_from_stored_event(
 
 fn device_link_bootstrap_request_from_stored_event(
     event: &StoredAppEvent,
-) -> Option<DeviceLinkBootstrapRequestV1> {
+) -> Option<DeviceLinkBootstrapRequestV2> {
     let payload = typed_namespaced_payload(
         &event.plaintext,
-        FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1,
+        FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2,
     )?;
-    let request = serde_json::from_slice::<DeviceLinkBootstrapRequestV1>(&payload).ok()?;
-    (request.version == DEVICE_LINK_BOOTSTRAP_VERSION_V1
+    let request = serde_json::from_slice::<DeviceLinkBootstrapRequestV2>(&payload).ok()?;
+    (request.version == DEVICE_LINK_BOOTSTRAP_VERSION_V2
         && request.validate_limits().is_ok()
         && request.requester == event.sender)
         .then_some(request)
 }
 
 fn is_device_link_control_event(plaintext: &[u8]) -> bool {
-    typed_namespaced_payload(plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1).is_some()
-        || typed_namespaced_payload(plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1)
+    typed_namespaced_payload(plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2).is_some()
+        || typed_namespaced_payload(plaintext, FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2)
             .is_some()
 }
 
-/// Returns one stable category for each projection foundation needed by the
-/// selected route. Callers walk newest-first, retaining the latest metadata,
-/// the selected segment's start, its latest title, and its archive state.
-fn device_link_foundation_kind(
-    event: &StoredAppEvent,
-    selection: &DeviceLinkBootstrapSelectionV1,
-) -> Option<u8> {
-    let app_event = serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext).ok()?;
-    if app_event.validate_limits().is_err()
-        || app_event.conversation_id.as_deref() != Some(selection.topic_id.as_str())
-    {
-        return None;
-    }
-    match app_event.kind {
-        DurableAppEventKind::ConversationCreate | DurableAppEventKind::ConversationUpdate => {
-            Some(0)
-        }
-        DurableAppEventKind::ConversationSegmentStart => {
-            let segment =
-                serde_json::from_slice::<ConversationSegmentStartV1>(&app_event.payload).ok()?;
-            (segment.segment_id == selection.chat_id).then_some(1)
-        }
-        DurableAppEventKind::Namespaced { name, policy }
-            if name == FINITECHAT_CHAT_ARCHIVE_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING
-                && app_event.segment_id.as_deref() == Some(selection.chat_id.as_str()) =>
-        {
-            Some(3)
-        }
-        DurableAppEventKind::Namespaced { name, policy }
-            if name == FINITECHAT_CHAT_RENAME_EVENT_V1
-                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING
-                && app_event.segment_id.as_deref() == Some(selection.chat_id.as_str()) =>
-        {
-            Some(2)
-        }
-        _ => None,
-    }
+fn device_link_history_event_from_stored(
+    event: StoredAppEvent,
+) -> Result<DeviceLinkBootstrapEventV2, FiniteChatCoreError> {
+    let history = DeviceLinkBootstrapEventV2 {
+        seq: event.seq,
+        message_id: event.message_id,
+        sender: event.sender,
+        plaintext: event.plaintext,
+        timestamp_unix_seconds: event.timestamp_unix_seconds,
+    };
+    history.validate_limits().map_err(client_error)?;
+    Ok(history)
+}
+
+fn update_device_link_history_digest(digest: &mut Sha256, event: &DeviceLinkBootstrapEventV2) {
+    digest.update(event.seq.to_be_bytes());
+    update_device_link_digest_field(digest, event.message_id.as_bytes());
+    update_device_link_digest_field(digest, event.sender.account_id.as_bytes());
+    update_device_link_digest_field(digest, event.sender.device_id.as_bytes());
+    update_device_link_digest_field(digest, &event.plaintext);
+    digest.update(event.timestamp_unix_seconds.to_be_bytes());
+}
+
+fn update_device_link_digest_field(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
 }
 
 fn device_link_bootstrap_profile_from_app(
     profile: AppProfileSummary,
-) -> DeviceLinkBootstrapProfileV1 {
-    DeviceLinkBootstrapProfileV1 {
+) -> DeviceLinkBootstrapProfileV2 {
+    DeviceLinkBootstrapProfileV2 {
         account_id: profile.account_id,
         npub: profile.npub,
         display_name: profile.display_name,
@@ -8937,7 +9378,7 @@ fn device_link_bootstrap_profile_from_app(
 }
 
 fn app_profile_from_device_link_bootstrap(
-    profile: DeviceLinkBootstrapProfileV1,
+    profile: DeviceLinkBootstrapProfileV2,
 ) -> AppProfileSummary {
     AppProfileSummary {
         account_id: profile.account_id,
@@ -9613,22 +10054,6 @@ impl ChatProjectionState {
             .collect()
     }
 
-    fn chat_archive_values_for_room(&self, room_id: &str) -> Vec<DeviceLinkBootstrapChatArchiveV1> {
-        self.chat_archives
-            .iter()
-            .filter(|((candidate_room_id, _, _), _)| candidate_room_id == room_id)
-            .filter(|(_, archive)| archive.source == ChatArchiveProjectionSource::CanonicalEvent)
-            .map(
-                |((_, topic_id, chat_id), archive)| DeviceLinkBootstrapChatArchiveV1 {
-                    topic_id: topic_id.clone(),
-                    chat_id: chat_id.clone(),
-                    accepted_seq: archive.accepted_seq,
-                    archived: archive.archived,
-                },
-            )
-            .collect()
-    }
-
     fn topics(&self, local_read_seq: &BTreeMap<String, u64>) -> Vec<AppTopicSummary> {
         let mut messages_by_topic = BTreeMap::<(String, String), Vec<&ChatMessage>>::new();
         for message in self.messages.values() {
@@ -9890,7 +10315,30 @@ impl ChatProjectionState {
         }
         let key = message_key(&message);
         if !self.messages.contains_key(&key) {
-            self.message_arrival_order.push_back(key.clone());
+            let latest_same_room_seq =
+                self.message_arrival_order
+                    .iter()
+                    .rev()
+                    .find_map(|candidate| {
+                        self.messages
+                            .get(candidate)
+                            .filter(|existing| existing.room_id == message.room_id)
+                            .map(|existing| existing.seq)
+                    });
+            if latest_same_room_seq.is_none_or(|seq| seq <= message.seq) {
+                self.message_arrival_order.push_back(key.clone());
+            } else {
+                let position = self
+                    .message_arrival_order
+                    .iter()
+                    .position(|candidate| {
+                        self.messages.get(candidate).is_some_and(|existing| {
+                            existing.room_id == message.room_id && existing.seq > message.seq
+                        })
+                    })
+                    .unwrap_or(self.message_arrival_order.len());
+                self.message_arrival_order.insert(position, key.clone());
+            }
         }
         self.messages.insert(key, message);
     }
@@ -10032,7 +10480,7 @@ impl ChatProjectionState {
         let should_replace = self
             .chat_titles
             .get(&key)
-            .is_none_or(|existing| accepted_seq >= existing.accepted_seq);
+            .is_none_or(|existing| accepted_seq > existing.accepted_seq);
         if should_replace {
             self.chat_titles.insert(
                 key,
@@ -10069,7 +10517,7 @@ impl ChatProjectionState {
                         ChatArchiveProjectionSource::CanonicalEvent,
                         ChatArchiveProjectionSource::CacheFallback,
                     ) => false,
-                    _ => accepted_seq >= existing.accepted_seq,
+                    _ => accepted_seq > existing.accepted_seq,
                 });
         if should_replace {
             self.chat_archives.insert(
@@ -11269,10 +11717,156 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
+    fn next_permutation(values: &mut [usize]) -> bool {
+        let Some(pivot) = (1..values.len())
+            .rev()
+            .find(|&index| values[index - 1] < values[index])
+            .map(|index| index - 1)
+        else {
+            return false;
+        };
+        let successor = (pivot + 1..values.len())
+            .rev()
+            .find(|&index| values[pivot] < values[index])
+            .expect("a permutation pivot always has a successor");
+        values.swap(pivot, successor);
+        values[pivot + 1..].reverse();
+        true
+    }
+
+    fn test_device_link_history_event(seq: u64) -> DeviceLinkBootstrapEventV2 {
+        DeviceLinkBootstrapEventV2 {
+            seq,
+            message_id: format!("history-{seq}"),
+            sender: DeviceRef {
+                account_id: "history-account".to_owned(),
+                device_id: "history-device".to_owned(),
+            },
+            plaintext: encode_application_event(
+                DurableAppEventKind::ChatMessage,
+                None,
+                &encode_text_message_payload(&format!("history {seq}"), None).unwrap(),
+            )
+            .unwrap(),
+            timestamp_unix_seconds: NOW + seq,
+        }
+    }
+
+    fn test_pending_device_link_bootstrap(
+        chunks: BTreeMap<u32, Vec<DeviceLinkBootstrapEventV2>>,
+        chunk_count: u32,
+        canonical_history: &[DeviceLinkBootstrapEventV2],
+    ) -> PendingDeviceLinkBootstrap {
+        let mut digest = Sha256::new();
+        for event in canonical_history {
+            update_device_link_history_digest(&mut digest, event);
+        }
+        PendingDeviceLinkBootstrap {
+            target: DeviceRef {
+                account_id: "history-account".to_owned(),
+                device_id: "linked-device".to_owned(),
+            },
+            room: DeviceLinkBootstrapRoomV2 {
+                room_id: "history-room".to_owned(),
+                display_name: "History".to_owned(),
+                picture: None,
+            },
+            canonical_selection: None,
+            profiles: Vec::new(),
+            chunk_count,
+            total_history_events: canonical_history.len() as u64,
+            history_sha256: hex::encode(digest.finalize()),
+            earliest_envelope_seq: 100,
+            chunks,
+        }
+    }
+
+    #[test]
+    fn complete_device_link_history_accepts_every_chunk_arrival_order() {
+        let history = (1..=3)
+            .map(test_device_link_history_event)
+            .collect::<Vec<_>>();
+        let split = [
+            vec![history[0].clone()],
+            vec![history[1].clone()],
+            vec![history[2].clone()],
+        ];
+        let mut order = [0, 1, 2];
+        loop {
+            let chunks = order
+                .iter()
+                .map(|index| (*index as u32, split[*index].clone()))
+                .collect();
+            let pending = test_pending_device_link_bootstrap(chunks, 3, &history);
+            let imported =
+                validated_device_link_bootstrap_history(&pending, "history-room").unwrap();
+            assert_eq!(
+                imported.iter().map(|event| event.seq).collect::<Vec<_>>(),
+                vec![1, 2, 3],
+                "arrival order {order:?} must yield canonical history"
+            );
+            if !next_permutation(&mut order) {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_or_ambiguous_device_link_history_fails_closed() {
+        let history = (1..=3)
+            .map(test_device_link_history_event)
+            .collect::<Vec<_>>();
+
+        let missing_middle =
+            BTreeMap::from([(0, vec![history[0].clone()]), (2, vec![history[2].clone()])]);
+        let pending = test_pending_device_link_bootstrap(missing_middle, 3, &history);
+        assert!(
+            validated_device_link_bootstrap_history(&pending, "history-room").is_none(),
+            "a missing chunk must never expose a partial room"
+        );
+
+        let mut duplicate_history = history.clone();
+        duplicate_history[1].message_id = duplicate_history[0].message_id.clone();
+        let duplicate_chunks = duplicate_history
+            .iter()
+            .enumerate()
+            .map(|(index, event)| (index as u32, vec![event.clone()]))
+            .collect();
+        let pending = test_pending_device_link_bootstrap(duplicate_chunks, 3, &duplicate_history);
+        assert!(
+            validated_device_link_bootstrap_history(&pending, "history-room").is_none(),
+            "duplicate message IDs are ambiguous even when the manifest digest matches"
+        );
+
+        let valid_chunks = history
+            .iter()
+            .enumerate()
+            .map(|(index, event)| (index as u32, vec![event.clone()]))
+            .collect();
+        let mut pending = test_pending_device_link_bootstrap(valid_chunks, 3, &history);
+        pending.history_sha256 = "0".repeat(64);
+        assert!(
+            validated_device_link_bootstrap_history(&pending, "history-room").is_none(),
+            "digest corruption must never expose the room"
+        );
+
+        let valid_chunks = history
+            .iter()
+            .enumerate()
+            .map(|(index, event)| (index as u32, vec![event.clone()]))
+            .collect();
+        let mut pending = test_pending_device_link_bootstrap(valid_chunks, 3, &history);
+        pending.earliest_envelope_seq = 3;
+        assert!(
+            validated_device_link_bootstrap_history(&pending, "history-room").is_none(),
+            "history at or after the transfer envelope is not a frozen pre-transfer snapshot"
+        );
+    }
+
     #[test]
     #[ignore = "timing harness; run explicitly in release mode"]
     fn app_runtime_idle_tick_with_full_projection_history() {
-        const HISTORY_ITEMS: usize = MAX_APP_MESSAGES;
+        const HISTORY_ITEMS: usize = 5_000;
         const SAMPLES: usize = 10;
 
         let dir = tempfile::tempdir().unwrap();
@@ -12175,6 +12769,73 @@ mod tests {
     }
 
     #[test]
+    fn topic_and_named_chat_mutations_reject_invalid_inputs_without_projection_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let app = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "alice-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let before = app
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Mutation Guard Room".to_owned(),
+            })
+            .unwrap();
+        let room_id = before.selected_room_id.clone().unwrap();
+        let home_chat_id = before.selected_chat_id.clone().unwrap();
+
+        let empty_topic = app
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "   ".to_owned(),
+            })
+            .expect_err("empty topic titles must fail before generating durable state");
+        assert!(
+            empty_topic
+                .to_string()
+                .contains("topic title must not be empty")
+        );
+
+        app.dispatch_and_wait(AppAction::StartTopicChat {
+            room_id: room_id.clone(),
+            topic_id: "missing-topic".to_owned(),
+            reason: None,
+        })
+        .expect_err("a chat cannot be started under a missing topic");
+        app.dispatch_and_wait(AppAction::RenameChat {
+            room_id: room_id.clone(),
+            topic_id: HOME_TOPIC_ID.to_owned(),
+            chat_id: "missing-chat".to_owned(),
+            title: "Impossible rename".to_owned(),
+        })
+        .expect_err("a missing chat cannot acquire projection metadata");
+        app.dispatch_and_wait(AppAction::SetChatArchived {
+            room_id: room_id.clone(),
+            topic_id: HOME_TOPIC_ID.to_owned(),
+            chat_id: "missing-chat".to_owned(),
+            archived: true,
+        })
+        .expect_err("a missing chat cannot acquire archive metadata");
+        app.dispatch_and_wait(AppAction::RenameChat {
+            room_id: room_id.clone(),
+            topic_id: HOME_TOPIC_ID.to_owned(),
+            chat_id: home_chat_id,
+            title: "   ".to_owned(),
+        })
+        .expect_err("empty chat titles are rejected");
+
+        let after = app.state().unwrap();
+        assert_eq!(after.topics, before.topics);
+        assert_eq!(after.selected_room_id, before.selected_room_id);
+        assert_eq!(after.selected_topic_id, before.selected_topic_id);
+        assert_eq!(after.selected_chat_id, before.selected_chat_id);
+    }
+
+    #[test]
     fn app_runtime_chat_rename_replays_and_syncs_to_another_device() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
@@ -12229,6 +12890,15 @@ mod tests {
             .map(|chat| chat.title.as_str());
         assert_eq!(fallback_title, Some("Implement the chats sidebar"));
 
+        let elsewhere = alice
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Elsewhere".to_owned(),
+            })
+            .unwrap();
+        let elsewhere_topic_id = elsewhere.selected_topic_id.unwrap();
+        let elsewhere_chat_id = elsewhere.selected_chat_id.unwrap();
+
         let renamed = alice
             .dispatch_and_wait(AppAction::RenameChat {
                 room_id: room_id.clone(),
@@ -12244,6 +12914,16 @@ mod tests {
             .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
             .map(|chat| chat.title.as_str());
         assert_eq!(explicit_title, Some("SaaS chat polish"));
+        assert_eq!(
+            renamed.selected_topic_id.as_deref(),
+            Some(elsewhere_topic_id.as_str()),
+            "renaming a background chat must not change the active topic"
+        );
+        assert_eq!(
+            renamed.selected_chat_id.as_deref(),
+            Some(elsewhere_chat_id.as_str()),
+            "renaming a background chat must not change the active chat"
+        );
 
         let bob_synced = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
         let bob_title = bob_synced
@@ -12308,13 +12988,6 @@ mod tests {
             projection.stored_chat_archives()[0].archived,
             "cache fallback may restore local display when canonical history was pruned"
         );
-        assert!(
-            projection
-                .chat_archive_values_for_room("room-main")
-                .is_empty(),
-            "cache fallback must not be exported as canonical evidence"
-        );
-
         assert!(projection.apply_chat_archive(
             "room-main",
             40,
@@ -12328,16 +13001,6 @@ mod tests {
         let canonical = projection.stored_chat_archives();
         assert_eq!(canonical[0].accepted_seq, 40);
         assert!(!canonical[0].archived);
-        assert_eq!(
-            projection.chat_archive_values_for_room("room-main"),
-            vec![DeviceLinkBootstrapChatArchiveV1 {
-                topic_id: "topic-main".to_owned(),
-                chat_id: "chat-main".to_owned(),
-                accepted_seq: 40,
-                archived: false,
-            }]
-        );
-
         projection.restore_chat_archives(&[StoredChatArchiveState {
             room_id: "room-main".to_owned(),
             topic_id: "topic-main".to_owned(),
@@ -12348,6 +13011,112 @@ mod tests {
         let after_confused_cache = projection.stored_chat_archives();
         assert_eq!(after_confused_cache[0].accepted_seq, 40);
         assert!(!after_confused_cache[0].archived);
+    }
+
+    #[test]
+    fn named_chat_rename_and_archive_converge_across_every_observation_order() {
+        #[derive(Clone, Copy)]
+        enum Operation {
+            Rename {
+                accepted_seq: u64,
+                title: &'static str,
+            },
+            Archive {
+                accepted_seq: u64,
+                archived: bool,
+            },
+        }
+
+        let operations = [
+            Operation::Rename {
+                accepted_seq: 10,
+                title: "Initial name",
+            },
+            Operation::Archive {
+                accepted_seq: 15,
+                archived: true,
+            },
+            Operation::Rename {
+                accepted_seq: 20,
+                title: "Canonical name",
+            },
+            Operation::Archive {
+                accepted_seq: 25,
+                archived: false,
+            },
+        ];
+        let mut order = [0, 1, 2, 3];
+        let mut checked = 0_u32;
+
+        loop {
+            let mut projection = ChatProjectionState::default();
+            for index in order {
+                let operation = operations[index];
+                for _ in 0..2 {
+                    match operation {
+                        Operation::Rename {
+                            accepted_seq,
+                            title,
+                        } => projection.apply_chat_rename(
+                            "room-main",
+                            accepted_seq,
+                            ChatRenameV1 {
+                                topic_id: "topic-main".to_owned(),
+                                chat_id: "chat-main".to_owned(),
+                                title: title.to_owned(),
+                            },
+                        ),
+                        Operation::Archive {
+                            accepted_seq,
+                            archived,
+                        } => {
+                            let _ = projection.apply_chat_archive(
+                                "room-main",
+                                accepted_seq,
+                                ChatArchiveV1 {
+                                    topic_id: "topic-main".to_owned(),
+                                    chat_id: "chat-main".to_owned(),
+                                    archived,
+                                },
+                                ChatArchiveProjectionSource::CanonicalEvent,
+                            );
+                        }
+                    }
+                }
+            }
+
+            let title = projection
+                .chat_titles
+                .get(&(
+                    "room-main".to_owned(),
+                    "topic-main".to_owned(),
+                    "chat-main".to_owned(),
+                ))
+                .expect("latest title is retained");
+            assert_eq!(title.accepted_seq, 20, "observation order {order:?}");
+            assert_eq!(title.title, "Canonical name", "observation order {order:?}");
+            let archive = projection
+                .chat_archives
+                .get(&(
+                    "room-main".to_owned(),
+                    "topic-main".to_owned(),
+                    "chat-main".to_owned(),
+                ))
+                .expect("latest archive state is retained");
+            assert_eq!(archive.accepted_seq, 25, "observation order {order:?}");
+            assert!(!archive.archived, "observation order {order:?}");
+            assert_eq!(
+                archive.source,
+                ChatArchiveProjectionSource::CanonicalEvent,
+                "observation order {order:?}"
+            );
+            checked += 1;
+            if !next_permutation(&mut order) {
+                break;
+            }
+        }
+
+        assert_eq!(checked, 24);
     }
 
     #[test]
@@ -12411,6 +13180,33 @@ mod tests {
                 .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
                 .is_some_and(|chat| chat.archived),
             "archiving the current chat must preserve selection and expose shared metadata"
+        );
+
+        let elsewhere = alice
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Elsewhere".to_owned(),
+            })
+            .unwrap();
+        let elsewhere_topic_id = elsewhere.selected_topic_id.unwrap();
+        let elsewhere_chat_id = elsewhere.selected_chat_id.unwrap();
+        let background_archived = alice
+            .dispatch_and_wait(AppAction::SetChatArchived {
+                room_id: room_id.clone(),
+                topic_id: topic_id.clone(),
+                chat_id: chat_id.clone(),
+                archived: true,
+            })
+            .unwrap();
+        assert_eq!(
+            background_archived.selected_topic_id.as_deref(),
+            Some(elsewhere_topic_id.as_str()),
+            "archiving a background chat must not change the active topic"
+        );
+        assert_eq!(
+            background_archived.selected_chat_id.as_deref(),
+            Some(elsewhere_chat_id.as_str()),
+            "archiving a background chat must not change the active chat"
         );
 
         let bob_synced = bob.dispatch_and_wait(AppAction::StartRuntime).unwrap();
@@ -12550,6 +13346,252 @@ mod tests {
                 .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
                 .is_some_and(|chat| !chat.archived),
             "cold replay must recover the latest archive state without a live server"
+        );
+    }
+
+    #[test]
+    fn late_same_account_device_converges_topics_named_chats_and_archives_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let hosted = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("hosted").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let agent = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let created = hosted
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Convergence Room".to_owned(),
+            })
+            .unwrap();
+        let room_id = created.selected_room_id.unwrap();
+        add_runtime_member_named(&hosted, &agent, &room_id, "Agent");
+
+        let build = hosted
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Build".to_owned(),
+            })
+            .unwrap();
+        let build_topic_id = build.selected_topic_id.unwrap();
+        let first_build_chat_id = build.selected_chat_id.unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::SendChatMessage {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                text: "First build context".to_owned(),
+            })
+            .unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::RenameChat {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                title: "Pinned build chat".to_owned(),
+            })
+            .unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::SetChatArchived {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                archived: true,
+            })
+            .unwrap();
+
+        let second_build = hosted
+            .dispatch_and_wait(AppAction::StartTopicChat {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                reason: Some("new_context".to_owned()),
+            })
+            .unwrap();
+        let second_build_chat_id = second_build.selected_chat_id.unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::SendChatMessage {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: second_build_chat_id.clone(),
+                text: "Second build context".to_owned(),
+            })
+            .unwrap();
+
+        let operations = hosted
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Operations".to_owned(),
+            })
+            .unwrap();
+        let operations_topic_id = operations.selected_topic_id.unwrap();
+        let operations_chat_id = operations.selected_chat_id.unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::RenameChat {
+                room_id: room_id.clone(),
+                topic_id: operations_topic_id.clone(),
+                chat_id: operations_chat_id.clone(),
+                title: "Production operations".to_owned(),
+            })
+            .unwrap();
+        for index in 0..MAX_DEVICE_LINK_BOOTSTRAP_EVENTS + 8 {
+            hosted
+                .dispatch_and_wait(AppAction::SendChatMessage {
+                    room_id: room_id.clone(),
+                    topic_id: operations_topic_id.clone(),
+                    chat_id: operations_chat_id.clone(),
+                    text: format!("Busy operations history {index}"),
+                })
+                .unwrap();
+        }
+
+        let hosted_identity = hosted.state().unwrap().identity;
+        let account_secret_hex = hosted_identity.account_secret_hex;
+        let linked_dir = dir.path().join("linked-ios");
+        let linked = FiniteChatRuntime::open(OpenOptions {
+            data_dir: linked_dir.to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "linked-ios".to_owned(),
+            account_secret_hex: Some(account_secret_hex.clone()),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        linked
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("late Device publishes KeyPackages");
+        hosted
+            .link_device_and_wait("topic-hardening-link".to_owned(), "linked-ios".to_owned())
+            .expect("same-account Device fanout succeeds");
+        let linked_state = linked
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("late Device activates and commits its complete bootstrap");
+        let linked_db = rusqlite::Connection::open(linked_dir.join(CLIENT_STORE_FILE)).unwrap();
+        let linked_event_count = linked_db
+            .query_row("SELECT COUNT(*) FROM client_app_events", [], |row| {
+                row.get::<_, u64>(0)
+            })
+            .unwrap();
+        assert!(
+            linked_event_count > u64::from(MAX_DEVICE_LINK_BOOTSTRAP_EVENTS),
+            "the linked Device must durably import history across multiple chunks"
+        );
+        drop(linked_db);
+
+        let linked_build = linked_state
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == build_topic_id)
+            .expect("late Device receives the Build topic");
+        assert_eq!(linked_build.title, "Build");
+        assert_eq!(linked_build.chats.len(), 2);
+        let linked_first_build = linked_build
+            .chats
+            .iter()
+            .find(|chat| chat.chat_id == first_build_chat_id)
+            .expect("late Device receives the first Build chat");
+        assert_eq!(linked_first_build.title, "Pinned build chat");
+        assert!(linked_first_build.archived);
+        assert!(
+            linked_build
+                .chats
+                .iter()
+                .any(|chat| chat.chat_id == second_build_chat_id),
+            "late Device receives the newer Build chat boundary"
+        );
+        let linked_operations = linked_state
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == operations_topic_id)
+            .expect("late Device receives the Operations topic");
+        assert_eq!(linked_operations.title, "Operations");
+        assert!(linked_operations.chats.iter().any(
+            |chat| chat.chat_id == operations_chat_id && chat.title == "Production operations"
+        ));
+
+        linked
+            .dispatch_and_wait(AppAction::SetChatArchived {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                archived: false,
+            })
+            .unwrap();
+        hosted
+            .dispatch_and_wait(AppAction::RenameChat {
+                room_id: room_id.clone(),
+                topic_id: build_topic_id.clone(),
+                chat_id: first_build_chat_id.clone(),
+                title: "Final build chat".to_owned(),
+            })
+            .unwrap();
+
+        let hosted_converged = hosted.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        let linked_converged = linked.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        let agent_converged = agent.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        for (device, state) in [
+            ("hosted", &hosted_converged),
+            ("linked", &linked_converged),
+            ("agent", &agent_converged),
+        ] {
+            let chat = state
+                .topics
+                .iter()
+                .find(|topic| topic.topic_id == build_topic_id)
+                .and_then(|topic| {
+                    topic
+                        .chats
+                        .iter()
+                        .find(|chat| chat.chat_id == first_build_chat_id)
+                })
+                .unwrap_or_else(|| panic!("{device} must retain the first Build chat"));
+            assert_eq!(chat.title, "Final build chat", "{device} title");
+            assert!(!chat.archived, "{device} archive state");
+        }
+
+        drop(linked);
+        let reopened = FiniteChatRuntime::open(OpenOptions {
+            data_dir: linked_dir.to_string_lossy().into_owned(),
+            server_url: unavailable_http_server_url(),
+            device_id: "linked-ios".to_owned(),
+            account_secret_hex: Some(account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        let reopened_state = reopened.state().unwrap();
+        let reopened_chat = reopened_state
+            .topics
+            .iter()
+            .find(|topic| topic.topic_id == build_topic_id)
+            .and_then(|topic| {
+                topic
+                    .chats
+                    .iter()
+                    .find(|chat| chat.chat_id == first_build_chat_id)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "late Device cold restart retains named chat state; topics={:#?}",
+                    reopened_state.topics
+                )
+            });
+        assert_eq!(reopened_chat.title, "Final build chat");
+        assert!(!reopened_chat.archived);
+        assert!(
+            reopened_state
+                .topics
+                .iter()
+                .any(|topic| topic.topic_id == operations_topic_id),
+            "late Device cold restart retains sibling topics"
         );
     }
 
@@ -12910,7 +13952,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_projection_evicts_by_local_arrival_not_cross_room_sequence() {
+    fn chat_projection_retains_complete_history_across_rooms() {
         let owner = DeviceRef {
             account_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 .to_owned(),
@@ -12936,7 +13978,7 @@ mod tests {
         };
         let mut projection = ChatProjectionState::default();
         projection.append_messages(
-            (0..MAX_APP_MESSAGES)
+            (0..5_000)
                 .map(|index| {
                     project(
                         "mature-room",
@@ -12958,17 +14000,14 @@ mod tests {
             "a fresh message must not be evicted merely because its room-local sequence is low"
         );
         assert!(
-            !projection.message_exists("mature-room", "mature-message-0"),
-            "the oldest locally retained message should be evicted"
+            projection.message_exists("mature-room", "mature-message-0"),
+            "complete local history must not evict the oldest message"
         );
         assert!(
-            projection.message_exists(
-                "mature-room",
-                &format!("mature-message-{}", MAX_APP_MESSAGES - 1)
-            ),
+            projection.message_exists("mature-room", &format!("mature-message-{}", 5_000 - 1)),
             "the newest mature-room message should remain"
         );
-        assert_eq!(projection.messages.len(), MAX_APP_MESSAGES);
+        assert_eq!(projection.messages.len(), 5_001);
     }
 
     #[test]
@@ -15551,6 +16590,237 @@ mod tests {
             .chats
             .len();
         assert_eq!(chats, before + 1);
+    }
+
+    #[test]
+    fn app_pairs_one_agent_and_starts_home_chats_with_or_without_a_first_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let user_options = with_test_secret(OpenOptions {
+            data_dir: dir.path().join("user").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "user-ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        });
+        let user = FiniteChatRuntime::open(user_options.clone()).unwrap();
+        let agent = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("agent").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "agent".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let agent_state = agent
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("agent publishes key packages");
+        let mut agent_profile = test_profile(&agent_state.identity.account_id, "Agent");
+        agent_profile.is_agent = true;
+
+        let connected = user
+            .dispatch_and_wait(AppAction::StartProfileChat {
+                profile: agent_profile,
+                display_name: "Agent".to_owned(),
+            })
+            .expect("user creates an encrypted agent room");
+        let room_id = connected
+            .selected_room_id
+            .clone()
+            .expect("agent room is selected");
+        assert!(app_room(&connected, &room_id).is_agent_chat);
+        let before = connected
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .expect("agent room has a home topic")
+            .chats
+            .len();
+
+        let paired = user
+            .dispatch_and_wait(AppAction::PairAgent {
+                room_id: room_id.clone(),
+            })
+            .expect("connected agent can be paired");
+        assert_eq!(
+            paired
+                .paired_agent
+                .as_ref()
+                .map(|paired| paired.canonical_room_id.as_str()),
+            Some(room_id.as_str()),
+        );
+        let paired_again = user
+            .dispatch_and_wait(AppAction::PairAgent {
+                room_id: room_id.clone(),
+            })
+            .expect("pairing the same direct agent is idempotent");
+        assert_eq!(paired_again.paired_agent, paired.paired_agent);
+
+        let empty_message_error = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: Some("   ".to_owned()),
+                intent_key: "ios-home-empty-message".to_owned(),
+            })
+            .expect_err("an explicit first message must not be blank");
+        assert!(
+            empty_message_error
+                .to_string()
+                .contains("message must not be empty")
+        );
+
+        let created = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: None,
+                intent_key: "ios-home-attachment-1".to_owned(),
+            })
+            .expect("home can create an empty chat before sending an attachment");
+        let empty_chat_id = created
+            .selected_chat_id
+            .as_deref()
+            .expect("empty chat selected");
+        let created_home = created
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .expect("home topic remains available");
+        assert_eq!(created_home.chats.len(), before + 1);
+        assert!(!created.messages.iter().any(|message| {
+            message.room_id == room_id && message.chat_id.as_deref() == Some(empty_chat_id)
+        }));
+        let created_again = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: None,
+                intent_key: "ios-home-attachment-1".to_owned(),
+            })
+            .expect("retry reuses the empty chat");
+        let created_again_home = created_again
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .unwrap();
+        assert_eq!(created_again_home.chats.len(), before + 1);
+        assert_eq!(
+            created_again.selected_chat_id.as_deref(),
+            Some(empty_chat_id)
+        );
+        let attachment_bytes = b"home attachment".to_vec();
+        let with_attachment = user
+            .dispatch_and_wait(AppAction::SendChatAttachments {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: empty_chat_id.to_owned(),
+                attachments: vec![OutboundAttachment {
+                    filename: "home.txt".to_owned(),
+                    mime_type: "text/plain".to_owned(),
+                    kind: ChatMediaKind::File,
+                    bytes: attachment_bytes,
+                }],
+                caption: "from Home".to_owned(),
+                reply_to_message_id: None,
+            })
+            .expect("the retained encrypted attachment path sends into the created chat");
+        assert!(with_attachment.messages.iter().any(|message| {
+            message.room_id == room_id
+                && message.chat_id.as_deref() == Some(empty_chat_id)
+                && message.text == "from Home"
+                && message
+                    .media
+                    .iter()
+                    .any(|media| media.filename == "home.txt")
+        }));
+
+        let started = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: Some("  Help me ship this.  ".to_owned()),
+                intent_key: "ios-home-submit-1".to_owned(),
+            })
+            .expect("home starts a new chat and sends its first message");
+        let selected_chat_id = started
+            .selected_chat_id
+            .as_deref()
+            .expect("new chat selected");
+        let home = started
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .expect("home topic remains available");
+        assert_eq!(home.chats.len(), before + 2);
+        assert!(
+            home.chats
+                .iter()
+                .any(|chat| chat.chat_id == selected_chat_id)
+        );
+        assert!(started.messages.iter().any(|message| {
+            message.room_id == room_id
+                && message.chat_id.as_deref() == Some(selected_chat_id)
+                && message.text == "Help me ship this."
+        }));
+        let retried = user
+            .dispatch_and_wait(AppAction::StartHomeChat {
+                text: Some("Help me ship this.".to_owned()),
+                intent_key: "ios-home-submit-1".to_owned(),
+            })
+            .expect("retry reuses the chat and first message");
+        let retried_home = retried
+            .topics
+            .iter()
+            .find(|topic| topic.room_id == room_id && topic.topic_id == HOME_TOPIC_ID)
+            .unwrap();
+        assert_eq!(retried_home.chats.len(), before + 2);
+        assert_eq!(
+            retried
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.chat_id.as_deref() == Some(selected_chat_id)
+                        && message.text == "Help me ship this."
+                })
+                .count(),
+            1
+        );
+
+        drop(user);
+        let reopened = FiniteChatRuntime::open(user_options)
+            .expect("paired app state reopens from encrypted local storage")
+            .state()
+            .unwrap();
+        assert_eq!(
+            reopened
+                .paired_agent
+                .as_ref()
+                .map(|paired| paired.canonical_room_id.as_str()),
+            Some(room_id.as_str()),
+        );
+    }
+
+    #[test]
+    fn app_refuses_to_pair_a_non_agent_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let app = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("app").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "ios".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let room_id = app
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Not an agent".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+
+        let error = app
+            .dispatch_and_wait(AppAction::PairAgent { room_id })
+            .expect_err("ordinary rooms are outside the focused iOS product");
+        assert!(matches!(
+            error,
+            FiniteChatCoreError::Client { reason }
+                if reason.contains("is not an available")
+        ));
     }
 
     #[test]

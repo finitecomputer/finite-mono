@@ -16,6 +16,7 @@ use finitechat_server::{HttpServerState, http_router};
 const USER_SECRET: &str = "6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e";
 const AGENT_SECRET: &str = "4242424242424242424242424242424242424242424242424242424242424242";
 const PEER_SECRET: &str = "3131313131313131313131313131313131313131313131313131313131313131";
+const PRE_LINK_TRANSCRIPT_MESSAGES: usize = 130;
 
 #[test]
 fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
@@ -102,10 +103,10 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
     })
     .unwrap();
 
-    // Put the conversation foundations more than one bootstrap event window
-    // behind the live transcript. The bootstrap must still retain the topic
-    // metadata, selected segment start, and rename.
-    for index in 0..66 {
+    // Put the conversation foundations more than two bootstrap event windows
+    // behind the live transcript. Electron must receive the complete ordered
+    // journal across at least three chunks, not a representative tail.
+    for index in 0..PRE_LINK_TRANSCRIPT_MESSAGES {
         send_to_chat(
             &web,
             &agent_room_id,
@@ -124,8 +125,8 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
     sync(&agent);
 
     // The target publishes its own KeyPackages. Fanout still uses normal MLS
-    // Add/Welcome; the bounded application snapshot is sent only after those
-    // room memberships exist.
+    // Add/Welcome; the complete chunked transfer is sent only after those room
+    // memberships exist.
     sync(&electron);
     let fanout = web
         .link_device_and_wait(
@@ -135,7 +136,7 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
         .unwrap();
     assert!(fanout.fanout_complete);
     assert_eq!(fanout.room_count, 2);
-    let electron_after_join = sync(&electron);
+    let electron_after_join = load_all_selected_history(&electron, sync(&electron), &agent_room_id);
     assert_room_connected(&electron_after_join, &legacy_room_id);
     assert_room_connected(&electron_after_join, &agent_room_id);
     let activated = web
@@ -146,6 +147,7 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
         .unwrap();
     assert_eq!(activated.active_room_count, 2);
     assert_hydrated_agent_conversation(&electron_after_join, &agent_room_id, &topic_id, &chat_id);
+    assert_complete_pre_link_transcript(&electron_after_join, &topic_id, &chat_id);
     assert_eq!(
         electron_after_join
             .rooms
@@ -231,8 +233,19 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
         Some(legacy_room_id.as_str())
     );
     sync(&web); // consumes the encrypted requests and emits target-bound replies
-    let repaired = sync(&electron);
+    let repaired = load_all_selected_history(&electron, sync(&electron), &agent_room_id);
     assert_hydrated_agent_conversation(&repaired, &agent_room_id, &topic_id, &chat_id);
+    assert_complete_pre_link_transcript(&repaired, &topic_id, &chat_id);
+    assert_eq!(
+        repaired
+            .rooms
+            .iter()
+            .find(|room| room.room_id == legacy_room_id)
+            .unwrap()
+            .display_name,
+        "Legacy team room",
+        "Electron restart recovery must hydrate every provisional linked room"
+    );
     assert_unique_message_ids(&repaired);
 
     // Duplicate/no-op sync is idempotent, and a later explicit selection stays
@@ -277,6 +290,38 @@ fn open_runtime(
 
 fn sync(runtime: &Arc<FiniteChatRuntime>) -> AppState {
     runtime.dispatch_and_wait(AppAction::StartRuntime).unwrap()
+}
+
+fn load_all_selected_history(
+    runtime: &Arc<FiniteChatRuntime>,
+    mut state: AppState,
+    room_id: &str,
+) -> AppState {
+    for _ in 0..100 {
+        let can_load_older = state
+            .rooms
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .unwrap()
+            .can_load_older;
+        if !can_load_older {
+            return state;
+        }
+        let before_message_id = state
+            .messages
+            .first()
+            .expect("a paged transcript has an oldest visible message")
+            .message_id
+            .clone();
+        state = runtime
+            .dispatch_and_wait(AppAction::LoadOlderMessages {
+                room_id: room_id.to_owned(),
+                before_message_id,
+                limit: 64,
+            })
+            .unwrap();
+    }
+    panic!("Electron transcript pagination did not converge");
 }
 
 fn add_member(
@@ -382,9 +427,25 @@ fn assert_room_connected(state: &AppState, room_id: &str) {
 }
 
 fn assert_selection(state: &AppState, room_id: &str, topic_id: &str, chat_id: &str) {
-    assert_eq!(state.selected_room_id.as_deref(), Some(room_id));
-    assert_eq!(state.selected_topic_id.as_deref(), Some(topic_id));
-    assert_eq!(state.selected_chat_id.as_deref(), Some(chat_id));
+    assert_eq!(
+        state.selected_room_id.as_deref(),
+        Some(room_id),
+        "rooms={:#?}",
+        state.rooms
+    );
+    assert_eq!(
+        state.selected_topic_id.as_deref(),
+        Some(topic_id),
+        "rooms={:#?}; topics={:#?}",
+        state.rooms,
+        state.topics,
+    );
+    assert_eq!(
+        state.selected_chat_id.as_deref(),
+        Some(chat_id),
+        "topics={:#?}",
+        state.topics
+    );
 }
 
 fn assert_message_route(
@@ -480,6 +541,24 @@ fn assert_shared_order(left: &AppState, right: &AppState, expected: &[&str]) {
             .collect::<Vec<_>>(),
         expected
     );
+}
+
+fn assert_complete_pre_link_transcript(state: &AppState, topic_id: &str, chat_id: &str) {
+    let messages = state
+        .messages
+        .iter()
+        .filter(|message| message.text.starts_with("pre-link transcript "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages.len(),
+        PRE_LINK_TRANSCRIPT_MESSAGES,
+        "Electron must page through the complete pre-link transcript"
+    );
+    for (index, message) in messages.iter().enumerate() {
+        assert_eq!(message.text, format!("pre-link transcript {index:02}"));
+        assert_eq!(message.conversation_id.as_deref(), Some(topic_id));
+        assert_eq!(message.chat_id.as_deref(), Some(chat_id));
+    }
 }
 
 fn assert_unique_message_ids(state: &AppState) {

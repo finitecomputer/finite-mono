@@ -475,16 +475,16 @@ function parseDeviceLinkReadyRecord(line) {
     typeof record !== "object" ||
     Array.isArray(record) ||
     Object.keys(record).length !== 3 ||
-    record.event !== "link_ready" ||
-    typeof record.link_session_id !== "string" ||
-    !record.link_session_id ||
+    record.event !== "pairing_ready" ||
+    typeof record.pairing_session_id !== "string" ||
+    !record.pairing_session_id ||
     typeof record.target_device_id !== "string" ||
     !validDeviceId(record.target_device_id)
   ) {
     throw new Error("Finite Chat device link emitted an invalid status record");
   }
   return {
-    link_session_id: record.link_session_id,
+    pairing_session_id: record.pairing_session_id,
     target_device_id: record.target_device_id,
   };
 }
@@ -604,10 +604,12 @@ class DeviceLinkSupervisor {
         "3",
         "--confirm-fd",
         "4",
+        "--descriptor-fd",
+        "5",
       ],
       {
         cwd: this.cwd,
-        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe"],
         windowsHide: true,
       }
     );
@@ -689,7 +691,19 @@ class DeviceLinkSupervisor {
       return;
     }
     this.sawLinked = true;
-    this.promotionPromise = this.#promotePrivateResult();
+  }
+
+  acceptSourceDescriptor(descriptor) {
+    if (
+      !this.child
+      || !this.ready
+      || this.secretStored
+      || !descriptor
+      || typeof descriptor !== "object"
+    ) {
+      throw new Error("Finite Chat pairing descriptor arrived out of order");
+    }
+    this.child.stdio[5].end(`${JSON.stringify(descriptor)}\n`);
   }
 
   async #onPrivateLine(line) {
@@ -706,6 +720,8 @@ class DeviceLinkSupervisor {
     try {
       accountSecret = parseDeviceLinkSecretRecord(line);
       await this.storeAccountSecret(accountSecret);
+      await this.promoteAccountSecret(accountSecret);
+      this.secretPromoted = true;
       this.secretStored = true;
       if (this.cancelled || this.settled || !this.child) {
         return;
@@ -715,15 +731,6 @@ class DeviceLinkSupervisor {
       this.#fail(new Error("Finite Chat could not securely store the linked account"));
     } finally {
       accountSecret = null;
-    }
-  }
-
-  async #promotePrivateResult() {
-    try {
-      await this.promoteAccountSecret();
-      this.secretPromoted = true;
-    } catch {
-      this.#fail(new Error("Finite Chat could not commit the linked account"));
     }
   }
 

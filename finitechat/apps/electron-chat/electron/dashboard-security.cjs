@@ -173,7 +173,7 @@ function parseDeviceLinkPublicRequest(value) {
     throw new Error("Finite Chat device link is invalid");
   }
   return {
-    link_session_id: deviceLinkToken(value.link_session_id),
+    pairing_session_id: deviceLinkToken(value.pairing_session_id),
     target_device_id: deviceLinkToken(value.target_device_id),
   };
 }
@@ -184,14 +184,14 @@ function parseDeviceLinkPublicResponse(value, expected) {
     throw new Error("Finite Chat device-link service returned an invalid response");
   }
   const statuses = new Set([
-    "awaiting_claim",
+    "awaiting_offer",
     "awaiting_key_package",
     "joining_rooms",
     "ready",
     "expired",
   ]);
   if (
-    value.link_session_id !== request.link_session_id
+    value.pairing_session_id !== request.pairing_session_id
     || value.target_device_id !== request.target_device_id
     || !statuses.has(value.status)
     || !nonnegativeSafeInteger(value.expires_at_unix_seconds)
@@ -201,12 +201,35 @@ function parseDeviceLinkPublicResponse(value, expected) {
   ) {
     throw new Error("Finite Chat device-link service returned an invalid response");
   }
+  let sourceDescriptor;
+  if (value.source_descriptor !== undefined) {
+    const descriptor = value.source_descriptor;
+    const keys = descriptor && typeof descriptor === "object" && !Array.isArray(descriptor)
+      ? Object.keys(descriptor).sort()
+      : [];
+    if (
+      keys.join(",") !== "expires_at_unix_seconds,session_secret_hex,source_public_key,version"
+      || descriptor.version !== 1
+      || !/^[0-9a-f]{64}$/u.test(descriptor.source_public_key)
+      || !/^[0-9a-f]{64}$/u.test(descriptor.session_secret_hex)
+      || !nonnegativeSafeInteger(descriptor.expires_at_unix_seconds)
+    ) {
+      throw new Error("Finite Chat device-link service returned an invalid response");
+    }
+    sourceDescriptor = {
+      version: 1,
+      source_public_key: descriptor.source_public_key,
+      session_secret_hex: descriptor.session_secret_hex,
+      expires_at_unix_seconds: descriptor.expires_at_unix_seconds,
+    };
+  }
   return {
     ...request,
     status: value.status,
     expires_at_unix_seconds: value.expires_at_unix_seconds,
     room_count: value.room_count,
     active_room_count: value.active_room_count,
+    ...(sourceDescriptor ? { source_descriptor: sourceDescriptor } : {}),
   };
 }
 

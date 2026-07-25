@@ -60,8 +60,8 @@ function testAccountSecretStore(root) {
 function emitDeviceLinkReady(child) {
   child.stdout.write(
     `${JSON.stringify({
-      event: "link_ready",
-      link_session_id: "link-public-test",
+      event: "pairing_ready",
+      pairing_session_id: "pairing-public-test",
       target_device_id: "electron-test-device",
     })}\n`
   );
@@ -462,19 +462,19 @@ test("startup documents are bounded JSON and never require argv secrets", () => 
 test("device-link public and private records are narrow and independently validated", () => {
   const ready = parseDeviceLinkReadyRecord(
     JSON.stringify({
-      event: "link_ready",
-      link_session_id: "link-public-test",
+      event: "pairing_ready",
+      pairing_session_id: "pairing-public-test",
       target_device_id: "electron-test-device",
     })
   );
   assert.deepEqual(ready, {
-    link_session_id: "link-public-test",
+    pairing_session_id: "pairing-public-test",
     target_device_id: "electron-test-device",
   });
   assert.equal(parseDeviceLinkSecretRecord(JSON.stringify({ account_secret: "c".repeat(64) })), "c".repeat(64));
   assert.throws(
     () => parseDeviceLinkReadyRecord(
-      '{"event":"link_ready","link_session_id":"link-public-test","target_device_id":"electron-test-device","unexpected":"value"}'
+      '{"event":"pairing_ready","pairing_session_id":"pairing-public-test","target_device_id":"electron-test-device","unexpected":"value"}'
     ),
     /invalid status record/
   );
@@ -552,7 +552,7 @@ class FakeLinkChild extends EventEmitter {
     super();
     this.stdout = new PassThrough();
     this.stderr = new PassThrough();
-    this.stdio = [null, this.stdout, this.stderr, new PassThrough(), new PassThrough()];
+    this.stdio = [null, this.stdout, this.stderr, new PassThrough(), new PassThrough(), new PassThrough()];
     this.exitCode = null;
     this.signalCode = null;
   }
@@ -671,20 +671,20 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async (secret) => storedSecrets.push(secret),
-    promoteAccountSecret: async () => promotions.push("promoted"),
+    promoteAccountSecret: async (secret) => promotions.push(secret),
   });
   const readyPromise = link.begin();
   const completion = link.completion;
   child.stdout.write(
     `${JSON.stringify({
-      event: "link_ready",
-      link_session_id: "link-public-test",
+      event: "pairing_ready",
+      pairing_session_id: "pairing-public-test",
       target_device_id: "electron-test-device",
     })}\n`
   );
   const ready = await readyPromise;
   assert.equal(ready.target_device_id, "electron-test-device");
-  assert.deepEqual(spawnOptions.stdio, ["ignore", "pipe", "pipe", "pipe", "pipe"]);
+  assert.deepEqual(spawnOptions.stdio, ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe"]);
   assert.deepEqual(spawnArgs, [
     "link",
     "--server-url",
@@ -695,17 +695,25 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
     "3",
     "--confirm-fd",
     "4",
+    "--descriptor-fd",
+    "5",
   ]);
 
+  link.acceptSourceDescriptor({
+    version: 1,
+    source_public_key: "a".repeat(64),
+    session_secret_hex: "b".repeat(64),
+    expires_at_unix_seconds: 42,
+  });
   child.stdio[3].write(`${JSON.stringify({ account_secret: "d".repeat(64) })}\n`);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(storedSecrets, ["d".repeat(64)]);
   assert.equal(confirmation, "stored\n");
-  assert.deepEqual(promotions, []);
+  assert.deepEqual(promotions, ["d".repeat(64)]);
   child.stdout.write('{"event":"linked"}\n');
   child.exit(0);
   await completion;
-  assert.deepEqual(promotions, ["promoted"]);
+  assert.deepEqual(promotions, ["d".repeat(64)]);
 });
 
 test("device link propagates an allowlisted payload rejection without reflecting other stderr", async () => {
@@ -787,8 +795,8 @@ test("device link drains final stdout data after exit before settling on close",
   const completion = link.completion;
   child.stdout.write(
     `${JSON.stringify({
-      event: "link_ready",
-      link_session_id: "link-public-test",
+      event: "pairing_ready",
+      pairing_session_id: "pairing-public-test",
       target_device_id: "electron-test-device",
     })}\n`
   );
@@ -940,11 +948,11 @@ test("restart discards a provisional secret after a crash between fd3 and fd4", 
 
   child.exit(1);
   finishStorage();
-  await assert.rejects(completion, /stopped before completion/);
+  await assert.rejects(completion, /could not securely store/);
   assert.equal(confirmation, "");
 });
 
-test("restart discards a provisional secret after fd4 but before linked", async (context) => {
+test("active storage survives a crash after fd4 because confirmation follows promotion", async (context) => {
   const root = temporaryDirectory();
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = testAccountSecretStore(root);
@@ -970,18 +978,18 @@ test("restart discards a provisional secret after fd4 but before linked", async 
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(confirmation, "stored\n");
-  assert.equal(store.read(), null);
-  assert.equal(fs.existsSync(store.provisionalPath), true);
+  assert.equal(store.read(), "c".repeat(64));
+  assert.equal(fs.existsSync(store.provisionalPath), false);
 
   child.exit(1);
   await assert.rejects(completion, /stopped before completion/);
   const restartedStore = testAccountSecretStore(root);
   restartedStore.discardProvisional();
-  assert.equal(restartedStore.read(), null);
+  assert.equal(restartedStore.read(), "c".repeat(64));
   assert.equal(fs.existsSync(restartedStore.provisionalPath), false);
 });
 
-test("the final linked event promotes the provisional safe-storage file", async (context) => {
+test("safe storage is promoted before Rust receives its stored confirmation", async (context) => {
   const root = temporaryDirectory();
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const store = testAccountSecretStore(root);
@@ -1001,7 +1009,8 @@ test("the final linked event promotes the provisional safe-storage file", async 
   await readyPromise;
   child.stdio[3].write(`${JSON.stringify({ account_secret: "d".repeat(64) })}\n`);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(store.read(), null);
+  assert.equal(store.read(), "d".repeat(64));
+  assert.equal(fs.existsSync(store.provisionalPath), false);
 
   child.stdout.write('{"event":"linked"}\n');
   child.exit(0);
@@ -1030,8 +1039,8 @@ test("device link never confirms when secure storage fails", async () => {
   const completion = link.completion;
   child.stdout.write(
     `${JSON.stringify({
-      event: "link_ready",
-      link_session_id: "link-public-test",
+      event: "pairing_ready",
+      pairing_session_id: "pairing-public-test",
       target_device_id: "electron-test-device",
     })}\n`
   );
@@ -1058,12 +1067,13 @@ test("cancelling during secure storage never confirms and waits for the write", 
     deviceId: "electron-test-device",
     cwd: "/tmp",
     storeAccountSecret: async () => storageGate,
+    promoteAccountSecret: async () => {},
   });
   const readyPromise = link.begin();
   child.stdout.write(
     `${JSON.stringify({
-      event: "link_ready",
-      link_session_id: "link-public-test",
+      event: "pairing_ready",
+      pairing_session_id: "pairing-public-test",
       target_device_id: "electron-test-device",
     })}\n`
   );
