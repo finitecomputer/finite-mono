@@ -93,7 +93,7 @@ lat1-secret-bootstrap-contract:
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity
-    cargo test --locked -p finitechat-hosted-device --test http device_link
+    cargo test --locked -p finitechat-hosted-device --test http
     cargo test --locked -p finitechat-daemon
     cd finitechat/apps/electron-chat && npm ci && npm run check
 
