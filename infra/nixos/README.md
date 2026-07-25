@@ -241,11 +241,27 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite/brain-authority.env` | `FC_CORE_API_TOKEN` | provision Brain's trusted service credential for the narrow Core account/Agent resolution routes; never expose it to the Product Client |
 | `/etc/finite/sites-viewer-session.env` | `FINITE_SITES_VIEWER_SESSION_TOKEN` | generate exactly 32 random bytes as 64 lowercase hex characters (`openssl rand -hex 32`) for the Sites verified-email viewer-session boundary; systemd/Podman read this root:root 0600 file before dropping service privileges; Sites and the dashboard receive the same server-only value; store it in the team password manager |
 | `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
-| `/etc/finite-saas/sites.env` (0640) | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env`; the initial canary also lets `finite-identityd` read the existing send-only Resend credential without copying its value |
+| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and the initial canary also lets `finite-identityd` read the existing send-only Resend credential without copying its value |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
 | `/etc/finite/searxng.env` | `SEARXNG_SECRET` (+ optional `SEARXNG_BASE_URL`, `SEARXNG_LIMITER`) | lat2 `finite-search/searxng/.env` |
 | `/etc/finite/firecrawl.env` | `BULL_AUTH_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MAX_CPU`, `MAX_RAM` | lat2 `finite-search/firecrawl-upstream/.env` |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
+
+The machine-readable, values-free file inventory is
+`hosts/finite-lat-1/secret-bootstrap-contract.json`. From a reviewed checkout
+on the host, validate only existence, file type, mode, and ownership by default:
+
+```sh
+sudo scripts/check-lat1-secret-bootstrap
+```
+
+After separately authorizing a read of the secret files, add
+`--check-env-names` to validate required variable names. The checker discards
+values and never prints them. Neither mode proves that an off-host custodian
+actually has the value, that the value still works, or that the Postgres role
+password matches `FC_CORE_DATABASE_URL`; those require an encrypted custody
+record and an isolated restore/authentication drill. Do not add values,
+fingerprints, or password-derived hashes to the public contract.
 
 Finite Brain reads only `/etc/finite/identity-operator.env` and
 `/etc/finite/brain-authority.env`; the Product Client and Agent Runtime never
