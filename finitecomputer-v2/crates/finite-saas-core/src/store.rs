@@ -5683,8 +5683,11 @@ where
                current_window_used_units = 0,
                burst_window_epoch = finite_private_grants.burst_window_epoch + 1,
                updated_at = EXCLUDED.updated_at
-             RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
+             RETURNING id, user_id, limit_profile_id, status,
+                       to_char(current_window_started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS current_window_started_at,
+                       current_window_used_units, burst_window_epoch,
+                       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at,
+                       to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at",
             &[&grant_id, &user.id, &limit_profile_id, &now],
         )
         .await
@@ -8947,8 +8950,11 @@ where
             "UPDATE finite_private_grants
              SET status = 'revoked', updated_at = $2::text::timestamptz
              WHERE id = $1
-             RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
+             RETURNING id, user_id, limit_profile_id, status,
+                       to_char(current_window_started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS current_window_started_at,
+                       current_window_used_units, burst_window_epoch,
+                       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at,
+                       to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at",
             &[&grant_id, &now],
         )
         .await
@@ -9002,8 +9008,11 @@ where
                  burst_window_epoch = burst_window_epoch + 1,
                  updated_at = $2::text::timestamptz
              WHERE id = $1
-             RETURNING id, user_id, limit_profile_id, status, current_window_started_at::text,
-                       current_window_used_units, burst_window_epoch, created_at::text, updated_at::text",
+             RETURNING id, user_id, limit_profile_id, status,
+                       to_char(current_window_started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS current_window_started_at,
+                       current_window_used_units, burst_window_epoch,
+                       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at,
+                       to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at",
             &[&grant_id, &now],
         )
         .await
@@ -9950,13 +9959,12 @@ fn json_error(error: serde_json::Error) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_isolated_postgres;
     use crate::{
         FinitePrivateApiKeyStatus, RUNTIME_RELOCATION_SCHEMA, RunnerClass, RunnerLeaseCapacity,
         RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     };
-    use futures_util::FutureExt;
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
         RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
@@ -10013,36 +10021,6 @@ mod tests {
         ));
     }
 
-    /// Ephemeral-Postgres-per-test harness.
-    ///
-    /// The Postgres-gated tests used to SHARE one database. Because the
-    /// agent-creation lease queue is still global (Phase 2 territory — the
-    /// `WHERE status = 'requested' ... ORDER BY created_at` scan in
-    /// `postgres_lease_agent_creation_request` picks the oldest row across ALL
-    /// orgs), a leftover request from one test could be leased by another,
-    /// forcing a process-wide mutex and per-test "drain the queue" cleanup.
-    ///
-    /// Instead, each test now gets its OWN freshly-created database, migrated
-    /// from the schema, and dropped afterward. `FC_CORE_POSTGRES_TEST_URL`
-    /// names the maintenance connection; the harness `CREATE DATABASE`s an
-    /// isolated database under it (the default `postgres` superuser has
-    /// CREATEDB). Tests are fully independent, run in parallel, and leak no
-    /// state — re-running the whole suite twice against the same server is
-    /// clean because the databases are torn down (and uniquely named besides).
-    struct TestDb {
-        store: CoreStore,
-        url: String,
-    }
-
-    impl std::ops::Deref for TestDb {
-        type Target = CoreStore;
-        fn deref(&self) -> &CoreStore {
-            &self.store
-        }
-    }
-
-    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
-
     async fn issue_test_launch_code(store: &CoreStore, _now: &str) -> String {
         store
             .issue_launch_code_batch(IssueLaunchCodeBatchInput {
@@ -10083,106 +10061,6 @@ mod tests {
             max_sandbox_count: Some(1),
             active_sandbox_count: Some(provider_inventory_count),
             ..RunnerLeaseCapacity::default()
-        }
-    }
-
-    /// Swap the database name in a `postgres://user:pass@host:port/db?query`
-    /// URL, preserving auth, host, and any query string.
-    fn replace_database(url: &str, db_name: &str) -> String {
-        let (base, query) = match url.split_once('?') {
-            Some((base, query)) => (base, Some(query)),
-            None => (url, None),
-        };
-        let scheme_end = base.find("://").map(|idx| idx + 3).unwrap_or(0);
-        let new_base = match base[scheme_end..].find('/') {
-            Some(rel) => format!("{}/{db_name}", &base[..scheme_end + rel]),
-            None => format!("{base}/{db_name}"),
-        };
-        match query {
-            Some(query) => format!("{new_base}?{query}"),
-            None => new_base,
-        }
-    }
-
-    /// Run `test` against an isolated, migrated Postgres database. The database
-    /// is dropped afterward even if the test body panics (the panic is
-    /// re-raised so the test still fails). Returns without running when
-    /// `FC_CORE_POSTGRES_TEST_URL` is unset, matching the previous gating.
-    async fn with_isolated_postgres<F, Fut>(test: F)
-    where
-        F: FnOnce(TestDb) -> Fut,
-        Fut: std::future::Future<Output = ()>,
-    {
-        let Ok(admin_url) = std::env::var("FC_CORE_POSTGRES_TEST_URL") else {
-            return;
-        };
-
-        // Maintenance connection used only to CREATE/DROP the per-test database.
-        let (admin, admin_conn) = tokio_postgres::connect(&admin_url, NoTls).await.unwrap();
-        let admin_conn = tokio::spawn(async move {
-            let _ = admin_conn.await;
-        });
-
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let db_name = format!(
-            "fc_test_{unique}_{}",
-            TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        admin
-            .execute(&format!("CREATE DATABASE \"{db_name}\""), &[])
-            .await
-            .unwrap();
-
-        let url = replace_database(&admin_url, &db_name);
-        let store = CoreStore::connect_postgres(&url).await.unwrap();
-        store.migrate().await.unwrap();
-        // Every creation test exercises the current Core contract: a request
-        // is bound to an exact, promoted OCI artifact before it can lease.
-        // Keep this older than test-specific promotions so focused artifact
-        // tests still select their own fixture.
-        store
-            .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
-                id: "artifact-postgres-fixture".to_string(),
-                kind: crate::RuntimeArtifactKind::OciImage,
-                reference: format!(
-                    "ghcr.io/finitecomputer/agent-runtime:postgres-fixture@sha256:{}",
-                    "f".repeat(64)
-                ),
-                version_label: "postgres-fixture".to_string(),
-                source_git_sha: None,
-                finitec_version: None,
-                hermes_source_ref: None,
-                finite_platform_plugin_ref: None,
-                state_schema_version: "state-v1".to_string(),
-                base_image: Some("python:3.11-trixie".to_string()),
-                recover_known_good_chat: false,
-                promoted: true,
-                now: Some("2000-01-01T00:00:00Z".to_string()),
-            })
-            .await
-            .unwrap();
-
-        // Capture panics so the database is always torn down, then re-raise.
-        let outcome = std::panic::AssertUnwindSafe(test(TestDb { store, url }))
-            .catch_unwind()
-            .await;
-
-        // FORCE terminates any lingering connection (Postgres 13+), so teardown
-        // never races the store/raw clients the test opened.
-        let _ = admin
-            .execute(
-                &format!("DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"),
-                &[],
-            )
-            .await;
-        drop(admin);
-        admin_conn.abort();
-
-        if let Err(panic) = outcome {
-            std::panic::resume_unwind(panic);
         }
     }
 

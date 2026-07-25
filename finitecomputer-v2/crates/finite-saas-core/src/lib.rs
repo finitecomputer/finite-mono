@@ -2,6 +2,8 @@ pub mod api;
 pub mod auth;
 pub mod launch_codes;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
