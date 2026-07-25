@@ -67,6 +67,11 @@ lat1-rollout-contract:
     bash -n scripts/deploy-lat1 scripts/rollout-lat1-runtime-artifact
     python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
 
+# Evaluated systemd ordering plus synthetic transient/persistent endpoint
+# behavior for the aggregate production healthcheck.
+lat1-healthcheck-contract:
+    python3 scripts/check_lat1_healthcheck_contract.py
+
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:
     python3 scripts/check_runtime_image_contract.py
