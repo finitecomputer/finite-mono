@@ -32,6 +32,7 @@ struct RoomThreadView: View {
     @StateObject private var voiceRecorder = VoiceRecorder()
     @State private var voiceSendInFlight = false
     @State private var didConsumeComposerLaunch = false
+    @State private var composerOverlayHeight: CGFloat = 0
 
     init(
         model: AppModel,
@@ -234,47 +235,51 @@ struct RoomThreadView: View {
     }
 
     private func transcriptView(room: AppRoomSummary) -> some View {
-        ChatTranscriptView(
-            roomID: room.roomId,
-            rows: transcriptRows,
-            messagesById: projection.messagesById,
-            onReact: { message, emoji in
-                model.react(to: message, emoji: emoji)
-            },
-            onDownloadAttachment: { message, attachment in
-                model.downloadAttachment(roomID: room.roomId, message: message, attachment: attachment)
-            },
-            onOpenAttachment: { message, attachment in
-                handleAttachmentOpen(message: message, attachment: attachment)
-            },
-            onVotePoll: { message, option in
-                model.votePoll(message: message, option: option)
-            },
-            onRetryMessage: { message in
-                model.retry(message)
-            },
-            onLongPressMessage: { message, frame in
-                presentFocusedMessage(message, frame: frame)
-            },
-            onOpenURL: { url in
-                handleOpenURL(url)
-            },
-            canLoadOlder: room.canLoadOlder,
-            onLoadOlderMessages: { beforeMessageID in
-                model.loadOlderMessages(roomID: room.roomId, beforeMessageID: beforeMessageID)
-            },
-            followsBottom: $followsBottom
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemGroupedBackground))
-        .ignoresSafeArea(edges: .top)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        ZStack(alignment: .bottom) {
+            ChatTranscriptView(
+                roomID: room.roomId,
+                rows: transcriptRows,
+                messagesById: projection.messagesById,
+                bottomOverlayInset: composerOverlayHeight,
+                onReact: { message, emoji in
+                    model.react(to: message, emoji: emoji)
+                },
+                onDownloadAttachment: { message, attachment in
+                    model.downloadAttachment(roomID: room.roomId, message: message, attachment: attachment)
+                },
+                onOpenAttachment: { message, attachment in
+                    handleAttachmentOpen(message: message, attachment: attachment)
+                },
+                onVotePoll: { message, option in
+                    model.votePoll(message: message, option: option)
+                },
+                onRetryMessage: { message in
+                    model.retry(message)
+                },
+                onLongPressMessage: { message, frame in
+                    presentFocusedMessage(message, frame: frame)
+                },
+                onOpenURL: { url in
+                    handleOpenURL(url)
+                },
+                canLoadOlder: room.canLoadOlder,
+                onLoadOlderMessages: { beforeMessageID in
+                    model.loadOlderMessages(roomID: room.roomId, beforeMessageID: beforeMessageID)
+                },
+                followsBottom: $followsBottom
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(.systemGroupedBackground))
+
             composerAccessory
-                .background {
-                    Color(.systemGroupedBackground)
-                        .ignoresSafeArea(edges: .bottom)
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    guard abs(height - composerOverlayHeight) > 0.5 else { return }
+                    composerOverlayHeight = height
                 }
         }
+        .ignoresSafeArea(edges: .top)
         .accessibilityLabel("Messages")
     }
 

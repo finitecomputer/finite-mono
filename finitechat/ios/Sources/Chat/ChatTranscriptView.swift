@@ -21,6 +21,7 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
     let roomID: String
     let rows: [ChatTimelineRow]
     let messagesById: [String: ChatMessage]
+    let bottomOverlayInset: CGFloat
     let onReact: (ChatMessage, String) -> Void
     let onDownloadAttachment: (ChatMessage, ChatMediaAttachment) -> Void
     let onOpenAttachment: (ChatMessage, ChatMediaAttachment) -> Void
@@ -76,6 +77,7 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
         context.coordinator.collectionView = collectionView
         context.coordinator.viewController = viewController
         context.coordinator.lastContentState = contentState
+        viewController.setBottomOverlayInset(bottomOverlayInset)
 
         let registration = UICollectionView.CellRegistration<UICollectionViewCell, String> {
             [weak coordinator = context.coordinator] cell, _, itemID in
@@ -139,6 +141,7 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
         coordinator.parent = self
         coordinator.collectionView = viewController.collectionView
         coordinator.viewController = viewController
+        viewController.setBottomOverlayInset(bottomOverlayInset)
 
         let wasNearBottom = coordinator.isNearBottom()
         let shouldPinToBottom = MessageCollectionLayout.shouldPinToBottom(
@@ -601,7 +604,12 @@ struct ChatTranscriptView: UIViewControllerRepresentable {
             guard effectiveInset != lastAppliedEffectiveInset else { return false }
             lastAppliedEffectiveInset = effectiveInset
             collectionView.contentInset = effectiveInset
-            collectionView.verticalScrollIndicatorInsets = .zero
+            collectionView.verticalScrollIndicatorInsets = UIEdgeInsets(
+                top: 0,
+                left: 0,
+                bottom: viewController.bottomOverlayInset,
+                right: 0
+            )
             return true
         }
 
@@ -634,13 +642,17 @@ final class ChatTranscriptHostController: UIViewController {
     private var jumpButtonBottomConstraint: NSLayoutConstraint?
     private var isJumpButtonVisible = false
     private var viewportGeometryChangeScheduled = false
+    private(set) var bottomOverlayInset: CGFloat = 0
 
     var onViewportGeometryChange: (() -> Void)?
     var onWillDisappear: (() -> Void)?
     var onJumpToBottomTap: (() -> Void)?
 
     var bottomViewportInset: CGFloat {
-        max(0, view.safeAreaInsets.bottom)
+        MessageCollectionLayout.bottomViewportInset(
+            safeAreaInset: view.safeAreaInsets.bottom,
+            overlayInset: bottomOverlayInset
+        )
     }
 
     var isViewportReadyForInitialBottomPin: Bool {
@@ -706,6 +718,14 @@ final class ChatTranscriptHostController: UIViewController {
             self.viewportGeometryChangeScheduled = false
             self.onViewportGeometryChange?()
         }
+    }
+
+    func setBottomOverlayInset(_ inset: CGFloat) {
+        let inset = max(0, inset)
+        guard abs(inset - bottomOverlayInset) > 0.5 else { return }
+        bottomOverlayInset = inset
+        updateJumpButtonBottomConstraint()
+        scheduleViewportGeometryChange()
     }
 
     func setJumpButtonVisible(_ visible: Bool, animated: Bool) {
@@ -782,7 +802,9 @@ final class ChatTranscriptHostController: UIViewController {
     }
 
     private func updateJumpButtonBottomConstraint() {
-        jumpButtonBottomConstraint?.constant = -MessageCollectionLayout.jumpButtonSpacing
+        jumpButtonBottomConstraint?.constant = -(
+            bottomViewportInset + MessageCollectionLayout.jumpButtonSpacing
+        )
     }
 
     @objc

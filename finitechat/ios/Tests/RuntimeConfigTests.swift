@@ -3973,6 +3973,23 @@ final class MessageCollectionLayoutTests: XCTestCase {
         XCTAssertEqual(inset.bottom, 76)
     }
 
+    func testBottomViewportInsetCombinesSafeAreaAndComposerOverlay() {
+        XCTAssertEqual(
+            MessageCollectionLayout.bottomViewportInset(
+                safeAreaInset: 34,
+                overlayInset: 112
+            ),
+            146
+        )
+        XCTAssertEqual(
+            MessageCollectionLayout.bottomViewportInset(
+                safeAreaInset: -1,
+                overlayInset: -1
+            ),
+            0
+        )
+    }
+
     func testBottomPinSurvivesKeyboardGeometryTransition() {
         XCTAssertTrue(
             MessageCollectionLayout.shouldPinToBottom(

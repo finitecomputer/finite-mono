@@ -10,6 +10,13 @@ enum MessageCollectionLayout {
     static let jumpButtonSpacing: CGFloat = 12
     static let bottomContentSpacing: CGFloat = 4
 
+    static func bottomViewportInset(
+        safeAreaInset: CGFloat,
+        overlayInset: CGFloat
+    ) -> CGFloat {
+        max(0, safeAreaInset) + max(0, overlayInset)
+    }
+
     static func shouldPinToBottom(
         isNearBottom: Bool,
         followsBottom: Bool,
