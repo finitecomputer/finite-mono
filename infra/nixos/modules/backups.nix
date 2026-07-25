@@ -51,9 +51,11 @@ in
       chat_was_active=0
       brain_was_active=0
       identity_was_active=0
+      core_was_active=0
 
       cleanup() {
         rm -rf "$staging"
+        if [ "$core_was_active" = 1 ]; then systemctl start finite-saas-core.service; fi
         if [ "$identity_was_active" = 1 ]; then systemctl start finite-identity.service; fi
         if [ "$chat_was_active" = 1 ]; then systemctl start finitechat-server.service; fi
         if [ "$hosted_was_active" = 1 ]; then systemctl start finitechat-hosted-device.service; fi
@@ -66,6 +68,8 @@ in
       systemctl is-active --quiet finitechat-server.service && chat_was_active=1 || true
       systemctl is-active --quiet finite-brain-app.service && brain_was_active=1 || true
       systemctl is-active --quiet finite-identity.service && identity_was_active=1 || true
+      systemctl is-active --quiet finite-saas-core.service && core_was_active=1 || true
+      if [ "$core_was_active" = 1 ]; then systemctl stop finite-saas-core.service; fi
       if [ "$brain_was_active" = 1 ]; then systemctl stop finite-brain-app.service; fi
       if [ "$hosted_was_active" = 1 ]; then systemctl stop finitechat-hosted-device.service; fi
       if [ "$identity_was_active" = 1 ]; then systemctl stop finite-identity.service; fi
@@ -93,10 +97,18 @@ in
       runuser -u postgres -- pg_dump --format=custom finite_core > "$staging/saas-core/finite_core.dump"
       pg_restore --list "$staging/saas-core/finite_core.dump" >/dev/null
 
-      printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v1' > "$staging/format"
+      printf '%s\n' 'finite.hosted-web-chat-recovery-snapshot.v2' > "$staging/format"
+      cat > "$staging/recovery-set.tsv" <<'RECOVERY_SET'
+finite.hosted-web-chat-recovery-snapshot.v2
+hosted-device	directory	hosted-device
+finite-chat	sqlite	finite-chat/server.sqlite3
+saas-core	postgres-custom-dump	saas-core/finite_core.dump
+finite-brain	sqlite	finite-brain/finite-brain.sqlite3
+finite-identity	sqlite	finite-identity/identity.db
+RECOVERY_SET
       (
         cd "$staging"
-        find format hosted-device finite-chat saas-core finite-brain finite-identity -type f -print0 \
+        find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity -type f -print0 \
           | sort -z \
           | xargs -0 sha256sum > manifest.sha256
       )
@@ -131,6 +143,13 @@ in
         echo "Hosted Web Chat Recovery Snapshot is stale ($age seconds); deploy or run finite-hosted-web-chat-snapshot.service" >&2
         exit 1
       fi
+      test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v2
+      test "$(wc -l < "$latest/recovery-set.tsv")" -eq 6
+      grep -Fxq $'hosted-device\tdirectory\thosted-device' "$latest/recovery-set.tsv"
+      grep -Fxq $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' "$latest/recovery-set.tsv"
+      grep -Fxq $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' "$latest/recovery-set.tsv"
+      grep -Fxq $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' "$latest/recovery-set.tsv"
+      grep -Fxq $'finite-identity\tsqlite\tfinite-identity/identity.db' "$latest/recovery-set.tsv"
       (cd "$latest" && sha256sum --check manifest.sha256)
     '';
   };
@@ -164,6 +183,8 @@ in
       preHook = ''
         latest=${snapshotRoot}/latest
         test -L "$latest"
+        test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v2
+        test "$(wc -l < "$latest/recovery-set.tsv")" -eq 6
         (cd "$latest" && sha256sum --check manifest.sha256)
       '';
       postCreate = ''

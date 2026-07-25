@@ -14,18 +14,151 @@ usage() {
 
 source_dir=${1%/}
 target_dir=${2%/}
+[ -n "$source_dir" ] && [ -n "$target_dir" ] && [ "$target_dir" != / ] || usage
 [ -f "$source_dir/format" ] || { echo "restore refused: format marker missing" >&2; exit 66; }
-[ "$(cat "$source_dir/format")" = finite.hosted-web-chat-recovery-snapshot.v1 ] || {
-  echo "restore refused: unsupported snapshot format" >&2
+format=$(cat "$source_dir/format")
+[ "$format" != finite.hosted-web-chat-recovery-snapshot.v1 ] || {
+  echo "restore refused: v1 predates Brain and Finite Identity; create or select a complete v2 snapshot" >&2
+  exit 66
+}
+[ "$format" = finite.hosted-web-chat-recovery-snapshot.v2 ] || {
+  echo "restore refused: unsupported snapshot format $format" >&2
   exit 66
 }
 [ -f "$source_dir/manifest.sha256" ] || { echo "restore refused: manifest missing" >&2; exit 66; }
+[ -f "$source_dir/recovery-set.tsv" ] || { echo "restore refused: Recovery Set manifest missing" >&2; exit 66; }
+
+expected_recovery_set='finite.hosted-web-chat-recovery-snapshot.v2
+hosted-device	directory	hosted-device
+finite-chat	sqlite	finite-chat/server.sqlite3
+saas-core	postgres-custom-dump	saas-core/finite_core.dump
+finite-brain	sqlite	finite-brain/finite-brain.sqlite3
+finite-identity	sqlite	finite-identity/identity.db'
+[ "$(cat "$source_dir/recovery-set.tsv")" = "$expected_recovery_set" ] || {
+  echo "restore refused: Recovery Set component/artifact manifest is inconsistent" >&2
+  exit 66
+}
+for required in \
+  format \
+  recovery-set.tsv \
+  finite-chat/server.sqlite3 \
+  saas-core/finite_core.dump \
+  finite-brain/finite-brain.sqlite3 \
+  finite-identity/identity.db; do
+  [ -f "$source_dir/$required" ] || {
+    echo "restore refused: required Recovery Set artifact missing: $required" >&2
+    exit 66
+  }
+  awk -v required="$required" '$2 == required { found = 1 } END { exit !found }' \
+    "$source_dir/manifest.sha256" || {
+      echo "restore refused: required artifact absent from integrity manifest: $required" >&2
+      exit 66
+    }
+done
+awk '
+  NF != 2 { exit 1 }
+  $2 ~ /^\// || $2 ~ /(^|\/)\.\.($|\/)/ { exit 1 }
+  $2 !~ /^(format|recovery-set\.tsv|hosted-device\/|finite-chat\/|saas-core\/|finite-brain\/|finite-identity\/)/ { exit 1 }
+' "$source_dir/manifest.sha256" || {
+  echo "restore refused: integrity manifest contains an unsafe or unknown artifact path" >&2
+  exit 66
+}
+
+if [ -n "$(find "$source_dir" -type l -print -quit)" ]; then
+  echo "restore refused: Recovery Set contains a symlink" >&2
+  exit 66
+fi
+if [ -n "$(find "$source_dir" ! -type d ! -type f -print -quit)" ]; then
+  echo "restore refused: Recovery Set contains an unsupported filesystem entry" >&2
+  exit 66
+fi
+if ! diff -u \
+  <(awk '{ print $2 }' "$source_dir/manifest.sha256" | LC_ALL=C sort) \
+  <(cd "$source_dir" && find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity -type f -print | LC_ALL=C sort) \
+  >/dev/null; then
+  echo "restore refused: integrity manifest is not an exact Recovery Set file inventory" >&2
+  exit 66
+fi
 
 (cd "$source_dir" && sha256sum --check manifest.sha256)
+[ -n "$(find "$source_dir/hosted-device" -type f -name client.sqlite3 -print -quit)" ] || {
+  echo "restore refused: Hosted Device Recovery Set has no client database" >&2
+  exit 66
+}
 find "$source_dir/hosted-device" -type f -name client.sqlite3 -print0 \
   | while IFS= read -r -d '' database; do
+      case "$database" in
+        "$source_dir"/hosted-device/users/*/chat/client.sqlite3) ;;
+        *)
+          echo "restore refused: Hosted Device client database is outside the canonical user layout" >&2
+          exit 67
+          ;;
+      esac
+      user_root=${database%/chat/client.sqlite3}
+      identity_file="$user_root/finite-home/identity/identity.json"
+      [ -f "$identity_file" ] || {
+        echo "restore refused: Hosted Device client database has no account identity" >&2
+        exit 67
+      }
+      [ "$(wc -c < "$identity_file")" -le 4096 ] || {
+        echo "restore refused: Hosted Device account identity is oversized" >&2
+        exit 67
+      }
+      jq -e '
+        .version == 1 and
+        .kind == "nostr-secp256k1" and
+        (.secret_hex | type == "string" and test("^[0-9a-fA-F]{64}$")) and
+        (.public_key_hex | type == "string" and test("^[0-9a-f]{64}$"))
+      ' "$identity_file" >/dev/null || {
+        echo "restore refused: Hosted Device account identity is malformed" >&2
+        exit 67
+      }
+      key_check=$(
+        jq -r '.secret_hex' "$identity_file" \
+          | awk '{ printf "302e0201010420%sa00706052b8104000a", $0 }' \
+          | xxd -r -p \
+          | openssl ec -inform DER -check -noout 2>&1
+      ) || {
+        echo "restore refused: Hosted Device account identity secret is invalid" >&2
+        exit 67
+      }
+      [ "$key_check" = 'EC Key valid.' ] || {
+        echo "restore refused: Hosted Device account identity secret is invalid" >&2
+        exit 67
+      }
+      public_der_hex=$(
+        jq -r '.secret_hex' "$identity_file" \
+          | awk '{ printf "302e0201010420%sa00706052b8104000a", $0 }' \
+          | xxd -r -p \
+          | openssl ec -inform DER -pubout -conv_form uncompressed -outform DER 2>/dev/null \
+          | xxd -p -c 1000
+      ) || {
+        echo "restore refused: Hosted Device account identity public key derivation failed" >&2
+        exit 67
+      }
+      public_der_prefix=3056301006072a8648ce3d020106052b8104000a03420004
+      [ "${#public_der_hex}" -eq 176 ] \
+        && [ "${public_der_hex:0:48}" = "$public_der_prefix" ] || {
+          echo "restore refused: Hosted Device account identity public key derivation failed" >&2
+          exit 67
+        }
+      derived_account=${public_der_hex:48:64}
+      identity_account=$(jq -r '.public_key_hex' "$identity_file")
+      [ "$derived_account" = "$identity_account" ] || {
+        echo "restore refused: Hosted Device account identity keypair is inconsistent" >&2
+        exit 67
+      }
       [ "$(sqlite3 "$database" 'PRAGMA integrity_check;')" = ok ] || {
         echo "restore refused: Hosted Device SQLite integrity failed" >&2
+        exit 67
+      }
+      if ! database_account=$(sqlite3 "$database" \
+        'SELECT DISTINCT account_id FROM client_device_states ORDER BY account_id;'); then
+        echo "restore refused: Hosted Device client database has no readable account binding" >&2
+        exit 67
+      fi
+      [ "$database_account" = "$identity_account" ] || {
+        echo "restore refused: Hosted Device client database and account identity disagree" >&2
         exit 67
       }
     done
@@ -34,6 +167,14 @@ find "$source_dir/hosted-device" -type f -name client.sqlite3 -print0 \
   exit 67
 }
 pg_restore --list "$source_dir/saas-core/finite_core.dump" >/dev/null
+[ "$(sqlite3 "$source_dir/finite-brain/finite-brain.sqlite3" 'PRAGMA integrity_check;')" = ok ] || {
+  echo "restore refused: Finite Brain SQLite integrity failed" >&2
+  exit 67
+}
+[ "$(sqlite3 "$source_dir/finite-identity/identity.db" 'PRAGMA integrity_check;')" = ok ] || {
+  echo "restore refused: Finite Identity SQLite integrity failed" >&2
+  exit 67
+}
 
 if [ -e "$target_dir" ] && [ -n "$(find "$target_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
   echo "restore refused: target is not empty" >&2
@@ -41,12 +182,31 @@ if [ -e "$target_dir" ] && [ -n "$(find "$target_dir" -mindepth 1 -maxdepth 1 -p
 fi
 parent=$(dirname "$target_dir")
 name=$(basename "$target_dir")
+[ "$name" != . ] && [ "$name" != .. ] || {
+  echo "restore refused: target must name a child directory" >&2
+  exit 68
+}
+[ -d "$parent" ] || {
+  echo "restore refused: target parent does not exist" >&2
+  exit 68
+}
 staging="$parent/.${name}.restore-staging"
 [ ! -e "$staging" ] || { echo "restore refused: stale staging path exists" >&2; exit 68; }
 trap 'rm -rf "$staging"' EXIT
 install -d -m 0700 "$staging"
-cp -a "$source_dir/hosted-device" "$source_dir/finite-chat" "$source_dir/saas-core" "$staging/"
-cp -a "$source_dir/format" "$source_dir/manifest.sha256" "$staging/"
+cp -a \
+  "$source_dir/hosted-device" \
+  "$source_dir/finite-chat" \
+  "$source_dir/saas-core" \
+  "$source_dir/finite-brain" \
+  "$source_dir/finite-identity" \
+  "$staging/"
+cp -a "$source_dir/format" "$source_dir/recovery-set.tsv" "$source_dir/manifest.sha256" "$staging/"
+(cd "$staging" && sha256sum --check manifest.sha256)
+[ "${FINITE_RESTORE_FAIL_AFTER_STAGE:-0}" != 1 ] || {
+  echo "restore stopped after verified staging by requested failure injection" >&2
+  exit 69
+}
 if [ -e "$target_dir" ]; then rmdir "$target_dir"; fi
 mv "$staging" "$target_dir"
 trap - EXIT

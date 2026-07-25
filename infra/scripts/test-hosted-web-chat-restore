@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+restore="$repo_root/infra/scripts/restore-hosted-web-chat-snapshot"
+scratch=$(mktemp -d)
+postgres_started=0
+cleanup() {
+  if [ "$postgres_started" = 1 ]; then
+    pg_ctl -D "$scratch/postgres" -m immediate stop >/dev/null 2>&1 || true
+  fi
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+
+snapshot="$scratch/snapshot"
+socket="$scratch/socket"
+install -d -m 0700 \
+  "$snapshot/hosted-device/users/user-a/chat" \
+  "$snapshot/hosted-device/users/user-a/finite-home/identity" \
+  "$snapshot/finite-chat" \
+  "$snapshot/saas-core" \
+  "$snapshot/finite-brain" \
+  "$snapshot/finite-identity" \
+  "$socket"
+identity_account=79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+sqlite3 "$snapshot/hosted-device/users/user-a/chat/client.sqlite3" \
+  "CREATE TABLE client_device_states (account_id TEXT NOT NULL, device_id TEXT NOT NULL, state BLOB NOT NULL, PRIMARY KEY (account_id, device_id)); INSERT INTO client_device_states VALUES ('$identity_account', 'hosted-web', X'00');"
+printf '%s\n' \
+  '{' \
+  '  "version": 1,' \
+  '  "kind": "nostr-secp256k1",' \
+  '  "secret_hex": "0000000000000000000000000000000000000000000000000000000000000001",' \
+  "  \"public_key_hex\": \"$identity_account\"," \
+  '  "created_at": "2026-07-22T00:00:00Z",' \
+  '  "created_by": "hosted-recovery-contract"' \
+  '}' \
+  > "$snapshot/hosted-device/users/user-a/finite-home/identity/identity.json"
+chmod 0600 "$snapshot/hosted-device/users/user-a/finite-home/identity/identity.json"
+sqlite3 "$snapshot/finite-chat/server.sqlite3" \
+  'CREATE TABLE messages (room_id TEXT, author_npub TEXT, body TEXT); INSERT INTO messages VALUES ("room-recovery", "npub-recovery-owner", "recoverable chat content");'
+sqlite3 "$snapshot/finite-brain/finite-brain.sqlite3" \
+  'CREATE TABLE brain_access (brain_id TEXT, actor_npub TEXT, content TEXT); INSERT INTO brain_access VALUES ("brain-recovery", "npub-recovery-owner", "recoverable brain content");'
+sqlite3 "$snapshot/finite-identity/identity.db" \
+  'CREATE TABLE identities (workos_user_id TEXT, npub TEXT, email TEXT); INSERT INTO identities VALUES ("user-recovery", "npub-recovery-owner", "recovery@example.test");'
+
+initdb -D "$scratch/postgres" -A trust -U postgres >/dev/null
+pg_ctl -D "$scratch/postgres" -o "-F -k $socket -h '' -p 55439" -w start >/dev/null
+postgres_started=1
+createdb -h "$socket" -p 55439 -U postgres recovery_fixture
+psql -h "$socket" -p 55439 -U postgres recovery_fixture \
+  -c "CREATE TABLE recovery_proof (component text NOT NULL); INSERT INTO recovery_proof VALUES ('saas-core');" \
+  >/dev/null
+pg_dump -h "$socket" -p 55439 -U postgres --format=custom recovery_fixture \
+  > "$snapshot/saas-core/finite_core.dump"
+
+printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v2 > "$snapshot/format"
+printf '%s\n' \
+  finite.hosted-web-chat-recovery-snapshot.v2 \
+  $'hosted-device\tdirectory\thosted-device' \
+  $'finite-chat\tsqlite\tfinite-chat/server.sqlite3' \
+  $'saas-core\tpostgres-custom-dump\tsaas-core/finite_core.dump' \
+  $'finite-brain\tsqlite\tfinite-brain/finite-brain.sqlite3' \
+  $'finite-identity\tsqlite\tfinite-identity/identity.db' \
+  > "$snapshot/recovery-set.tsv"
+(
+  cd "$snapshot"
+  find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
+    -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256
+)
+
+target="$scratch/restored"
+FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$target" >/dev/null
+for required in \
+  hosted-device/users/user-a/chat/client.sqlite3 \
+  hosted-device/users/user-a/finite-home/identity/identity.json \
+  finite-chat/server.sqlite3 \
+  saas-core/finite_core.dump \
+  finite-brain/finite-brain.sqlite3 \
+  finite-identity/identity.db; do
+  test -f "$target/$required"
+done
+
+dropdb -h "$socket" -p 55439 -U postgres recovery_fixture
+createdb -h "$socket" -p 55439 -U postgres recovery_restored
+pg_restore -h "$socket" -p 55439 -U postgres --dbname=recovery_restored \
+  --exit-on-error --single-transaction "$target/saas-core/finite_core.dump"
+test "$(psql -h "$socket" -p 55439 -U postgres recovery_restored -Atc \
+  "SELECT component FROM recovery_proof")" = saas-core
+test "$(sqlite3 "$target/hosted-device/users/user-a/chat/client.sqlite3" \
+  'SELECT account_id FROM client_device_states WHERE device_id="hosted-web";')" = "$identity_account"
+test "$(jq -r '.public_key_hex' \
+  "$target/hosted-device/users/user-a/finite-home/identity/identity.json")" = "$identity_account"
+test "$(sqlite3 "$target/finite-identity/identity.db" \
+  'SELECT npub FROM identities WHERE workos_user_id="user-recovery";')" = npub-recovery-owner
+test "$(sqlite3 "$target/finite-chat/server.sqlite3" \
+  'SELECT body FROM messages WHERE author_npub="npub-recovery-owner";')" = 'recoverable chat content'
+test "$(sqlite3 "$target/finite-brain/finite-brain.sqlite3" \
+  'SELECT content FROM brain_access WHERE actor_npub="npub-recovery-owner";')" = 'recoverable brain content'
+
+mismatched_snapshot="$scratch/mismatched-snapshot"
+cp -a "$snapshot" "$mismatched_snapshot"
+mismatched_account=c6047f9441ed7d6d3045406e95c07cd85a4f5a4754a58f3e597f45a3be16cbaa
+sqlite3 "$mismatched_snapshot/hosted-device/users/user-a/chat/client.sqlite3" \
+  "UPDATE client_device_states SET account_id = '$mismatched_account';"
+jq --arg account "$mismatched_account" '.public_key_hex = $account' \
+  "$mismatched_snapshot/hosted-device/users/user-a/finite-home/identity/identity.json" \
+  > "$mismatched_snapshot/identity.json.tmp"
+mv "$mismatched_snapshot/identity.json.tmp" \
+  "$mismatched_snapshot/hosted-device/users/user-a/finite-home/identity/identity.json"
+chmod 0600 "$mismatched_snapshot/hosted-device/users/user-a/finite-home/identity/identity.json"
+(
+  cd "$mismatched_snapshot"
+  find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
+    -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256
+)
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$mismatched_snapshot" \
+  "$scratch/mismatched-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: mismatched Hosted Device identity was accepted" >&2
+  exit 1
+fi
+
+invalid_secret_snapshot="$scratch/invalid-secret-snapshot"
+cp -a "$snapshot" "$invalid_secret_snapshot"
+jq '.secret_hex = "0000000000000000000000000000000000000000000000000000000000000000"' \
+  "$invalid_secret_snapshot/hosted-device/users/user-a/finite-home/identity/identity.json" \
+  > "$invalid_secret_snapshot/identity.json.tmp"
+mv "$invalid_secret_snapshot/identity.json.tmp" \
+  "$invalid_secret_snapshot/hosted-device/users/user-a/finite-home/identity/identity.json"
+chmod 0600 "$invalid_secret_snapshot/hosted-device/users/user-a/finite-home/identity/identity.json"
+(
+  cd "$invalid_secret_snapshot"
+  find format recovery-set.tsv hosted-device finite-chat saas-core finite-brain finite-identity \
+    -type f -print0 | sort -z | xargs -0 sha256sum > manifest.sha256
+)
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$invalid_secret_snapshot" \
+  "$scratch/invalid-secret-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: invalid Hosted Device secret was accepted" >&2
+  exit 1
+fi
+
+cp "$snapshot/finite-chat/server.sqlite3" "$snapshot/finite-chat/unmanifested.sqlite3"
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/unmanifested-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: unmanifested file was accepted" >&2
+  exit 1
+fi
+rm "$snapshot/finite-chat/unmanifested.sqlite3"
+
+ln -s server.sqlite3 "$snapshot/finite-chat/unmanifested-link"
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/symlink-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: symlink was accepted" >&2
+  exit 1
+fi
+rm "$snapshot/finite-chat/unmanifested-link"
+
+injected_target="$scratch/injected-target"
+if FINITE_RESTORE_ISOLATED=1 FINITE_RESTORE_FAIL_AFTER_STAGE=1 \
+  "$restore" "$snapshot" "$injected_target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: injected activation failure succeeded" >&2
+  exit 1
+fi
+test ! -e "$injected_target"
+test ! -e "$scratch/.injected-target.restore-staging"
+
+printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v1 > "$snapshot/format"
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/v1-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: incomplete v1 snapshot was accepted" >&2
+  exit 1
+fi
+test ! -e "$scratch/v1-target"
+
+printf '%s\n' finite.hosted-web-chat-recovery-snapshot.v2 > "$snapshot/format"
+rm "$snapshot/finite-brain/finite-brain.sqlite3"
+if FINITE_RESTORE_ISOLATED=1 "$restore" "$snapshot" "$scratch/partial-target" >/dev/null 2>&1; then
+  echo "recovery contract test failed: partial Recovery Set was accepted" >&2
+  exit 1
+fi
+test ! -e "$scratch/partial-target"
+
+echo "hosted recovery v2 positive and negative contract checks passed"
