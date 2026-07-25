@@ -1649,13 +1649,13 @@ async fn postgres_store_with_retry(
 async fn connect_and_migrate_postgres(database_url: &str, mode: ImportMode) -> Result<CoreStore> {
     match mode {
         ImportMode::Commit => {
-            let store = CoreStore::connect_postgres(database_url).await?;
+            let store = CoreStore::connect(database_url).await?;
             store.migrate().await?;
             Ok(store)
         }
         // A dry run previews row writes only. It must not run schema DDL,
         // which commits outside the rolled-back transaction.
-        ImportMode::DryRun => Ok(CoreStore::connect_postgres_dry_run(database_url).await?),
+        ImportMode::DryRun => Ok(CoreStore::connect_dry_run(database_url).await?),
     }
 }
 
@@ -1796,7 +1796,7 @@ mod tests {
             return;
         };
         let _guard = DB_ENV_LOCK.lock().await;
-        CoreStore::connect_postgres(&url)
+        CoreStore::connect(&url)
             .await
             .unwrap()
             .migrate()

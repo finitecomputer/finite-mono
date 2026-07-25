@@ -26,6 +26,68 @@ impl std::ops::Deref for TestDb {
     }
 }
 
+impl TestDb {
+    /// Run a query and return each row's first column as JSON.
+    ///
+    /// Tests that used to read `BridgeCoreState`'s public maps directly need to
+    /// inspect durable rows the store exposes no reader for. Selecting
+    /// `to_jsonb(t)` keeps that to one helper instead of a typed accessor per
+    /// entity, and avoids widening the production store API for tests.
+    pub(crate) async fn query_json(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> Vec<serde_json::Value> {
+        let (client, connection) = tokio_postgres::connect(&self.url, NoTls).await.unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let rows = client
+            .query(sql, params)
+            .await
+            .unwrap_or_else(|error| panic!("test query failed: {error}\n{sql}"));
+        let out = rows
+            .iter()
+            .map(|row| row.get::<_, serde_json::Value>(0))
+            .collect();
+        drop(client);
+        handle.abort();
+        out
+    }
+
+    /// One row of `table` by primary key, as JSON.
+    ///
+    /// A few tables key on something other than `id`.
+    pub(crate) async fn row(&self, table: &str, id: &str) -> Option<serde_json::Value> {
+        let key = Self::primary_key(table);
+        self.query_json(
+            &format!("SELECT to_jsonb(t) FROM {table} t WHERE t.{key} = $1"),
+            &[&id],
+        )
+        .await
+        .into_iter()
+        .next()
+    }
+
+    /// Every row of `table`, as JSON, ordered by primary key for determinism.
+    pub(crate) async fn all(&self, table: &str) -> Vec<serde_json::Value> {
+        let key = Self::primary_key(table);
+        self.query_json(
+            &format!("SELECT to_jsonb(t) FROM {table} t ORDER BY t.{key}"),
+            &[],
+        )
+        .await
+    }
+
+    fn primary_key(table: &str) -> &'static str {
+        match table {
+            "runtime_retirement_snapshots" => "request_id",
+            "runtime_relay_credentials" => "agent_runtime_id",
+            _ => "id",
+        }
+    }
+}
+
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Swap the database name in a `postgres://user:pass@host:port/db?query` URL,
@@ -87,7 +149,7 @@ where
         .unwrap();
 
     let url = replace_database(&admin_url, &db_name);
-    let store = CoreStore::connect_postgres(&url).await.unwrap();
+    let store = CoreStore::connect(&url).await.unwrap();
     store.migrate().await.unwrap();
     // Every creation test exercises the current Core contract: a request is
     // bound to an exact, promoted OCI artifact before it can lease. Keep this
