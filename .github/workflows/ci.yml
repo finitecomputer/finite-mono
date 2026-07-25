@@ -195,6 +195,8 @@ jobs:
         run: nix develop --command just runtime-image-contract
       - name: lat1 existing-Runtime rollout contract
         run: nix develop --command just lat1-rollout-contract
+      - name: lat1 healthcheck activation contract
+        run: nix develop --command just lat1-healthcheck-contract
       - name: Stripe Price contract
         run: nix develop --command just stripe-price-contract
       - name: Hosted Recovery Set contract
