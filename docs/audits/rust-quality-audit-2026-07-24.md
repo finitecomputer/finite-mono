@@ -2,7 +2,7 @@
 
 Date: 2026-07-24
 
-Status: **ONE FIX IMPLEMENTED LOCALLY — REMAINDER IS ANALYSIS ONLY**
+Status: **IMPLEMENTED LOCALLY — NOT RELEASED OR DEPLOYED**
 
 Scope: workspace-wide Rust audit for performance problems, unnecessary
 abstractions, poor organization, and redundant implementations. Requested
@@ -44,9 +44,17 @@ Two things were tested and both came back negative:
   exactly 2 have no production reference.
 
 Two dead-feature hypotheses were investigated at length and **both were
-wrong**; see "Investigated and kept" below. The realistic near-term reduction
-is the ~5,650-line item in Finding 2, roughly **3.4% of the workspace** —
-concentrated in one crate, where it is 21%.
+wrong**; see "Investigated and kept" below.
+
+Delivered: **167,706 → 161,945 non-test lines (−5,761, 3.4%)**, all of it in
+`finite-saas-core`, where it is 21% of the crate. Workspace tests unchanged at
+1,575 passing.
+
+The size result is modest. The reliability result is not: removing the second
+implementation immediately exposed a defect affecting every timestamp the API
+returns (Finding 6), which had been invisible for the entire life of the
+row-native store because the fake it was tested against echoed inputs back
+instead of storing them.
 
 ## Finding 1 — `--dry-run` previewed against an empty database (FIXED)
 
@@ -156,18 +164,22 @@ deleting `--dry-run`. After Finding 1, dry-run is backed by real Postgres, so
 the in-memory path has no remaining production caller. The remaining work is a
 test migration, not an architecture change.
 
-**Candidate boundary:** delete `BridgeCoreState`, `MemoryCoreStore`, and the
-`CoreStore` dispatch enum; port the ~70 tests onto the existing
-`with_isolated_postgres` harness in `store.rs`, which already creates a
-migrated per-test database, runs in parallel, and tears down cleanly. ~18 tests
-already use it, so the pattern is proven.
+**DONE.** `BridgeCoreState`, `MemoryCoreStore`, and the `CoreStore` dispatch
+enum are deleted; `PostgresCoreStore` is now simply `CoreStore`. All 58
+in-memory tests were ported onto the shared Postgres harness with their
+assertions intact, plus the 24 in `api.rs`. Typed readers on `CoreStore` reuse
+the production `select_` / `*_from_row` pair so a test decodes rows exactly as
+production does, rather than degrading typed assertions to JSON comparisons.
 
-**Proof before change:** each ported test must keep its current assertions.
-Expect divergences to surface during the port — those are latent production
-bugs, and each needs its own decision rather than a test edit.
+Two tests forked an in-memory snapshot, which a database cannot do. Both were
+restructured rather than weakened: the archive fail-closed test now runs its
+rejection paths in sequence (a rejection mutates nothing), and the
+failure-then-cancel branch became its own test with its own database.
 
-**Estimated reduction:** ~5,650 non-test lines (3.4% of workspace, 21% of
-`finite-saas-core`).
+**Reduction: 5,761 non-test lines.** Workspace tests: 1,575 passed, 0 failed —
+the same count as before, so no coverage was traded away.
+
+**The port paid for itself immediately.** See Finding 6.
 
 ## Finding 3 — a non-atomic friend-key issue (FIXED)
 
@@ -213,12 +225,49 @@ The three must agree, and nothing enforces it. Adding a variant and updating
 two of three sites yields a silent encoding mismatch between the JSON API and
 the database column.
 
-**Candidate boundary:** one declarative macro emitting the enum, its serde
-impls, `as_str`, and `FromStr` from a single variant→string list. Round-trip
-tests then cover all three surfaces at once.
+**DONE.** `wire_enum!` takes one `variant => string` list and generates the
+enum, its serde impls, `as_str`, and `parse_*`. Adding a variant is one line in
+one place.
 
-**Estimated reduction:** ~250–400 non-test lines. The correctness argument
-matters more than the size.
+Sequencing mattered: `enum_serde_as_str_and_parse_encodings_agree` was added
+*first*, as the safety net, and verified non-vacuous by breaking one arm
+(`past_due` → `pastdue`) and watching it fail. All 53 variants already agreed,
+so the consolidation changed no encoding — and the test proves it.
+
+**Reduction: 257 non-test lines.**
+
+## Finding 6 — Core emitted timestamps it could not parse (FIXED)
+
+Found by Finding 2's port, and invisible before it: the in-memory store echoed
+request strings back verbatim, so no test ever compared a *stored* timestamp
+against the API contract.
+
+**159 TIMESTAMPTZ columns were read with a bare `::text` cast.** That renders
+Postgres's own display format in the **server's** timezone:
+
+```text
+created_at: "2026-05-25 07:00:00-05"   ← what the API returned
+created_at: "2026-05-25T12:00:00Z"     ← what the contract says
+```
+
+`parse_time` rejects the first with `InvalidTimestamp`, so those values did not
+round-trip: Core emitted timestamps it could not itself read back. This was not
+cosmetic and not test-only — `Project.created_at` on `/api/core/v1/me/projects`
+is consumed by the Dashboard, and the value is wrong in both format *and*
+apparent wall-clock whenever the server timezone is not UTC.
+
+The same table's SELECT path already used an `rfc3339_col` helper, so one
+struct was populated in two different formats depending on which query ran.
+
+**Fix:** one `core_rfc3339` SQL function (migration `0016_rfc3339_reads.sql`).
+Reads go through it instead of casting. It trims trailing zeros in the
+fractional second so a value round-trips byte-for-byte with the RFC3339 string
+Rust wrote.
+
+**Also found by the port, not fixed:** a nonexistent `projectId` on
+finite-private key issue returns 500 rather than a client error. `project_id`
+and `agent_runtime_id` are foreign keys; the fake enforced no referential
+integrity, so tests passed fabricated ids for the life of the crate.
 
 ## Finding 5 — organization: single files carrying whole subsystems
 
@@ -280,20 +329,38 @@ when the dashboard path fails, not dead code. **Keep all.**
 
 ## Prioritized plan for the remaining reduction
 
-1. **Delete the in-memory Core backend** (Finding 2) — ~5,650 lines, and the
-   largest reliability gain available. Unblocked by Finding 1. Budget the test
-   port generously; expect divergences.
-2. **Consolidate enum codecs** (Finding 4) — ~250–400 lines, removes a silent
-   drift class.
+1. ~~Delete the in-memory Core backend~~ — **done**, −5,761 lines.
+2. ~~Consolidate enum codecs~~ — **done**, −257 lines.
 3. **Apply the same reachability archaeology to `finite-core` (11,827) and
    `finite-saas-runner` (12,985).** Both predate the restart. The method that
-   worked here: trace from real entry points — dashboard `fetch` calls, runbook
+   worked here: trace from real entry points — Dashboard `fetch` calls, runbook
    command names, `devfinity` process definitions — rather than from Rust
    references, which stay internally consistent even when a whole feature is
    unreachable.
-4. **Split the four largest files into modules.** Zero line reduction; do it
+4. **Return the 500-on-bad-foreign-key to a client error** (Finding 6).
+5. **Split the four largest files into modules.** Zero line reduction; do it
    for review surface, and not as part of a size goal.
 
-A 25% workspace reduction is not available from items 1, 2, and 4 — they total
-roughly 6,000 lines, about 3.6%. Item 3 is the only place a large number could
-still be hiding, and it should be measured before it is promised.
+Items 1 and 2 are spent. A further 25% is not available from item 5, which
+removes nothing. Item 3 is the only place a large number could still be
+hiding, and it should be measured before it is promised.
+
+## Method note
+
+Two heuristics were tried and abandoned during this work; both are recorded so
+the next pass does not repeat them.
+
+**Operation-name overlap is not coverage.** Classifying the in-memory tests by
+"does this touch an operation no Postgres test covers" cleanly split them
+31 port / 28 delete. Spot-checking the largest deletion candidate showed the
+in-memory ledger test carried 37 assertions and 19 transition cases against its
+Postgres counterpart's 5 and 5 — same subject, different depth. Deleting it
+would have dropped real coverage. The two suites are complementary by
+construction: `BridgeCoreState` was the original engine, so the behavioral
+suite was written against it, while the `postgres_*` tests were added later by
+Phase 2c for row-native concerns.
+
+**Do not translate typed assertions into JSON.** The first port attempt
+rewrote collection reads to `to_jsonb`, which would have silently converted
+~200 typed assertions into string comparisons. Exposing the production
+`select_` functions as typed test readers keeps assertions exactly as written.
