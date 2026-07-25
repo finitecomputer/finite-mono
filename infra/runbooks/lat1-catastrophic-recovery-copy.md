@@ -67,10 +67,15 @@ account and listed both the account root and the exact
 transport and repository-file access. The Mac's ordinary SSH identities still
 cannot authenticate and no independent local copy of the noninteractive
 repository transport key has been proved. A Borg repository listing using the
-independently held passphrase, followed by an empty-target restore, remain
-separate cryptographic and recovery proofs. The exported repokey is the
-break-glass key recovery copy, not a prerequisite for an ordinary list while
-the repository's encrypted key material is intact.
+independently held passphrase then succeeded through rsync.net's `borg14`
+remote command and returned archive
+`finite-lat-1-hosted-web-chat-2026-07-25T03:07:00` with archive ID
+`41212ff65309daa365d21d1699b7fee2a31eac407f40ffc0cec6b56666f885e5`.
+That closes the independent transport, repository-location, and decryption
+proofs. The empty-target restore remains an operator-run recovery drill, not an
+additional credential-custody task. The exported repokey is the break-glass key
+recovery copy, not a prerequisite for an ordinary list while the repository's
+encrypted key material is intact.
 
 ## Pre-RAID creation gate
 
