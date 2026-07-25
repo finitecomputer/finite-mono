@@ -57,10 +57,13 @@ in an encrypted operator-controlled location with an independent unlock path.
 Never commit values, fingerprints, or password-derived hashes.
 
 As of the 2026-07-25 read-only audit, the operator Mac has mode-0600 copies of
-the lat1 Borg passphrase and exported repokey. Its ordinary SSH identities
-cannot authenticate to the rsync.net account, and no independent local copy of
-the repository transport key has been proved. Close that gap before relying on
-the remote archive after total host loss.
+the lat1 Borg passphrase and exported repokey. The operator also attests that
+the rsync.net account password is saved locally and permits an independent SSH
+login for recovery work. That password path is the off-host transport fallback;
+the Mac's ordinary SSH identities still cannot authenticate and no independent
+local copy of the noninteractive repository transport key has been proved.
+Exercise a Borg repository listing through the password-authenticated Mac path
+before destructive host work; the attestation alone is not a restore drill.
 
 ## Pre-RAID creation gate
 
