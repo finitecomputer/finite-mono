@@ -53,6 +53,10 @@ const {
   validDeviceId,
 } = require("./daemon-process.cjs");
 const {
+  dashboardLoadErrorScript,
+  shouldReplaceFailedDashboardDocument,
+} = require("./dashboard-load-error.cjs");
+const {
   fullBleedWindowOptions,
   hiddenElectronDashboardBrandCss,
   navigationActionForUrl,
@@ -206,6 +210,27 @@ function hideDashboardWordmark(window) {
   window.webContents.on("dom-ready", apply);
 }
 
+function showDashboardLoadError(details) {
+  const window = mainWindow;
+  if (
+    !window
+    || window.isDestroyed()
+    || window.webContents.isDestroyed()
+    || !isDashboardDocumentUrl(details.url, defaultDashboardUrl)
+    || !shouldReplaceFailedDashboardDocument(details, {
+      currentUrl: window.webContents.getURL(),
+      dashboardWebContentsId: window.webContents.id,
+    })
+  ) {
+    return;
+  }
+  void window.webContents
+    .executeJavaScript(dashboardLoadErrorScript(dashboardFailureLogoDataUrl()))
+    .catch(() => {
+      // A newer navigation or shutdown may dispose the failed document first.
+    });
+}
+
 function showWindowWhenReady(window) {
   window.once("ready-to-show", () => {
     if (!window.isDestroyed()) {
@@ -294,6 +319,14 @@ function createDashboardWindow(targetUrl = dashboardStartUrl) {
     if (isAllowedUnprivilegedNavigation(url, defaultDashboardUrl)) {
       transitionToAuth(url);
     }
+  });
+  mainWindow.webContents.on("did-navigate", (_event, url, statusCode) => {
+    showDashboardLoadError({
+      resourceType: "mainFrame",
+      statusCode,
+      url,
+      webContentsId: mainWindow?.webContents.id,
+    });
   });
   mainWindow.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
     if (!isMainFrame || isDashboardDocumentUrl(url, defaultDashboardUrl)) return;
@@ -390,6 +423,23 @@ function createAuthWindow(targetUrl = dashboardStartUrl) {
 
 function repoRoot() {
   return path.resolve(__dirname, "../../../..");
+}
+
+function dashboardFailureLogoDataUrl() {
+  const packagedAsset = path.join(__dirname, "finite-logo.svg");
+  const sourceAsset = path.join(
+    repoRoot(),
+    "finitecomputer-v2",
+    "apps",
+    "dashboard",
+    "public",
+    "finite-logo.svg"
+  );
+  const asset = fs.existsSync(packagedAsset) ? packagedAsset : sourceAsset;
+  const svg = fs
+    .readFileSync(asset, "utf8")
+    .replaceAll('fill="white"', 'fill="#0A84FF"');
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 }
 
 function registerAttachmentMediaProtocol() {
