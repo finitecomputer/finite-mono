@@ -1,7 +1,7 @@
 # finite-lat-1 — 64.34.82.77, Latitude.sh — THE single app server.
 # Reinstalled as NixOS via nixos-anywhere per finite-fable/single-server-plan.md.
 # Public exposure is exactly 22/80/443; every service binds loopback behind Caddy.
-{ pkgs, ... }:
+{ config, pkgs, ... }:
 {
   imports = [
     ./disko.nix
@@ -150,6 +150,70 @@
     "usbhid"
     "sd_mod"
     "ext4"
+  ];
+
+  # Pre-RAID reliability step: add bounded swap and use the same zswap policy
+  # qualified on finite-lat-3. This creates a file on the existing root
+  # filesystem; it does not repartition either disk or enable mdraid.
+  swapDevices = [
+    {
+      device = "/swapfile";
+      size = 64 * 1024;
+    }
+  ];
+  boot.zswap = {
+    enable = true;
+    compressor = "zstd";
+    zpool = "zsmalloc";
+    maxPoolPercent = 10;
+    acceptThresholdPercent = 90;
+    shrinkerEnabled = true;
+  };
+  boot.kernel.sysctl."vm.swappiness" = 20;
+  zramSwap.enable = false;
+
+  assertions = [
+    {
+      assertion = config.system.nixos.release == "26.05";
+      message = "finite-lat-1 pre-RAID platform candidate must stay on the qualified NixOS 26.05 pin";
+    }
+    {
+      assertion = config.system.stateVersion == "25.11";
+      message = "finite-lat-1 stateVersion must not change during a platform upgrade";
+    }
+    {
+      assertion = !config.boot.swraid.enable;
+      message = "finite-lat-1 pre-RAID platform candidate must not enable mdraid";
+    }
+    {
+      assertion =
+        config.disko.devices.disk.root.device
+        == "/dev/disk/by-id/nvme-Micron_7450_MTFDKBA480TFR_24474C59E53F"
+        &&
+          config.disko.devices.disk.data.device
+          == "/dev/disk/by-id/nvme-SAMSUNG_MZQL21T9HCJR-00A07_S64GNC0Y510146";
+      message = "finite-lat-1 pre-RAID candidate must retain the existing root and data disks";
+    }
+    {
+      assertion =
+        map (swap: {
+          inherit (swap) device size;
+        }) config.swapDevices == [
+          {
+            device = "/swapfile";
+            size = 64 * 1024;
+          }
+        ];
+      message = "finite-lat-1 pre-RAID swap contract drifted";
+    }
+    {
+      assertion =
+        config.boot.zswap.enable
+        && config.boot.zswap.compressor == "zstd"
+        && config.boot.zswap.maxPoolPercent == 10
+        && config.boot.zswap.shrinkerEnabled;
+      message = "finite-lat-1 pre-RAID zswap contract drifted";
+    }
   ];
 
   # Container-shaped services (dashboard, finite-search) run under podman.
