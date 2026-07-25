@@ -2779,15 +2779,7 @@ impl KataLauncher {
                 plan.state_root.display()
             ))
         })?;
-        let identity_metadata = plan
-            .state_root
-            .join("agent/identity.json")
-            .symlink_metadata()
-            .map_err(|_| {
-                RunnerError::RuntimeLaunch(
-                    "cold relocation state is missing agent/identity.json".to_string(),
-                )
-            })?;
+        let identity_metadata = staged_agent_identity_metadata(&plan.state_root)?;
         if !metadata.file_type().is_dir()
             || !identity_metadata.file_type().is_file()
             || self.inspect(&plan.container_name)?.is_some()
@@ -2805,6 +2797,17 @@ impl KataLauncher {
         }
         Ok(())
     }
+}
+
+fn staged_agent_identity_metadata(state_root: &Path) -> Result<std::fs::Metadata, RunnerError> {
+    state_root
+        .join("agent/identity/identity.json")
+        .symlink_metadata()
+        .map_err(|_| {
+            RunnerError::RuntimeLaunch(
+                "cold relocation state is missing agent/identity/identity.json".to_string(),
+            )
+        })
 }
 
 /// Stable manifest used on both the stopped source and the staged target. It
@@ -5433,10 +5436,10 @@ esac
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
         for root in [first.path(), second.path()] {
-            std::fs::create_dir_all(root.join("agent")).unwrap();
+            std::fs::create_dir_all(root.join("agent/identity")).unwrap();
             std::fs::create_dir_all(root.join("workspace")).unwrap();
             std::fs::write(
-                root.join("agent/identity.json"),
+                root.join("agent/identity/identity.json"),
                 b"{\"npub\":\"npub1same\"}\n",
             )
             .unwrap();
@@ -5466,6 +5469,33 @@ esac
         assert_ne!(
             expected,
             durable_state_manifest_sha256(second.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn cold_relocation_requires_the_runtime_identity_directory_layout() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("agent/identity")).unwrap();
+        std::fs::write(
+            root.path().join("agent/identity/identity.json"),
+            b"{\"npub\":\"npub1same\"}\n",
+        )
+        .unwrap();
+
+        assert!(staged_agent_identity_metadata(root.path()).is_ok());
+
+        std::fs::remove_file(root.path().join("agent/identity/identity.json")).unwrap();
+        std::fs::write(
+            root.path().join("agent/identity.json"),
+            b"{\"npub\":\"npub1wronglayout\"}\n",
+        )
+        .unwrap();
+
+        let error = staged_agent_identity_metadata(root.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("missing agent/identity/identity.json")
         );
     }
 
