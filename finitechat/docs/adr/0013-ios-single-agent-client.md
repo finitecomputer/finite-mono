@@ -21,14 +21,14 @@ pre-release iOS store or Keychain shape is explicitly not a requirement.
 ## Decision
 
 - iOS targets iOS 26 and uses native SwiftUI controls and Liquid Glass.
-- WorkOS authenticates the human through native-app PKCE. iOS then calls the
-  existing authenticated dashboard device-link APIs automatically, matching
-  Electron's current sequence without adding an approval page. A one-use Rust
-  receiver transfers the encrypted account secret to iOS, which stores it in a
-  new Keychain namespace before acknowledging delivery.
-- The browser never receives account or pairing secrets. Swift never implements
-  device-link cryptography, and secret material never enters `AppState`,
-  `UserDefaults`, diagnostics, URLs, or logs.
+- WorkOS authenticates the human through native-app PKCE. The authenticated
+  dashboard is the out-of-band trust and consent channel for the NIP-AB
+  pairing transcript described by ADR 0014. iOS stores the transferred account
+  secret in its Keychain namespace and reads it back before the Rust target
+  publishes completion.
+- The renderer never receives account or pairing secrets. Swift never
+  implements device-link cryptography, and secret material never enters
+  `AppState`, `UserDefaults`, diagnostics, URLs, or logs.
 - The user pairs exactly one connected direct agent Room. Rust persists both
   the agent account identity and canonical Room identity; selection and sort
   order are never authority.
@@ -77,6 +77,6 @@ pre-release iOS store or Keychain shape is explicitly not a requirement.
 
 - Full key self-custody.
 - Multiple simultaneously paired agents.
-- Apple sign-in configuration in WorkOS.
+- Replacing WorkOS as the first-release human-authentication surface.
 - Creating Topics, agents, rooms, or memberships from iOS.
 - Reworking the retained chat transcript UI.

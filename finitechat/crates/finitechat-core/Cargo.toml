@@ -21,6 +21,7 @@ finitechat-proto = { path = "../finitechat-proto" }
 base64.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+hkdf.workspace = true
 hypernote-mdx.workspace = true
 nostr.workspace = true
 reqwest.workspace = true
@@ -32,6 +33,7 @@ time.workspace = true
 tokio.workspace = true
 uniffi.workspace = true
 workos.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

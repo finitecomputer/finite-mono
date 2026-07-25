@@ -372,10 +372,20 @@ Repair:
 
 Device linking:
 
-- `POST /v1/link-sessions`
-- `POST /v1/link-sessions/{id}/payload`
-- `POST /v1/link-sessions/{id}/claim`
-- `POST /v1/link-sessions/{id}/ack`
+- `POST /v1/pairing-sessions`
+- `POST /v1/pairing-sessions/get`
+- `POST /v1/pairing-sessions/offer`
+- `POST /v1/pairing-sessions/response`
+- `POST /v1/pairing-sessions/complete`
+- `POST /v1/pairing-sessions/expire`
+
+The pairing payload is never server plaintext. These endpoints are a bounded,
+durable rendezvous for signed NIP-AB kind `24134` events. Session creation
+immutably binds one target Device and ephemeral target public key. A WorkOS
+authenticated hosted Device supplies the source descriptor out of band,
+authenticates the target offer, and publishes the encrypted account payload.
+The target persists and reads back the account secret before publishing its
+completion event. See ADR 0014.
 
 A newly linked device joins existing rooms through normal add-device Commits.
 Because MLS KeyPackages are single-use, the device must replenish enough

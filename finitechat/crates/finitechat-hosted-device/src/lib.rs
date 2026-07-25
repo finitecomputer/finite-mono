@@ -25,9 +25,10 @@ use finite_brain_core::{
     wrap_brain_invite_bootstrap,
 };
 use finite_identity::{FiniteIdentity, IdentityPaths};
-use finite_nostr::NostrPublicKey;
-use finitechat_core::device_link::{
-    DEVICE_LINK_MAX_TTL_SECONDS, DeviceLinkEncryptInput, encrypt_device_link_payload,
+use finite_nostr::{NostrPublicKey, decrypt_nip44, encrypt_nip44};
+use finitechat_core::nip_ab::{
+    FINITE_PAIRING_PURPOSE_V1, FinitePairingPayloadV1, NIP_AB_SESSION_TTL_SECONDS, NIP_AB_VERSION,
+    NipAbPayloadType, NipAbSourceCheckpointV1, NipAbSourceDescriptorV1, NipAbSourceSession,
 };
 use finitechat_core::{
     AppAction, AppProfileChatBootstrapInput, AppProfileChatBootstrapPreparedCommit, AppState,
@@ -36,8 +37,9 @@ use finitechat_core::{
     finite_sites_native_viewer_session_proof,
 };
 use finitechat_http::{
-    ExpireLinkSessionRequest, ExpireLinkSessionResponse, GetLinkSessionRequest,
-    HttpLinkSessionRecord, HttpLinkSessionState, UploadLinkPayloadRequest,
+    ExpirePairingSessionRequest, ExpirePairingSessionResponse, GetPairingSessionRequest,
+    HttpNipAbSourceDescriptorV1, HttpPairingSessionRecord, HttpPairingSessionState,
+    PublishPairingResponseRequest,
 };
 use finitechat_proto::{
     ClaimKeyPackageResult, CreateRoomRequest, DecryptedApplicationEventV1, DurableAppEventKind,
@@ -46,7 +48,7 @@ use finitechat_proto::{
     RuntimeCommandTerminalStatusV1,
 };
 use futures_util::{Stream, StreamExt};
-use nostr::{Keys, SecretKey};
+use nostr::{Event as NostrEvent, Keys, SecretKey};
 use openmls::prelude::{AeadType, OpenMlsCrypto, OpenMlsProvider, OpenMlsRand};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use serde::de::DeserializeOwned;
@@ -78,7 +80,7 @@ const RECENT_RUNTIME_EVENT_LIMIT: u32 = 512;
 const OWNER_CLAIM_EVENT_LIMIT: u32 = 5_000;
 const OWNER_CLAIM_COMMAND: &str = "agent.owner.claim";
 pub const MAX_HOSTED_PROFILE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
-const DEVICE_LINK_RECORD_VERSION: u16 = 1;
+const DEVICE_LINK_RECORD_VERSION: u16 = 2;
 const DEVICE_LINK_CREATED_BY: &str = "finitechat-hosted-device";
 const DEVICE_LINK_HTTP_TIMEOUT_SECS: u64 = 10;
 const MAX_DEVICE_LINK_RECORD_BYTES: u64 = 64 * 1024;
@@ -145,8 +147,8 @@ impl HostedDeviceState {
         self.user_root(user_id).join("chat")
     }
 
-    fn device_link_path(&self, user_id: &str, link_session_id: &str) -> PathBuf {
-        let digest = Sha256::digest(link_session_id.as_bytes());
+    fn device_link_path(&self, user_id: &str, pairing_session_id: &str) -> PathBuf {
+        let digest = Sha256::digest(pairing_session_id.as_bytes());
         self.user_root(user_id)
             .join("device-links")
             .join(format!("{}.json", hex::encode(digest)))
@@ -493,7 +495,7 @@ fn app_with_test_options(
 
 #[derive(Clone, Deserialize)]
 struct DeviceLinkRequest {
-    link_session_id: String,
+    pairing_session_id: String,
     target_device_id: String,
 }
 
@@ -524,21 +526,35 @@ enum ReconcileLinkedDeviceStatus {
 #[derive(Clone, Serialize, Deserialize)]
 struct PendingDeviceLinkV1 {
     version: u16,
-    link_session_id: String,
+    pairing_session_id: String,
     target_device_id: String,
-    pairing_public_key: String,
+    target_public_key: String,
+    source_public_key: String,
     account_id: String,
     server_url: String,
     issued_at_unix_seconds: u64,
     expires_at_unix_seconds: u64,
-    encrypted_payload: Vec<u8>,
+    sealed_state: String,
     fanout_id: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct HostedPairingSecretsV1 {
+    version: u16,
+    user_id: String,
+    pairing_session_id: String,
+    source_checkpoint: NipAbSourceCheckpointV1,
+    payload_json: String,
+    #[serde(default)]
+    source_confirmation_event: Option<Vec<u8>>,
+    #[serde(default)]
+    payload_event: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DeviceLinkStatusKind {
-    AwaitingClaim,
+    AwaitingOffer,
     AwaitingKeyPackage,
     JoiningRooms,
     Ready,
@@ -547,12 +563,14 @@ enum DeviceLinkStatusKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct DeviceLinkResponse {
-    link_session_id: String,
+    pairing_session_id: String,
     target_device_id: String,
     status: DeviceLinkStatusKind,
     expires_at_unix_seconds: u64,
     room_count: u32,
     active_room_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_descriptor: Option<HttpNipAbSourceDescriptorV1>,
 }
 
 async fn approve_device_link(
@@ -578,7 +596,7 @@ async fn device_link_status(
             .lock()
             .map_err(|_| HostedDeviceError::LockPoisoned)?;
         validate_device_link_request(&input)?;
-        let pending = load_pending_device_link(&state, &user_id, &input.link_session_id)?
+        let pending = load_pending_device_link(&state, &user_id, &input.pairing_session_id)?
             .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
         if pending.target_device_id != input.target_device_id {
             return Err(HostedDeviceError::DeviceLinkNotFound);
@@ -707,22 +725,28 @@ fn approve_device_link_for_user(
         .map_err(|_| HostedDeviceError::LockPoisoned)?;
     validate_device_link_request(&input)?;
 
-    if let Some(pending) = load_pending_device_link(state, user_id, &input.link_session_id)? {
+    if let Some(pending) = load_pending_device_link(state, user_id, &input.pairing_session_id)? {
         if pending.target_device_id != input.target_device_id {
             return Err(HostedDeviceError::DeviceLinkNotFound);
         }
-        return reconcile_device_link(state, user_id, pending);
+        let secrets = open_pairing_secrets(state, user_id, &pending)?;
+        let descriptor = pairing_descriptor(&secrets.source_checkpoint)?;
+        let mut response = reconcile_device_link(state, user_id, pending)?;
+        response.source_descriptor = Some(http_pairing_descriptor(descriptor));
+        return Ok(response);
     }
 
-    let session = get_link_session(state, &input.link_session_id)?
+    let session = get_pairing_session(state, &input.pairing_session_id)?
         .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
     // A session which another account already approved must not become an
     // account-discovery oracle. Only its original per-user pending record may
     // resume it.
-    if session.state != HttpLinkSessionState::Created {
+    if session.state != HttpPairingSessionState::Created {
         return Err(HostedDeviceError::DeviceLinkNotFound);
     }
-    if session.link_session_id != input.link_session_id {
+    if session.pairing_session_id != input.pairing_session_id
+        || session.target_device_id != input.target_device_id
+    {
         return Err(HostedDeviceError::DeviceLinkConflict(
             "link service returned a different session".to_owned(),
         ));
@@ -731,50 +755,60 @@ fn approve_device_link_for_user(
     let runtime = state.runtime_for(user_id)?;
     let identity = runtime.state()?.identity;
     let now = device_link_now(state)?;
-    let expires_at_unix_seconds =
-        now.checked_add(DEVICE_LINK_MAX_TTL_SECONDS)
-            .ok_or_else(|| {
-                HostedDeviceError::InvalidDeviceLink(
-                    "expiry is outside the supported range".to_owned(),
-                )
-            })?;
     let public_url = normalized_link_server_url(&state.config.public_url)?;
-    let encrypted_payload = encrypt_device_link_payload(DeviceLinkEncryptInput {
-        account_secret_hex: identity.account_secret_hex,
-        pairing_public_key: session.pairing_public_key.clone(),
-        link_session_id: input.link_session_id.clone(),
+    let (source, descriptor) =
+        NipAbSourceSession::create(session.target_public_key.clone(), now)
+            .map_err(|_| HostedDeviceError::InvalidDeviceLink("pairing setup failed".to_owned()))?;
+    let payload = FinitePairingPayloadV1 {
+        version: NIP_AB_VERSION,
+        purpose: FINITE_PAIRING_PURPOSE_V1.to_owned(),
+        pairing_session_id: input.pairing_session_id.clone(),
+        account_secret_hex: identity.account_secret_hex.clone(),
+        account_id: identity.account_id.clone(),
         target_device_id: input.target_device_id.clone(),
         server_url: public_url.clone(),
         issued_at_unix_seconds: now,
-        expires_at_unix_seconds,
-    })?;
+        expires_at_unix_seconds: descriptor.expires_at_unix_seconds,
+    };
+    let secrets = HostedPairingSecretsV1 {
+        version: NIP_AB_VERSION,
+        user_id: user_id.to_owned(),
+        pairing_session_id: input.pairing_session_id.clone(),
+        source_checkpoint: source.checkpoint(),
+        payload_json: serde_json::to_string(&payload)?,
+        source_confirmation_event: None,
+        payload_event: None,
+    };
     let digest = Sha256::digest(
         format!(
             "{DEVICE_LINK_CREATED_BY}\0{user_id}\0{}",
-            input.link_session_id
+            input.pairing_session_id
         )
         .as_bytes(),
     );
     let pending = PendingDeviceLinkV1 {
         version: DEVICE_LINK_RECORD_VERSION,
-        link_session_id: input.link_session_id,
+        pairing_session_id: input.pairing_session_id,
         target_device_id: input.target_device_id,
-        pairing_public_key: session.pairing_public_key,
+        target_public_key: session.target_public_key,
+        source_public_key: descriptor.source_public_key.clone(),
         account_id: identity.account_id,
         server_url: public_url,
         issued_at_unix_seconds: now,
-        expires_at_unix_seconds,
-        encrypted_payload,
+        expires_at_unix_seconds: descriptor.expires_at_unix_seconds,
+        sealed_state: seal_pairing_secrets(state, user_id, &secrets)?,
         fanout_id: format!("device-link-{}", &hex::encode(digest)[..40]),
     };
     let pending = persist_pending_device_link(state, user_id, &pending)?;
-    reconcile_device_link(state, user_id, pending)
+    let mut response = reconcile_device_link(state, user_id, pending)?;
+    response.source_descriptor = Some(http_pairing_descriptor(descriptor));
+    Ok(response)
 }
 
 fn reconcile_device_link(
     state: &HostedDeviceState,
     user_id: &str,
-    pending: PendingDeviceLinkV1,
+    mut pending: PendingDeviceLinkV1,
 ) -> Result<DeviceLinkResponse, HostedDeviceError> {
     validate_pending_device_link(state, &pending)?;
     let runtime = state.runtime_for(user_id)?;
@@ -785,7 +819,7 @@ fn reconcile_device_link(
     }
 
     if device_link_now(state)? > pending.expires_at_unix_seconds {
-        let _ = expire_link_session(state, &pending.link_session_id);
+        let _ = expire_pairing_session(state, &pending.pairing_session_id);
         return Ok(device_link_response(
             &pending,
             DeviceLinkStatusKind::Expired,
@@ -794,82 +828,211 @@ fn reconcile_device_link(
         ));
     }
 
-    let mut session = get_link_session(state, &pending.link_session_id)?
+    let session = get_pairing_session(state, &pending.pairing_session_id)?
         .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
-    if session.link_session_id != pending.link_session_id
-        || session.pairing_public_key != pending.pairing_public_key
+    if session.pairing_session_id != pending.pairing_session_id
+        || session.target_device_id != pending.target_device_id
+        || session.target_public_key != pending.target_public_key
     {
         return Err(HostedDeviceError::DeviceLinkConflict(
-            "link session no longer matches the approved Device".to_owned(),
+            "pairing session no longer matches the approved Device".to_owned(),
         ));
     }
-    match session.state {
-        HttpLinkSessionState::Created if session.encrypted_payload.is_some() => {
-            return Err(HostedDeviceError::DeviceLinkConflict(
-                "link session contains an unexpected payload".to_owned(),
-            ));
-        }
-        HttpLinkSessionState::PayloadUploaded
-        | HttpLinkSessionState::Claimed
-        | HttpLinkSessionState::Delivered
-            if session.encrypted_payload.as_deref()
-                != Some(pending.encrypted_payload.as_slice()) =>
-        {
-            return Err(HostedDeviceError::DeviceLinkConflict(
-                "link session payload no longer matches this approval".to_owned(),
-            ));
-        }
-        _ => {}
-    }
-
-    if session.state == HttpLinkSessionState::Created {
-        session = link_service_post(
-            state,
-            "/link-sessions/payload",
-            &UploadLinkPayloadRequest {
-                link_session_id: pending.link_session_id.clone(),
-                encrypted_payload: pending.encrypted_payload.clone(),
-            },
-        )?;
-    }
 
     match session.state {
-        HttpLinkSessionState::Created | HttpLinkSessionState::PayloadUploaded => Ok(
-            device_link_response(&pending, DeviceLinkStatusKind::AwaitingClaim, 0, 0),
-        ),
-        HttpLinkSessionState::Claimed => Ok(device_link_response(
+        HttpPairingSessionState::Created => Ok(device_link_response(
             &pending,
-            DeviceLinkStatusKind::AwaitingKeyPackage,
+            DeviceLinkStatusKind::AwaitingOffer,
             0,
             0,
         )),
-        HttpLinkSessionState::Delivered => {
-            let report = runtime.link_device_and_wait(
-                pending.fanout_id.clone(),
-                pending.target_device_id.clone(),
-            )?;
-            let status = if report.fanout_complete && report.room_count == report.active_room_count
-            {
-                DeviceLinkStatusKind::Ready
-            } else if report.room_count == 0 && !report.fanout_complete {
-                DeviceLinkStatusKind::AwaitingKeyPackage
-            } else {
-                DeviceLinkStatusKind::JoiningRooms
+        HttpPairingSessionState::OfferPublished => {
+            if session.events.len() != 1 {
+                return Err(HostedDeviceError::DeviceLinkConflict(
+                    "pairing offer record is malformed".to_owned(),
+                ));
+            }
+            let mut secrets = open_pairing_secrets(state, user_id, &pending)?;
+            let offer: NostrEvent = serde_json::from_slice(&session.events[0].event)?;
+            let mut source =
+                NipAbSourceSession::restore(&secrets.source_checkpoint, device_link_now(state)?)
+                    .map_err(|_| {
+                        HostedDeviceError::InvalidDeviceLink(
+                            "sealed pairing state could not be restored".to_owned(),
+                        )
+                    })?;
+            source
+                .accept_offer(&offer, device_link_now(state)?)
+                .map_err(|_| {
+                    HostedDeviceError::DeviceLinkConflict(
+                        "pairing offer failed authentication".to_owned(),
+                    )
+                })?;
+            let (confirmation, payload) = match (
+                secrets.source_confirmation_event.as_ref(),
+                secrets.payload_event.as_ref(),
+            ) {
+                (Some(confirmation), Some(payload)) => {
+                    let confirmation: NostrEvent = serde_json::from_slice(confirmation)?;
+                    let payload: NostrEvent = serde_json::from_slice(payload)?;
+                    source
+                        .accept_published_response(
+                            &confirmation,
+                            &payload,
+                            NipAbPayloadType::Custom,
+                            &secrets.payload_json,
+                            device_link_now(state)?,
+                        )
+                        .map_err(|_| {
+                            HostedDeviceError::DeviceLinkConflict(
+                                "sealed pairing response failed authentication".to_owned(),
+                            )
+                        })?;
+                    (confirmation, payload)
+                }
+                (None, None) => {
+                    let confirmation =
+                        source.confirm_sas(device_link_now(state)?).map_err(|_| {
+                            HostedDeviceError::InvalidDeviceLink(
+                                "pairing confirmation failed".to_owned(),
+                            )
+                        })?;
+                    let payload = source
+                        .send_payload(
+                            NipAbPayloadType::Custom,
+                            zeroize::Zeroizing::new(secrets.payload_json.clone()),
+                            device_link_now(state)?,
+                        )
+                        .map_err(|_| {
+                            HostedDeviceError::InvalidDeviceLink(
+                                "pairing payload preparation failed".to_owned(),
+                            )
+                        })?;
+                    secrets.source_confirmation_event = Some(serde_json::to_vec(&confirmation)?);
+                    secrets.payload_event = Some(serde_json::to_vec(&payload)?);
+                    pending.sealed_state = seal_pairing_secrets(state, user_id, &secrets)?;
+                    replace_pending_device_link(state, user_id, &pending)?;
+                    (confirmation, payload)
+                }
+                _ => {
+                    return Err(HostedDeviceError::InvalidDeviceLink(
+                        "sealed pairing response is incomplete".to_owned(),
+                    ));
+                }
             };
-            Ok(device_link_response(
-                &pending,
-                status,
-                report.room_count,
-                report.active_room_count,
-            ))
+            let session: HttpPairingSessionRecord = link_service_post(
+                state,
+                "/pairing-sessions/response",
+                &PublishPairingResponseRequest {
+                    pairing_session_id: pending.pairing_session_id.clone(),
+                    source_confirmation_event: serde_json::to_vec(&confirmation)?,
+                    payload_event: serde_json::to_vec(&payload)?,
+                },
+            )?;
+            if session.state != HttpPairingSessionState::ResponsePublished {
+                return Err(HostedDeviceError::DeviceLinkConflict(
+                    "pairing service did not retain the response".to_owned(),
+                ));
+            }
+            fanout_device_link(&runtime, &pending)
         }
-        HttpLinkSessionState::Expired => Ok(device_link_response(
+        HttpPairingSessionState::ResponsePublished | HttpPairingSessionState::Completed => {
+            verify_published_pairing_response(state, user_id, &pending, &session)?;
+            fanout_device_link(&runtime, &pending)
+        }
+        HttpPairingSessionState::Expired => Ok(device_link_response(
             &pending,
             DeviceLinkStatusKind::Expired,
             0,
             0,
         )),
     }
+}
+
+fn fanout_device_link(
+    runtime: &FiniteChatRuntime,
+    pending: &PendingDeviceLinkV1,
+) -> Result<DeviceLinkResponse, HostedDeviceError> {
+    let report = runtime
+        .link_device_and_wait(pending.fanout_id.clone(), pending.target_device_id.clone())?;
+    let status = if report.fanout_complete && report.room_count == report.active_room_count {
+        DeviceLinkStatusKind::Ready
+    } else if report.room_count == 0 && !report.fanout_complete {
+        DeviceLinkStatusKind::AwaitingKeyPackage
+    } else {
+        DeviceLinkStatusKind::JoiningRooms
+    };
+    Ok(device_link_response(
+        pending,
+        status,
+        report.room_count,
+        report.active_room_count,
+    ))
+}
+
+fn verify_published_pairing_response(
+    state: &HostedDeviceState,
+    user_id: &str,
+    pending: &PendingDeviceLinkV1,
+    session: &HttpPairingSessionRecord,
+) -> Result<(), HostedDeviceError> {
+    if session.events.len() < 3 {
+        return Err(HostedDeviceError::DeviceLinkConflict(
+            "pairing response is incomplete".to_owned(),
+        ));
+    }
+    let secrets = open_pairing_secrets(state, user_id, pending)?;
+    let offer: NostrEvent = serde_json::from_slice(&session.events[0].event)?;
+    let confirmation: NostrEvent = serde_json::from_slice(&session.events[1].event)?;
+    let payload: NostrEvent = serde_json::from_slice(&session.events[2].event)?;
+    if secrets.source_confirmation_event.as_deref() != Some(session.events[1].event.as_slice())
+        || secrets.payload_event.as_deref() != Some(session.events[2].event.as_slice())
+    {
+        return Err(HostedDeviceError::DeviceLinkConflict(
+            "pairing service response differs from the sealed checkpoint".to_owned(),
+        ));
+    }
+    let mut source =
+        NipAbSourceSession::restore(&secrets.source_checkpoint, device_link_now(state)?).map_err(
+            |_| {
+                HostedDeviceError::InvalidDeviceLink(
+                    "sealed pairing state could not be restored".to_owned(),
+                )
+            },
+        )?;
+    let now = device_link_now(state)?;
+    source
+        .accept_offer(&offer, now)
+        .and_then(|_| {
+            source.accept_published_response(
+                &confirmation,
+                &payload,
+                NipAbPayloadType::Custom,
+                &secrets.payload_json,
+                now,
+            )
+        })
+        .map_err(|_| {
+            HostedDeviceError::DeviceLinkConflict(
+                "pairing transcript failed authentication".to_owned(),
+            )
+        })?;
+    if session.state == HttpPairingSessionState::Completed {
+        if session.events.len() != 4 {
+            return Err(HostedDeviceError::DeviceLinkConflict(
+                "pairing completion record is malformed".to_owned(),
+            ));
+        }
+        let complete: NostrEvent = serde_json::from_slice(&session.events[3].event)?;
+        source
+            .accept_complete(&complete, device_link_now(state)?)
+            .map_err(|_| {
+                HostedDeviceError::DeviceLinkConflict(
+                    "pairing completion failed authentication".to_owned(),
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn device_link_response(
@@ -879,12 +1042,13 @@ fn device_link_response(
     active_room_count: u32,
 ) -> DeviceLinkResponse {
     DeviceLinkResponse {
-        link_session_id: pending.link_session_id.clone(),
+        pairing_session_id: pending.pairing_session_id.clone(),
         target_device_id: pending.target_device_id.clone(),
         status,
         expires_at_unix_seconds: pending.expires_at_unix_seconds,
         room_count,
         active_room_count,
+        source_descriptor: None,
     }
 }
 
@@ -893,7 +1057,7 @@ fn validate_device_link_request(input: &DeviceLinkRequest) -> Result<(), HostedD
     // pairing key would be wasteful here, so enforce its public token limits
     // before looking up any server state and let encryption re-check them.
     for (field, value) in [
-        ("link session id", input.link_session_id.as_str()),
+        ("pairing session id", input.pairing_session_id.as_str()),
         ("target Device id", input.target_device_id.as_str()),
     ] {
         if value.is_empty()
@@ -924,22 +1088,22 @@ fn validate_pending_device_link(
         ));
     }
     validate_device_link_request(&DeviceLinkRequest {
-        link_session_id: pending.link_session_id.clone(),
+        pairing_session_id: pending.pairing_session_id.clone(),
         target_device_id: pending.target_device_id.clone(),
     })?;
-    if pending.pairing_public_key.is_empty()
-        || pending.pairing_public_key.len() > 256
+    if pending.target_public_key.len() != 64
+        || pending.source_public_key.len() != 64
         || pending.account_id.is_empty()
         || pending.account_id.len() > 256
-        || pending.encrypted_payload.is_empty()
-        || pending.encrypted_payload.len() > 16 * 1024
+        || pending.sealed_state.is_empty()
+        || pending.sealed_state.len() > 64 * 1024
         || pending.fanout_id.is_empty()
         || pending.fanout_id.len() > 256
         || pending.expires_at_unix_seconds <= pending.issued_at_unix_seconds
         || pending
             .expires_at_unix_seconds
             .saturating_sub(pending.issued_at_unix_seconds)
-            > DEVICE_LINK_MAX_TTL_SECONDS
+            > NIP_AB_SESSION_TTL_SECONDS
         || pending.server_url != normalized_link_server_url(&state.config.public_url)?
     {
         return Err(HostedDeviceError::InvalidDeviceLink(
@@ -954,9 +1118,9 @@ fn persist_pending_device_link(
     user_id: &str,
     pending: &PendingDeviceLinkV1,
 ) -> Result<PendingDeviceLinkV1, HostedDeviceError> {
-    let path = state.device_link_path(user_id, &pending.link_session_id);
+    let path = state.device_link_path(user_id, &pending.pairing_session_id);
     if path.exists() {
-        let existing = load_pending_device_link(state, user_id, &pending.link_session_id)?
+        let existing = load_pending_device_link(state, user_id, &pending.pairing_session_id)?
             .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
         if same_device_link_binding(&existing, pending) {
             return Ok(existing);
@@ -1011,8 +1175,9 @@ fn persist_pending_device_link(
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let _ = fs::remove_file(&temporary);
-                let existing = load_pending_device_link(state, user_id, &pending.link_session_id)?
-                    .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
+                let existing =
+                    load_pending_device_link(state, user_id, &pending.pairing_session_id)?
+                        .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
                 if same_device_link_binding(&existing, pending) {
                     return Ok(existing);
                 }
@@ -1040,11 +1205,133 @@ fn persist_pending_device_link(
     write_result
 }
 
+fn replace_pending_device_link(
+    state: &HostedDeviceState,
+    user_id: &str,
+    pending: &PendingDeviceLinkV1,
+) -> Result<(), HostedDeviceError> {
+    validate_pending_device_link(state, pending)?;
+    let path = state.device_link_path(user_id, &pending.pairing_session_id);
+    let parent = path.parent().ok_or_else(|| {
+        HostedDeviceError::Task("device-link record has no parent directory".to_owned())
+    })?;
+    let encoded = serde_json::to_vec(pending)?;
+    if encoded.len() as u64 > MAX_DEVICE_LINK_RECORD_BYTES {
+        return Err(HostedDeviceError::InvalidDeviceLink(
+            "pending record is too large".to_owned(),
+        ));
+    }
+    let mut entropy = [0_u8; 16];
+    getrandom::fill(&mut entropy)
+        .map_err(|error| HostedDeviceError::Task(format!("pairing nonce failed: {error}")))?;
+    let temporary = parent.join(format!(".replace-{}.tmp", hex::encode(entropy)));
+    let result = (|| -> Result<(), HostedDeviceError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|error| {
+            HostedDeviceError::Task(format!("could not stage pairing record: {error}"))
+        })?;
+        file.write_all(&encoded).map_err(|error| {
+            HostedDeviceError::Task(format!("could not write pairing record: {error}"))
+        })?;
+        file.sync_all().map_err(|error| {
+            HostedDeviceError::Task(format!("could not sync pairing record: {error}"))
+        })?;
+        fs::rename(&temporary, &path).map_err(|error| {
+            HostedDeviceError::Task(format!("could not replace pairing record: {error}"))
+        })?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                HostedDeviceError::Task(format!("could not sync pairing directory: {error}"))
+            })?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn pairing_seal_key(
+    state: &HostedDeviceState,
+    user_id: &str,
+) -> Result<(SecretKey, NostrPublicKey), HostedDeviceError> {
+    let runtime = state.runtime_for(user_id)?;
+    let secret =
+        SecretKey::from_hex(&runtime.state()?.identity.account_secret_hex).map_err(|_| {
+            HostedDeviceError::InvalidDeviceLink("account key material is invalid".to_owned())
+        })?;
+    let public = NostrPublicKey::from_protocol(Keys::new(secret.clone()).public_key());
+    Ok((secret, public))
+}
+
+fn seal_pairing_secrets(
+    state: &HostedDeviceState,
+    user_id: &str,
+    secrets: &HostedPairingSecretsV1,
+) -> Result<String, HostedDeviceError> {
+    let (secret, public) = pairing_seal_key(state, user_id)?;
+    encrypt_nip44(&secret, public, serde_json::to_vec(secrets)?).map_err(|_| {
+        HostedDeviceError::InvalidDeviceLink("pairing checkpoint could not be sealed".to_owned())
+    })
+}
+
+fn open_pairing_secrets(
+    state: &HostedDeviceState,
+    user_id: &str,
+    pending: &PendingDeviceLinkV1,
+) -> Result<HostedPairingSecretsV1, HostedDeviceError> {
+    let (secret, public) = pairing_seal_key(state, user_id)?;
+    let plaintext = decrypt_nip44(&secret, public, &pending.sealed_state).map_err(|_| {
+        HostedDeviceError::InvalidDeviceLink("pairing checkpoint could not be opened".to_owned())
+    })?;
+    let secrets: HostedPairingSecretsV1 = serde_json::from_str(&plaintext)?;
+    if secrets.version != NIP_AB_VERSION
+        || secrets.user_id != user_id
+        || secrets.pairing_session_id != pending.pairing_session_id
+        || secrets.source_checkpoint.expected_target_public_key != pending.target_public_key
+    {
+        return Err(HostedDeviceError::InvalidDeviceLink(
+            "pairing checkpoint binding is invalid".to_owned(),
+        ));
+    }
+    Ok(secrets)
+}
+
+fn pairing_descriptor(
+    checkpoint: &NipAbSourceCheckpointV1,
+) -> Result<NipAbSourceDescriptorV1, HostedDeviceError> {
+    NipAbSourceSession::restore(checkpoint, checkpoint.issued_at_unix_seconds)
+        .map(|source| source.descriptor())
+        .map_err(|_| {
+            HostedDeviceError::InvalidDeviceLink(
+                "pairing checkpoint descriptor is invalid".to_owned(),
+            )
+        })
+}
+
+fn http_pairing_descriptor(descriptor: NipAbSourceDescriptorV1) -> HttpNipAbSourceDescriptorV1 {
+    HttpNipAbSourceDescriptorV1 {
+        version: descriptor.version,
+        source_public_key: descriptor.source_public_key,
+        session_secret_hex: descriptor.session_secret_hex,
+        expires_at_unix_seconds: descriptor.expires_at_unix_seconds,
+    }
+}
+
 fn same_device_link_binding(left: &PendingDeviceLinkV1, right: &PendingDeviceLinkV1) -> bool {
     left.version == right.version
-        && left.link_session_id == right.link_session_id
+        && left.pairing_session_id == right.pairing_session_id
         && left.target_device_id == right.target_device_id
-        && left.pairing_public_key == right.pairing_public_key
+        && left.target_public_key == right.target_public_key
+        && left.source_public_key == right.source_public_key
         && left.account_id == right.account_id
         && left.server_url == right.server_url
 }
@@ -1052,9 +1339,9 @@ fn same_device_link_binding(left: &PendingDeviceLinkV1, right: &PendingDeviceLin
 fn load_pending_device_link(
     state: &HostedDeviceState,
     user_id: &str,
-    link_session_id: &str,
+    pairing_session_id: &str,
 ) -> Result<Option<PendingDeviceLinkV1>, HostedDeviceError> {
-    let path = state.device_link_path(user_id, link_session_id);
+    let path = state.device_link_path(user_id, pairing_session_id);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1073,7 +1360,7 @@ fn load_pending_device_link(
         HostedDeviceError::Task(format!("could not read device-link record: {error}"))
     })?;
     let pending: PendingDeviceLinkV1 = serde_json::from_slice(&encoded)?;
-    if pending.link_session_id != link_session_id {
+    if pending.pairing_session_id != pairing_session_id {
         return Err(HostedDeviceError::InvalidDeviceLink(
             "pending record is bound to another session".to_owned(),
         ));
@@ -1082,28 +1369,28 @@ fn load_pending_device_link(
     Ok(Some(pending))
 }
 
-fn get_link_session(
+fn get_pairing_session(
     state: &HostedDeviceState,
-    link_session_id: &str,
-) -> Result<Option<HttpLinkSessionRecord>, HostedDeviceError> {
+    pairing_session_id: &str,
+) -> Result<Option<HttpPairingSessionRecord>, HostedDeviceError> {
     link_service_post(
         state,
-        "/link-sessions/get",
-        &GetLinkSessionRequest {
-            link_session_id: link_session_id.to_owned(),
+        "/pairing-sessions/get",
+        &GetPairingSessionRequest {
+            pairing_session_id: pairing_session_id.to_owned(),
         },
     )
 }
 
-fn expire_link_session(
+fn expire_pairing_session(
     state: &HostedDeviceState,
-    link_session_id: &str,
-) -> Result<ExpireLinkSessionResponse, HostedDeviceError> {
+    pairing_session_id: &str,
+) -> Result<ExpirePairingSessionResponse, HostedDeviceError> {
     link_service_post(
         state,
-        "/link-sessions/expire",
-        &ExpireLinkSessionRequest {
-            link_session_id: link_session_id.to_owned(),
+        "/pairing-sessions/expire",
+        &ExpirePairingSessionRequest {
+            pairing_session_id: pairing_session_id.to_owned(),
         },
     )
 }

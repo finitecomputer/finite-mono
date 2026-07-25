@@ -508,12 +508,18 @@ function writeDesktopSettings(settings) {
 }
 
 function pendingDeviceLink() {
-  const candidate = readDesktopSettings().pendingDeviceLink;
+  const settings = readDesktopSettings();
+  const candidate = settings.pendingDeviceLink;
   if (!candidate) return null;
   try {
     return parseDeviceLinkPublicRequest(candidate);
   } catch {
-    throw new Error("Finite Chat desktop settings contain an invalid pending Device link");
+    // Pre-release link sessions cannot be resumed by the NIP-AB hard cut.
+    // Discard only the bounded pending rendezvous marker; cryptographic state,
+    // the WorkOS session, and any active account secret remain untouched.
+    delete settings.pendingDeviceLink;
+    writeDesktopSettings(settings);
+    return null;
   }
 }
 
@@ -529,7 +535,7 @@ function clearPendingDeviceLink(expected) {
   const current = parseDeviceLinkPublicRequest(settings.pendingDeviceLink);
   const requested = parseDeviceLinkPublicRequest(expected);
   if (
-    current.link_session_id !== requested.link_session_id
+    current.pairing_session_id !== requested.pairing_session_id
     || current.target_device_id !== requested.target_device_id
   ) {
     return;
@@ -1066,7 +1072,12 @@ async function createAndApproveDeviceLink(generation) {
     deviceId: daemonDeviceId(),
     cwd: app.isPackaged ? path.dirname(binaryPath) : repoRoot(),
     storeAccountSecret: async (accountSecret) => writeProvisionalAccountSecret(accountSecret),
-    promoteAccountSecret: async () => promoteProvisionalAccountSecret(),
+    promoteAccountSecret: async (expectedSecret) => {
+      promoteProvisionalAccountSecret();
+      if (readStoredAccountSecret() !== expectedSecret) {
+        throw new Error("Secure storage read-back did not match");
+      }
+    },
   });
   activeDeviceLink = link;
   try {
@@ -1080,8 +1091,15 @@ async function createAndApproveDeviceLink(generation) {
     const request = parseDeviceLinkPublicRequest(ready);
     storePendingDeviceLink(request);
     const approved = await dashboardDeviceLinkRequest("/api/device-links/approve", request);
+    if (!approved.source_descriptor) {
+      throw new Error("Finite Chat pairing approval omitted its source descriptor");
+    }
+    link.acceptSourceDescriptor(approved.source_descriptor);
     assertLocalDeviceGeneration(generation);
-    await link.completion;
+    await Promise.all([
+      link.completion,
+      waitForDeviceLinkReady(request, approved, generation),
+    ]);
     assertLocalDeviceGeneration(generation);
     return { request, approved };
   } catch (error) {

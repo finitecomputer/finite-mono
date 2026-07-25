@@ -18,6 +18,7 @@ finitechat-transport.workspace = true
 finitechat-http = { path = "../finitechat-http" }
 finitechat-proto = { path = "../finitechat-proto" }
 futures-util.workspace = true
+nostr.workspace = true
 p256 = "0.13.2"
 reqwest.workspace = true
 rusqlite.workspace = true

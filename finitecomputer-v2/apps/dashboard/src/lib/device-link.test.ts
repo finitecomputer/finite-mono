@@ -18,11 +18,11 @@ const ACCOUNT_ID = "a".repeat(64);
 test("device-link requests bind one exact session to one distinct Device", () => {
   assert.deepEqual(
     parseDeviceLinkRequest({
-      link_session_id: "link-alpha-01",
+      pairing_session_id: "pairing-alpha-01",
       target_device_id: "electron-paul-01",
     }),
     {
-      link_session_id: "link-alpha-01",
+      pairing_session_id: "pairing-alpha-01",
       target_device_id: "electron-paul-01",
     }
   );
@@ -32,15 +32,15 @@ test("device-link requests bind one exact session to one distinct Device", () =>
     [],
     {},
     {
-      link_session_id: "link-alpha",
+      pairing_session_id: "pairing-alpha",
       target_device_id: "electron-alpha",
       approval_secret: "do-not-accept",
     },
-    { link_session_id: " link-alpha", target_device_id: "electron-alpha" },
-    { link_session_id: "link-alpha", target_device_id: "hosted-web" },
-    { link_session_id: "link-alpha\n", target_device_id: "electron-alpha" },
-    { link_session_id: "link-alpha", target_device_id: `electron\u200b-alpha` },
-    { link_session_id: "link-alpha", target_device_id: "é".repeat(129) },
+    { pairing_session_id: " pairing-alpha", target_device_id: "electron-alpha" },
+    { pairing_session_id: "pairing-alpha", target_device_id: "hosted-web" },
+    { pairing_session_id: "pairing-alpha\n", target_device_id: "electron-alpha" },
+    { pairing_session_id: "pairing-alpha", target_device_id: `electron\u200b-alpha` },
+    { pairing_session_id: "pairing-alpha", target_device_id: "é".repeat(129) },
   ]) {
     assert.throws(
       () => parseDeviceLinkRequest(value),
@@ -54,12 +54,12 @@ test("device-link JSON parsing enforces media type and actual byte limits", asyn
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({
-      link_session_id: "link-alpha-01",
+      pairing_session_id: "pairing-alpha-01",
       target_device_id: "electron-paul-01",
     }),
   });
   assert.deepEqual(await parseDeviceLinkJsonRequest(valid), {
-    link_session_id: "link-alpha-01",
+    pairing_session_id: "pairing-alpha-01",
     target_device_id: "electron-paul-01",
   });
 

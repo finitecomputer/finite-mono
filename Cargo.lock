@@ -1387,6 +1387,7 @@ dependencies = [
  "finitechat-server",
  "getrandom 0.3.4",
  "hex",
+ "hkdf",
  "hypernote-mdx",
  "nostr",
  "reqwest",
@@ -1400,6 +1401,7 @@ dependencies = [
  "tokio",
  "uniffi",
  "workos",
+ "zeroize",
 ]
 
 [[package]]
@@ -1415,6 +1417,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "http-body-util",
+ "nostr",
  "reqwest",
  "serde",
  "serde_json",
@@ -1422,6 +1425,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
+ "zeroize",
 ]
 
 [[package]]
@@ -1490,6 +1494,7 @@ dependencies = [
  "tokio",
  "tower",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]
@@ -1569,6 +1574,7 @@ dependencies = [
  "finitechat-proto 0.1.0",
  "finitechat-transport",
  "futures-util",
+ "nostr",
  "p256",
  "reqwest",
  "rusqlite",
