@@ -4,6 +4,11 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+enum ComposerFocusTarget: Hashable {
+    case home
+    case chat(String)
+}
+
 struct Composer: View {
     @Binding var text: String
     let replyTarget: ChatMessage?
@@ -12,7 +17,8 @@ struct Composer: View {
     @Binding var stagedAttachments: [StagedComposerAttachment]
     @Binding var isPhotoPickerPresented: Bool
     @Binding var selectedPhotoItems: [PhotosPickerItem]
-    var isInputFocused: FocusState<Bool>.Binding
+    var focusedComposer: FocusState<ComposerFocusTarget?>.Binding
+    let focusTarget: ComposerFocusTarget
     let onCancelReply: () -> Void
     let onSend: () -> Void
     var placeholder = "Message"
@@ -110,7 +116,7 @@ struct Composer: View {
         )
         .textFieldStyle(.plain)
         .lineLimit(1 ... (isExpanded ? 6 : 1))
-        .focused(isInputFocused)
+        .focused(focusedComposer, equals: focusTarget)
         .onChange(of: text) { _, _ in
             FinitePerformance.recordComposerEdit()
         }
@@ -232,7 +238,7 @@ struct Composer: View {
     private var isExpanded: Bool {
         ComposerPresentation.isExpanded(
             collapsesWhenIdle: collapsesWhenIdle,
-            isFocused: isInputFocused.wrappedValue,
+            isFocused: focusedComposer.wrappedValue == focusTarget,
             hasText: !text.isEmpty,
             hasReply: replyTarget != nil,
             hasAttachments: !stagedAttachments.isEmpty
@@ -250,7 +256,8 @@ struct RoomComposer: View {
     @Binding var stagedAttachments: [StagedComposerAttachment]
     @Binding var isPhotoPickerPresented: Bool
     @Binding var selectedPhotoItems: [PhotosPickerItem]
-    var isInputFocused: FocusState<Bool>.Binding
+    var focusedComposer: FocusState<ComposerFocusTarget?>.Binding
+    let focusTarget: ComposerFocusTarget
     let onCancelReply: () -> Void
     let onSend: (String, @escaping (Bool) -> Void) -> Void
     let onTypingIntentChange: (Bool) -> Void
@@ -268,7 +275,8 @@ struct RoomComposer: View {
         stagedAttachments: Binding<[StagedComposerAttachment]>,
         isPhotoPickerPresented: Binding<Bool>,
         selectedPhotoItems: Binding<[PhotosPickerItem]>,
-        isInputFocused: FocusState<Bool>.Binding,
+        focusedComposer: FocusState<ComposerFocusTarget?>.Binding,
+        focusTarget: ComposerFocusTarget,
         onCancelReply: @escaping () -> Void,
         onSend: @escaping (String, @escaping (Bool) -> Void) -> Void,
         onTypingIntentChange: @escaping (Bool) -> Void,
@@ -283,7 +291,8 @@ struct RoomComposer: View {
         _stagedAttachments = stagedAttachments
         _isPhotoPickerPresented = isPhotoPickerPresented
         _selectedPhotoItems = selectedPhotoItems
-        self.isInputFocused = isInputFocused
+        self.focusedComposer = focusedComposer
+        self.focusTarget = focusTarget
         self.onCancelReply = onCancelReply
         self.onSend = onSend
         self.onTypingIntentChange = onTypingIntentChange
@@ -303,7 +312,8 @@ struct RoomComposer: View {
             stagedAttachments: $stagedAttachments,
             isPhotoPickerPresented: $isPhotoPickerPresented,
             selectedPhotoItems: $selectedPhotoItems,
-            isInputFocused: isInputFocused,
+            focusedComposer: focusedComposer,
+            focusTarget: focusTarget,
             onCancelReply: onCancelReply,
             onSend: send,
             outerHorizontalPadding: outerHorizontalPadding,
@@ -345,7 +355,7 @@ enum ComposerLaunchAction: Hashable {
 }
 
 struct NewChatComposer: View {
-    var isInputFocused: FocusState<Bool>.Binding
+    var focusedComposer: FocusState<ComposerFocusTarget?>.Binding
     let placeholder: String
     let onStartChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
     var onDraftPresenceChange: (Bool) -> Void = { _ in }
@@ -366,7 +376,8 @@ struct NewChatComposer: View {
             stagedAttachments: $stagedAttachments,
             isPhotoPickerPresented: $isPhotoPickerPresented,
             selectedPhotoItems: $selectedPhotoItems,
-            isInputFocused: isInputFocused,
+            focusedComposer: focusedComposer,
+            focusTarget: .home,
             onCancelReply: {},
             onSend: {
                 beginChat(launchAction: nil)

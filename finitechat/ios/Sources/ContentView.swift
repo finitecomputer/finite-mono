@@ -12,6 +12,7 @@ struct RoomThreadView: View {
     let topicID: String
     let chatID: String
     let composerLaunch: ComposerLaunch?
+    var focusedComposer: FocusState<ComposerFocusTarget?>.Binding
     let openDrawer: () -> Void
     @State private var followsBottom = true
     @State private var importingAttachment = false
@@ -20,7 +21,6 @@ struct RoomThreadView: View {
     @State private var focusedMessageFrame: CGRect = .zero
     @State private var focusedActionsVisible = false
     @State private var reactionPickerContext: ReactionPickerContext?
-    @FocusState private var composerFocused: Bool
     @State private var imagePreviewSelection: ChatImagePreviewSelection?
     @State private var videoPreviewItem: ChatAttachmentPreviewItem?
     @State private var documentPreviewItem: ChatAttachmentPreviewItem?
@@ -39,6 +39,7 @@ struct RoomThreadView: View {
         topicID: String,
         chatID: String,
         composerLaunch: ComposerLaunch? = nil,
+        focusedComposer: FocusState<ComposerFocusTarget?>.Binding,
         openDrawer: @escaping () -> Void
     ) {
         self.model = model
@@ -46,6 +47,7 @@ struct RoomThreadView: View {
         self.topicID = topicID
         self.chatID = chatID
         self.composerLaunch = composerLaunch
+        self.focusedComposer = focusedComposer
         self.openDrawer = openDrawer
     }
 
@@ -87,6 +89,10 @@ struct RoomThreadView: View {
         projection.rows
     }
 
+    private var composerFocusTarget: ComposerFocusTarget {
+        .chat(chatID)
+    }
+
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
@@ -119,7 +125,7 @@ struct RoomThreadView: View {
                     },
                     onReply: {
                         replyDraftMessage = focusedMessage
-                        composerFocused = true
+                        focusedComposer.wrappedValue = composerFocusTarget
                         dismissFocusedMessage()
                     },
                     onRetry: {
@@ -199,7 +205,7 @@ struct RoomThreadView: View {
             FiniteSiteBrowserView(url: item.url, identity: model.nostrIdentity)
         }
         .onDisappear {
-            composerFocused = false
+            dismissComposerFocus()
             model.setTyping(roomID: roomID, isTyping: false)
             dismissFocusedMessage(animated: false)
             voiceRecorder.cancelRecording()
@@ -332,7 +338,8 @@ struct RoomThreadView: View {
                 stagedAttachments: $stagedAttachments,
                 isPhotoPickerPresented: $showPhotoPicker,
                 selectedPhotoItems: $selectedPhotoItems,
-                isInputFocused: $composerFocused,
+                focusedComposer: focusedComposer,
+                focusTarget: composerFocusTarget,
                 onCancelReply: {
                     replyDraftMessage = nil
                 },
@@ -397,7 +404,7 @@ struct RoomThreadView: View {
     }
 
     private func presentFocusedMessage(_ message: ChatMessage, frame: CGRect) {
-        composerFocused = false
+        dismissComposerFocus()
         focusedMessageFrame = frame
         withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
             focusedMessage = message
@@ -435,6 +442,11 @@ struct RoomThreadView: View {
     private func updateTypingIntent(_ isTyping: Bool) {
         guard room?.state == .connected else { return }
         model.setTyping(roomID: roomID, isTyping: isTyping)
+    }
+
+    private func dismissComposerFocus() {
+        guard focusedComposer.wrappedValue == composerFocusTarget else { return }
+        focusedComposer.wrappedValue = nil
     }
 
     private func markRoomReadIfNeeded() {
@@ -488,7 +500,7 @@ struct RoomThreadView: View {
 
     private func startVoiceRecording() {
         guard voiceRecorder.state == nil else { return }
-        composerFocused = false
+        dismissComposerFocus()
         Task {
             do {
                 try await voiceRecorder.startRecording()

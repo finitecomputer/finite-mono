@@ -122,6 +122,7 @@ struct ContentView: View {
     @State private var showsSettings = false
     @State private var showsAgentPicker = false
     @State private var pendingHomeSubmission: PendingHomeSubmission?
+    @FocusState private var focusedComposer: ComposerFocusTarget?
 
     var body: some View {
         Group {
@@ -152,6 +153,7 @@ struct ContentView: View {
             FocusedHomeView(
                 agentName: model.pairedAgent?.displayName,
                 recentChats: recentChats,
+                focusedComposer: $focusedComposer,
                 startChat: startHomeChat,
                 openChat: open,
                 chooseAgent: {
@@ -170,6 +172,7 @@ struct ContentView: View {
                     topicID: destination.topicID,
                     chatID: destination.chatID,
                     composerLaunch: destination.composerLaunch,
+                    focusedComposer: $focusedComposer,
                     openDrawer: presentDrawer
                 )
             }
@@ -446,6 +449,7 @@ struct ContentView: View {
     }
 
     private func startNewChatFromDrawer() {
+        focusedComposer = nil
         path.removeAll()
         dismissDrawer()
     }
@@ -592,10 +596,10 @@ struct FocusedHomeView: View {
     @Environment(\.finiteTokens) private var tokens
     let agentName: String?
     let recentChats: [ChatDestination]
+    var focusedComposer: FocusState<ComposerFocusTarget?>.Binding
     let startChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
     let openChat: (ChatDestination) -> Void
     let chooseAgent: () -> Void
-    @FocusState private var isComposerFocused: Bool
     @State private var hasComposerDraft = false
 
     var body: some View {
@@ -650,7 +654,7 @@ struct FocusedHomeView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if agentName != nil {
                 NewChatComposer(
-                    isInputFocused: $isComposerFocused,
+                    focusedComposer: focusedComposer,
                     placeholder: "What do you want to work on?",
                     onStartChat: startChat,
                     onDraftPresenceChange: { hasComposerDraft = $0 },
@@ -1371,40 +1375,38 @@ private enum FocusedPreviewFixtures {
     ]
 }
 
-#Preview("Home — paired") {
-    NavigationStack {
-        FocusedHomeView(
-            agentName: "Ada",
-            recentChats: FocusedPreviewFixtures.recent,
-            startChat: { _, _, completion in completion(true) },
-            openChat: { _ in },
-            chooseAgent: {}
-        )
+private struct FocusedHomePreview: View {
+    let agentName: String?
+    let recentChats: [ChatDestination]
+    @FocusState private var focusedComposer: ComposerFocusTarget?
+
+    var body: some View {
+        NavigationStack {
+            FocusedHomeView(
+                agentName: agentName,
+                recentChats: recentChats,
+                focusedComposer: $focusedComposer,
+                startChat: { _, _, completion in completion(true) },
+                openChat: { _ in },
+                chooseAgent: {}
+            )
+        }
     }
+}
+
+#Preview("Home — paired") {
+    FocusedHomePreview(
+        agentName: "Ada",
+        recentChats: FocusedPreviewFixtures.recent
+    )
 }
 
 #Preview("Home — first run") {
-    NavigationStack {
-        FocusedHomeView(
-            agentName: nil,
-            recentChats: [],
-            startChat: { _, _, completion in completion(true) },
-            openChat: { _ in },
-            chooseAgent: {}
-        )
-    }
+    FocusedHomePreview(agentName: nil, recentChats: [])
 }
 
 #Preview("Home — paired, no recents") {
-    NavigationStack {
-        FocusedHomeView(
-            agentName: "Ada",
-            recentChats: [],
-            startChat: { _, _, completion in completion(true) },
-            openChat: { _ in },
-            chooseAgent: {}
-        )
-    }
+    FocusedHomePreview(agentName: "Ada", recentChats: [])
 }
 
 #Preview("Chat drawer") {
