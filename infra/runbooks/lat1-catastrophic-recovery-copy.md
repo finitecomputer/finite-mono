@@ -46,24 +46,27 @@ defense in depth and must not replace the coordinated snapshot or `pg_dump`.
 Accessing the remote Borg repository requires all four of:
 
 - the exact rsync.net repository endpoint;
-- the SSH transport private key and pinned `known_hosts`;
+- an independently held SSH authentication credential and pinned `known_hosts`;
 - the Borg passphrase;
 - the exported Borg repokey.
 
-The private SSH key must be escrowed outside finite-lat-1 before the host is
-destroyed. Archiving that key inside the repository is useful redundancy but
-is circular by itself. Store the transport bundle and Borg recovery material
-in an encrypted operator-controlled location with an independent unlock path.
-Never commit values, fingerprints, or password-derived hashes.
+The production private SSH key should be escrowed outside finite-lat-1 before
+the host is destroyed. A separately held account password is also a valid
+break-glass transport credential. Archiving either credential inside the
+repository is useful redundancy but is circular by itself. Store the transport
+credential, pinned host identity, and Borg recovery material in an encrypted
+operator-controlled location with an independent unlock path. Never commit
+values, fingerprints, or password-derived hashes.
 
 As of the 2026-07-25 read-only audit, the operator Mac has mode-0600 copies of
-the lat1 Borg passphrase and exported repokey. The operator also attests that
-the rsync.net account password is saved locally and permits an independent SSH
-login for recovery work. That password path is the off-host transport fallback;
-the Mac's ordinary SSH identities still cannot authenticate and no independent
-local copy of the noninteractive repository transport key has been proved.
-Exercise a Borg repository listing through the password-authenticated Mac path
-before destructive host work; the attestation alone is not a restore drill.
+the lat1 Borg passphrase and exported repokey. The operator then proved an
+interactive, password-authenticated SSH login from the Mac to the rsync.net
+account and listed the account root containing the `finitecomputer` directory.
+That closes independent transport access. The Mac's ordinary SSH identities
+still cannot authenticate and no independent local copy of the noninteractive
+repository transport key has been proved. A Borg repository listing using the
+independently held passphrase and repokey, followed by an empty-target restore,
+remain separate recovery proofs.
 
 ## Pre-RAID creation gate
 
