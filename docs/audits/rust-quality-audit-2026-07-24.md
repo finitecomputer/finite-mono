@@ -345,6 +345,17 @@ Items 1 and 2 are spent. A further 25% is not available from item 5, which
 removes nothing. Item 3 is the only place a large number could still be
 hiding, and it should be measured before it is promised.
 
+## Observed, not caused: one timing-sensitive test
+
+`kata::tests::kata_upgrade_retry_recovers_crash_after_canonical_moved_to_rollback`
+in `finite-saas-runner` failed once in roughly six full-workspace runs and
+passed 6/6 in isolation. `finite-saas-runner` is untouched by this work (empty
+diff against `origin/main`), the test uses no Core store, and its launcher
+polls readiness against `readiness_timeout` with `Instant::elapsed`. It is a
+pre-existing timing sensitivity that shows up when a full parallel run
+saturates the machine, not a regression from these changes. Worth a deflake
+before it erodes trust in CI.
+
 ## Method note
 
 Two heuristics were tried and abandoned during this work; both are recorded so
