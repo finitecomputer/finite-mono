@@ -57,94 +57,142 @@ const DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS: i64 = 100_000_000;
 const DEFAULT_FINITE_PRIVATE_WEEKLY_LIMIT_UNITS: Option<i64> = None;
 const FINITE_PRIVATE_WEEKLY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BillingClass {
-    Grandfathered,
-    Sponsored,
-    Standard,
+/// Declare an enum together with the one wire string for each variant.
+///
+/// The string is written once and drives serde, `as_str`, and the `parse_*`
+/// function, so a new variant cannot encode one way in the JSON API and another
+/// in its database column. Those three used to be separate hand-written
+/// surfaces with nothing forcing them to agree.
+macro_rules! wire_enum {
+    (
+        $(#[doc = $doc:literal])*
+        $name:ident { $($variant:ident => $wire:literal),+ $(,)? }
+        parse: $parse:ident
+    ) => {
+        $(#[doc = $doc])*
+        #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+        pub enum $name {
+            $(
+                #[serde(rename = $wire)]
+                $variant,
+            )+
+        }
+
+        impl $name {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire,)+
+                }
+            }
+        }
+
+        pub fn $parse(value: &str) -> Option<$name> {
+            match value {
+                $($wire => Some($name::$variant),)+
+                _ => None,
+            }
+        }
+    };
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BillingSubscriptionStatus {
-    Incomplete,
-    IncompleteExpired,
-    Trialing,
-    Active,
-    PastDue,
-    Canceled,
-    Unpaid,
-    Paused,
+wire_enum! {
+    BillingClass {
+    Grandfathered => "grandfathered",
+    Sponsored => "sponsored",
+    Standard => "standard",
+    }
+    parse: parse_billing_class
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ImportCandidateStatus {
-    Pending,
-    Claimed,
-    AdminReview,
+wire_enum! {
+    BillingSubscriptionStatus {
+    Incomplete => "incomplete",
+    IncompleteExpired => "incomplete_expired",
+    Trialing => "trialing",
+    Active => "active",
+    PastDue => "past_due",
+    Canceled => "canceled",
+    Unpaid => "unpaid",
+    Paused => "paused",
+    }
+    parse: parse_billing_subscription_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum UserLinkStatus {
-    Pending,
-    Linked,
+wire_enum! {
+    ImportCandidateStatus {
+    Pending => "pending",
+    Claimed => "claimed",
+    AdminReview => "admin_review",
+    }
+    parse: parse_import_candidate_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectMembershipRole {
-    Owner,
-    Admin,
-    Member,
+wire_enum! {
+    UserLinkStatus {
+    Pending => "pending",
+    Linked => "linked",
+    }
+    parse: parse_user_link_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeSummaryStatus {
-    Online,
-    Offline,
-    Stale,
-    Unknown,
+wire_enum! {
+    ProjectMembershipRole {
+    Owner => "owner",
+    Admin => "admin",
+    Member => "member",
+    }
+    parse: parse_project_membership_role
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeArtifactKind {
-    OciImage,
+wire_enum! {
+    RuntimeSummaryStatus {
+    Online => "online",
+    Offline => "offline",
+    Stale => "stale",
+    Unknown => "unknown",
+    }
+    parse: parse_runtime_summary_status
 }
 
+wire_enum! {
+    RuntimeArtifactKind {
+    OciImage => "oci_image",
+    }
+    parse: parse_runtime_artifact_kind
+}
+
+wire_enum! {
 /// Customer-facing hosting promise. Provider placement remains a separate,
 /// Core-owned fact and is never inferred from BillingClass.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum HostingTier {
-    Standard,
-    Confidential,
+    HostingTier {
+    Standard => "standard",
+    Confidential => "confidential",
+    }
+    parse: parse_hosting_tier
 }
 
+wire_enum! {
 /// Provider-neutral minimum compute shape. Runner adapters translate this
 /// closed value to a provider-specific size and verify the returned capacity.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeResourceClass {
-    Vcpu4Memory8Gib,
-    Vcpu2Memory4Gib,
+    RuntimeResourceClass {
+    Vcpu4Memory8Gib => "vcpu4_memory8_gib",
+    Vcpu2Memory4Gib => "vcpu2_memory4_gib",
+    }
+    parse: parse_runtime_resource_class
 }
 
+wire_enum! {
 /// Product placement choice stored with an agent creation request. Provider
 /// vocabulary stops at the runner adapter; feature behavior does not branch on
 /// this value.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerClass {
-    LocalDocker,
-    AppleContainer,
-    Kata,
-    Phala,
-    Enclavia,
+    RunnerClass {
+    LocalDocker => "local_docker",
+    AppleContainer => "apple_container",
+    Kata => "kata",
+    Phala => "phala",
+    Enclavia => "enclavia",
+    }
+    parse: parse_runner_class
 }
 
 /// Immutable placement resolved by Core. Replacement and recovery copy this
@@ -377,33 +425,36 @@ impl RuntimeCapabilitiesEnvelope {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeControlKind {
-    Restart,
-    RecoverKnownGoodChatRuntime,
-    Upgrade,
-    Stop,
-    Destroy,
+wire_enum! {
+    RuntimeControlKind {
+    Restart => "restart",
+    RecoverKnownGoodChatRuntime => "recover_known_good_chat_runtime",
+    Upgrade => "upgrade",
+    Stop => "stop",
+    Destroy => "destroy",
+    }
+    parse: parse_runtime_control_kind
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeControlRequestStatus {
-    Requested,
-    Running,
-    Succeeded,
-    Failed,
+wire_enum! {
+    RuntimeControlRequestStatus {
+    Requested => "requested",
+    Running => "running",
+    Succeeded => "succeeded",
+    Failed => "failed",
+    }
+    parse: parse_runtime_control_request_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentCreationRequestStatus {
-    Requested,
-    Launching,
-    Running,
-    Failed,
-    Cancelled,
+wire_enum! {
+    AgentCreationRequestStatus {
+    Requested => "requested",
+    Launching => "launching",
+    Running => "running",
+    Failed => "failed",
+    Cancelled => "cancelled",
+    }
+    parse: parse_agent_creation_request_status
 }
 
 /// Structured detail captured from a failed store operation. The full detail
@@ -1097,18 +1148,20 @@ pub struct UpsertRuntimeArtifactInput {
     pub now: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FinitePrivateGrantStatus {
-    Active,
-    Revoked,
+wire_enum! {
+    FinitePrivateGrantStatus {
+    Active => "active",
+    Revoked => "revoked",
+    }
+    parse: parse_finite_private_grant_status
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FinitePrivateApiKeyStatus {
-    Active,
-    Revoked,
+wire_enum! {
+    FinitePrivateApiKeyStatus {
+    Active => "active",
+    Revoked => "revoked",
+    }
+    parse: parse_finite_private_api_key_status
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1119,11 +1172,12 @@ pub enum FinitePrivateReservationStatus {
     Denied,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FinitePrivateSettlementKind {
-    Actual,
-    Estimate,
+wire_enum! {
+    FinitePrivateSettlementKind {
+    Actual => "actual",
+    Estimate => "estimate",
+    }
+    parse: parse_finite_private_settlement_kind
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2006,30 +2060,7 @@ pub struct CancelAgentCreationRequestInput {
     pub now: Option<String>,
 }
 
-impl BillingClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Grandfathered => "grandfathered",
-            Self::Sponsored => "sponsored",
-            Self::Standard => "standard",
-        }
-    }
-}
-
 impl BillingSubscriptionStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Incomplete => "incomplete",
-            Self::IncompleteExpired => "incomplete_expired",
-            Self::Trialing => "trialing",
-            Self::Active => "active",
-            Self::PastDue => "past_due",
-            Self::Canceled => "canceled",
-            Self::Unpaid => "unpaid",
-            Self::Paused => "paused",
-        }
-    }
-
     pub fn can_create_agent(self) -> bool {
         matches!(self, Self::Active | Self::Trialing)
     }
@@ -2048,143 +2079,12 @@ fn should_replace_stripe_subscription(
     }
 }
 
-impl ImportCandidateStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Claimed => "claimed",
-            Self::AdminReview => "admin_review",
-        }
-    }
-}
-
-impl UserLinkStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Linked => "linked",
-        }
-    }
-}
-
-impl ProjectMembershipRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Owner => "owner",
-            Self::Admin => "admin",
-            Self::Member => "member",
-        }
-    }
-}
-
-impl RuntimeSummaryStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Online => "online",
-            Self::Offline => "offline",
-            Self::Stale => "stale",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-impl RuntimeArtifactKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OciImage => "oci_image",
-        }
-    }
-}
-
 impl std::str::FromStr for RuntimeArtifactKind {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         parse_runtime_artifact_kind(value)
             .ok_or_else(|| format!("invalid runtime artifact kind {value}"))
-    }
-}
-
-impl RuntimeControlKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Restart => "restart",
-            Self::RecoverKnownGoodChatRuntime => "recover_known_good_chat_runtime",
-            Self::Upgrade => "upgrade",
-            Self::Stop => "stop",
-            Self::Destroy => "destroy",
-        }
-    }
-}
-
-impl RuntimeControlRequestStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Requested => "requested",
-            Self::Running => "running",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl RunnerClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LocalDocker => "local_docker",
-            Self::AppleContainer => "apple_container",
-            Self::Kata => "kata",
-            Self::Phala => "phala",
-            Self::Enclavia => "enclavia",
-        }
-    }
-}
-
-impl HostingTier {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::Confidential => "confidential",
-        }
-    }
-}
-
-impl RuntimeResourceClass {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Vcpu4Memory8Gib => "vcpu4_memory8_gib",
-            Self::Vcpu2Memory4Gib => "vcpu2_memory4_gib",
-        }
-    }
-}
-
-impl AgentCreationRequestStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Requested => "requested",
-            Self::Launching => "launching",
-            Self::Running => "running",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-impl FinitePrivateGrantStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Revoked => "revoked",
-        }
-    }
-}
-
-impl FinitePrivateApiKeyStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Revoked => "revoked",
-        }
     }
 }
 
@@ -2198,156 +2098,6 @@ impl FinitePrivateReservationStatus {
     }
 }
 
-impl FinitePrivateSettlementKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Actual => "actual",
-            Self::Estimate => "estimate",
-        }
-    }
-}
-
-pub fn parse_runtime_artifact_kind(value: &str) -> Option<RuntimeArtifactKind> {
-    match value {
-        "oci_image" => Some(RuntimeArtifactKind::OciImage),
-        _ => None,
-    }
-}
-
-pub fn parse_runner_class(value: &str) -> Option<RunnerClass> {
-    match value {
-        "local_docker" => Some(RunnerClass::LocalDocker),
-        "apple_container" => Some(RunnerClass::AppleContainer),
-        "kata" => Some(RunnerClass::Kata),
-        "phala" => Some(RunnerClass::Phala),
-        "enclavia" => Some(RunnerClass::Enclavia),
-        _ => None,
-    }
-}
-
-pub fn parse_hosting_tier(value: &str) -> Option<HostingTier> {
-    match value {
-        "standard" => Some(HostingTier::Standard),
-        "confidential" => Some(HostingTier::Confidential),
-        _ => None,
-    }
-}
-
-pub fn parse_runtime_resource_class(value: &str) -> Option<RuntimeResourceClass> {
-    match value {
-        "vcpu4_memory8_gib" => Some(RuntimeResourceClass::Vcpu4Memory8Gib),
-        "vcpu2_memory4_gib" => Some(RuntimeResourceClass::Vcpu2Memory4Gib),
-        _ => None,
-    }
-}
-
-pub fn parse_billing_class(value: &str) -> Option<BillingClass> {
-    match value {
-        "grandfathered" => Some(BillingClass::Grandfathered),
-        "sponsored" => Some(BillingClass::Sponsored),
-        "standard" => Some(BillingClass::Standard),
-        _ => None,
-    }
-}
-
-pub fn parse_billing_subscription_status(value: &str) -> Option<BillingSubscriptionStatus> {
-    match value {
-        "incomplete" => Some(BillingSubscriptionStatus::Incomplete),
-        "incomplete_expired" => Some(BillingSubscriptionStatus::IncompleteExpired),
-        "trialing" => Some(BillingSubscriptionStatus::Trialing),
-        "active" => Some(BillingSubscriptionStatus::Active),
-        "past_due" => Some(BillingSubscriptionStatus::PastDue),
-        "canceled" => Some(BillingSubscriptionStatus::Canceled),
-        "unpaid" => Some(BillingSubscriptionStatus::Unpaid),
-        "paused" => Some(BillingSubscriptionStatus::Paused),
-        _ => None,
-    }
-}
-
-pub fn parse_import_candidate_status(value: &str) -> Option<ImportCandidateStatus> {
-    match value {
-        "pending" => Some(ImportCandidateStatus::Pending),
-        "claimed" => Some(ImportCandidateStatus::Claimed),
-        "admin_review" => Some(ImportCandidateStatus::AdminReview),
-        _ => None,
-    }
-}
-
-pub fn parse_user_link_status(value: &str) -> Option<UserLinkStatus> {
-    match value {
-        "pending" => Some(UserLinkStatus::Pending),
-        "linked" => Some(UserLinkStatus::Linked),
-        _ => None,
-    }
-}
-
-pub fn parse_project_membership_role(value: &str) -> Option<ProjectMembershipRole> {
-    match value {
-        "owner" => Some(ProjectMembershipRole::Owner),
-        "admin" => Some(ProjectMembershipRole::Admin),
-        "member" => Some(ProjectMembershipRole::Member),
-        _ => None,
-    }
-}
-
-pub fn parse_runtime_summary_status(value: &str) -> Option<RuntimeSummaryStatus> {
-    match value {
-        "online" => Some(RuntimeSummaryStatus::Online),
-        "offline" => Some(RuntimeSummaryStatus::Offline),
-        "stale" => Some(RuntimeSummaryStatus::Stale),
-        "unknown" => Some(RuntimeSummaryStatus::Unknown),
-        _ => None,
-    }
-}
-
-pub fn parse_agent_creation_request_status(value: &str) -> Option<AgentCreationRequestStatus> {
-    match value {
-        "requested" => Some(AgentCreationRequestStatus::Requested),
-        "launching" => Some(AgentCreationRequestStatus::Launching),
-        "running" => Some(AgentCreationRequestStatus::Running),
-        "failed" => Some(AgentCreationRequestStatus::Failed),
-        "cancelled" => Some(AgentCreationRequestStatus::Cancelled),
-        _ => None,
-    }
-}
-
-pub fn parse_runtime_control_kind(value: &str) -> Option<RuntimeControlKind> {
-    match value {
-        "restart" => Some(RuntimeControlKind::Restart),
-        "recover_known_good_chat_runtime" => Some(RuntimeControlKind::RecoverKnownGoodChatRuntime),
-        "upgrade" => Some(RuntimeControlKind::Upgrade),
-        "stop" => Some(RuntimeControlKind::Stop),
-        "destroy" => Some(RuntimeControlKind::Destroy),
-        _ => None,
-    }
-}
-
-pub fn parse_runtime_control_request_status(value: &str) -> Option<RuntimeControlRequestStatus> {
-    match value {
-        "requested" => Some(RuntimeControlRequestStatus::Requested),
-        "running" => Some(RuntimeControlRequestStatus::Running),
-        "succeeded" => Some(RuntimeControlRequestStatus::Succeeded),
-        "failed" => Some(RuntimeControlRequestStatus::Failed),
-        _ => None,
-    }
-}
-
-pub fn parse_finite_private_grant_status(value: &str) -> Option<FinitePrivateGrantStatus> {
-    match value {
-        "active" => Some(FinitePrivateGrantStatus::Active),
-        "revoked" => Some(FinitePrivateGrantStatus::Revoked),
-        _ => None,
-    }
-}
-
-pub fn parse_finite_private_api_key_status(value: &str) -> Option<FinitePrivateApiKeyStatus> {
-    match value {
-        "active" => Some(FinitePrivateApiKeyStatus::Active),
-        "revoked" => Some(FinitePrivateApiKeyStatus::Revoked),
-        _ => None,
-    }
-}
-
 pub fn parse_finite_private_reservation_status(
     value: &str,
 ) -> Option<FinitePrivateReservationStatus> {
@@ -2355,14 +2105,6 @@ pub fn parse_finite_private_reservation_status(
         "reserved" => Some(FinitePrivateReservationStatus::Reserved),
         "settled" => Some(FinitePrivateReservationStatus::Settled),
         "denied" => Some(FinitePrivateReservationStatus::Denied),
-        _ => None,
-    }
-}
-
-pub fn parse_finite_private_settlement_kind(value: &str) -> Option<FinitePrivateSettlementKind> {
-    match value {
-        "actual" => Some(FinitePrivateSettlementKind::Actual),
-        "estimate" => Some(FinitePrivateSettlementKind::Estimate),
         _ => None,
     }
 }
@@ -3608,11 +3350,11 @@ mod tests {
         };
     }
 
-    /// Every enum here spells its wire string three times: a serde
-    /// `rename_all` derive, a hand-written `as_str`, and a `parse_*` function.
-    /// Nothing forces those to agree, so adding a variant and updating two of
-    /// the three sites silently encodes one way in the JSON API and another in
-    /// the database column. This pins all three together for every variant.
+    /// `wire_enum!` now generates serde, `as_str`, and `parse_*` from one
+    /// variant list, so the three cannot drift by construction. This keeps
+    /// checking them because the guarantee depends on serde's `rename`
+    /// behaving as assumed, and because an enum added outside the macro would
+    /// otherwise reintroduce the three hand-written surfaces unnoticed.
     #[test]
     fn enum_serde_as_str_and_parse_encodings_agree() {
         use BillingClass::*;
