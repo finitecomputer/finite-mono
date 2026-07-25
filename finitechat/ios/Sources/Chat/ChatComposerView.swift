@@ -293,6 +293,7 @@ struct NewChatComposer: View {
     var isInputFocused: FocusState<Bool>.Binding
     let placeholder: String
     let onStartChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
+    var onDraftPresenceChange: (Bool) -> Void = { _ in }
     var outerHorizontalPadding: CGFloat = 16
     var surfaceRadius: CGFloat = 28
     @State private var stagedAttachments: [StagedComposerAttachment] = []
@@ -331,6 +332,13 @@ struct NewChatComposer: View {
                 beginChat(launchAction: .files)
             }
         )
+        .onChange(of: hasDraft) { _, hasDraft in
+            onDraftPresenceChange(hasDraft)
+        }
+    }
+
+    private var hasDraft: Bool {
+        !text.isEmpty
     }
 
     private var canSubmit: Bool {

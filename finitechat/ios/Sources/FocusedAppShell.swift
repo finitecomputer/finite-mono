@@ -602,6 +602,7 @@ struct FocusedHomeView: View {
     let openChat: (ChatDestination) -> Void
     let chooseAgent: () -> Void
     @FocusState private var isComposerFocused: Bool
+    @State private var hasComposerDraft = false
 
     var body: some View {
         ScrollView {
@@ -640,6 +641,10 @@ struct FocusedHomeView: View {
                         spacing: tokens.recentBadgeSpacing,
                         openChat: openChat
                     )
+                    .opacity(hasComposerDraft ? 0 : 1)
+                    .allowsHitTesting(!hasComposerDraft)
+                    .accessibilityHidden(hasComposerDraft)
+                    .animation(.easeOut(duration: 0.18), value: hasComposerDraft)
                 }
 
                 Spacer(minLength: 72)
@@ -654,9 +659,14 @@ struct FocusedHomeView: View {
                     isInputFocused: $isComposerFocused,
                     placeholder: "What do you want to work on?",
                     onStartChat: startChat,
+                    onDraftPresenceChange: { hasComposerDraft = $0 },
                     outerHorizontalPadding: tokens.composerHorizontalPadding,
                     surfaceRadius: tokens.composerRadius
                 )
+                .background {
+                    Color(.systemBackground)
+                        .ignoresSafeArea(edges: .bottom)
+                }
             }
         }
         .background(Color(.systemBackground))

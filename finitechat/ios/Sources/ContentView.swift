@@ -263,6 +263,10 @@ struct RoomThreadView: View {
         .ignoresSafeArea(edges: .top)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             composerAccessory
+                .background {
+                    Color(.systemGroupedBackground)
+                        .ignoresSafeArea(edges: .bottom)
+                }
         }
         .accessibilityLabel("Messages")
     }
