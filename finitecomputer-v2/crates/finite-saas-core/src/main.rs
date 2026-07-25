@@ -4,9 +4,9 @@ use finite_saas_core::api::router_with_agent_creation_placement;
 use finite_saas_core::auth::CoreAuth;
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
-    AdminArchiveUnrecoverableRuntimeInput, AdminRuntimeOverview, AdminRuntimeRetireExactInput,
-    AdminRuntimeUpgradeExactInput, ApproveFinitePrivateGrantInput, CoreResult,
-    ExistingHostProjectImport, FinitePrivateApiKey, FinitePrivateGrant,
+    AdminArchiveUnrecoverableRuntimeInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
+    AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, ApproveFinitePrivateGrantInput,
+    CoreResult, ExistingHostProjectImport, FinitePrivateApiKey, FinitePrivateGrant,
     IssueFinitePrivateApiKeyInput, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
@@ -123,6 +123,9 @@ enum Command {
     /// Retire one exact Runtime through the verified Recovery Snapshot lifecycle.
     #[command(name = "runtime-retire-exact")]
     RuntimeRetireExact(RuntimeRetireExactCliArgs),
+    /// Rebind one stopped Kata Runtime after its exact durable state is staged.
+    #[command(name = "runtime-cold-relocate-exact")]
+    RuntimeColdRelocateExact(RuntimeColdRelocateExactCliArgs),
     /// Archive a legacy Runtime only after exact binding and absence attestations.
     #[command(name = "runtime-archive-unrecoverable")]
     RuntimeArchiveUnrecoverable(RuntimeArchiveUnrecoverableCliArgs),
@@ -363,6 +366,30 @@ struct RuntimeRetireExactCliArgs {
     now: Option<String>,
 }
 
+#[derive(Debug, clap::Args)]
+struct RuntimeColdRelocateExactCliArgs {
+    #[arg(long)]
+    project_id: String,
+    #[arg(long)]
+    expected_agent_runtime_id: String,
+    #[arg(long)]
+    expected_source_host_id: String,
+    #[arg(long)]
+    expected_source_machine_id: String,
+    #[arg(long)]
+    target_source_host_id: String,
+    #[arg(long)]
+    expected_agent_npub: String,
+    #[arg(long)]
+    durable_state_manifest_sha256: String,
+    #[arg(long)]
+    admin_email: String,
+    #[arg(long)]
+    admin_workos_user_id: String,
+    #[arg(long)]
+    now: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CoreImportManifestInput {
     source_host_id: String,
@@ -460,6 +487,10 @@ async fn main() -> Result<()> {
         }
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
         Command::RuntimeRetireExact(args) => runtime_retire_exact_command(args).await,
+        Command::RuntimeColdRelocateExact(args) => {
+            let request = runtime_cold_relocate_exact_command(args).await?;
+            print_json(&request)
+        }
         Command::RuntimeArchiveUnrecoverable(args) => {
             let receipt = runtime_archive_unrecoverable_command(args).await?;
             print_json(&receipt)
@@ -1327,6 +1358,27 @@ async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs) -> Result
         bail!("runtime retirement failed; the same request remains retryable");
     }
     Ok(())
+}
+
+async fn runtime_cold_relocate_exact_command(
+    args: RuntimeColdRelocateExactCliArgs,
+) -> Result<finite_saas_core::AgentCreationRequest> {
+    let store = postgres_store_from_env().await?;
+    store
+        .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+            admin_verified_email: args.admin_email,
+            admin_workos_user_id: args.admin_workos_user_id,
+            project_id: args.project_id,
+            expected_agent_runtime_id: args.expected_agent_runtime_id,
+            expected_source_host_id: args.expected_source_host_id,
+            expected_source_machine_id: args.expected_source_machine_id,
+            target_source_host_id: args.target_source_host_id,
+            expected_agent_npub: args.expected_agent_npub,
+            durable_state_manifest_sha256: args.durable_state_manifest_sha256,
+            now: args.now,
+        })
+        .await
+        .map_err(Into::into)
 }
 
 async fn finite_private_grant_approve(

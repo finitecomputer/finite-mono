@@ -2997,6 +2997,8 @@ mod tests {
                 placement: Some(placement),
                 desired_runtime_artifact_id: None,
                 runtime_spec: None,
+                target_source_host_id: None,
+                relocation: None,
                 profile_picture_url: None,
                 status: AgentCreationRequestStatus::Launching,
                 requested_launch_code: None,

@@ -39,7 +39,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0014_finite_private_user_controls.sql"),
     "\n",
-    include_str!("../migrations/0015_runner_capacity_fences.sql")
+    include_str!("../migrations/0015_runner_capacity_fences.sql"),
+    "\n",
+    include_str!("../migrations/0016_runtime_cold_relocation.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -934,6 +936,15 @@ pub struct AgentCreationRequest {
     pub desired_runtime_artifact_id: Option<String>,
     #[serde(default)]
     pub runtime_spec: Option<RuntimeSpecEnvelope>,
+    /// Optional creation-queue partition. Relocation always names its target
+    /// host; ordinary creation remains unpinned.
+    #[serde(default)]
+    pub target_source_host_id: Option<String>,
+    /// Operator-only cold relocation contract. Ordinary creation leaves this
+    /// absent. The target Runner must verify the staged durable state and the
+    /// existing Agent Principal before Core replaces the source binding.
+    #[serde(default)]
+    pub relocation: Option<RuntimeRelocationEnvelope>,
     pub profile_picture_url: Option<String>,
     pub status: AgentCreationRequestStatus,
     pub requested_launch_code: Option<String>,
@@ -944,6 +955,33 @@ pub struct AgentCreationRequest {
     pub failure_message: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+pub const RUNTIME_RELOCATION_SCHEMA: &str = "runtime_relocation.v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeRelocationV1 {
+    pub source_host_id: String,
+    pub source_machine_id: String,
+    pub target_source_host_id: String,
+    pub expected_agent_npub: String,
+    pub durable_state_manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "schema", content = "relocation")]
+pub enum RuntimeRelocationEnvelope {
+    #[serde(rename = "runtime_relocation.v1")]
+    V1(RuntimeRelocationV1),
+}
+
+impl RuntimeRelocationEnvelope {
+    pub const fn v1(&self) -> &RuntimeRelocationV1 {
+        match self {
+            Self::V1(relocation) => relocation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1500,6 +1538,24 @@ pub struct AdminRuntimeControlInput {
     pub admin_verified_email: String,
     pub admin_workos_user_id: String,
     pub project_id: String,
+    pub now: Option<String>,
+}
+
+/// Exact operator boundary for a stopped Runtime cold relocation. Durable
+/// state transfer remains a separately observable step; the target Runner
+/// refuses to launch unless its tree hashes to this request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRuntimeRelocateExactInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub target_source_host_id: String,
+    pub expected_agent_npub: String,
+    pub durable_state_manifest_sha256: String,
     pub now: Option<String>,
 }
 
@@ -2345,6 +2401,8 @@ impl BridgeCoreState {
             placement: Some(placement),
             desired_runtime_artifact_id: None,
             runtime_spec: None,
+            target_source_host_id: None,
+            relocation: None,
             profile_picture_url,
             status: AgentCreationRequestStatus::Requested,
             requested_launch_code: selected_launch_code.map(|record| record.id),
@@ -2657,6 +2715,192 @@ impl BridgeCoreState {
             None,
             Some(&expected),
         )
+    }
+
+    pub fn admin_request_runtime_relocate_exact(
+        &mut self,
+        input: AdminRuntimeRelocateExactInput,
+    ) -> CoreResult<AgentCreationRequest> {
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
+            .ok_or(CoreError::MissingVerifiedEmail)?;
+        let admin_workos_user_id = input.admin_workos_user_id.trim().to_string();
+        if admin_workos_user_id.is_empty() {
+            return Err(CoreError::MissingWorkosUserId);
+        }
+        let admin_user = self.ensure_linked_user(&admin_email, &admin_workos_user_id, &now)?;
+        let project = self
+            .projects
+            .get(&input.project_id)
+            .cloned()
+            .ok_or(CoreError::ProjectNotFound)?;
+        let runtime = self
+            .active_runtime_for_project(&project.id)
+            .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        if runtime.id != input.expected_agent_runtime_id
+            || runtime.source_host_id != input.expected_source_host_id
+            || runtime.source_machine_id != input.expected_source_machine_id
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        let placement = runtime.placement.ok_or(CoreError::RuntimeSpecMismatch)?;
+        if placement.runner_class != RunnerClass::Kata
+            || runtime.host_facts.runtime_status != RuntimeSummaryStatus::Offline
+        {
+            return Err(CoreError::RuntimeControlUnsupported);
+        }
+        let target_source_host_id = normalize_source_host_id(&input.target_source_host_id)?;
+        if target_source_host_id == runtime.source_host_id {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        let expected_agent_npub = input.expected_agent_npub.trim().to_string();
+        let manifest = input
+            .durable_state_manifest_sha256
+            .trim()
+            .to_ascii_lowercase();
+        if !valid_agent_npub(&expected_agent_npub) || !valid_sha256_hex(&manifest) {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        if self.runtime_control_requests.values().any(|request| {
+            request.agent_runtime_id == runtime.id
+                && matches!(
+                    request.status,
+                    RuntimeControlRequestStatus::Requested | RuntimeControlRequestStatus::Running
+                )
+        }) {
+            return Err(CoreError::RuntimeControlOperationConflict);
+        }
+        let stopped = self.runtime_control_requests.values().any(|request| {
+            request.agent_runtime_id == runtime.id
+                && request.source_host_id == runtime.source_host_id
+                && request.source_machine_id == runtime.source_machine_id
+                && request.kind == RuntimeControlKind::Stop
+                && request.status == RuntimeControlRequestStatus::Succeeded
+        });
+        if !stopped {
+            return Err(CoreError::RuntimeControlOperationConflict);
+        }
+        if self
+            .runtime_retirement_snapshots
+            .values()
+            .any(|snapshot| snapshot.receipt.agent_runtime_id == runtime.id)
+        {
+            return Err(CoreError::RuntimeRetirementSnapshotConflict);
+        }
+        let relocation = RuntimeRelocationEnvelope::V1(RuntimeRelocationV1 {
+            source_host_id: runtime.source_host_id.clone(),
+            source_machine_id: runtime.source_machine_id.clone(),
+            target_source_host_id: target_source_host_id.clone(),
+            expected_agent_npub,
+            durable_state_manifest_sha256: manifest,
+        });
+        if let Some(existing) = self
+            .agent_creation_requests
+            .values()
+            .find(|request| {
+                request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
+                    && matches!(
+                        request.status,
+                        AgentCreationRequestStatus::Requested
+                            | AgentCreationRequestStatus::Launching
+                    )
+                    && request.relocation.is_some()
+            })
+            .cloned()
+        {
+            if existing.relocation.as_ref() == Some(&relocation)
+                && existing.target_source_host_id.as_deref() == Some(target_source_host_id.as_str())
+            {
+                return Ok(existing);
+            }
+            return Err(CoreError::RuntimeControlOperationConflict);
+        }
+        let current_creation = self
+            .agent_creation_requests
+            .values()
+            .filter(|request| {
+                request.agent_runtime_id.as_deref() == Some(runtime.id.as_str())
+                    && request.status == AgentCreationRequestStatus::Running
+                    && request.runtime_spec.is_some()
+            })
+            .max_by_key(|request| (request.created_at.clone(), request.id.clone()))
+            .cloned()
+            .ok_or(CoreError::RuntimeSpecMismatch)?;
+        let artifact_id = runtime
+            .runtime_artifact_id
+            .as_deref()
+            .ok_or(CoreError::MissingRuntimeArtifactId)?;
+        let artifact = self
+            .runtime_artifacts
+            .get(artifact_id)
+            .cloned()
+            .ok_or(CoreError::RuntimeArtifactNotFound)?;
+        let request_id = new_agent_creation_request_id()?;
+        let runtime_spec = runtime_operation_spec_v1(
+            current_creation
+                .runtime_spec
+                .as_ref()
+                .ok_or(CoreError::RuntimeSpecMismatch)?,
+            RuntimeSpecIdentity {
+                operation_id: &request_id,
+                project_id: &project.id,
+                agent_runtime_id: &runtime.id,
+                placement,
+            },
+            &artifact,
+            &artifact,
+            RuntimeBootIntent::Normal,
+            None,
+        )?;
+        let idempotency_key = format!(
+            "cold-relocate:{}:{}:{}",
+            runtime.id, target_source_host_id, request_id
+        );
+        let request = AgentCreationRequest {
+            id: request_id,
+            customer_org_id: project.customer_org_id.clone(),
+            owner_user_id: project.owner_user_id.clone(),
+            project_id: project.id.clone(),
+            idempotency_key,
+            display_name: project.display_name.clone(),
+            runner_class: placement.runner_class,
+            hosting_tier: project.hosting_tier,
+            placement: Some(placement),
+            desired_runtime_artifact_id: Some(artifact.id),
+            runtime_spec: Some(runtime_spec),
+            target_source_host_id: Some(target_source_host_id),
+            relocation: Some(relocation),
+            profile_picture_url: current_creation.profile_picture_url,
+            status: AgentCreationRequestStatus::Requested,
+            requested_launch_code: None,
+            agent_runtime_id: Some(runtime.id.clone()),
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            failure_message: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        self.agent_creation_requests
+            .insert(request.id.clone(), request.clone());
+        self.record_finite_private_admin_audit_event(FinitePrivateAdminAuditRecord {
+            action: "runtime.admin_cold_relocate",
+            target_type: "agent_runtime",
+            target_id: &runtime.id,
+            grant_id: None,
+            api_key_id: None,
+            actor: Some(&admin_email),
+            metadata: json!({
+                "projectId": project.id,
+                "agentCreationRequestId": request.id,
+                "sourceHostId": runtime.source_host_id,
+                "sourceMachineId": runtime.source_machine_id,
+                "targetSourceHostId": request.target_source_host_id,
+            }),
+            created_at: &now,
+        });
+        let _ = admin_user;
+        Ok(request)
     }
 
     pub fn admin_archive_unrecoverable_runtime(
@@ -3020,6 +3264,18 @@ impl BridgeCoreState {
             .agent_creation_requests
             .values()
             .filter(|request| self.agent_creation_request_is_leasable(request, now_time))
+            .filter(|request| {
+                if request.relocation.is_some() {
+                    input.source_host_id.is_some()
+                        && request.target_source_host_id.as_deref()
+                            == input.source_host_id.as_deref()
+                } else {
+                    request.target_source_host_id.is_none()
+                        || input.source_host_id.is_none()
+                        || request.target_source_host_id.as_deref()
+                            == input.source_host_id.as_deref()
+                }
+            })
             .filter(|request| {
                 in_flight_capacity.is_none()
                     || request.status == AgentCreationRequestStatus::Launching
@@ -3878,6 +4134,25 @@ impl BridgeCoreState {
                 .map(Ok)
                 .unwrap_or_else(new_agent_runtime_id)?
         };
+        let runtime_by_id = self.agent_runtimes.get(&runtime_id).cloned();
+        validate_runtime_relocation_registration(
+            &request,
+            runtime_by_id.as_ref(),
+            &source_host_id,
+            &source_machine_id,
+        )?;
+        if request.relocation.is_some() {
+            // A Kata relocation has already passed target health and Agent
+            // Principal verification before this acknowledgement. Keep Core's
+            // source Runtime/link untouched until the following completion
+            // transaction commits the target binding.
+            return Ok(AgentCreationLease {
+                project,
+                request,
+                provider_operation,
+                in_flight_capacity_reservation: None,
+            });
+        }
         let existing_runtime = runtime_by_source.or_else(|| {
             self.agent_runtimes
                 .get(&runtime_id)
@@ -4033,6 +4308,12 @@ impl BridgeCoreState {
                     request.id, request.project_id
                 ))
             })?;
+        validate_runtime_relocation_registration(
+            &request,
+            existing_runtime.as_ref(),
+            &source_host_id,
+            &source_machine_id,
+        )?;
         let source_import_key = source_import_key(&source_host_id, &source_machine_id);
         if self.agent_runtimes.values().any(|runtime| {
             runtime.source_import_key == source_import_key && runtime.project_id != project.id
@@ -4207,6 +4488,7 @@ impl BridgeCoreState {
             )?
         };
         let provisional_runtime_id = verified.agent_runtime_id.clone();
+        let is_relocation = verified.relocation.is_some();
         if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
             let key_id =
                 trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
@@ -4226,12 +4508,14 @@ impl BridgeCoreState {
             return Err(CoreError::AgentCreationRequestNotFound);
         };
         request.status = AgentCreationRequestStatus::Failed;
-        request.agent_runtime_id = None;
+        if !is_relocation {
+            request.agent_runtime_id = None;
+        }
         request.lease_token = None;
         request.lease_expires_at = None;
         request.failure_message = Some(failure_message);
         request.updated_at = now;
-        if let Some(runtime_id) = provisional_runtime_id {
+        if !is_relocation && let Some(runtime_id) = provisional_runtime_id {
             self.agent_runtimes.remove(&runtime_id);
             self.runtime_relay_credentials.remove(&runtime_id);
             self.runtime_status_snapshots.remove(&runtime_id);
@@ -4262,36 +4546,41 @@ impl BridgeCoreState {
             return Err(CoreError::ProviderOperationBoundaryNotReached);
         }
         let provisional_runtime_id = request.agent_runtime_id.clone();
+        let is_relocation = request.relocation.is_some();
         // Cancellation is the final cleanup step for failed/pre-provider
         // requests. Revoke every project-scoped launch key, including one a
         // crashed runner failed to identify in its failure acknowledgment.
-        let key_ids = self
-            .finite_private_api_keys
-            .values()
-            .filter(|key| {
-                key.status == FinitePrivateApiKeyStatus::Active
-                    && key.project_id.as_deref() == Some(request.project_id.as_str())
-            })
-            .map(|key| key.id.clone())
-            .collect::<Vec<_>>();
-        for key_id in key_ids {
-            self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
-                key_id,
-                now: Some(now.clone()),
-            })?;
+        if !is_relocation {
+            let key_ids = self
+                .finite_private_api_keys
+                .values()
+                .filter(|key| {
+                    key.status == FinitePrivateApiKeyStatus::Active
+                        && key.project_id.as_deref() == Some(request.project_id.as_str())
+                })
+                .map(|key| key.id.clone())
+                .collect::<Vec<_>>();
+            for key_id in key_ids {
+                self.revoke_finite_private_api_key(RevokeFinitePrivateApiKeyInput {
+                    key_id,
+                    now: Some(now.clone()),
+                })?;
+            }
         }
 
         let Some(request) = self.agent_creation_requests.get_mut(&input.request_id) else {
             return Err(CoreError::AgentCreationRequestNotFound);
         };
         request.status = AgentCreationRequestStatus::Cancelled;
-        request.agent_runtime_id = None;
+        if !is_relocation {
+            request.agent_runtime_id = None;
+        }
         request.runner_id = None;
         request.lease_token = None;
         request.lease_expires_at = None;
         request.failure_message = None;
         request.updated_at = now;
-        if let Some(runtime_id) = provisional_runtime_id {
+        if !is_relocation && let Some(runtime_id) = provisional_runtime_id {
             self.agent_runtimes.remove(&runtime_id);
             self.runtime_relay_credentials.remove(&runtime_id);
             self.runtime_status_snapshots.remove(&runtime_id);
@@ -5270,7 +5559,13 @@ impl BridgeCoreState {
                     source_host_id,
                     source_machine_id,
                 ))
-                .map(|runtime| runtime.id),
+                .map(|runtime| runtime.id)
+                .or_else(|| {
+                    request
+                        .relocation
+                        .as_ref()
+                        .and(request.agent_runtime_id.clone())
+                }),
             _ => request
                 .agent_runtime_id
                 .clone()
@@ -6654,6 +6949,49 @@ pub fn normalize_source_host_id(value: &str) -> CoreResult<String> {
         return Err(CoreError::InvalidSourceHostId);
     }
     Ok(source_host_id)
+}
+
+fn valid_agent_npub(value: &str) -> bool {
+    value.starts_with("npub1")
+        && value.len() <= 256
+        && value
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+}
+
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub(crate) fn validate_runtime_relocation_registration(
+    request: &AgentCreationRequest,
+    existing_runtime: Option<&AgentRuntime>,
+    reported_source_host_id: &str,
+    reported_source_machine_id: &str,
+) -> CoreResult<()> {
+    let Some(relocation) = request
+        .relocation
+        .as_ref()
+        .map(RuntimeRelocationEnvelope::v1)
+    else {
+        return Ok(());
+    };
+    let existing_runtime = existing_runtime.ok_or(CoreError::RuntimeSpecMismatch)?;
+    let source_is_frozen = relocation.source_host_id == existing_runtime.source_host_id
+        && relocation.source_machine_id == existing_runtime.source_machine_id
+        && existing_runtime.host_facts.runtime_status == RuntimeSummaryStatus::Offline;
+    let target_is_registered = relocation.target_source_host_id == existing_runtime.source_host_id
+        && relocation.source_machine_id == existing_runtime.source_machine_id;
+    if request.agent_runtime_id.as_deref() != Some(existing_runtime.id.as_str())
+        || request.target_source_host_id.as_deref()
+            != Some(relocation.target_source_host_id.as_str())
+        || relocation.target_source_host_id != reported_source_host_id
+        || relocation.source_machine_id != reported_source_machine_id
+        || (!source_is_frozen && !target_is_registered)
+    {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    Ok(())
 }
 
 fn normalize_source_host_relay_url(value: &str) -> CoreResult<String> {
@@ -13137,6 +13475,185 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, CoreError::RuntimeUpgradeUnsupported));
         assert!(state.runtime_control_requests.is_empty());
+    }
+
+    #[test]
+    fn cold_relocation_is_stopped_exact_targeted_and_failure_preserves_source_runtime() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "canary@finite.vip",
+            "workos-canary",
+            "canary-create",
+            "finite-kata-canary",
+            "artifact-v1",
+            "2026-05-25T13:00:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        let running = state
+            .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "finite-kata-canary".to_string(),
+                target_source_host_id: "oslo-host-3".to_string(),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "b".repeat(64),
+                now: Some("2026-05-25T13:01:00Z".to_string()),
+            })
+            .unwrap_err();
+        assert!(matches!(running, CoreError::RuntimeControlUnsupported));
+
+        let stop = state
+            .admin_request_runtime_control(
+                AdminRuntimeControlInput {
+                    admin_verified_email: "admin@finite.vip".to_string(),
+                    admin_workos_user_id: "workos-admin".to_string(),
+                    project_id: project_id.clone(),
+                    now: Some("2026-05-25T13:02:00Z".to_string()),
+                },
+                RuntimeControlKind::Stop,
+                None,
+            )
+            .unwrap();
+        let capacity = RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::Kata],
+            runtime_capabilities: Some(kata_runtime_capabilities()),
+            ..RunnerLeaseCapacity::default()
+        };
+        let stop_lease = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "stop-lease".to_string(),
+                lease_seconds: Some(300),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(capacity.clone()),
+                now: Some("2026-05-25T13:03:00Z".to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(stop_lease.request.id, stop.id);
+        state
+            .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                request_id: stop.id,
+                runner_id: "runner-oslo-1".to_string(),
+                lease_token: "stop-lease".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                runtime_capabilities: None,
+                runtime_host: None,
+                published_app_urls: None,
+                retirement_snapshot: None,
+                now: Some("2026-05-25T13:04:00Z".to_string()),
+            })
+            .unwrap();
+
+        let relocation = state
+            .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                admin_verified_email: "admin@finite.vip".to_string(),
+                admin_workos_user_id: "workos-admin".to_string(),
+                project_id: project_id.clone(),
+                expected_agent_runtime_id: runtime_id.clone(),
+                expected_source_host_id: "oslo-host-1".to_string(),
+                expected_source_machine_id: "finite-kata-canary".to_string(),
+                target_source_host_id: "oslo-host-3".to_string(),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "b".repeat(64),
+                now: Some("2026-05-25T13:05:00Z".to_string()),
+            })
+            .unwrap();
+        assert_eq!(
+            relocation.target_source_host_id.as_deref(),
+            Some("oslo-host-3")
+        );
+        assert_eq!(
+            relocation.agent_runtime_id.as_deref(),
+            Some(runtime_id.as_str())
+        );
+        assert!(relocation.relocation.is_some());
+
+        assert!(
+            state
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: "wrong-host".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(capacity.clone()),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    now: Some("2026-05-25T13:06:00Z".to_string()),
+                })
+                .unwrap()
+                .is_none()
+        );
+        let lease = state
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "runner-oslo-3".to_string(),
+                lease_token: "relocate-lease".to_string(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(capacity),
+                source_host_id: Some("oslo-host-3".to_string()),
+                now: Some("2026-05-25T13:06:00Z".to_string()),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.request.id, relocation.id);
+        state
+            .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
+                request_id: relocation.id.clone(),
+                runner_id: "runner-oslo-3".to_string(),
+                lease_token: "relocate-lease".to_string(),
+                source_host_id: "oslo-host-3".to_string(),
+                source_machine_id: "finite-kata-canary".to_string(),
+                runtime_artifact_id: Some("artifact-v1".to_string()),
+                state_schema_version: Some("state-v1".to_string()),
+                provider_runtime_handle: None,
+                contact_endpoint: Some("http://oslo-host-3:4201/contact".to_string()),
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                runtime_relay_token_hash: "relay-token-hash".to_string(),
+                display_name: None,
+                hostname: None,
+                runtime_host: Some("http://oslo-host-3:4201".to_string()),
+                runtime_status: Some(RuntimeSummaryStatus::Unknown),
+                active_inference_profile: Some("finite-private".to_string()),
+                hermes_available: Some(true),
+                published_app_urls: Vec::new(),
+                now: Some("2026-05-25T13:06:30Z".to_string()),
+            })
+            .unwrap();
+        let still_source = &state.agent_runtimes[&runtime_id];
+        assert_eq!(still_source.source_host_id, "oslo-host-1");
+        assert_eq!(
+            still_source.host_facts.runtime_status,
+            RuntimeSummaryStatus::Offline
+        );
+        state
+            .fail_agent_creation_request(FailAgentCreationRequestInput {
+                request_id: relocation.id.clone(),
+                runner_id: "runner-oslo-3".to_string(),
+                lease_token: "relocate-lease".to_string(),
+                failure_message: "synthetic target launch failure".to_string(),
+                provisioned_finite_private_api_key_id: None,
+                now: Some("2026-05-25T13:07:00Z".to_string()),
+            })
+            .unwrap();
+        let source = &state.agent_runtimes[&runtime_id];
+        assert_eq!(source.source_host_id, "oslo-host-1");
+        assert_eq!(
+            source.host_facts.runtime_status,
+            RuntimeSummaryStatus::Offline
+        );
+        assert_eq!(
+            state.agent_creation_requests[&relocation.id]
+                .agent_runtime_id
+                .as_deref(),
+            Some(runtime_id.as_str())
+        );
+        assert!(state.project_runtime_links.values().any(|link| {
+            link.project_id == project_id && link.agent_runtime_id == runtime_id && link.active
+        }));
     }
 
     fn promote_runtime_artifact(state: &mut BridgeCoreState) {

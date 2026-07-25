@@ -8,9 +8,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::Output;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use walkdir::WalkDir;
 
 const KATA_PROVIDER_DIR: &str = "kata";
 const KATA_METADATA_DIR: &str = "kata-metadata";
@@ -2665,7 +2670,24 @@ impl RuntimeLauncher for KataLauncher {
         let launcher = KataLauncher::new(self.config_for_creation(lease)?);
         launcher.validate_ready()?;
         let plan = launcher.plan_launch(lease);
+        let _relocation_operation_lock = if lease.request.relocation.is_some() {
+            Some(launcher.acquire_runtime_operation_lock(&plan)?)
+        } else {
+            None
+        };
+        if let Some(relocation) = lease.request.relocation.as_ref() {
+            launcher.verify_relocation_state(&plan, lease, relocation.v1())?;
+        }
         let host_port = launcher.run_fresh(&plan, lease, options)?;
+        if let Some(relocation) = lease.request.relocation.as_ref() {
+            let observed_npub = launcher.wait_for_agent_npub(&plan, host_port)?;
+            if observed_npub != relocation.v1().expected_agent_npub {
+                let _ = launcher.remove_compute(&plan.container_name);
+                return Err(RunnerError::RuntimeLaunch(
+                    "cold relocation target exposed a different Agent Principal".to_string(),
+                ));
+            }
+        }
         let runtime_bootstrap_token = random_runtime_bootstrap_token();
         let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
             .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
@@ -2701,14 +2723,17 @@ impl RuntimeLauncher for KataLauncher {
 }
 
 pub(crate) fn kata_launch_plan(config: &KataConfig, lease: &AgentCreationLease) -> KataLaunchPlan {
-    let request_suffix = lease
-        .request
-        .id
-        .strip_prefix("agent_request_")
-        .unwrap_or(&lease.request.id);
-    let container_name =
+    let container_name = if let Some(relocation) = lease.request.relocation.as_ref() {
+        sanitize_sandbox_name(&relocation.v1().source_machine_id).to_ascii_lowercase()
+    } else {
+        let request_suffix = lease
+            .request
+            .id
+            .strip_prefix("agent_request_")
+            .unwrap_or(&lease.request.id);
         sanitize_sandbox_name(&format!("{}-{request_suffix}", config.name_prefix.trim()))
-            .to_ascii_lowercase();
+            .to_ascii_lowercase()
+    };
     let spec = lease.request.runtime_spec.as_ref().map(runtime_spec_v1);
     kata_launch_plan_for_source_machine(
         config,
@@ -2717,6 +2742,146 @@ pub(crate) fn kata_launch_plan(config: &KataConfig, lease: &AgentCreationLease) 
         spec.map(|spec| spec.endpoints.service_port)
             .unwrap_or(config.container_port),
     )
+}
+
+impl KataLauncher {
+    fn verify_relocation_state(
+        &self,
+        plan: &KataLaunchPlan,
+        lease: &AgentCreationLease,
+        relocation: &finite_saas_core::RuntimeRelocationV1,
+    ) -> Result<(), RunnerError> {
+        let spec = creation_runtime_spec(lease, RunnerClass::Kata)?.ok_or_else(|| {
+            RunnerError::RuntimeLaunch(
+                "cold relocation requires a Core-bound RuntimeSpec".to_string(),
+            )
+        })?;
+        if relocation.target_source_host_id != self.config.source_host_id
+            || lease.request.target_source_host_id.as_deref()
+                != Some(self.config.source_host_id.as_str())
+            || relocation.source_host_id == relocation.target_source_host_id
+            || relocation.source_machine_id != plan.container_name
+            || spec.agent_runtime_id != lease.request.agent_runtime_id.clone().unwrap_or_default()
+            || plan.state_root
+                != self
+                    .config
+                    .work_root
+                    .join(KATA_PROVIDER_DIR)
+                    .join(sanitize_sandbox_name(&spec.durable_state_id))
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "cold relocation binding did not match the target Runner plan".to_string(),
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(&plan.state_root).map_err(|error| {
+            RunnerError::RuntimeLaunch(format!(
+                "staged cold relocation state {} is unavailable: {error}",
+                plan.state_root.display()
+            ))
+        })?;
+        let identity_metadata = plan
+            .state_root
+            .join("agent/identity.json")
+            .symlink_metadata()
+            .map_err(|_| {
+                RunnerError::RuntimeLaunch(
+                    "cold relocation state is missing agent/identity.json".to_string(),
+                )
+            })?;
+        if !metadata.file_type().is_dir()
+            || !identity_metadata.file_type().is_file()
+            || self.inspect(&plan.container_name)?.is_some()
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "cold relocation requires staged state with identity and no target compute"
+                    .to_string(),
+            ));
+        }
+        let observed = durable_state_manifest_sha256(&plan.state_root)?;
+        if observed != relocation.durable_state_manifest_sha256 {
+            return Err(RunnerError::RuntimeLaunch(
+                "staged cold relocation state manifest did not match Core".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Stable manifest used on both the stopped source and the staged target. It
+/// does not follow symlinks and rejects sockets/devices instead of silently
+/// omitting state. Ownership and xattrs are preserved by the transfer command
+/// but intentionally excluded so an operator can stage through an encrypted
+/// intermediate host without changing the content proof.
+pub fn durable_state_manifest_sha256(root: &Path) -> Result<String, RunnerError> {
+    let root_metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(RunnerError::RuntimeLaunch(
+            "durable state manifest root must be a directory".to_string(),
+        ));
+    }
+    let mut entries = WalkDir::new(root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+    entries.retain(|entry| entry.path() != root);
+    let mut manifest = Sha256::new();
+    manifest.update(b"finite.runtime-state-manifest.v1\0");
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        #[cfg(unix)]
+        let relative_bytes = relative.as_os_str().as_bytes();
+        #[cfg(not(unix))]
+        let relative_bytes = relative.to_string_lossy().as_bytes();
+        manifest.update((relative_bytes.len() as u64).to_be_bytes());
+        manifest.update(relative_bytes);
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        #[cfg(unix)]
+        manifest.update(metadata.permissions().mode().to_be_bytes());
+        #[cfg(not(unix))]
+        manifest.update(0_u32.to_be_bytes());
+        let file_type = metadata.file_type();
+        if file_type.is_dir() {
+            manifest.update(b"d");
+        } else if file_type.is_file() {
+            manifest.update(b"f");
+            manifest.update(metadata.len().to_be_bytes());
+            let mut file = std::fs::File::open(path)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                manifest.update(&buffer[..read]);
+            }
+        } else if file_type.is_symlink() {
+            manifest.update(b"l");
+            let target = std::fs::read_link(path)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            #[cfg(unix)]
+            let target_bytes = target.as_os_str().as_bytes();
+            #[cfg(not(unix))]
+            let target_bytes = target.to_string_lossy().as_bytes();
+            manifest.update((target_bytes.len() as u64).to_be_bytes());
+            manifest.update(target_bytes);
+        } else {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "durable state contains unsupported special file {}",
+                relative.display()
+            )));
+        }
+    }
+    Ok(hex::encode(manifest.finalize()))
 }
 
 fn kata_launch_plan_for_source_machine(
@@ -5259,6 +5424,49 @@ esac
             .unwrap();
         assert!(remove_old < stop);
         assert!(!kata_recovery_fence_path(&plan).exists());
+    }
+
+    #[test]
+    fn durable_state_manifest_is_stable_and_detects_file_and_symlink_changes() {
+        use std::os::unix::fs::symlink;
+
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for root in [first.path(), second.path()] {
+            std::fs::create_dir_all(root.join("agent")).unwrap();
+            std::fs::create_dir_all(root.join("workspace")).unwrap();
+            std::fs::write(
+                root.join("agent/identity.json"),
+                b"{\"npub\":\"npub1same\"}\n",
+            )
+            .unwrap();
+            std::fs::write(root.join("workspace/note.txt"), b"canary state\n").unwrap();
+            symlink("../workspace/note.txt", root.join("agent/note-link")).unwrap();
+        }
+
+        let expected = durable_state_manifest_sha256(first.path()).unwrap();
+        assert_eq!(
+            expected,
+            durable_state_manifest_sha256(second.path()).unwrap()
+        );
+
+        std::fs::write(second.path().join("workspace/note.txt"), b"changed\n").unwrap();
+        assert_ne!(
+            expected,
+            durable_state_manifest_sha256(second.path()).unwrap()
+        );
+
+        std::fs::write(second.path().join("workspace/note.txt"), b"canary state\n").unwrap();
+        std::fs::remove_file(second.path().join("agent/note-link")).unwrap();
+        symlink(
+            "../workspace/missing.txt",
+            second.path().join("agent/note-link"),
+        )
+        .unwrap();
+        assert_ne!(
+            expected,
+            durable_state_manifest_sha256(second.path()).unwrap()
+        );
     }
 
     #[test]
