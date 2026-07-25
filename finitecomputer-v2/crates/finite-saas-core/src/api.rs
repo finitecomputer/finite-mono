@@ -3489,6 +3489,8 @@ mod tests {
         access_token, access_token_with_subject, core_auth, core_auth_with_runner_credentials,
         runner_credential_config, shared_route_core_auth,
     };
+    use crate::parse_time;
+    use crate::test_support::with_isolated_postgres;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -3851,1657 +3853,2016 @@ mod tests {
 
     #[tokio::test]
     async fn core_api_reconciles_claims_and_lists_visible_projects() {
-        let app = router(CoreStore::memory(), test_auth());
-        let reconcile = serde_json::to_vec(&ReconcileImportsRequest {
-            records: vec![ExistingHostProjectImport {
-                source_host_id: "smoke".to_string(),
-                source_machine_id: "test-smoke".to_string(),
-                owner_email: Some("test@finite.vip".to_string()),
-                display_name: "Smoke".to_string(),
-                hostname: Some("smoke.example.com".to_string()),
-                runtime_host: Some("smoke".to_string()),
-                runtime_status: crate::RuntimeSummaryStatus::Online,
-                active_inference_profile: Some("finite-private".to_string()),
-                hermes_available: Some(true),
-                published_app_urls: vec![
-                    "not-a-contact-url".to_string(),
-                    "https://smoke.example.com/contact/".to_string(),
+        with_isolated_postgres(|db| async move {
+            let app = router(db.store.clone(), test_auth());
+            let reconcile = serde_json::to_vec(&ReconcileImportsRequest {
+                records: vec![ExistingHostProjectImport {
+                    source_host_id: "smoke".to_string(),
+                    source_machine_id: "test-smoke".to_string(),
+                    owner_email: Some("test@finite.vip".to_string()),
+                    display_name: "Smoke".to_string(),
+                    hostname: Some("smoke.example.com".to_string()),
+                    runtime_host: Some("smoke".to_string()),
+                    runtime_status: crate::RuntimeSummaryStatus::Online,
+                    active_inference_profile: Some("finite-private".to_string()),
+                    hermes_available: Some(true),
+                    published_app_urls: vec![
+                        "not-a-contact-url".to_string(),
+                        "https://smoke.example.com/contact/".to_string(),
+                    ],
+                    known_external_channel_participants: Vec::new(),
+                    admin_visible_to_emails: Vec::new(),
+                }],
+                allowlisted_owner_emails: vec!["test@finite.vip".to_string()],
+                now: Some("2026-05-25T12:00:00Z".to_string()),
+            })
+            .unwrap();
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/import-candidates/reconcile")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(reconcile))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_test",
+                                    "test@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let me_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(me_json.get("workos_user_id").is_some());
+            assert!(me_json.get("claimable_candidates").is_some());
+            assert!(me_json.get("agent_creation_requests").is_some());
+            assert!(me_json.get("workosUserId").is_none());
+            assert!(me_json.get("claimableCandidates").is_none());
+            assert!(me_json.get("agentCreationRequests").is_none());
+            assert_json_omits_keys(
+                &me_json,
+                &[
+                    "runner_class",
+                    "placement",
+                    "source_host_id",
+                    "source_machine_id",
+                    "source_import_key",
+                    "provider_runtime_handle",
+                    "provider_runtime_handle_history",
+                    "published_app_urls",
+                    "host_facts",
                 ],
-                known_external_channel_participants: Vec::new(),
-                admin_visible_to_emails: Vec::new(),
-            }],
-            allowlisted_owner_emails: vec!["test@finite.vip".to_string()],
-            now: Some("2026-05-25T12:00:00Z".to_string()),
+            );
+            let me: MeResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(me.claimable_candidates.len(), 1);
+            assert_eq!(me.claimable_candidates[0].display_name, "Smoke");
+            assert!(me.projects.is_empty());
+            assert!(me.agent_creation_requests.is_empty());
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me/billing")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_test",
+                                    "test@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let billing_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me/dashboard-summary")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_test",
+                                    "test@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(summary["me"], me_json);
+            assert_eq!(summary["billing"], billing_json);
+            assert!(summary["finite_private_usage"].is_null());
+
+            let claim = serde_json::to_vec(&ClaimImportsRequest {
+                selected_candidate_ids: vec![me.claimable_candidates[0].id.clone()],
+                now: Some("2026-05-25T13:00:00Z".to_string()),
+            })
+            .unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/import-candidates/claim")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_test",
+                                    "test@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(claim))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let claim_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(claim_json.get("claimed_project_ids").is_some());
+            assert!(claim_json.get("claimedProjectIds").is_none());
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me/projects")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_test",
+                                    "test@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
+            assert!(
+                projects.is_empty(),
+                "legacy imports stay out of the product DTO"
+            );
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me/runtime-routes/test-smoke")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_test",
+                                    "test@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_prod_google",
+                                    "test@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let relinked_me: MeResponse = serde_json::from_slice(&body).unwrap();
+            assert!(relinked_me.projects.is_empty());
+            assert_eq!(relinked_me.workos_user_id, "user_workos_prod_google");
         })
-        .unwrap();
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/import-candidates/reconcile")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(reconcile))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_test",
-                                "test@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let me_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(me_json.get("workos_user_id").is_some());
-        assert!(me_json.get("claimable_candidates").is_some());
-        assert!(me_json.get("agent_creation_requests").is_some());
-        assert!(me_json.get("workosUserId").is_none());
-        assert!(me_json.get("claimableCandidates").is_none());
-        assert!(me_json.get("agentCreationRequests").is_none());
-        assert_json_omits_keys(
-            &me_json,
-            &[
-                "runner_class",
-                "placement",
-                "source_host_id",
-                "source_machine_id",
-                "source_import_key",
-                "provider_runtime_handle",
-                "provider_runtime_handle_history",
-                "published_app_urls",
-                "host_facts",
-            ],
-        );
-        let me: MeResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(me.claimable_candidates.len(), 1);
-        assert_eq!(me.claimable_candidates[0].display_name, "Smoke");
-        assert!(me.projects.is_empty());
-        assert!(me.agent_creation_requests.is_empty());
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me/billing")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_test",
-                                "test@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let billing_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me/dashboard-summary")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_test",
-                                "test@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(summary["me"], me_json);
-        assert_eq!(summary["billing"], billing_json);
-        assert!(summary["finite_private_usage"].is_null());
-
-        let claim = serde_json::to_vec(&ClaimImportsRequest {
-            selected_candidate_ids: vec![me.claimable_candidates[0].id.clone()],
-            now: Some("2026-05-25T13:00:00Z".to_string()),
-        })
-        .unwrap();
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/import-candidates/claim")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_test",
-                                "test@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(claim))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let claim_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(claim_json.get("claimed_project_ids").is_some());
-        assert!(claim_json.get("claimedProjectIds").is_none());
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me/projects")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_test",
-                                "test@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
-        assert!(
-            projects.is_empty(),
-            "legacy imports stay out of the product DTO"
-        );
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me/runtime-routes/test-smoke")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_test",
-                                "test@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_prod_google",
-                                "test@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let relinked_me: MeResponse = serde_json::from_slice(&body).unwrap();
-        assert!(relinked_me.projects.is_empty());
-        assert_eq!(relinked_me.workos_user_id, "user_workos_prod_google");
+        .await;
     }
 
     #[tokio::test]
     async fn core_api_stores_source_host_relay_endpoints_behind_service_auth() {
-        let app = router(CoreStore::memory(), test_auth());
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/core/v1/source-host-relays/Smoke")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "url": "https://relay.smoke.finite.computer/",
-                            "adminToken": "smoke-token",
-                            "now": "2026-05-25T12:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let endpoint: SourceHostRelayEndpoint = serde_json::from_slice(&body).unwrap();
-        assert_eq!(endpoint.source_host_id, "smoke");
-        assert_eq!(endpoint.url, "https://relay.smoke.finite.computer");
-        assert_eq!(endpoint.admin_token, "smoke-token");
+        with_isolated_postgres(|db| async move {
+            let app = router(db.store.clone(), test_auth());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/core/v1/source-host-relays/Smoke")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "url": "https://relay.smoke.finite.computer/",
+                                "adminToken": "smoke-token",
+                                "now": "2026-05-25T12:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let endpoint: SourceHostRelayEndpoint = serde_json::from_slice(&body).unwrap();
+            assert_eq!(endpoint.source_host_id, "smoke");
+            assert_eq!(endpoint.url, "https://relay.smoke.finite.computer");
+            assert_eq!(endpoint.admin_token, "smoke-token");
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/source-host-relays/smoke")
-                    .header("authorization", "Bearer core-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/source-host-relays/smoke")
+                        .header("authorization", "Bearer core-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/source-host-relays/smoke")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/source-host-relays/smoke")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn core_api_serves_finite_private_operator_grant_and_key_lifecycle() {
-        let app = router(CoreStore::memory(), test_auth());
-        let operator_authorization = format!(
-            "Bearer {}",
-            access_token_with_subject(
-                "operator_finite_private",
-                "admin@finite.vip",
-                true,
-                Some(OPERATOR_ORG_ID),
-            )
-        );
+        with_isolated_postgres(|db| async move {
+            let app = router(db.store.clone(), test_auth());
+            let operator_authorization = format!(
+                "Bearer {}",
+                access_token_with_subject(
+                    "operator_finite_private",
+                    "admin@finite.vip",
+                    true,
+                    Some(OPERATOR_ORG_ID),
+                )
+            );
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/finite-private/grants")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "verifiedEmail": "private@finite.vip",
-                            "workosUserId": "user_workos_private",
-                            "now": "2026-05-26T12:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/finite-private/grants")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "verifiedEmail": "private@finite.vip",
+                                "workosUserId": "user_workos_private",
+                                "now": "2026-05-26T12:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/finite-private/grants")
-                    .header("authorization", &operator_authorization)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "verifiedEmail": "private@finite.vip",
-                            "workosUserId": "user_workos_private",
-                            "now": "2026-05-26T12:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let grant: FinitePrivateGrant = serde_json::from_slice(&body).unwrap();
-        assert_eq!(grant.status, crate::FinitePrivateGrantStatus::Active);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/finite-private/grants")
+                        .header("authorization", &operator_authorization)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "verifiedEmail": "private@finite.vip",
+                                "workosUserId": "user_workos_private",
+                                "now": "2026-05-26T12:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let grant: FinitePrivateGrant = serde_json::from_slice(&body).unwrap();
+            assert_eq!(grant.status, crate::FinitePrivateGrantStatus::Active);
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/finite-private/grants/{}/api-keys",
-                        grant.id
-                    ))
-                    .header("authorization", &operator_authorization)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "rawKey": "fpk_live_old",
-                            "projectId": "proj_private",
-                            "agentRuntimeId": "runtime_private",
-                            "now": "2026-05-26T12:01:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let old_key: FinitePrivateApiKey = serde_json::from_slice(&body).unwrap();
-        assert_eq!(old_key.status, crate::FinitePrivateApiKeyStatus::Active);
-        assert_eq!(old_key.grant_id, grant.id);
-        assert_ne!(old_key.key_hash, "fpk_live_old");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/finite-private/grants/{}/api-keys",
+                            grant.id
+                        ))
+                        .header("authorization", &operator_authorization)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            // Unscoped: this test covers the operator
+                            // grant/key lifecycle, not project scoping, and
+                            // never asserted on either id. Real ids would need
+                            // a seeded Project and Agent Runtime, since both
+                            // columns are foreign keys.
+                            serde_json::json!({
+                                "rawKey": "fpk_live_old",
+                                "now": "2026-05-26T12:01:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let old_key: FinitePrivateApiKey = serde_json::from_slice(&body).unwrap();
+            assert_eq!(old_key.status, crate::FinitePrivateApiKeyStatus::Active);
+            assert_eq!(old_key.grant_id, grant.id);
+            assert_ne!(old_key.key_hash, "fpk_live_old");
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/internal/finite-private/v1/reservations")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "requestId": "req-private-admin-before-reset",
-                            "presentedApiKey": "fpk_live_old",
-                            "endpoint": "/v1/chat/completions",
-                            "model": "kimi-k2-6",
-                            "estimatedPromptTokens": 50,
-                            "estimatedCompletionTokens": 100,
-                            "estimatedUsageUnits": 350,
-                            "usageFormulaVersion": "2026-05-26.v1",
-                            "dashboardUrl": "https://finite.computer/dashboard",
-                            "now": "2026-05-26T12:02:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let decision: FinitePrivateUsageDecision = serde_json::from_slice(&body).unwrap();
-        assert_eq!(decision.decision, "allow");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/internal/finite-private/v1/reservations")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "requestId": "req-private-admin-before-reset",
+                                "presentedApiKey": "fpk_live_old",
+                                "endpoint": "/v1/chat/completions",
+                                "model": "kimi-k2-6",
+                                "estimatedPromptTokens": 50,
+                                "estimatedCompletionTokens": 100,
+                                "estimatedUsageUnits": 350,
+                                "usageFormulaVersion": "2026-05-26.v1",
+                                "dashboardUrl": "https://finite.computer/dashboard",
+                                "now": "2026-05-26T12:02:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let decision: FinitePrivateUsageDecision = serde_json::from_slice(&body).unwrap();
+            assert_eq!(decision.decision, "allow");
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/finite-private/grants/{}/reset",
-                        grant.id
-                    ))
-                    .header("authorization", &operator_authorization)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "now": "2026-05-26T12:03:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let reset_grant: FinitePrivateGrant = serde_json::from_slice(&body).unwrap();
-        assert_eq!(reset_grant.current_window_used_units, 0);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/finite-private/grants/{}/reset",
+                            grant.id
+                        ))
+                        .header("authorization", &operator_authorization)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "now": "2026-05-26T12:03:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let reset_grant: FinitePrivateGrant = serde_json::from_slice(&body).unwrap();
+            assert_eq!(reset_grant.current_window_used_units, 0);
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/finite-private/api-keys/{}/rotate",
-                        old_key.id
-                    ))
-                    .header("authorization", &operator_authorization)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "rawKey": "fpk_live_new",
-                            "now": "2026-05-26T12:04:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let new_key: FinitePrivateApiKey = serde_json::from_slice(&body).unwrap();
-        assert_ne!(new_key.id, old_key.id);
-        assert_eq!(new_key.status, crate::FinitePrivateApiKeyStatus::Active);
-        assert_eq!(new_key.grant_id, grant.id);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/finite-private/api-keys/{}/rotate",
+                            old_key.id
+                        ))
+                        .header("authorization", &operator_authorization)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "rawKey": "fpk_live_new",
+                                "now": "2026-05-26T12:04:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let new_key: FinitePrivateApiKey = serde_json::from_slice(&body).unwrap();
+            assert_ne!(new_key.id, old_key.id);
+            assert_eq!(new_key.status, crate::FinitePrivateApiKeyStatus::Active);
+            assert_eq!(new_key.grant_id, grant.id);
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/internal/finite-private/v1/reservations")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "requestId": "req-private-admin-old-key-denied",
-                            "presentedApiKey": "fpk_live_old",
-                            "endpoint": "/v1/chat/completions",
-                            "model": "kimi-k2-6",
-                            "estimatedPromptTokens": 50,
-                            "estimatedCompletionTokens": 100,
-                            "estimatedUsageUnits": 350,
-                            "usageFormulaVersion": "2026-05-26.v1",
-                            "dashboardUrl": "https://finite.computer/dashboard",
-                            "now": "2026-05-26T12:05:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let decision: FinitePrivateUsageDecision = serde_json::from_slice(&body).unwrap();
-        assert_eq!(decision.decision, "deny");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/internal/finite-private/v1/reservations")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "requestId": "req-private-admin-old-key-denied",
+                                "presentedApiKey": "fpk_live_old",
+                                "endpoint": "/v1/chat/completions",
+                                "model": "kimi-k2-6",
+                                "estimatedPromptTokens": 50,
+                                "estimatedCompletionTokens": 100,
+                                "estimatedUsageUnits": 350,
+                                "usageFormulaVersion": "2026-05-26.v1",
+                                "dashboardUrl": "https://finite.computer/dashboard",
+                                "now": "2026-05-26T12:05:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let decision: FinitePrivateUsageDecision = serde_json::from_slice(&body).unwrap();
+            assert_eq!(decision.decision, "deny");
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/finite-private/api-keys/{}/revoke",
-                        new_key.id
-                    ))
-                    .header("authorization", &operator_authorization)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "now": "2026-05-26T12:06:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let revoked_key: FinitePrivateApiKey = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            revoked_key.status,
-            crate::FinitePrivateApiKeyStatus::Revoked
-        );
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/finite-private/api-keys/{}/revoke",
+                            new_key.id
+                        ))
+                        .header("authorization", &operator_authorization)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "now": "2026-05-26T12:06:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let revoked_key: FinitePrivateApiKey = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                revoked_key.status,
+                crate::FinitePrivateApiKeyStatus::Revoked
+            );
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/core/v1/finite-private/admin-audit-events")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token("admin@finite.vip", true, Some(OPERATOR_ORG_ID),)
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let audit_events: Vec<FinitePrivateAdminAuditEvent> =
-            serde_json::from_slice(&body).unwrap();
-        assert!(
-            audit_events
-                .iter()
-                .any(|event| event.action == "finite_private.api_key.rotate")
-        );
-        let audit_json = serde_json::to_string(&audit_events).unwrap();
-        assert!(!audit_json.contains("fpk_live_old"));
-        assert!(!audit_json.contains("fpk_live_new"));
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/api/core/v1/finite-private/admin-audit-events")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token("admin@finite.vip", true, Some(OPERATOR_ORG_ID),)
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let audit_events: Vec<FinitePrivateAdminAuditEvent> =
+                serde_json::from_slice(&body).unwrap();
+            assert!(
+                audit_events
+                    .iter()
+                    .any(|event| event.action == "finite_private.api_key.rotate")
+            );
+            let audit_json = serde_json::to_string(&audit_events).unwrap();
+            assert!(!audit_json.contains("fpk_live_old"));
+            assert!(!audit_json.contains("fpk_live_new"));
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/core/v1/finite-private/admin-state")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token("admin@finite.vip", true, Some(OPERATOR_ORG_ID),)
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let admin_state: crate::FinitePrivateAdminState = serde_json::from_slice(&body).unwrap();
-        assert_eq!(admin_state.grants.len(), 1);
-        assert_eq!(admin_state.api_keys.len(), 2);
-        assert!(
-            admin_state.api_keys.iter().any(|key| key.id == old_key.id
-                && key.status == crate::FinitePrivateApiKeyStatus::Revoked)
-        );
-        let admin_state_json = serde_json::to_string(&admin_state).unwrap();
-        assert!(!admin_state_json.contains("fpk_live_old"));
-        assert!(!admin_state_json.contains("fpk_live_new"));
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/api/core/v1/finite-private/admin-state")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token("admin@finite.vip", true, Some(OPERATOR_ORG_ID),)
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let admin_state: crate::FinitePrivateAdminState =
+                serde_json::from_slice(&body).unwrap();
+            assert_eq!(admin_state.grants.len(), 1);
+            assert_eq!(admin_state.api_keys.len(), 2);
+            assert!(admin_state.api_keys.iter().any(|key| key.id == old_key.id
+                && key.status == crate::FinitePrivateApiKeyStatus::Revoked));
+            let admin_state_json = serde_json::to_string(&admin_state).unwrap();
+            assert!(!admin_state_json.contains("fpk_live_old"));
+            assert!(!admin_state_json.contains("fpk_live_new"));
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/finite-private/grants/{}/revoke",
-                        grant.id
-                    ))
-                    .header("authorization", &operator_authorization)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "now": "2026-05-26T12:07:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let revoked_grant: FinitePrivateGrant = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            revoked_grant.status,
-            crate::FinitePrivateGrantStatus::Revoked
-        );
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/finite-private/grants/{}/revoke",
+                            grant.id
+                        ))
+                        .header("authorization", &operator_authorization)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "now": "2026-05-26T12:07:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let revoked_grant: FinitePrivateGrant = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                revoked_grant.status,
+                crate::FinitePrivateGrantStatus::Revoked
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn finite_private_user_controls_share_one_daily_claim_across_key_and_dashboard() {
-        let store = CoreStore::memory();
-        let grant = store
-            .approve_finite_private_grant(crate::ApproveFinitePrivateGrantInput {
-                verified_email: "controls@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_controls".to_string()),
-                limit_profile_id: None,
-                now: None,
-            })
-            .await
-            .unwrap();
-        store
-            .issue_finite_private_api_key(crate::IssueFinitePrivateApiKeyInput {
-                grant_id: grant.id,
-                raw_key: "fpk_live_controls".to_string(),
-                project_id: None,
-                agent_runtime_id: None,
-                now: None,
-            })
-            .await
-            .unwrap();
-        let app = router(store, test_auth());
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let grant = store
+                .approve_finite_private_grant(crate::ApproveFinitePrivateGrantInput {
+                    verified_email: "controls@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_controls".to_string()),
+                    limit_profile_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            store
+                .issue_finite_private_api_key(crate::IssueFinitePrivateApiKeyInput {
+                    grant_id: grant.id,
+                    raw_key: "fpk_live_controls".to_string(),
+                    project_id: None,
+                    agent_runtime_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            let app = router(store, test_auth());
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/finite-private/usage")
-                    .header("authorization", "Bearer fpk_live_controls")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let status: crate::FinitePrivateUsageStatus = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status.burst_limit_units, 100_000_000);
-        assert!(status.free_daily_reset_available);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/finite-private/usage")
+                        .header("authorization", "Bearer fpk_live_controls")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let status: crate::FinitePrivateUsageStatus = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status.burst_limit_units, 100_000_000);
+            assert!(status.free_daily_reset_available);
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/finite-private/usage/reset")
-                    .header("authorization", "Bearer fpk_live_controls")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let reset: crate::FinitePrivateDailyResetResult = serde_json::from_slice(&body).unwrap();
-        assert!(reset.performed);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/finite-private/usage/reset")
+                        .header("authorization", "Bearer fpk_live_controls")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let reset: crate::FinitePrivateDailyResetResult =
+                serde_json::from_slice(&body).unwrap();
+            assert!(reset.performed);
 
-        let dashboard_authorization = format!(
-            "Bearer {}",
-            access_token_with_subject("user_workos_controls", "controls@finite.vip", true, None,)
-        );
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/finite-private/usage/reset")
-                    .header("authorization", &dashboard_authorization)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let dashboard_reset: Option<crate::FinitePrivateDailyResetResult> =
-            serde_json::from_slice(&body).unwrap();
-        assert!(!dashboard_reset.unwrap().performed);
+            let dashboard_authorization = format!(
+                "Bearer {}",
+                access_token_with_subject(
+                    "user_workos_controls",
+                    "controls@finite.vip",
+                    true,
+                    None,
+                )
+            );
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/finite-private/usage/reset")
+                        .header("authorization", &dashboard_authorization)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let dashboard_reset: Option<crate::FinitePrivateDailyResetResult> =
+                serde_json::from_slice(&body).unwrap();
+            assert!(!dashboard_reset.unwrap().performed);
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/finite-private/usage")
-                    .header("authorization", "Bearer invalid")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/finite-private/usage")
+                        .header("authorization", "Bearer invalid")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn core_api_serves_finite_private_usage_reserve_and_settle() {
-        let store = CoreStore::memory();
-        let grant = store
-            .approve_finite_private_grant(crate::ApproveFinitePrivateGrantInput {
-                verified_email: "private@finite.vip".to_string(),
-                workos_user_id: Some("user_workos_private".to_string()),
-                limit_profile_id: None,
-                now: Some("2026-05-25T12:00:00Z".to_string()),
-            })
-            .await
-            .unwrap();
-        store
-            .issue_finite_private_api_key(crate::IssueFinitePrivateApiKeyInput {
-                grant_id: grant.id,
-                raw_key: "fpk_live_secret".to_string(),
-                project_id: None,
-                agent_runtime_id: None,
-                now: Some("2026-05-25T12:00:00Z".to_string()),
-            })
-            .await
-            .unwrap();
-        let app = router(store, test_auth());
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let grant = store
+                .approve_finite_private_grant(crate::ApproveFinitePrivateGrantInput {
+                    verified_email: "private@finite.vip".to_string(),
+                    workos_user_id: Some("user_workos_private".to_string()),
+                    limit_profile_id: None,
+                    now: Some("2026-05-25T12:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            store
+                .issue_finite_private_api_key(crate::IssueFinitePrivateApiKeyInput {
+                    grant_id: grant.id,
+                    raw_key: "fpk_live_secret".to_string(),
+                    project_id: None,
+                    agent_runtime_id: None,
+                    now: Some("2026-05-25T12:00:00Z".to_string()),
+                })
+                .await
+                .unwrap();
+            let app = router(store, test_auth());
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/internal/finite-private/v1/health")
-                    .header("authorization", "Bearer core-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/internal/finite-private/v1/health")
+                        .header("authorization", "Bearer core-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/internal/finite-private/v1/reservations")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "requestId": "req-private-api-1",
-                            "presentedApiKey": "fpk_live_secret",
-                            "endpoint": "/v1/chat/completions",
-                            "model": "kimi-k2-6",
-                            "estimatedPromptTokens": 120000,
-                            "estimatedCompletionTokens": 4096,
-                            "estimatedUsageUnits": 250000,
-                            "usageFormulaVersion": "2026-05-26.v1",
-                            "dashboardUrl": "https://finite.computer/dashboard",
-                            "now": "2026-05-25T13:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let decision: FinitePrivateUsageDecision = serde_json::from_slice(&body).unwrap();
-        assert_eq!(decision.decision, "allow");
-        let reservation_id = decision.reservation_id.unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/internal/finite-private/v1/reservations")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "requestId": "req-private-api-1",
+                                "presentedApiKey": "fpk_live_secret",
+                                "endpoint": "/v1/chat/completions",
+                                "model": "kimi-k2-6",
+                                "estimatedPromptTokens": 120000,
+                                "estimatedCompletionTokens": 4096,
+                                "estimatedUsageUnits": 250000,
+                                "usageFormulaVersion": "2026-05-26.v1",
+                                "dashboardUrl": "https://finite.computer/dashboard",
+                                "now": "2026-05-25T13:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let decision: FinitePrivateUsageDecision = serde_json::from_slice(&body).unwrap();
+            assert_eq!(decision.decision, "allow");
+            let reservation_id = decision.reservation_id.unwrap();
 
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/internal/finite-private/v1/reservations/{reservation_id}/settle"
-                    ))
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "requestId": "req-private-api-1",
-                            "settlement": "actual",
-                            "promptTokens": 120000,
-                            "completionTokens": 1200,
-                            "usageUnits": 160000,
-                            "usageFormulaVersion": "2026-05-26.v1",
-                            "upstreamStatus": 200,
-                            "upstreamErrorClass": null,
-                            "now": "2026-05-25T13:05:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let settled: SettleFinitePrivateReservationResult = serde_json::from_slice(&body).unwrap();
-        assert!(settled.settled);
-        assert_eq!(settled.reservation_id, reservation_id);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/internal/finite-private/v1/reservations/{reservation_id}/settle"
+                        ))
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "requestId": "req-private-api-1",
+                                "settlement": "actual",
+                                "promptTokens": 120000,
+                                "completionTokens": 1200,
+                                "usageUnits": 160000,
+                                "usageFormulaVersion": "2026-05-26.v1",
+                                "upstreamStatus": 200,
+                                "upstreamErrorClass": null,
+                                "now": "2026-05-25T13:05:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let settled: SettleFinitePrivateReservationResult =
+                serde_json::from_slice(&body).unwrap();
+            assert!(settled.settled);
+            assert_eq!(settled.reservation_id, reservation_id);
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/internal/finite-private/v1/reservations")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "requestId": "req-private-api-unauth",
-                            "presentedApiKey": "fpk_live_secret",
-                            "endpoint": "/v1/chat/completions",
-                            "model": "kimi-k2-6",
-                            "estimatedPromptTokens": 100,
-                            "estimatedCompletionTokens": 100,
-                            "estimatedUsageUnits": 200,
-                            "usageFormulaVersion": "2026-05-26.v1",
-                            "dashboardUrl": "https://finite.computer/dashboard"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/internal/finite-private/v1/reservations")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "requestId": "req-private-api-unauth",
+                                "presentedApiKey": "fpk_live_secret",
+                                "endpoint": "/v1/chat/completions",
+                                "model": "kimi-k2-6",
+                                "estimatedPromptTokens": 100,
+                                "estimatedCompletionTokens": 100,
+                                "estimatedUsageUnits": 200,
+                                "usageFormulaVersion": "2026-05-26.v1",
+                                "dashboardUrl": "https://finite.computer/dashboard"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn core_api_creates_self_serve_agent_request_with_launch_code() {
-        let store = CoreStore::memory();
-        let launch_code = issue_test_launch_code(&store).await;
-        let app = router(store, test_auth());
-        let create = serde_json::to_vec(&CreateAgentRequest {
-            display_name: "Oslo Agent".to_string(),
-            launch_code: launch_code.clone(),
-            idempotency_key: "browser-submit-1".to_string(),
-            hosting_tier: None,
-            profile_picture_url: Some("https://chat.finite.computer/v1/blobs/profile".to_string()),
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let launch_code = issue_test_launch_code(&store).await;
+            let app = router(store, test_auth());
+            let create = serde_json::to_vec(&CreateAgentRequest {
+                display_name: "Oslo Agent".to_string(),
+                launch_code: launch_code.clone(),
+                idempotency_key: "browser-submit-1".to_string(),
+                hosting_tier: None,
+                profile_picture_url: Some(
+                    "https://chat.finite.computer/v1/blobs/profile".to_string(),
+                ),
+            })
+            .unwrap();
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(create.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result.project.display_name, "Oslo Agent");
+            let agent_email = result
+                .project
+                .agent_email
+                .as_deref()
+                .expect("new hosted agents receive a canonical email");
+            assert!(agent_email.starts_with("oslo-agent-"));
+            assert!(agent_email.ends_with("@finite.vip"));
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/brain/agent-account")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "managedAgentEmail": agent_email }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let binding: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(binding["workosUserId"], "user_workos_new");
+            assert_eq!(binding["managedAgentEmail"], agent_email);
+            assert_eq!(binding["status"], "active");
+
+            assert!(result.project.import_candidate_id.is_none());
+            assert!(result.request.agent_runtime_id.is_none());
+            assert_eq!(result.request.runner_class, RunnerClass::Kata);
+            assert_eq!(
+                result.request.profile_picture_url.as_deref(),
+                Some("https://chat.finite.computer/v1/blobs/profile")
+            );
+            assert!(!result.reused);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let me: MeResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(me.projects.len(), 1);
+            assert_eq!(me.projects[0].project.id, result.project.id);
+            assert_eq!(
+                me.projects[0].project.agent_email.as_deref(),
+                Some(agent_email)
+            );
+            assert!(me.projects[0].runtime.is_none());
+            assert_eq!(me.agent_creation_requests.len(), 1);
+            assert_eq!(me.agent_creation_requests[0].project_id, result.project.id);
+            assert_eq!(
+                me.agent_creation_requests[0].status,
+                crate::AgentCreationRequestStatus::Requested
+            );
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(create))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let retry: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+            assert!(retry.reused);
+            assert_eq!(retry.project.id, result.project.id);
+
+            let second = serde_json::to_vec(&CreateAgentRequest {
+                display_name: "Second Agent".to_string(),
+                launch_code: launch_code.clone(),
+                idempotency_key: "browser-submit-2".to_string(),
+                hosting_tier: None,
+                profile_picture_url: None,
+            })
+            .unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(second))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         })
-        .unwrap();
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/agent-creation-requests")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(create.clone()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
-        assert_eq!(result.project.display_name, "Oslo Agent");
-        let agent_email = result
-            .project
-            .agent_email
-            .as_deref()
-            .expect("new hosted agents receive a canonical email");
-        assert!(agent_email.starts_with("oslo-agent-"));
-        assert!(agent_email.ends_with("@finite.vip"));
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/brain/agent-account")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "managedAgentEmail": agent_email }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let binding: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(binding["workosUserId"], "user_workos_new");
-        assert_eq!(binding["managedAgentEmail"], agent_email);
-        assert_eq!(binding["status"], "active");
-
-        assert!(result.project.import_candidate_id.is_none());
-        assert!(result.request.agent_runtime_id.is_none());
-        assert_eq!(result.request.runner_class, RunnerClass::Kata);
-        assert_eq!(
-            result.request.profile_picture_url.as_deref(),
-            Some("https://chat.finite.computer/v1/blobs/profile")
-        );
-        assert!(!result.reused);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let me: MeResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(me.projects.len(), 1);
-        assert_eq!(me.projects[0].project.id, result.project.id);
-        assert_eq!(
-            me.projects[0].project.agent_email.as_deref(),
-            Some(agent_email)
-        );
-        assert!(me.projects[0].runtime.is_none());
-        assert_eq!(me.agent_creation_requests.len(), 1);
-        assert_eq!(me.agent_creation_requests[0].project_id, result.project.id);
-        assert_eq!(
-            me.agent_creation_requests[0].status,
-            crate::AgentCreationRequestStatus::Requested
-        );
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/agent-creation-requests")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(create))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let retry: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
-        assert!(retry.reused);
-        assert_eq!(retry.project.id, result.project.id);
-
-        let second = serde_json::to_vec(&CreateAgentRequest {
-            display_name: "Second Agent".to_string(),
-            launch_code: launch_code.clone(),
-            idempotency_key: "browser-submit-2".to_string(),
-            hosting_tier: None,
-            profile_picture_url: None,
-        })
-        .unwrap();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/agent-creation-requests")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(second))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        .await;
     }
 
     #[tokio::test]
     async fn core_api_rejects_tier_mismatch_without_consuming_launch_code() {
-        let store = CoreStore::memory();
-        let launch_code = issue_test_launch_code(&store).await;
-        let app = router(store, test_auth());
-        let user = identity_headers("tier-check@finite.vip", "true");
-        let mut request = serde_json::json!({
-            "displayName": "Tier Check",
-            "launchCode": launch_code,
-            "idempotencyKey": "tier-check-submit",
-            "hostingTier": "confidential"
-        });
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let launch_code = issue_test_launch_code(&store).await;
+            let app = router(store, test_auth());
+            let user = identity_headers("tier-check@finite.vip", "true");
+            let mut request = serde_json::json!({
+                "displayName": "Tier Check",
+                "launchCode": launch_code,
+                "idempotencyKey": "tier-check-submit",
+                "hostingTier": "confidential"
+            });
 
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/me/agent-creation-requests",
-            &user,
-            Some(request.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/me/agent-creation-requests",
+                &user,
+                Some(request.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
 
-        request["hostingTier"] = serde_json::json!("standard");
-        let (status, body) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/me/agent-creation-requests",
-            &user,
-            Some(request),
-        )
+            request["hostingTier"] = serde_json::json!("standard");
+            let (status, body) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/me/agent-creation-requests",
+                &user,
+                Some(request),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["request"]["runner_class"], "kata");
+        })
         .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["request"]["runner_class"], "kata");
     }
 
     #[tokio::test]
     async fn core_api_uses_server_time_for_launch_code_expiry() {
-        let store = CoreStore::memory();
-        let issued = store
-            .issue_launch_code_batch(crate::launch_codes::IssueLaunchCodeBatchInput {
-                name: "Expired browser code".to_string(),
-                code_count: 1,
-                expires_in_hours: Some(1),
-                hosting_tier: None,
-                created_by_workos_user_id: "workos-test-operator".to_string(),
-                now: Some("2020-01-01T00:00:00Z".to_string()),
-            })
-            .await
-            .expect("expired test batch should issue");
-        let plaintext = issued.codes[0].code.clone();
-        let app = router(store.clone(), test_auth());
-        let user = identity_headers("expired-code@finite.vip", "true");
-        let request = serde_json::json!({
-            "displayName": "Expired Agent",
-            "launchCode": plaintext,
-            "idempotencyKey": "expired-browser-submit"
-        });
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let issued = store
+                .issue_launch_code_batch(crate::launch_codes::IssueLaunchCodeBatchInput {
+                    name: "Expired browser code".to_string(),
+                    code_count: 1,
+                    expires_in_hours: Some(1),
+                    hosting_tier: None,
+                    created_by_workos_user_id: "workos-test-operator".to_string(),
+                    now: Some("2020-01-01T00:00:00Z".to_string()),
+                })
+                .await
+                .expect("expired test batch should issue");
+            let plaintext = issued.codes[0].code.clone();
+            let app = router(store.clone(), test_auth());
+            let user = identity_headers("expired-code@finite.vip", "true");
+            let request = serde_json::json!({
+                "displayName": "Expired Agent",
+                "launchCode": plaintext,
+                "idempotencyKey": "expired-browser-submit"
+            });
 
-        let mut forged = request.clone();
-        forged["now"] = serde_json::json!("2020-01-01T00:30:00Z");
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/me/agent-creation-requests",
-            &user,
-            Some(forged),
-        )
+            let mut forged = request.clone();
+            forged["now"] = serde_json::json!("2020-01-01T00:30:00Z");
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/me/agent-creation-requests",
+                &user,
+                Some(forged),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/me/agent-creation-requests",
+                &user,
+                Some(request),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let batches = store.list_launch_code_batches().await.unwrap();
+            assert_eq!(batches.len(), 1);
+            assert!(batches[0].codes[0].redeemed_at.is_none());
+            assert!(batches[0].codes[0].redeemed_customer_org_id.is_none());
+        })
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/me/agent-creation-requests",
-            &user,
-            Some(request),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-
-        let batches = store.list_launch_code_batches().await.unwrap();
-        assert_eq!(batches.len(), 1);
-        assert!(batches[0].codes[0].redeemed_at.is_none());
-        assert!(batches[0].codes[0].redeemed_customer_org_id.is_none());
     }
 
     #[tokio::test]
     async fn core_api_lets_runner_lease_and_complete_agent_creation_request() {
-        let store = CoreStore::memory();
-        let launch_code = issue_test_launch_code(&store).await;
-        let app = router(store, scoped_test_auth());
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/core/v1/runtime-artifacts/artifact-v1")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "kind": "oci_image",
-                            "reference": format!(
-                                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
-                                "a".repeat(64)
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let launch_code = issue_test_launch_code(&store).await;
+            let app = router(store, scoped_test_auth());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/core/v1/runtime-artifacts/artifact-v1")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "kind": "oci_image",
+                                "reference": format!(
+                                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                                    "a".repeat(64)
+                                ),
+                                "versionLabel": "v1",
+                                "stateSchemaVersion": "state-v1",
+                                "baseImage": "python:3.11-trixie",
+                                "promoted": true,
+                                "now": "2026-05-25T12:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let create = serde_json::to_vec(&CreateAgentRequest {
+                display_name: "Oslo Agent".to_string(),
+                launch_code: launch_code.clone(),
+                idempotency_key: "browser-submit-1".to_string(),
+                hosting_tier: None,
+                profile_picture_url: None,
+            })
+            .unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
                             ),
-                            "versionLabel": "v1",
-                            "stateSchemaVersion": "state-v1",
-                            "baseImage": "python:3.11-trixie",
-                            "promoted": true,
-                            "now": "2026-05-25T12:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(create))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
 
-        let create = serde_json::to_vec(&CreateAgentRequest {
-            display_name: "Oslo Agent".to_string(),
-            launch_code: launch_code.clone(),
-            idempotency_key: "browser-submit-1".to_string(),
-            hosting_tier: None,
-            profile_picture_url: None,
-        })
-        .unwrap();
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/agent-creation-requests")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(create))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/agent-creation-requests/lease")
-                    .header("authorization", runner_authorization())
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "runnerId": "runner-oslo-1",
-                            "leaseToken": "lease-token-1",
-                            "leaseSeconds": 300,
-                            "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let lease: Option<AgentCreationLease> = serde_json::from_slice(&body).unwrap();
-        let lease = lease.unwrap();
-        assert_eq!(
-            lease.request.status,
-            crate::AgentCreationRequestStatus::Launching
-        );
-        assert_eq!(lease.request.runner_id.as_deref(), Some("runner-oslo-1"));
-
-        let operation_uri = format!(
-            "/api/core/v1/agent-creation-requests/{}/provider-operation/transitions",
-            lease.request.id
-        );
-        let runner_headers = vec![("authorization".to_string(), runner_authorization())];
-        let transition =
-            |lease_token: &str, correlation_id: &str, transition: serde_json::Value| {
-                serde_json::json!({
-                    "runnerId": "runner-oslo-1",
-                    "leaseToken": lease_token,
-                    "correlationId": correlation_id,
-                    "placement": {
-                        "runnerClass": "kata",
-                        "runtimeResourceClass": "vcpu4_memory8_gib"
-                    },
-                    "transition": transition
-                })
-            };
-        let reserve = transition(
-            "lease-token-1",
-            "api-correlation-1",
-            serde_json::json!({"kind": "correlation_reserved"}),
-        );
-        let (status, first_ack) = send_json(
-            &app,
-            "POST",
-            &operation_uri,
-            &runner_headers,
-            Some(reserve.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, replay_ack) =
-            send_json(&app, "POST", &operation_uri, &runner_headers, Some(reserve)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(replay_ack, first_ack);
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            &operation_uri,
-            &runner_headers,
-            Some(transition(
-                "wrong-token",
-                "api-correlation-1",
-                serde_json::json!({"kind": "provisioned", "provider_facts": {}}),
-            )),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        for provider_transition in [
-            serde_json::json!({"kind": "provision_started"}),
-            serde_json::json!({
-                "kind": "provisioned",
-                "provider_facts": {"provider_id": "opaque-api-1"}
-            }),
-            serde_json::json!({"kind": "commit_started"}),
-        ] {
-            let (status, _) = send_json(
-                &app,
-                "POST",
-                &operation_uri,
-                &runner_headers,
-                Some(transition(
-                    "lease-token-1",
-                    "api-correlation-1",
-                    provider_transition,
-                )),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK);
-        }
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let me: MeResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(me.agent_creation_requests.len(), 1);
-        assert_eq!(
-            me.agent_creation_requests[0].status,
-            crate::AgentCreationRequestStatus::Launching
-        );
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/agent-creation-requests/{}/complete",
-                        lease.request.id
-                    ))
-                    .header("authorization", runner_authorization())
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "runnerId": "runner-oslo-1",
-                            "leaseToken": "lease-token-1",
-                            "sourceHostId": "oslo-host-1",
-                            "sourceMachineId": "oslo-agent-001",
-                            "runtimeArtifactId": "artifact-v1",
-                            "providerRuntimeHandle": {
-                                "schema": "provider_runtime_handle.v1",
-                                "handle": {
-                                    "runnerClass": "kata",
-                                    "opaque": {"sandbox_id": "opaque-api-1"}
-                                }
-                            },
-                            "contactEndpoint": "https://oslo-agent.example.test/contact/",
-                            "hostname": "oslo-agent-001.finite.computer",
-                            "runtimeHost": "oslo-host-1",
-                            "runtimeStatus": "online",
-                            "activeInferenceProfile": "finite-private",
-                            "hermesAvailable": true,
-                            "publishedAppUrls": [],
-                            "runtimeCapabilities": runtime_capabilities_json(true),
-                            "now": "2026-05-25T13:01:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let completed: AgentCreationLease = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            completed.request.status,
-            crate::AgentCreationRequestStatus::Running
-        );
-        assert!(completed.request.agent_runtime_id.is_some());
-        assert!(matches!(
-            completed
-                .provider_operation
-                .unwrap()
-                .v1()
-                .transitions
-                .last()
-                .unwrap()
-                .transition,
-            ProviderOperationTransition::Ready
-        ));
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me/projects")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let projects_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_json_omits_keys(
-            &projects_json,
-            &[
-                "runner_class",
-                "placement",
-                "source_host_id",
-                "source_machine_id",
-                "source_import_key",
-                "provider_runtime_handle",
-                "provider_runtime_handle_history",
-                "published_app_urls",
-                "host_facts",
-            ],
-        );
-        let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(projects.len(), 1);
-        assert_eq!(
-            projects[0].runtime.as_ref().unwrap().runtime_status,
-            RuntimeSummaryStatus::Online
-        );
-        assert_eq!(
-            projects[0]
-                .runtime
-                .as_ref()
-                .unwrap()
-                .contact_endpoint
-                .as_deref(),
-            Some("https://oslo-agent.example.test/contact")
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me/runtime-routes/oslo-agent-001")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let resolution: RuntimeRouteResolution = serde_json::from_slice(&body).unwrap();
-        assert_eq!(resolution.project_id, projects[0].project.id);
-        assert_eq!(
-            resolution.runtime_id,
-            projects[0].runtime.as_ref().unwrap().id
-        );
-    }
-
-    #[tokio::test]
-    async fn core_api_skips_full_or_draining_runner_without_blocking_other_runner() {
-        let store = CoreStore::memory();
-        let launch_code = issue_test_launch_code(&store).await;
-        let app = router(store, test_auth());
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/core/v1/runtime-artifacts/artifact-v1")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "kind": "oci_image",
-                            "reference": format!(
-                                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
-                                "a".repeat(64)
-                            ),
-                            "versionLabel": "v1",
-                            "stateSchemaVersion": "state-v1",
-                            "baseImage": "python:3.11-trixie",
-                            "promoted": true,
-                            "now": "2026-05-25T12:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/agent-creation-requests")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "displayName": "Oslo Agent",
-                            "launchCode": launch_code.clone(),
-                            "idempotencyKey": "browser-submit-1"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        for runner_capacity in [
-            serde_json::json!({
-                "draining": true,
-                "maxSandboxCount": 4,
-                "activeSandboxCount": 1,
-                "availableMemoryBytes": 8589934592_u64,
-                "runnerClasses": ["kata"],
-                "runtimeCapabilities": runtime_capabilities_json(true)
-            }),
-            serde_json::json!({
-                "draining": false,
-                "maxSandboxCount": 1,
-                "activeSandboxCount": 1,
-                "availableMemoryBytes": 1073741824_u64,
-                "runnerClasses": ["kata"],
-                "runtimeCapabilities": runtime_capabilities_json(true)
-            }),
-        ] {
             let response = app
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method("POST")
                         .uri("/api/core/v1/agent-creation-requests/lease")
-                        .header("authorization", format!("Bearer {FULL_RUNNER_TOKEN}"))
+                        .header("authorization", runner_authorization())
                         .header("content-type", "application/json")
                         .body(Body::from(
                             serde_json::json!({
-                                "runnerId": "runner-oslo-full",
-                                "leaseToken": "lease-token-full",
+                                "runnerId": "runner-oslo-1",
+                                "leaseToken": "lease-token-1",
                                 "leaseSeconds": 300,
-                                "runnerCapacity": runner_capacity,
+                                "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let lease: Option<AgentCreationLease> = serde_json::from_slice(&body).unwrap();
+            let lease = lease.unwrap();
+            assert_eq!(
+                lease.request.status,
+                crate::AgentCreationRequestStatus::Launching
+            );
+            assert_eq!(lease.request.runner_id.as_deref(), Some("runner-oslo-1"));
+
+            let operation_uri = format!(
+                "/api/core/v1/agent-creation-requests/{}/provider-operation/transitions",
+                lease.request.id
+            );
+            let runner_headers = vec![("authorization".to_string(), runner_authorization())];
+            let transition =
+                |lease_token: &str, correlation_id: &str, transition: serde_json::Value| {
+                    serde_json::json!({
+                        "runnerId": "runner-oslo-1",
+                        "leaseToken": lease_token,
+                        "correlationId": correlation_id,
+                        "placement": {
+                            "runnerClass": "kata",
+                            "runtimeResourceClass": "vcpu4_memory8_gib"
+                        },
+                        "transition": transition
+                    })
+                };
+            let reserve = transition(
+                "lease-token-1",
+                "api-correlation-1",
+                serde_json::json!({"kind": "correlation_reserved"}),
+            );
+            let (status, first_ack) = send_json(
+                &app,
+                "POST",
+                &operation_uri,
+                &runner_headers,
+                Some(reserve.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, replay_ack) =
+                send_json(&app, "POST", &operation_uri, &runner_headers, Some(reserve)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(replay_ack, first_ack);
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                &operation_uri,
+                &runner_headers,
+                Some(transition(
+                    "wrong-token",
+                    "api-correlation-1",
+                    serde_json::json!({"kind": "provisioned", "provider_facts": {}}),
+                )),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            for provider_transition in [
+                serde_json::json!({"kind": "provision_started"}),
+                serde_json::json!({
+                    "kind": "provisioned",
+                    "provider_facts": {"provider_id": "opaque-api-1"}
+                }),
+                serde_json::json!({"kind": "commit_started"}),
+            ] {
+                let (status, _) = send_json(
+                    &app,
+                    "POST",
+                    &operation_uri,
+                    &runner_headers,
+                    Some(transition(
+                        "lease-token-1",
+                        "api-correlation-1",
+                        provider_transition,
+                    )),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+            }
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let me: MeResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(me.agent_creation_requests.len(), 1);
+            assert_eq!(
+                me.agent_creation_requests[0].status,
+                crate::AgentCreationRequestStatus::Launching
+            );
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/agent-creation-requests/{}/complete",
+                            lease.request.id
+                        ))
+                        .header("authorization", runner_authorization())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "runnerId": "runner-oslo-1",
+                                "leaseToken": "lease-token-1",
+                                "sourceHostId": "oslo-host-1",
+                                "sourceMachineId": "oslo-agent-001",
+                                "runtimeArtifactId": "artifact-v1",
+                                "providerRuntimeHandle": {
+                                    "schema": "provider_runtime_handle.v1",
+                                    "handle": {
+                                        "runnerClass": "kata",
+                                        "opaque": {"sandbox_id": "opaque-api-1"}
+                                    }
+                                },
+                                "contactEndpoint": "https://oslo-agent.example.test/contact/",
+                                "hostname": "oslo-agent-001.finite.computer",
+                                "runtimeHost": "oslo-host-1",
+                                "runtimeStatus": "online",
+                                "activeInferenceProfile": "finite-private",
+                                "hermesAvailable": true,
+                                "publishedAppUrls": [],
+                                "runtimeCapabilities": runtime_capabilities_json(true),
+                                "now": "2026-05-25T13:01:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let completed: AgentCreationLease = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                completed.request.status,
+                crate::AgentCreationRequestStatus::Running
+            );
+            assert!(completed.request.agent_runtime_id.is_some());
+            assert!(matches!(
+                completed
+                    .provider_operation
+                    .unwrap()
+                    .v1()
+                    .transitions
+                    .last()
+                    .unwrap()
+                    .transition,
+                ProviderOperationTransition::Ready
+            ));
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me/projects")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let projects_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_json_omits_keys(
+                &projects_json,
+                &[
+                    "runner_class",
+                    "placement",
+                    "source_host_id",
+                    "source_machine_id",
+                    "source_import_key",
+                    "provider_runtime_handle",
+                    "provider_runtime_handle_history",
+                    "published_app_urls",
+                    "host_facts",
+                ],
+            );
+            let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
+            assert_eq!(projects.len(), 1);
+            assert_eq!(
+                projects[0].runtime.as_ref().unwrap().runtime_status,
+                RuntimeSummaryStatus::Online
+            );
+            assert_eq!(
+                projects[0]
+                    .runtime
+                    .as_ref()
+                    .unwrap()
+                    .contact_endpoint
+                    .as_deref(),
+                Some("https://oslo-agent.example.test/contact")
+            );
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me/runtime-routes/oslo-agent-001")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let resolution: RuntimeRouteResolution = serde_json::from_slice(&body).unwrap();
+            assert_eq!(resolution.project_id, projects[0].project.id);
+            assert_eq!(
+                resolution.runtime_id,
+                projects[0].runtime.as_ref().unwrap().id
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn core_api_skips_full_or_draining_runner_without_blocking_other_runner() {
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let launch_code = issue_test_launch_code(&store).await;
+            let app = router(store, test_auth());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/core/v1/runtime-artifacts/artifact-v1")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "kind": "oci_image",
+                                "reference": format!(
+                                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                                    "a".repeat(64)
+                                ),
+                                "versionLabel": "v1",
+                                "stateSchemaVersion": "state-v1",
+                                "baseImage": "python:3.11-trixie",
+                                "promoted": true,
+                                "now": "2026-05-25T12:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "displayName": "Oslo Agent",
+                                "launchCode": launch_code.clone(),
+                                "idempotencyKey": "browser-submit-1"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            for runner_capacity in [
+                serde_json::json!({
+                    "draining": true,
+                    "maxSandboxCount": 4,
+                    "activeSandboxCount": 1,
+                    "availableMemoryBytes": 8589934592_u64,
+                    "runnerClasses": ["kata"],
+                    "runtimeCapabilities": runtime_capabilities_json(true)
+                }),
+                serde_json::json!({
+                    "draining": false,
+                    "maxSandboxCount": 1,
+                    "activeSandboxCount": 1,
+                    "availableMemoryBytes": 1073741824_u64,
+                    "runnerClasses": ["kata"],
+                    "runtimeCapabilities": runtime_capabilities_json(true)
+                }),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/core/v1/agent-creation-requests/lease")
+                            .header("authorization", format!("Bearer {FULL_RUNNER_TOKEN}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                serde_json::json!({
+                                    "runnerId": "runner-oslo-full",
+                                    "leaseToken": "lease-token-full",
+                                    "leaseSeconds": 300,
+                                    "runnerCapacity": runner_capacity,
+                                    "now": "2026-05-25T13:00:00Z"
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let lease: Option<AgentCreationLease> = serde_json::from_slice(&body).unwrap();
+                assert!(lease.is_none());
+            }
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/agent-creation-requests/lease")
+                        .header("authorization", format!("Bearer {SECOND_RUNNER_TOKEN}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "runnerId": "runner-oslo-2",
+                                "leaseToken": "lease-token-2",
+                                "leaseSeconds": 300,
+                                "runnerCapacity": {
+                                    "draining": false,
+                                    "maxSandboxCount": 4,
+                                    "activeSandboxCount": 1,
+                                    "availableMemoryBytes": 8589934592_u64,
+                                    "runnerClasses": ["kata"],
+                                    "runtimeCapabilities": runtime_capabilities_json(true)
+                                },
+                                "now": "2026-05-25T13:00:01Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let lease: Option<AgentCreationLease> = serde_json::from_slice(&body).unwrap();
+            let lease = lease.expect("available runner should lease queued work");
+            assert_eq!(lease.request.runner_id.as_deref(), Some("runner-oslo-2"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn core_api_lets_operator_cancel_failed_agent_creation_request() {
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let launch_code = issue_test_launch_code(&store).await;
+            let app = router(store, test_auth());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/core/v1/runtime-artifacts/artifact-v1")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "kind": "oci_image",
+                                "reference": format!(
+                                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                                    "a".repeat(64)
+                                ),
+                                "versionLabel": "v1",
+                                "stateSchemaVersion": "state-v1",
+                                "promoted": true,
+                                "now": "2026-05-25T12:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let create = serde_json::to_vec(&CreateAgentRequest {
+                display_name: "Oslo Agent".to_string(),
+                launch_code: launch_code.clone(),
+                idempotency_key: "browser-submit-1".to_string(),
+                hosting_tier: None,
+                profile_picture_url: None,
+            })
+            .unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(create))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let created: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/agent-creation-requests/lease")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "runnerId": "runner-oslo-1",
+                                "leaseToken": "lease-token-1",
+                                "leaseSeconds": 300,
+                                "now": "2026-05-25T13:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/agent-creation-requests/{}/fail",
+                            created.request.id
+                        ))
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "runnerId": "runner-oslo-1",
+                                "leaseToken": "lease-token-1",
+                                "failureMessage": "runtime did not publish a relay heartbeat",
+                                "now": "2026-05-25T13:01:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/agent-creation-requests/{}/cancel",
+                            created.request.id
+                        ))
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let cancelled: AgentCreationRequest = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                cancelled.status,
+                crate::AgentCreationRequestStatus::Cancelled
+            );
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me/projects")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_new",
+                                    "new@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
+            assert!(projects.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn core_api_serves_runtime_chat_relay_endpoints() {
+        with_isolated_postgres(|db| async move {
+            let relay_dir = tempfile::tempdir().unwrap();
+            let store = db.store.clone();
+            let launch_code = issue_test_launch_code(&store).await;
+            let app = router_with_relay_state_dir(store, test_auth(), relay_dir.path());
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/core/v1/runtime-artifacts/artifact-v1")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "kind": "oci_image",
+                                "reference": format!(
+                                    "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
+                                    "a".repeat(64)
+                                ),
+                                "versionLabel": "v1",
+                                "stateSchemaVersion": "state-v1",
+                                "baseImage": "python:3.11-trixie",
+                                "promoted": true,
+                                "now": "2026-05-25T12:00:00Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_chat",
+                                    "chat@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "displayName": "Chat Agent",
+                                "launchCode": launch_code.clone(),
+                                "idempotencyKey": "chat-submit-1"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let created: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+            let project_agent_id = format!("agent_{}", created.project.id);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/agent-creation-requests/lease")
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "runnerId": "runner-oslo-1",
+                                "leaseToken": "lease-token-1",
+                                "leaseSeconds": 300,
                                 "now": "2026-05-25T13:00:00Z"
                             })
                             .to_string(),
@@ -5515,940 +5876,648 @@ mod tests {
                 .await
                 .unwrap();
             let lease: Option<AgentCreationLease> = serde_json::from_slice(&body).unwrap();
-            assert!(lease.is_none());
-        }
+            let lease = lease.unwrap();
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/agent-creation-requests/lease")
-                    .header("authorization", format!("Bearer {SECOND_RUNNER_TOKEN}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "runnerId": "runner-oslo-2",
-                            "leaseToken": "lease-token-2",
-                            "leaseSeconds": 300,
-                            "runnerCapacity": {
-                                "draining": false,
-                                "maxSandboxCount": 4,
-                                "activeSandboxCount": 1,
-                                "availableMemoryBytes": 8589934592_u64,
-                                "runnerClasses": ["kata"],
-                                "runtimeCapabilities": runtime_capabilities_json(true)
-                            },
-                            "now": "2026-05-25T13:00:01Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let lease: Option<AgentCreationLease> = serde_json::from_slice(&body).unwrap();
-        let lease = lease.expect("available runner should lease queued work");
-        assert_eq!(lease.request.runner_id.as_deref(), Some("runner-oslo-2"));
-    }
+            let runtime_token = "runtime-token-1";
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/core/v1/agent-creation-requests/{}/runtime",
+                            lease.request.id
+                        ))
+                        .header("authorization", "Bearer core-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "runnerId": "runner-oslo-1",
+                                "leaseToken": "lease-token-1",
+                                "sourceHostId": "oslo-host-1",
+                                "sourceMachineId": "oslo-agent-001",
+                                "runtimeArtifactId": "artifact-v1",
+                                "stateSchemaVersion": "state-v1",
+                                "runtimeRelayTokenHash": crate::runtime_relay_token_hash(runtime_token).unwrap(),
+                                "displayName": "Chat Agent",
+                                "runtimeHost": "oslo-host-1",
+                                "runtimeStatus": "unknown",
+                                "hermesAvailable": true,
+                                "publishedAppUrls": [],
+                                "now": "2026-05-25T13:00:30Z"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
 
-    #[tokio::test]
-    async fn core_api_lets_operator_cancel_failed_agent_creation_request() {
-        let store = CoreStore::memory();
-        let launch_code = issue_test_launch_code(&store).await;
-        let app = router(store, test_auth());
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/core/v1/runtime-artifacts/artifact-v1")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "kind": "oci_image",
-                            "reference": format!(
-                                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
-                                "a".repeat(64)
-                            ),
-                            "versionLabel": "v1",
-                            "stateSchemaVersion": "state-v1",
-                            "promoted": true,
-                            "now": "2026-05-25T12:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let create = serde_json::to_vec(&CreateAgentRequest {
-            display_name: "Oslo Agent".to_string(),
-            launch_code: launch_code.clone(),
-            idempotency_key: "browser-submit-1".to_string(),
-            hosting_tier: None,
-            profile_picture_url: None,
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/finite/v1/chat/inbox?projectAgentId={project_agent_id}&after=0&limit=10"
+                        ))
+                        .header("authorization", "Bearer runtime-token-1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let inbox: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(inbox["machineId"], "oslo-agent-001");
+            assert_eq!(inbox["events"].as_array().unwrap().len(), 0);
+
+            let snapshot = serde_json::json!({
+                "users": [],
+                "machines": [{ "id": "oslo-agent-001" }],
+                "project_agents": [{ "id": project_agent_id }],
+                "sites": [],
+                "skills": [],
+                "capabilities": []
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/finite/v1/chat/snapshot")
+                        .header("authorization", "Bearer runtime-token-1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "snapshot": snapshot }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/finite/v1/chat/log/messages")
+                        .header("authorization", "Bearer runtime-token-1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "projectAgentId": project_agent_id,
+                                "threads": [{
+                                    "id": "topic-1",
+                                    "project_agent_id": project_agent_id,
+                                    "created_by": "runtime",
+                                    "title": "Smoke",
+                                    "created_at": "2026-05-25T13:00:00Z",
+                                    "last_activity_at": "2026-05-25T13:00:00Z",
+                                    "message_count": 0
+                                }],
+                                "messages": []
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/finite/v1/machines/oslo-agent-001/chat/snapshot")
+                        .header("authorization", "Bearer core-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
         })
-        .unwrap();
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/agent-creation-requests")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(create))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let created: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/agent-creation-requests/lease")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "runnerId": "runner-oslo-1",
-                            "leaseToken": "lease-token-1",
-                            "leaseSeconds": 300,
-                            "now": "2026-05-25T13:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/agent-creation-requests/{}/fail",
-                        created.request.id
-                    ))
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "runnerId": "runner-oslo-1",
-                            "leaseToken": "lease-token-1",
-                            "failureMessage": "runtime did not publish a relay heartbeat",
-                            "now": "2026-05-25T13:01:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/agent-creation-requests/{}/cancel",
-                        created.request.id
-                    ))
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let cancelled: AgentCreationRequest = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            cancelled.status,
-            crate::AgentCreationRequestStatus::Cancelled
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me/projects")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_new",
-                                "new@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let projects: Vec<PublicVisibleProject> = serde_json::from_slice(&body).unwrap();
-        assert!(projects.is_empty());
-    }
-
-    #[tokio::test]
-    async fn core_api_serves_runtime_chat_relay_endpoints() {
-        let relay_dir = tempfile::tempdir().unwrap();
-        let store = CoreStore::memory();
-        let launch_code = issue_test_launch_code(&store).await;
-        let app = router_with_relay_state_dir(store, test_auth(), relay_dir.path());
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/core/v1/runtime-artifacts/artifact-v1")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "kind": "oci_image",
-                            "reference": format!(
-                                "ghcr.io/finitecomputer/agent-runtime:v1@sha256:{}",
-                                "a".repeat(64)
-                            ),
-                            "versionLabel": "v1",
-                            "stateSchemaVersion": "state-v1",
-                            "baseImage": "python:3.11-trixie",
-                            "promoted": true,
-                            "now": "2026-05-25T12:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/agent-creation-requests")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_chat",
-                                "chat@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "displayName": "Chat Agent",
-                            "launchCode": launch_code.clone(),
-                            "idempotencyKey": "chat-submit-1"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let created: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
-        let project_agent_id = format!("agent_{}", created.project.id);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/agent-creation-requests/lease")
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "runnerId": "runner-oslo-1",
-                            "leaseToken": "lease-token-1",
-                            "leaseSeconds": 300,
-                            "now": "2026-05-25T13:00:00Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let lease: Option<AgentCreationLease> = serde_json::from_slice(&body).unwrap();
-        let lease = lease.unwrap();
-
-        let runtime_token = "runtime-token-1";
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!(
-                        "/api/core/v1/agent-creation-requests/{}/runtime",
-                        lease.request.id
-                    ))
-                    .header("authorization", "Bearer core-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "runnerId": "runner-oslo-1",
-                            "leaseToken": "lease-token-1",
-                            "sourceHostId": "oslo-host-1",
-                            "sourceMachineId": "oslo-agent-001",
-                            "runtimeArtifactId": "artifact-v1",
-                            "stateSchemaVersion": "state-v1",
-                            "runtimeRelayTokenHash": crate::runtime_relay_token_hash(runtime_token).unwrap(),
-                            "displayName": "Chat Agent",
-                            "runtimeHost": "oslo-host-1",
-                            "runtimeStatus": "unknown",
-                            "hermesAvailable": true,
-                            "publishedAppUrls": [],
-                            "now": "2026-05-25T13:00:30Z"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/finite/v1/chat/inbox?projectAgentId={project_agent_id}&after=0&limit=10"
-                    ))
-                    .header("authorization", "Bearer runtime-token-1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let inbox: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(inbox["machineId"], "oslo-agent-001");
-        assert_eq!(inbox["events"].as_array().unwrap().len(), 0);
-
-        let snapshot = serde_json::json!({
-            "users": [],
-            "machines": [{ "id": "oslo-agent-001" }],
-            "project_agents": [{ "id": project_agent_id }],
-            "sites": [],
-            "skills": [],
-            "capabilities": []
-        });
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/finite/v1/chat/snapshot")
-                    .header("authorization", "Bearer runtime-token-1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "snapshot": snapshot }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/finite/v1/chat/log/messages")
-                    .header("authorization", "Bearer runtime-token-1")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "projectAgentId": project_agent_id,
-                            "threads": [{
-                                "id": "topic-1",
-                                "project_agent_id": project_agent_id,
-                                "created_by": "runtime",
-                                "title": "Smoke",
-                                "created_at": "2026-05-25T13:00:00Z",
-                                "last_activity_at": "2026-05-25T13:00:00Z",
-                                "message_count": 0
-                            }],
-                            "messages": []
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/finite/v1/machines/oslo-agent-001/chat/snapshot")
-                    .header("authorization", "Bearer core-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        .await;
     }
 
     #[tokio::test]
     async fn trusted_server_configuration_can_place_local_agent_creation() {
-        let store = CoreStore::memory();
-        let launch_code = issue_test_launch_code(&store).await;
-        let placement = RuntimePlacement {
-            runner_class: RunnerClass::AppleContainer,
-            runtime_resource_class: crate::RuntimeResourceClass::Vcpu4Memory8Gib,
-        };
-        let app = router_with_agent_creation_placement(store, test_auth(), Some(placement));
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let launch_code = issue_test_launch_code(&store).await;
+            let placement = RuntimePlacement {
+                runner_class: RunnerClass::AppleContainer,
+                runtime_resource_class: crate::RuntimeResourceClass::Vcpu4Memory8Gib,
+            };
+            let app = router_with_agent_creation_placement(store, test_auth(), Some(placement));
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/me/agent-creation-requests")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "user_workos_local",
-                                "local@finite.vip",
-                                true,
-                                None,
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "displayName": "Local Agent",
-                            "launchCode": launch_code,
-                            "idempotencyKey": "local-browser-submit"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/me/agent-creation-requests")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_workos_local",
+                                    "local@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "displayName": "Local Agent",
+                                "launchCode": launch_code,
+                                "idempotencyKey": "local-browser-submit"
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
-        assert_eq!(result.project.hosting_tier, Some(HostingTier::Standard));
-        assert_eq!(result.project.placement, Some(placement));
-        assert_eq!(result.request.runner_class, RunnerClass::AppleContainer);
-        assert_eq!(result.request.placement, Some(placement));
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let result: RequestAgentCreationResult = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result.project.hosting_tier, Some(HostingTier::Standard));
+            assert_eq!(result.project.placement, Some(placement));
+            assert_eq!(result.request.runner_class, RunnerClass::AppleContainer);
+            assert_eq!(result.request.placement, Some(placement));
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn core_api_rejects_spoofed_legacy_identity_headers() {
-        let app = router(CoreStore::memory(), test_auth());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me")
-                    .header(WORKOS_USER_ID_HEADER, "user_workos_test")
-                    .header(WORKOS_EMAIL_HEADER, "test@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        with_isolated_postgres(|db| async move {
+            let app = router(db.store.clone(), test_auth());
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me")
+                        .header(WORKOS_USER_ID_HEADER, "user_workos_test")
+                        .header(WORKOS_EMAIL_HEADER, "test@finite.vip")
+                        .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn core_api_rejects_mismatched_identity_headers_even_with_valid_jwt() {
-        let app = router(CoreStore::memory(), test_auth());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/core/v1/me")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject("user_real", "real@finite.vip", true, None,)
-                        ),
-                    )
-                    .header(WORKOS_USER_ID_HEADER, "user_spoofed")
-                    .header(WORKOS_EMAIL_HEADER, "spoofed@finite.vip")
-                    .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        with_isolated_postgres(|db| async move {
+            let app = router(db.store.clone(), test_auth());
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/core/v1/me")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "user_real",
+                                    "real@finite.vip",
+                                    true,
+                                    None,
+                                )
+                            ),
+                        )
+                        .header(WORKOS_USER_ID_HEADER, "user_spoofed")
+                        .header(WORKOS_EMAIL_HEADER, "spoofed@finite.vip")
+                        .header(WORKOS_EMAIL_VERIFIED_HEADER, "true")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn runner_keyring_enforces_worker_class_source_and_revocation_bindings() {
-        let auth = core_auth_with_runner_credentials(
-            "service-token",
-            vec![
-                runner_credential_config(
-                    "kata-current",
-                    "kata-current-token",
-                    "kata-worker-1",
-                    &[RunnerClass::Kata],
-                    "kata-host-1",
-                    false,
-                ),
-                runner_credential_config(
-                    "kata-next",
-                    "kata-next-token",
-                    "kata-worker-1",
-                    &[RunnerClass::Kata],
-                    "kata-host-1",
-                    false,
-                ),
-                runner_credential_config(
-                    "kata-revoked",
-                    "kata-revoked-token",
-                    "kata-worker-1",
-                    &[RunnerClass::Kata],
-                    "kata-host-1",
-                    true,
-                ),
-                runner_credential_config(
-                    "phala-current",
-                    "phala-current-token",
-                    "phala-worker-1",
-                    &[RunnerClass::Phala],
-                    "phala-host-1",
-                    false,
-                ),
-            ],
-            "usage-token",
-        );
-        let app = router(CoreStore::memory(), auth);
+        with_isolated_postgres(|db| async move {
+            let auth = core_auth_with_runner_credentials(
+                "service-token",
+                vec![
+                    runner_credential_config(
+                        "kata-current",
+                        "kata-current-token",
+                        "kata-worker-1",
+                        &[RunnerClass::Kata],
+                        "kata-host-1",
+                        false,
+                    ),
+                    runner_credential_config(
+                        "kata-next",
+                        "kata-next-token",
+                        "kata-worker-1",
+                        &[RunnerClass::Kata],
+                        "kata-host-1",
+                        false,
+                    ),
+                    runner_credential_config(
+                        "kata-revoked",
+                        "kata-revoked-token",
+                        "kata-worker-1",
+                        &[RunnerClass::Kata],
+                        "kata-host-1",
+                        true,
+                    ),
+                    runner_credential_config(
+                        "phala-current",
+                        "phala-current-token",
+                        "phala-worker-1",
+                        &[RunnerClass::Phala],
+                        "phala-host-1",
+                        false,
+                    ),
+                ],
+                "usage-token",
+            );
+            let app = router(db.store.clone(), auth);
 
-        for token in ["kata-current-token", "kata-next-token"] {
-            let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
-            let (status, body) = send_json(
+            for token in ["kata-current-token", "kata-next-token"] {
+                let headers = vec![("authorization".to_string(), format!("Bearer {token}"))];
+                let (status, body) = send_json(
+                    &app,
+                    "POST",
+                    "/api/core/v1/agent-creation-requests/lease",
+                    &headers,
+                    Some(serde_json::json!({
+                        "runnerId": "kata-worker-1",
+                        "leaseToken": "lease-token",
+                        "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
+                    })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                assert!(body.is_null(), "empty queue must return no lease");
+            }
+
+            let kata = vec![(
+                "authorization".to_string(),
+                "Bearer kata-current-token".to_string(),
+            )];
+            for body in [
+                serde_json::json!({
+                    "runnerId": "phala-worker-1",
+                    "leaseToken": "lease-token",
+                    "runnerCapacity": { "runnerClasses": ["kata"] }
+                }),
+                serde_json::json!({
+                    "runnerId": "kata-worker-1",
+                    "leaseToken": "lease-token",
+                    "runnerCapacity": { "runnerClasses": [] }
+                }),
+                serde_json::json!({
+                    "runnerId": "kata-worker-1",
+                    "leaseToken": "lease-token",
+                    "runnerCapacity": runner_capacity_json(RunnerClass::Phala)
+                }),
+            ] {
+                let (status, _) = send_json(
+                    &app,
+                    "POST",
+                    "/api/core/v1/agent-creation-requests/lease",
+                    &kata,
+                    Some(body),
+                )
+                .await;
+                assert_eq!(status, StatusCode::FORBIDDEN);
+            }
+
+            let phala = vec![(
+                "authorization".to_string(),
+                "Bearer phala-current-token".to_string(),
+            )];
+            let (status, _) = send_json(
                 &app,
                 "POST",
                 "/api/core/v1/agent-creation-requests/lease",
-                &headers,
+                &phala,
                 Some(serde_json::json!({
-                    "runnerId": "kata-worker-1",
+                    "runnerId": "phala-worker-1",
                     "leaseToken": "lease-token",
-                    "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
+                    "runnerCapacity": { "runnerClasses": ["kata"] }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+
+            let (status, body) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-control-requests/lease",
+                &phala,
+                Some(serde_json::json!({
+                    "runnerId": "phala-worker-1",
+                    "leaseToken": "lease-token",
+                    "sourceHostId": "phala-host-1",
+                    "runnerCapacity": runner_capacity_json(RunnerClass::Phala)
                 })),
             )
             .await;
             assert_eq!(status, StatusCode::OK);
-            assert!(body.is_null(), "empty queue must return no lease");
-        }
+            assert!(body.is_null());
 
-        let kata = vec![(
-            "authorization".to_string(),
-            "Bearer kata-current-token".to_string(),
-        )];
-        for body in [
-            serde_json::json!({
-                "runnerId": "phala-worker-1",
-                "leaseToken": "lease-token",
-                "runnerCapacity": { "runnerClasses": ["kata"] }
-            }),
-            serde_json::json!({
-                "runnerId": "kata-worker-1",
-                "leaseToken": "lease-token",
-                "runnerCapacity": { "runnerClasses": [] }
-            }),
-            serde_json::json!({
-                "runnerId": "kata-worker-1",
-                "leaseToken": "lease-token",
-                "runnerCapacity": runner_capacity_json(RunnerClass::Phala)
-            }),
-        ] {
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-control-requests/lease",
+                &phala,
+                Some(serde_json::json!({
+                    "runnerId": "phala-worker-1",
+                    "leaseToken": "lease-token",
+                    "sourceHostId": "kata-host-1",
+                    "runnerCapacity": { "runnerClasses": ["phala"] }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+
+            let revoked = vec![(
+                "authorization".to_string(),
+                "Bearer kata-revoked-token".to_string(),
+            )];
             let (status, _) = send_json(
                 &app,
                 "POST",
                 "/api/core/v1/agent-creation-requests/lease",
-                &kata,
-                Some(body),
+                &revoked,
+                Some(serde_json::json!({
+                    "runnerId": "kata-worker-1",
+                    "leaseToken": "lease-token",
+                    "runnerCapacity": { "runnerClasses": ["kata"] }
+                })),
             )
             .await;
-            assert_eq!(status, StatusCode::FORBIDDEN);
-        }
-
-        let phala = vec![(
-            "authorization".to_string(),
-            "Bearer phala-current-token".to_string(),
-        )];
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/agent-creation-requests/lease",
-            &phala,
-            Some(serde_json::json!({
-                "runnerId": "phala-worker-1",
-                "leaseToken": "lease-token",
-                "runnerCapacity": { "runnerClasses": ["kata"] }
-            })),
-        )
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        })
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        let (status, body) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/runtime-control-requests/lease",
-            &phala,
-            Some(serde_json::json!({
-                "runnerId": "phala-worker-1",
-                "leaseToken": "lease-token",
-                "sourceHostId": "phala-host-1",
-                "runnerCapacity": runner_capacity_json(RunnerClass::Phala)
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.is_null());
-
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/runtime-control-requests/lease",
-            &phala,
-            Some(serde_json::json!({
-                "runnerId": "phala-worker-1",
-                "leaseToken": "lease-token",
-                "sourceHostId": "kata-host-1",
-                "runnerCapacity": { "runnerClasses": ["phala"] }
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        let revoked = vec![(
-            "authorization".to_string(),
-            "Bearer kata-revoked-token".to_string(),
-        )];
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/agent-creation-requests/lease",
-            &revoked,
-            Some(serde_json::json!({
-                "runnerId": "kata-worker-1",
-                "leaseToken": "lease-token",
-                "runnerCapacity": { "runnerClasses": ["kata"] }
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn route_scoped_credentials_cannot_cross_user_admin_or_runner_boundaries() {
-        let app = router(CoreStore::memory(), scoped_test_auth());
-        let runner = vec![("authorization".to_string(), boundary_runner_authorization())];
-        let service = vec![("authorization".to_string(), "Bearer core-token".to_string())];
-        let usage = vec![("authorization".to_string(), usage_authorization())];
+        with_isolated_postgres(|db| async move {
+            let app = router(db.store.clone(), scoped_test_auth());
+            let runner = vec![("authorization".to_string(), boundary_runner_authorization())];
+            let service = vec![("authorization".to_string(), "Bearer core-token".to_string())];
+            let usage = vec![("authorization".to_string(), usage_authorization())];
 
-        for uri in ["/api/core/v1/me", "/api/core/v1/admin/runtimes"] {
-            for (credential, headers) in [
-                ("service", &service),
-                ("Runner", &runner),
-                ("usage", &usage),
-            ] {
-                let (status, _) = send_json(&app, "GET", uri, headers, None).await;
-                assert_eq!(
-                    status,
-                    StatusCode::UNAUTHORIZED,
-                    "{credential} credential entered {uri}"
-                );
+            for uri in ["/api/core/v1/me", "/api/core/v1/admin/runtimes"] {
+                for (credential, headers) in [
+                    ("service", &service),
+                    ("Runner", &runner),
+                    ("usage", &usage),
+                ] {
+                    let (status, _) = send_json(&app, "GET", uri, headers, None).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::UNAUTHORIZED,
+                        "{credential} credential entered {uri}"
+                    );
+                }
             }
-        }
 
-        let runner_routes = [
-            (
-                "/api/core/v1/agent-creation-requests/lease",
-                serde_json::json!({
-                    "runnerId": "runner-auth-boundary",
-                    "leaseToken": "lease-auth-boundary",
-                    "leaseSeconds": 60,
-                    "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
-                }),
-            ),
-            (
-                "/api/core/v1/runtime-control-requests/lease",
-                serde_json::json!({
-                    "runnerId": "runner-auth-boundary",
-                    "leaseToken": "lease-auth-boundary",
-                    "leaseSeconds": 60,
-                    "sourceHostId": "source-auth-boundary",
-                    "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
-                }),
-            ),
-            (
-                "/api/core/v1/runtime-control-requests/missing/complete",
-                serde_json::json!({
-                    "runnerId": "runner-auth-boundary",
-                    "leaseToken": "lease-auth-boundary"
-                }),
-            ),
-            (
-                "/api/core/v1/runtime-control-requests/missing/fail",
-                serde_json::json!({
-                    "runnerId": "runner-auth-boundary",
-                    "leaseToken": "lease-auth-boundary",
-                    "failureMessage": "boundary test"
-                }),
-            ),
-            (
-                "/api/core/v1/agent-creation-requests/missing/complete",
-                serde_json::json!({
-                    "runnerId": "runner-auth-boundary",
-                    "leaseToken": "lease-auth-boundary",
-                    "sourceHostId": "source-auth-boundary",
-                    "sourceMachineId": "machine-auth-boundary",
-                    "publishedAppUrls": []
-                }),
-            ),
-            (
-                "/api/core/v1/agent-creation-requests/missing/runtime",
-                serde_json::json!({
-                    "runnerId": "runner-auth-boundary",
-                    "leaseToken": "lease-auth-boundary",
-                    "sourceHostId": "source-auth-boundary",
-                    "sourceMachineId": "machine-auth-boundary",
-                    "runtimeRelayTokenHash": "hash-auth-boundary",
-                    "publishedAppUrls": []
-                }),
-            ),
-            (
-                "/api/core/v1/agent-creation-requests/missing/finite-private-key",
-                serde_json::json!({
-                    "runnerId": "runner-auth-boundary",
-                    "leaseToken": "lease-auth-boundary"
-                }),
-            ),
-            (
-                "/api/core/v1/agent-creation-requests/missing/fail",
-                serde_json::json!({
-                    "runnerId": "runner-auth-boundary",
-                    "leaseToken": "lease-auth-boundary",
-                    "failureMessage": "boundary test"
-                }),
-            ),
-        ];
-        for (uri, body) in &runner_routes {
-            for (credential, headers) in [("service", &service), ("usage", &usage)] {
-                let (status, _) = send_json(&app, "POST", uri, headers, Some(body.clone())).await;
-                assert_eq!(
-                    status,
-                    StatusCode::UNAUTHORIZED,
-                    "{credential} credential entered {uri}"
-                );
+            let runner_routes = [
+                (
+                    "/api/core/v1/agent-creation-requests/lease",
+                    serde_json::json!({
+                        "runnerId": "runner-auth-boundary",
+                        "leaseToken": "lease-auth-boundary",
+                        "leaseSeconds": 60,
+                        "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
+                    }),
+                ),
+                (
+                    "/api/core/v1/runtime-control-requests/lease",
+                    serde_json::json!({
+                        "runnerId": "runner-auth-boundary",
+                        "leaseToken": "lease-auth-boundary",
+                        "leaseSeconds": 60,
+                        "sourceHostId": "source-auth-boundary",
+                        "runnerCapacity": runner_capacity_json(RunnerClass::Kata)
+                    }),
+                ),
+                (
+                    "/api/core/v1/runtime-control-requests/missing/complete",
+                    serde_json::json!({
+                        "runnerId": "runner-auth-boundary",
+                        "leaseToken": "lease-auth-boundary"
+                    }),
+                ),
+                (
+                    "/api/core/v1/runtime-control-requests/missing/fail",
+                    serde_json::json!({
+                        "runnerId": "runner-auth-boundary",
+                        "leaseToken": "lease-auth-boundary",
+                        "failureMessage": "boundary test"
+                    }),
+                ),
+                (
+                    "/api/core/v1/agent-creation-requests/missing/complete",
+                    serde_json::json!({
+                        "runnerId": "runner-auth-boundary",
+                        "leaseToken": "lease-auth-boundary",
+                        "sourceHostId": "source-auth-boundary",
+                        "sourceMachineId": "machine-auth-boundary",
+                        "publishedAppUrls": []
+                    }),
+                ),
+                (
+                    "/api/core/v1/agent-creation-requests/missing/runtime",
+                    serde_json::json!({
+                        "runnerId": "runner-auth-boundary",
+                        "leaseToken": "lease-auth-boundary",
+                        "sourceHostId": "source-auth-boundary",
+                        "sourceMachineId": "machine-auth-boundary",
+                        "runtimeRelayTokenHash": "hash-auth-boundary",
+                        "publishedAppUrls": []
+                    }),
+                ),
+                (
+                    "/api/core/v1/agent-creation-requests/missing/finite-private-key",
+                    serde_json::json!({
+                        "runnerId": "runner-auth-boundary",
+                        "leaseToken": "lease-auth-boundary"
+                    }),
+                ),
+                (
+                    "/api/core/v1/agent-creation-requests/missing/fail",
+                    serde_json::json!({
+                        "runnerId": "runner-auth-boundary",
+                        "leaseToken": "lease-auth-boundary",
+                        "failureMessage": "boundary test"
+                    }),
+                ),
+            ];
+            for (uri, body) in &runner_routes {
+                for (credential, headers) in [("service", &service), ("usage", &usage)] {
+                    let (status, _) = send_json(&app, "POST", uri, headers, Some(body.clone())).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::UNAUTHORIZED,
+                        "{credential} credential entered {uri}"
+                    );
+                }
             }
-        }
 
-        for headers in [&runner, &usage] {
+            for headers in [&runner, &usage] {
+                let (status, _) = send_json(
+                    &app,
+                    "GET",
+                    "/api/core/v1/source-host-relays/missing",
+                    headers,
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
             let (status, _) = send_json(
                 &app,
                 "GET",
                 "/api/core/v1/source-host-relays/missing",
-                headers,
+                &service,
                 None,
             )
             .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-        }
-        let (status, _) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/source-host-relays/missing",
-            &service,
-            None,
-        )
-        .await;
-        assert_ne!(status, StatusCode::UNAUTHORIZED);
+            assert_ne!(status, StatusCode::UNAUTHORIZED);
 
-        let (status, _) = send_json(
-            &app,
-            "PUT",
-            "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
-            &service,
-            Some(serde_json::json!({
-                "kind": "oci_image",
-                "reference": "ghcr.io/finitecomputer/agent-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "versionLabel": "auth-boundary",
-                "stateSchemaVersion": "state-v1",
-                "baseImage": "python:3.13-trixie",
-                "promoted": true
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        for headers in [&service, &usage] {
-            let (status, _) = send_json(
-                &app,
-                "GET",
-                "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
-                headers,
-                None,
-            )
-            .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-        }
-        let (status, artifact) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
-            &runner,
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(artifact["id"], "artifact-auth-boundary");
-
-        for headers in [&runner, &usage] {
             let (status, _) = send_json(
                 &app,
                 "PUT",
-                "/api/core/v1/runtime-artifacts/forbidden-artifact",
-                headers,
+                "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+                &service,
                 Some(serde_json::json!({
                     "kind": "oci_image",
-                    "reference": "ghcr.io/finitecomputer/agent-runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "versionLabel": "forbidden",
+                    "reference": "ghcr.io/finitecomputer/agent-runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "versionLabel": "auth-boundary",
                     "stateSchemaVersion": "state-v1",
                     "baseImage": "python:3.13-trixie",
                     "promoted": true
                 })),
             )
             .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-        }
+            assert_eq!(status, StatusCode::OK);
 
-        for headers in [&service, &usage] {
+            for headers in [&service, &usage] {
+                let (status, _) = send_json(
+                    &app,
+                    "GET",
+                    "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+                    headers,
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+            let (status, artifact) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/runtime-artifacts/artifact-auth-boundary",
+                &runner,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(artifact["id"], "artifact-auth-boundary");
+
+            for headers in [&runner, &usage] {
+                let (status, _) = send_json(
+                    &app,
+                    "PUT",
+                    "/api/core/v1/runtime-artifacts/forbidden-artifact",
+                    headers,
+                    Some(serde_json::json!({
+                        "kind": "oci_image",
+                        "reference": "ghcr.io/finitecomputer/agent-runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "versionLabel": "forbidden",
+                        "stateSchemaVersion": "state-v1",
+                        "baseImage": "python:3.13-trixie",
+                        "promoted": true
+                    })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+
+            for headers in [&service, &usage] {
+                let (status, _) = send_json(
+                    &app,
+                    "GET",
+                    "/api/finite/v1/machines/missing/heartbeat",
+                    headers,
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
             let (status, _) = send_json(
                 &app,
                 "GET",
                 "/api/finite/v1/machines/missing/heartbeat",
-                headers,
+                &runner,
                 None,
             )
             .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-        }
-        let (status, _) = send_json(
-            &app,
-            "GET",
-            "/api/finite/v1/machines/missing/heartbeat",
-            &runner,
-            None,
-        )
-        .await;
-        assert_ne!(status, StatusCode::UNAUTHORIZED);
+            assert_ne!(status, StatusCode::UNAUTHORIZED);
 
-        for headers in [&service, &runner] {
+            for headers in [&service, &runner] {
+                let (status, _) = send_json(
+                    &app,
+                    "GET",
+                    "/internal/finite-private/v1/health",
+                    headers,
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
             let (status, _) = send_json(
                 &app,
                 "GET",
                 "/internal/finite-private/v1/health",
-                headers,
+                &usage,
                 None,
             )
             .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-        }
-        let (status, _) = send_json(
-            &app,
-            "GET",
-            "/internal/finite-private/v1/health",
-            &usage,
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
+            assert_eq!(status, StatusCode::OK);
 
-        let (status, body) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/agent-creation-requests/lease",
-            &runner,
-            Some(runner_routes[0].1.clone()),
-        )
+            let (status, body) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/agent-creation-requests/lease",
+                &runner,
+                Some(runner_routes[0].1.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.is_null(), "empty Runner queue should return null");
+        })
         .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.is_null(), "empty Runner queue should return null");
     }
 
     fn admin_router(store: CoreStore) -> Router {
@@ -6508,82 +6577,88 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_upgrade_first_use_gate_is_fail_closed_without_blocking_restart() {
-        let app = router_with_runtime_upgrades(
-            CoreStore::memory(),
-            test_auth(),
-            default_relay_state_dir(),
-            false,
-        );
-        let admin = operator_identity_headers("admin@finite.vip");
-        let (upgrade_status, upgrade_body) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/admin/projects/missing/runtime/upgrade",
-            &admin,
-            Some(serde_json::json!({ "targetRuntimeArtifactId": "artifact-v2" })),
-        )
-        .await;
-        assert_eq!(upgrade_status, StatusCode::CONFLICT);
-        assert!(
-            upgrade_body["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("not enabled")
-        );
+        with_isolated_postgres(|db| async move {
+            let app = router_with_runtime_upgrades(
+                db.store.clone(),
+                test_auth(),
+                default_relay_state_dir(),
+                false,
+            );
+            let admin = operator_identity_headers("admin@finite.vip");
+            let (upgrade_status, upgrade_body) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/admin/projects/missing/runtime/upgrade",
+                &admin,
+                Some(serde_json::json!({ "targetRuntimeArtifactId": "artifact-v2" })),
+            )
+            .await;
+            assert_eq!(upgrade_status, StatusCode::CONFLICT);
+            assert!(
+                upgrade_body["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("not enabled")
+            );
 
-        let (restart_status, _) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/admin/projects/missing/runtime/restart",
-            &admin,
-            Some(serde_json::json!({})),
-        )
+            let (restart_status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/admin/projects/missing/runtime/restart",
+                &admin,
+                Some(serde_json::json!({})),
+            )
+            .await;
+            assert_eq!(restart_status, StatusCode::NOT_FOUND);
+        })
         .await;
-        assert_eq!(restart_status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn runtime_retirement_product_gate_is_independently_fail_closed() {
-        let user = identity_headers("owner@finite.vip", "true");
-        let disabled = router_with_runtime_features(
-            CoreStore::memory(),
-            test_auth(),
-            default_relay_state_dir(),
-            true,
-            false,
-        );
-        let (disabled_status, disabled_body) = send_json(
-            &disabled,
-            "POST",
-            "/api/core/v1/me/projects/missing/runtime/destroy",
-            &user,
-            Some(serde_json::json!({})),
-        )
-        .await;
-        assert_eq!(disabled_status, StatusCode::CONFLICT);
-        assert!(
-            disabled_body["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("not enabled")
-        );
+        with_isolated_postgres(|db| async move {
+            let user = identity_headers("owner@finite.vip", "true");
+            let disabled = router_with_runtime_features(
+                db.store.clone(),
+                test_auth(),
+                default_relay_state_dir(),
+                true,
+                false,
+            );
+            let (disabled_status, disabled_body) = send_json(
+                &disabled,
+                "POST",
+                "/api/core/v1/me/projects/missing/runtime/destroy",
+                &user,
+                Some(serde_json::json!({})),
+            )
+            .await;
+            assert_eq!(disabled_status, StatusCode::CONFLICT);
+            assert!(
+                disabled_body["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("not enabled")
+            );
 
-        let enabled = router_with_runtime_features(
-            CoreStore::memory(),
-            test_auth(),
-            default_relay_state_dir(),
-            true,
-            true,
-        );
-        let (enabled_status, _) = send_json(
-            &enabled,
-            "POST",
-            "/api/core/v1/me/projects/missing/runtime/destroy",
-            &user,
-            Some(serde_json::json!({})),
-        )
+            let enabled = router_with_runtime_features(
+                db.store.clone(),
+                test_auth(),
+                default_relay_state_dir(),
+                true,
+                true,
+            );
+            let (enabled_status, _) = send_json(
+                &enabled,
+                "POST",
+                "/api/core/v1/me/projects/missing/runtime/destroy",
+                &user,
+                Some(serde_json::json!({})),
+            )
+            .await;
+            assert_eq!(enabled_status, StatusCode::NOT_FOUND);
+        })
         .await;
-        assert_eq!(enabled_status, StatusCode::NOT_FOUND);
     }
 
     /// Provision one hosted agent through the same HTTP flow the dashboard and
@@ -6675,652 +6750,679 @@ mod tests {
 
     #[tokio::test]
     async fn launch_code_admin_api_derives_operator_and_returns_plaintext_once() {
-        let app = admin_router(CoreStore::memory());
-        let operator_subject = "workos_operator_subject";
-        let operator = vec![(
-            "authorization".to_string(),
-            format!(
-                "Bearer {}",
-                access_token_with_subject(
-                    operator_subject,
-                    "admin@finite.vip",
-                    true,
-                    Some(OPERATOR_ORG_ID),
-                )
-            ),
-        )];
-        let (status, issued) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/admin/launch-code-batches",
-            &operator,
-            Some(serde_json::json!({
-                "name": "Twelve-person training",
-                "codeCount": 12,
-                "expiresInHours": 24
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(issued["batch"]["code_count"], 12);
-        assert_eq!(
-            issued["batch"]["created_by_workos_user_id"],
-            operator_subject
-        );
-        let codes = issued["codes"].as_array().unwrap();
-        assert_eq!(codes.len(), 12);
-        let plaintext = codes[0]["code"].as_str().unwrap().to_string();
-        let batch_id = issued["batch"]["id"].as_str().unwrap().to_string();
-
-        let (status, listed) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/admin/launch-code-batches",
-            &operator,
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(listed.as_array().unwrap().len(), 1);
-        assert!(!listed.to_string().contains(&plaintext));
-        assert!(listed[0]["codes"][0].get("code").is_none());
-
-        let (status, revoked) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/admin/launch-code-batches/{batch_id}/revoke"),
-            &operator,
-            Some(serde_json::json!({})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            revoked["batch"]["revoked_by_workos_user_id"],
-            operator_subject
-        );
-        assert!(!revoked.to_string().contains(&plaintext));
-
-        let ordinary_user = identity_headers("member@finite.vip", "true");
-        for (method, uri, body) in [
-            (
-                "GET",
-                "/api/core/v1/admin/launch-code-batches".to_string(),
-                None,
-            ),
-            (
+        with_isolated_postgres(|db| async move {
+            let app = admin_router(db.store.clone());
+            let operator_subject = "workos_operator_subject";
+            let operator = vec![(
+                "authorization".to_string(),
+                format!(
+                    "Bearer {}",
+                    access_token_with_subject(
+                        operator_subject,
+                        "admin@finite.vip",
+                        true,
+                        Some(OPERATOR_ORG_ID),
+                    )
+                ),
+            )];
+            let (status, issued) = send_json(
+                &app,
                 "POST",
-                "/api/core/v1/admin/launch-code-batches".to_string(),
+                "/api/core/v1/admin/launch-code-batches",
+                &operator,
                 Some(serde_json::json!({
-                    "name": "Forbidden",
-                    "codeCount": 1,
+                    "name": "Twelve-person training",
+                    "codeCount": 12,
                     "expiresInHours": 24
                 })),
-            ),
-        ] {
-            let (status, _) = send_json(&app, method, &uri, &ordinary_user, body).await;
-            assert_eq!(status, StatusCode::FORBIDDEN);
-        }
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(issued["batch"]["code_count"], 12);
+            assert_eq!(
+                issued["batch"]["created_by_workos_user_id"],
+                operator_subject
+            );
+            let codes = issued["codes"].as_array().unwrap();
+            assert_eq!(codes.len(), 12);
+            let plaintext = codes[0]["code"].as_str().unwrap().to_string();
+            let batch_id = issued["batch"]["id"].as_str().unwrap().to_string();
+
+            let (status, listed) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/admin/launch-code-batches",
+                &operator,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(listed.as_array().unwrap().len(), 1);
+            assert!(!listed.to_string().contains(&plaintext));
+            assert!(listed[0]["codes"][0].get("code").is_none());
+
+            let (status, revoked) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/admin/launch-code-batches/{batch_id}/revoke"),
+                &operator,
+                Some(serde_json::json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                revoked["batch"]["revoked_by_workos_user_id"],
+                operator_subject
+            );
+            assert!(!revoked.to_string().contains(&plaintext));
+
+            let ordinary_user = identity_headers("member@finite.vip", "true");
+            for (method, uri, body) in [
+                (
+                    "GET",
+                    "/api/core/v1/admin/launch-code-batches".to_string(),
+                    None,
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/launch-code-batches".to_string(),
+                    Some(serde_json::json!({
+                        "name": "Forbidden",
+                        "codeCount": 1,
+                        "expiresInHours": 24
+                    })),
+                ),
+            ] {
+                let (status, _) = send_json(&app, method, &uri, &ordinary_user, body).await;
+                assert_eq!(status, StatusCode::FORBIDDEN);
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn launch_code_plaintext_issuance_response_is_not_cacheable() {
-        let app = admin_router(CoreStore::memory());
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/core/v1/admin/launch-code-batches")
-                    .header(
-                        "authorization",
-                        format!(
-                            "Bearer {}",
-                            access_token_with_subject(
-                                "workos_operator_no_store",
-                                "admin@finite.vip",
-                                true,
-                                Some(OPERATOR_ORG_ID),
-                            )
-                        ),
-                    )
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "name": "One-time response",
-                            "codeCount": 1,
-                            "expiresInHours": 24
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get("cache-control")
-                .and_then(|value| value.to_str().ok()),
-            Some("no-store, private")
-        );
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let issued: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(issued["codes"][0]["code"].as_str().is_some());
+        with_isolated_postgres(|db| async move {
+            let app = admin_router(db.store.clone());
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/core/v1/admin/launch-code-batches")
+                        .header(
+                            "authorization",
+                            format!(
+                                "Bearer {}",
+                                access_token_with_subject(
+                                    "workos_operator_no_store",
+                                    "admin@finite.vip",
+                                    true,
+                                    Some(OPERATOR_ORG_ID),
+                                )
+                            ),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "name": "One-time response",
+                                "codeCount": 1,
+                                "expiresInHours": 24
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("cache-control")
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store, private")
+            );
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let issued: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(issued["codes"][0]["code"].as_str().is_some());
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn core_api_admin_endpoints_require_configured_operator_organization() {
-        let app = admin_router(CoreStore::memory());
+        with_isolated_postgres(|db| async move {
+            let app = admin_router(db.store.clone());
 
-        // Missing WorkOS access token entirely.
-        let (status, _) = send_json(&app, "GET", "/api/core/v1/admin/runtimes", &[], None).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+            // Missing WorkOS access token entirely.
+            let (status, _) =
+                send_json(&app, "GET", "/api/core/v1/admin/runtimes", &[], None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-        // A service credential cannot enter the operator boundary.
-        let service = [("authorization".to_string(), "Bearer core-token".to_string())];
-        let (status, _) =
-            send_json(&app, "GET", "/api/core/v1/admin/runtimes", &service, None).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+            // A service credential cannot enter the operator boundary.
+            let service = [("authorization".to_string(), "Bearer core-token".to_string())];
+            let (status, _) =
+                send_json(&app, "GET", "/api/core/v1/admin/runtimes", &service, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-        // A valid user without an organization is not an operator.
-        let (status, body) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/admin/runtimes",
-            &identity_headers("stranger@finite.vip", "true"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(body["error"].as_str().unwrap().contains("admin access"));
-
-        // Operator organization membership cannot bypass email verification.
-        let (status, _) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/admin/runtimes",
-            &workos_headers("admin@finite.vip", false, Some(OPERATOR_ORG_ID)),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // The configured operator organization is accepted.
-        let (status, body) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/admin/runtimes",
-            &operator_identity_headers("admin@finite.vip"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.as_array().unwrap().is_empty());
-
-        // Account Auth's operator organization is never reused as a Core
-        // Customer Organization, even when an operator uses a user route.
-        let operator = operator_identity_headers("admin@finite.vip");
-        let (status, _) = send_json(&app, "GET", "/api/core/v1/me", &operator, None).await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, billing) =
-            send_json(&app, "GET", "/api/core/v1/me/billing", &operator, None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_ne!(billing["customer_org"]["id"], OPERATOR_ORG_ID);
-
-        // Every mutating admin endpoint rejects a valid user without the
-        // configured operator organization.
-        for (method, uri, body) in [
-            (
+            // A valid user without an organization is not an operator.
+            let (status, body) = send_json(
+                &app,
                 "GET",
-                "/api/core/v1/finite-private/admin-audit-events".to_string(),
-                serde_json::json!({}),
-            ),
-            (
+                "/api/core/v1/admin/runtimes",
+                &identity_headers("stranger@finite.vip", "true"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(body["error"].as_str().unwrap().contains("admin access"));
+
+            // Operator organization membership cannot bypass email verification.
+            let (status, _) = send_json(
+                &app,
                 "GET",
-                "/api/core/v1/finite-private/admin-state".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/finite-private/grants".to_string(),
-                serde_json::json!({ "verifiedEmail": "friend@finite.vip" }),
-            ),
-            (
-                "POST",
-                "/api/core/v1/finite-private/grants/grant_x/api-keys".to_string(),
-                serde_json::json!({ "rawKey": "test-key-never-stored" }),
-            ),
-            (
-                "POST",
-                "/api/core/v1/finite-private/grants/grant_x/revoke".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/finite-private/grants/grant_x/reset".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/finite-private/api-keys/key_x/revoke".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/finite-private/api-keys/key_x/rotate".to_string(),
-                serde_json::json!({ "rawKey": "replacement-test-key-never-stored" }),
-            ),
-            (
+                "/api/core/v1/admin/runtimes",
+                &workos_headers("admin@finite.vip", false, Some(OPERATOR_ORG_ID)),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+
+            // The configured operator organization is accepted.
+            let (status, body) = send_json(
+                &app,
                 "GET",
-                "/api/core/v1/admin/launch-code-batches".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/launch-code-batches".to_string(),
-                serde_json::json!({
-                    "name": "Forbidden",
-                    "codeCount": 1,
-                    "expiresInHours": 24
-                }),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/launch-code-batches/batch_x/revoke".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/projects/project_x/runtime/restart".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/projects/project_x/runtime/recover-known-good-chat".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/projects/project_x/runtime/upgrade".to_string(),
-                serde_json::json!({ "targetRuntimeArtifactId": "artifact-v2" }),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/finite-private/friend-keys".to_string(),
-                serde_json::json!({ "email": "friend@finite.vip" }),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/finite-private/keys/key_x/rotate".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/finite-private/keys/key_x/revoke".to_string(),
-                serde_json::json!({}),
-            ),
-            (
-                "POST",
-                "/api/core/v1/admin/finite-private/grants/grant_x/window-reset".to_string(),
-                serde_json::json!({}),
-            ),
-        ] {
-            for headers in [
-                identity_headers("stranger@finite.vip", "true"),
-                workos_headers("member@finite.vip", true, Some("workos_org_not_operator")),
+                "/api/core/v1/admin/runtimes",
+                &operator_identity_headers("admin@finite.vip"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.as_array().unwrap().is_empty());
+
+            // Account Auth's operator organization is never reused as a Core
+            // Customer Organization, even when an operator uses a user route.
+            let operator = operator_identity_headers("admin@finite.vip");
+            let (status, _) = send_json(&app, "GET", "/api/core/v1/me", &operator, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, billing) =
+                send_json(&app, "GET", "/api/core/v1/me/billing", &operator, None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_ne!(billing["customer_org"]["id"], OPERATOR_ORG_ID);
+
+            // Every mutating admin endpoint rejects a valid user without the
+            // configured operator organization.
+            for (method, uri, body) in [
+                (
+                    "GET",
+                    "/api/core/v1/finite-private/admin-audit-events".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "GET",
+                    "/api/core/v1/finite-private/admin-state".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/finite-private/grants".to_string(),
+                    serde_json::json!({ "verifiedEmail": "friend@finite.vip" }),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/finite-private/grants/grant_x/api-keys".to_string(),
+                    serde_json::json!({ "rawKey": "test-key-never-stored" }),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/finite-private/grants/grant_x/revoke".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/finite-private/grants/grant_x/reset".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/finite-private/api-keys/key_x/revoke".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/finite-private/api-keys/key_x/rotate".to_string(),
+                    serde_json::json!({ "rawKey": "replacement-test-key-never-stored" }),
+                ),
+                (
+                    "GET",
+                    "/api/core/v1/admin/launch-code-batches".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/launch-code-batches".to_string(),
+                    serde_json::json!({
+                        "name": "Forbidden",
+                        "codeCount": 1,
+                        "expiresInHours": 24
+                    }),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/launch-code-batches/batch_x/revoke".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/projects/project_x/runtime/restart".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/projects/project_x/runtime/recover-known-good-chat"
+                        .to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/projects/project_x/runtime/upgrade".to_string(),
+                    serde_json::json!({ "targetRuntimeArtifactId": "artifact-v2" }),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/finite-private/friend-keys".to_string(),
+                    serde_json::json!({ "email": "friend@finite.vip" }),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/finite-private/keys/key_x/rotate".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/finite-private/keys/key_x/revoke".to_string(),
+                    serde_json::json!({}),
+                ),
+                (
+                    "POST",
+                    "/api/core/v1/admin/finite-private/grants/grant_x/window-reset".to_string(),
+                    serde_json::json!({}),
+                ),
             ] {
-                let (status, _) = send_json(&app, method, &uri, &headers, Some(body.clone())).await;
-                assert_eq!(status, StatusCode::FORBIDDEN, "{uri} must be admin-gated");
+                for headers in [
+                    identity_headers("stranger@finite.vip", "true"),
+                    workos_headers("member@finite.vip", true, Some("workos_org_not_operator")),
+                ] {
+                    let (status, _) =
+                        send_json(&app, method, &uri, &headers, Some(body.clone())).await;
+                    assert_eq!(status, StatusCode::FORBIDDEN, "{uri} must be admin-gated");
+                }
             }
-        }
 
-        // A different WorkOS organization fails closed as well.
-        let (status, _) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/admin/runtimes",
-            &workos_headers("admin@finite.vip", true, Some("workos_org_customer")),
-            None,
-        )
+            // A different WorkOS organization fails closed as well.
+            let (status, _) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/admin/runtimes",
+                &workos_headers("admin@finite.vip", true, Some("workos_org_customer")),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        })
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn core_api_admin_runtimes_and_runtime_control_feed_the_runner_queue() {
-        let store = CoreStore::memory();
-        let launch_code = issue_test_launch_code(&store).await;
-        let app = admin_router(store);
-        let (project_id, runtime_id) = provision_hosted_agent(&app, &launch_code).await;
-        let admin = operator_identity_headers("admin@finite.vip");
-        let service = [("authorization".to_string(), "Bearer core-token".to_string())];
+        with_isolated_postgres(|db| async move {
+            let store = db.store.clone();
+            let launch_code = issue_test_launch_code(&store).await;
+            let app = admin_router(store);
+            let (project_id, runtime_id) = provision_hosted_agent(&app, &launch_code).await;
+            let admin = operator_identity_headers("admin@finite.vip");
+            let service = [("authorization".to_string(), "Bearer core-token".to_string())];
 
-        let (status, runtimes) =
-            send_json(&app, "GET", "/api/core/v1/admin/runtimes", &admin, None).await;
-        assert_eq!(status, StatusCode::OK);
-        let runtimes = runtimes.as_array().unwrap().clone();
-        assert_eq!(runtimes.len(), 1);
-        let overview = &runtimes[0];
-        assert_eq!(overview["project_id"], project_id.as_str());
-        assert_eq!(overview["agent_runtime_id"], runtime_id.as_str());
-        assert_eq!(overview["owner_email"], "owner@finite.vip");
-        assert_eq!(overview["source_host_id"], "oslo-host-1");
-        assert_eq!(overview["runtime_artifact_version_label"], "v1");
-        assert_eq!(overview["runtime_status"], "online");
-        assert_eq!(overview["runtime_capabilities"]["restart"], true);
-        assert_eq!(
-            overview["runtime_capabilities"]["recover_known_good_chat"],
-            false
-        );
-        assert_eq!(overview["runtime_capabilities"]["runtime_upgrade"], true);
-        assert_eq!(overview["runtime_capabilities"]["stop"], true);
-        assert_eq!(
-            overview["runtime_capabilities"]["runtime_retirement"],
-            false
-        );
+            let (status, runtimes) =
+                send_json(&app, "GET", "/api/core/v1/admin/runtimes", &admin, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let runtimes = runtimes.as_array().unwrap().clone();
+            assert_eq!(runtimes.len(), 1);
+            let overview = &runtimes[0];
+            assert_eq!(overview["project_id"], project_id.as_str());
+            assert_eq!(overview["agent_runtime_id"], runtime_id.as_str());
+            assert_eq!(overview["owner_email"], "owner@finite.vip");
+            assert_eq!(overview["source_host_id"], "oslo-host-1");
+            assert_eq!(overview["runtime_artifact_version_label"], "v1");
+            assert_eq!(overview["runtime_status"], "online");
+            assert_eq!(overview["runtime_capabilities"]["restart"], true);
+            assert_eq!(
+                overview["runtime_capabilities"]["recover_known_good_chat"],
+                false
+            );
+            assert_eq!(overview["runtime_capabilities"]["runtime_upgrade"], true);
+            assert_eq!(overview["runtime_capabilities"]["stop"], true);
+            assert_eq!(
+                overview["runtime_capabilities"]["runtime_retirement"],
+                false
+            );
 
-        // Admin restart succeeds even though the admin does not own the project.
-        let (status, restart) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/admin/projects/{project_id}/runtime/restart"),
-            &admin,
-            Some(serde_json::json!({ "now": "2026-05-25T13:03:00Z" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(restart["kind"], "restart");
-        assert_eq!(restart["status"], "requested");
-        assert_eq!(restart["agent_runtime_id"], runtime_id.as_str());
-        assert!(restart.get("lease_token").is_none());
-        let restart_id = restart["id"].as_str().unwrap().to_string();
+            // Admin restart succeeds even though the admin does not own the project.
+            let (status, restart) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/admin/projects/{project_id}/runtime/restart"),
+                &admin,
+                Some(serde_json::json!({ "now": "2026-05-25T13:03:00Z" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(restart["kind"], "restart");
+            assert_eq!(restart["status"], "requested");
+            assert_eq!(restart["agent_runtime_id"], runtime_id.as_str());
+            assert!(restart.get("lease_token").is_none());
+            let restart_id = restart["id"].as_str().unwrap().to_string();
 
-        // The runner consumes the admin-created request through the same lease
-        // endpoint and shape as owner-created requests.
-        let (status, lease) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/runtime-control-requests/lease",
-            &service,
-            Some(serde_json::json!({
-                "runnerId": "runner-oslo-1",
-                "leaseToken": "restart-lease-1",
-                "leaseSeconds": 60,
-                "sourceHostId": "oslo-host-1",
-                "now": "2026-05-25T13:04:00Z"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(lease["request"]["id"], restart_id.as_str());
-        assert_eq!(lease["request"]["status"], "running");
-        assert_eq!(lease["runtime"]["source_machine_id"], "oslo-agent-001");
+            // The runner consumes the admin-created request through the same lease
+            // endpoint and shape as owner-created requests.
+            let (status, lease) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-control-requests/lease",
+                &service,
+                Some(serde_json::json!({
+                    "runnerId": "runner-oslo-1",
+                    "leaseToken": "restart-lease-1",
+                    "leaseSeconds": 60,
+                    "sourceHostId": "oslo-host-1",
+                    "now": "2026-05-25T13:04:00Z"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(lease["request"]["id"], restart_id.as_str());
+            assert_eq!(lease["request"]["status"], "running");
+            assert_eq!(lease["runtime"]["source_machine_id"], "oslo-agent-001");
 
-        let (status, completed) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/runtime-control-requests/{restart_id}/complete"),
-            &service,
-            Some(serde_json::json!({
-                "runnerId": "runner-oslo-1",
-                "leaseToken": "restart-lease-1",
-                "now": "2026-05-25T13:05:00Z"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(completed["status"], "succeeded");
+            let (status, completed) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/runtime-control-requests/{restart_id}/complete"),
+                &service,
+                Some(serde_json::json!({
+                    "runnerId": "runner-oslo-1",
+                    "leaseToken": "restart-lease-1",
+                    "now": "2026-05-25T13:05:00Z"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(completed["status"], "succeeded");
 
-        let target_reference = format!(
-            "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
-            "b".repeat(64)
-        );
-        let (status, _) = send_json(
-            &app,
-            "PUT",
-            "/api/core/v1/runtime-artifacts/artifact-v2",
-            &service,
-            Some(serde_json::json!({
-                "kind": "oci_image",
-                "reference": target_reference,
-                "versionLabel": "v2",
-                "stateSchemaVersion": "state-v1",
-                "promoted": true,
-                "now": "2026-05-25T13:05:10Z"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, upgrade) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/admin/projects/{project_id}/runtime/upgrade"),
-            &admin,
-            Some(serde_json::json!({
-                "targetRuntimeArtifactId": "artifact-v2",
-                "now": "2026-05-25T13:05:20Z"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(upgrade["kind"], "upgrade");
-        assert_eq!(upgrade["target_runtime_artifact_id"], "artifact-v2");
-        let upgrade_id = upgrade["id"].as_str().unwrap();
-        let (status, lease) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/runtime-control-requests/lease",
-            &service,
-            Some(serde_json::json!({
-                "runnerId": "runner-oslo-1",
-                "leaseToken": "upgrade-lease-1",
-                "leaseSeconds": 60,
-                "sourceHostId": "oslo-host-1",
-                "runnerCapacity": { "runnerClasses": ["kata"] },
-                "now": "2026-05-25T13:05:30Z"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(lease["request"]["id"], upgrade_id);
-        assert_eq!(lease["target_runtime_artifact"]["id"], "artifact-v2");
-        let (status, upgraded) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/runtime-control-requests/{upgrade_id}/complete"),
-            &service,
-            Some(serde_json::json!({
-                "runnerId": "runner-oslo-1",
-                "leaseToken": "upgrade-lease-1",
-                "runtimeArtifactId": "artifact-v2",
-                "stateSchemaVersion": "state-v1",
-                "runtimeHost": "http://127.0.0.1:41002",
-                "publishedAppUrls": ["http://127.0.0.1:41002/contact"],
-                "now": "2026-05-25T13:05:40Z"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(upgraded["status"], "succeeded");
+            let target_reference = format!(
+                "ghcr.io/finitecomputer/agent-runtime:v2@sha256:{}",
+                "b".repeat(64)
+            );
+            let (status, _) = send_json(
+                &app,
+                "PUT",
+                "/api/core/v1/runtime-artifacts/artifact-v2",
+                &service,
+                Some(serde_json::json!({
+                    "kind": "oci_image",
+                    "reference": target_reference,
+                    "versionLabel": "v2",
+                    "stateSchemaVersion": "state-v1",
+                    "promoted": true,
+                    "now": "2026-05-25T13:05:10Z"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, upgrade) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/admin/projects/{project_id}/runtime/upgrade"),
+                &admin,
+                Some(serde_json::json!({
+                    "targetRuntimeArtifactId": "artifact-v2",
+                    "now": "2026-05-25T13:05:20Z"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(upgrade["kind"], "upgrade");
+            assert_eq!(upgrade["target_runtime_artifact_id"], "artifact-v2");
+            let upgrade_id = upgrade["id"].as_str().unwrap();
+            let (status, lease) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/runtime-control-requests/lease",
+                &service,
+                Some(serde_json::json!({
+                    "runnerId": "runner-oslo-1",
+                    "leaseToken": "upgrade-lease-1",
+                    "leaseSeconds": 60,
+                    "sourceHostId": "oslo-host-1",
+                    "runnerCapacity": { "runnerClasses": ["kata"] },
+                    "now": "2026-05-25T13:05:30Z"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(lease["request"]["id"], upgrade_id);
+            assert_eq!(lease["target_runtime_artifact"]["id"], "artifact-v2");
+            let (status, upgraded) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/runtime-control-requests/{upgrade_id}/complete"),
+                &service,
+                Some(serde_json::json!({
+                    "runnerId": "runner-oslo-1",
+                    "leaseToken": "upgrade-lease-1",
+                    "runtimeArtifactId": "artifact-v2",
+                    "stateSchemaVersion": "state-v1",
+                    "runtimeHost": "http://127.0.0.1:41002",
+                    "publishedAppUrls": ["http://127.0.0.1:41002/contact"],
+                    "now": "2026-05-25T13:05:40Z"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(upgraded["status"], "succeeded");
 
-        // Recovery remains disabled until it is more than a restart alias.
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/admin/projects/{project_id}/runtime/recover-known-good-chat"),
-            &admin,
-            Some(serde_json::json!({ "now": "2026-05-25T13:06:00Z" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT);
+            // Recovery remains disabled until it is more than a restart alias.
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                &format!(
+                    "/api/core/v1/admin/projects/{project_id}/runtime/recover-known-good-chat"
+                ),
+                &admin,
+                Some(serde_json::json!({ "now": "2026-05-25T13:06:00Z" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
 
-        // Both admin actions are audited with the admin's email as actor.
-        let (status, events) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/finite-private/admin-audit-events",
-            &admin,
-            None,
-        )
+            // Both admin actions are audited with the admin's email as actor.
+            let (status, events) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/finite-private/admin-audit-events",
+                &admin,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let events = events.as_array().unwrap().clone();
+            let admin_actions = events
+                .iter()
+                .filter(|event| event["actor"] == "admin@finite.vip")
+                .map(|event| event["action"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>();
+            assert!(admin_actions.contains(&"runtime.admin_restart".to_string()));
+            assert!(admin_actions.contains(&"runtime.admin_upgrade".to_string()));
+            assert!(!admin_actions.contains(&"runtime.admin_recover_known_good_chat".to_string()));
+        })
         .await;
-        assert_eq!(status, StatusCode::OK);
-        let events = events.as_array().unwrap().clone();
-        let admin_actions = events
-            .iter()
-            .filter(|event| event["actor"] == "admin@finite.vip")
-            .map(|event| event["action"].as_str().unwrap().to_string())
-            .collect::<Vec<_>>();
-        assert!(admin_actions.contains(&"runtime.admin_restart".to_string()));
-        assert!(admin_actions.contains(&"runtime.admin_upgrade".to_string()));
-        assert!(!admin_actions.contains(&"runtime.admin_recover_known_good_chat".to_string()));
     }
 
     #[tokio::test]
     async fn core_api_admin_friend_key_lifecycle_returns_raw_key_exactly_once() {
-        let app = admin_router(CoreStore::memory());
-        let admin = operator_identity_headers("admin@finite.vip");
+        with_isolated_postgres(|db| async move {
+            let app = admin_router(db.store.clone());
+            let admin = operator_identity_headers("admin@finite.vip");
 
-        let (status, issued) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/admin/finite-private/friend-keys",
-            &admin,
-            Some(serde_json::json!({
-                "email": "Friend@Finite.VIP",
-                "now": "2026-05-25T12:00:00Z"
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let raw_key = issued["raw_api_key"].as_str().unwrap().to_string();
-        assert!(raw_key.starts_with("fpk_live_"));
-        assert_eq!(issued["grant"]["status"], "active");
-        assert_eq!(issued["api_key"]["status"], "active");
-        assert_ne!(issued["api_key"]["key_hash"], raw_key.as_str());
-        assert!(
-            issued["raw_api_key_note"]
-                .as_str()
-                .unwrap()
-                .contains("shown once")
-        );
-        let key_id = issued["api_key"]["id"].as_str().unwrap().to_string();
-        let grant_id = issued["grant"]["id"].as_str().unwrap().to_string();
-
-        // Core never stores or re-serves the raw key: the whole admin state
-        // must not contain it anywhere.
-        let (status, admin_state) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/finite-private/admin-state",
-            &admin,
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(!admin_state.to_string().contains(&raw_key));
-
-        // Rotate returns a brand-new one-time raw key and revokes the old key.
-        let (status, rotated) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/admin/finite-private/keys/{key_id}/rotate"),
-            &admin,
-            Some(serde_json::json!({ "now": "2026-05-25T13:00:00Z" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let rotated_raw = rotated["raw_api_key"].as_str().unwrap().to_string();
-        assert!(rotated_raw.starts_with("fpk_live_"));
-        assert_ne!(rotated_raw, raw_key);
-        assert!(rotated.get("grant").is_none());
-        let rotated_key_id = rotated["api_key"]["id"].as_str().unwrap().to_string();
-        assert_ne!(rotated_key_id, key_id);
-
-        let (_, admin_state) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/finite-private/admin-state",
-            &admin,
-            None,
-        )
-        .await;
-        let keys = admin_state["apiKeys"].as_array().unwrap().clone();
-        let old_key = keys
-            .iter()
-            .find(|key| key["id"] == key_id.as_str())
-            .unwrap();
-        assert_eq!(old_key["status"], "revoked");
-        let new_key = keys
-            .iter()
-            .find(|key| key["id"] == rotated_key_id.as_str())
-            .unwrap();
-        assert_eq!(new_key["status"], "active");
-        assert!(!admin_state.to_string().contains(&rotated_raw));
-
-        // Revoke the rotated key.
-        let (status, revoked) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/admin/finite-private/keys/{rotated_key_id}/revoke"),
-            &admin,
-            Some(serde_json::json!({ "now": "2026-05-25T14:00:00Z" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(revoked["status"], "revoked");
-
-        // Burst window reset mirrors the CLI window-reset semantics.
-        let (status, reset) = send_json(
-            &app,
-            "POST",
-            &format!("/api/core/v1/admin/finite-private/grants/{grant_id}/window-reset"),
-            &admin,
-            Some(serde_json::json!({ "now": "2026-05-25T15:00:00Z" })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(reset["current_window_used_units"], 0);
-        assert_eq!(reset["current_window_started_at"], "2026-05-25T15:00:00Z");
-
-        // Unknown ids surface as 404s, and every admin action was audited
-        // with the admin as actor.
-        let (status, _) = send_json(
-            &app,
-            "POST",
-            "/api/core/v1/admin/finite-private/grants/missing/window-reset",
-            &admin,
-            Some(serde_json::json!({})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-
-        let (_, events) = send_json(
-            &app,
-            "GET",
-            "/api/core/v1/finite-private/admin-audit-events",
-            &admin,
-            None,
-        )
-        .await;
-        let admin_actions = events
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|event| event["actor"] == "admin@finite.vip")
-            .map(|event| event["action"].as_str().unwrap().to_string())
-            .collect::<Vec<_>>();
-        for expected in [
-            "finite_private.friend_key.admin_issue",
-            "finite_private.api_key.admin_rotate",
-            "finite_private.api_key.admin_revoke",
-            "finite_private.grant.admin_window_reset",
-        ] {
+            let (status, issued) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/admin/finite-private/friend-keys",
+                &admin,
+                Some(serde_json::json!({
+                    "email": "Friend@Finite.VIP",
+                    "now": "2026-05-25T12:00:00Z"
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let raw_key = issued["raw_api_key"].as_str().unwrap().to_string();
+            assert!(raw_key.starts_with("fpk_live_"));
+            assert_eq!(issued["grant"]["status"], "active");
+            assert_eq!(issued["api_key"]["status"], "active");
+            assert_ne!(issued["api_key"]["key_hash"], raw_key.as_str());
             assert!(
-                admin_actions.contains(&expected.to_string()),
-                "missing audit action {expected}"
+                issued["raw_api_key_note"]
+                    .as_str()
+                    .unwrap()
+                    .contains("shown once")
             );
-        }
+            let key_id = issued["api_key"]["id"].as_str().unwrap().to_string();
+            let grant_id = issued["grant"]["id"].as_str().unwrap().to_string();
+
+            // Core never stores or re-serves the raw key: the whole admin state
+            // must not contain it anywhere.
+            let (status, admin_state) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/finite-private/admin-state",
+                &admin,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!admin_state.to_string().contains(&raw_key));
+
+            // Rotate returns a brand-new one-time raw key and revokes the old key.
+            let (status, rotated) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/admin/finite-private/keys/{key_id}/rotate"),
+                &admin,
+                Some(serde_json::json!({ "now": "2026-05-25T13:00:00Z" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let rotated_raw = rotated["raw_api_key"].as_str().unwrap().to_string();
+            assert!(rotated_raw.starts_with("fpk_live_"));
+            assert_ne!(rotated_raw, raw_key);
+            assert!(rotated.get("grant").is_none());
+            let rotated_key_id = rotated["api_key"]["id"].as_str().unwrap().to_string();
+            assert_ne!(rotated_key_id, key_id);
+
+            let (_, admin_state) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/finite-private/admin-state",
+                &admin,
+                None,
+            )
+            .await;
+            let keys = admin_state["apiKeys"].as_array().unwrap().clone();
+            let old_key = keys
+                .iter()
+                .find(|key| key["id"] == key_id.as_str())
+                .unwrap();
+            assert_eq!(old_key["status"], "revoked");
+            let new_key = keys
+                .iter()
+                .find(|key| key["id"] == rotated_key_id.as_str())
+                .unwrap();
+            assert_eq!(new_key["status"], "active");
+            assert!(!admin_state.to_string().contains(&rotated_raw));
+
+            // Revoke the rotated key.
+            let (status, revoked) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/admin/finite-private/keys/{rotated_key_id}/revoke"),
+                &admin,
+                Some(serde_json::json!({ "now": "2026-05-25T14:00:00Z" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(revoked["status"], "revoked");
+
+            // Burst window reset mirrors the CLI window-reset semantics.
+            let (status, reset) = send_json(
+                &app,
+                "POST",
+                &format!("/api/core/v1/admin/finite-private/grants/{grant_id}/window-reset"),
+                &admin,
+                Some(serde_json::json!({ "now": "2026-05-25T15:00:00Z" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(reset["current_window_used_units"], 0);
+            // Compare instants, not strings: Postgres renders RFC3339 with
+            // microseconds ("2026-05-25T15:00:00.000000Z") where the old
+            // in-memory store echoed the request string back verbatim.
+            // Both name the same instant, which is what this pins.
+            assert_eq!(
+                parse_time(reset["current_window_started_at"].as_str().unwrap()).unwrap(),
+                parse_time("2026-05-25T15:00:00Z").unwrap(),
+            );
+
+            // Unknown ids surface as 404s, and every admin action was audited
+            // with the admin as actor.
+            let (status, _) = send_json(
+                &app,
+                "POST",
+                "/api/core/v1/admin/finite-private/grants/missing/window-reset",
+                &admin,
+                Some(serde_json::json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            let (_, events) = send_json(
+                &app,
+                "GET",
+                "/api/core/v1/finite-private/admin-audit-events",
+                &admin,
+                None,
+            )
+            .await;
+            let admin_actions = events
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|event| event["actor"] == "admin@finite.vip")
+                .map(|event| event["action"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>();
+            for expected in [
+                "finite_private.friend_key.admin_issue",
+                "finite_private.api_key.admin_rotate",
+                "finite_private.api_key.admin_revoke",
+                "finite_private.grant.admin_window_reset",
+            ] {
+                assert!(
+                    admin_actions.contains(&expected.to_string()),
+                    "missing audit action {expected}"
+                );
+            }
+        })
+        .await;
     }
 }
