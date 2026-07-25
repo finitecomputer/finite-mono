@@ -330,6 +330,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByRole("textbox", { name: "Confidential Launch Code" })
         .waitFor({ state: "visible" });
     });
+    // This differently configured Next dev server is not used again. Keeping
+    // both compilers alive makes later on-demand route compilation contend in CI.
+    await stopChildProcess(paidDashboard);
 
     core.reset();
     await withSignedInPage(browser, dashboardPort, async (page) => {
@@ -652,10 +655,20 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .waitFor({ state: "visible" });
 
       const machineSwitcher = page.getByRole("button", {
-        name: "Completed Oslo Bot",
+        name: "Completed Oslo Bot, Online",
         exact: true,
       });
-      await machineSwitcher.waitFor({ state: "visible" });
+      await waitFor(
+        async () => {
+          if (await machineSwitcher.isVisible()) return true;
+          await page.waitForTimeout(250);
+          await page.reload();
+          return machineSwitcher.isVisible();
+        },
+        15_000,
+        async () =>
+          `agent switcher did not hydrate after returning from Skills\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
+      );
       await machineSwitcher.click();
       const secondAgentItem = page.getByRole("menuitem", {
         name: "Second Oslo Bot",
@@ -666,7 +679,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
 
       const secondMachineSwitcher = page.getByRole("button", {
-        name: "Second Oslo Bot",
+        name: "Second Oslo Bot, Online",
         exact: true,
       });
       await secondMachineSwitcher.waitFor({ state: "visible" });
@@ -1119,6 +1132,16 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.getByRole("button", { name: "Send message" }).click();
       await page.getByRole("img", { name: "browser-proof.png" }).waitFor({ state: "visible" });
 
+      // Next dev compiles this API route on first access. Wait for successful
+      // delivery before checking browser decode instead of racing a short poll
+      // against compilation on a loaded runner.
+      const agentAttachmentPath =
+        "/hosted-device/attachments/room_browser_agent/message_4/attachment_4";
+      const agentAttachmentResponse = page.waitForResponse(
+        (response) =>
+          response.url().includes(agentAttachmentPath) && response.status() === 200,
+        { timeout: 30_000 }
+      );
       hostedDevice.state.app.messages.push(
         hostedImageMessage("Image returned by agent.", false, 4, "agent-proof.png")
       );
@@ -1126,11 +1149,21 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       const agentImage = page.getByRole("img", { name: "agent-proof.png" });
       await agentImage.waitFor({ state: "visible" });
       await agentImage.evaluate((image) => image.scrollIntoView({ block: "center" }));
-      await waitFor(() =>
-        agentImage.evaluate(
-          (image) =>
-            image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0
-        )
+      const attachmentResponse = await agentAttachmentResponse;
+      assert.match(
+        attachmentResponse.headers()["content-type"] ?? "",
+        /^image\/png\b/u,
+        "agent attachment route did not return PNG bytes"
+      );
+      await waitFor(
+        () =>
+          agentImage.evaluate(
+            (image) =>
+              image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0
+          ),
+        15_000,
+        async () =>
+          `agent attachment returned 200 but did not decode\nURL: ${attachmentResponse.url()}\n${await pageText(page)}`
       );
       assert.equal(
         hostedDevice.state.authRequests.some((request) =>
@@ -1625,22 +1658,26 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     });
   } finally {
     await browser?.close().catch(() => {});
-    dashboard.kill("SIGTERM");
-    paidDashboard.kill("SIGTERM");
+    await Promise.all([
+      stopChildProcess(dashboard),
+      stopChildProcess(paidDashboard),
+    ]);
     core.server.close();
     hostedDevice.close();
     brain.server.close();
     sites.server.close();
-    await Promise.race([
-      once(dashboard, "exit"),
-      new Promise((resolve) => setTimeout(resolve, 2_000)),
-    ]);
-    await Promise.race([
-      once(paidDashboard, "exit"),
-      new Promise((resolve) => setTimeout(resolve, 2_000)),
-    ]);
   }
 });
+
+async function stopChildProcess(process: ChildProcessWithoutNullStreams) {
+  if (process.exitCode !== null || process.signalCode !== null) return;
+  const exited = once(process, "exit");
+  process.kill("SIGTERM");
+  await Promise.race([
+    exited,
+    new Promise((resolve) => setTimeout(resolve, 2_000)),
+  ]);
+}
 
 function startDashboard(
   port: number,
