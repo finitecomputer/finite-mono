@@ -2,7 +2,6 @@ const navigationToolbarHeight = 44;
 const navigationToolbarWidth = 62;
 const navigationCommandScheme = "finitechat-navigation:";
 const macTrafficLightInset = 14;
-const macTrafficLightSafeEdge = 72;
 
 function electronDashboardChromeCss(platform = process.platform) {
   const macWindowChrome = platform === "darwin"
@@ -24,15 +23,24 @@ function electronDashboardChromeCss(platform = process.platform) {
         app-region: no-drag;
       }
 
-      .finite-agent-shell.is-sidebar-collapsed .finite-chat__desktop-collapse-button {
-        position: fixed;
-        top: 14px;
-        left: ${macTrafficLightSafeEdge}px;
-        z-index: 100;
+      .finite-chat__sidebar-top {
+        min-height: 40px;
+        padding-top: 4px;
+        padding-bottom: 4px;
       }
 
-      .finite-agent-shell.is-sidebar-collapsed .finite-chat__topbar {
-        padding-left: 58px;
+      .finite-chat__topbar {
+        min-height: 40px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+      }
+
+      .finite-agent-shell.is-sidebar-collapsed .finite-chat__desktop-collapse-button {
+        display: none;
+      }
+
+      .finite-agent-shell.is-sidebar-collapsed .finite-chat__sidebar-toggle {
+        display: inline-flex;
       }
     `
     : "";

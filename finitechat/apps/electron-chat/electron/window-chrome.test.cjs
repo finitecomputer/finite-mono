@@ -22,7 +22,11 @@ test("Electron dashboard CSS hides only its two wordmark placements", () => {
   const css = electronDashboardChromeCss("darwin");
   assert.match(css, /\.ocean-app-header__brand \.ocean-brand/u);
   assert.match(css, /\.finite-chat__brand \.ocean-brand/u);
-  assert.doesNotMatch(css, /display:\s*none/u);
+  assert.match(css, /visibility:\s*hidden\s*!important/u);
+  assert.doesNotMatch(
+    css,
+    /\.finite-chat__brand \.ocean-brand\s*\{[^}]*display:\s*none/su
+  );
 });
 
 test("macOS dashboard CSS reserves traffic-light space and exposes draggable chrome", () => {
@@ -39,12 +43,15 @@ test("macOS dashboard CSS reserves traffic-light space and exposes draggable chr
     css,
     /\.finite-agent-shell\.is-sidebar-collapsed \.finite-chat__desktop-collapse-button/u
   );
-  assert.match(css, /left:\s*72px/u);
   assert.match(
     css,
-    /\.finite-agent-shell\.is-sidebar-collapsed \.finite-chat__topbar/u
+    /\.finite-agent-shell\.is-sidebar-collapsed \.finite-chat__sidebar-toggle/u
   );
-  assert.match(css, /padding-left:\s*58px/u);
+  assert.match(css, /display:\s*none/u);
+  assert.match(css, /display:\s*inline-flex/u);
+  assert.match(css, /\.finite-chat__sidebar-top\s*\{[^}]*min-height:\s*40px/su);
+  assert.match(css, /\.finite-chat__topbar\s*\{[^}]*min-height:\s*40px/su);
+  assert.doesNotMatch(css, /position:\s*fixed/u);
 });
 
 test("non-macOS dashboard CSS does not alter native window chrome", () => {
