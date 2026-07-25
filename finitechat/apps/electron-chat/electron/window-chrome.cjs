@@ -1,7 +1,7 @@
 const navigationToolbarHeight = 44;
 const navigationToolbarWidth = 62;
 const navigationCommandScheme = "finitechat-navigation:";
-const macTrafficLightInset = 14;
+const macTrafficLightInset = 20;
 
 function electronDashboardChromeCss(platform = process.platform) {
   const macWindowChrome = platform === "darwin"

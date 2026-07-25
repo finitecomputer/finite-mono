@@ -12,7 +12,7 @@ const {
 test("macOS windows use a full-bleed hidden title bar", () => {
   assert.deepEqual(fullBleedWindowOptions("darwin"), {
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 14 },
+    trafficLightPosition: { x: 20, y: 20 },
   });
   assert.deepEqual(fullBleedWindowOptions("linux"), {});
   assert.deepEqual(fullBleedWindowOptions("win32"), {});
