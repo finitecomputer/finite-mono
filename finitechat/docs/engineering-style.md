@@ -68,6 +68,11 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
 - Give independently ordered projection fields independent sequence authority.
   A late bootstrap, cache replay, exact duplicate, or restart must not let an
   older metadata, archive, or active-segment event regress a newer value.
+- Treat linked-Device history as an atomic Room snapshot. Bounded chunks may
+  stage and retry for as long as needed, but no imported Topic, Chat, archive
+  state, or message becomes visible until the complete manifest validates and
+  commits. A source that cannot prove complete retained plaintext fails closed;
+  it never substitutes a recent or representative subset.
 - Audit every dependency addition before adding it. Prefer the standard library,
   existing workspace dependencies, or a small Rust crate over shell/Python
   tooling. New scripts should be Rust binaries or tests unless a non-Rust tool

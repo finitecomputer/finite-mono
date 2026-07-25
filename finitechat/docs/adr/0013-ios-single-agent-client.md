@@ -32,6 +32,11 @@ pre-release iOS store or Keychain shape is explicitly not a requirement.
 - The user pairs exactly one connected direct agent Room. Rust persists both
   the agent account identity and canonical Room identity; selection and sort
   order are never authority.
+- That paired Room's pre-membership history is all-or-nothing. An existing
+  same-account Device may transfer the complete retained encrypted application
+  history in bounded, digest-bound chunks; iOS keeps the Room provisional and
+  exposes none of the import until the full manifest commits. A source that
+  cannot certify complete local plaintext refuses the transfer.
 - Home is the root. Submitting its composer dispatches one idempotent
   `StartHomeChat` intent. Rust chooses the paired Room and `home` Topic, creates
   or reuses the intent-specific Chat, persists the first message in the normal

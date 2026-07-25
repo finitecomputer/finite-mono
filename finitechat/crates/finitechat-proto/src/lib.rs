@@ -93,12 +93,16 @@ pub const FINITECHAT_ACTIVITY_PRESENT_EXPIRY_MILLIS: u64 = 2 * 60 * 1000;
 pub const FINITECHAT_ACTIVITY_WORKING_EXPIRY_MILLIS: u64 = 5 * 60 * 1000;
 pub const FINITECHAT_CHAT_ARCHIVE_EVENT_V1: &str = "finitechat.chat.archive.v1";
 pub const FINITECHAT_CHAT_RENAME_EVENT_V1: &str = "finitechat.chat.rename.v1";
-pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1: &str = "finitechat.device-link.bootstrap.v1";
-pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V1: &str =
-    "finitechat.device-link.bootstrap-request.v1";
-pub const DEVICE_LINK_BOOTSTRAP_VERSION_V1: u16 = 1;
+pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2: &str = "finitechat.device-link.bootstrap.v2";
+pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2: &str =
+    "finitechat.device-link.bootstrap-request.v2";
+pub const DEVICE_LINK_BOOTSTRAP_VERSION_V2: u16 = 2;
+/// Every transfer is finite and every individual envelope remains bounded.
+/// A transfer above this explicit ceiling fails without exposing partial data.
+pub const MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS: u32 = 65_536;
 pub const MAX_DEVICE_LINK_BOOTSTRAP_EVENTS: u32 = 64;
-pub const MAX_DEVICE_LINK_BOOTSTRAP_CHAT_ARCHIVES: u32 = 256;
+pub const MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS: u64 =
+    MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS as u64 * MAX_DEVICE_LINK_BOOTSTRAP_EVENTS as u64;
 pub const MAX_DEVICE_LINK_BOOTSTRAP_PROFILES: u32 = MAX_ACCOUNT_DEVICES_PER_ROOM;
 // The bootstrap is itself carried as a base64 payload inside a JSON
 // DecryptedApplicationEventV1. Leave room for that 4/3 expansion and the
@@ -124,6 +128,8 @@ const _: () = {
     assert!(MAX_CHAT_TITLE_BYTES > 0);
     assert!(MAX_CHAT_TITLE_BYTES <= MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_DEVICE_LINK_BOOTSTRAP_EVENTS > 0);
+    assert!(MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS > 0);
+    assert!(MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS > 0);
     assert!(MAX_DEVICE_LINK_BOOTSTRAP_PROFILES > 0);
     assert!(MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES > 0);
     assert!(MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES < MAX_ENVELOPE_PAYLOAD_BYTES);
@@ -444,50 +450,40 @@ pub struct ChatArchiveV1 {
     pub archived: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceLinkBootstrapChatArchiveV1 {
-    pub topic_id: ConversationId,
-    pub chat_id: ConversationSegmentId,
-    pub accepted_seq: u64,
-    pub archived: bool,
-}
-
 /// An account-authored snapshot sent immediately after a Device is added to a
 /// room. The enclosing application event is MLS encrypted and is accepted only
 /// by `target`; the server never sees these fields or the copied transcript.
 ///
-/// History is deliberately a bounded set of the room's already-authenticated
-/// durable application events. Replaying those events into the target Device's
-/// encrypted local projection reconstructs conversation/topic/chat state
-/// without inventing a second metadata model.
+/// One value is a bounded chunk of a complete room-history transfer. Receivers
+/// stage chunks invisibly and only commit the imported history after every
+/// chunk and the transfer digest validate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceLinkBootstrapV1 {
+pub struct DeviceLinkBootstrapV2 {
     pub version: u16,
     pub bootstrap_id: String,
     pub target: DeviceRef,
-    pub room: DeviceLinkBootstrapRoomV1,
+    pub chunk_index: u32,
+    pub chunk_count: u32,
+    pub total_history_events: u64,
+    pub history_sha256: String,
+    pub room: DeviceLinkBootstrapRoomV2,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_selection: Option<DeviceLinkBootstrapSelectionV1>,
+    pub canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
     #[serde(default)]
-    pub profiles: Vec<DeviceLinkBootstrapProfileV1>,
-    /// Compact current-value projection chunks for chat archive state. This is
-    /// a same-account Device bootstrap snapshot derived from durable archive
-    /// events, not a second server-side source of truth.
+    pub profiles: Vec<DeviceLinkBootstrapProfileV2>,
     #[serde(default)]
-    pub chat_archives: Vec<DeviceLinkBootstrapChatArchiveV1>,
-    #[serde(default)]
-    pub history: Vec<DeviceLinkBootstrapEventV1>,
+    pub history: Vec<DeviceLinkBootstrapEventV2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceLinkBootstrapRequestV1 {
+pub struct DeviceLinkBootstrapRequestV2 {
     pub version: u16,
     pub request_id: String,
     pub requester: DeviceRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceLinkBootstrapRoomV1 {
+pub struct DeviceLinkBootstrapRoomV2 {
     pub room_id: RoomId,
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -495,14 +491,14 @@ pub struct DeviceLinkBootstrapRoomV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceLinkBootstrapSelectionV1 {
+pub struct DeviceLinkBootstrapSelectionV2 {
     pub room_id: RoomId,
     pub topic_id: ConversationId,
     pub chat_id: ConversationSegmentId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceLinkBootstrapProfileV1 {
+pub struct DeviceLinkBootstrapProfileV2 {
     pub account_id: String,
     pub npub: String,
     pub display_name: String,
@@ -515,7 +511,7 @@ pub struct DeviceLinkBootstrapProfileV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceLinkBootstrapEventV1 {
+pub struct DeviceLinkBootstrapEventV2 {
     pub seq: Seq,
     pub message_id: MessageId,
     pub sender: DeviceRef,
@@ -2636,18 +2632,7 @@ impl ChatArchiveV1 {
     }
 }
 
-impl DeviceLinkBootstrapChatArchiveV1 {
-    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
-        ChatArchiveV1 {
-            topic_id: self.topic_id.clone(),
-            chat_id: self.chat_id.clone(),
-            archived: self.archived,
-        }
-        .validate_limits()
-    }
-}
-
-impl DeviceLinkBootstrapV1 {
+impl DeviceLinkBootstrapV2 {
     pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
         validate_bytes_non_empty(
             "device_link_bootstrap.bootstrap_id",
@@ -2659,6 +2644,40 @@ impl DeviceLinkBootstrapV1 {
             MAX_OBJECT_ID_BYTES,
         )?;
         self.target.validate_limits()?;
+        if self.chunk_count == 0 || self.chunk_count > MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS {
+            return Err(ProtocolLimitError::TooManyItems {
+                field: "device_link_bootstrap.chunk_count".to_owned(),
+                actual_items: u64::from(self.chunk_count),
+                max_items: u64::from(MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS),
+            });
+        }
+        if self.chunk_index >= self.chunk_count {
+            return Err(ProtocolLimitError::InvalidValue {
+                field: "device_link_bootstrap.chunk_index".to_owned(),
+            });
+        }
+        if self.total_history_events > MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS {
+            return Err(ProtocolLimitError::TooManyItems {
+                field: "device_link_bootstrap.total_history_events".to_owned(),
+                actual_items: self.total_history_events,
+                max_items: MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS,
+            });
+        }
+        validate_string_bytes(
+            "device_link_bootstrap.history_sha256",
+            &self.history_sha256,
+            64,
+        )?;
+        if self.history_sha256.len() != 64
+            || !self
+                .history_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ProtocolLimitError::InvalidValue {
+                field: "device_link_bootstrap.history_sha256".to_owned(),
+            });
+        }
         self.room.validate_limits()?;
         if let Some(selection) = &self.canonical_selection {
             selection.validate_limits()?;
@@ -2672,18 +2691,25 @@ impl DeviceLinkBootstrapV1 {
             profile.validate_limits()?;
         }
         validate_item_count(
-            "device_link_bootstrap.chat_archives",
-            self.chat_archives.len(),
-            MAX_DEVICE_LINK_BOOTSTRAP_CHAT_ARCHIVES,
-        )?;
-        for archive in &self.chat_archives {
-            archive.validate_limits()?;
-        }
-        validate_item_count(
             "device_link_bootstrap.history",
             self.history.len(),
             MAX_DEVICE_LINK_BOOTSTRAP_EVENTS,
         )?;
+        if self.total_history_events == 0 {
+            if self.chunk_count != 1 || self.chunk_index != 0 || !self.history.is_empty() {
+                return Err(ProtocolLimitError::InvalidValue {
+                    field: "device_link_bootstrap.empty_transfer".to_owned(),
+                });
+            }
+        } else if self.history.is_empty()
+            || u64::from(self.chunk_count) > self.total_history_events
+            || self.total_history_events
+                > u64::from(self.chunk_count) * u64::from(MAX_DEVICE_LINK_BOOTSTRAP_EVENTS)
+        {
+            return Err(ProtocolLimitError::InvalidValue {
+                field: "device_link_bootstrap.transfer_shape".to_owned(),
+            });
+        }
         for event in &self.history {
             event.validate_limits()?;
         }
@@ -2691,7 +2717,7 @@ impl DeviceLinkBootstrapV1 {
     }
 }
 
-impl DeviceLinkBootstrapRequestV1 {
+impl DeviceLinkBootstrapRequestV2 {
     pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
         validate_bytes_non_empty(
             "device_link_bootstrap_request.request_id",
@@ -2706,7 +2732,7 @@ impl DeviceLinkBootstrapRequestV1 {
     }
 }
 
-impl DeviceLinkBootstrapRoomV1 {
+impl DeviceLinkBootstrapRoomV2 {
     pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
         validate_room_id(&self.room_id)?;
         validate_bytes_non_empty(
@@ -2729,7 +2755,7 @@ impl DeviceLinkBootstrapRoomV1 {
     }
 }
 
-impl DeviceLinkBootstrapSelectionV1 {
+impl DeviceLinkBootstrapSelectionV2 {
     pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
         validate_room_id(&self.room_id)?;
         validate_bytes_non_empty(
@@ -2753,7 +2779,7 @@ impl DeviceLinkBootstrapSelectionV1 {
     }
 }
 
-impl DeviceLinkBootstrapProfileV1 {
+impl DeviceLinkBootstrapProfileV2 {
     pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
         validate_bytes_non_empty(
             "device_link_bootstrap.profile.account_id",
@@ -2797,7 +2823,7 @@ impl DeviceLinkBootstrapProfileV1 {
     }
 }
 
-impl DeviceLinkBootstrapEventV1 {
+impl DeviceLinkBootstrapEventV2 {
     pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
         validate_bytes_non_empty(
             "device_link_bootstrap.event.message_id",
@@ -3082,6 +3108,8 @@ pub enum ProtocolLimitError {
         max_millis: u64,
         actual_millis: u64,
     },
+    #[error("{field} has an invalid value")]
+    InvalidValue { field: String },
 }
 
 pub fn validate_room_id(room_id: &str) -> Result<(), ProtocolLimitError> {
@@ -3438,7 +3466,7 @@ mod tests {
     fn device_link_bootstrap_cap_fits_its_outer_application_event() {
         let outer = DecryptedApplicationEventV1 {
             kind: DurableAppEventKind::Namespaced {
-                name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V1.to_owned(),
+                name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2.to_owned(),
                 policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
             },
             conversation_id: None,
@@ -3447,6 +3475,46 @@ mod tests {
         };
         let encoded = serde_json::to_vec(&outer).unwrap();
         assert!(encoded.len() <= MAX_ENVELOPE_PAYLOAD_BYTES as usize);
+    }
+
+    #[test]
+    fn device_link_bootstrap_v2_rejects_incoherent_transfer_shapes() {
+        let mut bootstrap = DeviceLinkBootstrapV2 {
+            version: DEVICE_LINK_BOOTSTRAP_VERSION_V2,
+            bootstrap_id: "bootstrap".to_owned(),
+            target: device("account", "phone"),
+            chunk_index: 0,
+            chunk_count: 1,
+            total_history_events: 0,
+            history_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .to_owned(),
+            room: DeviceLinkBootstrapRoomV2 {
+                room_id: "room".to_owned(),
+                display_name: "Agent".to_owned(),
+                picture: None,
+            },
+            canonical_selection: None,
+            profiles: Vec::new(),
+            history: Vec::new(),
+        };
+        bootstrap.validate_limits().unwrap();
+
+        bootstrap.chunk_index = 1;
+        assert!(matches!(
+            bootstrap.validate_limits(),
+            Err(ProtocolLimitError::InvalidValue { field })
+                if field == "device_link_bootstrap.chunk_index"
+        ));
+        bootstrap.chunk_index = 0;
+        bootstrap.history_sha256 = "ABC".to_owned();
+        assert!(bootstrap.validate_limits().is_err());
+        bootstrap.history_sha256 = "0".repeat(64);
+        bootstrap.total_history_events = 1;
+        assert!(matches!(
+            bootstrap.validate_limits(),
+            Err(ProtocolLimitError::InvalidValue { field })
+                if field == "device_link_bootstrap.transfer_shape"
+        ));
     }
 
     #[test]
