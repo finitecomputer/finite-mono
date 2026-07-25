@@ -23,6 +23,7 @@ export function CoreAgentCreationForm({
   initialName,
   initialPictureUrl,
   initialHostingTier,
+  allowConfidentialHosting,
   returnMachineId,
   requiresAccess,
   stripeConfigured,
@@ -32,6 +33,7 @@ export function CoreAgentCreationForm({
   initialName?: string | null;
   initialPictureUrl?: string | null;
   initialHostingTier?: "standard" | "confidential" | null;
+  allowConfidentialHosting: boolean;
   returnMachineId?: string | null;
   requiresAccess: boolean;
   stripeConfigured: boolean;
@@ -40,7 +42,9 @@ export function CoreAgentCreationForm({
   const [displayName, setDisplayName] = useState(initialName ?? "");
   const [picturePreview, setPicturePreview] = useState(initialPictureUrl ?? "");
   const [hostingTier, setHostingTier] = useState<"standard" | "confidential">(
-    initialHostingTier ?? "standard"
+    allowConfidentialHosting && initialHostingTier === "confidential"
+      ? "confidential"
+      : "standard"
   );
   const [submitting, setSubmitting] = useState<"launch" | "stripe" | "launch-code" | null>(null);
   const submittedRef = useRef(false);
@@ -175,35 +179,37 @@ export function CoreAgentCreationForm({
               </span>
             </span>
           </label>
-          <label
-            className={`flex cursor-pointer items-start gap-3 rounded-[var(--radius-card-inner)] border p-3 ${
-              hostingTier === "confidential"
-                ? "border-primary bg-primary/5"
-                : "border-border bg-white/[0.03]"
-            }`}
-          >
-            <input
-              type="radio"
-              name="hostingTier"
-              value="confidential"
-              checked={hostingTier === "confidential"}
-              onChange={() => setHostingTier("confidential")}
-              className="mt-1"
-              tabIndex={step === "profile" ? 0 : -1}
-            />
-            <span className="grid gap-0.5">
-              <span className="inline-flex items-center gap-1.5 text-sm font-medium text-foreground">
-                <ShieldCheckIcon className="size-4" />
-                Confidential
-                <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-normal text-muted-foreground">
-                  Early access
+          {allowConfidentialHosting ? (
+            <label
+              className={`flex cursor-pointer items-start gap-3 rounded-[var(--radius-card-inner)] border p-3 ${
+                hostingTier === "confidential"
+                  ? "border-primary bg-primary/5"
+                  : "border-border bg-white/[0.03]"
+              }`}
+            >
+              <input
+                type="radio"
+                name="hostingTier"
+                value="confidential"
+                checked={hostingTier === "confidential"}
+                onChange={() => setHostingTier("confidential")}
+                className="mt-1"
+                tabIndex={step === "profile" ? 0 : -1}
+              />
+              <span className="grid gap-0.5">
+                <span className="inline-flex items-center gap-1.5 text-sm font-medium text-foreground">
+                  <ShieldCheckIcon className="size-4" />
+                  Confidential
+                  <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-normal text-muted-foreground">
+                    Early access
+                  </span>
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  Runs in confidential compute. Pardon our dust while access is limited to Confidential Launch Codes.
                 </span>
               </span>
-              <span className="text-xs text-muted-foreground">
-                Runs in confidential compute. Pardon our dust while access is limited to Confidential Launch Codes.
-              </span>
-            </span>
-          </label>
+            </label>
+          ) : null}
         </fieldset>
 
         {selectionRequiresAccess ? (
