@@ -1154,6 +1154,82 @@ final class ChatTimelineActivityTests: XCTestCase {
 
 @MainActor
 final class AppModelPersistenceTests: XCTestCase {
+    func testLocalEnrollmentReadinessRejectsPartialAndProvisionalRooms() {
+        var state = emptyChatState(deviceID: "ios-enrollment")
+        state.rooms = [
+            AppRoomSummary(
+                roomId: "agent-room",
+                displayName: "Hermes",
+                picture: nil,
+                state: .connected,
+                status: "connected",
+                userStatusText: "Connected",
+                lastMessagePreview: "",
+                unreadCount: 0,
+                canLoadOlder: false,
+                isAgentChat: true
+            ),
+        ]
+        state.pairedAgent = AppPairedAgent(
+            agentAccountId: "agent",
+            canonicalRoomId: "agent-room"
+        )
+        let manifest = NativeDeviceEnrollmentManifest(
+            bootstrapId: "bootstrap-one",
+            roomId: "agent-room",
+            manifestSha256: String(repeating: "1", count: 64)
+        )
+        state.deviceLinkBootstrapReceipts = [
+            AppDeviceLinkBootstrapReceipt(
+                bootstrapId: manifest.bootstrapId,
+                roomId: manifest.roomId,
+                manifestSha256: manifest.manifestSha256
+            ),
+        ]
+
+        XCTAssertTrue(
+            AppModel.localEnrollmentIsReady(
+                state,
+                expectedAccountID: "alice-account",
+                expectedManifests: [manifest]
+            )
+        )
+        XCTAssertFalse(
+            AppModel.localEnrollmentIsReady(
+                state,
+                expectedAccountID: String(repeating: "2", count: 64),
+                expectedManifests: [manifest]
+            ),
+            "the local identity must match the account cryptographically granted by NIP-AB"
+        )
+
+        state.deviceLinkBootstrapReceipts = []
+        XCTAssertFalse(
+            AppModel.localEnrollmentIsReady(
+                state,
+                expectedAccountID: "alice-account",
+                expectedManifests: [manifest]
+            ),
+            "a connected Room is still provisional without the exact durable receipt"
+        )
+
+        state.deviceLinkBootstrapReceipts = [
+            AppDeviceLinkBootstrapReceipt(
+                bootstrapId: manifest.bootstrapId,
+                roomId: manifest.roomId,
+                manifestSha256: manifest.manifestSha256
+            ),
+        ]
+        state.pairedAgent = nil
+        XCTAssertFalse(
+            AppModel.localEnrollmentIsReady(
+                state,
+                expectedAccountID: "alice-account",
+                expectedManifests: [manifest]
+            ),
+            "source fanout is not ready until the canonical agent validates locally"
+        )
+    }
 
     func testTypingDispatchesOnlyWhenTheMeaningfulIntentChanges() async throws {
         let state = savedChatState()
@@ -3244,6 +3320,7 @@ final class AppModelPersistenceTests: XCTestCase {
             profiles: [],
             devices: [],
             typingMembers: [],
+            deviceLinkBootstrapReceipts: [],
             flow: flow
         )
     }
@@ -3382,8 +3459,50 @@ final class AppModelPersistenceTests: XCTestCase {
             profiles: [],
             devices: [],
             typingMembers: [],
+            deviceLinkBootstrapReceipts: [],
             flow: flow
         )
+    }
+
+    @MainActor
+    func testPendingEnrollmentPersistsWithTheKeychainIdentityUntilCompletion() throws {
+        let material = try createNostrIdentity()
+        let enrollment = AppDeviceEnrollment(
+            grant: NativeDeviceEnrollmentGrant(
+                pairingSessionId: "pair-resume",
+                targetDeviceId: "ios-resume",
+                accountId: String(repeating: "1", count: 64),
+                enrollmentUserId: "user_resume",
+                enrollmentCapabilityHex: String(repeating: "ab", count: 32)
+            )
+        )
+        let identity = AppNostrIdentity(
+            material: material,
+            pendingEnrollment: enrollment
+        )
+
+        let reopened = try JSONDecoder().decode(
+            AppNostrIdentity.self,
+            from: JSONEncoder().encode(identity)
+        )
+        XCTAssertEqual(reopened.pendingEnrollment, enrollment)
+        XCTAssertEqual(reopened.pendingEnrollment?.nativeGrant.pairingSessionId, "pair-resume")
+        let model = AppModel(
+            config: RuntimeConfig(
+                serverURL: RuntimeConfig.defaultServerURL,
+                deviceID: "ios-resume"
+            ),
+            applicationSupportURL: try temporarySupportURL(),
+            requiresNostrLogin: true,
+            nostrIdentityStore: MemoryNostrIdentityStore(identity: reopened),
+            startsUpdateLoop: false
+        )
+        XCTAssertTrue(model.hasPendingDeviceEnrollment)
+
+        let completed = reopened.enrollmentCompleted()
+        XCTAssertNil(completed.pendingEnrollment)
+        XCTAssertEqual(completed.accountSecretHex, identity.accountSecretHex)
+        XCTAssertEqual(completed.accountID, identity.accountID)
     }
 
     private func roomUserStatusText(state: AppRoomState, status: String) -> String {
@@ -4341,6 +4460,25 @@ final class VoiceMessageTests: XCTestCase {
             ""
         )
         XCTAssertEqual(voiceRecordingCaption(nil), "")
+    }
+}
+
+final class NativeWebAuthenticationPresenterTests: XCTestCase {
+    func testCallbackDiagnosticsDescribeShapeWithoutValues() throws {
+        let callback = try XCTUnwrap(URL(
+            string: "https://finite.computer/auth/ios/callback?code=secret-code&state=secret-state&extra=secret-extra"
+        ))
+        let summary = NativeWebAuthenticationPresenter.callbackDiagnosticSummary(callback)
+
+        XCTAssertTrue(summary.contains("scheme_https=true"))
+        XCTAssertTrue(summary.contains("host_expected=true"))
+        XCTAssertTrue(summary.contains("path_expected=true"))
+        XCTAssertTrue(summary.contains("code_count=1"))
+        XCTAssertTrue(summary.contains("state_count=1"))
+        XCTAssertTrue(summary.contains("unexpected_query_count=1"))
+        XCTAssertFalse(summary.contains("secret-code"))
+        XCTAssertFalse(summary.contains("secret-state"))
+        XCTAssertFalse(summary.contains("secret-extra"))
     }
 }
 

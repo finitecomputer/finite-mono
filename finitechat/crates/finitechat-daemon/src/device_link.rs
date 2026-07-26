@@ -2,8 +2,8 @@ use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use finitechat_core::nip_ab::{
-    FinitePairingPayloadV1, NIP_AB_SESSION_TTL_SECONDS, NIP_AB_VERSION, NipAbPayloadType,
-    NipAbSourceDescriptorV1, NipAbTargetSession,
+    FinitePairingPayloadDecodeError, NIP_AB_SESSION_TTL_SECONDS, NIP_AB_VERSION, NipAbPayloadType,
+    NipAbSourceDescriptorV1, NipAbTargetSession, decode_finite_pairing_payload_v2,
 };
 use finitechat_http::{
     CreatePairingSessionRequest, ExpirePairingSessionRequest, GetPairingSessionRequest,
@@ -94,6 +94,8 @@ pub struct ClaimedDeviceLink {
     pairing_session_id: String,
     target: NipAbTargetSession,
     account_secret_hex: Zeroizing<String>,
+    enrollment_user_id: String,
+    enrollment_capability_hex: Zeroizing<String>,
     deadline_unix_seconds: u64,
     poll_interval: Duration,
 }
@@ -114,6 +116,8 @@ pub enum DeviceLinkBootstrapError {
     Expired,
     #[error("device-link payload failed authentication")]
     PayloadRejected,
+    #[error("device-link source is not compatible with this app version")]
+    IncompatiblePayload,
     #[error("device-link result pipe failed")]
     ResultPipe,
 }
@@ -255,8 +259,15 @@ impl WaitingDeviceLinkSession {
             if kind != NipAbPayloadType::Custom {
                 return Err(DeviceLinkBootstrapError::PayloadRejected);
             }
-            let payload: FinitePairingPayloadV1 = serde_json::from_str(&encoded)
-                .map_err(|_| DeviceLinkBootstrapError::PayloadRejected)?;
+            let payload =
+                decode_finite_pairing_payload_v2(&encoded).map_err(|error| match error {
+                    FinitePairingPayloadDecodeError::IncompatibleVersion => {
+                        DeviceLinkBootstrapError::IncompatiblePayload
+                    }
+                    FinitePairingPayloadDecodeError::Invalid => {
+                        DeviceLinkBootstrapError::PayloadRejected
+                    }
+                })?;
             payload
                 .validate(
                     &self.pairing_session_id,
@@ -271,6 +282,10 @@ impl WaitingDeviceLinkSession {
                 pairing_session_id: self.pairing_session_id,
                 target: self.target,
                 account_secret_hex: Zeroizing::new(payload.account_secret_hex.clone()),
+                enrollment_user_id: payload.enrollment_user_id.clone(),
+                enrollment_capability_hex: Zeroizing::new(
+                    payload.enrollment_capability_hex.clone(),
+                ),
                 deadline_unix_seconds: self.deadline_unix_seconds,
                 poll_interval: self.poll_interval,
             });
@@ -298,11 +313,15 @@ impl ClaimedDeviceLink {
         #[derive(Serialize)]
         struct SecretResult<'a> {
             account_secret: &'a str,
+            enrollment_user_id: &'a str,
+            enrollment_capability_hex: &'a str,
         }
         serde_json::to_writer(
             &mut writer,
             &SecretResult {
                 account_secret: &self.account_secret_hex,
+                enrollment_user_id: &self.enrollment_user_id,
+                enrollment_capability_hex: &self.enrollment_capability_hex,
             },
         )
         .map_err(|_| DeviceLinkBootstrapError::ResultPipe)?;

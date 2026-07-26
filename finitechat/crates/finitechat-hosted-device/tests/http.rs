@@ -3,12 +3,20 @@ use axum::http::{Request, StatusCode};
 use finite_brain_core::{BRAIN_IDENTITY_PROVIDER_VERSION, FolderKey};
 use finite_identity::{FiniteIdentity, IdentityPaths};
 use finite_nostr::verify_event_integrity;
+use finitechat_core::nip_ab::{
+    NipAbPayloadType, NipAbSourceDescriptorV1, NipAbTargetSession, decode_finite_pairing_payload_v2,
+};
 use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions, npub_from_account_id};
 use finitechat_hosted_device::{
     HostedDeviceConfig, HostedIdentityAuthorityConfig, MAX_HOSTED_ATTACHMENT_BYTES,
     MAX_HOSTED_ATTACHMENTS_PER_MESSAGE, MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_USER_HEADER, app,
-    app_with_final_agent_binding_persist_failures, app_with_identity_authority,
+    app_with_final_agent_binding_persist_failures, app_with_fixed_device_link_now,
+    app_with_fixed_device_link_now_and_lock_hook, app_with_identity_authority,
     app_with_profile_bootstrap_room_create_failures, app_with_profile_bootstrap_submit_failures,
+};
+use finitechat_http::{
+    CreatePairingSessionRequest, GetPairingSessionRequest, HttpPairingSessionRecord,
+    PublishPairingCompleteRequest, PublishPairingOfferRequest,
 };
 use finitechat_proto::{
     DecryptedApplicationEventV1, DurableAppEventKind, RuntimeCommandJsonPayloadV1,
@@ -121,6 +129,7 @@ async fn state_requires_internal_authorization_and_verified_user() {
     for path in [
         "/v1/device-links/approve",
         "/v1/device-links/status",
+        "/v1/device-links/enroll",
         "/v1/device-links/reconcile",
     ] {
         let response = test_app(&root)
@@ -170,6 +179,59 @@ async fn state_requires_internal_authorization_and_verified_user() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn device_enrollment_authenticates_before_strict_bounded_json_parsing() {
+    let root = TempDir::new().unwrap();
+    let hosted = test_app(&root);
+
+    let unauthorized = hosted
+        .clone()
+        .oneshot(
+            Request::post("/v1/device-links/enroll")
+                .header("content-type", "application/json")
+                .body(Body::from("not-json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    for body in [
+        Body::from("not-json"),
+        Body::from(
+            r#"{"pairing_session_id":"pair-a","target_device_id":"electron-a","enrollment_user_id":"user-a","enrollment_capability_hex":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","unexpected":true}"#,
+        ),
+        Body::from(
+            r#"{"pairing_session_id":"pair-a","target_device_id":"electron-a","enrollment_user_id":"user-a","enrollment_capability_hex":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        ),
+    ] {
+        let response = hosted
+            .clone()
+            .oneshot(
+                Request::post("/v1/device-links/enroll")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let oversized = hosted
+        .oneshot(
+            Request::post("/v1/device-links/enroll")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; 4 * 1024 + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
@@ -234,6 +296,434 @@ async fn device_reconciliation_authenticates_before_strict_bounded_json_parsing(
         .await
         .unwrap();
     assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_nip_ab_approval_persists_a_target_bound_checkpoint() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("pairing-server.sqlite3"), None).await;
+    let authority_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_authority_requests = std::sync::Arc::clone(&authority_requests);
+    let identity_authority = axum::Router::new().route(
+        "/api/v1/operator/account-principal-bindings",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let observed_authority_requests =
+                    std::sync::Arc::clone(&observed_authority_requests);
+                async move {
+                    assert_eq!(
+                        headers
+                            .get("x-finite-operator-token")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("pairing-identity-test-token")
+                    );
+                    observed_authority_requests.lock().unwrap().push(body);
+                    axum::Json(serde_json::json!({ "created": true }))
+                }
+            },
+        ),
+    );
+    let authority_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority_address = authority_listener.local_addr().unwrap();
+    let authority_task = tokio::spawn(async move {
+        axum::serve(authority_listener, identity_authority)
+            .await
+            .unwrap()
+    });
+    let authority_config = HostedIdentityAuthorityConfig {
+        base_url: format!("http://{authority_address}"),
+        operator_token: "pairing-identity-test-token".to_owned(),
+    };
+    let target = NipAbTargetSession::prepare();
+    let pairing_session_id = "pair-hosted-happy-path";
+    let target_device_id = "ios-hosted-happy-path";
+    let created = reqwest::Client::new()
+        .post(format!("{server_url}/pairing-sessions"))
+        .json(&CreatePairingSessionRequest {
+            version: 1,
+            pairing_session_id: pairing_session_id.to_owned(),
+            target_device_id: target_device_id.to_owned(),
+            target_public_key: target.public_key(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<HttpPairingSessionRecord>()
+        .await
+        .unwrap();
+    assert_eq!(created.pairing_session_id, pairing_session_id);
+
+    let data_root = root.path().join("hosted-devices");
+    let hosted_config = HostedDeviceConfig {
+        data_root: data_root.clone(),
+        server_url: server_url.clone(),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let existing_hosted =
+        app_with_identity_authority(hosted_config.clone(), authority_config.clone());
+    let existing_state = state_for(existing_hosted, "user_pairing_happy_path").await;
+    let existing_account_id = existing_state["identity"]["account_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Recreate the service over the durable account before approving. A fresh
+    // fixture alone cannot catch deployment failures that occur while opening
+    // an established Hosted Device and reasserting its authority binding.
+    let hosted = app_with_identity_authority(hosted_config, authority_config);
+    let response = device_link_for(
+        hosted.clone(),
+        "user_pairing_happy_path",
+        "/v1/device-links/approve",
+        pairing_session_id,
+        target_device_id,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "awaiting_offer");
+    let descriptor = NipAbSourceDescriptorV1 {
+        version: json["source_descriptor"]["version"].as_u64().unwrap() as u16,
+        source_public_key: json["source_descriptor"]["source_public_key"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        session_secret_hex: json["source_descriptor"]["session_secret_hex"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        expires_at_unix_seconds: json["source_descriptor"]["expires_at_unix_seconds"]
+            .as_u64()
+            .unwrap(),
+    };
+    NipAbTargetSession::create(target, &descriptor, test_now_unix_seconds())
+        .expect("the hosted source descriptor must authenticate for the original target");
+    let reopened_state = state_for(hosted, "user_pairing_happy_path").await;
+    assert_eq!(
+        reopened_state["identity"]["account_id"], existing_account_id,
+        "service restart must reopen the same durable human account"
+    );
+    let authority_requests = authority_requests.lock().unwrap();
+    assert_eq!(authority_requests.len(), 2);
+    assert_eq!(authority_requests[0], authority_requests[1]);
+
+    let record_path = data_root
+        .join("users")
+        .join(hex::encode(sha2::Sha256::digest(
+            b"user_pairing_happy_path",
+        )))
+        .join("device-links")
+        .join(format!(
+            "{}.json",
+            hex::encode(sha2::Sha256::digest(pairing_session_id.as_bytes()))
+        ));
+    assert!(
+        record_path.is_file(),
+        "approval must durably persist its target-bound checkpoint before returning"
+    );
+    authority_task.abort();
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn encrypted_enrollment_capability_resumes_after_grant_expiry_without_workos() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("resume-server.sqlite3"), None).await;
+    let now = test_now_unix_seconds();
+    let user_id = "user_pairing_resume";
+    let target_device_id = "ios-pairing-resume";
+    let pairing_session_id = "pair-hosted-resume";
+    let config = HostedDeviceConfig {
+        data_root: root.path().join("resume-hosted"),
+        server_url: server_url.clone(),
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    };
+    let hosted = app_with_fixed_device_link_now(config.clone(), now);
+    action_for(
+        hosted.clone(),
+        user_id,
+        serde_json::json!({
+            "CreateRoom": { "display_name": "Durable resume room" }
+        }),
+    )
+    .await;
+
+    let target_bootstrap = NipAbTargetSession::prepare();
+    reqwest::Client::new()
+        .post(format!("{server_url}/pairing-sessions"))
+        .json(&CreatePairingSessionRequest {
+            version: 1,
+            pairing_session_id: pairing_session_id.to_owned(),
+            target_device_id: target_device_id.to_owned(),
+            target_public_key: target_bootstrap.public_key(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let approved = device_link_for(
+        hosted.clone(),
+        user_id,
+        "/v1/device-links/approve",
+        pairing_session_id,
+        target_device_id,
+    )
+    .await;
+    let approved: Value =
+        serde_json::from_slice(&approved.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let descriptor = NipAbSourceDescriptorV1 {
+        version: approved["source_descriptor"]["version"].as_u64().unwrap() as u16,
+        source_public_key: approved["source_descriptor"]["source_public_key"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        session_secret_hex: approved["source_descriptor"]["session_secret_hex"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        expires_at_unix_seconds: approved["source_descriptor"]["expires_at_unix_seconds"]
+            .as_u64()
+            .unwrap(),
+    };
+    let (mut target_session, offer) =
+        NipAbTargetSession::create(target_bootstrap, &descriptor, now).unwrap();
+    reqwest::Client::new()
+        .post(format!("{server_url}/pairing-sessions/offer"))
+        .json(&PublishPairingOfferRequest {
+            pairing_session_id: pairing_session_id.to_owned(),
+            offer_event: serde_json::to_vec(&offer).unwrap(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let response = device_link_for(
+        hosted.clone(),
+        user_id,
+        "/v1/device-links/status",
+        pairing_session_id,
+        target_device_id,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let record = reqwest::Client::new()
+        .post(format!("{server_url}/pairing-sessions/get"))
+        .json(&GetPairingSessionRequest {
+            pairing_session_id: pairing_session_id.to_owned(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Option<HttpPairingSessionRecord>>()
+        .await
+        .unwrap()
+        .unwrap();
+    let confirmation: Event = serde_json::from_slice(&record.events[1].event).unwrap();
+    let payload_event: Event = serde_json::from_slice(&record.events[2].event).unwrap();
+    target_session
+        .accept_source_confirmation(&confirmation, now)
+        .unwrap();
+    target_session.confirm_sas(now).unwrap();
+    let (kind, payload_json) = target_session.accept_payload(&payload_event, now).unwrap();
+    assert_eq!(kind, NipAbPayloadType::Custom);
+    let payload = decode_finite_pairing_payload_v2(&payload_json).unwrap();
+    payload
+        .validate(pairing_session_id, target_device_id, PUBLIC_SERVER_URL, now)
+        .unwrap();
+    assert_eq!(payload.enrollment_user_id, user_id);
+    let complete = target_session.complete(now).unwrap();
+
+    // The narrow NIP-AB grant is complete before its deadline. Simulate a kill
+    // after secure payload storage but before durable room enrollment starts;
+    // the target comes back after the 120-second grant has expired.
+    reqwest::Client::new()
+        .post(format!("{server_url}/pairing-sessions/complete"))
+        .json(&PublishPairingCompleteRequest {
+            pairing_session_id: pairing_session_id.to_owned(),
+            complete_event: serde_json::to_vec(&complete).unwrap(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    drop(hosted);
+    let target = FiniteChatRuntime::open(OpenOptions {
+        data_dir: root.path().join("resume-target").display().to_string(),
+        server_url: server_url.clone(),
+        device_id: target_device_id.to_owned(),
+        account_secret_hex: Some(payload.account_secret_hex.clone()),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    target
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .expect("resumed target publishes a KeyPackage");
+    let resumed = app_with_fixed_device_link_now(config.clone(), now + 300);
+
+    // Hold the global mutation lock with one authenticated enrollment. A
+    // random capability miss must still finish immediately, proving misses
+    // are rejected before they can serialize valid pairing work.
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+    let lock_hook = {
+        let release_rx = std::sync::Arc::clone(&release_rx);
+        std::sync::Arc::new(move || {
+            entered_tx
+                .send(())
+                .expect("lock observer receives the valid enrollment");
+            release_rx
+                .lock()
+                .unwrap()
+                .recv()
+                .expect("test releases valid enrollment");
+        })
+    };
+    let contended =
+        app_with_fixed_device_link_now_and_lock_hook(config.clone(), now + 300, lock_hook);
+    let valid_app = contended.clone();
+    let valid_capability = payload.enrollment_capability_hex.clone();
+    let valid_request = tokio::spawn(async move {
+        device_enrollment_for(
+            valid_app,
+            pairing_session_id,
+            target_device_id,
+            user_id,
+            &valid_capability,
+        )
+        .await
+    });
+    tokio::task::spawn_blocking(move || {
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("valid enrollment acquires the mutation lock")
+    })
+    .await
+    .unwrap();
+    let miss = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        device_enrollment_for(
+            contended,
+            pairing_session_id,
+            target_device_id,
+            user_id,
+            &"00".repeat(32),
+        ),
+    )
+    .await
+    .expect("random capability miss must not wait behind valid fanout");
+    assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+    release_tx.send(()).unwrap();
+    let first_resume_response = valid_request.await.unwrap();
+    let first_resume_status = first_resume_response.status();
+    let first_resume_body = first_resume_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(
+        first_resume_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&first_resume_body)
+    );
+    let first_resume: Value = serde_json::from_slice(&first_resume_body).unwrap();
+    assert!(
+        first_resume["status"] == "joining_rooms" || first_resume["status"] == "ready",
+        "durable resume must either advance enrollment or finish it: {first_resume}"
+    );
+    let mut ready = first_resume;
+    for _ in 0..64 {
+        if ready["status"] == "ready" {
+            break;
+        }
+        target
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("resumed target advances its Welcome and complete bootstrap");
+        ready = device_enrollment_json(
+            resumed.clone(),
+            pairing_session_id,
+            target_device_id,
+            user_id,
+            &payload.enrollment_capability_hex,
+        )
+        .await;
+        assert!(
+            ready["status"] == "joining_rooms" || ready["status"] == "ready",
+            "durable enrollment returned an invalid intermediate state: {ready}"
+        );
+    }
+    assert_eq!(
+        ready["status"], "ready",
+        "durable enrollment did not converge within its bounded test budget: {ready}"
+    );
+    assert_eq!(ready["room_count"], 1);
+
+    let record_path = device_link_record_path(&config.data_root, user_id, pairing_session_id);
+    let completion_record: Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(
+        completion_record["enrollment_completion"]["room_count"], 1,
+        "Ready must be durable before the response is acknowledged"
+    );
+    let enrollment_expiry = completion_record["enrollment_expires_at_unix_seconds"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        enrollment_expiry > descriptor.expires_at_unix_seconds,
+        "durable enrollment needs a lifecycle distinct from the NIP-AB exchange"
+    );
+
+    let target_state = target
+        .dispatch_and_wait(AppAction::StartRuntime)
+        .expect("resumed target projects imported history");
+    assert_eq!(target_state.rooms.len(), 1);
+
+    // Once Ready is persisted, replay is a local tombstone lookup. It remains
+    // safe and exact across restarts even if the pairing service is offline.
+    drop(resumed);
+    server_task.abort();
+    let _ = server_task.await;
+    let offline = app_with_fixed_device_link_now(config.clone(), now + 600);
+    for _ in 0..2 {
+        let replay = device_enrollment_json(
+            offline.clone(),
+            pairing_session_id,
+            target_device_id,
+            user_id,
+            &payload.enrollment_capability_hex,
+        )
+        .await;
+        assert_eq!(replay["status"], "ready");
+        assert_eq!(replay["room_count"], 1);
+    }
+
+    // The consumed capability is retained only for its bounded replay window.
+    // The first authenticated use after expiry removes the exact tombstone.
+    let expired = app_with_fixed_device_link_now(config, enrollment_expiry + 1);
+    let expired_response = device_enrollment_for(
+        expired,
+        pairing_session_id,
+        target_device_id,
+        user_id,
+        &payload.enrollment_capability_hex,
+    )
+    .await;
+    assert_eq!(expired_response.status(), StatusCode::NOT_FOUND);
+    assert!(!record_path.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -380,16 +870,25 @@ async fn device_reconciliation_requires_the_sealed_project_binding_and_resumes_f
     assert_eq!(joining["room_count"], 2);
     assert_eq!(joining["active_room_count"], 0);
 
-    target
-        .dispatch_and_wait(AppAction::StartRuntime)
-        .expect("target Device activates its Welcomes");
-    let ready = reconcile_device_json(
-        hosted.clone(),
-        "reconcile-user",
-        "project-reconcile",
-        "electron-reconcile",
-    )
-    .await;
+    let mut ready = None;
+    for _ in 0..100 {
+        target
+            .dispatch_and_wait(AppAction::StartRuntime)
+            .expect("target Device advances one bounded enrollment tick");
+        let progress = reconcile_device_json(
+            hosted.clone(),
+            "reconcile-user",
+            "project-reconcile",
+            "electron-reconcile",
+        )
+        .await;
+        if progress["status"] == "ready" {
+            ready = Some(progress);
+            break;
+        }
+        assert_eq!(progress["status"], "joining_rooms");
+    }
+    let ready = ready.expect("bounded source export reaches ready");
     assert_eq!(ready["status"], "ready");
     assert_eq!(ready["room_count"], 2);
     assert_eq!(ready["active_room_count"], 2);
@@ -2578,6 +3077,68 @@ async fn device_link_for(
     )
     .await
     .unwrap()
+}
+
+async fn device_enrollment_for(
+    app: axum::Router,
+    pairing_session_id: &str,
+    target_device_id: &str,
+    enrollment_user_id: &str,
+    enrollment_capability_hex: &str,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::post("/v1/device-links/enroll")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "pairing_session_id": pairing_session_id,
+                    "target_device_id": target_device_id,
+                    "enrollment_user_id": enrollment_user_id,
+                    "enrollment_capability_hex": enrollment_capability_hex,
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn device_enrollment_json(
+    app: axum::Router,
+    pairing_session_id: &str,
+    target_device_id: &str,
+    enrollment_user_id: &str,
+    enrollment_capability_hex: &str,
+) -> Value {
+    let response = device_enrollment_for(
+        app,
+        pairing_session_id,
+        target_device_id,
+        enrollment_user_id,
+        enrollment_capability_hex,
+    )
+    .await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    serde_json::from_slice(&body).unwrap()
+}
+
+fn device_link_record_path(
+    data_root: &Path,
+    user_id: &str,
+    pairing_session_id: &str,
+) -> std::path::PathBuf {
+    data_root
+        .join("users")
+        .join(hex::encode(sha2::Sha256::digest(user_id.as_bytes())))
+        .join("device-links")
+        .join(format!(
+            "{}.json",
+            hex::encode(sha2::Sha256::digest(pairing_session_id.as_bytes()))
+        ))
 }
 
 async fn reconcile_device_for(

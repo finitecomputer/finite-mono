@@ -384,8 +384,18 @@ durable rendezvous for signed NIP-AB kind `24134` events. Session creation
 immutably binds one target Device and ephemeral target public key. A WorkOS
 authenticated hosted Device supplies the source descriptor out of band,
 authenticates the target offer, and publishes the encrypted account payload.
-The target persists and reads back the account secret before publishing its
-completion event. See ADR 0014.
+The payload includes a random enrollment resume capability whose digest alone
+is stored by the hosted source. The target persists and reads back the account
+secret and capability together before publishing its completion event.
+
+NIP-AB is only the bounded credential grant. Room fanout and complete-history
+transfer are a durable enrollment operation that starts after credential
+storage is acknowledged and may outlive the 120-second grant. The target may
+resume that exact pending enrollment through a service-authenticated capability
+endpoint without WorkOS; the capability neither reopens nor extends the NIP-AB
+transcript. A wrong capability fails closed. `ready` requires both the source's
+exact linked Room count and the target's exact connected, hydrated Room
+projection with its canonical paired agent. See ADR 0014.
 
 A newly linked device joins existing rooms through normal add-device Commits.
 Because MLS KeyPackages are single-use, the device must replenish enough
@@ -412,26 +422,34 @@ message, not by making the server authoritative over old plaintext or hidden
 key access. A product that promises retained history must implement and test
 one of those paths before treating Device-store loss as recoverable.
 
-Finite's linked clients use the explicit member-to-member path. A same-account
-member answers `finitechat.device-link.bootstrap-request.v2` with bounded
-`finitechat.device-link.bootstrap.v2` chunks for each exact provisional Room.
-This is the paired agent Room on a single-agent client and every linked Room
-still missing authoritative metadata on Electron. Every chunk repeats one
-manifest: source transfer id, target, Room metadata, canonical selection,
-chunk count, total event count, and the SHA-256 digest of the canonical
-`(seq, message_id)`-ordered plaintext stream.
+Finite's linked clients use the explicit member-to-member path. The durable
+link-fanout record is also the sole source-side history job; there is no
+target-authored bootstrap request, replay ledger, or process-local worker.
+After each Room add Commit is accepted, the source freezes that accepted
+sequence as the immutable history cutoff. Later messages use ordinary MLS sync
+and cannot change the enrollment snapshot.
 
-Before export, the source pages the server-visible Room log and proves that
-every application entry through the scan cutoff has a corresponding encrypted
-local plaintext event. A gap aborts the whole transfer. The target stages
-out-of-order chunks without projecting them, accepts exact duplicates, poisons
-conflicting duplicates, and commits only after all indices, counts, event
-limits, ordering constraints, and the manifest digest validate. The Room keeps
-its provisional identity until that commit and canonical replay complete, so a
-crash or missing chunk exposes no imported Topic, Chat, archive state, or
-message history. Restart may request a fresh transfer; re-importing the exact
-canonical event set is idempotent, while a conflicting local event aborts the
-transaction.
+Authenticated or capability enrollment polling advances at most one bounded
+export phase or one page. The source first audits the server-visible Room log
+through the frozen cutoff and proves that every application entry has a
+corresponding encrypted local plaintext event. A gap aborts the transfer.
+It then plans canonical `(seq, message_id)`-ordered pages, persists every page
+boundary and digest, and emits at most one
+`finitechat.device-link.bootstrap.v2` chunk per tick with a deterministic
+idempotency key. Restart resumes from the persisted phase and boundaries.
+
+Every chunk repeats one immutable manifest: bootstrap id, source and target,
+Room metadata, canonical selection, chunk count, total event count, per-chunk
+digests, and the aggregate SHA-256 of those ordered digests. The target stages
+authenticated chunks in encrypted SQLite in the same transaction that advances
+its Room cursor. It accepts exact duplicates, durably poisons conflicts, and
+projects nothing until all indices, counts, event limits, ordering constraints,
+and digests validate. One transaction then imports all history and profiles,
+publishes authoritative Room metadata, records the exact manifest receipt, and
+removes the staged chunk bodies. A crash before that transaction exposes
+nothing; a crash after it reopens from the receipt without contacting the
+source. Source `ready` is an immutable list of those expected receipts, and the
+client declares local readiness only after observing the exact list.
 
 The V2 event names are intentionally distinct. A V1 receiver must not decode a
 V2 chunk as a standalone complete bootstrap, and a total-history client does

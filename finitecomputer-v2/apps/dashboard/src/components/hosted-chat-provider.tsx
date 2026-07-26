@@ -23,6 +23,7 @@ import {
   reconcileElectronChatState,
   type ElectronAttachmentAddress,
   type ElectronChatRuntime,
+  type ElectronDeviceLinkStatus,
   type ElectronLocalDevice,
 } from "@/lib/electron-chat-runtime";
 import type { HostedChatAction, HostedChatState } from "@/lib/hosted-web-device";
@@ -69,6 +70,7 @@ type HostedChatContextValue = {
   ownerClaimed: boolean;
   bindingRecoveryRequired: boolean;
   localDeviceRecoveryRequired: boolean;
+  deviceLinkStatus: ElectronDeviceLinkStatus | null;
   selectionPending: boolean;
   load: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
   claimOwner: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
@@ -98,6 +100,8 @@ export function HostedChatProvider({
   const [ownerClaimed, setOwnerClaimed] = useState(false);
   const [bindingRecoveryRequired, setBindingRecoveryRequired] = useState(false);
   const [localDeviceRecoveryRequired, setLocalDeviceRecoveryRequired] = useState(false);
+  const [deviceLinkStatus, setDeviceLinkStatus] =
+    useState<ElectronDeviceLinkStatus | null>(runtime ? { status: "preparing" } : null);
   const [selectionPending, setSelectionPending] = useState(false);
   const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
   const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
@@ -192,6 +196,7 @@ export function HostedChatProvider({
       try {
         let next: HostedChatState;
         if (runtime) {
+          setDeviceLinkStatus({ status: "preparing" });
           const deviceResult = await runtime.ensureLocalDevice();
           if (isElectronLocalDeviceRecoveryRequired(deviceResult)) {
             setLocalDeviceRecoveryRequired(true);
@@ -231,6 +236,7 @@ export function HostedChatProvider({
         setTransportError(null);
         setBindingRecoveryRequired(false);
         setLocalDeviceRecoveryRequired(false);
+        if (runtime) setDeviceLinkStatus({ status: "ready" });
         return "succeeded";
       } catch (caught) {
         if (runtime && signal?.aborted) return "stop";
@@ -528,9 +534,12 @@ export function HostedChatProvider({
         setTransportError(message || CHAT_UNAVAILABLE_MESSAGE);
       });
       const unsubscribeLinkStatus = runtime.onDeviceLinkStatus((status) => {
-        if (disposed || status.status !== "failed") return;
-        setStreamConnected(false);
-        setTransportError(status.message || CHAT_UNAVAILABLE_MESSAGE);
+        if (disposed) return;
+        setDeviceLinkStatus(status);
+        if (status.status === "failed") {
+          setStreamConnected(false);
+          setTransportError(status.message || CHAT_UNAVAILABLE_MESSAGE);
+        }
       });
       // Register generation last. Main replays generation before the first
       // state, allowing a restarted daemon to reset revision ordering.
@@ -624,6 +633,7 @@ export function HostedChatProvider({
       ownerClaimed,
       bindingRecoveryRequired,
       localDeviceRecoveryRequired,
+      deviceLinkStatus,
       selectionPending,
       load,
       claimOwner,

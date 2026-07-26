@@ -4,11 +4,12 @@ import {
 } from "@/lib/dashboard-auth";
 import {
   HostedDeviceRequestError,
-  hostedDeviceAction,
   hostedDeviceApproveLink,
   hostedDeviceConfig,
   hostedDeviceLinkStatus,
+  hostedDeviceResumeEnrollment,
   hostedDeviceState,
+  type HostedDeviceEnrollmentRequest,
   type HostedDeviceLinkRequest,
   type HostedDeviceLinkResponse,
 } from "@/lib/hosted-web-device";
@@ -72,6 +73,10 @@ export function parseDeviceLinkRequest(value: unknown): HostedDeviceLinkRequest 
 export async function parseDeviceLinkJsonRequest(
   request: Request
 ): Promise<HostedDeviceLinkRequest> {
+  return parseDeviceLinkRequest(await parseBoundedDeviceLinkJson(request));
+}
+
+async function parseBoundedDeviceLinkJson(request: Request): Promise<unknown> {
   const mediaType = (request.headers.get("content-type") ?? "")
     .split(";", 1)[0]
     .trim()
@@ -116,13 +121,46 @@ export async function parseDeviceLinkJsonRequest(
     offset += chunk.byteLength;
   }
 
-  let value: unknown;
   try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(encoded));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(encoded));
   } catch {
     throw new DeviceLinkError("This device-link request is invalid.", 400);
   }
-  return parseDeviceLinkRequest(value);
+}
+
+export async function parseDeviceEnrollmentJsonRequest(
+  request: Request
+): Promise<HostedDeviceEnrollmentRequest> {
+  const value = await parseBoundedDeviceLinkJson(request);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new DeviceLinkError("This Device enrollment request is invalid.", 400);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.join(",") !==
+      "enrollment_capability_hex,enrollment_user_id,pairing_session_id,target_device_id"
+  ) {
+    throw new DeviceLinkError("This Device enrollment request is invalid.", 400);
+  }
+  const enrollmentCapability = deviceLinkToken(
+    "enrollment capability",
+    record.enrollment_capability_hex
+  );
+  if (!/^[0-9a-f]{64}$/u.test(enrollmentCapability)) {
+    throw new DeviceLinkError("The enrollment capability is invalid.", 400);
+  }
+  return {
+    ...parseDeviceLinkRequest({
+      pairing_session_id: record.pairing_session_id,
+      target_device_id: record.target_device_id,
+    }),
+    enrollment_user_id: deviceLinkToken(
+      "enrollment user",
+      record.enrollment_user_id
+    ),
+    enrollment_capability_hex: enrollmentCapability,
+  };
 }
 
 export async function approveCurrentAccountDeviceLink(
@@ -145,16 +183,33 @@ export async function currentAccountDeviceLinkStatus(
   );
 }
 
+export async function resumeDeviceEnrollment(
+  input: HostedDeviceEnrollmentRequest
+): Promise<HostedDeviceLinkResponse> {
+  let config: ReturnType<typeof hostedDeviceConfig>;
+  try {
+    config = hostedDeviceConfig();
+  } catch {
+    throw new DeviceLinkError("Device linking is not configured.", 503);
+  }
+  if (!config) {
+    throw new DeviceLinkError("Device linking is not configured.", 503);
+  }
+  try {
+    return await hostedDeviceResumeEnrollment(config, input);
+  } catch (error) {
+    throw deviceLinkBoundaryError(error);
+  }
+}
+
 export async function currentHostedWebAccountBinding(
   targetDeviceId?: string
 ): Promise<HostedWebAccountBinding> {
   return withCurrentAccount(async (config, account) => {
-    // A recovery decision must not rely on a cached Device projection. The
-    // Hosted Web Device is already the account's link authority, so reuse its
-    // existing bounded refresh action before reporting the requested status.
-    const state = targetDeviceId === undefined
-      ? await hostedDeviceState(config, account)
-      : await hostedDeviceAction(config, account, { RefreshDevices: null });
+    // This endpoint is an identity comparison, not a state-changing
+    // reconciliation command. Pairing progress is driven exclusively by the
+    // idempotent device-link status operation.
+    const state = await hostedDeviceState(config, account);
     return projectHostedWebAccountBinding(state, targetDeviceId);
   });
 }

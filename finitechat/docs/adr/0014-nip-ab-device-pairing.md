@@ -33,7 +33,9 @@ standard or a substitute for our own review:
   supervisor boundary. It never enters the dashboard renderer.
 - The custom encrypted payload binds its schema version, purpose,
   pairing-session ID, account secret and derived account ID, target Device,
-  public server URL, issue time, and expiry.
+  public server URL, issue time, expiry, enrollment account, and a random
+  enrollment resume capability. Outside the sealed encrypted payload
+  checkpoint, the hosted source stores only the capability's SHA-256 digest.
 - The hosted source seals its state-machine checkpoint and exact randomized
   outbound events before publishing. A retry or process restart republishes the
   exact same bytes and event IDs.
@@ -41,29 +43,56 @@ standard or a substitute for our own review:
   encrypted payload, and target completion. Exact retries are idempotent;
   alternate bytes, keys, order, recipients, or closed-state mutations fail.
 - A target does not publish completion until its platform credential store has
-  promoted and read back the account secret.
-- Existing MLS room fanout and complete-history transfer begin once the source
-  response is durably published. They do not depend on receiving the target's
-  courtesy completion event.
+  atomically stored and read back both the account secret and enrollment
+  capability.
+- NIP-AB is a bounded 120-second credential grant. Existing MLS room fanout and
+  complete-history transfer begin only after the target acknowledges durable
+  credential storage, but they are a separate durable enrollment operation.
+  Once the grant is acknowledged, either client can resume enrollment using
+  the encrypted capability without another WorkOS session and without
+  extending or replaying the NIP-AB grant.
+- Enrollment is advanced synchronously by authenticated/capability polling
+  against one durable pending record. There is no detached in-memory history
+  worker, process-local retry map, or second background finisher.
+- The durable MLS link-fanout record is the sole source history job. Each Room
+  freezes its accepted membership sequence, audits and plans one page per tick,
+  and emits deterministic chunks. There is no target bootstrap request/replay
+  protocol.
+- The target keeps chunks invisible in encrypted SQLite. Its commit atomically
+  imports exact history, Room metadata, profiles, and an immutable manifest
+  receipt; conflicting duplicates durably poison the transfer.
+- `ready` is an exact manifest receipt list, not a Room-count heuristic. The
+  source returns the frozen manifests and the target independently proves the
+  matching durable receipts plus its canonical paired agent. Intermediate
+  source success is never presented as completed pairing.
+- The resume capability lives for seven days independently of the 120-second
+  NIP-AB transcript. `ready` consumes its mutation authority but retains an
+  exact replayable tombstone until expiry. Expired valid records are removed,
+  and each new approval opportunistically garbage-collects at most 32 expired
+  records.
 
 ## Platform Boundaries
 
 On iOS, Rust owns the ephemeral keys and transcript. Swift receives only the
-decrypted account secret long enough to store and read it back from Keychain.
+decrypted account secret and opaque enrollment grant long enough to store and
+read them back together from Keychain. Relaunch resumes pending enrollment
+through Rust and clears the capability only after strict target readiness.
 
 On Electron, the authenticated source descriptor travels from the main process
 to the Rust child through a bounded dedicated file descriptor. The account
 secret travels from Rust on a separate private descriptor. It is written
 provisionally, promoted into Electron safe storage, read back, and only then
 confirmed to Rust. Neither value is renderer IPC, argv, stdout, stderr, or log
-data.
+data. The main process stores the enrollment grant before promoting the
+credential, so every active credential has a crash-resumable enrollment path.
 
 ## Hard Cut
 
 The old `/link-sessions` endpoints, payload/claim/ack records, crypto helper,
-CLI commands, and compatibility decoding are removed. A stale pre-release
-pending-session marker may be discarded, but active credentials and user chat
-data are never deleted as part of that cleanup.
+CLI commands, compatibility decoding, bootstrap request event, mutable replay
+ledger, and pre-release client recovery flow are removed. A stale pre-release
+pending-session marker may be discarded, but active hosted credentials and
+user chat data are never deleted as part of that cleanup.
 
 ## Deferred
 
@@ -81,5 +110,9 @@ credential-transfer protocol.
 Tests must cover the published derivation vector, attacker target keys, signed
 events bound to the wrong transcript, route/account/expiry substitution,
 explicit confirmation, restart with exact event IDs, server idempotency and
-durability, and credential-store ordering. Shipping clients additionally
-require an iOS Simulator build/test/launch and Electron supervisor tests.
+durability, and credential-store ordering. A required integration scenario
+kills the target after credential storage but before NIP-AB completion,
+restarts after the 120-second grant expires, rejects an incorrect resume
+capability, and completes enrollment without WorkOS. Shipping clients
+additionally require an iOS Simulator build/test/launch, Electron supervisor
+tests, and complete-history stress above one transfer chunk/window.

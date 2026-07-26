@@ -1077,8 +1077,9 @@ impl MemoryCoreStore {
         input: CompleteRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
         let mut state = self.state.lock().await;
-        state.complete_runtime_control_request_with_runtime_secret_references(
+        state.complete_runtime_control_request_with_runtime_configuration(
             input,
+            Some(self.runtime_environment.as_ref()),
             self.runtime_secret_references.as_ref(),
         )
     }
@@ -1921,6 +1922,7 @@ impl PostgresCoreStore {
         let result = postgres_complete_runtime_control_request(
             &*tx,
             input,
+            self.runtime_environment.as_ref(),
             self.runtime_secret_references.as_ref(),
         )
         .await?;
@@ -6840,6 +6842,7 @@ where
         &artifact,
         RuntimeBootIntent::Normal,
         None,
+        None,
     )?;
     let idempotency_key = format!(
         "cold-relocate:{}:{}:{}",
@@ -7151,6 +7154,7 @@ where
                 &current_artifact,
                 desired_artifact,
                 boot_intent,
+                (request.kind == RuntimeControlKind::Upgrade).then_some(runtime_environment),
                 (request.kind == RuntimeControlKind::Upgrade).then_some(runtime_secret_references),
             )?)
         } else {
@@ -7346,11 +7350,13 @@ where
 async fn postgres_complete_runtime_control_request<C>(
     client: &C,
     input: CompleteRuntimeControlRequestInput,
+    runtime_environment: &BTreeMap<String, String>,
     runtime_secret_references: &[String],
 ) -> CoreResult<RuntimeControlRequest>
 where
     C: GenericClient + Sync,
 {
+    validate_runtime_spec_environment(runtime_environment)?;
     runtime_spec_secret_references(runtime_secret_references)?;
     let now = input.now.clone().unwrap_or(current_time_iso()?);
     let locked = locked_runtime_control_request(client, &input.request_id).await?;
@@ -7481,6 +7487,7 @@ where
                 &current_artifact,
                 &target,
                 RuntimeBootIntent::Normal,
+                Some(runtime_environment),
                 Some(runtime_secret_references),
             )?)
         } else {
@@ -12799,6 +12806,11 @@ mod tests {
             let upgrade_store = store
                 .store
                 .clone()
+                .with_runtime_environment(BTreeMap::from([(
+                    "FINITE_BRAIN_SERVER_URL".to_string(),
+                    "https://brain.finite.computer".to_string(),
+                )]))
+                .unwrap()
                 .with_runtime_secret_references(vec![
                     "FAL_KEY".to_string(),
                     "XAI_API_KEY".to_string(),
@@ -12841,6 +12853,13 @@ mod tests {
             assert_eq!(
                 runtime_spec_v1(upgrade_lease.runtime_spec.as_ref().unwrap()).secret_references,
                 vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
+            );
+            assert_eq!(
+                runtime_spec_v1(upgrade_lease.runtime_spec.as_ref().unwrap()).environment,
+                BTreeMap::from([(
+                    "FINITE_BRAIN_SERVER_URL".to_string(),
+                    "https://brain.finite.computer".to_string(),
+                )])
             );
             raw.execute(
                 "UPDATE runtime_artifacts
@@ -12908,6 +12927,10 @@ mod tests {
             assert_eq!(
                 upgraded_spec["spec"]["secretReferences"],
                 serde_json::json!(["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"])
+            );
+            assert_eq!(
+                upgraded_spec["spec"]["environment"]["FINITE_BRAIN_SERVER_URL"],
+                "https://brain.finite.computer"
             );
             assert_eq!(
                 upgraded_spec["spec"]["durableStateId"], machine,

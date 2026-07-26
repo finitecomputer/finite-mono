@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use finitechat_http::{
     CreatePairingSessionRequest, ExpirePairingSessionRequest, GetPairingSessionRequest,
@@ -8,6 +8,7 @@ use finitechat_http::{
     PublishPairingOfferRequest,
 };
 use nostr::Event;
+use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,13 +17,14 @@ use zeroize::Zeroizing;
 use crate::FiniteChatCoreError;
 use crate::native_authkit::NativeAuthKitSession;
 use crate::nip_ab::{
-    FinitePairingPayloadV1, NIP_AB_VERSION, NipAbPayloadType, NipAbSourceDescriptorV1,
-    NipAbTargetSession,
+    FinitePairingPayloadDecodeError, NIP_AB_VERSION, NipAbPayloadType, NipAbSourceDescriptorV1,
+    NipAbTargetSession, decode_finite_pairing_payload_v2,
 };
 
 const MAX_PAIRING_RESPONSE_BYTES: usize = 128 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const PAIRING_POLL_INTERVAL: Duration = Duration::from_millis(400);
+const ENROLLMENT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// A one-use native account pairing. The target ephemeral secret, WorkOS
 /// token, source descriptor, and account secret never enter Swift view state.
@@ -42,6 +44,7 @@ struct NativeDeviceLinkState {
     target: Option<NipAbTargetSession>,
     access_token: Option<String>,
     account_secret_hex: Option<Zeroizing<String>>,
+    enrollment_grant: Option<NativeDeviceEnrollmentGrant>,
     acknowledged: bool,
 }
 
@@ -51,13 +54,52 @@ struct DashboardPairingRequest<'a> {
     target_device_id: &'a str,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct NativeDeviceEnrollmentGrant {
+    pub pairing_session_id: String,
+    pub target_device_id: String,
+    pub account_id: String,
+    pub enrollment_user_id: String,
+    pub enrollment_capability_hex: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct NativeDeviceEnrollmentManifest {
+    pub bootstrap_id: String,
+    pub room_id: String,
+    pub manifest_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct NativeDeviceEnrollmentReady {
+    pub room_count: u32,
+    pub manifests: Vec<NativeDeviceEnrollmentManifest>,
+}
+
+#[derive(Serialize)]
+struct DashboardEnrollmentRequest<'a> {
+    pairing_session_id: &'a str,
+    target_device_id: &'a str,
+    enrollment_user_id: &'a str,
+    enrollment_capability_hex: &'a str,
+}
+
 #[derive(Deserialize)]
 struct DashboardPairingResponse {
     pairing_session_id: String,
     target_device_id: String,
     status: String,
+    room_count: u32,
+    active_room_count: u32,
+    #[serde(default)]
+    bootstrap_manifests: Vec<NativeDeviceEnrollmentManifest>,
     #[serde(default)]
     source_descriptor: Option<HttpNipAbSourceDescriptorV1>,
+}
+
+enum EnrollmentPollError {
+    Retryable,
+    Terminal(FiniteChatCoreError),
 }
 
 #[uniffi::export]
@@ -110,6 +152,7 @@ impl NativeDeviceLinkSession {
                 target: None,
                 access_token: None,
                 account_secret_hex: None,
+                enrollment_grant: None,
                 acknowledged: false,
             }),
         }))
@@ -228,37 +271,13 @@ impl NativeDeviceLinkSession {
         Ok(())
     }
 
-    pub fn wait_until_ready(
-        &self,
-        access_token: Option<String>,
-    ) -> Result<(), FiniteChatCoreError> {
-        loop {
-            if now_unix_seconds()? >= self.deadline_unix_seconds {
-                return Err(pairing_error("pairing request expired"));
-            }
-            if let Ok(response) =
-                self.dashboard_post("/api/device-links/status", access_token.as_deref())
-            {
-                self.validate_dashboard_response(&response)?;
-                match response.status.as_str() {
-                    "ready" => return Ok(()),
-                    "awaiting_offer"
-                    | "awaiting_storage"
-                    | "awaiting_key_package"
-                    | "joining_rooms" => {}
-                    "expired" => return Err(pairing_error("pairing request expired")),
-                    _ => return Err(pairing_error("invalid pairing dashboard response")),
-                }
-            }
-            std::thread::sleep(PAIRING_POLL_INTERVAL);
-        }
-    }
-
-    pub fn wait_until_ready_with_authkit(
-        &self,
-        authkit: Arc<NativeAuthKitSession>,
-    ) -> Result<(), FiniteChatCoreError> {
-        self.wait_until_ready(Some(authkit.access_token()?))
+    pub fn enrollment_grant(&self) -> Result<NativeDeviceEnrollmentGrant, FiniteChatCoreError> {
+        self.state
+            .lock()
+            .map_err(|_| FiniteChatCoreError::LockPoisoned)?
+            .enrollment_grant
+            .clone()
+            .ok_or_else(|| pairing_error("pairing payload has not been received"))
     }
 
     pub fn release(&self) {
@@ -307,8 +326,12 @@ impl NativeDeviceLinkSession {
         if payload_type != NipAbPayloadType::Custom {
             return Err(pairing_error("pairing payload type is invalid"));
         }
-        let payload: FinitePairingPayloadV1 = serde_json::from_str(&encoded)
-            .map_err(|_| pairing_error("pairing payload is invalid"))?;
+        let payload = decode_finite_pairing_payload_v2(&encoded).map_err(|error| match error {
+            FinitePairingPayloadDecodeError::IncompatibleVersion => {
+                pairing_error("pairing source is not compatible with this app version")
+            }
+            FinitePairingPayloadDecodeError::Invalid => pairing_error("pairing payload is invalid"),
+        })?;
         payload
             .validate(
                 &self.pairing_session_id,
@@ -319,6 +342,13 @@ impl NativeDeviceLinkSession {
             .map_err(|_| pairing_error("pairing payload is invalid"))?;
         let secret = Zeroizing::new(payload.account_secret_hex.clone());
         let result = secret.to_string();
+        state.enrollment_grant = Some(NativeDeviceEnrollmentGrant {
+            pairing_session_id: payload.pairing_session_id.clone(),
+            target_device_id: payload.target_device_id.clone(),
+            account_id: payload.account_id.clone(),
+            enrollment_user_id: payload.enrollment_user_id.clone(),
+            enrollment_capability_hex: payload.enrollment_capability_hex.clone(),
+        });
         state.account_secret_hex = Some(secret);
         Ok(Some(result))
     }
@@ -352,6 +382,7 @@ impl NativeDeviceLinkSession {
     ) -> Result<(), FiniteChatCoreError> {
         if response.pairing_session_id != self.pairing_session_id
             || response.target_device_id != self.target_device_id
+            || response.active_room_count > response.room_count
         {
             return Err(pairing_error(
                 "pairing dashboard returned a mismatched response",
@@ -372,6 +403,168 @@ impl NativeDeviceLinkSession {
     }
 }
 
+#[derive(uniffi::Object)]
+pub struct NativeDeviceEnrollmentSession {
+    client: Client,
+    dashboard_url: String,
+    grant: NativeDeviceEnrollmentGrant,
+}
+
+#[uniffi::export]
+impl NativeDeviceEnrollmentSession {
+    #[uniffi::constructor]
+    pub fn resume(
+        dashboard_url: String,
+        grant: NativeDeviceEnrollmentGrant,
+    ) -> Result<Arc<Self>, FiniteChatCoreError> {
+        let dashboard_url = normalize_base_url(&dashboard_url)?;
+        validate_enrollment_grant(&grant)?;
+        let client = Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|_| pairing_error("enrollment request failed"))?;
+        Ok(Arc::new(Self {
+            client,
+            dashboard_url,
+            grant,
+        }))
+    }
+
+    pub fn wait_until_ready(&self) -> Result<NativeDeviceEnrollmentReady, FiniteChatCoreError> {
+        let deadline = Instant::now() + ENROLLMENT_TIMEOUT;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(pairing_error(
+                    "device enrollment timed out before complete history arrived",
+                ));
+            }
+            match self.enrollment_post() {
+                Ok(response) => {
+                    self.validate_response(&response)?;
+                    match response.status.as_str() {
+                        "ready"
+                            if response.room_count > 0
+                                && response.bootstrap_manifests.len()
+                                    == response.room_count as usize =>
+                        {
+                            return Ok(NativeDeviceEnrollmentReady {
+                                room_count: response.room_count,
+                                manifests: response.bootstrap_manifests,
+                            });
+                        }
+                        "ready" => {
+                            return Err(pairing_error(
+                                "linked account has no available agent rooms",
+                            ));
+                        }
+                        "awaiting_key_package" | "joining_rooms" => {}
+                        _ => return Err(pairing_error("invalid enrollment response")),
+                    }
+                }
+                Err(EnrollmentPollError::Retryable) => {}
+                Err(EnrollmentPollError::Terminal(error)) => return Err(error),
+            }
+            std::thread::sleep(PAIRING_POLL_INTERVAL);
+        }
+    }
+}
+
+impl NativeDeviceEnrollmentSession {
+    fn enrollment_post(&self) -> Result<DashboardPairingResponse, EnrollmentPollError> {
+        let response = self
+            .client
+            .post(endpoint(&self.dashboard_url, "/api/device-links/enroll"))
+            .json(&DashboardEnrollmentRequest {
+                pairing_session_id: &self.grant.pairing_session_id,
+                target_device_id: &self.grant.target_device_id,
+                enrollment_user_id: &self.grant.enrollment_user_id,
+                enrollment_capability_hex: &self.grant.enrollment_capability_hex,
+            })
+            .send()
+            .map_err(|_| EnrollmentPollError::Retryable)?;
+        let status = response.status();
+        if enrollment_status_is_retryable(status) {
+            return Err(EnrollmentPollError::Retryable);
+        }
+        if !status.is_success() {
+            return Err(EnrollmentPollError::Terminal(pairing_error(format!(
+                "enrollment dashboard rejected the request ({})",
+                status.as_u16()
+            ))));
+        }
+        let bytes = bounded_response_bytes(response).map_err(EnrollmentPollError::Terminal)?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            EnrollmentPollError::Terminal(pairing_error(
+                "enrollment dashboard returned invalid JSON",
+            ))
+        })
+    }
+
+    fn validate_response(
+        &self,
+        response: &DashboardPairingResponse,
+    ) -> Result<(), FiniteChatCoreError> {
+        let manifests_valid = response.bootstrap_manifests.iter().all(|manifest| {
+            !manifest.bootstrap_id.is_empty()
+                && !manifest.room_id.is_empty()
+                && manifest.manifest_sha256.len() == 64
+                && manifest
+                    .manifest_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        });
+        let unique_manifests = response
+            .bootstrap_manifests
+            .iter()
+            .map(|manifest| (manifest.bootstrap_id.as_str(), manifest.room_id.as_str()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == response.bootstrap_manifests.len();
+        if response.pairing_session_id != self.grant.pairing_session_id
+            || response.target_device_id != self.grant.target_device_id
+            || response.active_room_count > response.room_count
+            || !manifests_valid
+            || !unique_manifests
+            || (response.status == "ready"
+                && response.bootstrap_manifests.len() != response.room_count as usize)
+        {
+            return Err(pairing_error(
+                "enrollment dashboard returned a mismatched response",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn enrollment_status_is_retryable(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn validate_enrollment_grant(
+    grant: &NativeDeviceEnrollmentGrant,
+) -> Result<(), FiniteChatCoreError> {
+    validate_token("pairing session", &grant.pairing_session_id)?;
+    validate_device_id(&grant.target_device_id)?;
+    if grant.account_id.len() != 64
+        || !grant
+            .account_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(pairing_error("invalid enrollment account"));
+    }
+    validate_token("enrollment user", &grant.enrollment_user_id)?;
+    if grant.enrollment_capability_hex.len() != 64
+        || !grant
+            .enrollment_capability_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(pairing_error("invalid enrollment capability"));
+    }
+    Ok(())
+}
+
 fn validate_device_id(value: &str) -> Result<(), FiniteChatCoreError> {
     if value.is_empty()
         || value.len() > 256
@@ -380,6 +573,18 @@ fn validate_device_id(value: &str) -> Result<(), FiniteChatCoreError> {
         || value == "hosted-web"
     {
         Err(pairing_error("invalid pairing configuration"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_token(field: &str, value: &str) -> Result<(), FiniteChatCoreError> {
+    if value.is_empty()
+        || value.len() > 512
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        Err(pairing_error(format!("invalid {field}")))
     } else {
         Ok(())
     }
@@ -522,5 +727,62 @@ fn bounded_response_bytes(response: Response) -> Result<Vec<u8>, FiniteChatCoreE
 fn pairing_error(message: impl Into<String>) -> FiniteChatCoreError {
     FiniteChatCoreError::Client {
         reason: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        NativeDeviceEnrollmentGrant, enrollment_status_is_retryable, validate_enrollment_grant,
+    };
+    use reqwest::StatusCode;
+
+    #[test]
+    fn enrollment_retries_only_throttling_and_server_failures() {
+        for status in [
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(enrollment_status_is_retryable(status), "{status}");
+        }
+        for status in [
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::CONFLICT,
+            StatusCode::GONE,
+        ] {
+            assert!(!enrollment_status_is_retryable(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn enrollment_grant_is_exact_and_lowercase() {
+        let valid = NativeDeviceEnrollmentGrant {
+            pairing_session_id: "pair-test".to_owned(),
+            target_device_id: "ios-test".to_owned(),
+            account_id: "11".repeat(32),
+            enrollment_user_id: "user_test".to_owned(),
+            enrollment_capability_hex: "ab".repeat(32),
+        };
+        validate_enrollment_grant(&valid).unwrap();
+        assert!(
+            validate_enrollment_grant(&NativeDeviceEnrollmentGrant {
+                enrollment_capability_hex: "AB".repeat(32),
+                ..valid.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_enrollment_grant(&NativeDeviceEnrollmentGrant {
+                enrollment_user_id: " user_test".to_owned(),
+                ..valid
+            })
+            .is_err()
+        );
     }
 }

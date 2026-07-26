@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ElectronChatStateError,
   electronAttachmentUpload,
+  electronDeviceLinkPresentation,
   electronChatRuntime,
   electronRuntimeSupportsChatArchive,
   reconcileElectronChatState,
@@ -19,6 +20,35 @@ const DEVICE: ElectronLocalDevice = {
   account_id: ACCOUNT_ID,
   device_id: "electron-device",
 };
+
+test("desktop pairing progress presents every durable stage and retry state", () => {
+  assert.deepEqual(electronDeviceLinkPresentation({ status: "preparing" }), {
+    label: "Preparing this Mac…",
+    detail: "Checking this Device’s encrypted local chat.",
+  });
+  assert.match(
+    electronDeviceLinkPresentation({ status: "linking" }).label,
+    /Securely linking/u
+  );
+  assert.match(
+    electronDeviceLinkPresentation({ status: "joining_rooms" }).detail ?? "",
+    /retry temporary interruptions automatically/u
+  );
+  assert.deepEqual(
+    electronDeviceLinkPresentation({
+      status: "joining_rooms",
+      message: "A temporary interruption occurred. Retrying automatically…",
+    }),
+    {
+      label: "Syncing your complete chat history…",
+      detail: "A temporary interruption occurred. Retrying automatically…",
+    }
+  );
+  assert.match(
+    electronDeviceLinkPresentation({ status: "ready" }).detail ?? "",
+    /linked/u
+  );
+});
 
 test("dashboard accepts released Electron bridges and gates archive on v3", (context) => {
   const previousWindow = globalThis.window;

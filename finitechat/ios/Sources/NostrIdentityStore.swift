@@ -1,15 +1,67 @@
 import Foundation
 import Security
 
+struct AppDeviceEnrollment: Codable, Equatable, Sendable {
+    let pairingSessionID: String
+    let targetDeviceID: String
+    let accountID: String
+    let enrollmentUserID: String
+    let enrollmentCapabilityHex: String
+
+    init(grant: NativeDeviceEnrollmentGrant) {
+        pairingSessionID = grant.pairingSessionId
+        targetDeviceID = grant.targetDeviceId
+        accountID = grant.accountId
+        enrollmentUserID = grant.enrollmentUserId
+        enrollmentCapabilityHex = grant.enrollmentCapabilityHex
+    }
+
+    var nativeGrant: NativeDeviceEnrollmentGrant {
+        NativeDeviceEnrollmentGrant(
+            pairingSessionId: pairingSessionID,
+            targetDeviceId: targetDeviceID,
+            accountId: accountID,
+            enrollmentUserId: enrollmentUserID,
+            enrollmentCapabilityHex: enrollmentCapabilityHex
+        )
+    }
+}
+
 struct AppNostrIdentity: Codable, Equatable, Sendable {
     let accountSecretHex: String
     let accountID: String
     let npub: String
+    let pendingEnrollment: AppDeviceEnrollment?
 
-    init(material: NostrIdentityMaterial) {
+    init(
+        material: NostrIdentityMaterial,
+        pendingEnrollment: AppDeviceEnrollment? = nil
+    ) {
         accountSecretHex = material.accountSecretHex
         accountID = material.accountId
         npub = material.npub
+        self.pendingEnrollment = pendingEnrollment
+    }
+
+    func enrollmentCompleted() -> AppNostrIdentity {
+        AppNostrIdentity(
+            accountSecretHex: accountSecretHex,
+            accountID: accountID,
+            npub: npub,
+            pendingEnrollment: nil
+        )
+    }
+
+    private init(
+        accountSecretHex: String,
+        accountID: String,
+        npub: String,
+        pendingEnrollment: AppDeviceEnrollment?
+    ) {
+        self.accountSecretHex = accountSecretHex
+        self.accountID = accountID
+        self.npub = npub
+        self.pendingEnrollment = pendingEnrollment
     }
 }
 

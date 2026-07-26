@@ -576,6 +576,10 @@ final class AppModel: ObservableObject, AppReconciler {
     @Published private(set) var canRecoverRuntimeIdentity: Bool
     @Published private(set) var accountLinkPhase: AccountLinkPhase = .ready
 
+    var hasPendingDeviceEnrollment: Bool {
+        nostrIdentity?.pendingEnrollment != nil
+    }
+
     private var runtime: (any FiniteChatRuntimeProtocol)?
     private var openKey = ""
     private var foregroundStartKey: String?
@@ -594,6 +598,7 @@ final class AppModel: ObservableObject, AppReconciler {
     private var updateTask: Task<Void, Never>?
     private var launchAutomationTask: Task<Void, Never>?
     private var postSendCatchUpTask: Task<Void, Never>?
+    private var enrollmentResumeTask: Task<Void, Never>?
     private var runtimeDispatchTail: Task<Void, Never>?
     private var lastAppliedRuntimeRev: UInt64 = 0
     private var attachmentDownloadsInFlight = Set<String>()
@@ -609,6 +614,7 @@ final class AppModel: ObservableObject, AppReconciler {
         updateTask?.cancel()
         launchAutomationTask?.cancel()
         postSendCatchUpTask?.cancel()
+        enrollmentResumeTask?.cancel()
         runtimeDispatchTail?.cancel()
         accountLinkTask?.cancel()
     }
@@ -890,6 +896,18 @@ final class AppModel: ObservableObject, AppReconciler {
                     let callbackURL = try await self.webAuthenticationPresenter.authenticate(
                         url: authorizationURL
                     )
+                    let callbackDiagnostic =
+                        NativeWebAuthenticationPresenter.callbackDiagnosticSummary(
+                            callbackURL
+                        )
+                    Self.accountLinkLogger.info(
+                        "callback received \(callbackDiagnostic, privacy: .public)"
+                    )
+                    self.appendDiagnostic(
+                        category: "account_link",
+                        event: "authentication.callback",
+                        details: ["shape": callbackDiagnostic]
+                    )
                     stage = .exchangingAuthentication
                     self.appendAccountLinkProgress(stage)
                     try await Task.detached(priority: .userInitiated) {
@@ -934,29 +952,38 @@ final class AppModel: ObservableObject, AppReconciler {
                 let accountSecret = try await Task.detached(priority: .userInitiated) {
                     try link.claimAccountSecret()
                 }.value
+                let enrollmentGrant = try link.enrollmentGrant()
                 stage = .storingAccount
                 self.appendAccountLinkProgress(stage)
                 let material = try nostrIdentityFromAccountSecretHex(
                     accountSecretHex: accountSecret
                 )
                 try self.applyNostrIdentity(
-                    AppNostrIdentity(material: material),
+                    AppNostrIdentity(
+                        material: material,
+                        pendingEnrollment: AppDeviceEnrollment(
+                            grant: enrollmentGrant
+                        )
+                    ),
                     resetStore: true
                 )
                 stage = .acknowledgingAccount
                 self.appendAccountLinkProgress(stage)
-                try await Task.detached(priority: .utility) {
-                    try link.acknowledgeStored()
-                }.value
+                Task.detached(priority: .utility) {
+                    defer { link.release() }
+                    try? link.acknowledgeStored()
+                }
                 stage = .waitingForAgent
                 self.appendAccountLinkProgress(stage)
                 stage = .startingRuntime
                 self.appendAccountLinkProgress(stage)
                 self.startFromForeground()
+                try await self.finishPendingEnrollment(
+                    AppDeviceEnrollment(grant: enrollmentGrant)
+                )
                 self.accountLinkPhase = .ready
                 Self.accountLinkLogger.notice("succeeded")
                 self.appendDiagnostic(category: "account_link", event: "succeeded")
-                self.finishAccountLinkInBackground(link: link, authKit: authKit)
             } catch let error as WebAuthenticationPresentationError
                 where error == .canceled
             {
@@ -986,18 +1013,12 @@ final class AppModel: ObservableObject, AppReconciler {
                 self?.errorText = Self.accountLinkErrorText(error, stage: stage)
                 var details = self?.diagnosticErrorDetails(error) ?? [:]
                 details["stage"] = stage.rawValue
-                if stage == .exchangingAuthentication {
-                    let reason = Self.redactedDiagnosticValue(
-                        String(describing: error)
-                    )
-                    Self.accountLinkLogger.error(
-                        "failed stage=\(stage.rawValue, privacy: .public) type=\(String(describing: type(of: error)), privacy: .public) reason=\(reason, privacy: .public)"
-                    )
-                } else {
-                    Self.accountLinkLogger.error(
-                        "failed stage=\(stage.rawValue, privacy: .public) type=\(String(describing: type(of: error)), privacy: .public)"
-                    )
-                }
+                let reason = Self.redactedDiagnosticValue(
+                    String(describing: error)
+                )
+                Self.accountLinkLogger.error(
+                    "failed stage=\(stage.rawValue, privacy: .public) type=\(String(describing: type(of: error)), privacy: .public) reason=\(reason, privacy: .public)"
+                )
                 self?.appendDiagnostic(
                     category: "account_link",
                     event: "failed",
@@ -1007,32 +1028,136 @@ final class AppModel: ObservableObject, AppReconciler {
         }
     }
 
-    private func finishAccountLinkInBackground(
-        link: NativeDeviceLinkSession,
-        authKit: NativeAuthKitSession?
-    ) {
-        appendDiagnostic(category: "account_link", event: "finalization.requested")
-        Task { [weak self, link, authKit] in
-            do {
-                try await Task.detached(priority: .utility) {
-                    if let authKit {
-                        try link.waitUntilReadyWithAuthkit(authkit: authKit)
-                    } else {
-                        try link.waitUntilReady(accessToken: nil)
-                    }
-                }.value
-                self?.appendDiagnostic(
-                    category: "account_link",
-                    event: "finalization.succeeded"
-                )
-            } catch {
-                guard let self else { return }
-                self.appendDiagnostic(
-                    category: "account_link",
-                    event: "finalization.failed",
-                    details: self.diagnosticErrorDetails(error)
+    private func waitForLocalEnrollment(
+        expectedAccountID: String,
+        expectedManifests: [NativeDeviceEnrollmentManifest]
+    ) async throws {
+        guard !expectedManifests.isEmpty else {
+            throw AppLaunchConfigurationError(
+                message: "The linked account has no available agent rooms."
+            )
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(30 * 60))
+        while true {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else {
+                throw AppLaunchConfigurationError(
+                    message: "This iPhone could not finish syncing its complete chat history. Please try again."
                 )
             }
+            let runtime = try currentRuntime()
+            let nextState = try await Task.detached(priority: .utility) {
+                try runtime.dispatchAndWait(action: .startRuntime)
+            }.value
+            applyRuntimeSnapshot(nextState)
+            if Self.localEnrollmentIsReady(
+                nextState,
+                expectedAccountID: expectedAccountID,
+                expectedManifests: expectedManifests
+            ) {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(750))
+        }
+    }
+
+    private func finishPendingEnrollment(
+        _ enrollment: AppDeviceEnrollment
+    ) async throws {
+        let dashboardURL = dashboardURL
+        let session = try await Task.detached(priority: .utility) {
+            try NativeDeviceEnrollmentSession.resume(
+                dashboardUrl: dashboardURL,
+                grant: enrollment.nativeGrant
+            )
+        }.value
+        let ready = try await Task.detached(priority: .utility) {
+            try session.waitUntilReady()
+        }.value
+        try await waitForLocalEnrollment(
+            expectedAccountID: enrollment.accountID,
+            expectedManifests: ready.manifests
+        )
+        guard let identity = nostrIdentity,
+              identity.pendingEnrollment == enrollment
+        else {
+            throw AppLaunchConfigurationError(
+                message: "The linked account changed before enrollment completed."
+            )
+        }
+        let completed = identity.enrollmentCompleted()
+        try nostrIdentityStore.save(completed)
+        nostrIdentity = completed
+        appendDiagnostic(
+            category: "account_link",
+            event: "enrollment.completed"
+        )
+    }
+
+    private func resumePendingEnrollmentIfNeeded() {
+        guard accountLinkPhase == .ready,
+              enrollmentResumeTask == nil,
+              let enrollment = nostrIdentity?.pendingEnrollment
+        else {
+            return
+        }
+        appendDiagnostic(
+            category: "account_link",
+            event: "enrollment.resuming"
+        )
+        accountLinkPhase = .waiting
+        errorText = nil
+        enrollmentResumeTask = Task { [weak self] in
+            defer { self?.enrollmentResumeTask = nil }
+            do {
+                try await self?.finishPendingEnrollment(enrollment)
+                self?.errorText = nil
+                self?.accountLinkPhase = .ready
+            } catch is CancellationError {
+                self?.accountLinkPhase = .ready
+                return
+            } catch {
+                self?.accountLinkPhase = .ready
+                self?.errorText =
+                    "This iPhone could not finish syncing its complete chat history. Please try again."
+                self?.appendDiagnostic(
+                    category: "account_link",
+                    event: "enrollment.resume_failed",
+                    details: self?.diagnosticErrorDetails(error) ?? [:]
+                )
+            }
+        }
+    }
+
+    func retryPendingEnrollment() {
+        guard hasPendingDeviceEnrollment else { return }
+        appendDiagnostic(
+            category: "account_link",
+            event: "enrollment.retry_requested"
+        )
+        resumePendingEnrollmentIfNeeded()
+    }
+
+    static func localEnrollmentIsReady(
+        _ state: AppState,
+        expectedAccountID: String,
+        expectedManifests: [NativeDeviceEnrollmentManifest]
+    ) -> Bool {
+        guard !expectedManifests.isEmpty,
+              state.identity.accountId == expectedAccountID,
+              let paired = state.pairedAgent
+        else {
+            return false
+        }
+        let expected = Set(expectedManifests.map {
+            "\($0.bootstrapId)\u{0}\($0.roomId)\u{0}\($0.manifestSha256)"
+        })
+        let actual = Set(state.deviceLinkBootstrapReceipts.map {
+            "\($0.bootstrapId)\u{0}\($0.roomId)\u{0}\($0.manifestSha256)"
+        })
+        guard expected.isSubset(of: actual) else { return false }
+        return state.rooms.contains {
+            $0.roomId == paired.canonicalRoomId && $0.isAgentChat
         }
     }
 
@@ -1083,6 +1208,11 @@ final class AppModel: ObservableObject, AppReconciler {
         if description.localizedCaseInsensitiveContains("temporarily unavailable") {
             return "Secure sign in is temporarily unavailable. Try again in a moment."
         }
+        if description.localizedCaseInsensitiveContains(
+            "not compatible with this app version"
+        ) {
+            return "Finite is being updated. This app can link after the update finishes."
+        }
         switch stage {
         case .startingAuthentication:
             return "Secure sign in could not start. Please try again."
@@ -1125,6 +1255,8 @@ final class AppModel: ObservableObject, AppReconciler {
             removePushTokenDuringSignOut(runtime: runtimeForPushCleanup)
         }
         pendingPushToken = nil
+        enrollmentResumeTask?.cancel()
+        enrollmentResumeTask = nil
         nostrIdentityStore.clear()
         closeRuntime()
         try? RuntimeDataStore.deleteDataDir(
@@ -1218,6 +1350,7 @@ final class AppModel: ObservableObject, AppReconciler {
                     self.restartUpdateLoopIfEnabled()
                     self.flushPendingPushTokenIfPossible()
                     self.runLaunchAutomationIfRequested()
+                    self.resumePendingEnrollmentIfNeeded()
                 },
                 onFailure: { [weak self] error in
                     guard let self else { return }
@@ -1265,6 +1398,7 @@ final class AppModel: ObservableObject, AppReconciler {
                     self.restartUpdateLoopIfEnabled()
                     self.flushPendingPushTokenIfPossible()
                     self.runLaunchAutomationIfRequested()
+                    self.resumePendingEnrollmentIfNeeded()
                 },
                 onFailure: { [weak self] error in
                     guard let self else { return }

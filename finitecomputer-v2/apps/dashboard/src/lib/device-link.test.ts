@@ -6,6 +6,7 @@ import {
   MAX_DEVICE_LINK_REQUEST_BYTES,
   deviceLinkBoundaryError,
   deviceLinkRouteError,
+  parseDeviceEnrollmentJsonRequest,
   parseDeviceLinkJsonRequest,
   parseDeviceLinkRequest,
   parseOptionalDeviceStatusTarget,
@@ -95,6 +96,37 @@ test("device-link JSON parsing enforces media type and actual byte limits", asyn
     parseDeviceLinkJsonRequest(oversizedActual),
     (error: unknown) => error instanceof DeviceLinkError && error.status === 413
   );
+});
+
+test("device enrollment accepts only the exact bounded resume capability", async () => {
+  const input = {
+    pairing_session_id: "pairing-alpha-01",
+    target_device_id: "electron-paul-01",
+    enrollment_user_id: "user_test",
+    enrollment_capability_hex: "ab".repeat(32),
+  };
+  const valid = new Request("https://finite.computer/api/device-links/enroll", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  assert.deepEqual(await parseDeviceEnrollmentJsonRequest(valid), input);
+
+  for (const value of [
+    { ...input, enrollment_capability_hex: "AB".repeat(32) },
+    { ...input, enrollment_user_id: " user_test" },
+    { ...input, access_token: "must-not-be-accepted" },
+  ]) {
+    const request = new Request("https://finite.computer/api/device-links/enroll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(value),
+    });
+    await assert.rejects(
+      parseDeviceEnrollmentJsonRequest(request),
+      (error: unknown) => error instanceof DeviceLinkError && error.status === 400
+    );
+  }
 });
 
 test("device-link boundary maps upstream failures to fixed public errors", () => {

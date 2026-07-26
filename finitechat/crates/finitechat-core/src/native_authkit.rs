@@ -125,20 +125,23 @@ impl NativeAuthKitSession {
 }
 
 fn parse_callback(callback_url: &str, expected_state: &str) -> Result<String, FiniteChatCoreError> {
-    if callback_url.is_empty()
-        || callback_url.len() > MAX_AUTHKIT_VALUE_BYTES
-        || callback_url.chars().any(char::is_control)
-    {
-        return Err(authkit_error("secure sign in returned an invalid callback"));
+    if callback_url.is_empty() {
+        return Err(invalid_callback("empty"));
     }
-    let parsed = reqwest::Url::parse(callback_url)
-        .map_err(|_| authkit_error("secure sign in returned an invalid callback"))?;
+    if callback_url.len() > MAX_AUTHKIT_VALUE_BYTES {
+        return Err(invalid_callback("oversize"));
+    }
+    if callback_url.chars().any(char::is_control) {
+        return Err(invalid_callback("control_character"));
+    }
+    let parsed =
+        reqwest::Url::parse(callback_url).map_err(|_| invalid_callback("malformed_url"))?;
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("finite.computer")
         || parsed.path() != "/auth/ios/callback"
         || parsed.fragment().is_some()
     {
-        return Err(authkit_error("secure sign in returned an invalid callback"));
+        return Err(invalid_callback("redirect_mismatch"));
     }
 
     let mut code = None;
@@ -152,17 +155,17 @@ fn parse_callback(callback_url: &str, expected_state: &str) -> Result<String, Fi
             _ => continue,
         };
         if destination.replace(value.into_owned()).is_some() {
-            return Err(authkit_error("secure sign in returned an invalid callback"));
+            return Err(invalid_callback("duplicate_parameter"));
         }
     }
     let state = state
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| authkit_error("secure sign in returned an invalid callback"))?;
+        .ok_or_else(|| invalid_callback("missing_state"))?;
     if state != expected_state {
-        return Err(authkit_error("secure sign in returned an invalid callback"));
+        return Err(invalid_callback("state_mismatch"));
     }
     if code.is_some() && error.is_some() {
-        return Err(authkit_error("secure sign in returned an invalid callback"));
+        return Err(invalid_callback("code_and_error"));
     }
     if let Some(error) = error {
         return Err(authkit_authorization_error(&error));
@@ -172,7 +175,15 @@ fn parse_callback(callback_url: &str, expected_state: &str) -> Result<String, Fi
             && value.len() <= MAX_AUTHKIT_VALUE_BYTES
             && !value.chars().any(char::is_control)
     });
-    code.ok_or_else(|| authkit_error("secure sign in returned an invalid callback"))
+    code.ok_or_else(|| invalid_callback("missing_or_invalid_code"))
+}
+
+fn invalid_callback(reason: &'static str) -> FiniteChatCoreError {
+    // The reason is a closed, value-free diagnostic class. It deliberately
+    // never contains the authorization code, OAuth state, or callback URL.
+    authkit_error(format!(
+        "secure sign in returned an invalid callback ({reason})"
+    ))
 }
 
 fn validate_client_id(value: &str) -> Result<(), FiniteChatCoreError> {
@@ -328,10 +339,21 @@ mod tests {
         );
         assert!(
             parse_callback(
+                "https://finite.computer/auth/ios/callback?code=abc&state=wrong",
+                "expected"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("state_mismatch")
+        );
+        assert!(
+            parse_callback(
                 "https://finite.computer/auth/ios/callback?code=a&code=b&state=expected",
                 "expected"
             )
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate_parameter")
         );
         assert!(
             parse_callback(
@@ -350,6 +372,24 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("invalid callback")
+        );
+        assert!(
+            parse_callback(
+                "https://finite.computer/auth/ios/callback?code=abc",
+                "expected"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("missing_state")
+        );
+        assert!(
+            parse_callback(
+                "https://finite.computer/auth/ios/callback?state=expected",
+                "expected"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("missing_or_invalid_code")
         );
         assert!(
             parse_callback(
