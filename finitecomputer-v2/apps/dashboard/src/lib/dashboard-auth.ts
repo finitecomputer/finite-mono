@@ -237,14 +237,18 @@ export async function loadOptionalViewerContext() {
 
 function viewerContextFromModel(model: DashboardModel, account: AccountAuthContext) {
   const email = account.email;
-  const isSaasAccount = account.source === "workos" || account.source === "dev";
   const operatorOrganizationId = process.env.FC_WORKOS_OPERATOR_ORG_ID?.trim();
   const dashboardState = {
     ...model.dashboardState,
     admins: Array.from(new Set([...model.dashboardState.admins, ...devAdminEmails()])),
   };
-  const isAdmin = isSaasAccount
-    ? Boolean(operatorOrganizationId && account.organizationId === operatorOrganizationId)
+  const organizationAdmin = Boolean(
+    operatorOrganizationId && account.organizationId === operatorOrganizationId
+  );
+  const isAdmin = account.source === "workos"
+    ? organizationAdmin
+    : account.source === "dev"
+      ? organizationAdmin || isAdminEmail(dashboardState, email)
     : isAdminEmail(dashboardState, email);
   const invitedMachines = model.machines.filter((machine) => ownsMachine(machine, email));
   const visibleMachines = visibleMachinesForViewer(model.machines, dashboardState, email);

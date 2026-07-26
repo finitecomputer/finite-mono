@@ -17,6 +17,12 @@ import {
 } from "lucide-react";
 
 import { AccountMenu } from "@/components/agent-navigation";
+import {
+  AgentOnboardingProgress,
+  AgentOnboardingStageProvider,
+  agentOnboardingStageFromSearchParams,
+  type AgentOnboardingStage,
+} from "@/components/agent-onboarding-progress";
 import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
@@ -333,6 +339,40 @@ function DashboardAppSection({
   );
 }
 
+function OnboardingAppSection({
+  children,
+  initialStage,
+}: {
+  children: React.ReactNode;
+  initialStage: AgentOnboardingStage;
+}) {
+  return (
+    <AgentOnboardingStageProvider initialStage={initialStage}>
+      <div className="relative grid h-[100dvh] min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-background text-foreground">
+        <div
+          className="pointer-events-none absolute inset-0 opacity-70"
+          aria-hidden
+          style={{
+            background:
+              "radial-gradient(circle at 50% 32%, color-mix(in srgb, var(--accent-blue) 12%, transparent), transparent 38%)",
+          }}
+        />
+
+        <header className="relative z-10 flex items-center justify-between gap-4 px-5 py-5 sm:px-8 sm:py-7">
+          <FiniteBrand href="/dashboard" />
+          <AgentOnboardingProgress />
+        </header>
+
+        <main className="relative z-10 min-h-0 overflow-y-auto">
+          <div className="mx-auto grid min-h-full w-full max-w-5xl place-items-center px-5 py-8 sm:px-8">
+            {children}
+          </div>
+        </main>
+      </div>
+    </AgentOnboardingStageProvider>
+  );
+}
+
 function AgentAppSection({
   children,
   isChatSurface,
@@ -430,6 +470,18 @@ export function DashboardShell({
     && activeMachine
     && (activeMachineId || (pathname === "/dashboard/skills" && queryMachineId))
   );
+
+  if (isNewAgentFlow) {
+    return (
+      <div className="ocean-shell">
+        <OnboardingAppSection
+          initialStage={agentOnboardingStageFromSearchParams(searchParams)}
+        >
+          {children}
+        </OnboardingAppSection>
+      </div>
+    );
+  }
 
   if (isAgentSurface && activeMachine) {
     return (

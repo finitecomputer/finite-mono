@@ -1,0 +1,245 @@
+.loader {
+  --finite-loader-size: 72px;
+
+  position: relative;
+  display: inline-block;
+  width: var(--finite-loader-size);
+  height: var(--finite-loader-size);
+  flex: none;
+  color: var(--primary);
+  contain: layout paint;
+}
+
+.ghost,
+.bar,
+.reveal {
+  position: absolute;
+  inset: 0;
+  background: currentColor;
+  mask: url("/finite-icon.svg") center / contain no-repeat;
+  -webkit-mask: url("/finite-icon.svg") center / contain no-repeat;
+}
+
+.ghost {
+  display: none;
+}
+
+.bar {
+  opacity: 1;
+  will-change: transform, opacity;
+  animation: finite-loader-rise 1.65s ease-in-out infinite;
+  animation-delay: calc((var(--order) * 42ms) - 1.65s);
+}
+
+.loader[data-variant="left"] .bar {
+  animation-name: finite-loader-left;
+}
+
+.loader[data-variant="right"] .bar {
+  animation-name: finite-loader-right;
+}
+
+.loader[data-variant="split"] .bar {
+  animation-name: finite-loader-split-left;
+}
+
+.loader[data-variant="split"] .bar:nth-child(even) {
+  animation-name: finite-loader-split-right;
+}
+
+.loader[data-variant="scan-up"] .bar,
+.loader[data-variant="scan-down"] .bar,
+.loader[data-variant="center-out"] .bar,
+.loader[data-variant="edges-in"] .bar,
+.loader[data-variant="alternate"] .bar,
+.loader[data-variant="signal"] .bar {
+  animation-name: finite-loader-toggle;
+  animation-timing-function: steps(1, end);
+}
+
+.loader[data-variant="line-cycle"] .bar {
+  animation-name: finite-loader-line-cycle;
+  animation-duration: 2.2s;
+  animation-delay: calc((var(--order) * 44ms) - 2.2s);
+  animation-timing-function: steps(1, end);
+}
+
+.reveal {
+  opacity: 1;
+  will-change: clip-path;
+  animation: finite-loader-wipe-right 1.8s ease-in-out infinite;
+}
+
+.loader[data-variant="grow-middle"] .reveal {
+  animation-name: finite-loader-grow-middle;
+}
+
+@keyframes finite-loader-rise {
+  0%,
+  18% {
+    transform: translateY(8px);
+  }
+
+  42%,
+  68% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  92%,
+  100% {
+    transform: translateY(8px);
+  }
+}
+
+@keyframes finite-loader-left {
+  0%,
+  18% {
+    transform: translateX(8px);
+  }
+
+  42%,
+  68% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  92%,
+  100% {
+    transform: translateX(8px);
+  }
+}
+
+@keyframes finite-loader-right {
+  0%,
+  18% {
+    transform: translateX(-8px);
+  }
+
+  42%,
+  68% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  92%,
+  100% {
+    transform: translateX(-8px);
+  }
+}
+
+@keyframes finite-loader-split-left {
+  0%,
+  18% {
+    transform: translateX(7px);
+  }
+
+  42%,
+  68% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  92%,
+  100% {
+    transform: translateX(7px);
+  }
+}
+
+@keyframes finite-loader-split-right {
+  0%,
+  18% {
+    transform: translateX(-7px);
+  }
+
+  42%,
+  68% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  92%,
+  100% {
+    transform: translateX(-7px);
+  }
+}
+
+@keyframes finite-loader-toggle {
+  0%,
+  22% {
+    opacity: 0;
+  }
+
+  42%,
+  68% {
+    opacity: 1;
+  }
+
+  88%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes finite-loader-line-cycle {
+  0%,
+  12% {
+    opacity: 1;
+  }
+
+  30%,
+  56% {
+    opacity: 0;
+  }
+
+  76%,
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes finite-loader-wipe-right {
+  0%,
+  16% {
+    clip-path: inset(0 100% 0 0);
+  }
+
+  46%,
+  70% {
+    clip-path: inset(0);
+  }
+
+  100% {
+    clip-path: inset(0 0 0 100%);
+  }
+}
+
+@keyframes finite-loader-grow-middle {
+  0%,
+  16% {
+    clip-path: inset(0 50%);
+  }
+
+  46%,
+  70% {
+    clip-path: inset(0);
+  }
+
+  100% {
+    clip-path: inset(0 50%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar,
+  .reveal {
+    opacity: 1;
+    animation: none;
+    transform: none;
+    clip-path: none;
+  }
+
+  .ghost {
+    display: none;
+  }
+}

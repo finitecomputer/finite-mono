@@ -249,7 +249,10 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     core.url,
     hostedDevice.url,
     brain.url,
-    sites.apiUrl
+    sites.apiUrl,
+    {
+      runtimeRetirement: true,
+    }
   );
   const dashboardOutput = collectOutput(dashboard);
   const paidDashboardPort = await freePort();
@@ -262,6 +265,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
     {
       admin: true,
       stripeConfigured: true,
+      runtimeRetirement: true,
       distDir: ".next-browser-stripe-test",
     }
   );
@@ -330,6 +334,82 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .getByRole("textbox", { name: "Confidential Launch Code" })
         .waitFor({ state: "visible" });
     });
+
+    core.reset({
+      projects: [
+        visibleProject(
+          "project_non_admin_advanced",
+          "Customer Controls Bot",
+          hostedDevice.runtimeStatusUrl,
+          "customer-controls-bot",
+          true,
+          true
+        ),
+      ],
+      requests: [],
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_customer-controls-bot`
+      );
+      await page.getByRole("heading", { name: "Customer Controls Bot" }).waitFor({
+        state: "visible",
+      });
+      assert.equal(
+        await page.locator("summary").filter({ hasText: /^Advanced$/u }).count(),
+        0,
+        "non-admin viewers must not see Advanced runtime controls"
+      );
+      assert.equal(await page.getByRole("button", { name: "Recover chat" }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "Retire agent" }).count(), 0);
+    });
+
+    core.reset({
+      projects: [
+        visibleProject(
+          "project_advanced",
+          "Advanced Controls Bot",
+          hostedDevice.runtimeStatusUrl,
+          "advanced-controls-bot",
+          true,
+          true
+        ),
+      ],
+      requests: [
+        agentCreationRequest({
+          id: "agent_request_advanced",
+          projectId: "project_advanced",
+          displayName: "Advanced Controls Bot",
+          status: "running",
+          agentRuntimeId: "runtime_advanced-controls-bot",
+        }),
+      ],
+    });
+    await withSignedInPage(browser, paidDashboardPort, async (page) => {
+      await page.goto(
+        `http://127.0.0.1:${paidDashboardPort}/dashboard/machines/runtime_advanced-controls-bot`
+      );
+      const advanced = page.locator("summary").filter({ hasText: /^Advanced$/u });
+      await advanced.waitFor({ state: "visible" }).catch(async (error) => {
+        throw new Error(
+          `Advanced controls did not render: ${String(error)}\n${await pageText(page)}\n${paidDashboardOutput()}`
+        );
+      });
+      await page
+        .getByRole("heading", { name: "Chat recovery" })
+        .waitFor({ state: "hidden" });
+      await page
+        .getByRole("heading", { name: "Retire this agent" })
+        .waitFor({ state: "hidden" });
+      await advanced.click();
+      await page
+        .getByRole("button", { name: "Recover chat" })
+        .waitFor({ state: "visible" });
+      await page
+        .getByRole("button", { name: "Retire agent" })
+        .waitFor({ state: "visible" });
+    });
+
     // This differently configured Next dev server is not used again. Keeping
     // both compilers alive makes later on-demand route compilation contend in CI.
     await stopChildProcess(paidDashboard);
@@ -521,6 +601,40 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await expectVisibleText(page, "Runner capacity exhausted");
       await page.getByRole("button", { name: "Start over" }).click();
       await waitFor(() => core.state.cancelPosts.includes("agent_request_failed"));
+    });
+
+    core.reset({
+      requests: [
+        agentCreationRequest({
+          id: "agent_request_immersive_failed",
+          projectId: "project_immersive_failed",
+          displayName: "Failed Immersive Bot",
+          status: "failed",
+          failureMessage: "Runner failed its startup health check",
+        }),
+      ],
+    });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(
+        `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_immersive_failed`
+      );
+      await expectVisibleText(page, "Agent creation needs a retry");
+      await expectVisibleText(page, "Runner failed its startup health check");
+      assert.equal(
+        (await page.locator('[aria-current="step"]').innerText()).trim(),
+        "Launch: current"
+      );
+
+      await page.getByRole("button", { name: "Start over" }).click();
+      await waitFor(() =>
+        core.state.cancelPosts.includes("agent_request_immersive_failed")
+      );
+      await page.getByLabel("Agent name").waitFor({ state: "visible" });
+      await expectVisibleText(page, "Give your agent a name.");
+      await waitFor(async () =>
+        (await page.locator('[aria-current="step"]').innerText()).trim() ===
+        "Profile: current"
+      );
     });
 
     core.reset({
@@ -755,7 +869,27 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard?new=1&creation=agent_request_second`
       );
-      await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
+      await page
+        .getByRole("heading", { name: "Second Oslo Bot is online." })
+        .waitFor({ state: "visible" });
+      assert.match(
+        page.url(),
+        /\/dashboard\?new=1&creation=agent_request_second$/u,
+        "a ready agent should pause on the Ready interstitial"
+      );
+      await page.locator(".status-prism-scene--happy").waitFor({ state: "visible" });
+      const meetAgent = page.getByRole("link", { name: "Meet Second Oslo Bot" });
+      assert.equal(
+        await meetAgent.getAttribute("href"),
+        "/dashboard/machines/runtime_second-oslo-bot/chat"
+      );
+      await meetAgent.click();
+      await page.waitForURL(
+        /\/dashboard\/machines\/runtime_second-oslo-bot\/chat$/u
+      );
+      await page
+        .getByRole("navigation", { name: "Agent, topics, and chats" })
+        .waitFor({ state: "visible" });
 
       hostedDevice.holdOwnerClaim();
       await page.goto(
@@ -1688,6 +1822,7 @@ function startDashboard(
   options: {
     admin?: boolean;
     stripeConfigured?: boolean;
+    runtimeRetirement?: boolean;
     distDir?: string;
   } = {}
 ) {
@@ -1719,6 +1854,7 @@ function startDashboard(
         FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: devAccessToken,
         FC_WORKOS_OPERATOR_ORG_ID: options.admin ? adminOrganizationId : "",
         FC_DASHBOARD_RUNTIME_MODE: options.stripeConfigured ? "customer" : "canary",
+        FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT: options.runtimeRetirement ? "1" : "",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
         FC_WORKOS_AUTH_ENABLED: "0",
         NEXT_PUBLIC_WORKOS_REDIRECT_URI: `http://127.0.0.1:${port}/callback`,
@@ -2607,9 +2743,11 @@ async function handleCoreRequest(
   state: CoreState,
   onRecover: () => void
 ) {
+  const authorization = request.headers.authorization;
   if (
-    request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
-    request.headers.authorization !== "Bearer fixture-browser-access-token"
+    authorization !== `Bearer ${CORE_TOKEN}` &&
+    authorization !== "Bearer fixture-browser-access-token" &&
+    !authorization?.startsWith("Bearer fixture.")
   ) {
     writeJson(response, 401, { error: "missing service token" });
     return;
