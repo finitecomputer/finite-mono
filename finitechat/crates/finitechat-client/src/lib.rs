@@ -6312,8 +6312,8 @@ pub enum ClientStoreError {
     InvalidDeviceLinkBootstrapState { state: i64 },
     #[error("device-link bootstrap room mismatch: expected {expected}, actual {actual}")]
     DeviceLinkBootstrapRoomMismatch { expected: String, actual: String },
-    #[error("device-link bootstrap receipt does not match its encrypted manifest")]
-    DeviceLinkBootstrapReceiptMismatch,
+    #[error("device-link bootstrap receipt mismatch at {stage}")]
+    DeviceLinkBootstrapReceiptMismatch { stage: &'static str },
     #[error("device-link bootstrap chunk index {index} cannot be represented in sqlite")]
     DeviceLinkBootstrapChunkIndexOutOfRange { index: u32 },
     #[error("device-link bootstrap chunk index is negative: {index}")]
@@ -7544,7 +7544,9 @@ fn validate_device_link_bootstrap_for_owner(
         || source.device_id == owner.device_id
         || bootstrap.target != *owner
     {
-        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "owner_binding",
+        });
     }
     let encoded = serde_json::to_vec(bootstrap)
         .map_err(|_| ClientStoreError::EncodeDeviceLinkBootstrapChunk)?;
@@ -7583,18 +7585,24 @@ fn validate_device_link_bootstrap_manifest_fields(
         || bootstrap.total_history_events > finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS
         || !is_lower_hex_sha256(&bootstrap.history_sha256)
     {
-        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "manifest_fields",
+        });
     }
     if bootstrap.total_history_events == 0 {
         if bootstrap.chunk_count != 1 {
-            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+                stage: "empty_history_shape",
+            });
         }
     } else if u64::from(bootstrap.chunk_count) > bootstrap.total_history_events
         || bootstrap.total_history_events
             > u64::from(bootstrap.chunk_count)
                 * u64::from(finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_EVENTS)
     {
-        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "history_chunk_shape",
+        });
     }
     bootstrap
         .room
@@ -7644,7 +7652,9 @@ fn validate_device_link_bootstrap_receipt(
         || !is_lower_hex_sha256(&receipt.history_sha256)
         || !is_lower_hex_sha256(&receipt.manifest_sha256)
     {
-        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "receipt_fields",
+        });
     }
     Ok(())
 }
@@ -7735,7 +7745,9 @@ fn load_device_link_bootstrap_transfer_row(
     };
     validate_device_link_bootstrap_state(state)?;
     if !is_lower_hex_sha256(&manifest_sha256) {
-        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "stored_manifest_digest_format",
+        });
     }
     let manifest = decrypt_device_link_bootstrap_manifest(
         encryption_key,
@@ -7749,7 +7761,9 @@ fn load_device_link_bootstrap_transfer_row(
         || manifest.source != *identity.source
         || manifest.manifest_sha256()? != manifest_sha256
     {
-        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "stored_manifest_identity_or_digest",
+        });
     }
     Ok(Some(StoredDeviceLinkBootstrapTransferRow {
         state,
@@ -8081,7 +8095,9 @@ fn stage_device_link_bootstrap_chunk_tx(
         .map_err(|_| ClientStoreError::DeviceLinkBootstrapChunkCountOverflow)?;
     if received_chunks == receipt.chunk_count {
         let ready = load_pending_device_link_bootstrap(tx, encryption_key, owner, &receipt)?
-            .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch)?;
+            .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+                stage: "completed_chunk_missing_transfer",
+            })?;
         return Ok(DeviceLinkBootstrapStageOutcome::Ready(ready));
     }
     if received_chunks > receipt.chunk_count {
@@ -8115,7 +8131,9 @@ fn load_pending_device_link_bootstrap(
         return Ok(None);
     }
     if row.manifest.receipt()? != *receipt {
-        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "pending_receipt",
+        });
     }
     let mut stmt = conn.prepare(
         r#"
@@ -8153,7 +8171,9 @@ fn load_pending_device_link_bootstrap(
         let (chunk_index, stored_digest, nonce, ciphertext) = row?;
         let chunk_index = sqlite_device_link_chunk_index_to_u32(chunk_index)?;
         let (Some(nonce), Some(ciphertext)) = (nonce, ciphertext) else {
-            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+                stage: "chunk_ciphertext_missing",
+            });
         };
         let history = decrypt_device_link_bootstrap_chunk(
             encryption_key,
@@ -8164,10 +8184,14 @@ fn load_pending_device_link_bootstrap(
             &ciphertext,
         )?;
         if stored_digest.as_slice() != device_link_bootstrap_chunk_sha256(&history) {
-            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+                stage: "chunk_digest",
+            });
         }
         if chunks.insert(chunk_index, history).is_some() {
-            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+                stage: "duplicate_chunk_index",
+            });
         }
     }
     Ok(Some(StoredPendingDeviceLinkBootstrap {
@@ -8222,12 +8246,18 @@ fn load_pending_device_link_bootstraps(
             bootstrap_id: &bootstrap_id,
             source: &source,
         };
-        let row = load_device_link_bootstrap_transfer_row(conn, encryption_key, identity)?
-            .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch)?;
+        let row = load_device_link_bootstrap_transfer_row(conn, encryption_key, identity)?.ok_or(
+            ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+                stage: "receiving_transfer_disappeared",
+            },
+        )?;
         let receipt = row.manifest.receipt()?;
         pending.push(
-            load_pending_device_link_bootstrap(conn, encryption_key, owner, &receipt)?
-                .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch)?,
+            load_pending_device_link_bootstrap(conn, encryption_key, owner, &receipt)?.ok_or(
+                ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+                    stage: "receiving_transfer_not_pending",
+                },
+            )?,
         );
     }
     Ok(pending)
@@ -8326,8 +8356,11 @@ fn commit_device_link_bootstrap_tx(
         poison_device_link_bootstrap_identity_tx(tx, identity)?;
         return Ok(DeviceLinkBootstrapCommitOutcome::Poisoned);
     }
-    let pending = load_pending_device_link_bootstrap(tx, encryption_key, owner, expected)?
-        .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch)?;
+    let pending = load_pending_device_link_bootstrap(tx, encryption_key, owner, expected)?.ok_or(
+        ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "commit_transfer_not_pending",
+        },
+    )?;
     if !pending.is_complete() {
         return Ok(DeviceLinkBootstrapCommitOutcome::Incomplete);
     }
@@ -10165,7 +10198,9 @@ fn device_link_bootstrap_aad(
 ) -> Result<Vec<u8>, ClientStoreError> {
     validate_device_link_bootstrap_identity(identity)?;
     if !is_lower_hex_sha256(manifest_sha256) {
-        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch {
+            stage: "aad_manifest_digest_format",
+        });
     }
     let mut aad = Vec::with_capacity(
         domain.len()

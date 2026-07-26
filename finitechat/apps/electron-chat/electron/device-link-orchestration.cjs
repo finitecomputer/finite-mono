@@ -83,6 +83,7 @@ async function waitForTargetEnrollment({
 async function waitForSourceEnrollment({
   request,
   pollEnrollment,
+  advanceTarget = async () => {},
   parseResponse,
   isRetryableError = () => true,
   assertActive = () => {},
@@ -103,6 +104,11 @@ async function waitForSourceEnrollment({
         "This desktop could not finish syncing its complete chat history. Try again."
       );
     }
+    // The source consumes one target KeyPackage per room. Keep the fresh
+    // daemon moving before every source poll so it can replenish KeyPackages
+    // and consume Welcomes while fanout is still in progress.
+    await advanceTarget();
+    assertActive();
     try {
       const current = parseResponse(await pollEnrollment(request), request);
       assertActive();

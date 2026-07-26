@@ -20769,6 +20769,140 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_device_links_converge_to_exact_receipts_without_interleaving_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let source = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("source").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "source-device".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+        let room_ids = (0..7)
+            .map(|index| {
+                let room_id = source
+                    .dispatch_and_wait(AppAction::CreateRoom {
+                        display_name: format!("Concurrent pairing room {index}"),
+                    })
+                    .unwrap()
+                    .selected_room_id
+                    .unwrap();
+                for message_index in 0..2 {
+                    source
+                        .dispatch_and_wait(AppAction::SendMessage {
+                            room_id: room_id.clone(),
+                            text: format!("room {index} history {message_index}"),
+                        })
+                        .unwrap();
+                }
+                room_id
+            })
+            .collect::<Vec<_>>();
+        let source_identity = source.state().unwrap().identity;
+        let ios = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir.path().join("ios").to_string_lossy().into_owned(),
+            server_url: server_url.clone(),
+            device_id: "ios-device".to_owned(),
+            account_secret_hex: Some(source_identity.account_secret_hex.clone()),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        let electron = FiniteChatRuntime::open(OpenOptions {
+            data_dir: dir.path().join("electron").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "electron-device".to_owned(),
+            account_secret_hex: Some(source_identity.account_secret_hex),
+            now_unix_seconds: Some(NOW),
+        })
+        .unwrap();
+        ios.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        electron.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+        let mut ios_report = None;
+        let mut electron_report = None;
+
+        // This is the old native-iOS ordering: publish the initial inventory,
+        // then poll only the source until it says Ready. More rooms than the
+        // initial KeyPackage inventory makes that ordering deterministically
+        // stall.
+        for _ in 0..20 {
+            ios_report = Some(
+                source
+                    .link_device_and_wait("simultaneous-ios".to_owned(), "ios-device".to_owned())
+                    .unwrap(),
+            );
+        }
+        let stalled_ios = ios_report.as_ref().unwrap();
+        assert!(!stalled_ios.fanout_complete);
+        assert!(stalled_ios.room_count > 0);
+        assert!(stalled_ios.room_count < room_ids.len() as u32);
+
+        const MAX_TICKS: usize = 500;
+        for _ in 0..MAX_TICKS {
+            let ios_state = ios
+                .dispatch_and_wait(AppAction::StartRuntime)
+                .expect("iOS replenishes KeyPackages while source fanout is active");
+            ios_report = Some(
+                source
+                    .link_device_and_wait("simultaneous-ios".to_owned(), "ios-device".to_owned())
+                    .expect("the iOS enrollment poll must remain retryable"),
+            );
+            electron_report = Some(
+                source
+                    .link_device_and_wait(
+                        "simultaneous-electron".to_owned(),
+                        "electron-device".to_owned(),
+                    )
+                    .expect("the Electron enrollment poll must remain retryable"),
+            );
+            let electron_state = electron.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+
+            let ios_ready = ios_report.as_ref().is_some_and(|report| {
+                report.fanout_complete
+                    && report.bootstrap_manifests.iter().all(|expected| {
+                        ios_state
+                            .device_link_bootstrap_receipts
+                            .iter()
+                            .any(|actual| {
+                                actual.bootstrap_id == expected.bootstrap_id
+                                    && actual.room_id == expected.room_id
+                                    && actual.manifest_sha256 == expected.manifest_sha256
+                            })
+                    })
+            });
+            let electron_ready = electron_report.as_ref().is_some_and(|report| {
+                report.fanout_complete
+                    && report.bootstrap_manifests.iter().all(|expected| {
+                        electron_state
+                            .device_link_bootstrap_receipts
+                            .iter()
+                            .any(|actual| {
+                                actual.bootstrap_id == expected.bootstrap_id
+                                    && actual.room_id == expected.room_id
+                                    && actual.manifest_sha256 == expected.manifest_sha256
+                            })
+                    })
+            });
+            if ios_ready && electron_ready {
+                for room_id in &room_ids {
+                    assert_eq!(app_room(&ios_state, room_id).state, AppRoomState::Connected);
+                    assert_eq!(
+                        app_room(&electron_state, room_id).state,
+                        AppRoomState::Connected
+                    );
+                }
+                return;
+            }
+        }
+
+        panic!(
+            "simultaneous enrollment did not converge: ios={ios_report:?}, electron={electron_report:?}"
+        );
+    }
+
+    #[test]
     fn device_link_export_restarts_at_every_boundary_and_terminal_polls_are_inert() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));

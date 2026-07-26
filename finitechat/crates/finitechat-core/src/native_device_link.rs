@@ -438,33 +438,37 @@ impl NativeDeviceEnrollmentSession {
                     "device enrollment timed out before complete history arrived",
                 ));
             }
-            match self.enrollment_post() {
-                Ok(response) => {
-                    self.validate_response(&response)?;
-                    match response.status.as_str() {
-                        "ready"
-                            if response.room_count > 0
-                                && response.bootstrap_manifests.len()
-                                    == response.room_count as usize =>
-                        {
-                            return Ok(NativeDeviceEnrollmentReady {
-                                room_count: response.room_count,
-                                manifests: response.bootstrap_manifests,
-                            });
-                        }
-                        "ready" => {
-                            return Err(pairing_error(
-                                "linked account has no available agent rooms",
-                            ));
-                        }
-                        "awaiting_key_package" | "joining_rooms" => {}
-                        _ => return Err(pairing_error("invalid enrollment response")),
-                    }
-                }
-                Err(EnrollmentPollError::Retryable) => {}
-                Err(EnrollmentPollError::Terminal(error)) => return Err(error),
+            if let Some(ready) = self.poll_once()? {
+                return Ok(ready);
             }
             std::thread::sleep(PAIRING_POLL_INTERVAL);
+        }
+    }
+
+    /// Advance one bounded source-side enrollment poll. Native clients must
+    /// interleave this with local runtime sync ticks so the fresh target can
+    /// replenish KeyPackages and consume Welcomes while the source fanout is
+    /// still in progress.
+    pub fn poll_once(&self) -> Result<Option<NativeDeviceEnrollmentReady>, FiniteChatCoreError> {
+        let response = match self.enrollment_post() {
+            Ok(response) => response,
+            Err(EnrollmentPollError::Retryable) => return Ok(None),
+            Err(EnrollmentPollError::Terminal(error)) => return Err(error),
+        };
+        self.validate_response(&response)?;
+        match response.status.as_str() {
+            "ready"
+                if response.room_count > 0
+                    && response.bootstrap_manifests.len() == response.room_count as usize =>
+            {
+                Ok(Some(NativeDeviceEnrollmentReady {
+                    room_count: response.room_count,
+                    manifests: response.bootstrap_manifests,
+                }))
+            }
+            "ready" => Err(pairing_error("linked account has no available agent rooms")),
+            "awaiting_key_package" | "joining_rooms" => Ok(None),
+            _ => Err(pairing_error("invalid enrollment response")),
         }
     }
 }
@@ -537,7 +541,9 @@ impl NativeDeviceEnrollmentSession {
 }
 
 fn enrollment_status_is_retryable(status: StatusCode) -> bool {
-    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+    status == StatusCode::NOT_FOUND
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
 }
 
 fn validate_enrollment_grant(
@@ -738,8 +744,9 @@ mod tests {
     use reqwest::StatusCode;
 
     #[test]
-    fn enrollment_retries_only_throttling_and_server_failures() {
+    fn enrollment_retries_route_skew_throttling_and_server_failures() {
         for status in [
+            StatusCode::NOT_FOUND,
             StatusCode::TOO_MANY_REQUESTS,
             StatusCode::INTERNAL_SERVER_ERROR,
             StatusCode::BAD_GATEWAY,
@@ -752,7 +759,6 @@ mod tests {
             StatusCode::BAD_REQUEST,
             StatusCode::UNAUTHORIZED,
             StatusCode::FORBIDDEN,
-            StatusCode::NOT_FOUND,
             StatusCode::CONFLICT,
             StatusCode::GONE,
         ] {
