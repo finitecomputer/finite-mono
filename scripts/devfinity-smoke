@@ -434,6 +434,9 @@ check_http "finitebrain" "$brain_url/health" '"status":"ok"'
 check_http "dashboard" "$dashboard_url" '<html'
 check_native_requesting_user_site
 check_dashboard_agent_creation
+cargo test -p finitechat-client --locked --lib \
+  tests::sqlite_client_store_loads_metadata_written_before_paired_agent_field \
+  -- --exact
 cargo test -p devfinity --locked --test stack_smoke \
   native_device_pairing_crosses_dashboard_hosted_and_authority \
   -- --ignored --exact --nocapture

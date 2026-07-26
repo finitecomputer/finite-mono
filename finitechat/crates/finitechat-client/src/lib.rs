@@ -10754,7 +10754,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_client_store_loads_pre_pairing_app_state_metadata() {
+    fn sqlite_client_store_loads_metadata_written_before_paired_agent_field() {
         let dir = tempfile::tempdir().unwrap();
         let secret = NostrSecretKey::from_bytes([17; NOSTR_SECRET_KEY_BYTES]).unwrap();
         let device_id = "hosted-web";
@@ -10772,19 +10772,17 @@ mod tests {
         let mut store = SqliteClientStore::open(&db_path, options.clone()).unwrap();
         store.save_device_state(&device).unwrap();
 
-        let mut metadata = serde_json::to_value(StoredAppStateMetadataV1 {
-            selected_room_id: Some("room-main".to_owned()),
-            selected_topic_id: Some("home".to_owned()),
-            selected_chat_id: Some("segment-main".to_owned()),
-            paired_agent: Some(StoredPairedAgent {
-                agent_account_id: "agent-account".to_owned(),
-                canonical_room_id: "room-agent".to_owned(),
-            }),
-            revoked_devices: BTreeSet::new(),
-            chat_archives: Vec::new(),
-        })
-        .unwrap();
-        metadata.as_object_mut().unwrap().remove("paired_agent");
+        // Keep this as literal predecessor output instead of serializing the
+        // current StoredAppStateMetadataV1 and deleting a field. The latter
+        // makes the fixture change with the candidate writer and recreates the
+        // all-new writer/all-new reader blind spot that broke production.
+        let metadata = serde_json::json!({
+            "selected_room_id": "room-main",
+            "selected_topic_id": "home",
+            "selected_chat_id": "segment-main",
+            "revoked_devices": [],
+            "chat_archives": []
+        });
 
         let sealed = encrypt_app_state_metadata_json(&options.encryption_key, &owner, &metadata);
         store
