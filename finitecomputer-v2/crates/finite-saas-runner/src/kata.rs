@@ -2679,14 +2679,14 @@ impl RuntimeLauncher for KataLauncher {
             launcher.verify_relocation_state(&plan, lease, relocation.v1())?;
         }
         let host_port = launcher.run_fresh(&plan, lease, options)?;
-        if let Some(relocation) = lease.request.relocation.as_ref() {
-            let observed_npub = launcher.wait_for_agent_npub(&plan, host_port)?;
-            if observed_npub != relocation.v1().expected_agent_npub {
-                let _ = launcher.remove_compute(&plan.container_name);
-                return Err(RunnerError::RuntimeLaunch(
-                    "cold relocation target exposed a different Agent Principal".to_string(),
-                ));
-            }
+        let observed_npub = launcher.wait_for_agent_npub(&plan, host_port)?;
+        if let Some(relocation) = lease.request.relocation.as_ref()
+            && observed_npub != relocation.v1().expected_agent_npub
+        {
+            let _ = launcher.remove_compute(&plan.container_name);
+            return Err(RunnerError::RuntimeLaunch(
+                "cold relocation target exposed a different Agent Principal".to_string(),
+            ));
         }
         let runtime_bootstrap_token = random_runtime_bootstrap_token();
         let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
