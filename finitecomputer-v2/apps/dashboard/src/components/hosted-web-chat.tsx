@@ -62,6 +62,7 @@ import type {
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
+import { electronDeviceLinkPresentation } from "@/lib/electron-chat-runtime";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
 import { runtimeCanPresentActivity } from "@/lib/runtime-presentation";
@@ -127,6 +128,7 @@ export function HostedWebChat({
     claimError,
     bindingRecoveryRequired,
     localDeviceRecoveryRequired,
+    deviceLinkStatus,
     selectionPending,
     streamConnected,
     ownerClaimed,
@@ -139,6 +141,7 @@ export function HostedWebChat({
     uploadAttachments,
     attachmentUrl,
   } = useHostedChat();
+  const deviceLinkPresentation = electronDeviceLinkPresentation(deviceLinkStatus);
   const [actionError, setActionError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
@@ -828,7 +831,12 @@ export function HostedWebChat({
                   setShowLatest(!shouldFollowScrollRef.current);
                 }}
               >
-                {!state && !transportError ? <ChatLoading label="Opening your chat…" /> : null}
+                {!state && !transportError ? (
+                  <ChatLoading
+                    label={deviceLinkPresentation.label}
+                    detail={deviceLinkPresentation.detail}
+                  />
+                ) : null}
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
@@ -1301,8 +1309,14 @@ function EmptyChat({ body, title }: { body: string; title: string }) {
   );
 }
 
-function ChatLoading({ label }: { label: string }) {
-  return <div className="finite-chat__notice"><Loader2Icon className="finite-chat__spin" /><span>{label}</span></div>;
+function ChatLoading({ detail, label }: { detail?: string | null; label: string }) {
+  return (
+    <div className="finite-chat__notice">
+      <Loader2Icon className="finite-chat__spin" />
+      {detail ? <strong>{label}</strong> : <span>{label}</span>}
+      {detail ? <span>{detail}</span> : null}
+    </div>
+  );
 }
 
 function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite, sites }: { activeSite: PreviewSite; className: string; machineId: string; onClose: () => void; onSelectSite: (id: string) => void; sites: PreviewSite[] }) {

@@ -3464,6 +3464,7 @@ final class AppModelPersistenceTests: XCTestCase {
         )
     }
 
+    @MainActor
     func testPendingEnrollmentPersistsWithTheKeychainIdentityUntilCompletion() throws {
         let material = try createNostrIdentity()
         let enrollment = AppDeviceEnrollment(
@@ -3486,6 +3487,17 @@ final class AppModelPersistenceTests: XCTestCase {
         )
         XCTAssertEqual(reopened.pendingEnrollment, enrollment)
         XCTAssertEqual(reopened.pendingEnrollment?.nativeGrant.pairingSessionId, "pair-resume")
+        let model = AppModel(
+            config: RuntimeConfig(
+                serverURL: RuntimeConfig.defaultServerURL,
+                deviceID: "ios-resume"
+            ),
+            applicationSupportURL: try temporarySupportURL(),
+            requiresNostrLogin: true,
+            nostrIdentityStore: MemoryNostrIdentityStore(identity: reopened),
+            startsUpdateLoop: false
+        )
+        XCTAssertTrue(model.hasPendingDeviceEnrollment)
 
         let completed = reopened.enrollmentCompleted()
         XCTAssertNil(completed.pendingEnrollment)

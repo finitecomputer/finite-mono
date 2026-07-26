@@ -340,6 +340,7 @@ test("durable source enrollment retries transport failures and returns only read
     response("ready"),
   ];
   let polls = 0;
+  const progress = [];
   const ready = await waitForSourceEnrollment({
     request,
     pollEnrollment: async () => {
@@ -348,11 +349,20 @@ test("durable source enrollment retries transport failures and returns only read
       return result;
     },
     parseResponse,
+    reportStatus: (status) => progress.push(status),
     delay: async () => {},
     pollIntervalMs: 0,
   });
   assert.equal(polls, 4);
   assert.equal(ready.status, "ready");
+  assert.deepEqual(progress, [
+    {
+      status: "joining_rooms",
+      message: "A temporary interruption occurred. Retrying automatically…",
+    },
+    { status: "joining_rooms" },
+    { status: "joining_rooms" },
+  ]);
 });
 
 test("durable source enrollment has a typed terminal bound", async () => {

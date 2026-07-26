@@ -120,6 +120,10 @@ async function waitForSourceEnrollment({
       assertActive();
       if (!isRetryableError(error)) throw error;
       if (now() >= deadline) throw error;
+      reportStatus({
+        status: "joining_rooms",
+        message: "A temporary interruption occurred. Retrying automatically…",
+      });
     }
     await delay(pollIntervalMs);
   }

@@ -576,6 +576,10 @@ final class AppModel: ObservableObject, AppReconciler {
     @Published private(set) var canRecoverRuntimeIdentity: Bool
     @Published private(set) var accountLinkPhase: AccountLinkPhase = .ready
 
+    var hasPendingDeviceEnrollment: Bool {
+        nostrIdentity?.pendingEnrollment != nil
+    }
+
     private var runtime: (any FiniteChatRuntimeProtocol)?
     private var openKey = ""
     private var foregroundStartKey: String?
@@ -1101,14 +1105,19 @@ final class AppModel: ObservableObject, AppReconciler {
             category: "account_link",
             event: "enrollment.resuming"
         )
+        accountLinkPhase = .waiting
+        errorText = nil
         enrollmentResumeTask = Task { [weak self] in
             defer { self?.enrollmentResumeTask = nil }
             do {
                 try await self?.finishPendingEnrollment(enrollment)
                 self?.errorText = nil
+                self?.accountLinkPhase = .ready
             } catch is CancellationError {
+                self?.accountLinkPhase = .ready
                 return
             } catch {
+                self?.accountLinkPhase = .ready
                 self?.errorText =
                     "This iPhone could not finish syncing its complete chat history. Please try again."
                 self?.appendDiagnostic(
@@ -1118,6 +1127,15 @@ final class AppModel: ObservableObject, AppReconciler {
                 )
             }
         }
+    }
+
+    func retryPendingEnrollment() {
+        guard hasPendingDeviceEnrollment else { return }
+        appendDiagnostic(
+            category: "account_link",
+            event: "enrollment.retry_requested"
+        )
+        resumePendingEnrollmentIfNeeded()
     }
 
     static func localEnrollmentIsReady(

@@ -11275,6 +11275,41 @@ mod tests {
     }
 
     #[test]
+    fn current_reader_opens_actual_predecessor_v8_encrypted_snapshot() {
+        // This SQLite file was emitted by the unmodified V8 writer at
+        // 5276a77d63a1b5069d21f3c2f5289947728f2784. Keep it static: encoding a
+        // "legacy" value with today's writer would not prove staggered-version
+        // compatibility.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        std::fs::write(
+            &db_path,
+            include_bytes!("../tests/fixtures/client-state-v8-predecessor.sqlite3"),
+        )
+        .unwrap();
+        let secret = NostrSecretKey::from_bytes([42; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "v8-predecessor-device";
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let store = SqliteClientStore::open(&db_path, options).unwrap();
+        let restored = store
+            .load_device(FiniteChatDeviceConfig {
+                account_secret_key: secret,
+                device_id: device_id.to_owned(),
+                now_unix_seconds: NOW,
+                credential_not_before_unix_seconds: NOW.saturating_sub(60),
+                credential_not_after_unix_seconds: NOW.saturating_add(600),
+            })
+            .unwrap();
+        let fanout = restored.link_fanout("v8-predecessor-fanout").unwrap();
+        assert_eq!(fanout.target_device.device_id, "v8-target-device");
+        assert_eq!(
+            fanout.bootstrap_export,
+            LinkBootstrapExportState::WaitingForFanout,
+            "V8 had no bootstrap-export field; V9 must supply the safe restart default"
+        );
+    }
+
+    #[test]
     fn refreshed_device_clock_accepts_key_packages_created_after_runtime_open() {
         let alice_secret = NostrSecretKey::from_bytes([1; NOSTR_SECRET_KEY_BYTES]).unwrap();
         let bob_secret = NostrSecretKey::from_bytes([2; NOSTR_SECRET_KEY_BYTES]).unwrap();

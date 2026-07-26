@@ -134,12 +134,20 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if model.requiresNostrLogin || model.accountLinkPhase != .ready {
+            if model.requiresNostrLogin
+                || model.accountLinkPhase != .ready
+                || model.hasPendingDeviceEnrollment
+            {
                 AccountLinkView(
                     phase: model.accountLinkPhase,
                     errorMessage: model.developerErrorText,
+                    resumesPendingEnrollment: model.hasPendingDeviceEnrollment,
                     beginLink: {
-                        model.beginAccountLink()
+                        if model.hasPendingDeviceEnrollment {
+                            model.retryPendingEnrollment()
+                        } else {
+                            model.beginAccountLink()
+                        }
                     }
                 )
             } else {
@@ -1292,6 +1300,7 @@ struct AccountLinkView: View {
     @Environment(\.finiteTokens) private var tokens
     let phase: AccountLinkPhase
     let errorMessage: String?
+    var resumesPendingEnrollment = false
     let beginLink: () -> Void
 
     var body: some View {
@@ -1355,7 +1364,7 @@ struct AccountLinkView: View {
     private var buttonTitle: String {
         switch phase {
         case .ready:
-            "Continue with Finite"
+            resumesPendingEnrollment ? "Retry secure link" : "Continue with Finite"
         case .authenticating:
             "Signing in…"
         case .waiting:
@@ -1488,6 +1497,7 @@ private struct FocusedHomePreview: View {
     AccountLinkView(
         phase: .ready,
         errorMessage: "This iPhone could not finish linking. Please try again.",
+        resumesPendingEnrollment: true,
         beginLink: {}
     )
 }

@@ -46,6 +46,50 @@ export type ElectronDeviceLinkStatus = {
   message?: string;
 };
 
+export type ElectronDeviceLinkPresentation = {
+  label: string;
+  detail: string | null;
+};
+
+export function electronDeviceLinkPresentation(
+  progress: ElectronDeviceLinkStatus | null
+): ElectronDeviceLinkPresentation {
+  switch (progress?.status) {
+  case "preparing":
+    return {
+      label: "Preparing this Mac…",
+      detail: "Checking this Device’s encrypted local chat.",
+    };
+  case "linking":
+    return {
+      label: "Securely linking this Mac…",
+      detail: "Keep Finite open while your account is securely linked to this Device.",
+    };
+  case "joining_rooms":
+    return {
+      label: "Syncing your complete chat history…",
+      detail: progress.message
+        ?? "This can take a while. Finite will retry temporary interruptions automatically.",
+    };
+  case "ready":
+    return {
+      label: "Opening your chat…",
+      detail: "Your Device is linked and its encrypted history is ready.",
+    };
+  case "recovery_required":
+  case "failed":
+    return {
+      label: "Chat needs attention",
+      detail: progress.message ?? null,
+    };
+  default:
+    return {
+      label: "Opening your chat…",
+      detail: null,
+    };
+  }
+}
+
 export type ElectronLocalDevice = {
   status: "ready";
   account_id: string;
