@@ -401,7 +401,7 @@ async fn initial_nip_ab_approval_persists_a_target_bound_checkpoint() {
             .as_u64()
             .unwrap(),
     };
-    NipAbTargetSession::create(target, &descriptor, created.issued_at_unix_seconds)
+    NipAbTargetSession::create(target, &descriptor, test_now_unix_seconds())
         .expect("the hosted source descriptor must authenticate for the original target");
     let reopened_state = state_for(hosted, "user_pairing_happy_path").await;
     assert_eq!(
