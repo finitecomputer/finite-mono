@@ -1,6 +1,9 @@
 # iOS Existing-Agent Companion App Store Activation
 
-Status: ACTIVE (2026-07-24 — Paul explicitly selected the existing-agent
+Status: PAUSED (2026-07-26 — Paul paused PR #303 and placed the repository in
+a camp feature freeze; resume only after the
+[`Camp SaaS Stability`](camp-saas-stability-2026-07-26.md) run closes. The
+previous status was ACTIVE from 2026-07-24, when Paul selected the existing-agent
 companion path and prioritized CI-driven internal TestFlight distribution)
 
 Sequence note: On 2026-07-24, Paul moved the active sequence here from

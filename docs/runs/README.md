@@ -1,6 +1,11 @@
 # Run documents
 Status: ACTIVE
 
+Current run: [`camp-saas-stability-2026-07-26.md`](camp-saas-stability-2026-07-26.md).
+Paul placed the repository in a temporary feature freeze on 2026-07-26. Until
+that run closes, only bounded production bug fixes and reliability work that
+protect signup, Agent creation, chat, or recovery may advance.
+
 Standing rules: work only the one ACTIVE run, top-down; parking-lot everything
 else. Every commit body names the active run and exact queue bullet. The win
 condition is Ready-for-Paul: hand Paul an Acceptance Request he can execute in

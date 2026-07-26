@@ -7,7 +7,9 @@
 let
   ids = import ./storage-ids.nix;
   paulKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHqbHvWlrXRkTc0403ubkqNE/Ge4YbPvKwWuRBoLPVAW paul@paul.lol";
-  identityAuthority = "https://identity.finite.vip";
+  # Operator routes are deliberately absent from the public Identity vhost.
+  # Reach the loopback Authority through lat1's peer-scoped WireGuard proxy.
+  identityAuthority = "http://10.254.3.1:18790";
   identityOperatorEnvironmentFile = "/etc/finite/identity-operator.env";
 in
 {
@@ -37,13 +39,10 @@ in
       assertion =
         config.systemd.services.finite-saas-runner.environment.FINITE_IDENTITY_AUTHORITY
         == identityAuthority;
-      message = "finite-lat-3 Runner must use the production Identity Authority";
+      message = "finite-lat-3 Runner must use the private production Identity Authority";
     }
     {
-      assertion =
-        builtins.elem
-          identityOperatorEnvironmentFile
-          config.systemd.services.finite-saas-runner.serviceConfig.EnvironmentFile;
+      assertion = builtins.elem identityOperatorEnvironmentFile config.systemd.services.finite-saas-runner.serviceConfig.EnvironmentFile;
       message = "finite-lat-3 Runner must load its Identity Authority operator credential";
     }
   ];
