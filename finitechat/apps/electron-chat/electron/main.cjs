@@ -1154,6 +1154,7 @@ async function waitForDeviceEnrollmentReady(
   return waitForSourceEnrollment({
     request: expected,
     pollEnrollment: dashboardDeviceEnrollmentRequest,
+    advanceTarget: () => dispatchInternalDaemonAction({ StartRuntime: null }),
     parseResponse: parseDeviceLinkPublicResponse,
     isRetryableError: (error) => error?.retryable === true,
     assertActive: generation === null
@@ -1294,7 +1295,7 @@ async function ensureLocalDeviceNow(generation) {
       expectedAccountId: identity.expected_account_id,
       expectedDeviceId: deviceId,
       expectedManifests: source.bootstrap_manifests,
-      readState: requestDaemonState,
+      readState: () => dispatchInternalDaemonAction({ StartRuntime: null }),
       assertActive: () => assertLocalDeviceGeneration(generation),
       reportStatus: deviceLinkStatus,
       delay,
