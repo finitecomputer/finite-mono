@@ -73,6 +73,7 @@ const CLIENT_APP_ROOM_AAD_DOMAIN: &[u8] = b"finitechat.client-app-room.v1";
 const CLIENT_APP_STATE_AAD_DOMAIN: &[u8] = b"finitechat.client-app-state.v1";
 const CLIENT_APP_PROFILE_AAD_DOMAIN: &[u8] = b"finitechat.client-app-profile.v1";
 const CLIENT_STATE_SNAPSHOT_VERSION: u16 = 8;
+const READABLE_CLIENT_STATE_SNAPSHOT_VERSION: u16 = 9;
 const CLIENT_STORE_KEY_BYTES: usize = 32;
 const CLIENT_STORE_NONCE_BYTES: usize = 12;
 const CLIENT_STORE_AEAD_TAG_BYTES: u32 = 16;
@@ -5568,6 +5569,8 @@ pub enum ClientStoreError {
     StateSnapshotTrailingBytes,
     #[error("encrypted client state snapshot has invalid UTF-8")]
     StateSnapshotUtf8,
+    #[error("encrypted client state snapshot has invalid device-link bootstrap export")]
+    DecodeLinkBootstrapExport,
     #[error("encrypted client state snapshot enum {field} has unknown value {value}")]
     StateSnapshotEnum { field: &'static str, value: u64 },
     #[error("encrypted client state snapshot length overflow")]
@@ -7312,7 +7315,11 @@ fn encrypt_device_state(
 ) -> Result<SealedClientState, ClientStoreError> {
     state.validate_limits()?;
     let plaintext = encode_device_state(state)?;
-    let aad = client_store_aad(&state.device_ref.account_id, &state.device_ref.device_id)?;
+    let aad = client_store_aad(
+        CLIENT_STATE_SNAPSHOT_VERSION,
+        &state.device_ref.account_id,
+        &state.device_ref.device_id,
+    )?;
     let provider = OpenMlsRustCrypto::default();
     let nonce: [u8; CLIENT_STORE_NONCE_BYTES] = provider
         .rand()
@@ -7655,18 +7662,25 @@ fn decrypt_device_state(
         MAX_CLIENT_STATE_CIPHERTEXT_BYTES,
     )
     .map_err(ClientError::from)?;
-    let aad = client_store_aad(account_id, device_id)?;
     let provider = OpenMlsRustCrypto::default();
-    let plaintext = provider
-        .crypto()
-        .aead_decrypt(
+    let mut plaintext = None;
+    for version in [
+        CLIENT_STATE_SNAPSHOT_VERSION,
+        READABLE_CLIENT_STATE_SNAPSHOT_VERSION,
+    ] {
+        let aad = client_store_aad(version, account_id, device_id)?;
+        if let Ok(opened) = provider.crypto().aead_decrypt(
             AeadType::Aes256Gcm,
             encryption_key.as_bytes(),
             ciphertext,
             nonce,
             &aad,
-        )
-        .map_err(|_| ClientStoreError::DecryptState)?;
+        ) {
+            plaintext = Some(opened);
+            break;
+        }
+    }
+    let plaintext = plaintext.ok_or(ClientStoreError::DecryptState)?;
     decode_device_state(&plaintext)
 }
 
@@ -7984,7 +7998,11 @@ fn decrypt_app_profile_metadata(
     Ok(metadata)
 }
 
-fn client_store_aad(account_id: &str, device_id: &str) -> Result<Vec<u8>, ClientStoreError> {
+fn client_store_aad(
+    snapshot_version: u16,
+    account_id: &str,
+    device_id: &str,
+) -> Result<Vec<u8>, ClientStoreError> {
     validate_string_bytes("account_id", account_id, MAX_ACCOUNT_ID_BYTES)
         .map_err(ClientError::from)?;
     validate_string_bytes("device_id", device_id, MAX_DEVICE_ID_BYTES)
@@ -7998,7 +8016,7 @@ fn client_store_aad(account_id: &str, device_id: &str) -> Result<Vec<u8>, Client
             + device_id.len(),
     );
     aad.extend_from_slice(CLIENT_STATE_SNAPSHOT_MAGIC);
-    aad.extend_from_slice(&CLIENT_STATE_SNAPSHOT_VERSION.to_be_bytes());
+    aad.extend_from_slice(&snapshot_version.to_be_bytes());
     append_raw_len_prefixed(&mut aad, account_id.as_bytes())?;
     append_raw_len_prefixed(&mut aad, device_id.as_bytes())?;
     debug_assert!(aad.len() >= CLIENT_STATE_SNAPSHOT_MAGIC.len() + U16_BYTES);
@@ -8314,7 +8332,8 @@ fn decode_device_state(bytes: &[u8]) -> Result<FiniteChatDeviceState, ClientStor
     let mut cursor = ClientStateCursor::new(bytes);
     cursor.take_magic()?;
     let version = cursor.take_u16()?;
-    if version != CLIENT_STATE_SNAPSHOT_VERSION {
+    if version != CLIENT_STATE_SNAPSHOT_VERSION && version != READABLE_CLIENT_STATE_SNAPSHOT_VERSION
+    {
         return Err(ClientStoreError::StateSnapshotVersion(version));
     }
     let account_id = cursor.take_string("account_id", MAX_ACCOUNT_ID_BYTES)?;
@@ -8394,7 +8413,7 @@ fn decode_device_state(bytes: &[u8]) -> Result<FiniteChatDeviceState, ClientStor
     let link_fanout_count = cursor.take_count("client_state.link_fanouts", MAX_LINK_FANOUTS)?;
     let mut link_fanouts = Vec::with_capacity(link_fanout_count);
     for _ in 0..link_fanout_count {
-        link_fanouts.push(cursor.take_link_fanout_state()?);
+        link_fanouts.push(cursor.take_link_fanout_state(version)?);
     }
 
     let storage_count = cursor.take_count(
@@ -9122,21 +9141,37 @@ impl<'a> ClientStateCursor<'a> {
         Ok(request)
     }
 
-    fn take_link_fanout_state(&mut self) -> Result<LinkFanoutState, ClientStoreError> {
+    fn take_link_fanout_state(
+        &mut self,
+        snapshot_version: u16,
+    ) -> Result<LinkFanoutState, ClientStoreError> {
+        let fanout_id = self.take_string("link_fanout.fanout_id", MAX_OBJECT_ID_BYTES)?;
+        let target_device = self.take_device_ref("link_fanout.target_device")?;
+        let after_room_id =
+            self.take_optional_string("link_fanout.after_room_id", MAX_ROOM_ID_BYTES)?;
+        let discovery_complete = self.take_bool()?;
+        let rooms = {
+            let count = self.take_count("link_fanout.rooms", MAX_LINK_FANOUT_ROOMS)?;
+            let mut rooms = Vec::with_capacity(count);
+            for _ in 0..count {
+                rooms.push(self.take_link_fanout_room_state()?);
+            }
+            rooms
+        };
+        if snapshot_version == READABLE_CLIENT_STATE_SNAPSHOT_VERSION {
+            let encoded = self.take_vec(
+                "link_fanout.bootstrap_export",
+                MAX_CLIENT_STATE_PLAINTEXT_BYTES,
+            )?;
+            serde_json::from_slice::<serde_json::Value>(&encoded)
+                .map_err(|_| ClientStoreError::DecodeLinkBootstrapExport)?;
+        }
         let fanout = LinkFanoutState {
-            fanout_id: self.take_string("link_fanout.fanout_id", MAX_OBJECT_ID_BYTES)?,
-            target_device: self.take_device_ref("link_fanout.target_device")?,
-            after_room_id: self
-                .take_optional_string("link_fanout.after_room_id", MAX_ROOM_ID_BYTES)?,
-            discovery_complete: self.take_bool()?,
-            rooms: {
-                let count = self.take_count("link_fanout.rooms", MAX_LINK_FANOUT_ROOMS)?;
-                let mut rooms = Vec::with_capacity(count);
-                for _ in 0..count {
-                    rooms.push(self.take_link_fanout_room_state()?);
-                }
-                rooms
-            },
+            fanout_id,
+            target_device,
+            after_room_id,
+            discovery_complete,
+            rooms,
         };
         fanout.validate_limits()?;
         Ok(fanout)
@@ -9387,6 +9422,93 @@ mod tests {
         assert_eq!(
             key_hex,
             "cb0a531322f96b78a76cec704b201c2ccc4695855f78022a024e50e8349bb656"
+        );
+    }
+
+    #[test]
+    fn compatibility_reader_opens_candidate_v9_and_rewrites_v8() {
+        // This SQLite file was emitted by PR 303's real V9 writer. Keeping the
+        // bytes fixed proves both halves of the expand/contract boundary:
+        // this release can read candidate state, but every ordinary save
+        // remains readable by the production V8 implementation.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        std::fs::write(
+            &db_path,
+            include_bytes!("../tests/fixtures/client-state-v9-candidate.sqlite3"),
+        )
+        .unwrap();
+        let secret = NostrSecretKey::from_bytes([43; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "v9-candidate-device";
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let encryption_key = options.encryption_key.clone();
+        let mut store = SqliteClientStore::open(&db_path, options).unwrap();
+        let restored = store
+            .load_device(FiniteChatDeviceConfig {
+                account_secret_key: secret,
+                device_id: device_id.to_owned(),
+                now_unix_seconds: NOW,
+                credential_not_before_unix_seconds: NOW.saturating_sub(60),
+                credential_not_after_unix_seconds: NOW.saturating_add(600),
+            })
+            .unwrap();
+        let fanout = restored.link_fanout("v9-candidate-fanout").unwrap();
+        assert_eq!(fanout.target_device.device_id, "v9-target-device");
+
+        store.save_device_state(&restored).unwrap();
+        let owner = restored.device_ref();
+        let (nonce, ciphertext) = store
+            .conn
+            .query_row(
+                r#"
+                SELECT nonce, ciphertext
+                FROM client_device_states
+                WHERE account_id = ?1 AND device_id = ?2
+                "#,
+                params![&owner.account_id, &owner.device_id],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .unwrap();
+        let provider = OpenMlsRustCrypto::default();
+        let v8_plaintext = provider
+            .crypto()
+            .aead_decrypt(
+                AeadType::Aes256Gcm,
+                encryption_key.as_bytes(),
+                &ciphertext,
+                &nonce,
+                &client_store_aad(
+                    CLIENT_STATE_SNAPSHOT_VERSION,
+                    &owner.account_id,
+                    &owner.device_id,
+                )
+                .unwrap(),
+            )
+            .expect("the compatibility release must continue writing V8");
+        assert_eq!(
+            u16::from_be_bytes([
+                v8_plaintext[CLIENT_STATE_SNAPSHOT_MAGIC.len()],
+                v8_plaintext[CLIENT_STATE_SNAPSHOT_MAGIC.len() + 1],
+            ]),
+            CLIENT_STATE_SNAPSHOT_VERSION
+        );
+        assert!(
+            provider
+                .crypto()
+                .aead_decrypt(
+                    AeadType::Aes256Gcm,
+                    encryption_key.as_bytes(),
+                    &ciphertext,
+                    &nonce,
+                    &client_store_aad(
+                        READABLE_CLIENT_STATE_SNAPSHOT_VERSION,
+                        &owner.account_id,
+                        &owner.device_id,
+                    )
+                    .unwrap(),
+                )
+                .is_err(),
+            "a V8 compatibility save must not authenticate as V9"
         );
     }
 
