@@ -90,9 +90,8 @@ jobs:
 
   electron-alpha:
     name: Electron production-dashboard alpha
-    needs:
-      - rust
-      - dashboard
+    # This job builds and tests its own Rust daemon on macOS, so it consumes
+    # no artifacts from the Rust workspace or Dashboard jobs.
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
