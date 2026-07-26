@@ -890,6 +890,18 @@ final class AppModel: ObservableObject, AppReconciler {
                     let callbackURL = try await self.webAuthenticationPresenter.authenticate(
                         url: authorizationURL
                     )
+                    let callbackDiagnostic =
+                        NativeWebAuthenticationPresenter.callbackDiagnosticSummary(
+                            callbackURL
+                        )
+                    Self.accountLinkLogger.info(
+                        "callback received \(callbackDiagnostic, privacy: .public)"
+                    )
+                    self.appendDiagnostic(
+                        category: "account_link",
+                        event: "authentication.callback",
+                        details: ["shape": callbackDiagnostic]
+                    )
                     stage = .exchangingAuthentication
                     self.appendAccountLinkProgress(stage)
                     try await Task.detached(priority: .userInitiated) {
@@ -986,18 +998,12 @@ final class AppModel: ObservableObject, AppReconciler {
                 self?.errorText = Self.accountLinkErrorText(error, stage: stage)
                 var details = self?.diagnosticErrorDetails(error) ?? [:]
                 details["stage"] = stage.rawValue
-                if stage == .exchangingAuthentication {
-                    let reason = Self.redactedDiagnosticValue(
-                        String(describing: error)
-                    )
-                    Self.accountLinkLogger.error(
-                        "failed stage=\(stage.rawValue, privacy: .public) type=\(String(describing: type(of: error)), privacy: .public) reason=\(reason, privacy: .public)"
-                    )
-                } else {
-                    Self.accountLinkLogger.error(
-                        "failed stage=\(stage.rawValue, privacy: .public) type=\(String(describing: type(of: error)), privacy: .public)"
-                    )
-                }
+                let reason = Self.redactedDiagnosticValue(
+                    String(describing: error)
+                )
+                Self.accountLinkLogger.error(
+                    "failed stage=\(stage.rawValue, privacy: .public) type=\(String(describing: type(of: error)), privacy: .public) reason=\(reason, privacy: .public)"
+                )
                 self?.appendDiagnostic(
                     category: "account_link",
                     event: "failed",

@@ -4344,6 +4344,25 @@ final class VoiceMessageTests: XCTestCase {
     }
 }
 
+final class NativeWebAuthenticationPresenterTests: XCTestCase {
+    func testCallbackDiagnosticsDescribeShapeWithoutValues() throws {
+        let callback = try XCTUnwrap(URL(
+            string: "https://finite.computer/auth/ios/callback?code=secret-code&state=secret-state&extra=secret-extra"
+        ))
+        let summary = NativeWebAuthenticationPresenter.callbackDiagnosticSummary(callback)
+
+        XCTAssertTrue(summary.contains("scheme_https=true"))
+        XCTAssertTrue(summary.contains("host_expected=true"))
+        XCTAssertTrue(summary.contains("path_expected=true"))
+        XCTAssertTrue(summary.contains("code_count=1"))
+        XCTAssertTrue(summary.contains("state_count=1"))
+        XCTAssertTrue(summary.contains("unexpected_query_count=1"))
+        XCTAssertFalse(summary.contains("secret-code"))
+        XCTAssertFalse(summary.contains("secret-state"))
+        XCTAssertFalse(summary.contains("secret-extra"))
+    }
+}
+
 @MainActor
 private final class StubWebAuthenticationPresenter: WebAuthenticationPresenting {
     enum Result {

@@ -3,6 +3,7 @@ use axum::http::{Request, StatusCode};
 use finite_brain_core::{BRAIN_IDENTITY_PROVIDER_VERSION, FolderKey};
 use finite_identity::{FiniteIdentity, IdentityPaths};
 use finite_nostr::verify_event_integrity;
+use finitechat_core::nip_ab::{NipAbSourceDescriptorV1, NipAbTargetSession};
 use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions, npub_from_account_id};
 use finitechat_hosted_device::{
     HostedDeviceConfig, HostedIdentityAuthorityConfig, MAX_HOSTED_ATTACHMENT_BYTES,
@@ -10,6 +11,7 @@ use finitechat_hosted_device::{
     app_with_final_agent_binding_persist_failures, app_with_identity_authority,
     app_with_profile_bootstrap_room_create_failures, app_with_profile_bootstrap_submit_failures,
 };
+use finitechat_http::{CreatePairingSessionRequest, HttpPairingSessionRecord};
 use finitechat_proto::{
     DecryptedApplicationEventV1, DurableAppEventKind, RuntimeCommandJsonPayloadV1,
     RuntimeCommandPayloadKindV1, RuntimeCommandRequestV1, RuntimeCommandResultV1,
@@ -234,6 +236,85 @@ async fn device_reconciliation_authenticates_before_strict_bounded_json_parsing(
         .await
         .unwrap();
     assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initial_nip_ab_approval_persists_a_target_bound_checkpoint() {
+    let root = TempDir::new().unwrap();
+    let (server_url, _, server_task) =
+        spawn_chat_server(&root.path().join("pairing-server.sqlite3"), None).await;
+    let target = NipAbTargetSession::prepare();
+    let pairing_session_id = "pair-hosted-happy-path";
+    let target_device_id = "ios-hosted-happy-path";
+    let created = reqwest::Client::new()
+        .post(format!("{server_url}/pairing-sessions"))
+        .json(&CreatePairingSessionRequest {
+            version: 1,
+            pairing_session_id: pairing_session_id.to_owned(),
+            target_device_id: target_device_id.to_owned(),
+            target_public_key: target.public_key(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<HttpPairingSessionRecord>()
+        .await
+        .unwrap();
+    assert_eq!(created.pairing_session_id, pairing_session_id);
+
+    let data_root = root.path().join("hosted-devices");
+    let hosted = app(HostedDeviceConfig {
+        data_root: data_root.clone(),
+        server_url,
+        public_url: PUBLIC_SERVER_URL.to_owned(),
+        api_token: TOKEN.to_owned(),
+    });
+    let response = device_link_for(
+        hosted,
+        "user_pairing_happy_path",
+        "/v1/device-links/approve",
+        pairing_session_id,
+        target_device_id,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "awaiting_offer");
+    let descriptor = NipAbSourceDescriptorV1 {
+        version: json["source_descriptor"]["version"].as_u64().unwrap() as u16,
+        source_public_key: json["source_descriptor"]["source_public_key"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        session_secret_hex: json["source_descriptor"]["session_secret_hex"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        expires_at_unix_seconds: json["source_descriptor"]["expires_at_unix_seconds"]
+            .as_u64()
+            .unwrap(),
+    };
+    NipAbTargetSession::create(target, &descriptor, created.issued_at_unix_seconds)
+        .expect("the hosted source descriptor must authenticate for the original target");
+
+    let record_path = data_root
+        .join("users")
+        .join(hex::encode(sha2::Sha256::digest(
+            b"user_pairing_happy_path",
+        )))
+        .join("device-links")
+        .join(format!(
+            "{}.json",
+            hex::encode(sha2::Sha256::digest(pairing_session_id.as_bytes()))
+        ));
+    assert!(
+        record_path.is_file(),
+        "approval must durably persist its target-bound checkpoint before returning"
+    );
+    server_task.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

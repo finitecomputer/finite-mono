@@ -334,7 +334,19 @@ pub enum HostedDeviceError {
 
 impl IntoResponse for HostedDeviceError {
     fn into_response(self) -> Response {
-        let status = match self {
+        let status = self.status_code();
+        eprintln!(
+            "finitechat hosted-device request failed status={} class={}",
+            status.as_u16(),
+            self.diagnostic_class()
+        );
+        (status, Json(json!({ "error": self.to_string() }))).into_response()
+    }
+}
+
+impl HostedDeviceError {
+    fn status_code(&self) -> StatusCode {
+        match self {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::MissingUser
             | Self::InvalidUser
@@ -366,8 +378,43 @@ impl IntoResponse for HostedDeviceError {
             | Self::LockPoisoned
             | Self::Io(_)
             | Self::Task(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (status, Json(json!({ "error": self.to_string() }))).into_response()
+        }
+    }
+
+    fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::MissingUser => "missing_user",
+            Self::InvalidUser => "invalid_user",
+            Self::InvalidMultipart(_) => "invalid_multipart",
+            Self::PayloadTooLarge(_) => "payload_too_large",
+            Self::AttachmentNotFound => "attachment_not_found",
+            Self::AttachmentUnavailable => "attachment_unavailable",
+            Self::UnsafeAttachmentPath => "unsafe_attachment_path",
+            Self::DeviceLinkNotFound => "device_link_not_found",
+            Self::InvalidDeviceLink(_) => "invalid_device_link",
+            Self::DeviceLinkConflict(_) => "device_link_conflict",
+            Self::DeviceLinkService(_) => "device_link_service",
+            Self::IdentityAuthority(_) => "identity_authority",
+            Self::LockPoisoned => "lock_poisoned",
+            Self::IncompleteUserState => "incomplete_user_state",
+            Self::AgentBindingNotFound => "agent_binding_not_found",
+            Self::AgentBindingInvalid(_) => "agent_binding_invalid",
+            Self::BrainIdentitySetupRequired => "brain_identity_setup_required",
+            Self::InvalidBrainIdentityProvider(_) => "invalid_brain_identity_provider",
+            Self::SitesIdentitySetupRequired => "sites_identity_setup_required",
+            Self::InvalidSitesIdentityProvider(_) => "invalid_sites_identity_provider",
+            Self::CanonicalChatConflict(_) => "canonical_chat_conflict",
+            Self::Io(_) => "io",
+            Self::Task(_) => "task",
+            Self::Core(FiniteChatCoreError::Client { .. }) => "core_client",
+            Self::Core(FiniteChatCoreError::Profile { .. }) => "core_profile",
+            Self::Core(FiniteChatCoreError::ServerRejected { .. }) => "core_server_rejected",
+            Self::Core(FiniteChatCoreError::Delivery { .. }) => "core_delivery",
+            Self::Core(_) => "core_internal",
+            Self::Identity(_) => "identity",
+            Self::Serialize(_) => "serialize",
+        }
     }
 }
 
@@ -755,8 +802,11 @@ fn approve_device_link_for_user(
         return Ok(response);
     }
 
-    let session = get_pairing_session(state, &input.pairing_session_id)?
-        .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
+    let session = device_link_approval_stage(
+        "fetch_session",
+        get_pairing_session(state, &input.pairing_session_id),
+    )?
+    .ok_or(HostedDeviceError::DeviceLinkNotFound)?;
     // A session which another account already approved must not become an
     // account-discovery oracle. Only its original per-user pending record may
     // resume it.
@@ -771,13 +821,22 @@ fn approve_device_link_for_user(
         ));
     }
 
-    let runtime = state.runtime_for(user_id)?;
-    let identity = runtime.state()?.identity;
-    let now = device_link_now(state)?;
-    let public_url = normalized_link_server_url(&state.config.public_url)?;
-    let (source, descriptor) =
+    let runtime = device_link_approval_stage("open_runtime", state.runtime_for(user_id))?;
+    let identity = device_link_approval_stage(
+        "read_runtime_state",
+        runtime.state().map_err(HostedDeviceError::from),
+    )?
+    .identity;
+    let now = device_link_approval_stage("read_clock", device_link_now(state))?;
+    let public_url = device_link_approval_stage(
+        "normalize_server",
+        normalized_link_server_url(&state.config.public_url),
+    )?;
+    let (source, descriptor) = device_link_approval_stage(
+        "create_source",
         NipAbSourceSession::create(session.target_public_key.clone(), now)
-            .map_err(|_| HostedDeviceError::InvalidDeviceLink("pairing setup failed".to_owned()))?;
+            .map_err(|_| HostedDeviceError::InvalidDeviceLink("pairing setup failed".to_owned())),
+    )?;
     let payload = FinitePairingPayloadV1 {
         version: NIP_AB_VERSION,
         purpose: FINITE_PAIRING_PURPOSE_V1.to_owned(),
@@ -794,7 +853,10 @@ fn approve_device_link_for_user(
         user_id: user_id.to_owned(),
         pairing_session_id: input.pairing_session_id.clone(),
         source_checkpoint: source.checkpoint(),
-        payload_json: serde_json::to_string(&payload)?,
+        payload_json: device_link_approval_stage(
+            "serialize_checkpoint",
+            serde_json::to_string(&payload).map_err(HostedDeviceError::from),
+        )?,
         source_confirmation_event: None,
         payload_event: None,
     };
@@ -815,13 +877,32 @@ fn approve_device_link_for_user(
         server_url: public_url,
         issued_at_unix_seconds: now,
         expires_at_unix_seconds: descriptor.expires_at_unix_seconds,
-        sealed_state: seal_pairing_secrets(state, user_id, &secrets)?,
+        sealed_state: device_link_approval_stage(
+            "seal_checkpoint",
+            seal_pairing_secrets(state, user_id, &secrets),
+        )?,
         fanout_id: format!("device-link-{}", &hex::encode(digest)[..40]),
     };
-    let pending = persist_pending_device_link(state, user_id, &pending)?;
-    let mut response = reconcile_device_link(state, user_id, pending)?;
+    let pending = device_link_approval_stage(
+        "persist_checkpoint",
+        persist_pending_device_link(state, user_id, &pending),
+    )?;
+    let mut response =
+        device_link_approval_stage("reconcile", reconcile_device_link(state, user_id, pending))?;
     response.source_descriptor = Some(http_pairing_descriptor(descriptor));
     Ok(response)
+}
+
+fn device_link_approval_stage<T>(
+    stage: &'static str,
+    result: Result<T, HostedDeviceError>,
+) -> Result<T, HostedDeviceError> {
+    result.inspect_err(|error| {
+        eprintln!(
+            "finitechat hosted-device device-link approval failed stage={stage} class={}",
+            error.diagnostic_class()
+        );
+    })
 }
 
 fn reconcile_device_link(

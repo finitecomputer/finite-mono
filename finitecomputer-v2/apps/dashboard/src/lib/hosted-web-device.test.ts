@@ -7,12 +7,14 @@ import {
   hostedDeviceAttachments,
   hostedDeviceBrainIdentityProvider,
   hostedDeviceConfig,
+  hostedDeviceDiagnosticPath,
   hostedDeviceHeaders,
   hostedDeviceProfileImage,
   hostedDeviceLinkStatus,
   hostedDeviceReconcileDevice,
   hostedDeviceRuntimeCommand,
   hostedDeviceSitesIdentityProvider,
+  hostedDeviceState,
 } from "@/lib/hosted-web-device";
 
 const verifiedAccount = {
@@ -44,6 +46,64 @@ test("hostedDeviceHeaders binds the internal call to the verified WorkOS user", 
   );
   assert.equal(headers.get("authorization"), "Bearer secret");
   assert.equal(headers.get("x-finite-workos-user-id"), "user_paul");
+});
+
+test("hosted-device diagnostic paths never expose resource identifiers", () => {
+  assert.equal(hostedDeviceDiagnosticPath("/v1/app/state"), "/v1/app/state");
+  assert.equal(
+    hostedDeviceDiagnosticPath(
+      "/v1/app/attachments/private-room/private-message/private-attachment"
+    ),
+    "/v1/app/attachments/:room/:message/:attachment"
+  );
+  assert.equal(
+    hostedDeviceDiagnosticPath("/v1/device-links/private-operation?secret=value"),
+    "/v1/device-links/:operation"
+  );
+  assert.equal(hostedDeviceDiagnosticPath("/v1/app/state/private-value"), "/unknown");
+  assert.equal(hostedDeviceDiagnosticPath("/private/account/path"), "/unknown");
+});
+
+test("hosted-device failures log only bounded request structure", async (context) => {
+  const originalFetch = global.fetch;
+  const originalConsoleError = console.error;
+  context.after(() => {
+    global.fetch = originalFetch;
+    console.error = originalConsoleError;
+  });
+  const logs: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    logs.push(args);
+  };
+  global.fetch = (async () =>
+    Response.json(
+      {
+        error:
+          "sensitive downstream detail with user_paul and internal-token",
+      },
+      { status: 502 }
+    )) as typeof fetch;
+
+  await assert.rejects(
+    hostedDeviceState(
+      { baseUrl: "https://device.internal", apiToken: "internal-token" },
+      verifiedAccount
+    ),
+    /sensitive downstream detail/u
+  );
+
+  assert.deepEqual(logs, [
+    [
+      "hosted-device request failed",
+      {
+        path: "/v1/app/state",
+        status: 502,
+        errorClass: "downstream_http",
+      },
+    ],
+  ]);
+  const serializedLogs = JSON.stringify(logs);
+  assert.doesNotMatch(serializedLogs, /user_paul|internal-token|sensitive downstream/u);
 });
 
 test("Brain identity operations use the narrow WorkOS-bound custody endpoint", async (context) => {

@@ -19,6 +19,30 @@ enum WebAuthenticationPresentationError: Error, Equatable {
 final class NativeWebAuthenticationPresenter: NSObject, WebAuthenticationPresenting {
     private var session: ASWebAuthenticationSession?
 
+    nonisolated static func callbackDiagnosticSummary(_ url: URL) -> String {
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let queryItems = components?.queryItems ?? []
+        let codeCount = queryItems.count(where: { $0.name == "code" })
+        let stateCount = queryItems.count(where: { $0.name == "state" })
+        let errorCount = queryItems.count(where: { $0.name == "error" })
+        let unexpectedCount = queryItems.count(where: {
+            $0.name != "code"
+                && $0.name != "state"
+                && $0.name != "error"
+                && $0.name != "error_description"
+        })
+        return [
+            "scheme_https=\(components?.scheme == "https")",
+            "host_expected=\(components?.host == "finite.computer")",
+            "path_expected=\(components?.path == "/auth/ios/callback")",
+            "fragment_present=\(components?.fragment != nil)",
+            "code_count=\(codeCount)",
+            "state_count=\(stateCount)",
+            "error_count=\(errorCount)",
+            "unexpected_query_count=\(unexpectedCount)",
+        ].joined(separator: " ")
+    }
+
     func authenticate(url: URL) async throws -> URL {
         cancel()
         return try await withCheckedThrowingContinuation { continuation in

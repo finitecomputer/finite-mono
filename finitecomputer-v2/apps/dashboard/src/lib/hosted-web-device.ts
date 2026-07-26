@@ -625,16 +625,65 @@ async function hostedDeviceJson<T>(
   init: RequestInit = {},
   timeoutMs = HOSTED_DEVICE_TIMEOUT_MS
 ): Promise<T> {
-  const response = await fetch(`${config.baseUrl}${path}`, {
-    ...init,
-    cache: "no-store",
-    headers: hostedDeviceHeaders(config, account, typeof init.body === "string"),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  const diagnosticPath = hostedDeviceDiagnosticPath(path);
+  let response: Response;
+  try {
+    response = await fetch(`${config.baseUrl}${path}`, {
+      ...init,
+      cache: "no-store",
+      headers: hostedDeviceHeaders(config, account, typeof init.body === "string"),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    console.error("hosted-device request failed", {
+      path: diagnosticPath,
+      errorClass:
+        error instanceof DOMException && error.name === "TimeoutError"
+          ? "timeout"
+          : "transport",
+    });
+    throw error;
+  }
   if (!response.ok) {
+    console.error("hosted-device request failed", {
+      path: diagnosticPath,
+      status: response.status,
+      errorClass: "downstream_http",
+    });
     throw new HostedDeviceRequestError(await responseError(response), response.status);
   }
   return response.json() as Promise<T>;
+}
+
+export function hostedDeviceDiagnosticPath(path: string) {
+  const pathname = path.split("?", 1)[0];
+  if (pathname.startsWith("/v1/app/attachments/")) {
+    return "/v1/app/attachments/:room/:message/:attachment";
+  }
+  if (pathname.startsWith("/v1/device-links/")) {
+    return "/v1/device-links/:operation";
+  }
+  if (
+    new Set([
+      "/v1/app/actions",
+      "/v1/app/agent-bindings/authorize-bootstrap",
+      "/v1/app/agent-bindings/ensure",
+      "/v1/app/agent-bindings/open",
+      "/v1/app/attachments",
+      "/v1/app/new-chat",
+      "/v1/app/runtime-commands",
+      "/v1/app/state",
+    ]).has(pathname)
+  ) {
+    return pathname;
+  }
+  if (pathname.startsWith("/v1/brain/")) {
+    return "/v1/brain/:operation";
+  }
+  if (pathname.startsWith("/v1/sites/")) {
+    return "/v1/sites/:operation";
+  }
+  return "/unknown";
 }
 
 function parseHostedDeviceLinkResponse(
