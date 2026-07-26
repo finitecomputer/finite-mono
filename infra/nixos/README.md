@@ -334,6 +334,7 @@ that final operation read-only unless the tester explicitly intends a write.
 | 9100 | 127.0.0.1 | node-exporter | new |
 | 2019 | 127.0.0.1 | caddy admin API | lat1/lat2 |
 | 14200 | 10.254.3.1 (WireGuard) | private proxy to Core :4200 | lat3 Runner only |
+| 18790 | 10.254.3.1 (WireGuard) | private proxy to Identity Authority :8790 | lat3 Runner only |
 | dynamic 32768-60999 | 10.254.3.2 (WireGuard) | lat3 Kata Runtime contact/health | lat1 peer only |
 
 Caddy vhost → backend: `finite.computer` → 4200 for
