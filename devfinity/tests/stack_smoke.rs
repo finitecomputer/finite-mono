@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use finitechat_core::native_device_link::NativeDeviceLinkSession;
+use finitechat_core::native_device_link::{NativeDeviceEnrollmentSession, NativeDeviceLinkSession};
 use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -177,6 +177,7 @@ fn pair_native_device(
     // that context.
     link.approve_authenticated_account(None)?;
     let account_secret = link.claim_account_secret()?;
+    let enrollment_grant = link.enrollment_grant()?;
     if account_secret.len() != 64 || !account_secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("pairing did not return one 32-byte account secret".into());
     }
@@ -189,15 +190,33 @@ fn pair_native_device(
         account_secret_hex: Some(account_secret),
         now_unix_seconds: None,
     })?;
-    let target_state = target.dispatch_and_wait(AppAction::StartRuntime)?;
-    let account_id = target_state.identity.account_id;
+    let mut target_state = target.dispatch_and_wait(AppAction::StartRuntime)?;
+    let account_id = target_state.identity.account_id.clone();
     if account_id.len() != 64 || !account_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("paired Device did not open the expected Native Principal".into());
     }
 
     link.acknowledge_stored()?;
-    link.wait_until_ready(None)?;
-    Ok(account_id)
+    let enrollment =
+        NativeDeviceEnrollmentSession::resume(dashboard_origin.to_owned(), enrollment_grant)?;
+    let ready = enrollment.wait_until_ready()?;
+    for _ in 0..100_000 {
+        let exact_receipts_present = ready.manifests.iter().all(|expected| {
+            target_state
+                .device_link_bootstrap_receipts
+                .iter()
+                .any(|actual| {
+                    actual.bootstrap_id == expected.bootstrap_id
+                        && actual.room_id == expected.room_id
+                        && actual.manifest_sha256 == expected.manifest_sha256
+                })
+        });
+        if exact_receipts_present && target_state.paired_agent.is_some() {
+            return Ok(account_id);
+        }
+        target_state = target.dispatch_and_wait(AppAction::StartRuntime)?;
+    }
+    Err("paired Device did not converge to exact complete-history receipts".into())
 }
 
 struct DevfinityEnv {
