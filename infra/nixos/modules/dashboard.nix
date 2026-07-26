@@ -4,8 +4,8 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # 2026-07-25.4, source a2cf549134fb9f9cf4a887586a5e3a8e323a346f.
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:3eaec043be406af9af1b1ed4616a7bdb8553f552b66d4c3cec7f556dfd8ded5f";
+    # 2026-07-26.1, source 6c7aa6d8cf2f8d55e4d236695ed21462c3832097.
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:fe83cd4ebab7ec5ef7c476c6d5953fb83d1ee580e72adf48f9ae6d25333b2e66";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
