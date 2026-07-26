@@ -2851,6 +2851,7 @@ impl BridgeCoreState {
             &artifact,
             RuntimeBootIntent::Normal,
             None,
+            None,
         )?;
         let idempotency_key = format!(
             "cold-relocate:{}:{}:{}",
@@ -3669,6 +3670,8 @@ impl BridgeCoreState {
                         desired_artifact,
                         boot_intent,
                         (pending.kind == RuntimeControlKind::Upgrade)
+                            .then_some(runtime_environment),
+                        (pending.kind == RuntimeControlKind::Upgrade)
                             .then_some(runtime_secret_references),
                     )
                 })
@@ -3700,14 +3703,18 @@ impl BridgeCoreState {
         &mut self,
         input: CompleteRuntimeControlRequestInput,
     ) -> CoreResult<RuntimeControlRequest> {
-        self.complete_runtime_control_request_with_runtime_secret_references(input, &[])
+        self.complete_runtime_control_request_with_runtime_configuration(input, None, &[])
     }
 
-    pub(crate) fn complete_runtime_control_request_with_runtime_secret_references(
+    pub(crate) fn complete_runtime_control_request_with_runtime_configuration(
         &mut self,
         input: CompleteRuntimeControlRequestInput,
+        runtime_environment: Option<&BTreeMap<String, String>>,
         runtime_secret_references: &[String],
     ) -> CoreResult<RuntimeControlRequest> {
+        if let Some(runtime_environment) = runtime_environment {
+            validate_runtime_spec_environment(runtime_environment)?;
+        }
         runtime_spec_secret_references(runtime_secret_references)?;
         let now = input.now.clone().unwrap_or(current_time_iso()?);
         if let Some(completed) = self.runtime_control_requests.get(&input.request_id)
@@ -3831,6 +3838,7 @@ impl BridgeCoreState {
                         current_artifact,
                         &target,
                         RuntimeBootIntent::Normal,
+                        runtime_environment,
                         Some(runtime_secret_references),
                     )
                 })
@@ -7202,6 +7210,7 @@ pub(crate) fn runtime_operation_spec_v1(
     current_artifact: &RuntimeArtifact,
     desired_artifact: &RuntimeArtifact,
     boot_intent: RuntimeBootIntent,
+    refreshed_environment: Option<&BTreeMap<String, String>>,
     refreshed_secret_references: Option<&[String]>,
 ) -> CoreResult<RuntimeSpecEnvelope> {
     validate_runtime_spec_binding(
@@ -7218,11 +7227,14 @@ pub(crate) fn runtime_operation_spec_v1(
     } else {
         current.secret_references.clone()
     };
+    let environment = refreshed_environment
+        .cloned()
+        .unwrap_or_else(|| current.environment.clone());
     build_runtime_spec_v1(
         identity,
         desired_artifact,
         &current.durable_state_id,
-        current.environment.clone(),
+        environment,
         secret_references,
         boot_intent,
     )
@@ -13261,6 +13273,10 @@ mod tests {
                 now: Some("2026-05-25T13:04:55Z".to_string()),
             })
             .unwrap();
+        let refreshed_environment = BTreeMap::from([(
+            "FINITE_BRAIN_SERVER_URL".to_string(),
+            "https://brain.finite.computer".to_string(),
+        )]);
         let refreshed_secret_references = vec!["FAL_KEY".to_string(), "XAI_API_KEY".to_string()];
         let lease = state
             .lease_runtime_control_request_with_runtime_configuration(
@@ -13276,7 +13292,7 @@ mod tests {
                     }),
                     now: Some("2026-05-25T13:05:00Z".to_string()),
                 },
-                &BTreeMap::new(),
+                &refreshed_environment,
                 &refreshed_secret_references,
             )
             .unwrap()
@@ -13301,6 +13317,10 @@ mod tests {
         assert_eq!(
             runtime_spec_v1(synthesized_upgrade_spec).secret_references,
             vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
+        );
+        assert_eq!(
+            runtime_spec_v1(synthesized_upgrade_spec).environment,
+            refreshed_environment
         );
 
         let mismatch = state
@@ -13338,7 +13358,7 @@ mod tests {
             .unwrap()
             .retired_at = Some("2026-05-25T13:06:30Z".to_string());
         state
-            .complete_runtime_control_request_with_runtime_secret_references(
+            .complete_runtime_control_request_with_runtime_configuration(
                 CompleteRuntimeControlRequestInput {
                     request_id: upgrade.id.clone(),
                     runner_id: "kata-runner".to_string(),
@@ -13356,6 +13376,7 @@ mod tests {
                     retirement_snapshot: None,
                     now: Some("2026-05-25T13:06:40Z".to_string()),
                 },
+                Some(&refreshed_environment),
                 &refreshed_secret_references,
             )
             .unwrap();
@@ -13385,6 +13406,10 @@ mod tests {
         assert_eq!(
             runtime_spec_v1(persisted_spec).secret_references,
             vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
+        );
+        assert_eq!(
+            runtime_spec_v1(persisted_spec).environment,
+            refreshed_environment
         );
         assert!(
             state
