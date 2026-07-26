@@ -25,6 +25,10 @@ fmt:
 test:
     cargo test --workspace --locked
 
+# Runs the opt-in full-history Device convergence stress test.
+chat-history-stress:
+    cargo test --locked -p finitechat-core --lib tests::late_same_account_device_converges_topics_named_chats_and_archives_after_restart -- --ignored --exact --nocapture
+
 # Web-only contributor gate: dashboard unit tests, lint, and production build.
 web-check:
     cd finitecomputer-v2/apps/dashboard && npm ci && npm test && npm run lint && npm run build
