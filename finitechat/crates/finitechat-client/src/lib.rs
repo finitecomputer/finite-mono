@@ -11310,6 +11310,37 @@ mod tests {
     }
 
     #[test]
+    fn current_reader_opens_actual_candidate_v9_encrypted_snapshot() {
+        // This SQLite file was emitted by the V9 candidate before the
+        // expand/contract branches were restacked. Keep it static so the
+        // release reader must remain compatible with state already produced
+        // during candidate testing.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        std::fs::write(
+            &db_path,
+            include_bytes!("../tests/fixtures/client-state-v9-candidate.sqlite3"),
+        )
+        .unwrap();
+        let secret = NostrSecretKey::from_bytes([43; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "v9-candidate-device";
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let store = SqliteClientStore::open(&db_path, options).unwrap();
+        let restored = store
+            .load_device(FiniteChatDeviceConfig {
+                account_secret_key: secret,
+                device_id: device_id.to_owned(),
+                now_unix_seconds: NOW,
+                credential_not_before_unix_seconds: NOW.saturating_sub(60),
+                credential_not_after_unix_seconds: NOW.saturating_add(600),
+            })
+            .unwrap();
+        let fanout = restored.link_fanout("v9-candidate-fanout").unwrap();
+        assert_eq!(fanout.target_device.device_id, "v9-target-device");
+        fanout.validate_limits().unwrap();
+    }
+
+    #[test]
     fn refreshed_device_clock_accepts_key_packages_created_after_runtime_open() {
         let alice_secret = NostrSecretKey::from_bytes([1; NOSTR_SECRET_KEY_BYTES]).unwrap();
         let bob_secret = NostrSecretKey::from_bytes([2; NOSTR_SECRET_KEY_BYTES]).unwrap();
