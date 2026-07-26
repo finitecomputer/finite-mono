@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 pub mod workos_fixture;
 use workos_fixture::{
@@ -303,6 +303,7 @@ impl Stack {
         let logs_dir = run_dir.join("logs");
         let pids_dir = run_dir.join("pids");
         let process_compose_control_dir = process_compose_control_dir(&run_dir);
+        let port_offset = optional_env_u16("DEVFINITY_PORT_OFFSET", 0)?;
         let runtime_agent_port = optional_env_u16("DEVFINITY_RUNTIME_AGENT_PORT", 18080)?;
         let apple_container_name_prefix = std::env::var("DEVFINITY_APPLE_CONTAINER_NAME_PREFIX")
             .ok()
@@ -318,16 +319,16 @@ impl Stack {
             logs_dir,
             pids_dir,
             ports: Ports {
-                core: 14200,
-                dashboard: 13002,
-                postgres: 15432,
-                finitechat: 18787,
-                hosted_web_device: 38918,
-                finitesites: 18789,
-                finite_identity: 18788,
-                finite_brain: 18790,
-                finite_private_limiter: 18002,
-                workos_fixture: 14199,
+                core: offset_port(14200, port_offset)?,
+                dashboard: offset_port(13002, port_offset)?,
+                postgres: offset_port(15432, port_offset)?,
+                finitechat: offset_port(18787, port_offset)?,
+                hosted_web_device: offset_port(38918, port_offset)?,
+                finitesites: offset_port(18789, port_offset)?,
+                finite_identity: offset_port(18788, port_offset)?,
+                finite_brain: offset_port(18790, port_offset)?,
+                finite_private_limiter: offset_port(18002, port_offset)?,
+                workos_fixture: offset_port(14199, port_offset)?,
                 runtime_agent: runtime_agent_port,
             },
             core_token: "devfinity-core-service-token".to_string(),
@@ -2639,6 +2640,7 @@ wait "$postgres_pid"
                 self.hosted_web_device_token.clone(),
             ),
             ("FINITE_SITES_API", self.finitesites_api_url()),
+            ("FINITE_BRAIN_SERVER_URL", self.finite_brain_url()),
             (
                 "FC_SITES_UPSTREAM_URL",
                 format!("http://127.0.0.1:{}", self.ports.finitesites),
@@ -3286,6 +3288,11 @@ fn optional_env_u16(name: &str, default: u16) -> Result<u16> {
     Ok(parsed)
 }
 
+fn offset_port(base: u16, offset: u16) -> Result<u16> {
+    base.checked_add(offset)
+        .ok_or_else(|| anyhow!("DEVFINITY_PORT_OFFSET places a service port above 65535"))
+}
+
 fn required_secret_env(name: &str) -> Result<String> {
     nonempty_env_value(name)
         .with_context(|| format!("{name} is required for the selected inference mode"))
@@ -3770,6 +3777,19 @@ mod tests {
         assert!(yaml.contains("finitesites:\n        condition: process_healthy"));
         assert!(!yaml.contains("postgres:16-alpine"));
         assert!(!yaml.contains("fpk_"));
+    }
+
+    #[test]
+    fn port_offsets_keep_parallel_worktrees_isolated_and_bounded() {
+        assert_eq!(offset_port(13_002, 1_000).unwrap(), 14_002);
+        assert!(offset_port(65_000, 1_000).is_err());
+
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        stack.ports.finite_brain = 19_790;
+        assert!(stack.env_values().contains(&(
+            "FINITE_BRAIN_SERVER_URL",
+            "http://127.0.0.1:19790".to_owned()
+        )));
     }
 
     #[test]

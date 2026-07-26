@@ -243,6 +243,38 @@ async fn initial_nip_ab_approval_persists_a_target_bound_checkpoint() {
     let root = TempDir::new().unwrap();
     let (server_url, _, server_task) =
         spawn_chat_server(&root.path().join("pairing-server.sqlite3"), None).await;
+    let authority_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_authority_requests = std::sync::Arc::clone(&authority_requests);
+    let identity_authority = axum::Router::new().route(
+        "/api/v1/operator/account-principal-bindings",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let observed_authority_requests =
+                    std::sync::Arc::clone(&observed_authority_requests);
+                async move {
+                    assert_eq!(
+                        headers
+                            .get("x-finite-operator-token")
+                            .and_then(|value| value.to_str().ok()),
+                        Some("pairing-identity-test-token")
+                    );
+                    observed_authority_requests.lock().unwrap().push(body);
+                    axum::Json(serde_json::json!({ "created": true }))
+                }
+            },
+        ),
+    );
+    let authority_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority_address = authority_listener.local_addr().unwrap();
+    let authority_task = tokio::spawn(async move {
+        axum::serve(authority_listener, identity_authority)
+            .await
+            .unwrap()
+    });
+    let authority_config = HostedIdentityAuthorityConfig {
+        base_url: format!("http://{authority_address}"),
+        operator_token: "pairing-identity-test-token".to_owned(),
+    };
     let target = NipAbTargetSession::prepare();
     let pairing_session_id = "pair-hosted-happy-path";
     let target_device_id = "ios-hosted-happy-path";
@@ -265,14 +297,26 @@ async fn initial_nip_ab_approval_persists_a_target_bound_checkpoint() {
     assert_eq!(created.pairing_session_id, pairing_session_id);
 
     let data_root = root.path().join("hosted-devices");
-    let hosted = app(HostedDeviceConfig {
+    let hosted_config = HostedDeviceConfig {
         data_root: data_root.clone(),
-        server_url,
+        server_url: server_url.clone(),
         public_url: PUBLIC_SERVER_URL.to_owned(),
         api_token: TOKEN.to_owned(),
-    });
+    };
+    let existing_hosted =
+        app_with_identity_authority(hosted_config.clone(), authority_config.clone());
+    let existing_state = state_for(existing_hosted, "user_pairing_happy_path").await;
+    let existing_account_id = existing_state["identity"]["account_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Recreate the service over the durable account before approving. A fresh
+    // fixture alone cannot catch deployment failures that occur while opening
+    // an established Hosted Device and reasserting its authority binding.
+    let hosted = app_with_identity_authority(hosted_config, authority_config);
     let response = device_link_for(
-        hosted,
+        hosted.clone(),
         "user_pairing_happy_path",
         "/v1/device-links/approve",
         pairing_session_id,
@@ -299,6 +343,14 @@ async fn initial_nip_ab_approval_persists_a_target_bound_checkpoint() {
     };
     NipAbTargetSession::create(target, &descriptor, created.issued_at_unix_seconds)
         .expect("the hosted source descriptor must authenticate for the original target");
+    let reopened_state = state_for(hosted, "user_pairing_happy_path").await;
+    assert_eq!(
+        reopened_state["identity"]["account_id"], existing_account_id,
+        "service restart must reopen the same durable human account"
+    );
+    let authority_requests = authority_requests.lock().unwrap();
+    assert_eq!(authority_requests.len(), 2);
+    assert_eq!(authority_requests[0], authority_requests[1]);
 
     let record_path = data_root
         .join("users")
@@ -314,6 +366,7 @@ async fn initial_nip_ab_approval_persists_a_target_bound_checkpoint() {
         record_path.is_file(),
         "approval must durably persist its target-bound checkpoint before returning"
     );
+    authority_task.abort();
     server_task.abort();
 }
 

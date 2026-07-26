@@ -3,7 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use finitechat_core::native_device_link::NativeDeviceLinkSession;
+use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions};
 use serde_json::Value;
+use tempfile::TempDir;
 
 #[test]
 #[ignore = "requires a running devfinity stack; run `just dev rust-smoke`"]
@@ -127,6 +130,74 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
             .unwrap_or("<unknown>")
     );
     Ok(())
+}
+
+#[test]
+#[ignore = "requires a running devfinity stack; run `just dev smoke`"]
+fn native_device_pairing_crosses_dashboard_hosted_and_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let env = DevfinityEnv::from_env()?;
+    assert_eq!(env.profile, "services-only");
+    let dashboard_origin = env
+        .dashboard_url
+        .strip_suffix("/dashboard")
+        .ok_or("FC_DASHBOARD_URL must end in /dashboard")?;
+
+    // The shell smoke opens this same Hosted Device before invoking this test.
+    // Pair twice so both an established account and the source state changed by
+    // a previous Device admission must survive the complete boundary.
+    let first_account = pair_native_device(&env, dashboard_origin, "first")?;
+    let second_account = pair_native_device(&env, dashboard_origin, "second")?;
+    assert_eq!(
+        first_account, second_account,
+        "successive clean Devices must join the same durable human account"
+    );
+
+    println!(
+        "native Device pairing crossed dashboard, Hosted Device, Identity Authority, and chat server twice"
+    );
+    Ok(())
+}
+
+fn pair_native_device(
+    env: &DevfinityEnv,
+    dashboard_origin: &str,
+    suffix: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let run_id = smoke_run_id();
+    let device_id = format!("devfinity-pair-{suffix}-{run_id}");
+    let link = NativeDeviceLinkSession::create(
+        env.finitechat_url.clone(),
+        dashboard_origin.to_owned(),
+        device_id.clone(),
+    )?;
+
+    // Fixture-mode devfinity uses its bounded server-side account context.
+    // Production uses the same route after bearer verification has produced
+    // that context.
+    link.approve_authenticated_account(None)?;
+    let account_secret = link.claim_account_secret()?;
+    if account_secret.len() != 64 || !account_secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("pairing did not return one 32-byte account secret".into());
+    }
+
+    let target_store = TempDir::new()?;
+    let target = FiniteChatRuntime::open(OpenOptions {
+        data_dir: target_store.path().display().to_string(),
+        server_url: env.finitechat_url.clone(),
+        device_id,
+        account_secret_hex: Some(account_secret),
+        now_unix_seconds: None,
+    })?;
+    let target_state = target.dispatch_and_wait(AppAction::StartRuntime)?;
+    let account_id = target_state.identity.account_id;
+    if account_id.len() != 64 || !account_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("paired Device did not open the expected Native Principal".into());
+    }
+
+    link.acknowledge_stored()?;
+    link.wait_until_ready(None)?;
+    Ok(account_id)
 }
 
 struct DevfinityEnv {
