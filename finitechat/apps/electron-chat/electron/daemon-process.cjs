@@ -27,6 +27,8 @@ const DEVICE_LINK_FAILURE_MESSAGES = Object.freeze({
   FINITECHAT_DEVICE_LINK_EXPIRED: "This device link expired. Start a new link to try again.",
   FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED:
     "The approved device-link payload did not match this link. Start a new link to try again.",
+  FINITECHAT_DEVICE_LINK_INCOMPATIBLE_PAYLOAD:
+    "Finite is being updated. This desktop can link after the update finishes.",
   FINITECHAT_DEVICE_LINK_RESULT_PIPE:
     "This desktop could not securely receive the linked account. Start a new link to try again.",
 });
@@ -38,6 +40,10 @@ const DEVICE_LINK_BOOTSTRAP_FAILURE_CODES = new Map([
   ["device-link server returned an invalid response", "FINITECHAT_DEVICE_LINK_INVALID_RESPONSE"],
   ["device-link request expired", "FINITECHAT_DEVICE_LINK_EXPIRED"],
   ["device-link payload failed authentication", "FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED"],
+  [
+    "device-link source is not compatible with this app version",
+    "FINITECHAT_DEVICE_LINK_INCOMPATIBLE_PAYLOAD",
+  ],
   ["device-link result pipe failed", "FINITECHAT_DEVICE_LINK_RESULT_PIPE"],
 ]);
 

@@ -17,8 +17,8 @@ use zeroize::Zeroizing;
 use crate::FiniteChatCoreError;
 use crate::native_authkit::NativeAuthKitSession;
 use crate::nip_ab::{
-    FinitePairingPayloadV1, NIP_AB_VERSION, NipAbPayloadType, NipAbSourceDescriptorV1,
-    NipAbTargetSession,
+    FinitePairingPayloadDecodeError, NIP_AB_VERSION, NipAbPayloadType, NipAbSourceDescriptorV1,
+    NipAbTargetSession, decode_finite_pairing_payload_v2,
 };
 
 const MAX_PAIRING_RESPONSE_BYTES: usize = 128 * 1024;
@@ -326,8 +326,12 @@ impl NativeDeviceLinkSession {
         if payload_type != NipAbPayloadType::Custom {
             return Err(pairing_error("pairing payload type is invalid"));
         }
-        let payload: FinitePairingPayloadV1 = serde_json::from_str(&encoded)
-            .map_err(|_| pairing_error("pairing payload is invalid"))?;
+        let payload = decode_finite_pairing_payload_v2(&encoded).map_err(|error| match error {
+            FinitePairingPayloadDecodeError::IncompatibleVersion => {
+                pairing_error("pairing source is not compatible with this app version")
+            }
+            FinitePairingPayloadDecodeError::Invalid => pairing_error("pairing payload is invalid"),
+        })?;
         payload
             .validate(
                 &self.pairing_session_id,

@@ -27,8 +27,9 @@ use finite_brain_core::{
 use finite_identity::{FiniteIdentity, IdentityPaths};
 use finite_nostr::{NostrPublicKey, decrypt_nip44, encrypt_nip44};
 use finitechat_core::nip_ab::{
-    FINITE_PAIRING_PURPOSE_V1, FinitePairingPayloadV1, NIP_AB_SESSION_TTL_SECONDS, NIP_AB_VERSION,
-    NipAbPayloadType, NipAbSourceCheckpointV1, NipAbSourceDescriptorV1, NipAbSourceSession,
+    FINITE_PAIRING_PAYLOAD_VERSION, FINITE_PAIRING_PURPOSE_V2, FinitePairingPayloadV2,
+    NIP_AB_SESSION_TTL_SECONDS, NIP_AB_VERSION, NipAbPayloadType, NipAbSourceCheckpointV1,
+    NipAbSourceDescriptorV1, NipAbSourceSession,
 };
 use finitechat_core::{
     AppAction, AppProfileChatBootstrapInput, AppProfileChatBootstrapPreparedCommit, AppState,
@@ -940,9 +941,9 @@ fn approve_device_link_for_user(
         NipAbSourceSession::create(session.target_public_key.clone(), now)
             .map_err(|_| HostedDeviceError::InvalidDeviceLink("pairing setup failed".to_owned())),
     )?;
-    let payload = FinitePairingPayloadV1 {
-        version: NIP_AB_VERSION,
-        purpose: FINITE_PAIRING_PURPOSE_V1.to_owned(),
+    let payload = FinitePairingPayloadV2 {
+        version: FINITE_PAIRING_PAYLOAD_VERSION,
+        purpose: FINITE_PAIRING_PURPOSE_V2.to_owned(),
         pairing_session_id: input.pairing_session_id.clone(),
         account_secret_hex: identity.account_secret_hex.clone(),
         account_id: identity.account_id.clone(),

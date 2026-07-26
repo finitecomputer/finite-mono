@@ -682,6 +682,10 @@ test("device-link child failures use a bounded exact allowlist with fixed render
     ["device-link server returned an invalid response", "FINITECHAT_DEVICE_LINK_INVALID_RESPONSE"],
     ["device-link request expired", "FINITECHAT_DEVICE_LINK_EXPIRED"],
     ["device-link payload failed authentication", "FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED"],
+    [
+      "device-link source is not compatible with this app version",
+      "FINITECHAT_DEVICE_LINK_INCOMPATIBLE_PAYLOAD",
+    ],
     ["device-link result pipe failed", "FINITECHAT_DEVICE_LINK_RESULT_PIPE"],
   ]);
   for (const [line, code] of knownFailures) {
@@ -693,6 +697,13 @@ test("device-link child failures use a bounded exact allowlist with fixed render
   assert.equal(
     deviceLinkFailureMessage(payloadRejected),
     "The approved device-link payload did not match this link. Start a new link to try again."
+  );
+  const incompatible = parseDeviceLinkBootstrapError(
+    "device-link source is not compatible with this app version"
+  );
+  assert.equal(
+    deviceLinkFailureMessage(incompatible),
+    "Finite is being updated. This desktop can link after the update finishes."
   );
 
   const serverStatus = parseDeviceLinkBootstrapError("device-link server rejected the request (502)");

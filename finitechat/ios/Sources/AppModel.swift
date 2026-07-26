@@ -1208,6 +1208,11 @@ final class AppModel: ObservableObject, AppReconciler {
         if description.localizedCaseInsensitiveContains("temporarily unavailable") {
             return "Secure sign in is temporarily unavailable. Try again in a moment."
         }
+        if description.localizedCaseInsensitiveContains(
+            "not compatible with this app version"
+        ) {
+            return "Finite is being updated. This app can link after the update finishes."
+        }
         switch stage {
         case .startingAuthentication:
             return "Secure sign in could not start. Please try again."

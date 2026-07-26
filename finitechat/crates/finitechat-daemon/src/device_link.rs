@@ -2,8 +2,8 @@ use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use finitechat_core::nip_ab::{
-    FinitePairingPayloadV1, NIP_AB_SESSION_TTL_SECONDS, NIP_AB_VERSION, NipAbPayloadType,
-    NipAbSourceDescriptorV1, NipAbTargetSession,
+    FinitePairingPayloadDecodeError, NIP_AB_SESSION_TTL_SECONDS, NIP_AB_VERSION, NipAbPayloadType,
+    NipAbSourceDescriptorV1, NipAbTargetSession, decode_finite_pairing_payload_v2,
 };
 use finitechat_http::{
     CreatePairingSessionRequest, ExpirePairingSessionRequest, GetPairingSessionRequest,
@@ -116,6 +116,8 @@ pub enum DeviceLinkBootstrapError {
     Expired,
     #[error("device-link payload failed authentication")]
     PayloadRejected,
+    #[error("device-link source is not compatible with this app version")]
+    IncompatiblePayload,
     #[error("device-link result pipe failed")]
     ResultPipe,
 }
@@ -257,8 +259,15 @@ impl WaitingDeviceLinkSession {
             if kind != NipAbPayloadType::Custom {
                 return Err(DeviceLinkBootstrapError::PayloadRejected);
             }
-            let payload: FinitePairingPayloadV1 = serde_json::from_str(&encoded)
-                .map_err(|_| DeviceLinkBootstrapError::PayloadRejected)?;
+            let payload =
+                decode_finite_pairing_payload_v2(&encoded).map_err(|error| match error {
+                    FinitePairingPayloadDecodeError::IncompatibleVersion => {
+                        DeviceLinkBootstrapError::IncompatiblePayload
+                    }
+                    FinitePairingPayloadDecodeError::Invalid => {
+                        DeviceLinkBootstrapError::PayloadRejected
+                    }
+                })?;
             payload
                 .validate(
                     &self.pairing_session_id,

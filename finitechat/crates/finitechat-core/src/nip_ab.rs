@@ -20,7 +20,8 @@ pub const NIP_AB_VERSION: u16 = 1;
 pub const NIP_AB_EVENT_KIND: u16 = 24_134;
 pub const NIP_AB_SESSION_TTL_SECONDS: u64 = 120;
 pub const NIP_AB_MAX_PLAINTEXT_BYTES: usize = 65_535;
-pub const FINITE_PAIRING_PURPOSE_V1: &str = "finitechat.account-pairing.v1";
+pub const FINITE_PAIRING_PAYLOAD_VERSION: u16 = 2;
+pub const FINITE_PAIRING_PURPOSE_V2: &str = "finitechat.account-pairing.v2";
 const NIP_AB_MIN_CONTENT_CHARS: usize = 132;
 const NIP_AB_MAX_CONTENT_CHARS: usize = 87_472;
 const NIP_AB_MAX_PROCESSED_EVENTS: usize = 8;
@@ -122,7 +123,7 @@ pub struct NipAbSourceDescriptorV1 {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-pub struct FinitePairingPayloadV1 {
+pub struct FinitePairingPayloadV2 {
     #[zeroize(skip)]
     pub version: u16,
     pub purpose: String,
@@ -144,7 +145,7 @@ pub struct FinitePairingPayloadV1 {
     pub expires_at_unix_seconds: u64,
 }
 
-impl FinitePairingPayloadV1 {
+impl FinitePairingPayloadV2 {
     pub fn validate(
         &self,
         expected_pairing_session_id: &str,
@@ -152,8 +153,8 @@ impl FinitePairingPayloadV1 {
         expected_server_url: &str,
         now_unix_seconds: u64,
     ) -> Result<(), NipAbError> {
-        if self.version != NIP_AB_VERSION
-            || self.purpose != FINITE_PAIRING_PURPOSE_V1
+        if self.version != FINITE_PAIRING_PAYLOAD_VERSION
+            || self.purpose != FINITE_PAIRING_PURPOSE_V2
             || self.pairing_session_id != expected_pairing_session_id
             || self.target_device_id != expected_target_device_id
             || self.enrollment_user_id.is_empty()
@@ -178,6 +179,29 @@ impl FinitePairingPayloadV1 {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum FinitePairingPayloadDecodeError {
+    #[error("pairing source uses an incompatible payload version")]
+    IncompatibleVersion,
+    #[error("pairing payload is invalid")]
+    Invalid,
+}
+
+pub fn decode_finite_pairing_payload_v2(
+    encoded: &str,
+) -> Result<FinitePairingPayloadV2, FinitePairingPayloadDecodeError> {
+    let value = serde_json::from_str::<serde_json::Value>(encoded)
+        .map_err(|_| FinitePairingPayloadDecodeError::Invalid)?;
+    if value.get("version").and_then(serde_json::Value::as_u64)
+        != Some(u64::from(FINITE_PAIRING_PAYLOAD_VERSION))
+        || value.get("purpose").and_then(serde_json::Value::as_str)
+            != Some(FINITE_PAIRING_PURPOSE_V2)
+    {
+        return Err(FinitePairingPayloadDecodeError::IncompatibleVersion);
+    }
+    serde_json::from_value(value).map_err(|_| FinitePairingPayloadDecodeError::Invalid)
 }
 
 pub struct NipAbTargetBootstrap {
@@ -952,9 +976,9 @@ mod tests {
 
         let source_sas = source.accept_offer(&offer, NOW + 1).unwrap();
         let confirmation = source.confirm_sas(NOW + 1).unwrap();
-        let payload = FinitePairingPayloadV1 {
-            version: 1,
-            purpose: FINITE_PAIRING_PURPOSE_V1.to_owned(),
+        let payload = FinitePairingPayloadV2 {
+            version: FINITE_PAIRING_PAYLOAD_VERSION,
+            purpose: FINITE_PAIRING_PURPOSE_V2.to_owned(),
             pairing_session_id: "pair-test".to_owned(),
             account_secret_hex: "11".repeat(32),
             account_id: Keys::new(parse_secret_key(&"11".repeat(32)).unwrap())
@@ -983,7 +1007,7 @@ mod tests {
         target.confirm_sas(NOW + 2).unwrap();
         let (payload_type, received) = target.accept_payload(&payload_event, NOW + 2).unwrap();
         assert_eq!(payload_type, NipAbPayloadType::Custom);
-        let decoded: FinitePairingPayloadV1 = serde_json::from_str(&received).unwrap();
+        let decoded = decode_finite_pairing_payload_v2(&received).unwrap();
         assert_eq!(decoded.target_device_id, "ios-test");
 
         let complete = target.complete(NOW + 2).unwrap();
@@ -1053,9 +1077,9 @@ mod tests {
     #[test]
     fn finite_payload_route_account_and_expiry_substitutions_fail_closed() {
         let account_secret = "11".repeat(32);
-        let payload = FinitePairingPayloadV1 {
-            version: NIP_AB_VERSION,
-            purpose: FINITE_PAIRING_PURPOSE_V1.to_owned(),
+        let payload = FinitePairingPayloadV2 {
+            version: FINITE_PAIRING_PAYLOAD_VERSION,
+            purpose: FINITE_PAIRING_PURPOSE_V2.to_owned(),
             pairing_session_id: "pair-bound".to_owned(),
             account_secret_hex: account_secret.clone(),
             account_id: Keys::new(parse_secret_key(&account_secret).unwrap())
@@ -1106,6 +1130,25 @@ mod tests {
                 NOW + NIP_AB_SESSION_TTL_SECONDS + 1
             ),
             Err(NipAbError::InvalidPayload)
+        ));
+    }
+
+    #[test]
+    fn predecessor_payload_is_reported_as_incompatible_instead_of_invalid() {
+        let predecessor = serde_json::json!({
+            "version": 1,
+            "purpose": "finitechat.account-pairing.v1",
+            "pairing_session_id": "pair-old",
+            "account_secret_hex": "11".repeat(32),
+            "account_id": "22".repeat(32),
+            "target_device_id": "ios-old",
+            "server_url": "https://chat.finite.test",
+            "issued_at_unix_seconds": NOW,
+            "expires_at_unix_seconds": NOW + NIP_AB_SESSION_TTL_SECONDS,
+        });
+        assert!(matches!(
+            decode_finite_pairing_payload_v2(&predecessor.to_string()),
+            Err(FinitePairingPayloadDecodeError::IncompatibleVersion)
         ));
     }
 }

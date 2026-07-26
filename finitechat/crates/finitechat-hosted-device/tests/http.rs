@@ -4,7 +4,7 @@ use finite_brain_core::{BRAIN_IDENTITY_PROVIDER_VERSION, FolderKey};
 use finite_identity::{FiniteIdentity, IdentityPaths};
 use finite_nostr::verify_event_integrity;
 use finitechat_core::nip_ab::{
-    FinitePairingPayloadV1, NipAbPayloadType, NipAbSourceDescriptorV1, NipAbTargetSession,
+    NipAbPayloadType, NipAbSourceDescriptorV1, NipAbTargetSession, decode_finite_pairing_payload_v2,
 };
 use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions, npub_from_account_id};
 use finitechat_hosted_device::{
@@ -537,7 +537,7 @@ async fn encrypted_enrollment_capability_resumes_after_grant_expiry_without_work
     target_session.confirm_sas(now).unwrap();
     let (kind, payload_json) = target_session.accept_payload(&payload_event, now).unwrap();
     assert_eq!(kind, NipAbPayloadType::Custom);
-    let payload: FinitePairingPayloadV1 = serde_json::from_str(&payload_json).unwrap();
+    let payload = decode_finite_pairing_payload_v2(&payload_json).unwrap();
     payload
         .validate(pairing_session_id, target_device_id, PUBLIC_SERVER_URL, now)
         .unwrap();
