@@ -63,6 +63,7 @@ import type {
 } from "@/lib/hosted-web-device";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { electronDeviceLinkPresentation } from "@/lib/electron-chat-runtime";
+import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
 import { runtimeCanPresentActivity } from "@/lib/runtime-presentation";
@@ -1228,11 +1229,13 @@ function MessageAttachments({ attachmentUrl, compact = false, message }: { attac
 }
 
 function AttachmentCard({ attachmentUrl, attachment, compact, message }: { attachmentUrl: AttachmentUrl; attachment: HostedChatMediaAttachment; compact: boolean; message: HostedChatMessage }) {
-  const href = attachmentUrl({
-    room_id: message.room_id,
-    message_id: message.message_id,
-    attachment_id: attachment.attachment_id,
-  });
+  const href =
+    directHostedImageUrl(attachment) ??
+    attachmentUrl({
+      room_id: message.room_id,
+      message_id: message.message_id,
+      attachment_id: attachment.attachment_id,
+    });
   const cardClassName = compact
     ? "finite-chat__image-card is-compact"
     : "finite-chat__image-card";
@@ -1259,7 +1262,11 @@ function AttachmentCard({ attachmentUrl, attachment, compact, message }: { attac
     <span className={cardClassName}>
       <a className="finite-chat__image-link" href={href} target="_blank" rel="noreferrer">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={href} alt={attachment.filename} />
+        <img
+          src={href}
+          alt={attachment.filename}
+          referrerPolicy="no-referrer"
+        />
       </a>
       <AttachmentCaption href={href} name={attachment.filename} />
     </span>
