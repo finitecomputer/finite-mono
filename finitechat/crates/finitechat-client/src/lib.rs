@@ -613,7 +613,7 @@ struct StoredAppStateMetadataV1 {
     selected_topic_id: Option<String>,
     #[serde(default)]
     selected_chat_id: Option<String>,
-    #[serde(deserialize_with = "deserialize_required_option")]
+    #[serde(default)]
     paired_agent: Option<StoredPairedAgent>,
     revoked_devices: BTreeSet<DeviceRef>,
     #[serde(default)]
@@ -10555,11 +10555,7 @@ mod tests {
 
     #[test]
     fn sqlite_client_store_rejects_legacy_app_state_metadata_shapes() {
-        for case in [
-            "missing selected room",
-            "missing paired agent",
-            "missing revoked devices",
-        ] {
+        for case in ["missing selected room", "missing revoked devices"] {
             let dir = tempfile::tempdir().unwrap();
             let secret = NostrSecretKey::from_bytes([16; NOSTR_SECRET_KEY_BYTES]).unwrap();
             let device_id = "phone";
@@ -10599,9 +10595,6 @@ mod tests {
                 "missing selected room" => {
                     metadata_object.remove("selected_room_id");
                 }
-                "missing paired agent" => {
-                    metadata_object.remove("paired_agent");
-                }
                 "missing revoked devices" => {
                     metadata_object.remove("revoked_devices");
                 }
@@ -10636,6 +10629,73 @@ mod tests {
                 "{case} should fail closed, got {error}"
             );
         }
+    }
+
+    #[test]
+    fn sqlite_client_store_loads_pre_pairing_app_state_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([17; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "hosted-web";
+        let config = FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        };
+        let device = FiniteChatDevice::new(config).unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        let mut store = SqliteClientStore::open(&db_path, options.clone()).unwrap();
+        store.save_device_state(&device).unwrap();
+
+        let mut metadata = serde_json::to_value(StoredAppStateMetadataV1 {
+            selected_room_id: Some("room-main".to_owned()),
+            selected_topic_id: Some("home".to_owned()),
+            selected_chat_id: Some("segment-main".to_owned()),
+            paired_agent: Some(StoredPairedAgent {
+                agent_account_id: "agent-account".to_owned(),
+                canonical_room_id: "room-agent".to_owned(),
+            }),
+            revoked_devices: BTreeSet::new(),
+            chat_archives: Vec::new(),
+        })
+        .unwrap();
+        metadata.as_object_mut().unwrap().remove("paired_agent");
+
+        let sealed = encrypt_app_state_metadata_json(&options.encryption_key, &owner, &metadata);
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO client_app_state (
+                  account_id,
+                  device_id,
+                  nonce,
+                  ciphertext
+                ) VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![
+                    &owner.account_id,
+                    &owner.device_id,
+                    &sealed.nonce,
+                    &sealed.ciphertext,
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.load_app_state(&owner).unwrap(),
+            StoredAppState {
+                selected_room_id: Some("room-main".to_owned()),
+                selected_topic_id: Some("home".to_owned()),
+                selected_chat_id: Some("segment-main".to_owned()),
+                paired_agent: None,
+                revoked_devices: BTreeSet::new(),
+                chat_archives: Vec::new(),
+            }
+        );
     }
 
     #[test]
