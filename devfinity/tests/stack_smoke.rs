@@ -1,10 +1,13 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use finitechat_core::native_device_link::{NativeDeviceEnrollmentSession, NativeDeviceLinkSession};
-use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions};
+use finitechat_core::{
+    AppAction, AppProfileSummary, FiniteChatRuntime, OpenOptions, npub_from_account_id,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -146,8 +149,8 @@ fn native_device_pairing_crosses_dashboard_hosted_and_authority()
     // The shell smoke opens this same Hosted Device before invoking this test.
     // Pair twice so both an established account and the source state changed by
     // a previous Device admission must survive the complete boundary.
-    let first_account = pair_native_device(&env, dashboard_origin, "first")?;
-    let second_account = pair_native_device(&env, dashboard_origin, "second")?;
+    let first_account = pair_native_device(&env, dashboard_origin, "first", true)?;
+    let second_account = pair_native_device(&env, dashboard_origin, "second", false)?;
     assert_eq!(
         first_account, second_account,
         "successive clean Devices must join the same durable human account"
@@ -163,8 +166,16 @@ fn pair_native_device(
     env: &DevfinityEnv,
     dashboard_origin: &str,
     suffix: &str,
+    seed_agent: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let run_id = smoke_run_id();
+    // Pair the synthetic Agent on the established Hosted Device before the
+    // companion begins. The enrollment snapshot must originate from the
+    // source Device; creating this room on the target would bypass the exact
+    // boundary this smoke is intended to protect.
+    let _source_agent = seed_agent
+        .then(|| seed_source_agent(env, &run_id))
+        .transpose()?;
     let device_id = format!("devfinity-pair-{suffix}-{run_id}");
     let link = NativeDeviceLinkSession::create(
         env.finitechat_url.clone(),
@@ -219,6 +230,72 @@ fn pair_native_device(
     Err("paired Device did not converge to exact complete-history receipts".into())
 }
 
+fn seed_source_agent(
+    env: &DevfinityEnv,
+    run_id: &str,
+) -> Result<(TempDir, Arc<FiniteChatRuntime>), Box<dyn std::error::Error>> {
+    let agent_store = TempDir::new()?;
+    let agent = FiniteChatRuntime::open(OpenOptions {
+        data_dir: agent_store.path().display().to_string(),
+        server_url: env.finitechat_url.clone(),
+        device_id: format!("devfinity-agent-{run_id}"),
+        account_secret_hex: None,
+        now_unix_seconds: None,
+    })?;
+    let agent_state = agent.dispatch_and_wait(AppAction::StartRuntime)?;
+    let agent_account_id = agent_state.identity.account_id;
+    let profile = AppProfileSummary {
+        npub: npub_from_account_id(agent_account_id.clone())?,
+        account_id: agent_account_id,
+        display_name: "Devfinity Agent".to_owned(),
+        about: None,
+        picture: None,
+        stale: false,
+        is_agent: true,
+    };
+
+    hosted_action(env, serde_json::json!({ "StartRuntime": null }))?;
+    let connected = hosted_action(
+        env,
+        serde_json::json!({
+            "StartProfileChat": {
+                "profile": profile,
+                "display_name": "Devfinity Agent"
+            }
+        }),
+    )?;
+    let room_id = connected
+        .get("selected_room_id")
+        .and_then(Value::as_str)
+        .ok_or("Hosted source did not create the synthetic direct-agent room")?
+        .to_owned();
+    agent.dispatch_and_wait(AppAction::StartRuntime)?;
+    let paired = hosted_action(
+        env,
+        serde_json::json!({ "PairAgent": { "room_id": room_id } }),
+    )?;
+    if paired
+        .get("paired_agent")
+        .and_then(|value| value.get("canonical_room_id"))
+        .and_then(Value::as_str)
+        != Some(room_id.as_str())
+    {
+        return Err("Hosted source did not persist the canonical paired Agent".into());
+    }
+
+    Ok((agent_store, agent))
+}
+
+fn hosted_action(env: &DevfinityEnv, action: Value) -> Result<Value, Box<dyn std::error::Error>> {
+    Ok(
+        ureq::post(&format!("{}/v1/app/actions", env.hosted_web_device_url))
+            .set("authorization", &format!("Bearer {}", env.hosted_api_token))
+            .set("x-finite-workos-user-id", &env.workos_user_id)
+            .send_json(action)?
+            .into_json()?,
+    )
+}
+
 struct DevfinityEnv {
     core_url: String,
     dashboard_url: String,
@@ -227,6 +304,8 @@ struct DevfinityEnv {
     finitesites_api_url: String,
     operator_access_token: String,
     customer_access_token: String,
+    hosted_api_token: String,
+    workos_user_id: String,
     profile: String,
 }
 
@@ -241,6 +320,8 @@ impl DevfinityEnv {
             finitesites_api_url: trim_trailing_slash(env::var("FINITE_SITES_API")?),
             operator_access_token: read_nonempty_token(fixture_dir.join("operator.jwt"))?,
             customer_access_token: read_nonempty_token(fixture_dir.join("dashboard-customer.jwt"))?,
+            hosted_api_token: env::var("FINITECHAT_HOSTED_API_TOKEN")?,
+            workos_user_id: env::var("FC_DASHBOARD_DEV_WORKOS_USER_ID")?,
             profile: env::var("DEVFINITY_PROFILE")?,
         })
     }
