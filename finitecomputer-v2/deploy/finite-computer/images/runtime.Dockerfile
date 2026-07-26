@@ -119,6 +119,8 @@ ENV GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=/data/agent/hermes-home/google_token.j
 ENV FINITECHAT_WORKSPACE=/data/workspace
 ENV FBRAIN_CONFIG_DIR=/data/agent/fbrain
 ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain
+ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer
+ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer
 ENV FINITE_REQUIRE_BUNDLED_SKILLS=1
 ENV FINITE_DEFAULT_INFERENCE_PROFILE=finite-private
 # The limiter domain keeps the historical kimi-k2-6 name but serves glm-5-2.

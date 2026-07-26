@@ -1026,7 +1026,7 @@ async fn hosted_brain_identity_provider_requires_chat_setup_and_accepts_only_bra
     assert!(identify["npub"].as_str().unwrap().starts_with("npub1"));
 
     let now = test_now_unix_seconds();
-    let protected_url = "https://finite.computer/_admin/brains";
+    let protected_url = "https://finite.computer/v1/brains";
     let authorized = hosted
         .clone()
         .oneshot(provider_request(

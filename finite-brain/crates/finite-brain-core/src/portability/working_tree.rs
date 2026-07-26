@@ -1,5 +1,24 @@
 use super::*;
 
+pub const FOLDER_CONVENTION_DIRECTORIES: [&str; 6] = [
+    "raw",
+    "raw/assets",
+    "wiki",
+    "inventory",
+    "datasets",
+    "output",
+];
+
+pub fn folder_agent_instructions(folder_id: &str) -> String {
+    format!(
+        "# Folder Agent Instructions\n\nFolder id: `{folder_id}`\n\nUse `raw/` for source captures, `raw/assets/` for non-Markdown Assets, `wiki/` for durable synthesized pages, `inventory/` for source candidates and open questions, `datasets/` for manifests and query recipes, and `output/` for generated artifacts. Pair every Asset with a Markdown Source Note before citing it from synthesized work.\n"
+    )
+}
+
+pub fn folder_convention_marker(folder_id: &str, convention: &str) -> String {
+    format!("# {convention}\n\nAgent convention directory for Folder `{folder_id}`.\n")
+}
+
 /// Materialize already-opened content into a Brain Working Tree file map.
 pub fn materialize_brain_working_tree(
     input: WorkingTreeMaterializeInput,
@@ -217,7 +236,7 @@ pub fn materialize_brain_working_tree(
             continue;
         }
         insert_working_tree_file_if_absent(&mut files, &format!("{}/AGENTS.md", root.path), || {
-            folder_agents_file(&root.folder_id)
+            folder_agent_instructions(&root.folder_id)
         });
         insert_working_tree_file_if_absent(&mut files, &format!("{}/_index.md", root.path), || {
             folder_index_file(root, &state)
@@ -227,16 +246,11 @@ pub fn materialize_brain_working_tree(
             &format!("{}/_wiki/index.md", root.path),
             || folder_wiki_index(root, &input.generated_at, &input.generated_by_npub, &state),
         );
-        for convention in ["raw", "raw/assets", "compiled", "output"] {
+        for convention in FOLDER_CONVENTION_DIRECTORIES {
             insert_working_tree_file_if_absent(
                 &mut files,
                 &format!("{}/{convention}/.keep", root.path),
-                || {
-                    format!(
-                        "# {convention}\n\nAgent convention directory for Folder `{}`.\n",
-                        root.folder_id
-                    )
-                },
+                || folder_convention_marker(&root.folder_id, convention),
             );
         }
     }
@@ -348,12 +362,6 @@ fn safe_locked_reason(reason: &str) -> &'static str {
 fn root_agents_file(actor: &UserId) -> String {
     format!(
         "# FiniteBrain Personal Agent Working Tree\n\nActing principal: {actor}\n\n- Read and write the materialized Folders available to this principal.\n- Store non-Markdown sources under a Folder's `raw/assets/` and pair each Asset with a Markdown Source Note.\n- Do not write decrypted content into `.finitebrain/encrypted-sync`.\n- Changes must be returned through the Product Client encrypted sync path.\n"
-    )
-}
-
-fn folder_agents_file(folder_id: &str) -> String {
-    format!(
-        "# Folder Agent Instructions\n\nFolder id: `{folder_id}`\n\nUse `raw/` for source captures, `raw/assets/` for non-Markdown Assets, `compiled/` for curated wiki pages, and `output/` for generated artifacts. Pair every Asset with a Markdown Source Note before citing it from synthesized work.\n"
     )
 }
 

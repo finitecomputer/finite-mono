@@ -1,4 +1,5 @@
 use crate::*;
+use finite_brain_store::{MemberFolderRotation, MemberMountRotation};
 
 pub(crate) async fn list_brains_handler(
     State(state): State<ServerState>,
@@ -24,10 +25,11 @@ pub(crate) async fn create_brain_handler(
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor_npub = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let actor_user_id = UserId::new(actor_npub.clone())?;
     let request: CreateBrainRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
 
-    let organization_requester = match request.kind {
+    let requested_organization_requester = match request.kind {
         CreateBrainKind::Personal if request.requesting_user_npub.is_some() => {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
@@ -43,6 +45,47 @@ pub(crate) async fn create_brain_handler(
             .map(UserId::new)
             .transpose()?,
     };
+    let organization_requester = if request.kind == CreateBrainKind::Organization {
+        if state.agent_bootstrap_authorities.is_none() {
+            if requested_organization_requester.is_some() {
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "authenticated Organization Brain requester verification is not configured",
+                ));
+            }
+            None
+        } else {
+            match (
+                try_resolve_account_agent_principals(&state, &actor_user_id).await?,
+                requested_organization_requester,
+            ) {
+                (Some(principals), Some(requester)) if requester == principals.owner_npub => {
+                    Some(requester)
+                }
+                (Some(_), Some(_)) => {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "authenticated requester does not own the signing Managed Agent Principal",
+                    ));
+                }
+                (Some(_), None) => {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "Managed Agent Organization Brain creation requires authenticated requester context; retry from the authenticated chat turn",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "direct human Organization Brain creation cannot provide a separate requester identity",
+                    ));
+                }
+                (None, None) => None,
+            }
+        }
+    } else {
+        None
+    };
 
     let personal_agent = match request.kind {
         CreateBrainKind::Organization
@@ -55,16 +98,14 @@ pub(crate) async fn create_brain_handler(
         }
         CreateBrainKind::Organization => None,
         CreateBrainKind::Personal => {
-            let email_identity = request
-                .personal_agent_email
-                .as_deref()
-                .map(|email| resolve_identity_input(&state, email))
-                .transpose()?;
-            let npub_identity = request
-                .personal_agent_npub
-                .as_deref()
-                .map(|npub| resolve_identity_input(&state, npub))
-                .transpose()?;
+            let email_identity = match request.personal_agent_email.as_deref() {
+                Some(email) => Some(resolve_identity_input(&state, email).await?),
+                None => None,
+            };
+            let npub_identity = match request.personal_agent_npub.as_deref() {
+                Some(npub) => Some(resolve_identity_input(&state, npub).await?),
+                None => None,
+            };
             if let (Some(email), Some(npub)) = (&email_identity, &npub_identity)
                 && email.npub != npub.npub
             {
@@ -83,7 +124,8 @@ pub(crate) async fn create_brain_handler(
                     )
                 })?;
             let requested_agent_npub = UserId::new(requested_agent.npub.clone())?;
-            let principals = resolve_account_agent_principals(&state, &requested_agent_npub)?;
+            let principals =
+                resolve_account_agent_principals(&state, &requested_agent_npub).await?;
             if principals.owner_npub != UserId::new(actor_npub.clone())? {
                 return Err(ApiError::new(
                     StatusCode::FORBIDDEN,
@@ -112,16 +154,14 @@ pub(crate) async fn create_brain_handler(
         }
         CreateBrainKind::Personal => None,
         CreateBrainKind::Organization => {
-            let email_identity = request
-                .initial_agent_email
-                .as_deref()
-                .map(|email| resolve_identity_input(&state, email))
-                .transpose()?;
-            let npub_identity = request
-                .initial_agent_npub
-                .as_deref()
-                .map(|npub| resolve_identity_input(&state, npub))
-                .transpose()?;
+            let email_identity = match request.initial_agent_email.as_deref() {
+                Some(email) => Some(resolve_identity_input(&state, email).await?),
+                None => None,
+            };
+            let npub_identity = match request.initial_agent_npub.as_deref() {
+                Some(npub) => Some(resolve_identity_input(&state, npub).await?),
+                None => None,
+            };
             if let (Some(email), Some(npub)) = (&email_identity, &npub_identity)
                 && email.npub != npub.npub
             {
@@ -138,7 +178,8 @@ pub(crate) async fn create_brain_handler(
                     ));
                 }
                 let requested_agent_npub = UserId::new(requested_agent.npub.clone())?;
-                let principals = resolve_account_agent_principals(&state, &requested_agent_npub)?;
+                let principals =
+                    resolve_account_agent_principals(&state, &requested_agent_npub).await?;
                 if principals.owner_npub != UserId::new(actor_npub.clone())? {
                     return Err(ApiError::new(
                         StatusCode::FORBIDDEN,
@@ -313,14 +354,14 @@ pub(crate) async fn add_member_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(brain_id): AxumPath<String>,
+    AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request: AdminTargetRequest = serde_json::from_slice(&body)
+    let request: AdminEventRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
-    let target_identity = resolve_and_record_identity(&state, &request.target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
@@ -331,8 +372,9 @@ pub(crate) async fn add_member_handler(
         Some(target.as_str()),
         None,
     )?;
-    mutate_as_admin(state, brain_id, actor, event, payload, |store, brain_id| {
-        store.add_member(brain_id, &target)
+    let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
+    run_as_admin(state, brain_id, actor, |store, brain_id| {
+        store.add_member_with_control_records(brain_id, &target, &control_records)
     })
     .map(Json)
 }
@@ -346,10 +388,29 @@ pub(crate) async fn remove_member_handler(
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request: AdminEventRequest = serde_json::from_slice(&body)
+    let request: RemoveMemberRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    validate_folder_rotation_fanout(
+        FolderRotationOperation::MemberRemoval,
+        request
+            .rotations
+            .iter()
+            .map(|rotation| FolderRotationFanout {
+                grants: rotation.grants.len(),
+                reencrypted_records: rotation.reencrypted_records.len(),
+            })
+            .chain(
+                request
+                    .mount_rotations
+                    .iter()
+                    .map(|rotation| FolderRotationFanout {
+                        grants: rotation.grants.len(),
+                        reencrypted_records: rotation.reencrypted_records.len(),
+                    }),
+            ),
+    )?;
     let brain_id = BrainId::new(brain_id)?;
-    let target_identity = resolve_and_record_identity(&state, &target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
@@ -360,8 +421,82 @@ pub(crate) async fn remove_member_handler(
         Some(target.as_str()),
         None,
     )?;
-    mutate_as_admin(state, brain_id, actor, event, payload, |store, brain_id| {
-        store.remove_member(brain_id, &target)
+    let updated_at = server_timestamp(&state);
+    let mut control_records_by_brain = BTreeMap::<BrainId, Vec<SyncRecordInput>>::new();
+    let mut rotations = Vec::with_capacity(request.rotations.len());
+    for rotation in request.rotations {
+        let folder_id = FolderId::new(rotation.folder_id)?;
+        let grants =
+            grant_requests_to_metadata(&rotation.grants, &folder_id, &actor, None, &updated_at)?;
+        let control_records = control_records_by_brain
+            .entry(brain_id.clone())
+            .or_default();
+        for grant in &grants {
+            control_records.push(folder_key_grant_sync_record(grant)?);
+        }
+        let records = rotation_records_from_requests(
+            &brain_id,
+            &folder_id,
+            &actor,
+            rotation.new_key_version,
+            rotation.reencrypted_records,
+        )?;
+        rotations.push(MemberFolderRotation {
+            folder_id,
+            new_key_version: rotation.new_key_version,
+            grants,
+            reencrypted_records: records,
+        });
+    }
+    let mut mount_rotations = Vec::with_capacity(request.mount_rotations.len());
+    for rotation in request.mount_rotations {
+        let connection = {
+            let store = state.store.lock().map_err(lock_error)?;
+            store.load_shared_folder_connection(&rotation.mount_id)?
+        };
+        let grants = grant_requests_to_metadata(
+            &rotation.grants,
+            &connection.source_folder_id,
+            &actor,
+            None,
+            &updated_at,
+        )?;
+        let control_records = control_records_by_brain
+            .entry(connection.source_brain_id.clone())
+            .or_default();
+        for grant in &grants {
+            control_records.push(folder_key_grant_sync_record(grant)?);
+        }
+        let records = rotation_records_from_requests(
+            &connection.source_brain_id,
+            &connection.source_folder_id,
+            &actor,
+            rotation.new_key_version,
+            rotation.reencrypted_records,
+        )?;
+        mount_rotations.push(MemberMountRotation {
+            connection_id: rotation.mount_id,
+            revoke_mount: rotation.revoke_mount,
+            new_key_version: rotation.new_key_version,
+            grants,
+            reencrypted_records: records,
+        });
+    }
+    control_records_by_brain
+        .entry(brain_id.clone())
+        .or_default()
+        .push(admin_access_change_sync_record(&actor, &event, &payload)?);
+    let actor_user_id = UserId::new(&actor)?;
+    run_as_admin(state, brain_id, actor, |store, brain_id| {
+        store.remove_member_with_rotations_and_control_records(
+            brain_id,
+            &actor_user_id,
+            &target,
+            &rotations,
+            &mount_rotations,
+            &updated_at,
+            &control_records_by_brain,
+        )
     })
     .map(Json)
 }
@@ -371,14 +506,14 @@ pub(crate) async fn add_admin_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath(brain_id): AxumPath<String>,
+    AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request: AdminTargetRequest = serde_json::from_slice(&body)
+    let request: AdminEventRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
-    let target_identity = resolve_and_record_identity(&state, &request.target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
@@ -389,8 +524,9 @@ pub(crate) async fn add_admin_handler(
         Some(target.as_str()),
         None,
     )?;
-    mutate_as_admin(state, brain_id, actor, event, payload, |store, brain_id| {
-        store.add_admin(brain_id, &target)
+    let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
+    run_as_admin(state, brain_id, actor, |store, brain_id| {
+        store.add_admin_with_control_records(brain_id, &target, &control_records)
     })
     .map(Json)
 }
@@ -407,7 +543,7 @@ pub(crate) async fn remove_admin_handler(
     let request: AdminEventRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
-    let target_identity = resolve_and_record_identity(&state, &target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
@@ -418,8 +554,9 @@ pub(crate) async fn remove_admin_handler(
         Some(target.as_str()),
         None,
     )?;
-    mutate_as_admin(state, brain_id, actor, event, payload, |store, brain_id| {
-        store.remove_admin(brain_id, &target)
+    let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
+    run_as_admin(state, brain_id, actor, |store, brain_id| {
+        store.remove_admin_with_control_records(brain_id, &target, &control_records)
     })
     .map(Json)
 }
@@ -440,6 +577,7 @@ pub(crate) async fn list_brain_invitations_handler(
         let mut responses = store
             .list_brain_invitations(&brain_id)?
             .into_iter()
+            .filter(|invitation| !invitation.folder_only)
             .map(brain_invitation_response)
             .collect::<Vec<_>>();
         for response in &mut responses {
@@ -462,6 +600,12 @@ pub(crate) async fn create_brain_invitation_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: CreateBrainInvitationRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    if request.folder_only && !uri.path().split('/').any(|segment| segment == "folders") {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Folder Invitations must be created through the Folder invitation collection",
+        ));
+    }
     let brain_id = BrainId::new(brain_id)?;
     let actor_user_id = UserId::new(actor.clone())?;
     let created_at = server_timestamp(&state);
@@ -470,9 +614,11 @@ pub(crate) async fn create_brain_invitation_handler(
     let npub_target = if let Ok(public_key) = NostrPublicKey::parse(&target_input) {
         Some(public_key.to_npub().map_err(nostr_identity_error)?)
     } else if finite_vip_email(&target_input) {
-        resolve_and_record_identity(&state, &target_input)
-            .ok()
-            .map(|identity| identity.npub)
+        match resolve_and_record_identity(&state, &target_input).await {
+            Ok(identity) => Some(identity.npub),
+            Err(error) if error.status == StatusCode::NOT_FOUND => None,
+            Err(error) => return Err(error),
+        }
     } else {
         None
     };
@@ -503,7 +649,7 @@ pub(crate) async fn create_brain_invitation_handler(
             ],
             16,
         );
-        let accept_path = format!("/_admin/brain-invitation-links/{invite_code}/accept");
+        let accept_path = format!("/v1/brain-invitation-links/{invite_code}/accept");
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_brain_admin(&stored, &actor)?;
@@ -570,11 +716,21 @@ pub(crate) async fn create_brain_invitation_handler(
         validate_folder_key_grant_wrapper(bootstrap_wrapped_event_json, &invite_unwrap_npub)?;
         let selected_restricted_folder_access =
             selected_folder_ids(&request.initial_folder_access)?;
+        let invitation_scope_key = if request.folder_only {
+            selected_restricted_folder_access
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            "brain-membership".to_owned()
+        };
         let id = generated_link_id(
             "invitation",
             &[
                 brain_id.as_str(),
                 invited_email.as_str(),
+                &invitation_scope_key,
                 actor_user_id.as_str(),
                 request.expires_at.as_str(),
                 created_at.as_str(),
@@ -586,6 +742,7 @@ pub(crate) async fn create_brain_invitation_handler(
             &[
                 brain_id.as_str(),
                 invited_email.as_str(),
+                &invitation_scope_key,
                 actor_user_id.as_str(),
                 request.expires_at.as_str(),
                 created_at.as_str(),
@@ -593,11 +750,15 @@ pub(crate) async fn create_brain_invitation_handler(
             ],
             16,
         );
-        let accept_path = format!("/_admin/brain-invitation-links/{invite_code}/claim");
+        let accept_path = format!("/v1/brain-invitation-links/{invite_code}/claim");
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;
         ensure_brain_admin(&stored, &actor)?;
-        let scope = email_bootstrap_scope_for_brain(&stored, &selected_restricted_folder_access)?;
+        let scope = email_bootstrap_scope_for_brain(
+            &stored,
+            &selected_restricted_folder_access,
+            request.folder_only,
+        )?;
         validate_email_bootstrap_authorization(
             bootstrap_authorization_event_json,
             &actor,
@@ -619,6 +780,7 @@ pub(crate) async fn create_brain_invitation_handler(
             &invite_code,
             &accept_path,
             &selected_restricted_folder_access,
+            request.folder_only,
             &actor_user_id,
             &request.expires_at,
             &created_at,
@@ -628,61 +790,6 @@ pub(crate) async fn create_brain_invitation_handler(
     let delivery_status = deliver_email_invitation(&state, &invitation)?;
     let mut response = brain_invitation_response(invitation);
     response.delivery_status = delivery_status;
-    attach_invitation_public_url(&state, &mut response);
-    {
-        let store = state.store.lock().map_err(lock_error)?;
-        enrich_brain_invitation_identities(&store, &mut response)?;
-    }
-    Ok(Json(response))
-}
-
-pub(crate) async fn revoke_brain_invitation_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    AxumPath((brain_id, invitation_id)): AxumPath<(String, String)>,
-) -> Result<Json<BrainInvitationResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
-    let brain_id = BrainId::new(brain_id)?;
-    let actor_user_id = UserId::new(actor)?;
-    let updated_at = server_timestamp(&state);
-    let invitation = {
-        let mut store = state.store.lock().map_err(lock_error)?;
-        store.revoke_brain_invitation(&brain_id, &invitation_id, &actor_user_id, &updated_at)?
-    };
-    let mut response = brain_invitation_response(invitation);
-    attach_invitation_public_url(&state, &mut response);
-    {
-        let store = state.store.lock().map_err(lock_error)?;
-        enrich_brain_invitation_identities(&store, &mut response)?;
-    }
-    Ok(Json(response))
-}
-
-pub(crate) async fn accept_brain_invitation_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    AxumPath((brain_id, invitation_id)): AxumPath<(String, String)>,
-) -> Result<Json<BrainInvitationResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
-    let actor = UserId::new(actor)?;
-    let brain_id = BrainId::new(brain_id)?;
-    let now = server_timestamp(&state);
-    let invitation = {
-        let mut store = state.store.lock().map_err(lock_error)?;
-        let invitation = store.load_brain_invitation(&invitation_id)?;
-        if invitation.brain_id != brain_id {
-            return Err(StoreError::UnavailableLink {
-                kind: "brain invitation",
-            }
-            .into());
-        }
-        store.accept_brain_invitation_by_code(&invitation.invite_code, &actor, &now)?
-    };
-    let mut response = brain_invitation_response(invitation);
     attach_invitation_public_url(&state, &mut response);
     {
         let store = state.store.lock().map_err(lock_error)?;
@@ -749,7 +856,8 @@ pub(crate) async fn post_proof_brain_invitation_instructions_handler(
         &invite_code,
         &body,
         &request,
-    )?;
+    )
+    .await?;
     let stored = {
         let store = state.store.lock().map_err(lock_error)?;
         store.load_brain(&invitation.brain_id)?
@@ -779,7 +887,8 @@ pub(crate) async fn post_proof_brain_invitation_bootstrap_handler(
         &invite_code,
         &body,
         &request,
-    )?;
+    )
+    .await?;
     if invitation.status == LinkStatus::Pending && invitation.bootstrap_wrapped_event_json.is_none()
     {
         return Err(StoreError::UnavailableLink {
@@ -796,7 +905,7 @@ pub(crate) async fn post_proof_brain_invitation_bootstrap_handler(
     Ok(Json(response))
 }
 
-fn load_post_proof_email_invitation(
+async fn load_post_proof_email_invitation(
     state: &ServerState,
     headers: &HeaderMap,
     method: &Method,
@@ -837,7 +946,7 @@ fn load_post_proof_email_invitation(
         &request.email_proof_created_at,
         &server_timestamp(state),
     )?;
-    verify_identity_authority_email_proof(state, invited_email.as_str(), &actor_user_id)?;
+    verify_identity_authority_email_proof(state, invited_email.as_str(), &actor_user_id).await?;
     Ok(invitation)
 }
 
@@ -909,7 +1018,8 @@ pub(crate) async fn claim_email_brain_invitation_link_handler(
         }
     } else {
         validate_email_proof_window(&invitation, &request.email_proof_created_at, &now)?;
-        verify_identity_authority_email_proof(&state, invited_email.as_str(), &actor_user_id)?;
+        verify_identity_authority_email_proof(&state, invited_email.as_str(), &actor_user_id)
+            .await?;
         if let (Some(authorization), Some(invite_unwrap_npub), Some(payload_hash)) = (
             invitation.bootstrap_authorization_event_json.as_deref(),
             invitation.invite_unwrap_npub.as_ref(),
@@ -952,20 +1062,19 @@ pub(crate) async fn claim_email_brain_invitation_link_handler(
             ));
         }
         let grants = bootstrap_grant_requests_to_metadata(&request.grants, &actor, &now)?;
+        let control_records = grants
+            .iter()
+            .map(folder_key_grant_sync_record)
+            .collect::<Result<Vec<_>, _>>()?;
         let mut store = state.store.lock().map_err(lock_error)?;
-        let invitation = store.claim_email_brain_invitation_by_code(
+        store.claim_email_brain_invitation_by_code_with_control_records(
             &invite_code,
             invited_email.as_str(),
             &actor_user_id,
             &grants,
+            &control_records,
             &now,
-        )?;
-        if !invitation.duplicate_accept {
-            for grant in &grants {
-                append_folder_key_grant_record(&mut store, &invitation.brain_id, grant)?;
-            }
-        }
-        invitation
+        )?
     };
 
     let mut response = brain_invitation_response(invitation);

@@ -17,6 +17,8 @@ pub(crate) struct AgentState {
     pub(crate) auth_npub: Option<String>,
     pub(crate) daemon: DaemonState,
     pub(crate) sync: AgentSyncState,
+    #[serde(default)]
+    pub(crate) search_lifecycle: SearchLifecycleState,
     pub(crate) conflicts: Vec<ConflictEntry>,
     pub(crate) activity: Vec<ActivityEntry>,
     pub(crate) created_at: String,
@@ -45,6 +47,7 @@ impl AgentState {
                 mode: "automatic".to_owned(),
                 status: "idle".to_owned(),
             },
+            search_lifecycle: SearchLifecycleState::default(),
             conflicts: Vec::new(),
             activity: Vec::new(),
             created_at: now.to_owned(),
@@ -66,8 +69,26 @@ impl AgentState {
             kind,
             message: message.into(),
         });
+        const MAX_ACTIVITY_ENTRIES: usize = 256;
+        if self.activity.len() > MAX_ACTIVITY_ENTRIES {
+            self.activity
+                .drain(..self.activity.len() - MAX_ACTIVITY_ENTRIES);
+        }
         self.updated_at = at;
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchLifecycleState {
+    #[serde(default)]
+    pub(crate) reconciliation_pending: bool,
+    #[serde(default)]
+    pub(crate) consecutive_failures: u32,
+    #[serde(default)]
+    pub(crate) semantic_refresh_pending: bool,
+    #[serde(default)]
+    pub(crate) semantic_consecutive_failures: u32,
 }
 
 fn activity_id(at: &str, index: usize, kind: &str) -> String {
@@ -335,6 +356,20 @@ pub(crate) struct DoctorReport {
     pub(crate) server: HealthCheck,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VisibleBrainsResponse {
+    pub(crate) brains: Vec<VisibleBrainSummary>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VisibleBrainSummary {
+    pub(crate) brain_id: String,
+    pub(crate) kind: String,
+    pub(crate) role: String,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccessExplanation {
@@ -345,22 +380,10 @@ pub(crate) struct AccessExplanation {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AccessRemovalBlockedReport {
-    pub(crate) state: String,
-    pub(crate) operation: String,
-    pub(crate) brain_id: String,
-    pub(crate) folder_id: String,
-    pub(crate) target_npub: String,
-    pub(crate) route: String,
-    pub(crate) reason: String,
-    pub(crate) required: Vec<String>,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct AccessSummaryReport {
     pub(crate) brain_id: String,
     pub(crate) members: Vec<String>,
+    pub(crate) guests: Vec<String>,
     pub(crate) admins: Vec<String>,
     pub(crate) folders: Vec<FolderAccessSummary>,
     pub(crate) mounted_folders: Vec<MountedFolderMetadataView>,
@@ -376,7 +399,6 @@ pub(crate) struct FolderAccessSummary {
     pub(crate) access: String,
     pub(crate) parent_folder_id: Option<String>,
     pub(crate) path: String,
-    pub(crate) shared_folder_source: bool,
     pub(crate) current_key_version: u32,
     pub(crate) setup_incomplete: bool,
     pub(crate) explicit_access_user_ids: Vec<String>,
@@ -399,6 +421,8 @@ pub(crate) struct BrainMetadataView {
     #[serde(default)]
     pub(crate) personal_agent: Option<PersonalAgentView>,
     pub(crate) members: Vec<String>,
+    #[serde(default)]
+    pub(crate) guests: Vec<String>,
     pub(crate) admins: Vec<String>,
     pub(crate) folders: Vec<FolderMetadataView>,
     #[serde(default)]
@@ -424,8 +448,6 @@ pub(crate) struct FolderMetadataView {
     #[serde(default)]
     pub(crate) parent_folder_id: Option<String>,
     pub(crate) path: String,
-    #[serde(default)]
-    pub(crate) shared_folder_source: bool,
     pub(crate) access_user_ids: Vec<String>,
     pub(crate) current_key_version: u32,
     #[serde(default)]
@@ -436,10 +458,8 @@ pub(crate) struct FolderMetadataView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MountedFolderMetadataView {
     pub(crate) mount_id: String,
-    pub(crate) organization_brain_id: String,
     pub(crate) source_brain_id: String,
     pub(crate) source_folder_id: String,
-    pub(crate) connection_id: String,
     pub(crate) display_name: String,
     pub(crate) display_parent_folder_id: Option<String>,
     pub(crate) state: String,

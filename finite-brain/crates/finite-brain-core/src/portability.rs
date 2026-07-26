@@ -572,7 +572,10 @@ mod working_tree;
 pub use agents::agent_discovery_paths;
 pub use okf::{export_okf_bundle, plan_okf_import};
 pub use search::build_local_search_index;
-pub use working_tree::{materialize_brain_working_tree, plan_working_tree_change_intents};
+pub use working_tree::{
+    FOLDER_CONVENTION_DIRECTORIES, folder_agent_instructions, folder_convention_marker,
+    materialize_brain_working_tree, plan_working_tree_change_intents,
+};
 
 fn safe_locked_reason(reason: &str) -> &'static str {
     match reason {
@@ -791,7 +794,9 @@ mod tests {
         assert!(projection.files.contains_key("Concepts/_wiki/index.md"));
         assert!(projection.files.contains_key("Concepts/raw/.keep"));
         assert!(projection.files.contains_key("Concepts/raw/assets/.keep"));
-        assert!(projection.files.contains_key("Concepts/compiled/.keep"));
+        assert!(projection.files.contains_key("Concepts/wiki/.keep"));
+        assert!(projection.files.contains_key("Concepts/inventory/.keep"));
+        assert!(projection.files.contains_key("Concepts/datasets/.keep"));
         assert!(projection.files.contains_key("Concepts/output/.keep"));
         assert!(
             projection
@@ -806,6 +811,20 @@ mod tests {
                 .get("Concepts/AGENTS.md")
                 .unwrap()
                 .contains("Source Note")
+        );
+        assert!(
+            projection
+                .files
+                .get("Concepts/AGENTS.md")
+                .unwrap()
+                .contains("wiki/")
+        );
+        assert!(
+            !projection
+                .files
+                .get("Concepts/AGENTS.md")
+                .unwrap()
+                .contains("compiled/")
         );
         assert_eq!(
             projection
@@ -1172,7 +1191,6 @@ mod tests {
                     parent_folder_id: None,
                     path: SafeRelativePath::new("folder_path", "Concepts").unwrap(),
                     current_key_version: 1,
-                    shared_folder_source: false,
                 },
                 Folder {
                     id: FolderId::new("board").unwrap(),
@@ -1182,7 +1200,6 @@ mod tests {
                     parent_folder_id: None,
                     path: SafeRelativePath::new("folder_path", "Board").unwrap(),
                     current_key_version: 1,
-                    shared_folder_source: false,
                 },
             ],
             members: Vec::new(),

@@ -46,6 +46,10 @@ identity-conformance:
     cargo test --locked -p devfinity generated_yaml_contains_core_services
     nix eval --raw .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 
+# Static contract: active first-party callers use /v1, not the legacy /_admin API.
+brain-api-route-check:
+    python3 scripts/check-brain-api-routes.py
+
 # Evaluate and build immutable system + disko outputs on finite-lat-2. The
 # helper prints the exact, GC-rooted system path used for the deploy handoff.
 nixos-build-lat1 rev:
@@ -89,6 +93,12 @@ hosted-recovery-contract:
 lat1-secret-bootstrap-contract:
     python3 -m json.tool infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json >/dev/null
     python3 -m unittest scripts.tests.test_check_lat1_secret_bootstrap
+
+# Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
+brain-product-matrix:
+    FINITE_BRAIN_COLLABORATION_SMOKE_REPORT="$PWD/target/brain-product-matrix/organization-collaboration.json" cargo test --locked -p finite-brain-cli --test fbrain_process_acceptance built_fbrain_process_two_independent_homes_open_restricted_collaboration -- --nocapture
+    scripts/check-brain-collaboration-smoke-report.py "$PWD/target/brain-product-matrix/organization-collaboration.json"
+    scripts/devfinity-brain-product-matrix
 
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:

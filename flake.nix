@@ -128,7 +128,8 @@
               xxd
               rustToolchain
             ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ];
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         };

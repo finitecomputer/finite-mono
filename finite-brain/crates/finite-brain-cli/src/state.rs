@@ -13,6 +13,17 @@ use crate::{
     write_private_file_atomic_for_migration,
 };
 
+pub(crate) fn write_working_tree_state(
+    root: &Path,
+    tree: &BrainWorkingTreeStateManifest,
+) -> Result<(), CliError> {
+    let revocation_guards =
+        crate::search::revoke_search_admission_before_state_publish(root, tree)?;
+    write_json_file(&root.join(".finitebrain/working-tree-state.json"), tree)?;
+    drop(revocation_guards);
+    crate::search::finish_search_lifecycle_after_state_publish(root, tree)
+}
+
 /// Report the shared Finite identity without touching it: status never mints
 /// (finite-identity CLI-CONVENTIONS.md).
 pub(crate) fn auth_status(env: &CliEnvironment) -> Result<AuthStatus, CliError> {
@@ -166,6 +177,44 @@ pub(crate) fn current_tree_root(env: &CliEnvironment) -> Result<PathBuf, CliErro
     find_agent_state(&env.cwd)?.ok_or(CliError::MissingWorkingTree)
 }
 
+pub(crate) fn current_folder_id(env: &CliEnvironment) -> Result<String, CliError> {
+    let root = current_tree_root(env)?;
+    let tree = read_working_tree_state(&root)?;
+    let relative = env.cwd.strip_prefix(&root).map_err(|_| {
+        CliError::InvalidInput(
+            "current directory is outside the discovered Brain Working Tree".to_owned(),
+        )
+    })?;
+    let mut matches = tree
+        .folder_roots
+        .iter()
+        .filter_map(|folder| {
+            let folder_path = Path::new(&folder.path);
+            relative
+                .starts_with(folder_path)
+                .then_some((folder_path.components().count(), folder))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+    let Some((deepest, folder)) = matches.first().copied() else {
+        return Err(CliError::InvalidInput(
+            "current directory is not inside a managed Folder; cd into a Folder or pass its id explicitly"
+                .to_owned(),
+        ));
+    };
+    if matches
+        .iter()
+        .skip(1)
+        .any(|(depth, candidate)| *depth == deepest && candidate.folder_id != folder.folder_id)
+    {
+        return Err(CliError::InvalidInput(
+            "current directory matches multiple managed Folders; pass the Folder id explicitly"
+                .to_owned(),
+        ));
+    }
+    Ok(folder.folder_id.clone())
+}
+
 pub(crate) fn load_current_agent_state(env: &CliEnvironment) -> Result<AgentState, CliError> {
     let root = current_tree_root(env)?;
     read_agent_state(&root)
@@ -292,7 +341,12 @@ pub(crate) fn command_brain_id(args: &[String], env: &CliEnvironment) -> Result<
     if let Some(brain_id) = option_value(args, "--brain") {
         return Ok(brain_id);
     }
-    current_brain_id(env)?.ok_or(CliError::MissingArgument("brain-id or --brain"))
+    current_brain_id(env)?.ok_or_else(|| {
+        CliError::InvalidInput(
+            "No active Brain Working Tree was found. Run `fbrain brain list`, open the intended Brain, then retry from inside that Working Tree; advanced automation may pass `--brain <brain-id>`."
+                .to_owned(),
+        )
+    })
 }
 
 pub(crate) fn current_brain_id(env: &CliEnvironment) -> Result<Option<String>, CliError> {

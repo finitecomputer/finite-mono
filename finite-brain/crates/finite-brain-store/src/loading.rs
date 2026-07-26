@@ -90,8 +90,7 @@ impl BrainStore {
     pub(crate) fn load_folders(&self, brain_id: &BrainId) -> Result<Vec<Folder>, StoreError> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, name, role, access, parent_folder_id, path, current_key_version,
-                   shared_folder_source
+            SELECT id, name, role, access, parent_folder_id, path, current_key_version
             FROM folders
             WHERE brain_id = ?1
             ORDER BY id
@@ -106,7 +105,6 @@ impl BrainStore {
                 parent_folder_id: row.get(4)?,
                 path: row.get(5)?,
                 current_key_version: row.get(6)?,
-                shared_folder_source: row.get(7)?,
             })
         })?;
 
@@ -276,6 +274,44 @@ impl BrainStore {
     ) -> Result<BTreeSet<UserId>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT member_npub FROM shared_folder_connection_members WHERE connection_id = ?1 ORDER BY member_npub",
+        )?;
+        let rows = stmt.query_map(params![connection_id], |row| row.get::<_, String>(0))?;
+        let mut members = BTreeSet::new();
+        for row in rows {
+            members.insert(UserId::new(row?)?);
+        }
+        Ok(members)
+    }
+
+    pub(crate) fn load_connection_managed_access_members(
+        &self,
+        connection_id: &str,
+    ) -> Result<BTreeSet<UserId>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT members.member_npub
+             FROM shared_folder_connection_members members
+             JOIN shared_folder_connections connections
+               ON connections.id = members.connection_id
+             WHERE members.connection_id = ?1
+               AND EXISTS (
+                   SELECT 1 FROM folder_access_sources owned
+                   WHERE owned.brain_id = connections.source_brain_id
+                     AND owned.folder_id = connections.source_folder_id
+                     AND owned.user_id = members.member_npub
+                     AND owned.source_kind = 'mount'
+                     AND owned.source_id = connections.id
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM folder_access_sources other
+                   WHERE other.brain_id = connections.source_brain_id
+                     AND other.folder_id = connections.source_folder_id
+                     AND other.user_id = members.member_npub
+                     AND NOT (
+                         other.source_kind = 'mount'
+                         AND other.source_id = connections.id
+                     )
+               )
+             ORDER BY members.member_npub",
         )?;
         let rows = stmt.query_map(params![connection_id], |row| row.get::<_, String>(0))?;
         let mut members = BTreeSet::new();

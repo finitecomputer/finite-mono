@@ -752,6 +752,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await brainItem.waitFor({ state: "visible" });
       assert.equal(await brainItem.getAttribute("aria-disabled"), "true");
       assert.equal(await brainItem.getAttribute("href"), null);
+      assert.equal(await brainItem.getAttribute("title"), "Coming soon");
       const skillsLink = productNav.getByRole("link", { name: "Skills", exact: true });
       await skillsLink.waitFor({ state: "visible" });
       assert.equal(
@@ -1052,6 +1053,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await completedBrainItem.waitFor({ state: "visible" });
       assert.equal(await completedBrainItem.getAttribute("aria-disabled"), "true");
       assert.equal(await completedBrainItem.getAttribute("href"), null);
+      assert.equal(await completedBrainItem.getAttribute("title"), "Coming soon");
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_completed-oslo-bot/brain`
       );
@@ -1968,10 +1970,10 @@ async function startFakeBrain() {
     const requestUrl = new URL(request.url ?? "/", "http://brain.test");
     if (request.method === "GET" && requestUrl.pathname === "/client") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(`<!doctype html><html><head></head><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/_admin/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
+      response.end(`<!doctype html><html><head></head><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/v1/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
       return;
     }
-    if (request.method === "GET" && request.url === "/_admin/browser-proof") {
+    if (request.method === "GET" && request.url === "/v1/browser-proof") {
       writeJson(response, 200, { message: "Brain API ready" });
       return;
     }

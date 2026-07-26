@@ -35,11 +35,10 @@ pub(crate) async fn replace_personal_agent_handler(
             ));
         }
     }
-    let replacement_identity = request
-        .agent_email
-        .as_deref()
-        .map(|email| resolve_managed_agent_email(&state, email, &actor_id))
-        .transpose()?;
+    let replacement_identity = match request.agent_email.as_deref() {
+        Some(email) => Some(resolve_managed_agent_email(&state, email, &actor_id).await?),
+        None => None,
+    };
     let replacement = match replacement_identity.as_ref() {
         Some(identity) => Some(UserId::new(identity.npub.clone())?),
         None => None,
@@ -122,7 +121,7 @@ pub(crate) async fn bootstrap_personal_brain_for_agent_handler(
     let _request: BootstrapPersonalBrainForAgentRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let agent_npub = UserId::new(agent_actor)?;
-    let principals = resolve_account_agent_principals(&state, &agent_npub)?;
+    let principals = resolve_account_agent_principals(&state, &agent_npub).await?;
     let owner_key =
         NostrPublicKey::parse(principals.owner_npub.as_str()).map_err(nostr_identity_error)?;
     let brain_id = BrainId::new(format!("personal-{}", &owner_key.to_hex()[..16]))?;

@@ -1,14 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+use std::path::{Component, Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use finite_brain_core::portability::{
-    BrainWorkingTreeStateManifest, MAX_WORKING_TREE_ASSET_BYTES, OkfOmittedFolder, OpenedAsset,
-    OpenedPage, WorkingTreeChange, WorkingTreeChangeIntent, WorkingTreeFolderRoot,
-    WorkingTreeIntentAction, WorkingTreeIntentContent, WorkingTreeIntentRoute,
-    WorkingTreeMaterializeInput, WorkingTreeObjectManifestEntry, WorkingTreeProjection,
+    BrainWorkingTreeStateManifest, FOLDER_CONVENTION_DIRECTORIES, MAX_WORKING_TREE_ASSET_BYTES,
+    OkfOmittedFolder, OpenedAsset, OpenedPage, WorkingTreeChange, WorkingTreeChangeIntent,
+    WorkingTreeFolderRoot, WorkingTreeIntentAction, WorkingTreeIntentContent,
+    WorkingTreeIntentRoute, WorkingTreeMaterializeInput, WorkingTreeObjectManifestEntry,
+    WorkingTreeProjection, folder_agent_instructions, folder_convention_marker,
     materialize_brain_working_tree, plan_working_tree_change_intents,
 };
 use finite_brain_core::{
@@ -19,16 +26,20 @@ use finite_brain_core::{
 };
 use finite_nostr::{GiftWrapValidation, NostrPublicKey, open_gift_wrap};
 use nostr::{Event, Keys, Kind, Tag};
+#[cfg(unix)]
+use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, open, openat, renameat_with, unlinkat};
 use serde::Deserialize;
 
 #[cfg(test)]
 use crate::initialize_private_working_tree;
 use crate::{
-    APP_SPECIFIC_KIND, AgentState, CliEnvironment, CliError, ConflictEntry, ConflictState,
-    SessionFolderKeyring, SyncChangeReport, SyncOnceReport, current_tree_root, deterministic_id,
-    load_signer, read_agent_state, read_working_tree_state, server_url_for_command, sign_event,
-    signed_json_request, signed_json_request_to_server, tag_vec, timestamp, timestamp_from_unix,
-    unix_timestamp, write_agent_state, write_json_file, write_private_file_atomic,
+    APP_SPECIFIC_KIND, AdminAccessAction, AgentState, BrainMetadataView, CliEnvironment, CliError,
+    ConflictEntry, ConflictState, SessionFolderKeyring, SyncChangeReport, SyncOnceReport,
+    admin_access_change_event, current_tree_root, deterministic_id, folder_key_grant_request,
+    folder_required_recipients, load_signer, read_agent_state, read_json_file,
+    read_working_tree_state, server_url_for_command, sign_event, signed_json_request,
+    signed_json_request_to_server, tag_vec, timestamp, timestamp_from_unix, unix_timestamp,
+    write_agent_state, write_json_file, write_private_file_atomic, write_working_tree_state,
 };
 
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
@@ -45,17 +56,28 @@ pub(crate) fn run_working_tree_sync(
     let root = current_tree_root(env)?;
     let agent_state = read_agent_state(&root)?;
     let prior_tree_state = read_working_tree_state(&root)?;
+    let prior_export_path = root.join(".finitebrain/encrypted-sync/export.json");
+    let prior_export = prior_export_path
+        .is_file()
+        .then(|| read_json_file(&prior_export_path))
+        .transpose()?;
     let server_url = server_url_for_command(env, args)?;
     let auth = load_signer(env)?;
     let export = fetch_encrypted_export(env, &server_url, &agent_state.brain_id)?;
-    let mounted_exports =
-        fetch_mounted_folder_sync_contexts(env, &server_url, &agent_state.brain_id, &export)?;
+    let has_known_mounts = prior_tree_state
+        .folder_roots
+        .iter()
+        .any(|folder| folder.source_brain_id.is_some());
+    let mut mounted_exports = if has_known_mounts {
+        fetch_mounted_folder_sync_contexts(env, &server_url, &agent_state.brain_id, &export)?
+    } else {
+        Vec::new()
+    };
     let mut session_keys = SessionFolderKeyring::default();
     open_export_folder_key_grants_into_session(&auth, &export, &mut session_keys)?;
     for mounted in &mounted_exports {
         open_export_folder_key_grants_into_session(&auth, &mounted.export, &mut session_keys)?;
     }
-    let opened_grants = session_keys.len();
     let newly_readable_keys = newly_readable_session_key_count(
         &prior_tree_state,
         &export,
@@ -83,10 +105,16 @@ pub(crate) fn run_working_tree_sync(
             prior_tree_state.sync.latest_sequence,
         )?
     };
+    if !has_known_mounts {
+        mounted_exports =
+            fetch_mounted_folder_sync_contexts(env, &server_url, &agent_state.brain_id, &export)?;
+        for mounted in &mounted_exports {
+            open_export_folder_key_grants_into_session(&auth, &mounted.export, &mut session_keys)?;
+        }
+    }
+    let opened_grants = session_keys.len();
     let mounted_materializations =
         fetch_mounted_folder_materializations(env, &server_url, mounted_exports)?;
-    write_sync_evidence(&root, &export, &remote_result.bootstrap)?;
-
     materialize_remote_projection(MaterializeRemoteProjectionContext {
         env,
         root: &root,
@@ -96,12 +124,25 @@ pub(crate) fn run_working_tree_sync(
         mounted_folders: &mounted_materializations,
         path_overrides: &local_result.path_overrides,
         session_keys: &session_keys,
+        prior_state: Some(&prior_tree_state),
     })?;
     restore_conflicted_files(
         &root,
         &local_result.conflicted_markdown,
         &local_result.conflicted_assets,
     )?;
+    let mut deleted_routes = deleted_folder_routes(&export, &remote_result.bootstrap)?;
+    for mounted in &mounted_materializations {
+        deleted_routes.extend(deleted_folder_routes(&mounted.export, &mounted.bootstrap)?);
+    }
+    remove_deleted_folder_roots(
+        &root,
+        &prior_tree_state,
+        prior_export.as_ref(),
+        &deleted_routes,
+        &export.brain.id,
+    )?;
+    write_sync_evidence(&root, &export, &remote_result.bootstrap)?;
 
     let applied_tree_state = read_working_tree_state(&root)?;
     let remote_changes = sync_record_reports(
@@ -174,7 +215,7 @@ pub(crate) fn open_brain_session_folder_keys(
     args: &[String],
     brain_id: &str,
 ) -> Result<SessionFolderKeyring, CliError> {
-    let path = format!("/_admin/brains/{brain_id}/export");
+    let path = format!("/v1/brains/{brain_id}/export");
     let response = signed_json_request(env, args, "GET", &path, None)?;
     let export: CliEncryptedBrainExport = serde_json::from_value(response)?;
     if export.brain.id != brain_id {
@@ -187,6 +228,208 @@ pub(crate) fn open_brain_session_folder_keys(
     let mut keyring = SessionFolderKeyring::default();
     open_export_folder_key_grants_into_session(&auth, &export, &mut keyring)?;
     Ok(keyring)
+}
+
+/// Open keys for the high-level collaboration operation. A damaged or
+/// undecryptable grant addressed to this signer is treated as an unavailable
+/// source key while other grants continue opening; the server receipt then
+/// reports the affected Folder as partial and names its current holders.
+pub(crate) fn open_brain_session_folder_keys_for_collaboration(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+) -> Result<SessionFolderKeyring, CliError> {
+    let path = format!("/v1/brains/{brain_id}/export");
+    let response = signed_json_request(env, args, "GET", &path, None)?;
+    let export: CliEncryptedBrainExport = serde_json::from_value(response)?;
+    if export.brain.id != brain_id {
+        return Err(CliError::InvalidInput(format!(
+            "encrypted export returned brain {} while opening {brain_id}",
+            export.brain.id
+        )));
+    }
+    let auth = load_signer(env)?;
+    let mut keyring = SessionFolderKeyring::default();
+    open_export_folder_key_grants_into_session_tolerant(&auth, &export, &mut keyring)?;
+    Ok(keyring)
+}
+
+pub(crate) fn prepare_folder_access_removal(
+    env: &CliEnvironment,
+    args: &[String],
+    metadata: &BrainMetadataView,
+    brain_id: &str,
+    folder_id: &str,
+    target_npub: &str,
+) -> Result<serde_json::Value, CliError> {
+    prepare_folder_access_removals(
+        env,
+        args,
+        metadata,
+        brain_id,
+        folder_id,
+        &BTreeSet::from([target_npub.to_owned()]),
+    )
+}
+
+pub(crate) fn prepare_folder_access_removals(
+    env: &CliEnvironment,
+    args: &[String],
+    metadata: &BrainMetadataView,
+    brain_id: &str,
+    folder_id: &str,
+    target_npubs: &BTreeSet<String>,
+) -> Result<serde_json::Value, CliError> {
+    if target_npubs.is_empty() {
+        return Err(CliError::InvalidInput(
+            "at least one Folder access target is required".to_owned(),
+        ));
+    }
+    let folder = metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == folder_id)
+        .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
+    let server_url = server_url_for_command(env, args)?;
+    let export = fetch_encrypted_export(env, &server_url, brain_id)?;
+    let export_folder = export
+        .folders
+        .iter()
+        .find(|folder| folder.id == folder_id)
+        .ok_or_else(|| CliError::NotFound(format!("folder {folder_id} in encrypted export")))?;
+    if !export_folder.accessible {
+        return Err(CliError::InvalidInput(format!(
+            "cannot prepare Folder access revocation: current Folder {folder_id} is not readable"
+        )));
+    }
+    let auth = load_signer(env)?;
+    let mut keyring = SessionFolderKeyring::default();
+    open_export_folder_key_grants_into_session(&auth, &export, &mut keyring)?;
+    let current_key = keyring
+        .get(brain_id, folder_id, folder.current_key_version)
+        .ok_or_else(|| CliError::GrantOpening {
+            brain_id: brain_id.to_owned(),
+            folder_id: folder_id.to_owned(),
+            key_version: folder.current_key_version,
+            reason: "the current Folder Key is required before revocation can be prepared"
+                .to_owned(),
+        })?;
+    let new_key_version = folder
+        .current_key_version
+        .checked_add(1)
+        .ok_or_else(|| CliError::InvalidInput("Folder Key version overflow".to_owned()))?;
+    let new_key = FolderKey::generate();
+    let remaining_access_user_ids = folder
+        .access_user_ids
+        .iter()
+        .filter(|recipient| !target_npubs.contains(*recipient))
+        .cloned()
+        .collect::<Vec<_>>();
+    let remaining_recipients =
+        folder_required_recipients(metadata, &folder.access, &remaining_access_user_ids)?;
+    if remaining_recipients.is_empty() {
+        return Err(CliError::InvalidInput(
+            "cannot revoke Folder access without at least one remaining authorized identity"
+                .to_owned(),
+        ));
+    }
+    let grants = remaining_recipients
+        .iter()
+        .map(|recipient| {
+            folder_key_grant_request(
+                &auth,
+                brain_id,
+                folder_id,
+                new_key_version,
+                recipient,
+                &new_key,
+                env,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let signing_keys = auth.keys.clone();
+    let brain_id_value =
+        BrainId::new(brain_id).map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let folder_id_value =
+        FolderId::new(folder_id).map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let mut reencrypted_records = Vec::new();
+    for object in export
+        .objects
+        .iter()
+        .filter(|object| object.folder_id == folder_id && !object.deleted)
+    {
+        let payload_json = object.payload_json.as_deref().ok_or_else(|| {
+            CliError::InvalidInput(format!(
+                "cannot prepare revocation: live object {} is opaque",
+                object.object_id
+            ))
+        })?;
+        let envelope_json = serde_json::from_str::<serde_json::Value>(payload_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("ciphertext")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| payload_json.to_owned());
+        let envelope = EncryptedFolderObjectEnvelope::from_json(&envelope_json)
+            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        let object_id = ObjectId::new(object.object_id.clone())
+            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        let old_aad = FolderObjectAad {
+            brain_id: brain_id_value.clone(),
+            folder_id: folder_id_value.clone(),
+            object_id: object_id.clone(),
+            key_version: folder.current_key_version,
+        };
+        let plaintext = open_folder_object(current_key, &old_aad, &envelope)
+            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        let new_aad = FolderObjectAad {
+            brain_id: brain_id_value.clone(),
+            folder_id: folder_id_value.clone(),
+            object_id: object_id.clone(),
+            key_version: new_key_version,
+        };
+        let new_envelope = encrypt_folder_object(&new_key, &new_aad, &plaintext)
+            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        let new_envelope_json = new_envelope.canonical_json();
+        let revision_event = signed_revision_event(
+            &signing_keys,
+            RevisionEventInput {
+                actor_npub: &auth.npub,
+                brain_id,
+                folder_id: &folder_id_value,
+                object_id: &object_id,
+                operation: FolderObjectOperation::Update,
+                base_revision: Some(object.revision),
+                key_version: new_key_version,
+                envelope_json: new_envelope_json.clone(),
+            },
+        )?;
+        reencrypted_records.push(serde_json::json!({
+            "objectId": object.object_id,
+            "baseRevision": object.revision,
+            "keyVersion": new_key_version,
+            "cipher": CIPHER_AES_256_GCM,
+            "ciphertext": new_envelope_json,
+            "revisionEvent": revision_event,
+        }));
+    }
+    let access_change_event = admin_access_change_event(
+        env,
+        brain_id,
+        AdminAccessAction::RemoveFolderAccess,
+        Some(folder_id),
+        target_npubs.iter().next().map(String::as_str),
+        Some(new_key_version),
+    )?;
+    Ok(serde_json::json!({
+        "newKeyVersion": new_key_version,
+        "grants": grants,
+        "reencryptedRecords": reencrypted_records,
+        "accessChangeEvent": access_change_event,
+    }))
 }
 
 fn newly_readable_session_key_count(
@@ -217,9 +460,28 @@ fn newly_readable_session_key_count(
     primary.count() + mounted.count()
 }
 
+#[cfg(test)]
 pub(crate) fn pending_working_tree_change_count(root: &Path) -> Result<usize, CliError> {
+    Ok(pending_working_tree_change_paths(root)?.len())
+}
+
+pub(crate) fn pending_working_tree_change_paths(root: &Path) -> Result<Vec<String>, CliError> {
     let tree_state = read_working_tree_state(root)?;
-    Ok(scan_working_tree_changes(root, &tree_state)?.len())
+    let mut paths = Vec::new();
+    for change in scan_working_tree_changes(root, &tree_state)? {
+        match change {
+            WorkingTreeChange::Upsert { path, .. }
+            | WorkingTreeChange::UpsertAsset { path, .. }
+            | WorkingTreeChange::Delete { path } => paths.push(path.to_string()),
+            WorkingTreeChange::Rename { from_path, to_path } => {
+                paths.push(from_path.to_string());
+                paths.push(to_path.to_string());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn fetch_encrypted_export(
@@ -227,7 +489,7 @@ fn fetch_encrypted_export(
     server_url: &str,
     brain_id: &str,
 ) -> Result<CliEncryptedBrainExport, CliError> {
-    let path = format!("/_admin/brains/{brain_id}/export");
+    let path = format!("/v1/brains/{brain_id}/export");
     let response = signed_json_request_to_server(env, server_url, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
 }
@@ -237,7 +499,7 @@ fn fetch_sync_bootstrap(
     server_url: &str,
     brain_id: &str,
 ) -> Result<CliSyncBootstrap, CliError> {
-    let path = format!("/_admin/brains/{brain_id}/sync/bootstrap");
+    let path = format!("/v1/brains/{brain_id}/sync/bootstrap");
     let response = signed_json_request_to_server(env, server_url, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
 }
@@ -343,7 +605,7 @@ fn fetch_sync_records_page(
     after_sequence: u64,
 ) -> Result<CliSyncPull, CliError> {
     let path = format!(
-        "/_admin/brains/{brain_id}/sync/records?after={after_sequence}&limit={SYNC_RECORDS_PAGE_LIMIT}"
+        "/v1/brains/{brain_id}/sync/records?after={after_sequence}&limit={SYNC_RECORDS_PAGE_LIMIT}"
     );
     let response = signed_json_request_to_server(env, server_url, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
@@ -364,11 +626,12 @@ fn sync_bootstrap_reason(local_result: &LocalSyncResult, opened_grants: usize) -
 }
 
 fn is_rebootstrap_required_error(error: &CliError) -> bool {
-    matches!(error, CliError::Http(message) if message.contains("410") || message.contains("rebootstrap required"))
+    matches!(error, CliError::Http(message) if message.contains("rebootstrap required"))
+        || matches!(error, CliError::HttpStatus { status: 410, body } if body.contains("rebootstrap required"))
 }
 
 fn is_sync_records_route_unavailable(error: &CliError) -> bool {
-    matches!(error, CliError::Http(message) if message.contains("404"))
+    matches!(error, CliError::HttpStatus { status: 404, .. })
 }
 
 fn apply_incremental_records(
@@ -383,6 +646,7 @@ fn apply_incremental_records(
         ));
     }
     let base = incremental_base_bootstrap(root, after_sequence)?;
+    let mut control_records = base.control_records;
     let mut objects = base
         .objects
         .into_iter()
@@ -425,6 +689,11 @@ fn apply_incremental_records(
                     },
                 );
             }
+            "brain_admin_access_change" if is_folder_subtree_tombstone_record(record) => {
+                let deleted_folder_ids = folder_subtree_tombstone_ids(record)?;
+                objects.retain(|(folder_id, _), _| !deleted_folder_ids.contains(folder_id));
+                control_records.push(record.clone());
+            }
             other => {
                 return Err(format!(
                     "sync record {} type {other} requires bootstrap",
@@ -437,6 +706,7 @@ fn apply_incremental_records(
     Ok(CliSyncBootstrap {
         latest_sequence,
         objects: objects.into_values().collect(),
+        control_records,
     })
 }
 
@@ -453,6 +723,7 @@ fn incremental_base_bootstrap(
         Ok(None) if after_sequence == 0 => Ok(CliSyncBootstrap {
             latest_sequence: 0,
             objects: Vec::new(),
+            control_records: Vec::new(),
         }),
         Ok(None) => Err(format!(
             "cached bootstrap missing for incremental cursor {after_sequence}"
@@ -539,8 +810,58 @@ fn sync_record_action(record: &CliSyncRecord) -> String {
             }
         }
         "folder_object_tombstone" => "delete".to_owned(),
+        "brain_admin_access_change" if is_folder_subtree_tombstone_record(record) => {
+            "delete-folder-subtree".to_owned()
+        }
         other => other.to_owned(),
     }
+}
+
+fn is_folder_subtree_tombstone_record(record: &CliSyncRecord) -> bool {
+    serde_json::from_str::<serde_json::Value>(&record.payload_json)
+        .ok()
+        .and_then(|payload| payload.get("recordType")?.as_str().map(ToOwned::to_owned))
+        .as_deref()
+        == Some("folder_subtree_tombstone")
+}
+
+fn folder_subtree_tombstone_ids(record: &CliSyncRecord) -> Result<BTreeSet<String>, String> {
+    let payload =
+        serde_json::from_str::<serde_json::Value>(&record.payload_json).map_err(|_| {
+            format!(
+                "sync record {} deletion payload is invalid",
+                record.sequence
+            )
+        })?;
+    let folder_ids = payload
+        .get("folderIds")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "sync record {} deletion payload is missing folderIds",
+                record.sequence
+            )
+        })?;
+    if folder_ids.is_empty() {
+        return Err(format!(
+            "sync record {} deletion payload has no folderIds",
+            record.sequence
+        ));
+    }
+    folder_ids
+        .iter()
+        .map(|folder_id| {
+            let folder_id = folder_id.as_str().ok_or_else(|| {
+                format!(
+                    "sync record {} deletion payload has an invalid folderId",
+                    record.sequence
+                )
+            })?;
+            FolderId::new(folder_id.to_owned())
+                .map(|folder_id| folder_id.to_string())
+                .map_err(|error| error.to_string())
+        })
+        .collect()
 }
 
 fn sync_record_base_revision_is_none(record: &CliSyncRecord) -> bool {
@@ -583,7 +904,7 @@ fn fetch_brain_metadata_for_sync(
     server_url: &str,
     brain_id: &str,
 ) -> Result<CliBrainMetadata, CliError> {
-    let path = format!("/_admin/brains/{brain_id}/metadata");
+    let path = format!("/v1/brains/{brain_id}/metadata");
     let response = signed_json_request_to_server(env, server_url, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
 }
@@ -594,12 +915,9 @@ fn fetch_mounted_folder_sync_contexts(
     brain_id: &str,
     export: &CliEncryptedBrainExport,
 ) -> Result<Vec<MountedFolderSyncContext>, CliError> {
-    if export.brain.kind != "organization" {
-        return Ok(Vec::new());
-    }
     let metadata = match fetch_brain_metadata_for_sync(env, server_url, brain_id) {
         Ok(metadata) => metadata,
-        Err(CliError::Http(_)) => return Ok(Vec::new()),
+        Err(CliError::Http(_)) | Err(CliError::HttpStatus { .. }) => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
     let mut used_paths = export
@@ -733,6 +1051,33 @@ fn open_export_folder_key_grants_into_session(
     Ok(opened_count)
 }
 
+fn open_export_folder_key_grants_into_session_tolerant(
+    auth: &crate::LocalSigner,
+    export: &CliEncryptedBrainExport,
+    session_keys: &mut SessionFolderKeyring,
+) -> Result<usize, CliError> {
+    let opened = opened_export_folder_key_grants_tolerant(auth, export);
+    let mut opened_count = 0;
+    for grant in opened {
+        let folder_key =
+            FolderKey::from_base64(&grant.folder_key).map_err(|_| CliError::GrantOpening {
+                brain_id: grant.brain_id.clone(),
+                folder_id: grant.folder_id.clone(),
+                key_version: grant.key_version,
+                reason: "opened grant did not contain a valid Folder Key".to_owned(),
+            })?;
+        if session_keys.insert(
+            grant.brain_id,
+            grant.folder_id,
+            grant.key_version,
+            folder_key,
+        ) {
+            opened_count += 1;
+        }
+    }
+    Ok(opened_count)
+}
+
 fn opened_export_folder_key_grants(
     auth: &crate::LocalSigner,
     export: &CliEncryptedBrainExport,
@@ -776,6 +1121,88 @@ fn opened_export_folder_key_grants(
     }
 
     Ok(opened)
+}
+
+pub(crate) fn open_offered_folder_key(
+    env: &CliEnvironment,
+    brain_id: &str,
+    folder_id: &str,
+    key_version: u32,
+    issuer_npub: &str,
+    wrapped_event_json: &str,
+) -> Result<FolderKey, CliError> {
+    let auth = load_signer(env)?;
+    let export = CliEncryptedBrainExport {
+        brain: CliExportBrain {
+            id: brain_id.to_owned(),
+            kind: String::new(),
+            name: String::new(),
+            owner_user_id: None,
+        },
+        folders: Vec::new(),
+        objects: Vec::new(),
+        key_grants: vec![CliFolderKeyGrant {
+            folder_id: folder_id.to_owned(),
+            key_version,
+            issuer_npub: issuer_npub.to_owned(),
+            recipient_npub: auth.npub.clone(),
+            wrapped_event_json: wrapped_event_json.to_owned(),
+        }],
+        access_state: CliExportAccessState {
+            members: Vec::new(),
+            admins: Vec::new(),
+        },
+    };
+    let plaintext = opened_export_folder_key_grants(&auth, &export)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CliError::GrantOpening {
+            brain_id: brain_id.to_owned(),
+            folder_id: folder_id.to_owned(),
+            key_version,
+            reason: "the Mount Offer did not include a usable grant for this controller".to_owned(),
+        })?;
+    FolderKey::from_base64(&plaintext.folder_key).map_err(|_| CliError::GrantOpening {
+        brain_id: brain_id.to_owned(),
+        folder_id: folder_id.to_owned(),
+        key_version,
+        reason: "the Mount Offer grant did not contain a valid Folder Key".to_owned(),
+    })
+}
+
+pub(crate) fn opened_export_folder_key_grants_tolerant(
+    auth: &crate::LocalSigner,
+    export: &CliEncryptedBrainExport,
+) -> Vec<CliFolderKeyGrantPlaintext> {
+    let keys = auth.keys.clone();
+    let recipient = match NostrPublicKey::parse(&auth.npub) {
+        Ok(recipient) => recipient,
+        Err(_) => return Vec::new(),
+    };
+    let validation = GiftWrapValidation::new(recipient);
+    export
+        .key_grants
+        .iter()
+        .filter(|grant| grant.recipient_npub == auth.npub)
+        .filter_map(|grant| {
+            let event = Event::from_json(grant.wrapped_event_json.clone()).ok()?;
+            let opened_wrap = open_gift_wrap(&keys, &event, &validation).ok()?;
+            let plaintext =
+                serde_json::from_str::<CliFolderKeyGrantPlaintext>(&opened_wrap.rumor.content)
+                    .ok()?;
+            if plaintext.version != "finite-folder-key-grant-v1"
+                || plaintext.brain_id != export.brain.id
+                || plaintext.folder_id != grant.folder_id
+                || plaintext.key_version != grant.key_version
+                || plaintext.issuer_npub != grant.issuer_npub
+                || plaintext.recipient_npub != auth.npub
+            {
+                return None;
+            }
+            FolderKey::from_base64(&plaintext.folder_key).ok()?;
+            Some(plaintext)
+        })
+        .collect()
 }
 
 fn push_local_working_tree_changes(
@@ -1069,13 +1496,13 @@ fn submit_change_intent(
             });
             let route = match intent.action {
                 WorkingTreeIntentAction::Move => format!(
-                    "/_admin/brains/{}/folders/{}/objects/{}/move",
+                    "/v1/brains/{}/folders/{}/objects/{}/move",
                     route_brain_id,
                     folder_id,
                     object_id.as_str()
                 ),
                 _ => format!(
-                    "/_admin/brains/{}/folders/{}/objects/{}",
+                    "/v1/brains/{}/folders/{}/objects/{}",
                     route_brain_id,
                     folder_id,
                     object_id.as_str()
@@ -1111,7 +1538,7 @@ fn submit_change_intent(
                 "tombstoneEvent": event
             });
             let route = format!(
-                "/_admin/brains/{}/folders/{}/objects/{}",
+                "/v1/brains/{}/folders/{}/objects/{}",
                 route_brain_id,
                 folder_id,
                 object_id.as_str()
@@ -1254,6 +1681,7 @@ struct MaterializeRemoteProjectionContext<'a> {
     mounted_folders: &'a [MountedFolderMaterializeContext],
     path_overrides: &'a BTreeMap<(String, String, String), String>,
     session_keys: &'a SessionFolderKeyring,
+    prior_state: Option<&'a BrainWorkingTreeStateManifest>,
 }
 
 fn materialize_remote_projection(
@@ -1268,8 +1696,15 @@ fn materialize_remote_projection(
         mounted_folders,
         path_overrides,
         session_keys,
+        prior_state,
     } = context;
-    let prior_state = read_working_tree_state(root)?;
+    let loaded_prior_state;
+    let prior_state = if let Some(prior_state) = prior_state {
+        prior_state
+    } else {
+        loaded_prior_state = read_working_tree_state(root)?;
+        &loaded_prior_state
+    };
     let brain = brain_from_export(export)?;
     let mut prior_paths = prior_state
         .objects
@@ -1375,13 +1810,19 @@ fn materialize_remote_projection(
             Some((&mounted.mount.source_folder_id, &mounted.display_path)),
         )?;
     }
+    let mut deleted_routes = deleted_folder_routes(export, bootstrap)?;
+    for mounted in mounted_folders {
+        deleted_routes.extend(deleted_folder_routes(&mounted.export, &mounted.bootstrap)?);
+    }
     preserve_unreadable_prior_projection(
-        &prior_state,
+        prior_state,
         &mut projection,
         &export.brain.id,
         &readable_folder_routes,
+        &deleted_routes,
     )?;
     remove_stale_object_files(root, &prior_state.objects, &projection.state.objects)?;
+    remove_obsolete_compiled_convention_markers(root, &projection.state.folder_roots)?;
     write_projection_files(root, &projection.files, &projection.binary_files)?;
     Ok(())
 }
@@ -1391,6 +1832,7 @@ fn preserve_unreadable_prior_projection(
     projection: &mut WorkingTreeProjection,
     primary_brain_id: &str,
     readable_folder_routes: &BTreeSet<(String, String)>,
+    deleted_folder_routes: &BTreeSet<(String, String)>,
 ) -> Result<(), CliError> {
     let is_unreadable = |source_brain_id: Option<&str>, folder_id: &str| {
         let source_brain_id = source_brain_id.unwrap_or(primary_brain_id);
@@ -1398,6 +1840,10 @@ fn preserve_unreadable_prior_projection(
     };
 
     for root in &prior_state.folder_roots {
+        let source_brain_id = root.source_brain_id.as_deref().unwrap_or(primary_brain_id);
+        if deleted_folder_routes.contains(&(source_brain_id.to_owned(), root.folder_id.clone())) {
+            continue;
+        }
         let route = (root.source_brain_id.clone(), root.folder_id.clone());
         if !is_unreadable(root.source_brain_id.as_deref(), &root.folder_id) {
             continue;
@@ -1420,6 +1866,13 @@ fn preserve_unreadable_prior_projection(
     }
 
     for object in &prior_state.objects {
+        let source_brain_id = object
+            .source_brain_id
+            .as_deref()
+            .unwrap_or(primary_brain_id);
+        if deleted_folder_routes.contains(&(source_brain_id.to_owned(), object.folder_id.clone())) {
+            continue;
+        }
         let route_is_unreadable =
             is_unreadable(object.source_brain_id.as_deref(), &object.folder_id);
         let object_key = (
@@ -1456,6 +1909,64 @@ fn preserve_unreadable_prior_projection(
         ".finitebrain/working-tree-state.json".to_owned(),
         serde_json::to_string_pretty(&projection.state)?,
     );
+    Ok(())
+}
+
+fn deleted_folder_routes(
+    export: &CliEncryptedBrainExport,
+    bootstrap: &CliSyncBootstrap,
+) -> Result<BTreeSet<(String, String)>, CliError> {
+    let mut routes = BTreeSet::new();
+    for record in &bootstrap.control_records {
+        if !is_folder_subtree_tombstone_record(record) {
+            continue;
+        }
+        for folder_id in folder_subtree_tombstone_ids(record).map_err(CliError::InvalidInput)? {
+            routes.insert((export.brain.id.clone(), folder_id));
+        }
+    }
+    Ok(routes)
+}
+
+fn remove_deleted_folder_roots(
+    root: &Path,
+    prior_state: &BrainWorkingTreeStateManifest,
+    prior_export: Option<&CliEncryptedBrainExport>,
+    deleted_folder_routes: &BTreeSet<(String, String)>,
+    primary_brain_id: &str,
+) -> Result<(), CliError> {
+    let mut deleted_paths = BTreeSet::new();
+    for folder in &prior_state.folder_roots {
+        let source_brain_id = folder
+            .source_brain_id
+            .as_deref()
+            .unwrap_or(primary_brain_id);
+        if !deleted_folder_routes.contains(&(source_brain_id.to_owned(), folder.folder_id.clone()))
+        {
+            continue;
+        }
+        deleted_paths.insert(folder.path.clone());
+    }
+    if let Some(prior_export) = prior_export {
+        for folder in &prior_export.folders {
+            if deleted_folder_routes.contains(&(prior_export.brain.id.clone(), folder.id.clone())) {
+                deleted_paths.insert(folder.path.clone());
+            }
+        }
+    }
+    for deleted_path in deleted_paths {
+        let path = SafeRelativePath::new("folder_path", deleted_path)
+            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        let path = root.join(path.as_str());
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(path)?;
+        } else if metadata.is_dir() {
+            fs::remove_dir_all(path)?;
+        }
+    }
     Ok(())
 }
 
@@ -1592,29 +2103,16 @@ fn add_empty_readable_folders(
         });
         projection.files.insert(
             format!("{}/AGENTS.md", folder_path),
-            format!(
-                "# Folder Agent Instructions\n\nFolder id: `{}`\n\nUse `raw/` for source captures, `raw/assets/` for non-Markdown Assets, `wiki/` for durable synthesized pages, `inventory/` for source candidates and open questions, `datasets/` for manifests and query recipes, and `output/` for generated artifacts. Pair every Asset with a Markdown Source Note before citing it from synthesized work.\n",
-                folder.id
-            ),
+            folder_agent_instructions(&folder.id),
         );
         projection.files.insert(
             format!("{}/_index.md", folder_path),
             format!("# {}\n\n", folder_path),
         );
-        for convention in [
-            "raw",
-            "raw/assets",
-            "wiki",
-            "inventory",
-            "datasets",
-            "output",
-        ] {
+        for convention in FOLDER_CONVENTION_DIRECTORIES {
             projection.files.insert(
                 format!("{}/{convention}/.keep", folder_path),
-                format!(
-                    "# {convention}\n\nAgent convention directory for Folder `{}`.\n",
-                    folder.id
-                ),
+                folder_convention_marker(&folder.id, convention),
             );
         }
     }
@@ -1706,7 +2204,6 @@ fn folder_from_export(folder: &CliExportFolder) -> Result<Folder, CliError> {
         path: SafeRelativePath::new("folder_path", folder.path.clone())
             .map_err(|error| CliError::InvalidInput(error.to_string()))?,
         current_key_version: folder.current_key_version,
-        shared_folder_source: folder.shared_folder_source,
     })
 }
 
@@ -2024,6 +2521,157 @@ fn remove_stale_object_files(
     Ok(())
 }
 
+fn remove_obsolete_compiled_convention_markers(
+    root: &Path,
+    folder_roots: &[WorkingTreeFolderRoot],
+) -> Result<(), CliError> {
+    for folder in folder_roots.iter().filter(|folder| folder.can_read) {
+        let legacy_marker = format!(
+            "# compiled\n\nAgent convention directory for Folder `{}`.\n",
+            folder.folder_id
+        );
+        remove_obsolete_compiled_convention_marker(root, &folder.path, legacy_marker.as_bytes())?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_obsolete_compiled_convention_marker(
+    root: &Path,
+    folder_path: &str,
+    legacy_marker: &[u8],
+) -> Result<(), CliError> {
+    let Some(compiled_fd) = open_compiled_directory(root, folder_path)? else {
+        return Ok(());
+    };
+    remove_legacy_marker_from_compiled_fd(&compiled_fd, legacy_marker)
+}
+
+#[cfg(unix)]
+fn open_compiled_directory(root: &Path, folder_path: &str) -> Result<Option<OwnedFd>, CliError> {
+    let mut current = match open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(_) => return Ok(None),
+    };
+    for component in Path::new(folder_path)
+        .components()
+        .chain([Component::Normal("compiled".as_ref())])
+    {
+        let Component::Normal(component) = component else {
+            return Ok(None);
+        };
+        current = match openat(
+            &current,
+            component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(_) => return Ok(None),
+        };
+    }
+    Ok(Some(current))
+}
+
+#[cfg(unix)]
+fn remove_legacy_marker_from_compiled_fd(
+    compiled_fd: &OwnedFd,
+    legacy_marker: &[u8],
+) -> Result<(), CliError> {
+    let Some(quarantine_name) = quarantine_legacy_marker(compiled_fd) else {
+        return Ok(());
+    };
+    verify_and_remove_quarantined_marker(compiled_fd, &quarantine_name, legacy_marker)
+}
+
+#[cfg(unix)]
+fn quarantine_legacy_marker(compiled_fd: &OwnedFd) -> Option<String> {
+    for attempt in 0..128 {
+        let quarantine_name = format!(
+            ".finitebrain-legacy-compiled-keep-{}-{attempt}",
+            std::process::id()
+        );
+        match renameat_with(
+            compiled_fd,
+            ".keep",
+            compiled_fd,
+            quarantine_name.as_str(),
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => return Some(quarantine_name),
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn verify_and_remove_quarantined_marker(
+    compiled_fd: &OwnedFd,
+    quarantine_name: &str,
+    legacy_marker: &[u8],
+) -> Result<(), CliError> {
+    let marker_fd = match openat(
+        compiled_fd,
+        quarantine_name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(_) => {
+            restore_quarantined_marker(compiled_fd, quarantine_name);
+            return Ok(());
+        }
+    };
+    let marker = File::from(marker_fd);
+    if !marker.metadata()?.is_file() {
+        restore_quarantined_marker(compiled_fd, quarantine_name);
+        return Ok(());
+    }
+    let mut body = Vec::with_capacity(legacy_marker.len().saturating_add(1));
+    if let Err(error) = marker
+        .take(legacy_marker.len().saturating_add(1) as u64)
+        .read_to_end(&mut body)
+    {
+        restore_quarantined_marker(compiled_fd, quarantine_name);
+        return Err(error.into());
+    }
+    if body == legacy_marker {
+        unlinkat(compiled_fd, quarantine_name, AtFlags::empty()).map_err(std::io::Error::from)?;
+    } else {
+        restore_quarantined_marker(compiled_fd, quarantine_name);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restore_quarantined_marker(compiled_fd: &OwnedFd, quarantine_name: &str) {
+    let _ = renameat_with(
+        compiled_fd,
+        quarantine_name,
+        compiled_fd,
+        ".keep",
+        RenameFlags::NOREPLACE,
+    );
+}
+
+#[cfg(not(unix))]
+fn remove_obsolete_compiled_convention_marker(
+    _root: &Path,
+    _folder_path: &str,
+    _legacy_marker: &[u8],
+) -> Result<(), CliError> {
+    // The legacy marker is harmless. Without Unix handle-relative open/unlink
+    // semantics, preserving it is safer than traversing a junction or reparse
+    // point during cosmetic cleanup.
+    Ok(())
+}
+
 fn folder_path_for_removed_object(
     root: &Path,
     object: &WorkingTreeObjectManifestEntry,
@@ -2045,7 +2693,10 @@ fn write_projection_files(
 ) -> Result<(), CliError> {
     for (relative_path, body) in files {
         let path = root.join(relative_path);
-        if relative_path.starts_with(".finitebrain/") {
+        if relative_path == ".finitebrain/working-tree-state.json" {
+            let state: BrainWorkingTreeStateManifest = serde_json::from_str(body)?;
+            write_working_tree_state(root, &state)?;
+        } else if relative_path.starts_with(".finitebrain/") {
             write_private_file_atomic(&path, body.as_bytes())?;
         } else {
             if let Some(parent) = path.parent() {
@@ -2103,7 +2754,7 @@ fn conflict_for_change(
 }
 
 fn is_http_conflict(error: &CliError) -> bool {
-    matches!(error, CliError::Http(message) if message.contains("409"))
+    matches!(error, CliError::HttpStatus { status: 409, .. })
 }
 
 fn mutate_agent_state_at_root<F>(root: &Path, now: String, f: F) -> Result<(), CliError>
@@ -2361,36 +3012,49 @@ struct CliFolderObjectAssetPlaintext {
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliEncryptedBrainExport {
-    brain: CliExportBrain,
-    folders: Vec<CliExportFolder>,
-    key_grants: Vec<CliFolderKeyGrant>,
-    access_state: CliExportAccessState,
+pub(crate) struct CliEncryptedBrainExport {
+    pub(crate) brain: CliExportBrain,
+    pub(crate) folders: Vec<CliExportFolder>,
+    #[serde(default)]
+    pub(crate) objects: Vec<CliExportObject>,
+    pub(crate) key_grants: Vec<CliFolderKeyGrant>,
+    pub(crate) access_state: CliExportAccessState,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliExportBrain {
-    id: String,
-    kind: String,
-    name: String,
-    owner_user_id: Option<String>,
+pub(crate) struct CliExportBrain {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) owner_user_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliExportFolder {
-    id: String,
-    path: String,
-    access: String,
-    current_key_version: u32,
-    shared_folder_source: bool,
-    accessible: bool,
+pub(crate) struct CliExportFolder {
+    pub(crate) id: String,
+    pub(crate) path: String,
+    pub(crate) access: String,
+    pub(crate) current_key_version: u32,
+    pub(crate) accessible: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliFolderKeyGrant {
+pub(crate) struct CliExportObject {
+    pub(crate) folder_id: String,
+    pub(crate) object_id: String,
+    pub(crate) payload_json: Option<String>,
+    pub(crate) revision: u64,
+    pub(crate) updated_at: String,
+    pub(crate) deleted: bool,
+    pub(crate) opaque: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliFolderKeyGrant {
     folder_id: String,
     key_version: u32,
     issuer_npub: String,
@@ -2400,9 +3064,9 @@ struct CliFolderKeyGrant {
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CliExportAccessState {
-    members: Vec<String>,
-    admins: Vec<String>,
+pub(crate) struct CliExportAccessState {
+    pub(crate) members: Vec<String>,
+    pub(crate) admins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -2410,6 +3074,8 @@ struct CliExportAccessState {
 struct CliSyncBootstrap {
     latest_sequence: u64,
     objects: Vec<CliSyncObject>,
+    #[serde(default)]
+    control_records: Vec<CliSyncRecord>,
 }
 
 #[allow(dead_code)]
@@ -2470,14 +3136,14 @@ struct CliMountedFolder {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CliFolderKeyGrantPlaintext {
-    version: String,
-    brain_id: String,
-    folder_id: String,
-    key_version: u32,
-    folder_key: String,
-    issuer_npub: String,
-    recipient_npub: String,
+pub(crate) struct CliFolderKeyGrantPlaintext {
+    pub(crate) version: String,
+    pub(crate) brain_id: String,
+    pub(crate) folder_id: String,
+    pub(crate) key_version: u32,
+    pub(crate) folder_key: String,
+    pub(crate) issuer_npub: String,
+    pub(crate) recipient_npub: String,
 }
 
 #[cfg(test)]
@@ -2489,6 +3155,64 @@ mod tests {
     };
     use finite_brain_core::{DisplayName, validate_revision_event};
     use tempfile::TempDir;
+
+    #[test]
+    fn deleted_folder_cleanup_uses_prior_export_when_manifest_lacks_ancestor_root() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join("Parent/Child/raw")).unwrap();
+        fs::write(temp.path().join("Parent/Child/raw/.keep"), "generated").unwrap();
+        let prior_state = BrainWorkingTreeStateManifest {
+            version: "finite-brain-working-tree-state-v1".to_owned(),
+            folder_roots: vec![],
+            objects: vec![],
+            sync: WorkingTreeSyncState { latest_sequence: 1 },
+        };
+        let prior_export = CliEncryptedBrainExport {
+            brain: CliExportBrain {
+                id: "brain".to_owned(),
+                kind: "organization".to_owned(),
+                name: "Brain".to_owned(),
+                owner_user_id: None,
+            },
+            folders: vec![
+                CliExportFolder {
+                    id: "parent".to_owned(),
+                    path: "Parent".to_owned(),
+                    access: "restricted".to_owned(),
+                    current_key_version: 1,
+                    accessible: true,
+                },
+                CliExportFolder {
+                    id: "child".to_owned(),
+                    path: "Parent/Child".to_owned(),
+                    access: "restricted".to_owned(),
+                    current_key_version: 1,
+                    accessible: true,
+                },
+            ],
+            objects: vec![],
+            key_grants: vec![],
+            access_state: CliExportAccessState {
+                members: vec![],
+                admins: vec![],
+            },
+        };
+        let deleted_routes = BTreeSet::from([
+            ("brain".to_owned(), "parent".to_owned()),
+            ("brain".to_owned(), "child".to_owned()),
+        ]);
+
+        remove_deleted_folder_roots(
+            temp.path(),
+            &prior_state,
+            Some(&prior_export),
+            &deleted_routes,
+            "brain",
+        )
+        .unwrap();
+
+        assert!(!temp.path().join("Parent").exists());
+    }
 
     #[test]
     fn scan_detects_markdown_create_update_and_delete() {
@@ -2828,10 +3552,13 @@ mod tests {
         let env = CliEnvironment {
             cwd: temp.path().to_path_buf(),
             config_dir: temp.path().join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(temp.path().join("finite-home")),
+            embedding_provider: None,
         };
         let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
             .unwrap();
@@ -2925,7 +3652,6 @@ mod tests {
                 parent_folder_id: None,
                 path: SafeRelativePath::new("folder_path", "home").unwrap(),
                 current_key_version: 1,
-                shared_folder_source: false,
             }],
             members: Vec::new(),
             admins: Vec::new(),
@@ -2952,9 +3678,9 @@ mod tests {
                 path: "home".to_owned(),
                 access: "owner".to_owned(),
                 current_key_version: 1,
-                shared_folder_source: false,
                 accessible: true,
             }],
+            objects: Vec::new(),
             key_grants: Vec::new(),
             access_state: CliExportAccessState {
                 members: Vec::new(),
@@ -3055,10 +3781,13 @@ mod tests {
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
         };
         let object_id = ObjectId::new("obj_remote000001").unwrap();
         let page_path = SafeRelativePath::new("page_path", "docs/from-envelope.md").unwrap();
@@ -3082,9 +3811,9 @@ mod tests {
                 path: "home".to_owned(),
                 access: "owner".to_owned(),
                 current_key_version: 1,
-                shared_folder_source: false,
                 accessible: true,
             }],
+            objects: Vec::new(),
             key_grants: Vec::new(),
             access_state: CliExportAccessState {
                 members: Vec::new(),
@@ -3100,6 +3829,7 @@ mod tests {
                 ciphertext: envelope.canonical_json(),
                 deleted: false,
             }],
+            control_records: Vec::new(),
         };
 
         materialize_remote_projection(MaterializeRemoteProjectionContext {
@@ -3111,6 +3841,7 @@ mod tests {
             mounted_folders: &[],
             path_overrides: &BTreeMap::new(),
             session_keys: &session_keys,
+            prior_state: None,
         })
         .unwrap();
 
@@ -3122,6 +3853,194 @@ mod tests {
         assert_eq!(state.objects.len(), 1);
         assert_eq!(state.objects[0].path, "docs/from-envelope.md");
         assert_eq!(state.sync.latest_sequence, 7);
+    }
+
+    #[test]
+    fn folder_conventions_stay_stable_when_the_first_page_is_materialized() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        initialize_private_working_tree(root).unwrap();
+        write_json_file(
+            &root.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: "finite-brain-working-tree-state-v1".to_owned(),
+                folder_roots: Vec::new(),
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        let folder_key = FolderKey::from_bytes([4; 32]);
+        let mut session_keys = SessionFolderKeyring::default();
+        session_keys.insert("brain", "home", 1, folder_key.clone());
+        let env = CliEnvironment {
+            cwd: root.to_path_buf(),
+            config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
+            working_tree_root: None,
+            now: Some("2026-07-25T18:00:00Z".to_owned()),
+            identity_authority_url: None,
+            finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
+        };
+        let export = CliEncryptedBrainExport {
+            brain: CliExportBrain {
+                id: "brain".to_owned(),
+                kind: "personal".to_owned(),
+                name: "Brain".to_owned(),
+                owner_user_id: Some("npub-owner".to_owned()),
+            },
+            folders: vec![CliExportFolder {
+                id: "home".to_owned(),
+                path: "home".to_owned(),
+                access: "owner".to_owned(),
+                current_key_version: 1,
+                accessible: true,
+            }],
+            objects: Vec::new(),
+            key_grants: Vec::new(),
+            access_state: CliExportAccessState {
+                members: Vec::new(),
+                admins: Vec::new(),
+            },
+        };
+        let empty_bootstrap = CliSyncBootstrap {
+            latest_sequence: 0,
+            objects: Vec::new(),
+            control_records: Vec::new(),
+        };
+
+        materialize_remote_projection(MaterializeRemoteProjectionContext {
+            env: &env,
+            root,
+            actor_npub: "npub-owner",
+            export: &export,
+            bootstrap: &empty_bootstrap,
+            mounted_folders: &[],
+            path_overrides: &BTreeMap::new(),
+            session_keys: &session_keys,
+            prior_state: None,
+        })
+        .unwrap();
+
+        let empty_instructions = fs::read_to_string(root.join("home/AGENTS.md")).unwrap();
+        let expected_conventions = [
+            "raw/.keep",
+            "raw/assets/.keep",
+            "wiki/.keep",
+            "inventory/.keep",
+            "datasets/.keep",
+            "output/.keep",
+        ];
+        for convention in expected_conventions {
+            assert!(root.join("home").join(convention).is_file());
+        }
+
+        fs::create_dir_all(root.join("home/compiled")).unwrap();
+        fs::write(
+            root.join("home/compiled/.keep"),
+            "# compiled\n\nAgent convention directory for Folder `home`.\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("home/compiled/user-authored.md"),
+            "# Preserve me\n",
+        )
+        .unwrap();
+
+        let object_id = ObjectId::new("obj_firstpage001").unwrap();
+        let page_path = SafeRelativePath::new("page_path", "wiki/first.md").unwrap();
+        let plaintext = encode_folder_object_page_plaintext(&page_path, "# First\n").unwrap();
+        let aad = FolderObjectAad {
+            brain_id: BrainId::new("brain").unwrap(),
+            folder_id: FolderId::new("home").unwrap(),
+            object_id: object_id.clone(),
+            key_version: 1,
+        };
+        let envelope = encrypt_folder_object(&folder_key, &aad, &plaintext).unwrap();
+        let populated_bootstrap = CliSyncBootstrap {
+            latest_sequence: 1,
+            objects: vec![CliSyncObject {
+                folder_id: "home".to_owned(),
+                object_id: object_id.as_str().to_owned(),
+                revision: 1,
+                ciphertext: envelope.canonical_json(),
+                deleted: false,
+            }],
+            control_records: Vec::new(),
+        };
+
+        for _ in 0..2 {
+            materialize_remote_projection(MaterializeRemoteProjectionContext {
+                env: &env,
+                root,
+                actor_npub: "npub-owner",
+                export: &export,
+                bootstrap: &populated_bootstrap,
+                mounted_folders: &[],
+                path_overrides: &BTreeMap::new(),
+                session_keys: &session_keys,
+                prior_state: None,
+            })
+            .unwrap();
+
+            assert_eq!(
+                fs::read_to_string(root.join("home/AGENTS.md")).unwrap(),
+                empty_instructions
+            );
+            for convention in expected_conventions {
+                assert!(root.join("home").join(convention).is_file());
+            }
+            assert_eq!(
+                fs::read_to_string(root.join("home/wiki/first.md")).unwrap(),
+                "# First\n"
+            );
+            assert!(!root.join("home/compiled/.keep").exists());
+            assert_eq!(
+                fs::read_to_string(root.join("home/compiled/user-authored.md")).unwrap(),
+                "# Preserve me\n"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn obsolete_marker_cleanup_stays_anchored_to_the_opened_compiled_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("tree");
+        let external = temp.path().join("external");
+        let compiled = root.join("home/compiled");
+        let moved_compiled = root.join("home/compiled-before-swap");
+        fs::create_dir_all(&compiled).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        let legacy_marker = "# compiled\n\nAgent convention directory for Folder `home`.\n";
+        fs::write(compiled.join(".keep"), legacy_marker).unwrap();
+        fs::write(external.join(".keep"), legacy_marker).unwrap();
+        let compiled_fd = open_compiled_directory(&root, "home").unwrap().unwrap();
+        let quarantine_name = quarantine_legacy_marker(&compiled_fd).unwrap();
+
+        fs::rename(&compiled, &moved_compiled).unwrap();
+        symlink(&external, &compiled).unwrap();
+        fs::write(moved_compiled.join(".keep"), "# Replacement\n").unwrap();
+        verify_and_remove_quarantined_marker(
+            &compiled_fd,
+            &quarantine_name,
+            legacy_marker.as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(external.join(".keep")).unwrap(),
+            legacy_marker
+        );
+        assert_eq!(
+            fs::read_to_string(moved_compiled.join(".keep")).unwrap(),
+            "# Replacement\n"
+        );
+        assert!(!moved_compiled.join(quarantine_name).exists());
     }
 
     #[test]
@@ -3145,10 +4064,13 @@ mod tests {
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
         };
         let object_id = ObjectId::new("obj_mounted00001").unwrap();
         let page_path = SafeRelativePath::new("page_path", "compiled/share-brief.md").unwrap();
@@ -3172,9 +4094,9 @@ mod tests {
                 path: "general".to_owned(),
                 access: "all_members".to_owned(),
                 current_key_version: 1,
-                shared_folder_source: false,
                 accessible: true,
             }],
+            objects: Vec::new(),
             key_grants: Vec::new(),
             access_state: CliExportAccessState {
                 members: Vec::new(),
@@ -3193,9 +4115,9 @@ mod tests {
                 path: "shared-lab".to_owned(),
                 access: "restricted".to_owned(),
                 current_key_version: 1,
-                shared_folder_source: true,
                 accessible: true,
             }],
+            objects: Vec::new(),
             key_grants: Vec::new(),
             access_state: CliExportAccessState {
                 members: Vec::new(),
@@ -3221,6 +4143,7 @@ mod tests {
                     ciphertext: envelope.canonical_json(),
                     deleted: false,
                 }],
+                control_records: Vec::new(),
             },
         };
 
@@ -3232,10 +4155,12 @@ mod tests {
             bootstrap: &CliSyncBootstrap {
                 latest_sequence: 2,
                 objects: Vec::new(),
+                control_records: Vec::new(),
             },
             mounted_folders: &[mounted],
             path_overrides: &BTreeMap::new(),
             session_keys: &session_keys,
+            prior_state: None,
         })
         .unwrap();
 
@@ -3243,6 +4168,19 @@ mod tests {
             fs::read_to_string(root.join("shared-lab/compiled/share-brief.md")).unwrap(),
             "# Share Brief\n"
         );
+        let mounted_instructions = fs::read_to_string(root.join("shared-lab/AGENTS.md")).unwrap();
+        assert!(mounted_instructions.contains("wiki/"));
+        assert!(!mounted_instructions.contains("compiled/"));
+        for marker in [
+            "raw/.keep",
+            "raw/assets/.keep",
+            "wiki/.keep",
+            "inventory/.keep",
+            "datasets/.keep",
+            "output/.keep",
+        ] {
+            assert!(root.join("shared-lab").join(marker).is_file());
+        }
         let state = read_working_tree_state(root).unwrap();
         let root_entry = state
             .folder_roots
@@ -3315,10 +4253,13 @@ mod tests {
         let env = CliEnvironment {
             cwd: root.to_path_buf(),
             config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
             working_tree_root: None,
             now: Some("2026-06-26T23:30:00Z".to_owned()),
             identity_authority_url: None,
             finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
         };
         let export = CliEncryptedBrainExport {
             brain: CliExportBrain {
@@ -3332,9 +4273,9 @@ mod tests {
                 path: "home".to_owned(),
                 access: "owner".to_owned(),
                 current_key_version: 2,
-                shared_folder_source: false,
                 accessible: true,
             }],
+            objects: Vec::new(),
             key_grants: Vec::new(),
             access_state: CliExportAccessState {
                 members: Vec::new(),
@@ -3344,6 +4285,7 @@ mod tests {
         let bootstrap = CliSyncBootstrap {
             latest_sequence: 0,
             objects: Vec::new(),
+            control_records: Vec::new(),
         };
 
         materialize_remote_projection(MaterializeRemoteProjectionContext {
@@ -3355,6 +4297,7 @@ mod tests {
             mounted_folders: &[],
             path_overrides: &BTreeMap::new(),
             session_keys: &session_keys,
+            prior_state: None,
         })
         .unwrap();
 

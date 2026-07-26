@@ -50,7 +50,7 @@ test("Brain proxy omits bodies for HTTP statuses that forbid them", () => {
 });
 
 test("Brain proxy bounds actual streamed request bytes", async () => {
-  const accepted = new Request("https://finite.computer/_admin/object", {
+  const accepted = new Request("https://finite.computer/v1/object", {
     method: "POST",
     body: "1234",
   });
@@ -60,7 +60,7 @@ test("Brain proxy bounds actual streamed request bytes", async () => {
   );
 
   const chunks = [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5])];
-  const oversized = new Request("https://finite.computer/_admin/object", {
+  const oversized = new Request("https://finite.computer/v1/object", {
     method: "POST",
     body: new ReadableStream({
       pull(controller) {
@@ -73,7 +73,7 @@ test("Brain proxy bounds actual streamed request bytes", async () => {
   } as RequestInit);
   await assert.rejects(readBoundedBrainRequestBody(oversized, 4));
 
-  const declaredOversized = new Request("https://finite.computer/_admin/object", {
+  const declaredOversized = new Request("https://finite.computer/v1/object", {
     method: "POST",
     headers: { "content-length": "5" },
     body: "12345",
@@ -82,7 +82,7 @@ test("Brain proxy bounds actual streamed request bytes", async () => {
 });
 
 test("Brain proxy body reads stop when their deadline aborts", async () => {
-  const request = new Request("https://finite.computer/_admin/object", {
+  const request = new Request("https://finite.computer/v1/object", {
     method: "POST",
     body: new ReadableStream({
       pull() {

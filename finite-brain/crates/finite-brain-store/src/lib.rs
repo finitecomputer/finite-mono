@@ -7,14 +7,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use finite_brain_core::{
-    BootstrapOutput, Brain, BrainId, BrainKind, BrainMember, CoreError, DisplayName, Folder,
-    FolderAccessMode, FolderId, FolderKeyRecipientPolicy, FolderRole, FolderRotationFanout,
-    FolderRotationOperation, ObjectId, RequiredFolderKeyGrant, SafeRelativePath, UserId,
+    BRAIN_CAPACITY_ENVELOPE, BootstrapOutput, Brain, BrainId, BrainKind, BrainMember, CoreError,
+    DisplayName, EmailInviteScopeError, EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId,
+    FolderKeyRecipientPolicy, FolderRole, FolderRotationFanout, FolderRotationOperation, ObjectId,
+    RequiredFolderKeyGrant, SafeRelativePath, UserId, derive_email_invite_scope,
     required_folder_key_recipients, validate_folder_rotation_fanout,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -30,7 +29,7 @@ mod sync_records;
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
 const MAX_PULL_LIMIT: u64 = 1_000;
-const MAX_BOOTSTRAP_FOLDERS: usize = 1_000;
+const MAX_BOOTSTRAP_FOLDERS: usize = BRAIN_CAPACITY_ENVELOPE.folders;
 const MAX_BOOTSTRAP_GRANTS: usize = 10_000;
 const MAX_LINK_LIST_ROWS: i64 = 200;
 const APP_SPECIFIC_KIND: u16 = 30_078;
@@ -70,6 +69,12 @@ pub enum StoreError {
     RebootstrapRequired { retention_floor: u64 },
     /// A singleton invitation or share link is unavailable to this actor.
     UnavailableLink { kind: &'static str },
+    /// A mutation would exceed the governed accepted-state envelope.
+    CapacityExceeded {
+        limit: String,
+        max: usize,
+        current: usize,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -101,6 +106,14 @@ impl fmt::Display for StoreError {
                 )
             }
             Self::UnavailableLink { kind } => write!(f, "{kind} unavailable"),
+            Self::CapacityExceeded {
+                limit,
+                max,
+                current,
+            } => write!(
+                f,
+                "capacity exceeded for {limit}: current {current}, maximum {max}"
+            ),
         }
     }
 }
@@ -115,10 +128,26 @@ impl From<CoreError> for StoreError {
 
 impl From<rusqlite::Error> for StoreError {
     fn from(value: rusqlite::Error) -> Self {
+        if let Some((limit, max)) = parse_capacity_error(&value.to_string()) {
+            return Self::CapacityExceeded {
+                limit,
+                max,
+                current: max.saturating_add(1),
+            };
+        }
         Self::Database {
             message: value.to_string(),
         }
     }
+}
+
+fn parse_capacity_error(message: &str) -> Option<(String, usize)> {
+    let marker = "finite_capacity:";
+    let encoded = message.split(marker).nth(1)?;
+    let mut parts = encoded.split(':');
+    let limit = parts.next()?.to_owned();
+    let max = parts.next()?.split_whitespace().next()?.parse().ok()?;
+    Some((limit, max))
 }
 
 /// Stored Folder Key Grant metadata. The encrypted key remains opaque to the server.
@@ -151,12 +180,39 @@ pub struct StoredBrain {
     pub brain: Brain,
     /// The one active Personal Agent relationship, when occupied.
     pub personal_agent: Option<PersonalAgent>,
-    /// Explicit restricted Folder access by Folder id.
+    /// Explicit Guest access by Folder id, independent of native access mode.
     pub folder_access: BTreeMap<FolderId, BTreeSet<UserId>>,
     /// Stored Folder Key Grant metadata.
     pub grants: Vec<FolderKeyGrantMetadata>,
     /// Folders that still need current grants.
     pub setup_incomplete_folder_ids: BTreeSet<FolderId>,
+    /// Exact pre-deletion readers allowed to observe each subtree tombstone.
+    pub folder_deletion_audience: BTreeMap<String, BTreeSet<UserId>>,
+}
+
+impl StoredBrain {
+    /// Active Folder-limited identities that do not hold Brain Membership.
+    pub fn guest_user_ids(&self) -> BTreeSet<UserId> {
+        let members = self
+            .brain
+            .members
+            .iter()
+            .map(|member| member.user_id.clone())
+            .collect::<BTreeSet<_>>();
+        let owner = self.brain.owner_user_id.as_ref();
+        let personal_agent = self
+            .personal_agent
+            .as_ref()
+            .map(|relationship| &relationship.agent_npub);
+        self.folder_access
+            .values()
+            .flat_map(BTreeSet::iter)
+            .filter(|user| {
+                !members.contains(*user) && owner != Some(*user) && personal_agent != Some(*user)
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 /// One active Personal Agent relationship owned by a Personal Brain.
@@ -213,6 +269,8 @@ pub enum VisibleBrainRole {
     Admin,
     /// Organization Brain member.
     Member,
+    /// Folder-limited identity without Brain Membership.
+    Guest,
     /// Pending Organization Brain invitation.
     Invited,
 }
@@ -331,6 +389,29 @@ pub struct FolderSubtreeDeletion {
     pub duplicate: bool,
     pub folder_count: usize,
     pub object_count: usize,
+    pub deleted_folder_ids: Vec<FolderId>,
+    /// Content-free deterministic accounting for the bounded delete transaction.
+    pub work: FolderDeletionWork,
+}
+
+/// Deterministic work counters for one direct Folder subtree deletion.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct FolderDeletionWork {
+    pub descendants_visited: usize,
+    pub objects_collected: usize,
+    pub audience_collected: usize,
+    pub invitations_scanned: usize,
+    pub invitations_deleted: usize,
+    pub mutation_statements: usize,
+    pub max_statement_parameters: usize,
+    pub retry_attempts: usize,
+}
+
+/// Optional HTTP-signed scope shown to a user before destructive confirmation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderDeletionExpectation {
+    pub folder_ids: BTreeSet<FolderId>,
+    pub object_count: usize,
 }
 
 /// Retained facts needed to validate an exact retry after a Folder is gone.
@@ -437,8 +518,6 @@ pub struct EncryptedExportFolder {
     pub access: FolderAccessMode,
     /// Current key version.
     pub current_key_version: u32,
-    /// Whether this is a Shared Folder Source.
-    pub shared_folder_source: bool,
     /// Whether the actor can access current encrypted objects in this Folder.
     pub accessible: bool,
 }
@@ -469,17 +548,36 @@ pub struct EncryptedExportAccessState {
     pub members: Vec<UserId>,
     /// Visible admins.
     pub admins: Vec<UserId>,
-    /// Visible restricted Folder access entries.
+    /// Visible explicit Folder access entries.
     pub folders: Vec<EncryptedExportFolderAccess>,
 }
 
-/// Restricted Folder access entry.
+/// Explicit Folder access entry.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct EncryptedExportFolderAccess {
     /// Folder id.
     pub folder_id: FolderId,
     /// Visible users.
     pub user_ids: Vec<UserId>,
+}
+
+/// One Folder Key rotation prepared for atomic Member removal.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemberFolderRotation {
+    pub folder_id: FolderId,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantMetadata>,
+    pub reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
+}
+
+/// One mounted source Folder rotation prepared for atomic Member removal.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemberMountRotation {
+    pub connection_id: String,
+    pub revoke_mount: bool,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantMetadata>,
+    pub reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
 }
 
 /// Current lifecycle state for Brain Invitations and Share Links.
@@ -525,16 +623,8 @@ impl TryFrom<&str> for BrainInvitationTargetKind {
     }
 }
 
-/// One folder included in an Email Invite Bootstrap authorization scope.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct EmailInviteBootstrapScopeFolder {
-    /// Folder id.
-    pub folder_id: FolderId,
-    /// Folder access mode at invite creation.
-    pub access: FolderAccessMode,
-    /// Exact Folder Key version authorized for bootstrap.
-    pub key_version: u32,
-}
+/// Backward-compatible store name for the core-owned Email Invite Bootstrap scope item.
+pub type EmailInviteBootstrapScopeFolder = EmailInviteScopeFolder;
 
 /// Stored singleton Brain Invitation.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -559,6 +649,8 @@ pub struct StoredBrainInvitation {
     pub bootstrap_authorization_event_json: Option<String>,
     /// Server-visible authorized folder scope and key versions.
     pub bootstrap_scope: Vec<EmailInviteBootstrapScopeFolder>,
+    /// True when claim creates bounded Guest access instead of Brain Membership.
+    pub folder_only: bool,
     /// Claiming user npub after successful email bootstrap claim.
     pub claimed_by_npub: Option<UserId>,
     /// Lifecycle state.
@@ -610,10 +702,6 @@ pub struct StoredShareLink {
     pub accepted_at: Option<String>,
     /// Folder Key Grant material to insert at accept time.
     pub folder_key_grant: FolderKeyGrantMetadata,
-    /// Whether accept should create personal mount state.
-    pub create_personal_mount: bool,
-    /// Created personal mount id, if requested and accepted.
-    pub personal_mount_id: Option<String>,
     /// True when accept returned an already-consumed result for the same target.
     pub duplicate_accept: bool,
 }
@@ -652,6 +740,8 @@ pub struct StoredSharedFolderInvitation {
     pub created_at: String,
     /// Last update timestamp.
     pub updated_at: String,
+    /// Offer expiry timestamp.
+    pub expires_at: String,
     /// Acceptance timestamp when consumed.
     pub accepted_at: Option<String>,
     /// Folder Key Grant material for the destination admin.
@@ -681,15 +771,17 @@ pub struct StoredSharedFolderConnection {
     pub updated_at: String,
     /// Participating destination members with source Folder Access.
     pub member_npubs: BTreeSet<UserId>,
+    /// Participants whose source Folder Access was created by this Mount.
+    pub managed_access_npubs: BTreeSet<UserId>,
 }
 
-/// Stored Organization Folder Mount.
+/// Stored universal Folder Mount.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct StoredOrganizationFolderMount {
+pub struct StoredFolderMount {
     /// Stable deterministic mount id.
     pub id: String,
-    /// Destination Organization Brain id.
-    pub organization_brain_id: BrainId,
+    /// Destination Brain id.
+    pub destination_brain_id: BrainId,
     /// Source Brain id.
     pub source_brain_id: BrainId,
     /// Source Folder id.
@@ -705,6 +797,36 @@ pub struct StoredOrganizationFolderMount {
     /// Creation timestamp.
     pub created_at: String,
     /// Last update timestamp.
+    pub updated_at: String,
+}
+
+/// Historical Mount access whose original ownership cannot be reconstructed safely.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LegacyFolderAccessSourceRepair {
+    /// Mount connection whose historical ownership is ambiguous.
+    pub connection_id: String,
+    /// Native source Brain.
+    pub brain_id: BrainId,
+    /// Native source Folder.
+    pub folder_id: FolderId,
+    /// Participant whose access requires an explicit ownership decision.
+    pub user_id: UserId,
+    /// Human-readable repair reason.
+    pub reason: String,
+    /// Timestamp inherited from the historical participant row.
+    pub created_at: String,
+}
+
+/// A historical Personal Mount that could not be migrated without guessing.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LegacyPersonalMountRepair {
+    /// Historical mount id.
+    pub legacy_mount_id: String,
+    /// Resolved destination Brain when one was unambiguous.
+    pub destination_brain_id: Option<BrainId>,
+    /// Human-readable repair reason.
+    pub reason: String,
+    /// Last migration-attempt timestamp inherited from the legacy row.
     pub updated_at: String,
 }
 
@@ -731,10 +853,10 @@ pub enum MountedFolderState {
 /// Client-visible mounted Folder projection.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MountedFolderProjection {
-    /// Organization mount id.
+    /// Mount id.
     pub mount_id: String,
-    /// Destination Organization Brain id.
-    pub organization_brain_id: BrainId,
+    /// Destination Brain id.
+    pub destination_brain_id: BrainId,
     /// Source Brain id.
     pub source_brain_id: BrainId,
     /// Source Folder id.
@@ -753,6 +875,7 @@ struct SharedFolderAccessRemoval<'a> {
     removed_user_ids: &'a BTreeSet<UserId>,
     new_key_version: u32,
     grants: &'a [FolderKeyGrantMetadata],
+    control_records: &'a [SyncRecordInput],
     reencrypted_records: &'a [FolderObjectRevisionSyncRecord],
     updated_at: &'a str,
 }
@@ -837,7 +960,32 @@ impl BrainStore {
             folder_access,
             grants: self.load_grants(brain_id)?,
             setup_incomplete_folder_ids: self.load_setup_incomplete_folder_ids(brain_id)?,
+            folder_deletion_audience: self.load_folder_deletion_audience(brain_id)?,
         })
+    }
+
+    fn load_folder_deletion_audience(
+        &self,
+        brain_id: &BrainId,
+    ) -> Result<BTreeMap<String, BTreeSet<UserId>>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT deletion_event_id, actor_npub
+               FROM folder_deletion_audience
+               WHERE brain_id = ?1
+               ORDER BY deletion_event_id, actor_npub"#,
+        )?;
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut audience = BTreeMap::<String, BTreeSet<UserId>>::new();
+        for row in rows {
+            let (event_id, actor_npub) = row?;
+            audience
+                .entry(event_id)
+                .or_default()
+                .insert(UserId::new(actor_npub)?);
+        }
+        Ok(audience)
     }
 
     /// Upsert verified display metadata for a canonical Nostr identity.
@@ -963,14 +1111,21 @@ impl BrainStore {
             .personal_agent
             .as_ref()
             .is_some_and(|relationship| relationship.agent_npub == *actor_npub);
+        let is_member = stored
+            .brain
+            .members
+            .iter()
+            .any(|member| member.user_id == *actor_npub);
         let has_personal_folder_scope = stored.brain.kind != BrainKind::Personal
             || stored.brain.owner_user_id.as_ref() == Some(actor_npub)
             || is_personal_agent
+            || is_member
             || stored
                 .folder_access
                 .values()
                 .any(|users| users.contains(actor_npub));
-        if (!brain_visible_to_actor(&stored.brain, actor_npub) && !is_personal_agent)
+        let is_guest = stored.guest_user_ids().contains(actor_npub);
+        if (!brain_visible_to_actor(&stored.brain, actor_npub) && !is_personal_agent && !is_guest)
             || !has_personal_folder_scope
         {
             return Err(StoreError::BrokenInvariant {
@@ -978,21 +1133,18 @@ impl BrainStore {
             });
         }
         let is_admin = stored.brain.admins.contains(actor_npub);
-        let is_limited_personal_member = stored.brain.kind == BrainKind::Personal
-            && stored.brain.owner_user_id.as_ref() != Some(actor_npub)
-            && !is_personal_agent;
+        let is_limited_guest = is_guest;
         let folders = stored
             .brain
             .folders
             .iter()
             .filter_map(|folder| {
                 let accessible = folder_visible_to_actor(&stored, &folder.id, actor_npub);
-                (!is_limited_personal_member || accessible).then(|| EncryptedExportFolder {
+                (!is_limited_guest || accessible).then(|| EncryptedExportFolder {
                     id: folder.id.clone(),
                     path: folder.path.clone(),
                     access: folder.access,
                     current_key_version: folder.current_key_version,
-                    shared_folder_source: folder.shared_folder_source,
                     accessible,
                 })
             })
@@ -1002,7 +1154,7 @@ impl BrainStore {
             .into_iter()
             .filter_map(|object| {
                 let accessible = folder_visible_to_actor(&stored, &object.folder_id, actor_npub);
-                (!is_limited_personal_member || accessible).then(|| EncryptedExportObject {
+                (!is_limited_guest || accessible).then(|| EncryptedExportObject {
                     folder_id: object.folder_id,
                     object_id: object.object_id,
                     payload_json: accessible.then_some(object.payload_json),
@@ -1147,19 +1299,7 @@ impl BrainStore {
         access_user_ids: &BTreeSet<UserId>,
         grants: &[FolderKeyGrantMetadata],
     ) -> Result<(), StoreError> {
-        if brain.kind == BrainKind::Personal
-            && !matches!(
-                folder.access,
-                FolderAccessMode::Owner | FolderAccessMode::Restricted
-            )
-        {
-            return Err(StoreError::BrokenInvariant {
-                reason: "Personal Brain shared access requires a restricted Folder".to_owned(),
-            });
-        }
         validate_hierarchy(&self.conn, &brain.id, folder)?;
-        validate_access_list_shape(folder, access_user_ids)?;
-        validate_access_membership(brain, access_user_ids)?;
         let personal_agent = self
             .load_personal_agent(&brain.id)?
             .map(|relationship| relationship.agent_npub);
@@ -1202,14 +1342,12 @@ impl BrainStore {
         actor_npub: &UserId,
     ) -> Result<(), StoreError> {
         if connection.status != SharedFolderConnectionStatus::Active {
-            return Err(StoreError::UnavailableLink {
-                kind: "shared folder connection",
-            });
+            return Err(StoreError::UnavailableLink { kind: "Mount" });
         }
-        let destination = self.load_core_brain(&connection.destination_brain_id)?;
-        if destination.kind != BrainKind::Organization || !destination.admins.contains(actor_npub) {
+        let destination = self.load_brain(&connection.destination_brain_id)?;
+        if !has_brain_operational_authority(&destination, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "connection member management requires a destination brain admin"
+                reason: "mount participant management requires destination brain control"
                     .to_owned(),
             });
         }
@@ -1221,16 +1359,27 @@ impl BrainStore {
         destination_brain_id: &BrainId,
         target_npub: &UserId,
     ) -> Result<(), StoreError> {
-        let destination = self.load_core_brain(destination_brain_id)?;
-        if destination
+        let destination = self.load_brain(destination_brain_id)?;
+        let is_owner = destination
+            .brain
+            .owner_user_id
+            .as_ref()
+            .is_some_and(|owner| owner == target_npub);
+        let is_agent = destination
+            .personal_agent
+            .as_ref()
+            .is_some_and(|agent| &agent.agent_npub == target_npub);
+        let is_admin = destination.brain.admins.contains(target_npub);
+        let is_member = destination
+            .brain
             .members
             .iter()
-            .any(|member| member.user_id == *target_npub)
-        {
+            .any(|member| member.user_id == *target_npub);
+        if is_owner || is_agent || is_admin || is_member {
             Ok(())
         } else {
             Err(StoreError::BrokenInvariant {
-                reason: "connection target must be a destination brain member".to_owned(),
+                reason: "mount participant must be governed by the destination brain".to_owned(),
             })
         }
     }
@@ -1295,6 +1444,7 @@ impl BrainStore {
             rotation.grants,
             actor_npub,
         )?;
+        validate_folder_key_grant_control_records(rotation.grants, rotation.control_records)?;
         let live_objects = self
             .load_current_objects(&connection.source_brain_id)?
             .into_iter()
@@ -1330,6 +1480,11 @@ impl BrainStore {
         for grant in rotation.grants {
             insert_grant(&tx, &connection.source_brain_id, grant)?;
         }
+        sync_records::append_sync_records(
+            &tx,
+            &connection.source_brain_id,
+            rotation.control_records,
+        )?;
         for record in rotation.reencrypted_records {
             let input = SyncRecordInput::FolderObjectRevision(record.clone());
             sync_records::validate_sync_input(&input)?;
@@ -1569,7 +1724,6 @@ struct StoredFolderRow {
     parent_folder_id: Option<String>,
     path: String,
     current_key_version: u32,
-    shared_folder_source: bool,
 }
 
 impl StoredFolderRow {
@@ -1582,7 +1736,6 @@ impl StoredFolderRow {
             parent_folder_id: self.parent_folder_id.map(FolderId::new).transpose()?,
             path: SafeRelativePath::new("folder_path", self.path)?,
             current_key_version: self.current_key_version,
-            shared_folder_source: self.shared_folder_source,
         })
     }
 }
@@ -1664,6 +1817,7 @@ fn brain_invitation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored
                 Box::new(error),
             )
         })?,
+        folder_only: row.get::<_, i64>(20)? != 0,
         claimed_by_npub: row
             .get::<_, Option<String>>(18)?
             .map(UserId::new)
@@ -1719,8 +1873,6 @@ fn share_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredShareL
             access_change_event_json: Some(row.get(14)?),
             created_at: row.get(8)?,
         },
-        create_personal_mount: row.get(15)?,
-        personal_mount_id: row.get(16)?,
         duplicate_accept: false,
     })
 }
@@ -1752,6 +1904,7 @@ fn shared_folder_invitation_from_row(
         accept_path: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        expires_at: row.get(15)?,
         accepted_at: row.get(11)?,
         folder_key_grant: FolderKeyGrantMetadata {
             id: row.get(12)?,
@@ -1788,16 +1941,15 @@ fn shared_folder_connection_from_row(
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
         member_npubs,
+        managed_access_npubs: BTreeSet::new(),
     })
 }
 
-fn organization_mount_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<StoredOrganizationFolderMount> {
+fn folder_mount_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredFolderMount> {
     let display_parent_folder_id = row.get::<_, Option<String>>(6)?;
-    Ok(StoredOrganizationFolderMount {
+    Ok(StoredFolderMount {
         id: row.get(0)?,
-        organization_brain_id: BrainId::new(row.get::<_, String>(1)?)
+        destination_brain_id: BrainId::new(row.get::<_, String>(1)?)
             .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
         source_brain_id: BrainId::new(row.get::<_, String>(2)?)
             .map_err(to_from_sql_error(2, rusqlite::types::Type::Text))?,
@@ -1842,13 +1994,26 @@ fn ensure_share_link_available(
         || share_link.status != LinkStatus::Pending
         || timestamp_expired(&share_link.expires_at, now)
     {
-        return Err(StoreError::UnavailableLink { kind: "share link" });
+        return Err(StoreError::UnavailableLink {
+            kind: "Folder Invitation",
+        });
     }
     Ok(())
 }
 
 fn timestamp_expired(expires_at: &str, now: &str) -> bool {
-    !expires_at.is_empty() && expires_at <= now
+    if expires_at.is_empty() {
+        return false;
+    }
+    match (
+        OffsetDateTime::parse(expires_at, &Rfc3339),
+        OffsetDateTime::parse(now, &Rfc3339),
+    ) {
+        (Ok(expires_at), Ok(now)) => expires_at <= now,
+        // Persisted malformed lifecycle state must fail closed rather than
+        // making an invitation available indefinitely.
+        _ => true,
+    }
 }
 
 fn validate_link_id(field: &'static str, value: &str) -> Result<(), StoreError> {
@@ -1867,8 +2032,28 @@ fn validate_link_timestamp(field: &'static str, value: &str) -> Result<(), Store
         });
     }
     OffsetDateTime::parse(value, &Rfc3339).map_err(|_| StoreError::BrokenInvariant {
-        reason: format!("{field} must be RFC3339/ISO 8601 UTC timestamp"),
+        reason: format!("{field} must be an RFC3339 timestamp"),
     })?;
+    Ok(())
+}
+
+fn validate_bounded_offer_expiry(expires_at: &str, created_at: &str) -> Result<(), StoreError> {
+    validate_link_timestamp("expiresAt", expires_at)?;
+    validate_link_timestamp("createdAt", created_at)?;
+    let expires =
+        OffsetDateTime::parse(expires_at, &Rfc3339).map_err(|_| StoreError::BrokenInvariant {
+            reason: "expiresAt must be an RFC3339 timestamp".to_owned(),
+        })?;
+    let created =
+        OffsetDateTime::parse(created_at, &Rfc3339).map_err(|_| StoreError::BrokenInvariant {
+            reason: "createdAt must be an RFC3339 timestamp".to_owned(),
+        })?;
+    let duration = expires - created;
+    if duration < time::Duration::hours(1) || duration > time::Duration::days(30) {
+        return Err(StoreError::BrokenInvariant {
+            reason: "invitation expiry must be between one hour and thirty days".to_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -1943,6 +2128,108 @@ fn insert_folder_access_if_missing(
     Ok(())
 }
 
+fn insert_folder_access_source(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    folder_id: &FolderId,
+    user_id: &UserId,
+    source_kind: &str,
+    source_id: &str,
+    created_at: &str,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO folder_access_sources (
+            brain_id, folder_id, user_id, source_kind, source_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            brain_id.as_str(),
+            folder_id.as_str(),
+            user_id.as_str(),
+            source_kind,
+            source_id,
+            created_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn delete_folder_access_source(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    folder_id: &FolderId,
+    user_id: &UserId,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM folder_access_sources
+         WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3
+           AND source_kind = ?4 AND source_id = ?5",
+        params![
+            brain_id.as_str(),
+            folder_id.as_str(),
+            user_id.as_str(),
+            source_kind,
+            source_id
+        ],
+    )?;
+    Ok(())
+}
+
+fn delete_folder_access_sources_for_origin(
+    tx: &Transaction<'_>,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "DELETE FROM folder_access_sources WHERE source_kind = ?1 AND source_id = ?2",
+        params![source_kind, source_id],
+    )?;
+    Ok(())
+}
+
+fn folder_access_has_source(
+    conn: &Connection,
+    brain_id: &BrainId,
+    folder_id: &FolderId,
+    user_id: &UserId,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM folder_access_sources
+            WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3
+              AND source_kind = ?4 AND source_id = ?5
+         )",
+        params![
+            brain_id.as_str(),
+            folder_id.as_str(),
+            user_id.as_str(),
+            source_kind,
+            source_id
+        ],
+        |row| row.get(0),
+    )?)
+}
+
+fn folder_access_has_mount_source(
+    conn: &Connection,
+    brain_id: &BrainId,
+    folder_id: &FolderId,
+    user_id: &UserId,
+) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM folder_access_sources
+            WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3
+              AND source_kind = 'mount'
+         )",
+        params![brain_id.as_str(), folder_id.as_str(), user_id.as_str()],
+        |row| row.get(0),
+    )?)
+}
+
 fn insert_grant_or_ignore(
     tx: &Transaction<'_>,
     brain_id: &BrainId,
@@ -1970,29 +2257,6 @@ fn insert_grant_or_ignore(
         ],
     )?;
     Ok(())
-}
-
-fn personal_mount_id(
-    owner_npub: &UserId,
-    source_brain_id: &BrainId,
-    source_folder_id: &FolderId,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(owner_npub.as_str());
-    hasher.update(b"\n");
-    hasher.update(source_brain_id.as_str());
-    hasher.update(b"\n");
-    hasher.update(source_folder_id.as_str());
-    let hash = hasher.finalize();
-    format!("personal-mount-{}", hex_prefix(&hash, 8))
-}
-
-fn hex_prefix(bytes: &[u8], len: usize) -> String {
-    bytes
-        .iter()
-        .take(len)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 fn to_from_sql_error(
@@ -2179,6 +2443,37 @@ fn validate_grant_metadata(grant: &FolderKeyGrantMetadata) -> Result<(), StoreEr
     Ok(())
 }
 
+fn validate_folder_key_grant_control_records(
+    grants: &[FolderKeyGrantMetadata],
+    control_records: &[SyncRecordInput],
+) -> Result<(), StoreError> {
+    if control_records.len() != grants.len() {
+        return Err(StoreError::BrokenInvariant {
+            reason: "sharing mutation requires one Folder Key Grant control record per grant"
+                .to_owned(),
+        });
+    }
+    for (grant, input) in grants.iter().zip(control_records) {
+        sync_records::validate_sync_input(input)?;
+        let SyncRecordInput::Control(record) = input else {
+            return Err(StoreError::BrokenInvariant {
+                reason: "sharing mutation Folder Key Grant records must be control records"
+                    .to_owned(),
+            });
+        };
+        if record.record_type != SyncRecordType::FolderKeyGrant
+            || record.folder_id.as_ref() != Some(&grant.folder_id)
+            || record.actor_npub != grant.issuer_npub
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "sharing mutation control records do not match their Folder Key Grants"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn canonical_invited_email(value: &str) -> Result<String, StoreError> {
     let value = value.trim().to_ascii_lowercase();
     let Some((local, domain)) = value.split_once('@') else {
@@ -2210,53 +2505,27 @@ fn validate_required_text(field: &'static str, value: &str) -> Result<(), StoreE
 fn email_bootstrap_scope(
     brain: &Brain,
     selected_restricted_folder_access: &[FolderId],
+    folder_only: bool,
 ) -> Result<Vec<EmailInviteBootstrapScopeFolder>, StoreError> {
-    let selected = selected_restricted_folder_access
+    let folders = brain
+        .folders
         .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut seen_selected = BTreeSet::new();
-    let mut included = BTreeSet::new();
-    let mut scope = Vec::new();
-
-    for folder in &brain.folders {
-        let selected_folder = selected.contains(&folder.id);
-        if selected_folder {
-            seen_selected.insert(folder.id.clone());
-        }
-        let include = match folder.access {
-            FolderAccessMode::AllMembers => true,
-            FolderAccessMode::Restricted => selected_folder,
-            FolderAccessMode::Owner | FolderAccessMode::AdminOnly => {
-                if selected_folder {
-                    return Err(StoreError::BrokenInvariant {
-                        reason:
-                            "email bootstrap initial folder access supports all-members and restricted folders only"
-                                .to_owned(),
-                    });
-                }
-                false
+        .map(|folder| EmailInviteBootstrapScopeFolder {
+            folder_id: folder.id.clone(),
+            access: folder.access,
+            key_version: folder.current_key_version,
+        })
+        .collect::<Vec<_>>();
+    derive_email_invite_scope(&folders, selected_restricted_folder_access, folder_only).map_err(
+        |error| match error {
+            EmailInviteScopeError::MissingFolder { folder_id } => {
+                StoreError::MissingFolder { folder_id }
             }
-        };
-        if include && included.insert(folder.id.clone()) {
-            scope.push(EmailInviteBootstrapScopeFolder {
-                folder_id: folder.id.clone(),
-                access: folder.access,
-                key_version: folder.current_key_version,
-            });
-        }
-    }
-
-    if seen_selected != selected {
-        let missing = selected
-            .difference(&seen_selected)
-            .next()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "unknown".to_owned());
-        return Err(StoreError::MissingFolder { folder_id: missing });
-    }
-
-    Ok(scope)
+            other => StoreError::BrokenInvariant {
+                reason: other.to_string(),
+            },
+        },
+    )
 }
 
 fn validate_email_claim_grants(
@@ -2419,18 +2688,6 @@ fn validate_connection_rotation_grants(
     Ok(())
 }
 
-fn validate_access_list_shape(
-    folder: &Folder,
-    access_user_ids: &BTreeSet<UserId>,
-) -> Result<(), StoreError> {
-    if folder.access != FolderAccessMode::Restricted && !access_user_ids.is_empty() {
-        return Err(StoreError::BrokenInvariant {
-            reason: "explicit folder access users are only valid for restricted folders".to_owned(),
-        });
-    }
-    Ok(())
-}
-
 fn validate_hierarchy(
     conn: &Connection,
     brain_id: &BrainId,
@@ -2461,25 +2718,6 @@ fn validate_hierarchy(
         }
     }
 
-    Ok(())
-}
-
-fn validate_access_membership(
-    brain: &Brain,
-    access_user_ids: &BTreeSet<UserId>,
-) -> Result<(), StoreError> {
-    let members = brain
-        .members
-        .iter()
-        .map(|member| member.user_id.clone())
-        .collect::<BTreeSet<_>>();
-    for user_id in access_user_ids {
-        if !members.contains(user_id) {
-            return Err(StoreError::BrokenInvariant {
-                reason: format!("folder access user is not a brain member: {user_id}"),
-            });
-        }
-    }
     Ok(())
 }
 
@@ -2570,21 +2808,19 @@ fn folder_visible_to_actor(
     if is_personal_agent {
         return true;
     }
+    if stored
+        .folder_access
+        .get(folder_id)
+        .is_some_and(|users| users.contains(actor_npub))
+    {
+        return true;
+    }
 
     match folder.access {
         FolderAccessMode::Owner => is_owner,
         FolderAccessMode::AdminOnly => is_owner || is_admin,
-        FolderAccessMode::AllMembers => {
-            is_owner || is_admin || (stored.brain.kind == BrainKind::Organization && is_member)
-        }
-        FolderAccessMode::Restricted => {
-            is_owner
-                || is_admin
-                || stored
-                    .folder_access
-                    .get(folder_id)
-                    .is_some_and(|users| users.contains(actor_npub))
-        }
+        FolderAccessMode::AllMembers => is_owner || is_admin || is_member,
+        FolderAccessMode::Restricted => is_owner || is_admin,
     }
 }
 
@@ -2746,7 +2982,7 @@ fn insert_folder(
             brain_id, id, name, role, access, parent_folder_id, parent_folder_key, path,
             current_key_version, shared_folder_source, setup_incomplete, created_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)
         "#,
         params![
             brain_id.as_str(),
@@ -2761,7 +2997,6 @@ fn insert_folder(
                 .map_or("", FolderId::as_str),
             folder.path.as_str(),
             folder.current_key_version,
-            folder.shared_folder_source,
             setup_incomplete,
             current_timestamp()
         ],
@@ -2780,6 +3015,15 @@ fn insert_folder_access(
         tx.execute(
             "INSERT INTO folder_access (brain_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
             params![brain_id.as_str(), folder_id.as_str(), user_id.as_str()],
+        )?;
+        insert_folder_access_source(
+            tx,
+            brain_id,
+            folder_id,
+            user_id,
+            "direct",
+            "initial-folder-access",
+            &current_timestamp(),
         )?;
     }
     Ok(())
@@ -2820,13 +3064,18 @@ fn map_insert_error(
     value: &str,
 ) -> impl FnOnce(rusqlite::Error) -> StoreError {
     let value = value.to_owned();
-    move |error| match error {
-        rusqlite::Error::SqliteFailure(inner, _)
-            if matches!(inner.code, rusqlite::ErrorCode::ConstraintViolation) =>
-        {
-            StoreError::DuplicateId { field, value }
+    move |error| {
+        if parse_capacity_error(&error.to_string()).is_some() {
+            return StoreError::from(error);
         }
-        other => StoreError::from(other),
+        match error {
+            rusqlite::Error::SqliteFailure(inner, _)
+                if matches!(inner.code, rusqlite::ErrorCode::ConstraintViolation) =>
+            {
+                StoreError::DuplicateId { field, value }
+            }
+            other => StoreError::from(other),
+        }
     }
 }
 
@@ -3285,8 +3534,10 @@ mod tests {
 
         assert_eq!(
             store.create_brain_bootstrap(&output, &[]).unwrap_err(),
-            StoreError::BrokenInvariant {
-                reason: format!("bootstrap folder count exceeds limit {MAX_BOOTSTRAP_FOLDERS}")
+            StoreError::CapacityExceeded {
+                limit: "brain_folders".to_owned(),
+                max: MAX_BOOTSTRAP_FOLDERS,
+                current: MAX_BOOTSTRAP_FOLDERS + 1,
             }
         );
     }
@@ -3330,6 +3581,105 @@ mod tests {
         for expected_grant in grants {
             assert!(stored.grants.contains(&expected_grant));
         }
+    }
+
+    #[test]
+    fn organization_collaboration_converges_membership_grants_and_folder_audit_records() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let target = UserId::new("npub-collaborator").unwrap();
+        let grants = [
+            grant(
+                "grant-team-notes-collaborator",
+                "team-notes",
+                1,
+                "npub-admin",
+                target.as_str(),
+            ),
+            grant(
+                "grant-private-project-collaborator",
+                "private-project",
+                1,
+                "npub-admin",
+                target.as_str(),
+            ),
+        ];
+        let accepted = grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.clone(),
+                    folder_access_control_record(
+                        &format!("{}-grant", grant.id),
+                        SyncRecordType::FolderKeyGrant,
+                        grant.folder_id.as_str(),
+                        "npub-admin",
+                    ),
+                    folder_access_control_record(
+                        &format!("{}-access", grant.id),
+                        SyncRecordType::BrainAdminAccessChange,
+                        grant.folder_id.as_str(),
+                        "npub-admin",
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let admin_record = SyncRecordInput::Control(ControlSyncRecord {
+            record_event_id: "collaboration-admin".to_owned(),
+            record_type: SyncRecordType::BrainAdminAccessChange,
+            folder_id: None,
+            actor_npub: UserId::new("npub-admin").unwrap(),
+            client_created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            payload_json: "{\"control\":true}".to_owned(),
+            record_event_kind: APP_SPECIFIC_KIND,
+        });
+
+        store
+            .ensure_organization_admin_with_grants(
+                &brain_id,
+                &target,
+                &accepted,
+                Some(&admin_record),
+            )
+            .unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == target)
+        );
+        assert!(stored.brain.admins.contains(&target));
+        assert_eq!(
+            stored
+                .grants
+                .iter()
+                .filter(|grant| grant.recipient_npub == target)
+                .count(),
+            2
+        );
+        assert_eq!(
+            stored
+                .folder_access
+                .get(&FolderId::new("private-project").unwrap()),
+            Some(&BTreeSet::from([target.clone()]))
+        );
+
+        let before_retry = store.sync_bootstrap(&brain_id).unwrap().latest_sequence;
+        store
+            .ensure_organization_admin_with_grants(
+                &brain_id,
+                &target,
+                &accepted,
+                Some(&admin_record),
+            )
+            .unwrap();
+        assert_eq!(
+            store.sync_bootstrap(&brain_id).unwrap().latest_sequence,
+            before_retry,
+            "retry must not duplicate grants or collaboration control records"
+        );
     }
 
     #[test]
@@ -3390,7 +3740,7 @@ mod tests {
                 "invitation-initial-strategy",
                 &member,
                 "invite-initial-strategy0123456789ab",
-                "/_admin/brain-invitation-links/invite-initial-strategy0123456789ab/accept",
+                "/v1/brain-invitation-links/invite-initial-strategy0123456789ab/accept",
                 std::slice::from_ref(&folder_id),
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -3646,7 +3996,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_admin_only_folder_key_grant_to_non_admin() {
+    fn explicit_guest_grant_is_orthogonal_to_admin_only_native_access() {
         let mut store = empty_org_store();
         let brain_id = BrainId::new("acme").unwrap();
         let admin_only = admin_only_folder();
@@ -3681,11 +4031,21 @@ mod tests {
                         member.as_str(),
                     ),
                 )
-                .unwrap_err(),
-            StoreError::BrokenInvariant {
-                reason: "admin-only folder grants require a brain admin target".to_owned()
-            }
+                .unwrap(),
+            GrantFolderAccessOutcome::Granted
         );
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert_eq!(
+            stored
+                .folder_access
+                .get(&FolderId::new("admin-only").unwrap()),
+            Some(&BTreeSet::from([member.clone()]))
+        );
+        assert!(folder_visible_to_actor(
+            &stored,
+            &FolderId::new("admin-only").unwrap(),
+            &member
+        ));
     }
 
     #[test]
@@ -3704,7 +4064,7 @@ mod tests {
                 "invitation-target",
                 &target,
                 "invite-0123456789abcdef0123456789abcdef",
-                "/_admin/brain-invitation-links/invite-0123456789abcdef0123456789abcdef/accept",
+                "/v1/brain-invitation-links/invite-0123456789abcdef0123456789abcdef/accept",
                 std::slice::from_ref(&restricted),
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -3772,10 +4132,14 @@ mod tests {
         assert_eq!(retry.status, LinkStatus::Accepted);
         assert!(retry.duplicate_accept);
 
-        let revoked = store
-            .revoke_brain_invitation(&brain_id, "invitation-target", &admin, now)
-            .unwrap();
-        assert_eq!(revoked.status, LinkStatus::Revoked);
+        assert_eq!(
+            store
+                .revoke_brain_invitation(&brain_id, "invitation-target", &admin, now)
+                .unwrap_err(),
+            StoreError::UnavailableLink {
+                kind: "brain invitation"
+            }
+        );
         let stored = store.load_brain(&brain_id).unwrap();
         assert!(
             stored
@@ -3807,8 +4171,9 @@ mod tests {
                 "{\"kind\":1059}",
                 "{\"kind\":30078}",
                 "invite-email0123456789abcdef012345",
-                "/_admin/brain-invitation-links/invite-email0123456789abcdef012345/accept",
+                "/v1/brain-invitation-links/invite-email0123456789abcdef012345/accept",
                 std::slice::from_ref(&restricted),
+                false,
                 &admin,
                 "2026-06-30T00:00:00.000Z",
                 now,
@@ -3948,6 +4313,431 @@ mod tests {
     }
 
     #[test]
+    fn failed_email_invitation_replacement_preserves_the_pending_invitation() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let unwrap_npub = UserId::new("npub-unwrap").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        let original = store
+            .create_email_brain_invitation(
+                &brain_id,
+                "pending-email-invitation",
+                "guest@example.com",
+                &unwrap_npub,
+                "sha256-original",
+                "{\"kind\":1059,\"original\":true}",
+                "{\"kind\":30078}",
+                "invite-original0123456789abcdef0123",
+                "/v1/brain-invitation-links/invite-original0123456789abcdef0123/claim",
+                std::slice::from_ref(&restricted),
+                true,
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        store
+            .create_brain_invitation(
+                &brain_id,
+                "already-used-id",
+                &UserId::new("npub-target").unwrap(),
+                "invite-other0123456789abcdef012345",
+                "/v1/brain-invitation-links/invite-other0123456789abcdef012345/accept",
+                &[],
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .create_email_brain_invitation(
+                    &brain_id,
+                    "already-used-id",
+                    "guest@example.com",
+                    &unwrap_npub,
+                    "sha256-replacement",
+                    "{\"kind\":1059,\"replacement\":true}",
+                    "{\"kind\":30078}",
+                    "invite-replacement0123456789abcdef",
+                    "/v1/brain-invitation-links/invite-replacement0123456789abcdef/claim",
+                    std::slice::from_ref(&restricted),
+                    true,
+                    &admin,
+                    "2026-06-30T00:00:00.000Z",
+                    now,
+                )
+                .is_err()
+        );
+
+        let preserved = store.load_brain_invitation(&original.id).unwrap();
+        assert_eq!(preserved.status, LinkStatus::Pending);
+        assert_eq!(
+            preserved.bootstrap_wrapped_event_json.as_deref(),
+            Some("{\"kind\":1059,\"original\":true}")
+        );
+    }
+
+    #[test]
+    fn failed_email_folder_claim_sync_append_rolls_back_access_and_acceptance() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let unwrap_npub = UserId::new("npub-unwrap").unwrap();
+        let claimant = UserId::new("npub-folder-guest").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        let invitation = store
+            .create_email_brain_invitation(
+                &brain_id,
+                "atomic-folder-claim",
+                "atomic@example.com",
+                &unwrap_npub,
+                "sha256-atomic",
+                "{\"kind\":1059}",
+                "{\"kind\":30078}",
+                "invite-atomic0123456789abcdef012345",
+                "/v1/brain-invitation-links/invite-atomic0123456789abcdef012345/claim",
+                std::slice::from_ref(&restricted),
+                true,
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        let grant = grant(
+            "atomic-claim-grant",
+            restricted.as_str(),
+            1,
+            claimant.as_str(),
+            claimant.as_str(),
+        );
+        let duplicate_record = folder_key_grant_control_record(&grant, "duplicate-event");
+        store
+            .submit_sync_record(&brain_id, &duplicate_record)
+            .unwrap();
+
+        assert!(
+            store
+                .claim_email_brain_invitation_by_code_with_control_records(
+                    "invite-atomic0123456789abcdef012345",
+                    "atomic@example.com",
+                    &claimant,
+                    std::slice::from_ref(&grant),
+                    std::slice::from_ref(&duplicate_record),
+                    now,
+                )
+                .is_err()
+        );
+
+        let preserved = store.load_brain_invitation(&invitation.id).unwrap();
+        assert_eq!(preserved.status, LinkStatus::Pending);
+        assert!(preserved.bootstrap_wrapped_event_json.is_some());
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .folder_access
+                .get(&restricted)
+                .is_none_or(|users| !users.contains(&claimant))
+        );
+        assert!(!stored.grants.contains(&grant));
+    }
+
+    #[test]
+    fn email_folder_invitation_claims_guest_access_to_exactly_one_folder() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let team_notes = FolderId::new("team-notes").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let unwrap_npub = UserId::new("npub-unwrap").unwrap();
+        let claimant = UserId::new("npub-folder-guest").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        let invitation = store
+            .create_email_brain_invitation(
+                &brain_id,
+                "invitation-email-folder",
+                "guest@example.com",
+                &unwrap_npub,
+                "sha256-folder-bootstrap",
+                "{\"kind\":1059}",
+                "{\"kind\":30078}",
+                "invite-email-folder01234567890123",
+                "/v1/brain-invitation-links/invite-email-folder01234567890123/claim",
+                std::slice::from_ref(&restricted),
+                true,
+                &admin,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        assert!(invitation.folder_only);
+        assert_eq!(invitation.initial_folder_access, vec![restricted.clone()]);
+        assert_eq!(invitation.bootstrap_scope.len(), 1);
+
+        let grant = grant(
+            "claim-grant-folder-guest",
+            restricted.as_str(),
+            1,
+            claimant.as_str(),
+            claimant.as_str(),
+        );
+        store
+            .claim_email_brain_invitation_by_code(
+                "invite-email-folder01234567890123",
+                "guest@example.com",
+                &claimant,
+                std::slice::from_ref(&grant),
+                now,
+            )
+            .unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .all(|member| member.user_id != claimant)
+        );
+        assert_eq!(
+            stored.folder_access.get(&restricted),
+            Some(&BTreeSet::from([claimant.clone()]))
+        );
+        assert!(
+            stored
+                .folder_access
+                .get(&team_notes)
+                .is_none_or(|users| !users.contains(&claimant))
+        );
+        assert!(stored.grants.contains(&grant));
+    }
+
+    #[test]
+    fn email_folder_invitation_preserves_an_existing_member_relationship() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let restricted = FolderId::new("private-project").unwrap();
+        let unrelated = FolderId::new("unrelated-private").unwrap();
+        let claimant = UserId::new("npub-existing-member").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        store.add_member(&brain_id, &claimant).unwrap();
+
+        store
+            .create_email_brain_invitation(
+                &brain_id,
+                "invitation-email-existing-member",
+                "member@example.com",
+                &UserId::new("npub-unwrap").unwrap(),
+                "sha256-existing-member-bootstrap",
+                "{\"kind\":1059}",
+                "{\"kind\":30078}",
+                "invite-email-existing-member012345",
+                "/v1/brain-invitation-links/invite-email-existing-member012345/claim",
+                std::slice::from_ref(&restricted),
+                true,
+                &UserId::new("npub-admin").unwrap(),
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        let grant = grant(
+            "claim-grant-existing-member",
+            restricted.as_str(),
+            1,
+            claimant.as_str(),
+            claimant.as_str(),
+        );
+        store
+            .claim_email_brain_invitation_by_code(
+                "invite-email-existing-member012345",
+                "member@example.com",
+                &claimant,
+                std::slice::from_ref(&grant),
+                now,
+            )
+            .unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == claimant)
+        );
+        assert!(!stored.guest_user_ids().contains(&claimant));
+        assert_eq!(
+            stored.folder_access.get(&restricted),
+            Some(&BTreeSet::from([claimant.clone()]))
+        );
+        assert!(
+            stored
+                .folder_access
+                .get(&unrelated)
+                .is_none_or(|users| !users.contains(&claimant))
+        );
+        assert!(stored.grants.contains(&grant));
+    }
+
+    #[test]
+    fn email_folder_invitation_preserves_native_access_mode_for_guest_access() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("team-notes").unwrap();
+        let claimant = UserId::new("npub-all-members-guest").unwrap();
+        let invitation = store
+            .create_email_brain_invitation(
+                &brain_id,
+                "invitation-email-folder-all-members",
+                "guest@example.com",
+                &UserId::new("npub-unwrap").unwrap(),
+                "sha256-folder-bootstrap",
+                "{\"kind\":1059}",
+                "{\"kind\":30078}",
+                "invite-email-folder-all-members01",
+                "/v1/brain-invitation-links/invite-email-folder-all-members01/claim",
+                std::slice::from_ref(&folder_id),
+                true,
+                &UserId::new("npub-admin").unwrap(),
+                "2026-06-30T00:00:00.000Z",
+                "2026-06-23T00:00:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(invitation.bootstrap_scope.len(), 1);
+        assert_eq!(
+            invitation.bootstrap_scope[0].access,
+            FolderAccessMode::AllMembers
+        );
+
+        let claim_grant = grant(
+            "claim-grant-all-members-guest",
+            folder_id.as_str(),
+            1,
+            claimant.as_str(),
+            claimant.as_str(),
+        );
+        store
+            .claim_email_brain_invitation_by_code(
+                "invite-email-folder-all-members01",
+                "guest@example.com",
+                &claimant,
+                std::slice::from_ref(&claim_grant),
+                "2026-06-23T00:00:00.000Z",
+            )
+            .unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert_eq!(stored.guest_user_ids(), BTreeSet::from([claimant.clone()]));
+        assert_eq!(
+            stored.folder_access.get(&folder_id),
+            Some(&BTreeSet::from([claimant.clone()]))
+        );
+        assert!(
+            folder_visible_to_actor(&stored, &folder_id, &claimant),
+            "an explicit Guest grant must be orthogonal to the Folder's native access mode"
+        );
+    }
+
+    #[test]
+    fn email_folder_invitation_grants_a_personal_owner_folder_without_changing_its_mode() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let brain_id = BrainId::new("personal-invite").unwrap();
+        let owner = UserId::new("npub-personal-owner").unwrap();
+        let agent = UserId::new("npub-personal-agent").unwrap();
+        let claimant = UserId::new("npub-personal-guest").unwrap();
+        bootstrap_personal_named(
+            &mut store,
+            brain_id.as_str(),
+            owner.as_str(),
+            agent.as_str(),
+            "2026-06-23T00:00:00.000Z",
+        );
+        let folder = Folder {
+            id: FolderId::new("private-notes").unwrap(),
+            name: DisplayName::new("folder_name", "Private Notes").unwrap(),
+            role: FolderRole::Folder,
+            access: FolderAccessMode::Owner,
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Private Notes").unwrap(),
+            current_key_version: 1,
+        };
+        store
+            .create_folder(
+                &brain_id,
+                &folder,
+                &BTreeSet::new(),
+                &[
+                    grant(
+                        "grant-private-notes-owner",
+                        folder.id.as_str(),
+                        1,
+                        owner.as_str(),
+                        owner.as_str(),
+                    ),
+                    grant(
+                        "grant-private-notes-agent",
+                        folder.id.as_str(),
+                        1,
+                        owner.as_str(),
+                        agent.as_str(),
+                    ),
+                ],
+            )
+            .unwrap();
+
+        store
+            .create_email_brain_invitation(
+                &brain_id,
+                "invitation-personal-owner-folder",
+                "personal-guest@example.com",
+                &UserId::new("npub-personal-unwrap").unwrap(),
+                "sha256-personal-folder-bootstrap",
+                "{\"kind\":1059}",
+                "{\"kind\":30078}",
+                "invite-personal-owner-folder0001",
+                "/v1/brain-invitation-links/invite-personal-owner-folder0001/claim",
+                std::slice::from_ref(&folder.id),
+                true,
+                &owner,
+                "2026-06-30T00:00:00.000Z",
+                "2026-06-23T00:00:00.000Z",
+            )
+            .unwrap();
+        let claim_grant = grant(
+            "claim-grant-personal-owner-folder",
+            folder.id.as_str(),
+            1,
+            claimant.as_str(),
+            claimant.as_str(),
+        );
+        store
+            .claim_email_brain_invitation_by_code(
+                "invite-personal-owner-folder0001",
+                "personal-guest@example.com",
+                &claimant,
+                std::slice::from_ref(&claim_grant),
+                "2026-06-23T00:00:00.000Z",
+            )
+            .unwrap();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        let unchanged = stored
+            .brain
+            .folders
+            .iter()
+            .find(|candidate| candidate.id == folder.id)
+            .unwrap();
+        assert_eq!(unchanged.access, FolderAccessMode::Owner);
+        assert_eq!(stored.guest_user_ids(), BTreeSet::from([claimant.clone()]));
+        assert!(folder_visible_to_actor(&stored, &folder.id, &claimant));
+    }
+
+    #[test]
     fn email_brain_invitation_terminal_states_tombstone_bootstrap_ciphertext() {
         let mut store = org_store_with_access_test_folders();
         let brain_id = BrainId::new("acme").unwrap();
@@ -3969,8 +4759,9 @@ mod tests {
                         "{\"kind\":1059}",
                         "{\"kind\":30078}",
                         code,
-                        &format!("/_admin/brain-invitation-links/{code}/claim"),
+                        &format!("/v1/brain-invitation-links/{code}/claim"),
                         std::slice::from_ref(&restricted),
+                        false,
                         &admin,
                         expires_at,
                         now,
@@ -4021,8 +4812,15 @@ mod tests {
             "invitation-email-expired",
             "invite-email-expired012345678901",
             "expired@example.com",
-            "2026-06-22T00:00:00.000Z",
+            "2026-06-24T00:00:00.000Z",
         );
+        store
+            .conn
+            .execute(
+                "UPDATE brain_invitations SET expires_at = ?2 WHERE id = ?1",
+                params![expired.id.as_str(), "2026-06-22T00:00:00.000Z"],
+            )
+            .unwrap();
         assert!(matches!(
             store.claim_email_brain_invitation_by_code(
                 "invite-email-expired012345678901",
@@ -4127,8 +4925,9 @@ mod tests {
                 "{\"kind\":1059}",
                 "{\"kind\":30078}",
                 "invite-email-rotation0123456789",
-                "/_admin/brain-invitation-links/invite-email-rotation0123456789/claim",
+                "/v1/brain-invitation-links/invite-email-rotation0123456789/claim",
                 std::slice::from_ref(&restricted),
+                false,
                 &admin,
                 "2026-06-30T00:00:00.000Z",
                 now,
@@ -4196,7 +4995,7 @@ mod tests {
                     "invitation-existing-member",
                     &existing_member,
                     "invite-existing-member0123456789abcdef",
-                    "/_admin/brain-invitation-links/invite-existing-member0123456789abcdef/accept",
+                    "/v1/brain-invitation-links/invite-existing-member0123456789abcdef/accept",
                     &[],
                     &admin,
                     "2026-06-30T00:00:00.000Z",
@@ -4214,7 +5013,7 @@ mod tests {
                 "invitation-stale-member",
                 &stale_target,
                 "invite-stale-member0123456789abcdef",
-                "/_admin/brain-invitation-links/invite-stale-member0123456789abcdef/accept",
+                "/v1/brain-invitation-links/invite-stale-member0123456789abcdef/accept",
                 &[],
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -4244,7 +5043,7 @@ mod tests {
     }
 
     #[test]
-    fn share_link_accept_creates_member_access_grant_and_optional_mount_once() {
+    fn folder_invitation_accept_creates_guest_access_and_grant_once() {
         let mut store = store_with_strategy_folder();
         let brain_id = BrainId::new("acme").unwrap();
         let folder_id = FolderId::new("strategy").unwrap();
@@ -4268,9 +5067,8 @@ mod tests {
                 &recipient,
                 &admin,
                 "2026-06-30T00:00:00.000Z",
-                "/_admin/share-links/share-link-recipient/accept",
+                "/v1/share-links/share-link-recipient/accept",
                 &grant,
-                true,
                 now,
             )
             .unwrap();
@@ -4281,25 +5079,34 @@ mod tests {
             store
                 .load_available_share_link("share-link-recipient", &wrong_user, now)
                 .unwrap_err(),
-            StoreError::UnavailableLink { kind: "share link" }
+            StoreError::UnavailableLink {
+                kind: "Folder Invitation"
+            }
         );
 
+        let control_record =
+            folder_key_grant_control_record(&grant, "share-link-recipient-grant-record");
         let accepted = store
-            .accept_share_link("share-link-recipient", &recipient, now)
+            .accept_share_link(
+                "share-link-recipient",
+                &recipient,
+                std::slice::from_ref(&control_record),
+                now,
+            )
             .unwrap();
         assert_eq!(accepted.status, LinkStatus::Accepted);
         assert_eq!(accepted.accepted_at.as_deref(), Some(now));
-        assert!(accepted.personal_mount_id.is_some());
         assert!(!accepted.duplicate_accept);
 
         let stored = store.load_brain(&brain_id).unwrap();
         assert!(
-            stored
+            !stored
                 .brain
                 .members
                 .iter()
                 .any(|member| member.user_id == recipient)
         );
+        assert_eq!(stored.guest_user_ids(), BTreeSet::from([recipient.clone()]));
         assert_eq!(
             stored.folder_access.get(&folder_id),
             Some(&BTreeSet::from([recipient.clone()]))
@@ -4310,14 +5117,23 @@ mod tests {
         }));
 
         let retry = store
-            .accept_share_link("share-link-recipient", &recipient, now)
+            .accept_share_link(
+                "share-link-recipient",
+                &recipient,
+                std::slice::from_ref(&control_record),
+                now,
+            )
             .unwrap();
         assert!(retry.duplicate_accept);
 
-        let revoked = store
-            .revoke_share_link("share-link-recipient", &admin, now)
-            .unwrap();
-        assert_eq!(revoked.status, LinkStatus::Revoked);
+        assert_eq!(
+            store
+                .revoke_share_link("share-link-recipient", &admin, now)
+                .unwrap_err(),
+            StoreError::UnavailableLink {
+                kind: "Folder Invitation"
+            }
+        );
         let stored = store.load_brain(&brain_id).unwrap();
         assert_eq!(
             stored.folder_access.get(&folder_id),
@@ -4380,9 +5196,8 @@ mod tests {
                 &recipient,
                 &agent,
                 "2026-06-30T00:00:00Z",
-                "/_admin/share-links/share-link-personal-agent/accept",
+                "/v1/share-links/share-link-personal-agent/accept",
                 &recipient_grant,
-                true,
                 "2026-06-23T00:00:00Z",
             )
             .unwrap();
@@ -4466,11 +5281,42 @@ mod tests {
                     r#"{"recordType":"folder_subtree_tombstone"}"#,
                     "2026-06-23T00:00:00Z",
                     APP_SPECIFIC_KIND,
+                    None,
                 )
                 .unwrap_err(),
             StoreError::Conflict {
                 reason: "Folder Key version changed before deletion".to_owned(),
                 current_revision: Some(1),
+            }
+        );
+        assert!(store.folder_exists(&brain_id, &child.id).unwrap());
+
+        let stale_confirmation = FolderDeletionExpectation {
+            folder_ids: [
+                FolderId::new("strategy").unwrap(),
+                FolderId::new("strategy-child").unwrap(),
+            ]
+            .into_iter()
+            .collect(),
+            object_count: 1,
+        };
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &brain_id,
+                    &FolderId::new("strategy").unwrap(),
+                    &admin,
+                    1,
+                    "event-delete-stale-confirmation",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                    Some(&stale_confirmation),
+                )
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "Folder subtree changed after destructive confirmation".to_owned(),
+                current_revision: None,
             }
         );
         assert!(store.folder_exists(&brain_id, &child.id).unwrap());
@@ -4485,9 +5331,23 @@ mod tests {
                 r#"{"recordType":"folder_subtree_tombstone"}"#,
                 "2026-06-23T00:00:00Z",
                 APP_SPECIFIC_KIND,
+                None,
             )
             .unwrap();
         assert_eq!(deleted.folder_count, 2);
+        assert_eq!(
+            deleted.work,
+            FolderDeletionWork {
+                descendants_visited: 2,
+                objects_collected: 0,
+                audience_collected: 1,
+                invitations_scanned: 0,
+                invitations_deleted: 0,
+                mutation_statements: 8,
+                max_statement_parameters: 10,
+                retry_attempts: 0,
+            }
+        );
         let retry = store
             .delete_folder_subtree(
                 &brain_id,
@@ -4498,9 +5358,11 @@ mod tests {
                 r#"{"recordType":"folder_subtree_tombstone"}"#,
                 "2026-06-23T00:00:00Z",
                 APP_SPECIFIC_KIND,
+                None,
             )
             .unwrap();
         assert!(retry.duplicate);
+        assert_eq!(retry.work, FolderDeletionWork::default());
         assert_eq!(retry.folder_count, deleted.folder_count);
         assert_eq!(retry.object_count, deleted.object_count);
         assert!(!store.folder_exists(&brain_id, &child.id).unwrap());
@@ -4523,6 +5385,92 @@ mod tests {
                 reason: "deleted Folder identities cannot be reused".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn folder_depth_accepts_exact_boundary_and_rejects_one_over_without_mutation() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let mut parent = FolderId::new("strategy").unwrap();
+
+        for depth in 3..=BRAIN_CAPACITY_ENVELOPE.folder_depth {
+            let id = FolderId::new(format!("depth-{depth}")).unwrap();
+            let folder = Folder {
+                id: id.clone(),
+                name: DisplayName::new("folder_name", format!("Depth {depth}")).unwrap(),
+                parent_folder_id: Some(parent.clone()),
+                path: SafeRelativePath::new("folder_path", format!("Strategy/depth-{depth}"))
+                    .unwrap(),
+                ..strategy_folder()
+            };
+            store
+                .create_folder(
+                    &brain_id,
+                    &folder,
+                    &BTreeSet::new(),
+                    &[grant(
+                        &format!("grant-depth-{depth}"),
+                        id.as_str(),
+                        1,
+                        admin.as_str(),
+                        admin.as_str(),
+                    )],
+                )
+                .unwrap();
+            parent = id;
+        }
+
+        let one_over_depth = BRAIN_CAPACITY_ENVELOPE.folder_depth + 1;
+        let one_over = Folder {
+            id: FolderId::new(format!("depth-{one_over_depth}")).unwrap(),
+            name: DisplayName::new("folder_name", format!("Depth {one_over_depth}")).unwrap(),
+            parent_folder_id: Some(parent),
+            path: SafeRelativePath::new("folder_path", format!("Strategy/depth-{one_over_depth}"))
+                .unwrap(),
+            ..strategy_folder()
+        };
+        assert_eq!(
+            store
+                .create_folder(
+                    &brain_id,
+                    &one_over,
+                    &BTreeSet::new(),
+                    &[grant(
+                        "grant-depth-one-over",
+                        one_over.id.as_str(),
+                        1,
+                        admin.as_str(),
+                        admin.as_str(),
+                    )],
+                )
+                .unwrap_err(),
+            StoreError::CapacityExceeded {
+                limit: "folder_depth".to_owned(),
+                max: BRAIN_CAPACITY_ENVELOPE.folder_depth,
+                current: one_over_depth,
+            }
+        );
+        assert!(!store.folder_exists(&brain_id, &one_over.id).unwrap());
+        let accepted_depth: usize = store
+            .conn
+            .query_row(
+                "WITH RECURSIVE ancestors(id, depth) AS (
+                    SELECT ?1, 1
+                    UNION ALL
+                    SELECT f.parent_folder_id, ancestors.depth + 1
+                    FROM folders f
+                    JOIN ancestors ON f.brain_id = ?2 AND f.id = ancestors.id
+                    WHERE f.parent_folder_id IS NOT NULL
+                 ) SELECT MAX(depth) FROM ancestors",
+                params![
+                    format!("depth-{}", BRAIN_CAPACITY_ENVELOPE.folder_depth),
+                    brain_id.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(accepted_depth, BRAIN_CAPACITY_ENVELOPE.folder_depth);
     }
 
     #[test]
@@ -4563,6 +5511,7 @@ mod tests {
                     r#"{"recordType":"folder_subtree_tombstone"}"#,
                     "2026-06-23T00:00:00Z",
                     APP_SPECIFIC_KIND,
+                    None,
                 )
                 .unwrap_err(),
             StoreError::InvalidRecord {
@@ -5015,7 +5964,7 @@ mod tests {
                     "invitation-bad-time",
                     &target,
                     "invite-bad-time",
-                    "/_admin/brain-invitation-links/invite-bad-time/accept",
+                    "/v1/brain-invitation-links/invite-bad-time/accept",
                     &[],
                     &admin,
                     "not-a-timestamp",
@@ -5023,7 +5972,7 @@ mod tests {
                 )
                 .unwrap_err(),
             StoreError::BrokenInvariant {
-                reason: "expiresAt must be RFC3339/ISO 8601 UTC timestamp".to_owned()
+                reason: "expiresAt must be an RFC3339 timestamp".to_owned()
             }
         );
     }
@@ -5042,7 +5991,7 @@ mod tests {
                 "invitation-revoked",
                 &invite_target,
                 "invite-revoked0123456789abcdef012345",
-                "/_admin/brain-invitation-links/invite-revoked0123456789abcdef012345/accept",
+                "/v1/brain-invitation-links/invite-revoked0123456789abcdef012345/accept",
                 &[],
                 &admin,
                 "2026-06-30T00:00:00.000Z",
@@ -5072,11 +6021,18 @@ mod tests {
                 "invitation-expired",
                 &expired_target,
                 "invite-expired0123456789abcdef012345",
-                "/_admin/brain-invitation-links/invite-expired0123456789abcdef012345/accept",
+                "/v1/brain-invitation-links/invite-expired0123456789abcdef012345/accept",
                 &[],
                 &admin,
-                "2026-01-01T00:00:00.000Z",
+                "2026-06-24T00:00:00.000Z",
                 now,
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE brain_invitations SET expires_at = ?2 WHERE id = ?1",
+                params!["invitation-expired", "2026-06-22T00:00:00.000Z"],
             )
             .unwrap();
         assert_eq!(
@@ -5101,7 +6057,7 @@ mod tests {
                 &share_recipient,
                 &admin,
                 "2026-06-30T00:00:00.000Z",
-                "/_admin/share-links/share-link-revoked/accept",
+                "/v1/share-links/share-link-revoked/accept",
                 &grant(
                     "grant-share-revoked",
                     "strategy",
@@ -5109,7 +6065,6 @@ mod tests {
                     "npub-admin",
                     share_recipient.as_str(),
                 ),
-                false,
                 now,
             )
             .unwrap();
@@ -5118,10 +6073,28 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .accept_share_link("share-link-revoked", &share_recipient, now)
+                .accept_share_link("share-link-revoked", &share_recipient, &[], now)
                 .unwrap_err(),
-            StoreError::UnavailableLink { kind: "share link" }
+            StoreError::UnavailableLink {
+                kind: "Folder Invitation"
+            }
         );
+    }
+
+    #[test]
+    fn invitation_expiry_compares_rfc3339_instants_not_text() {
+        assert!(timestamp_expired(
+            "2026-08-01T00:00:00+05:00",
+            "2026-07-31T20:00:00Z"
+        ));
+        assert!(timestamp_expired(
+            "2026-07-31T19:00:00.000Z",
+            "2026-07-31T19:00:00Z"
+        ));
+        assert!(!timestamp_expired(
+            "2026-07-31T19:00:00.001Z",
+            "2026-07-31T19:00:00Z"
+        ));
     }
 
     #[test]
@@ -5136,20 +6109,6 @@ mod tests {
         let destination_member = UserId::new("npub-dest-member").unwrap();
         let now = "2026-06-23T00:00:00.000Z";
 
-        store
-            .mark_shared_folder_source(&source_brain_id, &source_folder_id)
-            .unwrap();
-        let source = store.load_brain(&source_brain_id).unwrap();
-        assert!(
-            source
-                .brain
-                .folders
-                .iter()
-                .find(|folder| folder.id == source_folder_id)
-                .unwrap()
-                .shared_folder_source
-        );
-
         let invitation = store
             .create_shared_folder_invitation(
                 &source_brain_id,
@@ -5158,7 +6117,7 @@ mod tests {
                 "shared-folder-invitation-dest",
                 &destination_admin,
                 &source_admin,
-                "/_admin/shared-folder-invitations/shared-folder-invitation-dest/accept",
+                "/v1/shared-folder-invitations/shared-folder-invitation-dest/accept",
                 &grant(
                     "grant-strategy-dest-admin-v1",
                     "strategy",
@@ -5166,31 +6125,34 @@ mod tests {
                     "npub-admin",
                     destination_admin.as_str(),
                 ),
+                "2026-06-30T00:00:00.000Z",
                 now,
             )
             .unwrap();
         assert_eq!(invitation.status, LinkStatus::Pending);
 
-        let accepted = store
-            .accept_shared_folder_invitation(
-                "shared-folder-invitation-dest",
-                &destination_admin,
-                "shared-folder-connection-acme-dest",
-                "organization-mount-dest-strategy",
-                now,
-            )
-            .unwrap();
+        let accepted = accept_mount_for_test(
+            &mut store,
+            "shared-folder-invitation-dest",
+            &destination_admin,
+            "shared-folder-connection-acme-dest",
+            "organization-mount-dest-strategy",
+            &[],
+            now,
+        )
+        .unwrap();
         assert_eq!(accepted.status, LinkStatus::Accepted);
         assert!(!accepted.duplicate_accept);
-        let retry = store
-            .accept_shared_folder_invitation(
-                "shared-folder-invitation-dest",
-                &destination_admin,
-                "shared-folder-connection-acme-dest",
-                "organization-mount-dest-strategy",
-                now,
-            )
-            .unwrap();
+        let retry = accept_mount_for_test(
+            &mut store,
+            "shared-folder-invitation-dest",
+            &destination_admin,
+            "shared-folder-connection-acme-dest",
+            "organization-mount-dest-strategy",
+            &[],
+            now,
+        )
+        .unwrap();
         assert_eq!(retry.status, LinkStatus::Accepted);
         assert!(retry.duplicate_accept);
         let connection = store
@@ -5217,21 +6179,21 @@ mod tests {
         store
             .add_member(&destination_brain_id, &destination_member)
             .unwrap();
-        let connection = store
-            .add_shared_folder_connection_member(
-                "shared-folder-connection-acme-dest",
-                &destination_admin,
-                &destination_member,
-                &grant(
-                    "grant-strategy-dest-member-v1",
-                    "strategy",
-                    1,
-                    destination_admin.as_str(),
-                    destination_member.as_str(),
-                ),
-                now,
-            )
-            .unwrap();
+        let connection = add_mount_member_for_test(
+            &mut store,
+            "shared-folder-connection-acme-dest",
+            &destination_admin,
+            &destination_member,
+            &grant(
+                "grant-strategy-dest-member-v1",
+                "strategy",
+                1,
+                destination_admin.as_str(),
+                destination_member.as_str(),
+            ),
+            now,
+        )
+        .unwrap();
         assert!(connection.member_npubs.contains(&destination_member));
         assert_eq!(
             store
@@ -5241,32 +6203,32 @@ mod tests {
             MountedFolderState::Available
         );
 
-        let connection = store
-            .remove_shared_folder_connection_member(
-                "shared-folder-connection-acme-dest",
-                &destination_admin,
-                &destination_member,
-                2,
-                &[
-                    grant(
-                        "grant-strategy-source-admin-v2",
-                        "strategy",
-                        2,
-                        destination_admin.as_str(),
-                        source_admin.as_str(),
-                    ),
-                    grant(
-                        "grant-strategy-dest-admin-v2",
-                        "strategy",
-                        2,
-                        destination_admin.as_str(),
-                        destination_admin.as_str(),
-                    ),
-                ],
-                &[],
-                now,
-            )
-            .unwrap();
+        let connection = remove_mount_member_for_test(
+            &mut store,
+            "shared-folder-connection-acme-dest",
+            &destination_admin,
+            &destination_member,
+            2,
+            &[
+                grant(
+                    "grant-strategy-source-admin-v2",
+                    "strategy",
+                    2,
+                    destination_admin.as_str(),
+                    source_admin.as_str(),
+                ),
+                grant(
+                    "grant-strategy-dest-admin-v2",
+                    "strategy",
+                    2,
+                    destination_admin.as_str(),
+                    destination_admin.as_str(),
+                ),
+            ],
+            &[],
+            now,
+        )
+        .unwrap();
         assert!(!connection.member_npubs.contains(&destination_member));
         assert_eq!(
             store
@@ -5276,22 +6238,22 @@ mod tests {
             MountedFolderState::Locked
         );
 
-        let connection = store
-            .revoke_shared_folder_connection(
-                "shared-folder-connection-acme-dest",
-                &source_admin,
+        let connection = revoke_mount_for_test(
+            &mut store,
+            "shared-folder-connection-acme-dest",
+            &source_admin,
+            3,
+            &[grant(
+                "grant-strategy-source-admin-v3",
+                "strategy",
                 3,
-                &[grant(
-                    "grant-strategy-source-admin-v3",
-                    "strategy",
-                    3,
-                    source_admin.as_str(),
-                    source_admin.as_str(),
-                )],
-                &[],
-                now,
-            )
-            .unwrap();
+                source_admin.as_str(),
+                source_admin.as_str(),
+            )],
+            &[],
+            now,
+        )
+        .unwrap();
         assert_eq!(connection.status, SharedFolderConnectionStatus::Revoked);
         assert_eq!(
             store
@@ -5300,6 +6262,846 @@ mod tests {
                 .state,
             MountedFolderState::Revoked
         );
+    }
+
+    #[test]
+    fn overlapping_mounts_preserve_access_until_the_last_entitlement_is_revoked() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest-a", "Destination A", "npub-shared-admin");
+        bootstrap_org_named(&mut store, "dest-b", "Destination B", "npub-shared-admin");
+        let source_brain_id = BrainId::new("acme").unwrap();
+        let source_folder_id = FolderId::new("strategy").unwrap();
+        let source_admin = UserId::new("npub-admin").unwrap();
+        let shared_admin = UserId::new("npub-shared-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        for (suffix, destination) in [("a", "dest-a"), ("b", "dest-b")] {
+            store
+                .create_shared_folder_invitation(
+                    &source_brain_id,
+                    &source_folder_id,
+                    &BrainId::new(destination).unwrap(),
+                    &format!("mount-offer-{suffix}"),
+                    &shared_admin,
+                    &source_admin,
+                    &format!("/v1/mount-offers/mount-offer-{suffix}/accept"),
+                    &grant(
+                        &format!("grant-mount-{suffix}-v1"),
+                        "strategy",
+                        1,
+                        source_admin.as_str(),
+                        shared_admin.as_str(),
+                    ),
+                    "2026-06-30T00:00:00.000Z",
+                    now,
+                )
+                .unwrap();
+            accept_mount_for_test(
+                &mut store,
+                &format!("mount-offer-{suffix}"),
+                &shared_admin,
+                &format!("mount-{suffix}"),
+                &format!("projection-{suffix}"),
+                &[],
+                now,
+            )
+            .unwrap();
+        }
+
+        let mount_a = store.load_shared_folder_connection("mount-a").unwrap();
+        assert!(
+            mount_a.managed_access_npubs.is_empty(),
+            "Mount A must not claim exclusive ownership while Mount B still authorizes the identity"
+        );
+        revoke_mount_for_test(&mut store, "mount-a", &source_admin, 0, &[], &[], now).unwrap();
+        let source = store.load_brain(&source_brain_id).unwrap();
+        assert!(
+            source
+                .folder_access
+                .get(&source_folder_id)
+                .is_some_and(|users| users.contains(&shared_admin))
+        );
+        assert_eq!(
+            source
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == source_folder_id)
+                .unwrap()
+                .current_key_version,
+            1
+        );
+        assert_eq!(
+            store
+                .load_shared_folder_connection("mount-b")
+                .unwrap()
+                .status,
+            SharedFolderConnectionStatus::Active
+        );
+
+        revoke_mount_for_test(
+            &mut store,
+            "mount-b",
+            &source_admin,
+            2,
+            &[grant(
+                "grant-strategy-source-admin-after-last-mount",
+                "strategy",
+                2,
+                source_admin.as_str(),
+                source_admin.as_str(),
+            )],
+            &[],
+            now,
+        )
+        .unwrap();
+        let source = store.load_brain(&source_brain_id).unwrap();
+        assert!(
+            !source
+                .folder_access
+                .get(&source_folder_id)
+                .is_some_and(|users| users.contains(&shared_admin)),
+            "the last Mount entitlement must remove access through key rotation"
+        );
+        assert_eq!(
+            source
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == source_folder_id)
+                .unwrap()
+                .current_key_version,
+            2
+        );
+    }
+
+    #[test]
+    fn migration_backfills_mount_provenance_for_pre_v19_connections() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Destination", "npub-dest-admin");
+        let source_brain_id = BrainId::new("acme").unwrap();
+        let source_folder_id = FolderId::new("strategy").unwrap();
+        let destination_brain_id = BrainId::new("dest").unwrap();
+        let source_admin = UserId::new("npub-admin").unwrap();
+        let destination_admin = UserId::new("npub-dest-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_shared_folder_invitation(
+                &source_brain_id,
+                &source_folder_id,
+                &destination_brain_id,
+                "mount-offer-pre-v19",
+                &destination_admin,
+                &source_admin,
+                "/v1/mount-offers/mount-offer-pre-v19/accept",
+                &grant(
+                    "grant-pre-v19-v1",
+                    "strategy",
+                    1,
+                    source_admin.as_str(),
+                    destination_admin.as_str(),
+                ),
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        accept_mount_for_test(
+            &mut store,
+            "mount-offer-pre-v19",
+            &destination_admin,
+            "mount-pre-v19",
+            "projection-pre-v19",
+            &[],
+            now,
+        )
+        .unwrap();
+
+        store
+            .conn
+            .execute_batch(
+                "DROP TABLE legacy_folder_access_source_repairs;
+                 DROP TABLE folder_access_sources;
+                 DELETE FROM schema_migrations WHERE version = 19;
+                 UPDATE shared_folder_connection_members SET manages_folder_access = 1;",
+            )
+            .unwrap();
+        store.apply_migrations().unwrap();
+
+        let migrated = store
+            .load_shared_folder_connection("mount-pre-v19")
+            .unwrap();
+        assert_eq!(
+            migrated.managed_access_npubs,
+            BTreeSet::from([destination_admin.clone()])
+        );
+        assert!(
+            store
+                .load_legacy_folder_access_source_repairs()
+                .unwrap()
+                .is_empty()
+        );
+
+        revoke_mount_for_test(
+            &mut store,
+            "mount-pre-v19",
+            &source_admin,
+            2,
+            &[grant(
+                "grant-pre-v19-source-v2",
+                "strategy",
+                2,
+                source_admin.as_str(),
+                source_admin.as_str(),
+            )],
+            &[],
+            now,
+        )
+        .unwrap();
+        let source = store.load_brain(&source_brain_id).unwrap();
+        assert!(
+            !source
+                .folder_access
+                .get(&source_folder_id)
+                .is_some_and(|users| users.contains(&destination_admin))
+        );
+    }
+
+    #[test]
+    fn migration_preserves_and_surfaces_ambiguous_pre_v19_mount_access() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Destination", "npub-dest-admin");
+        let source_brain_id = BrainId::new("acme").unwrap();
+        let source_folder_id = FolderId::new("strategy").unwrap();
+        let destination_brain_id = BrainId::new("dest").unwrap();
+        let source_admin = UserId::new("npub-admin").unwrap();
+        let destination_admin = UserId::new("npub-dest-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .create_shared_folder_invitation(
+                &source_brain_id,
+                &source_folder_id,
+                &destination_brain_id,
+                "mount-offer-ambiguous-pre-v19",
+                &destination_admin,
+                &source_admin,
+                "/v1/mount-offers/mount-offer-ambiguous-pre-v19/accept",
+                &grant(
+                    "grant-ambiguous-pre-v19-v1",
+                    "strategy",
+                    1,
+                    source_admin.as_str(),
+                    destination_admin.as_str(),
+                ),
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        accept_mount_for_test(
+            &mut store,
+            "mount-offer-ambiguous-pre-v19",
+            &destination_admin,
+            "mount-ambiguous-pre-v19",
+            "projection-ambiguous-pre-v19",
+            &[],
+            now,
+        )
+        .unwrap();
+
+        store
+            .conn
+            .execute_batch(
+                "DROP TABLE legacy_folder_access_source_repairs;
+                 DROP TABLE folder_access_sources;
+                 DELETE FROM schema_migrations WHERE version = 19;
+                 UPDATE shared_folder_connection_members SET manages_folder_access = 0;",
+            )
+            .unwrap();
+        store.apply_migrations().unwrap();
+
+        let migrated = store
+            .load_shared_folder_connection("mount-ambiguous-pre-v19")
+            .unwrap();
+        assert!(
+            migrated.managed_access_npubs.is_empty(),
+            "ambiguous legacy access must not be treated as exclusively Mount-owned"
+        );
+        let repairs = store.load_legacy_folder_access_source_repairs().unwrap();
+        assert_eq!(repairs.len(), 1);
+        assert_eq!(
+            repairs[0],
+            LegacyFolderAccessSourceRepair {
+                connection_id: "mount-ambiguous-pre-v19".to_owned(),
+                brain_id: source_brain_id.clone(),
+                folder_id: source_folder_id.clone(),
+                user_id: destination_admin.clone(),
+                reason: "legacy manages_folder_access=false cannot distinguish preexisting direct access from a pre-V17 Mount-owned grant".to_owned(),
+                created_at: now.to_owned(),
+            }
+        );
+
+        revoke_mount_for_test(
+            &mut store,
+            "mount-ambiguous-pre-v19",
+            &source_admin,
+            0,
+            &[],
+            &[],
+            now,
+        )
+        .unwrap();
+        let source = store.load_brain(&source_brain_id).unwrap();
+        assert!(
+            source
+                .folder_access
+                .get(&source_folder_id)
+                .is_some_and(|users| users.contains(&destination_admin)),
+            "ambiguous legacy access must remain until an operator resolves its provenance"
+        );
+    }
+
+    #[test]
+    fn legacy_personal_mounts_migrate_or_surface_explicit_repairs() {
+        let mut store = store_with_strategy_folder();
+        let now = "2026-06-23T00:00:00.000Z";
+        bootstrap_personal_named(
+            &mut store,
+            "personal-destination",
+            "npub-owner",
+            "npub-agent",
+            now,
+        );
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO personal_folder_mounts (
+                    id, owner_npub, source_brain_id, source_folder_id, display_name,
+                    display_parent_folder_id, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?6)
+                "#,
+                params![
+                    "legacy-mount-resolvable",
+                    "npub-owner",
+                    "acme",
+                    "strategy",
+                    "Legacy Strategy",
+                    now
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO personal_folder_mounts (
+                    id, owner_npub, source_brain_id, source_folder_id, display_name,
+                    display_parent_folder_id, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?6)
+                "#,
+                params![
+                    "legacy-mount-needs-repair",
+                    "npub-missing-owner",
+                    "acme",
+                    "strategy",
+                    "Unresolved Strategy",
+                    now
+                ],
+            )
+            .unwrap();
+
+        let tx = store.conn.transaction().unwrap();
+        schema::migrate_legacy_personal_mounts(&tx).unwrap();
+        schema::migrate_legacy_personal_mounts(&tx).unwrap();
+        tx.commit().unwrap();
+
+        let destination_brain_id = BrainId::new("personal-destination").unwrap();
+        let mounts = store.load_folder_mounts(&destination_brain_id).unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].id, "legacy-mount-resolvable");
+        assert_eq!(mounts[0].destination_brain_id, destination_brain_id);
+        let connection = store
+            .load_shared_folder_connection("legacy-personal-connection-legacy-mount-resolvable")
+            .unwrap();
+        assert_eq!(
+            connection.member_npubs,
+            BTreeSet::from([UserId::new("npub-owner").unwrap()])
+        );
+        assert_eq!(
+            connection.managed_access_npubs,
+            BTreeSet::from([UserId::new("npub-owner").unwrap()])
+        );
+
+        let repairs = store.load_legacy_personal_mount_repairs().unwrap();
+        assert_eq!(repairs.len(), 1);
+        assert_eq!(repairs[0].legacy_mount_id, "legacy-mount-needs-repair");
+        assert!(repairs[0].reason.contains("has no Personal Brain"));
+        let legacy_row_count: u64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM personal_folder_mounts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_row_count, 2, "legacy evidence must be preserved");
+    }
+
+    #[test]
+    fn mount_acceptance_rolls_back_when_its_grant_record_cannot_commit() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Destination", "npub-dest-admin");
+        let source_brain_id = BrainId::new("acme").unwrap();
+        let source_folder_id = FolderId::new("strategy").unwrap();
+        let destination_brain_id = BrainId::new("dest").unwrap();
+        let source_admin = UserId::new("npub-admin").unwrap();
+        let destination_admin = UserId::new("npub-dest-admin").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        let controller_grant = grant(
+            "grant-atomic-mount-v1",
+            "strategy",
+            1,
+            source_admin.as_str(),
+            destination_admin.as_str(),
+        );
+        store
+            .create_shared_folder_invitation(
+                &source_brain_id,
+                &source_folder_id,
+                &destination_brain_id,
+                "mount-offer-atomic",
+                &destination_admin,
+                &source_admin,
+                "/v1/mount-offers/mount-offer-atomic/accept",
+                &controller_grant,
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        let duplicate_record =
+            folder_key_grant_control_record(&controller_grant, "duplicate-mount-grant-event");
+        store
+            .submit_sync_record(&source_brain_id, &duplicate_record)
+            .unwrap();
+
+        assert!(
+            store
+                .accept_shared_folder_invitation(
+                    "mount-offer-atomic",
+                    &destination_admin,
+                    "mount-atomic",
+                    "projection-atomic",
+                    &[],
+                    std::slice::from_ref(&duplicate_record),
+                    now,
+                )
+                .is_err()
+        );
+
+        assert_eq!(
+            store
+                .load_shared_folder_invitation("mount-offer-atomic")
+                .unwrap()
+                .status,
+            LinkStatus::Pending
+        );
+        let connection_count: u64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM shared_folder_connections WHERE id = 'mount-atomic'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(connection_count, 0);
+        let source = store.load_brain(&source_brain_id).unwrap();
+        assert!(
+            !source
+                .folder_access
+                .get(&source_folder_id)
+                .is_some_and(|users| users.contains(&destination_admin))
+        );
+        assert!(
+            source
+                .grants
+                .iter()
+                .all(|grant| grant.id != controller_grant.id)
+        );
+    }
+
+    #[test]
+    fn member_removal_atomically_removes_mount_participation() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Dest", "npub-dest-admin");
+        let source_brain_id = BrainId::new("acme").unwrap();
+        let source_folder_id = FolderId::new("strategy").unwrap();
+        let destination_brain_id = BrainId::new("dest").unwrap();
+        let source_admin = UserId::new("npub-admin").unwrap();
+        let destination_admin = UserId::new("npub-dest-admin").unwrap();
+        let destination_member = UserId::new("npub-dest-member").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+
+        store
+            .add_member(&destination_brain_id, &destination_member)
+            .unwrap();
+        store
+            .create_shared_folder_invitation(
+                &source_brain_id,
+                &source_folder_id,
+                &destination_brain_id,
+                "mount-offer-member-removal",
+                &destination_admin,
+                &source_admin,
+                "/v1/mount-offers/mount-offer-member-removal/accept",
+                &grant(
+                    "grant-member-removal-controller-v1",
+                    "strategy",
+                    1,
+                    source_admin.as_str(),
+                    destination_admin.as_str(),
+                ),
+                "2026-06-30T00:00:00.000Z",
+                now,
+            )
+            .unwrap();
+        accept_mount_for_test(
+            &mut store,
+            "mount-offer-member-removal",
+            &destination_admin,
+            "mount-member-removal",
+            "projection-member-removal",
+            &[],
+            now,
+        )
+        .unwrap();
+        add_mount_member_for_test(
+            &mut store,
+            "mount-member-removal",
+            &destination_admin,
+            &destination_member,
+            &grant(
+                "grant-member-removal-member-v1",
+                "strategy",
+                1,
+                destination_admin.as_str(),
+                destination_member.as_str(),
+            ),
+            now,
+        )
+        .unwrap();
+
+        let mount_rotations = vec![MemberMountRotation {
+            connection_id: "mount-member-removal".to_owned(),
+            revoke_mount: false,
+            new_key_version: 2,
+            grants: vec![
+                grant(
+                    "grant-member-removal-source-v2",
+                    "strategy",
+                    2,
+                    destination_admin.as_str(),
+                    source_admin.as_str(),
+                ),
+                grant(
+                    "grant-member-removal-controller-v2",
+                    "strategy",
+                    2,
+                    destination_admin.as_str(),
+                    destination_admin.as_str(),
+                ),
+            ],
+            reencrypted_records: vec![],
+        }];
+        let control_records_by_brain = BTreeMap::from([
+            (
+                source_brain_id.clone(),
+                mount_control_records(&mount_rotations[0].grants),
+            ),
+            (
+                destination_brain_id.clone(),
+                vec![brain_admin_control_record(
+                    "member-removal-access-change",
+                    destination_admin.as_str(),
+                )],
+            ),
+        ]);
+        store
+            .remove_member_with_rotations_and_control_records(
+                &destination_brain_id,
+                &destination_admin,
+                &destination_member,
+                &[],
+                &mount_rotations,
+                now,
+                &control_records_by_brain,
+            )
+            .unwrap();
+
+        let destination = store.load_brain(&destination_brain_id).unwrap();
+        assert!(
+            !destination
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == destination_member)
+        );
+        let connection = store
+            .load_shared_folder_connection("mount-member-removal")
+            .unwrap();
+        assert_eq!(connection.status, SharedFolderConnectionStatus::Active);
+        assert!(!connection.member_npubs.contains(&destination_member));
+        let source = store.load_brain(&source_brain_id).unwrap();
+        assert!(
+            !source
+                .folder_access
+                .get(&source_folder_id)
+                .is_some_and(|users| users.contains(&destination_member))
+        );
+        assert_eq!(
+            source
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == source_folder_id)
+                .unwrap()
+                .current_key_version,
+            2
+        );
+        assert_eq!(
+            store
+                .sync_bootstrap(&source_brain_id)
+                .unwrap()
+                .control_records
+                .iter()
+                .filter(|record| record.record_type == SyncRecordType::FolderKeyGrant)
+                .count(),
+            4
+        );
+        assert_eq!(
+            store
+                .sync_bootstrap(&destination_brain_id)
+                .unwrap()
+                .control_records
+                .iter()
+                .filter(|record| record.record_type == SyncRecordType::BrainAdminAccessChange)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn member_removal_mount_discovery_is_not_truncated_at_list_page_size() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Dest", "npub-dest-admin");
+        let participant = UserId::new("npub-dest-member").unwrap();
+        let now = "2026-06-23T00:00:00.000Z";
+        for index in 0..=MAX_LINK_LIST_ROWS {
+            let folder_id = format!("source-{index:03}");
+            let connection_id = format!("mount-{index:03}");
+            store
+                .conn
+                .execute(
+                    "INSERT INTO folders (
+                        brain_id, id, name, role, access, parent_folder_id,
+                        parent_folder_key, path, current_key_version,
+                        shared_folder_source, setup_incomplete, created_at
+                     ) VALUES ('acme', ?1, ?1, 'folder', 'restricted', NULL, '', ?1, 1, 0, 0, ?2)",
+                    params![folder_id, now],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO shared_folder_connections (
+                        id, source_brain_id, source_folder_id, destination_brain_id,
+                        destination_admin_npub, status, created_at, updated_at
+                     ) VALUES (?1, 'acme', ?2, 'dest', 'npub-dest-admin', 'active', ?3, ?3)",
+                    params![connection_id, folder_id, now],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO shared_folder_connection_members (
+                        connection_id, member_npub, created_at
+                     ) VALUES (?1, ?2, ?3)",
+                    params![connection_id, participant.as_str(), now],
+                )
+                .unwrap();
+        }
+
+        let mounts = store
+            .list_active_destination_mounts_for_participant(
+                &BrainId::new("dest").unwrap(),
+                &participant,
+            )
+            .unwrap();
+        assert_eq!(mounts.len(), MAX_LINK_LIST_ROWS as usize + 1);
+    }
+
+    #[test]
+    fn member_removal_rejects_rotation_fanout_before_loading_state() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let rotations = (0..=BRAIN_CAPACITY_ENVELOPE.folders
+            + BRAIN_CAPACITY_ENVELOPE.shared_connections)
+            .map(|index| MemberFolderRotation {
+                folder_id: FolderId::new(format!("folder-{index}")).unwrap(),
+                new_key_version: 2,
+                grants: vec![],
+                reencrypted_records: vec![],
+            })
+            .collect::<Vec<_>>();
+        let error = store
+            .remove_member_with_rotations(
+                &BrainId::new("missing").unwrap(),
+                &UserId::new("npub-admin").unwrap(),
+                &UserId::new("npub-member").unwrap(),
+                &rotations,
+                &[],
+                "2026-06-23T00:00:00.000Z",
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::Core(CoreError::RotationFanoutLimitExceeded {
+                resource: "Folder rotations",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn mount_offer_acceptance_supports_every_brain_kind_pair() {
+        for source_personal in [false, true] {
+            for destination_personal in [false, true] {
+                let mut store = BrainStore::open_in_memory().unwrap();
+                let now = "2026-06-23T00:00:00Z";
+                let source_controller = UserId::new("npub-source-controller").unwrap();
+                let destination_controller = UserId::new("npub-destination-controller").unwrap();
+
+                if source_personal {
+                    bootstrap_personal_named(
+                        &mut store,
+                        "source",
+                        source_controller.as_str(),
+                        "npub-source-agent",
+                        now,
+                    );
+                } else {
+                    bootstrap_org_named(&mut store, "source", "Source", source_controller.as_str());
+                }
+                if destination_personal {
+                    bootstrap_personal_named(
+                        &mut store,
+                        "destination",
+                        destination_controller.as_str(),
+                        "npub-destination-agent",
+                        now,
+                    );
+                } else {
+                    bootstrap_org_named(
+                        &mut store,
+                        "destination",
+                        "Destination",
+                        destination_controller.as_str(),
+                    );
+                }
+
+                let source_brain_id = BrainId::new("source").unwrap();
+                let destination_brain_id = BrainId::new("destination").unwrap();
+                let source_folder = Folder {
+                    id: FolderId::new("shared").unwrap(),
+                    name: DisplayName::new("folder_name", "Shared").unwrap(),
+                    role: FolderRole::Folder,
+                    access: FolderAccessMode::Restricted,
+                    parent_folder_id: None,
+                    path: SafeRelativePath::new("folder_path", "Shared").unwrap(),
+                    current_key_version: 1,
+                };
+                let mut source_grants = vec![grant(
+                    "grant-source-controller",
+                    source_folder.id.as_str(),
+                    1,
+                    source_controller.as_str(),
+                    source_controller.as_str(),
+                )];
+                if source_personal {
+                    source_grants.push(grant(
+                        "grant-source-agent",
+                        source_folder.id.as_str(),
+                        1,
+                        source_controller.as_str(),
+                        "npub-source-agent",
+                    ));
+                }
+                store
+                    .create_folder(
+                        &source_brain_id,
+                        &source_folder,
+                        &BTreeSet::new(),
+                        &source_grants,
+                    )
+                    .unwrap();
+                let suffix = format!(
+                    "{}-{}",
+                    if source_personal { "personal" } else { "org" },
+                    if destination_personal {
+                        "personal"
+                    } else {
+                        "org"
+                    }
+                );
+                let offer_id = format!("mount-offer-{suffix}");
+                store
+                    .create_shared_folder_invitation(
+                        &source_brain_id,
+                        &source_folder.id,
+                        &destination_brain_id,
+                        &offer_id,
+                        &destination_controller,
+                        &source_controller,
+                        &format!("/v1/mount-offers/{offer_id}/accept"),
+                        &grant(
+                            &format!("grant-{suffix}-controller"),
+                            source_folder.id.as_str(),
+                            source_folder.current_key_version,
+                            source_controller.as_str(),
+                            destination_controller.as_str(),
+                        ),
+                        "2026-06-30T00:00:00Z",
+                        now,
+                    )
+                    .unwrap();
+
+                let supplemental = destination_personal.then(|| {
+                    grant(
+                        &format!("grant-{suffix}-agent"),
+                        source_folder.id.as_str(),
+                        source_folder.current_key_version,
+                        destination_controller.as_str(),
+                        "npub-destination-agent",
+                    )
+                });
+                accept_mount_for_test(
+                    &mut store,
+                    &offer_id,
+                    &destination_controller,
+                    &format!("mount-{suffix}"),
+                    &format!("projection-{suffix}"),
+                    supplemental.as_slice(),
+                    now,
+                )
+                .unwrap();
+
+                let connection = store
+                    .load_shared_folder_connection(&format!("mount-{suffix}"))
+                    .unwrap();
+                let mut expected = BTreeSet::from([destination_controller.clone()]);
+                if destination_personal {
+                    expected.insert(UserId::new("npub-destination-agent").unwrap());
+                }
+                assert_eq!(connection.member_npubs, expected, "{suffix}");
+            }
+        }
     }
 
     #[test]
@@ -5325,7 +7127,7 @@ mod tests {
                     "invitation-dest-member",
                     &destination_member,
                     "invite-dest-member",
-                    "/_admin/invitations/invitation-dest-member/accept",
+                    "/v1/invitations/invitation-dest-member/accept",
                     &[],
                     &destination_admin,
                     "2026-06-30T00:00:00.000Z",
@@ -5336,9 +7138,6 @@ mod tests {
                 .accept_brain_invitation_by_code("invite-dest-member", &destination_member, now)
                 .unwrap();
 
-            store
-                .mark_shared_folder_source(&source_brain_id, &source_folder_id)
-                .unwrap();
             store
                 .submit_sync_record(
                     &source_brain_id,
@@ -5360,7 +7159,7 @@ mod tests {
                     "shared-folder-invitation-lifecycle",
                     &destination_admin,
                     &source_admin,
-                    "/_admin/shared-folder-invitations/shared-folder-invitation-lifecycle/accept",
+                    "/v1/shared-folder-invitations/shared-folder-invitation-lifecycle/accept",
                     &grant(
                         "grant-lifecycle-dest-admin-v1",
                         "strategy",
@@ -5368,33 +7167,35 @@ mod tests {
                         "npub-admin",
                         destination_admin.as_str(),
                     ),
+                    "2026-06-30T00:00:00.000Z",
                     now,
                 )
                 .unwrap();
-            store
-                .accept_shared_folder_invitation(
-                    "shared-folder-invitation-lifecycle",
-                    &destination_admin,
-                    "shared-folder-connection-lifecycle",
-                    "organization-mount-lifecycle",
-                    now,
-                )
-                .unwrap();
-            store
-                .add_shared_folder_connection_member(
-                    "shared-folder-connection-lifecycle",
-                    &destination_admin,
-                    &destination_member,
-                    &grant(
-                        "grant-lifecycle-dest-member-v1",
-                        "strategy",
-                        1,
-                        destination_admin.as_str(),
-                        destination_member.as_str(),
-                    ),
-                    now,
-                )
-                .unwrap();
+            accept_mount_for_test(
+                &mut store,
+                "shared-folder-invitation-lifecycle",
+                &destination_admin,
+                "shared-folder-connection-lifecycle",
+                "organization-mount-lifecycle",
+                &[],
+                now,
+            )
+            .unwrap();
+            add_mount_member_for_test(
+                &mut store,
+                "shared-folder-connection-lifecycle",
+                &destination_admin,
+                &destination_member,
+                &grant(
+                    "grant-lifecycle-dest-member-v1",
+                    "strategy",
+                    1,
+                    destination_admin.as_str(),
+                    destination_member.as_str(),
+                ),
+                now,
+            )
+            .unwrap();
         }
 
         {
@@ -5421,81 +7222,79 @@ mod tests {
                     .sync_bootstrap(&source_brain_id)
                     .unwrap()
                     .latest_sequence,
-                1
+                3
             );
 
-            store
-                .remove_shared_folder_connection_member(
-                    "shared-folder-connection-lifecycle",
-                    &destination_admin,
-                    &destination_member,
-                    2,
-                    &[
-                        grant(
-                            "grant-lifecycle-source-admin-v2",
-                            "strategy",
-                            2,
-                            destination_admin.as_str(),
-                            source_admin.as_str(),
-                        ),
-                        grant(
-                            "grant-lifecycle-dest-admin-v2",
-                            "strategy",
-                            2,
-                            destination_admin.as_str(),
-                            destination_admin.as_str(),
-                        ),
-                    ],
-                    &[revision_record_struct(
-                        "event-lifecycle-reencrypt-member",
+            remove_mount_member_for_test(
+                &mut store,
+                "shared-folder-connection-lifecycle",
+                &destination_admin,
+                &destination_member,
+                2,
+                &[
+                    grant(
+                        "grant-lifecycle-source-admin-v2",
                         "strategy",
-                        "obj_000000000101",
                         2,
-                        Some(1),
-                        "shared-v2",
-                    )],
-                    now,
-                )
-                .unwrap();
+                        destination_admin.as_str(),
+                        source_admin.as_str(),
+                    ),
+                    grant(
+                        "grant-lifecycle-dest-admin-v2",
+                        "strategy",
+                        2,
+                        destination_admin.as_str(),
+                        destination_admin.as_str(),
+                    ),
+                ],
+                &[revision_record_struct(
+                    "event-lifecycle-reencrypt-member",
+                    "strategy",
+                    "obj_000000000101",
+                    2,
+                    Some(1),
+                    "shared-v2",
+                )],
+                now,
+            )
+            .unwrap();
             let locked_projection = store
                 .mounted_folder_projection(&destination_brain_id, &destination_member)
                 .unwrap();
             assert_eq!(locked_projection[0].state, MountedFolderState::Locked);
 
-            let filtered_export = store
-                .encrypted_brain_export(&source_brain_id, &destination_member)
-                .unwrap();
-            let filtered_object = filtered_export
-                .objects
-                .iter()
-                .find(|object| object.folder_id == source_folder_id)
-                .unwrap();
-            assert!(filtered_object.payload_json.is_none());
-            assert!(filtered_object.opaque);
+            assert_eq!(
+                store
+                    .encrypted_brain_export(&source_brain_id, &destination_member)
+                    .unwrap_err(),
+                StoreError::BrokenInvariant {
+                    reason: "brain access required for encrypted export".to_owned()
+                }
+            );
 
-            store
-                .revoke_shared_folder_connection(
-                    "shared-folder-connection-lifecycle",
-                    &source_admin,
+            revoke_mount_for_test(
+                &mut store,
+                "shared-folder-connection-lifecycle",
+                &source_admin,
+                3,
+                &[grant(
+                    "grant-lifecycle-source-admin-v3",
+                    "strategy",
                     3,
-                    &[grant(
-                        "grant-lifecycle-source-admin-v3",
-                        "strategy",
-                        3,
-                        source_admin.as_str(),
-                        source_admin.as_str(),
-                    )],
-                    &[revision_record_struct(
-                        "event-lifecycle-reencrypt-admin",
-                        "strategy",
-                        "obj_000000000101",
-                        3,
-                        Some(2),
-                        "shared-v3",
-                    )],
-                    now,
-                )
-                .unwrap();
+                    source_admin.as_str(),
+                    source_admin.as_str(),
+                )],
+                &[revision_record_struct(
+                    "event-lifecycle-reencrypt-admin",
+                    "strategy",
+                    "obj_000000000101",
+                    3,
+                    Some(2),
+                    "shared-v3",
+                )],
+                now,
+            )
+            .unwrap();
             let revoked_projection = store
                 .mounted_folder_projection(&destination_brain_id, &destination_admin)
                 .unwrap();
@@ -5505,7 +7304,7 @@ mod tests {
                     .sync_bootstrap(&source_brain_id)
                     .unwrap()
                     .latest_sequence,
-                3
+                8
             );
         }
     }
@@ -5690,6 +7489,156 @@ mod tests {
             Some(&BTreeSet::from([member]))
         );
         assert_eq!(store.sync_bootstrap(&brain_id).unwrap().latest_sequence, 3);
+    }
+
+    #[test]
+    fn access_removal_rolls_back_when_a_control_record_conflicts() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        store.add_member(&brain_id, &member).unwrap();
+        store
+            .grant_folder_access(
+                &brain_id,
+                &folder_id,
+                &member,
+                &grant(
+                    "grant-strategy-member",
+                    "strategy",
+                    1,
+                    "npub-admin",
+                    member.as_str(),
+                ),
+            )
+            .unwrap();
+        store
+            .submit_sync_record(
+                &brain_id,
+                &folder_access_control_record(
+                    "duplicate-access-change",
+                    SyncRecordType::BrainAdminAccessChange,
+                    "strategy",
+                    "npub-admin",
+                ),
+            )
+            .unwrap();
+        let sequence_before = store.sync_bootstrap(&brain_id).unwrap().latest_sequence;
+        let replacement_grant = grant(
+            "grant-strategy-admin-v2",
+            "strategy",
+            2,
+            "npub-admin",
+            "npub-admin",
+        );
+        let control_records = [
+            folder_key_grant_control_record(&replacement_grant, "replacement-grant-record"),
+            folder_access_control_record(
+                "duplicate-access-change",
+                SyncRecordType::BrainAdminAccessChange,
+                "strategy",
+                "npub-admin",
+            ),
+        ];
+
+        store
+            .rotate_folder_key_for_access_removal_with_control_records(
+                &brain_id,
+                &folder_id,
+                &member,
+                2,
+                std::slice::from_ref(&replacement_grant),
+                &[],
+                "2026-06-23T00:00:00.000Z",
+                &control_records,
+            )
+            .unwrap_err();
+
+        let stored = store.load_brain(&brain_id).unwrap();
+        let folder = stored
+            .brain
+            .folders
+            .iter()
+            .find(|folder| folder.id == folder_id)
+            .unwrap();
+        assert_eq!(folder.current_key_version, 1);
+        assert_eq!(
+            stored.folder_access.get(&folder_id),
+            Some(&BTreeSet::from([member]))
+        );
+        assert!(!stored.grants.contains(&replacement_grant));
+        assert_eq!(
+            store.sync_bootstrap(&brain_id).unwrap().latest_sequence,
+            sequence_before
+        );
+    }
+
+    #[test]
+    fn folder_creation_rolls_back_when_a_control_record_conflicts() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        store
+            .submit_sync_record(
+                &brain_id,
+                &folder_access_control_record(
+                    "duplicate-create-change",
+                    SyncRecordType::BrainAdminAccessChange,
+                    "strategy",
+                    "npub-admin",
+                ),
+            )
+            .unwrap();
+        let sequence_before = store.sync_bootstrap(&brain_id).unwrap().latest_sequence;
+        let folder = Folder {
+            id: FolderId::new("plans").unwrap(),
+            name: DisplayName::new("folder_name", "Plans").unwrap(),
+            role: FolderRole::Folder,
+            access: FolderAccessMode::Restricted,
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", "Plans").unwrap(),
+            current_key_version: 1,
+        };
+        let folder_grant = grant("grant-plans-admin", "plans", 1, "npub-admin", "npub-admin");
+        let control_records = [
+            folder_key_grant_control_record(&folder_grant, "plans-grant-record"),
+            folder_access_control_record(
+                "duplicate-create-change",
+                SyncRecordType::BrainAdminAccessChange,
+                "plans",
+                "npub-admin",
+            ),
+        ];
+
+        store
+            .create_folder_with_control_records(
+                &brain_id,
+                &folder,
+                &BTreeSet::new(),
+                std::slice::from_ref(&folder_grant),
+                &control_records,
+            )
+            .unwrap_err();
+
+        assert!(
+            store
+                .load_brain(&brain_id)
+                .unwrap()
+                .brain
+                .folders
+                .iter()
+                .all(|stored_folder| stored_folder.id != folder.id)
+        );
+        assert!(
+            !store
+                .load_brain(&brain_id)
+                .unwrap()
+                .grants
+                .contains(&folder_grant)
+        );
+        assert_eq!(
+            store.sync_bootstrap(&brain_id).unwrap().latest_sequence,
+            sequence_before
+        );
     }
 
     #[test]
@@ -5946,16 +7895,12 @@ mod tests {
         let brain_id = BrainId::new("personal").unwrap();
         let member = UserId::new("npub-member").unwrap();
 
-        assert_eq!(
-            store.add_member(&brain_id, &member).unwrap_err(),
-            StoreError::BrokenInvariant {
-                reason: "member/admin mutation requires an organization brain".to_owned()
-            }
-        );
+        store.add_member(&brain_id, &member).unwrap();
+        assert!(store.member_exists(&brain_id, &member).unwrap());
     }
 
     #[test]
-    fn personal_member_is_removed_when_their_last_folder_scope_is_removed() {
+    fn personal_guest_is_removed_when_their_last_folder_scope_is_removed() {
         let mut store = BrainStore::open_in_memory().unwrap();
         let output = bootstrap_personal_brain("personal", "Austin", "npub-owner").unwrap();
         let grants = grants_for_required(&output.required_key_grants, "npub-owner");
@@ -6006,6 +7951,16 @@ mod tests {
             )
             .unwrap();
 
+        let before = store.load_brain(&brain_id).unwrap();
+        assert_eq!(before.guest_user_ids(), BTreeSet::from([member.clone()]));
+        assert!(
+            !before
+                .brain
+                .members
+                .iter()
+                .any(|stored_member| stored_member.user_id == member)
+        );
+
         store
             .rotate_folder_key_for_access_removal(
                 &brain_id,
@@ -6041,6 +7996,7 @@ mod tests {
                 .iter()
                 .any(|stored_member| stored_member.user_id == member)
         );
+        assert!(stored.guest_user_ids().is_empty());
         assert!(store.list_visible_brains(&member).unwrap().is_empty());
     }
 
@@ -6070,6 +8026,33 @@ mod tests {
                 .members
                 .iter()
                 .any(|stored| stored.user_id == member)
+        );
+    }
+
+    #[test]
+    fn member_add_rolls_back_when_its_control_record_conflicts() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let member = UserId::new("npub-member").unwrap();
+        let duplicate = brain_admin_control_record("duplicate-member-change", "npub-admin");
+        store.submit_sync_record(&brain_id, &duplicate).unwrap();
+        let sequence_before = store.sync_bootstrap(&brain_id).unwrap().latest_sequence;
+
+        store
+            .add_member_with_control_records(
+                &brain_id,
+                &member,
+                &[brain_admin_control_record(
+                    "duplicate-member-change",
+                    "npub-admin",
+                )],
+            )
+            .unwrap_err();
+
+        assert!(!store.member_exists(&brain_id, &member).unwrap());
+        assert_eq!(
+            store.sync_bootstrap(&brain_id).unwrap().latest_sequence,
+            sequence_before
         );
     }
 
@@ -6105,7 +8088,7 @@ mod tests {
         assert_eq!(
             store.remove_member(&brain_id, &member).unwrap_err(),
             StoreError::BrokenInvariant {
-                reason: "remove restricted folder access before removing member".to_owned()
+                reason: "remove explicit Folder access before removing member".to_owned()
             }
         );
     }
@@ -6482,7 +8465,6 @@ mod tests {
                 parent_folder_id: None,
                 path: SafeRelativePath::new("folder_path", "Team Notes").unwrap(),
                 current_key_version: 1,
-                shared_folder_source: false,
             },
             Folder {
                 id: FolderId::new("private-project").unwrap(),
@@ -6492,7 +8474,6 @@ mod tests {
                 parent_folder_id: None,
                 path: SafeRelativePath::new("folder_path", "Private Project").unwrap(),
                 current_key_version: 1,
-                shared_folder_source: false,
             },
         ] {
             store
@@ -6518,6 +8499,58 @@ mod tests {
         store.create_brain_bootstrap(&output, &grants).unwrap();
     }
 
+    fn bootstrap_personal_named(
+        store: &mut BrainStore,
+        id: &str,
+        owner: &str,
+        agent: &str,
+        now: &str,
+    ) {
+        let output = bootstrap_personal_brain(id, "Personal", owner).unwrap();
+        let grants = grants_for_required(&output.required_key_grants, owner);
+        store
+            .create_personal_brain_bootstrap(
+                &output,
+                &grants,
+                &UserId::new(agent).unwrap(),
+                &UserId::new(owner).unwrap(),
+                now,
+            )
+            .unwrap();
+        let brain_id = BrainId::new(id).unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
+        for folder_id in stored.setup_incomplete_folder_ids {
+            let folder = stored
+                .brain
+                .folders
+                .iter()
+                .find(|folder| folder.id == folder_id)
+                .unwrap();
+            store
+                .finish_folder_setup(
+                    &brain_id,
+                    &folder_id,
+                    &[
+                        grant(
+                            &format!("grant-{id}-{folder_id}-owner"),
+                            folder_id.as_str(),
+                            folder.current_key_version,
+                            owner,
+                            owner,
+                        ),
+                        grant(
+                            &format!("grant-{id}-{folder_id}-agent"),
+                            folder_id.as_str(),
+                            folder.current_key_version,
+                            owner,
+                            agent,
+                        ),
+                    ],
+                )
+                .unwrap();
+        }
+    }
+
     fn strategy_folder() -> Folder {
         Folder {
             id: FolderId::new("strategy").unwrap(),
@@ -6527,7 +8560,6 @@ mod tests {
             parent_folder_id: Some(FolderId::new("team-notes").unwrap()),
             path: SafeRelativePath::new("folder_path", "Team Notes/Strategy").unwrap(),
             current_key_version: 1,
-            shared_folder_source: false,
         }
     }
 
@@ -6540,7 +8572,6 @@ mod tests {
             parent_folder_id: None,
             path: SafeRelativePath::new("folder_path", "admin-only").unwrap(),
             current_key_version: 1,
-            shared_folder_source: false,
         }
     }
 
@@ -6573,6 +8604,104 @@ mod tests {
         }
     }
 
+    fn mount_control_records(grants: &[FolderKeyGrantMetadata]) -> Vec<SyncRecordInput> {
+        grants
+            .iter()
+            .map(|grant| {
+                folder_key_grant_control_record(grant, &format!("{}-test-control-record", grant.id))
+            })
+            .collect()
+    }
+
+    fn accept_mount_for_test(
+        store: &mut BrainStore,
+        invitation_id: &str,
+        destination_admin_npub: &UserId,
+        connection_id: &str,
+        mount_id: &str,
+        supplemental_grants: &[FolderKeyGrantMetadata],
+        now: &str,
+    ) -> Result<StoredSharedFolderInvitation, StoreError> {
+        let invitation = store.load_shared_folder_invitation(invitation_id)?;
+        let all_grants = std::iter::once(invitation.folder_key_grant)
+            .chain(supplemental_grants.iter().cloned())
+            .collect::<Vec<_>>();
+        let control_records = mount_control_records(&all_grants);
+        store.accept_shared_folder_invitation(
+            invitation_id,
+            destination_admin_npub,
+            connection_id,
+            mount_id,
+            supplemental_grants,
+            &control_records,
+            now,
+        )
+    }
+
+    fn add_mount_member_for_test(
+        store: &mut BrainStore,
+        connection_id: &str,
+        actor_npub: &UserId,
+        target_npub: &UserId,
+        grant: &FolderKeyGrantMetadata,
+        now: &str,
+    ) -> Result<StoredSharedFolderConnection, StoreError> {
+        let control_records = mount_control_records(std::slice::from_ref(grant));
+        store.add_shared_folder_connection_member(
+            connection_id,
+            actor_npub,
+            target_npub,
+            grant,
+            &control_records,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn remove_mount_member_for_test(
+        store: &mut BrainStore,
+        connection_id: &str,
+        actor_npub: &UserId,
+        target_npub: &UserId,
+        new_key_version: u32,
+        grants: &[FolderKeyGrantMetadata],
+        reencrypted_records: &[FolderObjectRevisionSyncRecord],
+        now: &str,
+    ) -> Result<StoredSharedFolderConnection, StoreError> {
+        let control_records = mount_control_records(grants);
+        store.remove_shared_folder_connection_member(
+            connection_id,
+            actor_npub,
+            target_npub,
+            new_key_version,
+            grants,
+            &control_records,
+            reencrypted_records,
+            now,
+        )
+    }
+
+    fn revoke_mount_for_test(
+        store: &mut BrainStore,
+        connection_id: &str,
+        actor_npub: &UserId,
+        new_key_version: u32,
+        grants: &[FolderKeyGrantMetadata],
+        reencrypted_records: &[FolderObjectRevisionSyncRecord],
+        now: &str,
+    ) -> Result<StoredSharedFolderConnection, StoreError> {
+        let control_records = mount_control_records(grants);
+        store.revoke_shared_folder_connection(
+            connection_id,
+            actor_npub,
+            new_key_version,
+            grants,
+            &control_records,
+            reencrypted_records,
+            now,
+        )
+    }
+
     fn grant(
         id: &str,
         folder_id: &str,
@@ -6591,6 +8720,21 @@ mod tests {
             access_change_event_json: Some("{\"kind\":30078}".to_owned()),
             created_at: "2026-06-23T00:00:00.000Z".to_owned(),
         }
+    }
+
+    fn folder_key_grant_control_record(
+        grant: &FolderKeyGrantMetadata,
+        record_event_id: &str,
+    ) -> SyncRecordInput {
+        SyncRecordInput::Control(ControlSyncRecord {
+            record_event_id: record_event_id.to_owned(),
+            record_type: SyncRecordType::FolderKeyGrant,
+            folder_id: Some(grant.folder_id.clone()),
+            actor_npub: grant.issuer_npub.clone(),
+            client_created_at: grant.created_at.clone(),
+            payload_json: "{}".to_owned(),
+            record_event_kind: NIP59_GIFT_WRAP_KIND,
+        })
     }
 
     trait BrainStoreFolderGrantTestExt {
@@ -6665,6 +8809,18 @@ mod tests {
                 SyncRecordType::FolderKeyGrant => NIP59_GIFT_WRAP_KIND,
                 _ => APP_SPECIFIC_KIND,
             },
+        })
+    }
+
+    fn brain_admin_control_record(event_id: &str, actor_npub: &str) -> SyncRecordInput {
+        SyncRecordInput::Control(ControlSyncRecord {
+            record_event_id: event_id.to_owned(),
+            record_type: SyncRecordType::BrainAdminAccessChange,
+            folder_id: None,
+            actor_npub: UserId::new(actor_npub).unwrap(),
+            client_created_at: "2026-06-23T00:00:00.000Z".to_owned(),
+            payload_json: "{\"control\":true}".to_owned(),
+            record_event_kind: APP_SPECIFIC_KIND,
         })
     }
 
