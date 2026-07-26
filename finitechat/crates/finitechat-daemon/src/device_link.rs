@@ -94,6 +94,8 @@ pub struct ClaimedDeviceLink {
     pairing_session_id: String,
     target: NipAbTargetSession,
     account_secret_hex: Zeroizing<String>,
+    enrollment_user_id: String,
+    enrollment_capability_hex: Zeroizing<String>,
     deadline_unix_seconds: u64,
     poll_interval: Duration,
 }
@@ -271,6 +273,10 @@ impl WaitingDeviceLinkSession {
                 pairing_session_id: self.pairing_session_id,
                 target: self.target,
                 account_secret_hex: Zeroizing::new(payload.account_secret_hex.clone()),
+                enrollment_user_id: payload.enrollment_user_id.clone(),
+                enrollment_capability_hex: Zeroizing::new(
+                    payload.enrollment_capability_hex.clone(),
+                ),
                 deadline_unix_seconds: self.deadline_unix_seconds,
                 poll_interval: self.poll_interval,
             });
@@ -298,11 +304,15 @@ impl ClaimedDeviceLink {
         #[derive(Serialize)]
         struct SecretResult<'a> {
             account_secret: &'a str,
+            enrollment_user_id: &'a str,
+            enrollment_capability_hex: &'a str,
         }
         serde_json::to_writer(
             &mut writer,
             &SecretResult {
                 account_secret: &self.account_secret_hex,
+                enrollment_user_id: &self.enrollment_user_id,
+                enrollment_capability_hex: &self.enrollment_capability_hex,
             },
         )
         .map_err(|_| DeviceLinkBootstrapError::ResultPipe)?;

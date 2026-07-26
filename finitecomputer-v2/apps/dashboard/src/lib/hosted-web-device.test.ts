@@ -377,6 +377,21 @@ test("device linking stays server-side and projects only public progress", async
       expires_at_unix_seconds: 1_800_000_600,
       room_count: 2,
       active_room_count: observed.length === 1 ? 0 : 2,
+      bootstrap_manifests:
+        observed.length === 1
+          ? []
+          : [
+              {
+                bootstrap_id: "pairing-alpha",
+                room_id: "room-one",
+                manifest_sha256: "11".repeat(32),
+              },
+              {
+                bootstrap_id: "pairing-alpha",
+                room_id: "room-two",
+                manifest_sha256: "22".repeat(32),
+              },
+            ],
       ...(observed.length === 1
         ? {
             source_descriptor: {
@@ -413,6 +428,7 @@ test("device linking stays server-side and projects only public progress", async
     expires_at_unix_seconds: 1_800_000_600,
     room_count: 2,
     active_room_count: 0,
+    bootstrap_manifests: [],
     source_descriptor: {
       version: 1,
       source_public_key: "a".repeat(64),
@@ -434,6 +450,29 @@ test("device linking stays server-side and projects only public progress", async
   }
   assert.equal("account_secret_hex" in approved, false);
   assert.equal("encrypted_payload" in approved, false);
+
+  const duplicateManifest = {
+    bootstrap_id: "pairing-alpha",
+    room_id: "room-one",
+    manifest_sha256: "11".repeat(32),
+  };
+  global.fetch = (async () =>
+    Response.json({
+      ...input,
+      status: "ready",
+      expires_at_unix_seconds: 1_800_000_600,
+      room_count: 2,
+      active_room_count: 2,
+      bootstrap_manifests: [duplicateManifest, duplicateManifest],
+    })) as typeof fetch;
+  await assert.rejects(
+    hostedDeviceLinkStatus(
+      { baseUrl: "https://device.internal", apiToken: "internal-token" },
+      verifiedAccount,
+      input
+    ),
+    /invalid response/u
+  );
 });
 
 test("Device reconciliation is project-bound and projects only public progress", async (context) => {

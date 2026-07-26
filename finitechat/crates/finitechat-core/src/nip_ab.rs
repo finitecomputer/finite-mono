@@ -134,6 +134,9 @@ pub struct FinitePairingPayloadV1 {
     #[zeroize(skip)]
     pub target_device_id: String,
     #[zeroize(skip)]
+    pub enrollment_user_id: String,
+    pub enrollment_capability_hex: String,
+    #[zeroize(skip)]
     pub server_url: String,
     #[zeroize(skip)]
     pub issued_at_unix_seconds: u64,
@@ -153,6 +156,11 @@ impl FinitePairingPayloadV1 {
             || self.purpose != FINITE_PAIRING_PURPOSE_V1
             || self.pairing_session_id != expected_pairing_session_id
             || self.target_device_id != expected_target_device_id
+            || self.enrollment_user_id.is_empty()
+            || self.enrollment_user_id.len() > 512
+            || self.enrollment_user_id.trim() != self.enrollment_user_id
+            || self.enrollment_user_id.chars().any(char::is_control)
+            || parse_hex_32(&self.enrollment_capability_hex).is_err()
             || self.server_url.trim_end_matches('/') != expected_server_url.trim_end_matches('/')
             || self.issued_at_unix_seconds > now_unix_seconds
             || self.expires_at_unix_seconds < now_unix_seconds
@@ -953,6 +961,8 @@ mod tests {
                 .public_key()
                 .to_hex(),
             target_device_id: "ios-test".to_owned(),
+            enrollment_user_id: "user_test".to_owned(),
+            enrollment_capability_hex: "ab".repeat(32),
             server_url: "https://chat.finite.test".to_owned(),
             issued_at_unix_seconds: NOW,
             expires_at_unix_seconds: NOW + NIP_AB_SESSION_TTL_SECONDS,
@@ -1052,6 +1062,8 @@ mod tests {
                 .public_key()
                 .to_hex(),
             target_device_id: "ios-bound".to_owned(),
+            enrollment_user_id: "user_test".to_owned(),
+            enrollment_capability_hex: "cd".repeat(32),
             server_url: "https://chat.finite.test".to_owned(),
             issued_at_unix_seconds: NOW,
             expires_at_unix_seconds: NOW + NIP_AB_SESSION_TTL_SECONDS,

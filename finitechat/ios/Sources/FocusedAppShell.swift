@@ -134,7 +134,7 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if model.requiresNostrLogin {
+            if model.requiresNostrLogin || model.accountLinkPhase != .ready {
                 AccountLinkView(
                     phase: model.accountLinkPhase,
                     errorMessage: model.developerErrorText,

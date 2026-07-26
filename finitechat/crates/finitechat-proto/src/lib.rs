@@ -94,8 +94,6 @@ pub const FINITECHAT_ACTIVITY_WORKING_EXPIRY_MILLIS: u64 = 5 * 60 * 1000;
 pub const FINITECHAT_CHAT_ARCHIVE_EVENT_V1: &str = "finitechat.chat.archive.v1";
 pub const FINITECHAT_CHAT_RENAME_EVENT_V1: &str = "finitechat.chat.rename.v1";
 pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2: &str = "finitechat.device-link.bootstrap.v2";
-pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2: &str =
-    "finitechat.device-link.bootstrap-request.v2";
 pub const DEVICE_LINK_BOOTSTRAP_VERSION_V2: u16 = 2;
 /// Every transfer is finite and every individual envelope remains bounded.
 /// A transfer above this explicit ceiling fails without exposing partial data.
@@ -476,13 +474,6 @@ pub struct DeviceLinkBootstrapV2 {
     pub profiles: Vec<DeviceLinkBootstrapProfileV2>,
     #[serde(default)]
     pub history: Vec<DeviceLinkBootstrapEventV2>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceLinkBootstrapRequestV2 {
-    pub version: u16,
-    pub request_id: String,
-    pub requester: DeviceRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2717,21 +2708,6 @@ impl DeviceLinkBootstrapV2 {
             event.validate_limits()?;
         }
         Ok(())
-    }
-}
-
-impl DeviceLinkBootstrapRequestV2 {
-    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
-        validate_bytes_non_empty(
-            "device_link_bootstrap_request.request_id",
-            self.request_id.len(),
-        )?;
-        validate_string_bytes(
-            "device_link_bootstrap_request.request_id",
-            &self.request_id,
-            MAX_OBJECT_ID_BYTES,
-        )?;
-        self.requester.validate_limits()
     }
 }
 

@@ -178,6 +178,28 @@ function parseDeviceLinkPublicRequest(value) {
   };
 }
 
+function parseDeviceEnrollmentGrant(value) {
+  const request = parseDeviceLinkPublicRequest(value);
+  if (
+    Object.keys(value).sort().join(",") !==
+      "enrollment_capability_hex,enrollment_user_id,pairing_session_id,target_device_id" ||
+    typeof value.enrollment_user_id !== "string" ||
+    !value.enrollment_user_id ||
+    Buffer.byteLength(value.enrollment_user_id) > 512 ||
+    value.enrollment_user_id.trim() !== value.enrollment_user_id ||
+    /[\u0000-\u001f\u007f]/u.test(value.enrollment_user_id) ||
+    typeof value.enrollment_capability_hex !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(value.enrollment_capability_hex)
+  ) {
+    throw new Error("Finite Chat Device enrollment is invalid");
+  }
+  return {
+    ...request,
+    enrollment_user_id: value.enrollment_user_id,
+    enrollment_capability_hex: value.enrollment_capability_hex,
+  };
+}
+
 function parseDeviceLinkPublicResponse(value, expected) {
   const request = parseDeviceLinkPublicRequest(expected);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -223,12 +245,42 @@ function parseDeviceLinkPublicResponse(value, expected) {
       expires_at_unix_seconds: descriptor.expires_at_unix_seconds,
     };
   }
+  const bootstrapManifests = value.bootstrap_manifests === undefined
+    ? []
+    : value.bootstrap_manifests;
+  const manifestKeys = Array.isArray(bootstrapManifests)
+    ? bootstrapManifests.map((manifest) =>
+      manifest && typeof manifest === "object"
+        ? `${manifest.bootstrap_id}\u0000${manifest.room_id}`
+        : ""
+    )
+    : [];
+  if (
+    !Array.isArray(bootstrapManifests)
+    || bootstrapManifests.some((manifest) =>
+      !manifest
+      || typeof manifest !== "object"
+      || Array.isArray(manifest)
+      || Object.keys(manifest).sort().join(",")
+        !== "bootstrap_id,manifest_sha256,room_id"
+      || !manifest.bootstrap_id
+      || typeof manifest.bootstrap_id !== "string"
+      || !manifest.room_id
+      || typeof manifest.room_id !== "string"
+      || !/^[0-9a-f]{64}$/u.test(manifest.manifest_sha256)
+    )
+    || new Set(manifestKeys).size !== manifestKeys.length
+    || (value.status === "ready" && bootstrapManifests.length !== value.room_count)
+  ) {
+    throw new Error("Finite Chat device-link service returned an invalid response");
+  }
   return {
     ...request,
     status: value.status,
     expires_at_unix_seconds: value.expires_at_unix_seconds,
     room_count: value.room_count,
     active_room_count: value.active_room_count,
+    bootstrap_manifests: bootstrapManifests.map((manifest) => ({ ...manifest })),
     ...(sourceDescriptor ? { source_descriptor: sourceDescriptor } : {}),
   };
 }
@@ -272,7 +324,7 @@ function parseAccountBinding(value, expectedDeviceId = null) {
   };
 }
 
-function parseLocalDaemonIdentity(value, expectedAccountId) {
+function parseLocalDaemonIdentity(value, expectedAccountId, expectedDeviceId = null) {
   const identity = value?.identity;
   if (
     !value
@@ -293,6 +345,11 @@ function parseLocalDaemonIdentity(value, expectedAccountId) {
   if (identity.account_id !== expectedAccountId) {
     throw new Error(
       "This desktop is linked to a different Finite account. Sign back in with that account to use local chat."
+    );
+  }
+  if (expectedDeviceId !== null && identity.device_id !== expectedDeviceId) {
+    throw new Error(
+      "This desktop opened a different Finite Device identity. Restart Finite and try again."
     );
   }
   return {
@@ -318,6 +375,11 @@ function nonnegativeSafeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+function retryableDashboardStatus(status) {
+  return Number.isInteger(status)
+    && (status === 429 || (status >= 500 && status <= 599));
+}
+
 module.exports = {
   DESKTOP_BRIDGE_CONTRACT_VERSION,
   MAX_DESKTOP_ACTION_BYTES,
@@ -330,8 +392,10 @@ module.exports = {
   normalizeDashboardBaseUrl,
   parseAccountBinding,
   parseDeviceLinkPublicRequest,
+  parseDeviceEnrollmentGrant,
   parseDeviceLinkPublicResponse,
   parseLocalDaemonIdentity,
+  retryableDashboardStatus,
   shouldExposeLocalChatBridge,
   trustedDashboardIpcFrame,
   trustedDashboardMicrophonePermission,

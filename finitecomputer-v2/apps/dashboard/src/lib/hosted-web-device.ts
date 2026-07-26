@@ -292,6 +292,11 @@ export type HostedDeviceLinkRequest = {
   target_device_id: string;
 };
 
+export type HostedDeviceEnrollmentRequest = HostedDeviceLinkRequest & {
+  enrollment_user_id: string;
+  enrollment_capability_hex: string;
+};
+
 export type HostedDeviceLinkStatus =
   | "awaiting_offer"
   | "awaiting_key_package"
@@ -304,6 +309,11 @@ export type HostedDeviceLinkResponse = HostedDeviceLinkRequest & {
   expires_at_unix_seconds: number;
   room_count: number;
   active_room_count: number;
+  bootstrap_manifests: {
+    bootstrap_id: string;
+    room_id: string;
+    manifest_sha256: string;
+  }[];
   source_descriptor?: {
     version: number;
     source_public_key: string;
@@ -532,6 +542,27 @@ export async function hostedDeviceLinkStatus(
   return parseHostedDeviceLinkResponse(result, input);
 }
 
+export async function hostedDeviceResumeEnrollment(
+  config: HostedDeviceConfig,
+  input: HostedDeviceEnrollmentRequest
+) {
+  const response = await fetch(`${config.baseUrl}/v1/device-links/enroll`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${config.apiToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(input),
+    signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new HostedDeviceRequestError(await responseError(response), response.status);
+  }
+  return parseHostedDeviceLinkResponse(await response.json(), input);
+}
+
 export async function hostedDeviceReconcileDevice(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
@@ -705,6 +736,17 @@ function parseHostedDeviceLinkResponse(
   const expiresAt = record.expires_at_unix_seconds;
   const roomCount = record.room_count;
   const activeRoomCount = record.active_room_count;
+  const bootstrapManifests =
+    record.bootstrap_manifests === undefined ? [] : record.bootstrap_manifests;
+  const manifestKeys = Array.isArray(bootstrapManifests)
+    ? bootstrapManifests.map((manifest) => {
+        if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+          return "";
+        }
+        const item = manifest as Record<string, unknown>;
+        return `${String(item.bootstrap_id)}\u0000${String(item.room_id)}`;
+      })
+    : [];
   const descriptor = parsePairingSourceDescriptor(record.source_descriptor);
   if (
     record.pairing_session_id !== expected.pairing_session_id ||
@@ -717,7 +759,26 @@ function parseHostedDeviceLinkResponse(
     (roomCount as number) < 0 ||
     !Number.isSafeInteger(activeRoomCount) ||
     (activeRoomCount as number) < 0 ||
-    (activeRoomCount as number) > (roomCount as number)
+    (activeRoomCount as number) > (roomCount as number) ||
+    !Array.isArray(bootstrapManifests) ||
+    bootstrapManifests.some((manifest) => {
+      if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+        return true;
+      }
+      const item = manifest as Record<string, unknown>;
+      return (
+        Object.keys(item).sort().join(",") !==
+          "bootstrap_id,manifest_sha256,room_id" ||
+        typeof item.bootstrap_id !== "string" ||
+        item.bootstrap_id.length === 0 ||
+        typeof item.room_id !== "string" ||
+        item.room_id.length === 0 ||
+        typeof item.manifest_sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(item.manifest_sha256)
+      );
+    }) ||
+    new Set(manifestKeys).size !== manifestKeys.length ||
+    (status === "ready" && bootstrapManifests.length !== roomCount)
   ) {
     throw new Error("Device-link service returned an invalid response.");
   }
@@ -730,6 +791,7 @@ function parseHostedDeviceLinkResponse(
     expires_at_unix_seconds: expiresAt as number,
     room_count: roomCount as number,
     active_room_count: activeRoomCount as number,
+    bootstrap_manifests: bootstrapManifests as HostedDeviceLinkResponse["bootstrap_manifests"],
     ...(descriptor ? { source_descriptor: descriptor } : {}),
   };
 }

@@ -18,7 +18,8 @@ const {
 } = require("./attachment-media.cjs");
 
 const {
-  AccountSecretStore,
+  DEFAULT_READY_TIMEOUT_MS,
+  DeviceIdentityStore,
   DaemonUpdateRelay,
   DaemonSupervisor,
   DeviceLinkSupervisor,
@@ -31,11 +32,17 @@ const {
   parseReadyRecord,
   parseDeviceLinkReadyRecord,
   parseDeviceLinkSecretRecord,
+  parseDeviceIdentityEnvelope,
   parseDeviceLinkBootstrapError,
+  removeDeprecatedDeviceLinkSetting,
   resolveDaemonBinary,
   startDaemonRuntime,
   startupDocument,
 } = require("./daemon-process.cjs");
+
+test("the default daemon readiness budget covers complete-history cold starts", () => {
+  assert.ok(DEFAULT_READY_TIMEOUT_MS >= 60_000);
+});
 
 function temporaryDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "finitechat-electron-process-"));
@@ -45,14 +52,20 @@ function testSafeStorage() {
   return {
     isEncryptionAvailable: () => true,
     getSelectedStorageBackend: () => "keychain",
-    encryptString: (value) => Buffer.from(value, "utf8").reverse(),
-    decryptString: (value) => Buffer.from(value).reverse().toString("utf8"),
+    encryptString: (value) => Buffer.from(
+      Buffer.from(value, "utf8").toString("base64"),
+      "utf8"
+    ),
+    decryptString: (value) => Buffer.from(
+      Buffer.from(value).toString("utf8"),
+      "base64"
+    ).toString("utf8"),
   };
 }
 
-function testAccountSecretStore(root) {
-  return new AccountSecretStore({
-    secretPath: path.join(root, "account-secret.safe"),
+function testDeviceIdentityStore(root) {
+  return new DeviceIdentityStore({
+    identityPath: path.join(root, "device-identity.safe"),
     safeStorage: testSafeStorage(),
   });
 }
@@ -65,6 +78,30 @@ function emitDeviceLinkReady(child) {
       target_device_id: "electron-test-device",
     })}\n`
   );
+}
+
+function privateDeviceLinkResult(secretCharacter) {
+  return {
+    account_secret: secretCharacter.repeat(64),
+    enrollment_user_id: "user_test",
+    enrollment_capability_hex: "ab".repeat(32),
+  };
+}
+
+function identityEnvelope(secretCharacter = "d", overrides = {}) {
+  return {
+    version: 1,
+    account_secret: secretCharacter.repeat(64),
+    expected_account_id: "12".repeat(32),
+    expected_device_id: "electron-test-device",
+    pending_enrollment: {
+      pairing_session_id: "pairing-public-test",
+      target_device_id: "electron-test-device",
+      enrollment_user_id: "user_test",
+      enrollment_capability_hex: "ab".repeat(32),
+    },
+    ...overrides,
+  };
 }
 
 test("attachment upload form preserves binary views and scoped multipart fields", async () => {
@@ -317,16 +354,22 @@ test("revoked Device recovery archives local cryptographic state and creates a f
   const userDataDirectory = path.join(root, "user-data");
   const daemonDataDirectory = path.join(userDataDirectory, "finitechatd");
   const settingsFile = path.join(userDataDirectory, "desktop-settings.json");
-  const secretFile = path.join(userDataDirectory, "account-secret.safe");
   const deviceId = "electron-revoked-alpha";
+  const secretFile = path.join(
+    daemonDataDirectory,
+    `account-secret.${deviceId}.safe`
+  );
+  const leakedCapability = "cd".repeat(32);
   fs.mkdirSync(daemonDataDirectory, { recursive: true });
   fs.writeFileSync(path.join(daemonDataDirectory, "client.sqlite3"), "encrypted-state");
-  fs.writeFileSync(secretFile, "encrypted-account-secret");
+  fs.writeFileSync(secretFile, "encrypted-identity-envelope");
   fs.writeFileSync(settingsFile, `${JSON.stringify({
     deviceId,
     pendingDeviceLink: {
-      link_session_id: "old-link",
+      pairing_session_id: "old-link",
       target_device_id: deviceId,
+      enrollment_user_id: "user_old",
+      enrollment_capability_hex: leakedCapability,
     },
     dashboardPreference: "keep-me",
   })}\n`);
@@ -348,12 +391,38 @@ test("revoked Device recovery archives local cryptographic state and creates a f
     "encrypted-state"
   );
   assert.equal(
-    fs.readFileSync(path.join(archived.backupDirectory, "account-secret.safe"), "utf8"),
-    "encrypted-account-secret"
+    fs.readFileSync(
+      path.join(
+        archived.backupDirectory,
+        "finitechatd",
+        `account-secret.${deviceId}.safe`
+      ),
+      "utf8"
+    ),
+    "encrypted-identity-envelope"
   );
   assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, "utf8")), {
     dashboardPreference: "keep-me",
   });
+  assert.deepEqual(
+    JSON.parse(
+      fs.readFileSync(
+        path.join(archived.backupDirectory, "desktop-settings.json"),
+        "utf8"
+      )
+    ),
+    {
+      deviceId,
+      dashboardPreference: "keep-me",
+    }
+  );
+  assert.doesNotMatch(
+    fs.readFileSync(
+      path.join(archived.backupDirectory, "desktop-settings.json"),
+      "utf8"
+    ),
+    new RegExp(leakedCapability)
+  );
   assert.deepEqual(
     JSON.parse(fs.readFileSync(path.join(archived.backupDirectory, "recovery.json"), "utf8")),
     {
@@ -380,8 +449,11 @@ test("revoked Device archive rolls the original profile back after a partial fai
   const userDataDirectory = path.join(root, "user-data");
   const daemonDataDirectory = path.join(userDataDirectory, "finitechatd");
   const settingsFile = path.join(userDataDirectory, "desktop-settings.json");
-  const secretFile = path.join(userDataDirectory, "account-secret.safe");
   const deviceId = "electron-revoked-alpha";
+  const secretFile = path.join(
+    daemonDataDirectory,
+    `account-secret.${deviceId}.safe`
+  );
   fs.mkdirSync(daemonDataDirectory, { recursive: true });
   fs.writeFileSync(path.join(daemonDataDirectory, "client.sqlite3"), "encrypted-state");
   fs.writeFileSync(secretFile, "encrypted-account-secret");
@@ -471,7 +543,14 @@ test("device-link public and private records are narrow and independently valida
     pairing_session_id: "pairing-public-test",
     target_device_id: "electron-test-device",
   });
-  assert.equal(parseDeviceLinkSecretRecord(JSON.stringify({ account_secret: "c".repeat(64) })), "c".repeat(64));
+  assert.deepEqual(
+    parseDeviceLinkSecretRecord(JSON.stringify(privateDeviceLinkResult("c"))),
+    {
+      accountSecret: "c".repeat(64),
+      enrollmentUserId: "user_test",
+      enrollmentCapabilityHex: "ab".repeat(32),
+    }
+  );
   assert.throws(
     () => parseDeviceLinkReadyRecord(
       '{"event":"pairing_ready","pairing_session_id":"pairing-public-test","target_device_id":"electron-test-device","unexpected":"value"}'
@@ -479,9 +558,120 @@ test("device-link public and private records are narrow and independently valida
     /invalid status record/
   );
   assert.throws(
-    () => parseDeviceLinkSecretRecord(JSON.stringify({ account_secret: "not-secret-material" })),
+    () => parseDeviceLinkSecretRecord(JSON.stringify({
+      ...privateDeviceLinkResult("c"),
+      account_secret: "not-secret-material",
+    })),
     /invalid private result/
   );
+});
+
+test("identity envelope is exact, encrypted as one record, and rewrites atomically", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = testDeviceIdentityStore(root);
+  const identity = identityEnvelope();
+  const sensitiveValues = [
+    identity.account_secret,
+    identity.expected_account_id,
+    identity.pending_enrollment.enrollment_capability_hex,
+  ];
+
+  assert.deepEqual(parseDeviceIdentityEnvelope(identity), identity);
+  assert.throws(
+    () => parseDeviceIdentityEnvelope({ ...identity, unexpected: true }),
+    /stored identity is invalid/u
+  );
+
+  store.writeProvisional(identity);
+  assert.equal(store.read(), null, "a pre-rename crash has no active identity");
+  const provisionalBytes = fs.readFileSync(store.provisionalPath).toString("utf8");
+  for (const sensitive of sensitiveValues) {
+    assert.doesNotMatch(provisionalBytes, new RegExp(sensitive));
+  }
+  store.promoteProvisional();
+  assert.deepEqual(store.read(), identity);
+
+  const completed = { ...identity, pending_enrollment: null };
+  store.write(completed);
+  assert.deepEqual(store.read(), completed);
+  const activeBytes = fs.readFileSync(store.identityPath).toString("utf8");
+  for (const sensitive of sensitiveValues) {
+    assert.doesNotMatch(activeBytes, new RegExp(sensitive));
+  }
+});
+
+test("startup removes a pre-release plaintext enrollment capability", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const settingsFile = path.join(root, "desktop-settings.json");
+  const capability = "ef".repeat(32);
+  fs.writeFileSync(settingsFile, `${JSON.stringify({
+    deviceId: "electron-test-device",
+    pendingDeviceLink: {
+      pairing_session_id: "old-pairing",
+      target_device_id: "electron-test-device",
+      enrollment_user_id: "user_old",
+      enrollment_capability_hex: capability,
+    },
+    dashboardPreference: "preserved",
+  })}\n`);
+
+  assert.equal(
+    removeDeprecatedDeviceLinkSetting({ settingsFile }),
+    true
+  );
+  const plaintext = fs.readFileSync(settingsFile, "utf8");
+  assert.deepEqual(JSON.parse(plaintext), {
+    deviceId: "electron-test-device",
+    dashboardPreference: "preserved",
+  });
+  assert.doesNotMatch(plaintext, new RegExp(capability));
+  assert.equal(
+    removeDeprecatedDeviceLinkSetting({ settingsFile }),
+    false,
+    "cleanup is idempotent"
+  );
+});
+
+test("failed enrollment-clear rename preserves the complete resumable identity", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const initial = testDeviceIdentityStore(root);
+  const identity = identityEnvelope();
+  initial.write(identity);
+  const failingFileSystem = {
+    ...fs,
+    renameSync(source, destination) {
+      if (destination === initial.identityPath && /\.tmp$/u.test(source)) {
+        throw new Error("synthetic crash before identity rename");
+      }
+      return fs.renameSync(source, destination);
+    },
+  };
+  const restarted = new DeviceIdentityStore({
+    identityPath: initial.identityPath,
+    safeStorage: testSafeStorage(),
+    fileSystem: failingFileSystem,
+  });
+
+  assert.throws(
+    () => restarted.write({ ...identity, pending_enrollment: null }),
+    /synthetic crash/
+  );
+  assert.deepEqual(initial.read(), identity);
+  assert.equal(
+    fs.readdirSync(root).some((name) => name.endsWith(".tmp")),
+    false
+  );
+});
+
+test("corrupt encrypted identity fails closed instead of looking unpaired", (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = testDeviceIdentityStore(root);
+  fs.writeFileSync(store.identityPath, Buffer.from("not-an-envelope"));
+  assert.throws(() => store.read(), /stored identity is invalid/u);
 });
 
 test("device-link child failures use a bounded exact allowlist with fixed renderer copy", () => {
@@ -654,8 +844,7 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
   const child = new FakeLinkChild();
   let spawnArgs = null;
   let spawnOptions = null;
-  const storedSecrets = [];
-  const promotions = [];
+  const storedIdentities = [];
   let confirmation = "";
   child.stdio[4].on("data", (chunk) => {
     confirmation += chunk.toString();
@@ -670,10 +859,12 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async (secret) => storedSecrets.push(secret),
-    promoteAccountSecret: async (secret) => promotions.push(secret),
+    storeIdentityEnvelope: async (accountSecret, pendingEnrollment) => {
+      storedIdentities.push({ accountSecret, pendingEnrollment });
+    },
   });
   const readyPromise = link.begin();
+  const durable = link.durable;
   const completion = link.completion;
   child.stdout.write(
     `${JSON.stringify({
@@ -705,15 +896,37 @@ test("device link stores the fd3 secret before fd4 confirmation and clean comple
     session_secret_hex: "b".repeat(64),
     expires_at_unix_seconds: 42,
   });
-  child.stdio[3].write(`${JSON.stringify({ account_secret: "d".repeat(64) })}\n`);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(storedSecrets, ["d".repeat(64)]);
+  child.stdio[3].write(`${JSON.stringify(privateDeviceLinkResult("d"))}\n`);
+  const storedEnrollment = await durable;
   assert.equal(confirmation, "stored\n");
-  assert.deepEqual(promotions, ["d".repeat(64)]);
+  let completionSettled = false;
+  completion.finally(() => {
+    completionSettled = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    completionSettled,
+    false,
+    "durable storage succeeds before NIP Complete or child exit"
+  );
+  assert.deepEqual(storedIdentities, [{
+    accountSecret: "d".repeat(64),
+    pendingEnrollment: {
+      pairing_session_id: "pairing-public-test",
+      target_device_id: "electron-test-device",
+      enrollment_user_id: "user_test",
+      enrollment_capability_hex: "ab".repeat(32),
+    },
+  }]);
+  assert.deepEqual(storedEnrollment, {
+    pairing_session_id: "pairing-public-test",
+    target_device_id: "electron-test-device",
+    enrollment_user_id: "user_test",
+    enrollment_capability_hex: "ab".repeat(32),
+  });
   child.stdout.write('{"event":"linked"}\n');
   child.exit(0);
-  await completion;
-  assert.deepEqual(promotions, ["d".repeat(64)]);
+  assert.deepEqual(await completion, storedEnrollment);
 });
 
 test("device link propagates an allowlisted payload rejection without reflecting other stderr", async () => {
@@ -724,8 +937,7 @@ test("device link propagates an allowlisted payload rejection without reflecting
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async () => {},
-    promoteAccountSecret: async () => {},
+    storeIdentityEnvelope: async () => {},
   });
   const readyPromise = link.begin();
   const completion = link.completion;
@@ -756,8 +968,7 @@ test("device link keeps unknown child stderr behind the generic renderer failure
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async () => {},
-    promoteAccountSecret: async () => {},
+    storeIdentityEnvelope: async () => {},
   });
   const readyPromise = link.begin();
   const completion = link.completion;
@@ -788,8 +999,7 @@ test("device link drains final stdout data after exit before settling on close",
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async () => {},
-    promoteAccountSecret: async () => {},
+    storeIdentityEnvelope: async () => {},
   });
   const readyPromise = link.begin();
   const completion = link.completion;
@@ -801,7 +1011,7 @@ test("device link drains final stdout data after exit before settling on close",
     })}\n`
   );
   await readyPromise;
-  child.stdio[3].write(`${JSON.stringify({ account_secret: "a".repeat(64) })}\n`);
+  child.stdio[3].write(`${JSON.stringify(privateDeviceLinkResult("a"))}\n`);
   await new Promise((resolve) => setImmediate(resolve));
 
   let settled = false;
@@ -900,10 +1110,10 @@ test("a delayed daemon action response is rejected after daemon restart", async 
   assert.equal(daemonRequestVersionMatches(2, restartedConnection, 2, restartedConnection), true);
 });
 
-test("restart discards a provisional secret after a crash between fd3 and fd4", async (context) => {
+test("restart discards an uncommitted identity envelope after a crash before atomic rename", async (context) => {
   const root = temporaryDirectory();
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const store = testAccountSecretStore(root);
+  const store = testDeviceIdentityStore(root);
   const child = new FakeLinkChild();
   let confirmation = "";
   let finishStorage;
@@ -923,25 +1133,28 @@ test("restart discards a provisional secret after a crash between fd3 and fd4", 
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async (secret) => {
-      store.writeProvisional(secret);
+    storeIdentityEnvelope: async (accountSecret, pendingEnrollment) => {
+      store.writeProvisional(identityEnvelope("b", {
+        account_secret: accountSecret,
+        pending_enrollment: pendingEnrollment,
+      }));
       reportStored();
       await storageGate;
+      store.promoteProvisional();
     },
-    promoteAccountSecret: async () => store.promoteProvisional(),
   });
   const readyPromise = link.begin();
   const completion = link.completion;
   emitDeviceLinkReady(child);
   await readyPromise;
-  child.stdio[3].write(`${JSON.stringify({ account_secret: "b".repeat(64) })}\n`);
+  child.stdio[3].write(`${JSON.stringify(privateDeviceLinkResult("b"))}\n`);
   await provisionalStored;
 
   assert.equal(store.read(), null);
   assert.equal(fs.existsSync(store.provisionalPath), true);
   assert.equal(confirmation, "");
 
-  const restartedStore = testAccountSecretStore(root);
+  const restartedStore = testDeviceIdentityStore(root);
   restartedStore.discardProvisional();
   assert.equal(restartedStore.read(), null);
   assert.equal(fs.existsSync(restartedStore.provisionalPath), false);
@@ -952,10 +1165,63 @@ test("restart discards a provisional secret after a crash between fd3 and fd4", 
   assert.equal(confirmation, "");
 });
 
-test("active storage survives a crash after fd4 because confirmation follows promotion", async (context) => {
+test("committed identity resumes after a crash between atomic rename and fd4 confirmation", async (context) => {
   const root = temporaryDirectory();
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const store = testAccountSecretStore(root);
+  const store = testDeviceIdentityStore(root);
+  const child = new FakeLinkChild();
+  let confirmation = "";
+  let finishStorage;
+  let reportCommitted;
+  const storageGate = new Promise((resolve) => {
+    finishStorage = resolve;
+  });
+  const committed = new Promise((resolve) => {
+    reportCommitted = resolve;
+  });
+  child.stdio[4].on("data", (chunk) => {
+    confirmation += chunk.toString();
+  });
+  const link = new DeviceLinkSupervisor({
+    spawnProcess: () => child,
+    binaryPath: "/tmp/finitechatd",
+    serverUrl: "https://chat.finite.computer",
+    deviceId: "electron-test-device",
+    cwd: "/tmp",
+    storeIdentityEnvelope: async (accountSecret, pendingEnrollment) => {
+      store.writeProvisional(identityEnvelope("b", {
+        account_secret: accountSecret,
+        pending_enrollment: pendingEnrollment,
+      }));
+      store.promoteProvisional();
+      reportCommitted();
+      await storageGate;
+    },
+  });
+  const readyPromise = link.begin();
+  const durable = link.durable;
+  const completion = link.completion;
+  emitDeviceLinkReady(child);
+  await readyPromise;
+  child.stdio[3].write(`${JSON.stringify(privateDeviceLinkResult("b"))}\n`);
+  await committed;
+
+  assert.deepEqual(store.read(), identityEnvelope("b"));
+  assert.equal(confirmation, "");
+  child.exit(1);
+  finishStorage();
+  assert.deepEqual(await durable, identityEnvelope("b").pending_enrollment);
+  await assert.rejects(completion, /stopped before completion/);
+
+  const restartedStore = testDeviceIdentityStore(root);
+  restartedStore.discardProvisional();
+  assert.deepEqual(restartedStore.read(), identityEnvelope("b"));
+});
+
+test("committed identity envelope survives a crash after durable storage but before NIP Complete", async (context) => {
+  const root = temporaryDirectory();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = testDeviceIdentityStore(root);
   const child = new FakeLinkChild();
   let confirmation = "";
   child.stdio[4].on("data", (chunk) => {
@@ -967,32 +1233,39 @@ test("active storage survives a crash after fd4 because confirmation follows pro
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async (secret) => store.writeProvisional(secret),
-    promoteAccountSecret: async () => store.promoteProvisional(),
+    storeIdentityEnvelope: async (accountSecret, pendingEnrollment) => {
+      store.writeProvisional(identityEnvelope("c", {
+        account_secret: accountSecret,
+        pending_enrollment: pendingEnrollment,
+      }));
+      store.promoteProvisional();
+    },
   });
   const readyPromise = link.begin();
+  const durable = link.durable;
   const completion = link.completion;
   emitDeviceLinkReady(child);
   await readyPromise;
-  child.stdio[3].write(`${JSON.stringify({ account_secret: "c".repeat(64) })}\n`);
-  await new Promise((resolve) => setImmediate(resolve));
+  child.stdio[3].write(`${JSON.stringify(privateDeviceLinkResult("c"))}\n`);
+  const enrollment = await durable;
 
   assert.equal(confirmation, "stored\n");
-  assert.equal(store.read(), "c".repeat(64));
+  assert.deepEqual(store.read(), identityEnvelope("c"));
   assert.equal(fs.existsSync(store.provisionalPath), false);
+  assert.equal(enrollment.enrollment_capability_hex, "ab".repeat(32));
 
   child.exit(1);
   await assert.rejects(completion, /stopped before completion/);
-  const restartedStore = testAccountSecretStore(root);
+  const restartedStore = testDeviceIdentityStore(root);
   restartedStore.discardProvisional();
-  assert.equal(restartedStore.read(), "c".repeat(64));
+  assert.deepEqual(restartedStore.read(), identityEnvelope("c"));
   assert.equal(fs.existsSync(restartedStore.provisionalPath), false);
 });
 
-test("safe storage is promoted before Rust receives its stored confirmation", async (context) => {
+test("complete identity envelope is promoted before Rust receives its stored confirmation", async (context) => {
   const root = temporaryDirectory();
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const store = testAccountSecretStore(root);
+  const store = testDeviceIdentityStore(root);
   const child = new FakeLinkChild();
   const link = new DeviceLinkSupervisor({
     spawnProcess: () => child,
@@ -1000,22 +1273,28 @@ test("safe storage is promoted before Rust receives its stored confirmation", as
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async (secret) => store.writeProvisional(secret),
-    promoteAccountSecret: async () => store.promoteProvisional(),
+    storeIdentityEnvelope: async (accountSecret, pendingEnrollment) => {
+      store.writeProvisional(identityEnvelope("d", {
+        account_secret: accountSecret,
+        pending_enrollment: pendingEnrollment,
+      }));
+      store.promoteProvisional();
+    },
   });
   const readyPromise = link.begin();
+  const durable = link.durable;
   const completion = link.completion;
   emitDeviceLinkReady(child);
   await readyPromise;
-  child.stdio[3].write(`${JSON.stringify({ account_secret: "d".repeat(64) })}\n`);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(store.read(), "d".repeat(64));
+  child.stdio[3].write(`${JSON.stringify(privateDeviceLinkResult("d"))}\n`);
+  await durable;
+  assert.deepEqual(store.read(), identityEnvelope("d"));
   assert.equal(fs.existsSync(store.provisionalPath), false);
 
   child.stdout.write('{"event":"linked"}\n');
   child.exit(0);
   await completion;
-  assert.equal(store.read(), "d".repeat(64));
+  assert.deepEqual(store.read(), identityEnvelope("d"));
   assert.equal(fs.existsSync(store.provisionalPath), false);
 });
 
@@ -1031,7 +1310,7 @@ test("device link never confirms when secure storage fails", async () => {
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async () => {
+    storeIdentityEnvelope: async () => {
       throw new Error("storage unavailable");
     },
   });
@@ -1045,7 +1324,7 @@ test("device link never confirms when secure storage fails", async () => {
     })}\n`
   );
   await readyPromise;
-  child.stdio[3].write(`${JSON.stringify({ account_secret: "e".repeat(64) })}\n`);
+  child.stdio[3].write(`${JSON.stringify(privateDeviceLinkResult("e"))}\n`);
   await assert.rejects(completion, /securely store/);
   assert.equal(confirmation, "");
 });
@@ -1066,8 +1345,7 @@ test("cancelling during secure storage never confirms and waits for the write", 
     serverUrl: "https://chat.finite.computer",
     deviceId: "electron-test-device",
     cwd: "/tmp",
-    storeAccountSecret: async () => storageGate,
-    promoteAccountSecret: async () => {},
+    storeIdentityEnvelope: async () => storageGate,
   });
   const readyPromise = link.begin();
   child.stdout.write(
@@ -1078,12 +1356,12 @@ test("cancelling during secure storage never confirms and waits for the write", 
     })}\n`
   );
   await readyPromise;
-  child.stdio[3].write(`${JSON.stringify({ account_secret: "f".repeat(64) })}\n`);
+  child.stdio[3].write(`${JSON.stringify(privateDeviceLinkResult("f"))}\n`);
   await new Promise((resolve) => setImmediate(resolve));
   const cancellation = link.cancel();
   finishStorage();
   await cancellation;
-  assert.equal(link.secretStored, true);
+  assert.equal(link.identityStored, true);
   assert.equal(confirmation, "");
 });
 

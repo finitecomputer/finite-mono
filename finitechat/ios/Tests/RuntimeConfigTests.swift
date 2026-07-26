@@ -1154,6 +1154,82 @@ final class ChatTimelineActivityTests: XCTestCase {
 
 @MainActor
 final class AppModelPersistenceTests: XCTestCase {
+    func testLocalEnrollmentReadinessRejectsPartialAndProvisionalRooms() {
+        var state = emptyChatState(deviceID: "ios-enrollment")
+        state.rooms = [
+            AppRoomSummary(
+                roomId: "agent-room",
+                displayName: "Hermes",
+                picture: nil,
+                state: .connected,
+                status: "connected",
+                userStatusText: "Connected",
+                lastMessagePreview: "",
+                unreadCount: 0,
+                canLoadOlder: false,
+                isAgentChat: true
+            ),
+        ]
+        state.pairedAgent = AppPairedAgent(
+            agentAccountId: "agent",
+            canonicalRoomId: "agent-room"
+        )
+        let manifest = NativeDeviceEnrollmentManifest(
+            bootstrapId: "bootstrap-one",
+            roomId: "agent-room",
+            manifestSha256: String(repeating: "1", count: 64)
+        )
+        state.deviceLinkBootstrapReceipts = [
+            AppDeviceLinkBootstrapReceipt(
+                bootstrapId: manifest.bootstrapId,
+                roomId: manifest.roomId,
+                manifestSha256: manifest.manifestSha256
+            ),
+        ]
+
+        XCTAssertTrue(
+            AppModel.localEnrollmentIsReady(
+                state,
+                expectedAccountID: "alice-account",
+                expectedManifests: [manifest]
+            )
+        )
+        XCTAssertFalse(
+            AppModel.localEnrollmentIsReady(
+                state,
+                expectedAccountID: String(repeating: "2", count: 64),
+                expectedManifests: [manifest]
+            ),
+            "the local identity must match the account cryptographically granted by NIP-AB"
+        )
+
+        state.deviceLinkBootstrapReceipts = []
+        XCTAssertFalse(
+            AppModel.localEnrollmentIsReady(
+                state,
+                expectedAccountID: "alice-account",
+                expectedManifests: [manifest]
+            ),
+            "a connected Room is still provisional without the exact durable receipt"
+        )
+
+        state.deviceLinkBootstrapReceipts = [
+            AppDeviceLinkBootstrapReceipt(
+                bootstrapId: manifest.bootstrapId,
+                roomId: manifest.roomId,
+                manifestSha256: manifest.manifestSha256
+            ),
+        ]
+        state.pairedAgent = nil
+        XCTAssertFalse(
+            AppModel.localEnrollmentIsReady(
+                state,
+                expectedAccountID: "alice-account",
+                expectedManifests: [manifest]
+            ),
+            "source fanout is not ready until the canonical agent validates locally"
+        )
+    }
 
     func testTypingDispatchesOnlyWhenTheMeaningfulIntentChanges() async throws {
         let state = savedChatState()
@@ -3244,6 +3320,7 @@ final class AppModelPersistenceTests: XCTestCase {
             profiles: [],
             devices: [],
             typingMembers: [],
+            deviceLinkBootstrapReceipts: [],
             flow: flow
         )
     }
@@ -3382,8 +3459,38 @@ final class AppModelPersistenceTests: XCTestCase {
             profiles: [],
             devices: [],
             typingMembers: [],
+            deviceLinkBootstrapReceipts: [],
             flow: flow
         )
+    }
+
+    func testPendingEnrollmentPersistsWithTheKeychainIdentityUntilCompletion() throws {
+        let material = try createNostrIdentity()
+        let enrollment = AppDeviceEnrollment(
+            grant: NativeDeviceEnrollmentGrant(
+                pairingSessionId: "pair-resume",
+                targetDeviceId: "ios-resume",
+                accountId: String(repeating: "1", count: 64),
+                enrollmentUserId: "user_resume",
+                enrollmentCapabilityHex: String(repeating: "ab", count: 32)
+            )
+        )
+        let identity = AppNostrIdentity(
+            material: material,
+            pendingEnrollment: enrollment
+        )
+
+        let reopened = try JSONDecoder().decode(
+            AppNostrIdentity.self,
+            from: JSONEncoder().encode(identity)
+        )
+        XCTAssertEqual(reopened.pendingEnrollment, enrollment)
+        XCTAssertEqual(reopened.pendingEnrollment?.nativeGrant.pairingSessionId, "pair-resume")
+
+        let completed = reopened.enrollmentCompleted()
+        XCTAssertNil(completed.pendingEnrollment)
+        XCTAssertEqual(completed.accountSecretHex, identity.accountSecretHex)
+        XCTAssertEqual(completed.accountID, identity.accountID)
     }
 
     private func roomUserStatusText(state: AppRoomState, status: String) -> String {
