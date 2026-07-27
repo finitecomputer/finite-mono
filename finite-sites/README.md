@@ -362,9 +362,18 @@ the human through an email session.
 Project collaboration controls who can clone and push source:
 
 ```sh
-fsite project grant PROJECT --email bot@example.com --send-invite --output json
-fsite project revoke PROJECT --email bot@example.com --output json
+# Native agents and Finite users keep their own Principal.
+fsite project grant PROJECT --npub npub1... --output json
+fsite project revoke PROJECT --npub npub1... --output json
+
+# External email collaborators use the invitation flow.
+fsite project grant PROJECT --email editor@example.com --send-invite --output json
+fsite project revoke PROJECT --email editor@example.com --output json
 ```
+
+Use exactly one of `--npub` or `--email`. Native collaborators authenticate
+with their own local User Key and run `fsite auth git PROJECT --store`; they do
+not link or impersonate the project owner's email.
 
 Output visibility controls who can view the served website:
 

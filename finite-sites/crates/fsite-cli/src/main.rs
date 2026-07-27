@@ -10,7 +10,7 @@
 //!   fsite describe workflow publish-stateful-app --output json
 //!   fsite auth register --output json
 //!   fsite project init --config finite.toml --dry-run --output json
-//!   fsite project grant PROJECT --email EDITOR_EMAIL --send-invite --output json
+//!   fsite project grant PROJECT (--email EDITOR_EMAIL | --npub AGENT_NPUB) --output json
 //!   fsite project share PROJECT OUTPUT --public --yes-public --output json
 //!   fsite auth git PROJECT [--email EMAIL] [--store] [--output json]
 //!   fsite project status PROJECT --output json
@@ -148,8 +148,8 @@ fn usage() -> String {
      Commands:\n  fsite whoami\n  \
      fsite describe [workflow NAME] [--output json]\n  \
      fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  \
-     fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  \
-     fsite project revoke PROJECT --email EMAIL [--output json]\n  \
+     fsite project grant PROJECT (--email EMAIL | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  \
+     fsite project revoke PROJECT (--email EMAIL | --npub NPUB) [--output json]\n  \
      fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
      fsite project status PROJECT [--output json]\n  \
      fsite project list [--output json]\n  \
@@ -225,7 +225,7 @@ fn describe_help() -> &'static str {
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT --email EMAIL [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
+    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT (--email EMAIL | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT (--email EMAIL | --npub NPUB) [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
 }
 
 fn project_init_help() -> &'static str {
@@ -233,11 +233,11 @@ fn project_init_help() -> &'static str {
 }
 
 fn project_grant_help() -> &'static str {
-    "usage: fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n\nGrant Project Repository edit access to an External Principal email. Use --send-invite to email agent-facing auth/git instructions."
+    "usage: fsite project grant PROJECT (--email EMAIL | --npub NPUB) [--role editor] [--send-invite] [--output json]\n\nGrant Project Repository edit access to one External Principal email or Native Principal npub. Native agents keep their own identity. Use --send-invite only with email collaborators."
 }
 
 fn project_revoke_help() -> &'static str {
-    "usage: fsite project revoke PROJECT --email EMAIL [--output json]\n\nRemove Project Repository edit access for an External Principal email and revoke active Git Credentials. Safe to replay: removed=false means the collaborator was already inactive or unknown."
+    "usage: fsite project revoke PROJECT (--email EMAIL | --npub NPUB) [--output json]\n\nRemove Project Repository edit access for one email or npub Principal and revoke active Git Credentials. Safe to replay: removed=false means the collaborator was already inactive or unknown."
 }
 
 fn project_share_help() -> &'static str {
@@ -346,13 +346,13 @@ fn describe_commands() -> serde_json::Value {
             },
             {
                 "name": "project grant",
-                "summary": "Grant Project Repository edit access to an External Principal email.",
-                "usage": "fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]"
+                "summary": "Grant Project Repository edit access to one email or native npub Principal.",
+                "usage": "fsite project grant PROJECT (--email EMAIL | --npub NPUB) [--role editor] [--send-invite] [--output json]"
             },
             {
                 "name": "project revoke",
                 "summary": "Remove Project Repository edit access and revoke active Git Credentials for that Principal.",
-                "usage": "fsite project revoke PROJECT --email EMAIL [--output json]"
+                "usage": "fsite project revoke PROJECT (--email EMAIL | --npub NPUB) [--output json]"
             },
             {
                 "name": "project share",
@@ -608,9 +608,9 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
         "grant-collaborator" => serde_json::json!({
             "name": "grant-collaborator",
             "steps": [
-                "Use the Project owner identity, not the collaborator email key.",
-                "Run fsite project grant PROJECT --email COLLABORATOR_EMAIL --role editor --send-invite --output json.",
-                "Preferred native path: the collaborator runs fsite auth register --output json, then fsite auth redeem COLLABORATOR_EMAIL TOKEN_FROM_EMAIL --link-native --output json, then fsite auth git PROJECT --store --output json.",
+                "Use the Project owner identity, not the collaborator identity.",
+                "For an agent or native Finite user, run fsite project grant PROJECT --npub COLLABORATOR_NPUB --role editor --output json. The collaborator then runs fsite auth git PROJECT --store --output json with that same native identity.",
+                "For an External Principal, run fsite project grant PROJECT --email COLLABORATOR_EMAIL --role editor --send-invite --output json.",
                 "Email-only fallback: the collaborator runs fsite auth redeem COLLABORATOR_EMAIL TOKEN_FROM_EMAIL --output json, then fsite auth git PROJECT --email COLLABORATOR_EMAIL --store --output json."
             ]
         }),
@@ -632,8 +632,8 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
         "revoke-collaborator" => serde_json::json!({
             "name": "revoke-collaborator",
             "steps": [
-                "Use the Project owner identity, not the collaborator email key.",
-                "Run fsite project revoke PROJECT --email COLLABORATOR_EMAIL --output json.",
+                "Use the Project owner identity, not the collaborator identity.",
+                "Run fsite project revoke PROJECT --email COLLABORATOR_EMAIL --output json or fsite project revoke PROJECT --npub COLLABORATOR_NPUB --output json.",
                 "Check removed and revoked_git_credentials in the JSON response."
             ]
         }),
@@ -853,6 +853,7 @@ fn project_grant(args: &[String]) -> Result<(), CliError> {
     }
     let mut project: Option<String> = None;
     let mut email: Option<String> = None;
+    let mut collaborator_npub: Option<String> = None;
     let mut role = "editor".to_string();
     let mut send_invite = false;
     let mut output_json = false;
@@ -865,6 +866,13 @@ fn project_grant(args: &[String]) -> Result<(), CliError> {
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
                 email = Some(value.clone());
+                index += 2;
+            }
+            "--npub" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--npub needs a value".to_string()))?;
+                collaborator_npub = Some(value.clone());
                 index += 2;
             }
             "--role" => {
@@ -903,13 +911,26 @@ fn project_grant(args: &[String]) -> Result<(), CliError> {
         }
     }
     let project = project.ok_or_else(|| CliError::Usage(project_grant_help().to_string()))?;
-    let email = email.ok_or_else(|| CliError::Usage(project_grant_help().to_string()))?;
+    if email.is_some() == collaborator_npub.is_some() {
+        return Err(CliError::Usage(
+            "project grant requires exactly one of --email or --npub".to_string(),
+        ));
+    }
+    if send_invite && email.is_none() {
+        return Err(CliError::Usage(
+            "--send-invite requires an email collaborator".to_string(),
+        ));
+    }
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
     let response = client.grant_project(
         &identity,
         &project,
-        &ProjectGrantRequest { email, role },
+        &ProjectGrantRequest {
+            email: email.unwrap_or_default(),
+            npub: collaborator_npub,
+            role,
+        },
         send_invite,
     )?;
     if output_json {
@@ -919,7 +940,14 @@ fn project_grant(args: &[String]) -> Result<(), CliError> {
         );
     } else {
         println!("project: {}", response.project_slug);
-        println!("email:   {}", response.collaborator.email);
+        if response.collaborator.email.is_empty() {
+            println!(
+                "npub:    {}",
+                response.collaborator.npub.as_deref().unwrap_or("unknown")
+            );
+        } else {
+            println!("email:   {}", response.collaborator.email);
+        }
         println!("role:    {}", response.collaborator.role);
         println!("created: {}", response.collaborator.created);
         if !response.invited_emails.is_empty() {
@@ -935,6 +963,7 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
     }
     let mut project: Option<String> = None;
     let mut email: Option<String> = None;
+    let mut collaborator_npub: Option<String> = None;
     let mut output_json = false;
     let mut index: usize = 0;
     // Bounded by argv length.
@@ -945,6 +974,13 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
                 email = Some(value.clone());
+                index += 2;
+            }
+            "--npub" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--npub needs a value".to_string()))?;
+                collaborator_npub = Some(value.clone());
                 index += 2;
             }
             "--output" => {
@@ -973,10 +1009,21 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
     }
 
     let project = project.ok_or_else(|| CliError::Usage(project_revoke_help().to_string()))?;
-    let email = email.ok_or_else(|| CliError::Usage(project_revoke_help().to_string()))?;
+    if email.is_some() == collaborator_npub.is_some() {
+        return Err(CliError::Usage(
+            "project revoke requires exactly one of --email or --npub".to_string(),
+        ));
+    }
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
-    let response = client.revoke_project(&identity, &project, &ProjectRevokeRequest { email })?;
+    let response = client.revoke_project(
+        &identity,
+        &project,
+        &ProjectRevokeRequest {
+            email: email.unwrap_or_default(),
+            npub: collaborator_npub,
+        },
+    )?;
     if output_json {
         println!(
             "{}",
@@ -984,7 +1031,11 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
         );
     } else {
         println!("project: {}", response.project_slug);
-        println!("email:   {}", response.email);
+        if response.email.is_empty() {
+            println!("npub:    {}", response.npub.as_deref().unwrap_or("unknown"));
+        } else {
+            println!("email:   {}", response.email);
+        }
         println!("removed: {}", response.removed);
         println!(
             "revoked git credentials: {}",
@@ -2569,6 +2620,45 @@ mod tests {
         .unwrap();
         assert_eq!(native.add_npubs, vec!["npub1viewer"]);
         assert_eq!(native.remove_npubs, vec!["npub1former"]);
+    }
+
+    #[test]
+    fn collaborator_commands_require_one_identity_and_email_for_invites() {
+        assert!(project_grant_help().contains("--email EMAIL | --npub NPUB"));
+        assert!(project_revoke_help().contains("--email EMAIL | --npub NPUB"));
+        assert!(matches!(
+            project_grant(&args(&["demo"])),
+            Err(CliError::Usage(message)) if message.contains("exactly one")
+        ));
+        assert!(matches!(
+            project_grant(&args(&[
+                "demo",
+                "--email",
+                "editor@example.com",
+                "--npub",
+                "npub1agent",
+            ])),
+            Err(CliError::Usage(message)) if message.contains("exactly one")
+        ));
+        assert!(matches!(
+            project_grant(&args(&[
+                "demo",
+                "--npub",
+                "npub1agent",
+                "--send-invite",
+            ])),
+            Err(CliError::Usage(message)) if message.contains("requires an email")
+        ));
+        assert!(matches!(
+            project_revoke(&args(&[
+                "demo",
+                "--email",
+                "editor@example.com",
+                "--npub",
+                "npub1agent",
+            ])),
+            Err(CliError::Usage(message)) if message.contains("exactly one")
+        ));
     }
 
     #[test]

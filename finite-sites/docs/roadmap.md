@@ -91,9 +91,10 @@ implementation stay focused.
   `finite.toml` schema and example configs.
 - `fsite auth git PROJECT [--email EMAIL] --store --output json` mints a scoped HTTPS
   Git Credential.
-- `fsite project revoke PROJECT --email EMAIL --output json`
-  removes Project edit access and revokes active Git Credentials for that
-  Principal.
+- `fsite project grant PROJECT (--email EMAIL | --npub NPUB) --output json`
+  grants Project access to either an External or Native Principal.
+- `fsite project revoke PROJECT (--email EMAIL | --npub NPUB) --output json`
+  removes Project access and revokes active Git Credentials for that Principal.
 - `fsite project share PROJECT OUTPUT ... --output json` manages viewer
   access for one Project Output without falling back to site-first commands.
 - `git clone https://git.finite.chat/PROJECT.git` and `git push origin main`
