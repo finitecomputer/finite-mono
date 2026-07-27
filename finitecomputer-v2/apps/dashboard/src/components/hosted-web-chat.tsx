@@ -831,7 +831,15 @@ export function HostedWebChat({
     ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
     : null;
   const latestTranscriptItem = transcript[transcript.length - 1];
-  const activeToolRollupId = activityLabel && latestTranscriptItem?.type === "tools"
+  const waitingToolRollupId = latestTranscriptItem?.type === "tools"
+    && isAskForInputToolMessage(
+      latestTranscriptItem.messages[latestTranscriptItem.messages.length - 1]!
+    )
+    ? latestTranscriptItem.id
+    : null;
+  const activeToolRollupId = activityLabel
+    && !waitingToolRollupId
+    && latestTranscriptItem?.type === "tools"
     ? latestTranscriptItem.id
     : null;
   const hasRenderableChatContent = chatContentIsRenderable(
@@ -951,10 +959,13 @@ export function HostedWebChat({
                           key={item.id}
                           messages={item.messages}
                           active={item.id === activeToolRollupId}
+                          waitingForUser={item.id === waitingToolRollupId}
                         />
                       )
                     )}
-                    {activityLabel ? <LiveActivity label={activityLabel} /> : null}
+                    {activityLabel && !waitingToolRollupId
+                      ? <LiveActivity label={activityLabel} />
+                      : null}
                   </div>
                 ) : null}
               </div>
@@ -1229,13 +1240,12 @@ function LiveActivity({ label }: { label: string }) {
 function ToolRollup({
   messages,
   active,
+  waitingForUser,
 }: {
   messages: HostedChatMessage[];
   active: boolean;
+  waitingForUser: boolean;
 }) {
-  const latestMessage = messages[messages.length - 1];
-  const waitingForUser = latestMessage?.status === "running"
-    && isAskForInputToolMessage(latestMessage);
   const running = !waitingForUser
     && (active || messages.some((message) => message.status === "running"));
   const steps = messages.flatMap((message) => messageContent(message).split(/\n+/u).filter(Boolean));

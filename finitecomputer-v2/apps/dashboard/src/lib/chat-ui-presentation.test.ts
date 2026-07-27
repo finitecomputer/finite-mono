@@ -271,7 +271,7 @@ test("ask-for-input tools and projected transcript visibility are explicit prese
     messageId: "ask",
     seq: 2,
     kind: "tool",
-    status: "running",
+    status: "complete",
     displayContent: "❓ Asking Is this mapping correct?",
   });
   const ordinaryTool = message({
