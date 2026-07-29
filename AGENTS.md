@@ -50,7 +50,6 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   their internal layout; their crates are root workspace members and their
   old sub-workspace `Cargo.toml`/`Cargo.lock` files stay deleted. New crates
   get added to the root members list.
-- Update `docs/monorepo-migration-log.md` when recording migration facts.
 
 ## Development Environment
 
