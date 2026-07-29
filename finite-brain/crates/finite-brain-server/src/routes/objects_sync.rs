@@ -1,5 +1,32 @@
 use crate::*;
 
+pub(crate) async fn brain_updates_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+) -> Result<impl IntoResponse, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    let mut updates = state.brain_updates.subscribe();
+    let stream_state = state.clone();
+    let stream = async_stream::stream! {
+        yield Ok::<SseEvent, Infallible>(SseEvent::default().event("ready").data("{}"));
+        loop {
+            match updates.recv().await {
+                Ok(update) if update.notify_npubs.iter().any(|npub| npub == &actor)
+                    || stream_state.actor_can_see_brain(&actor, &update.brain_id) => {
+                    let data = serde_json::to_string(&update).unwrap_or_else(|_| "{}".to_owned());
+                    yield Ok(SseEvent::default().event("brain_update").data(data));
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 pub(crate) async fn put_object_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -16,10 +43,24 @@ pub(crate) async fn put_object_handler(
     } else {
         FolderObjectOperation::Create
     };
-    accept_object_revision(
-        state, brain_id, folder_id, object_id, actor, request, operation,
-    )
-    .map(Json)
+    let notification_brain_id = brain_id.clone();
+    let response = accept_object_revision(
+        state.clone(),
+        brain_id,
+        folder_id,
+        object_id,
+        actor,
+        request,
+        operation,
+    )?;
+    if !response.duplicate {
+        state.publish_brain_update(
+            notification_brain_id,
+            response.sequence,
+            BrainUpdateReason::ContentUpdated,
+        );
+    }
+    Ok(Json(response))
 }
 
 pub(crate) async fn move_object_handler(
@@ -33,16 +74,24 @@ pub(crate) async fn move_object_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: ObjectWriteRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    accept_object_revision(
-        state,
+    let notification_brain_id = brain_id.clone();
+    let response = accept_object_revision(
+        state.clone(),
         brain_id,
         folder_id,
         object_id,
         actor,
         request,
         FolderObjectOperation::Move,
-    )
-    .map(Json)
+    )?;
+    if !response.duplicate {
+        state.publish_brain_update(
+            notification_brain_id,
+            response.sequence,
+            BrainUpdateReason::ContentUpdated,
+        );
+    }
+    Ok(Json(response))
 }
 
 pub(crate) async fn delete_object_handler(
@@ -56,7 +105,23 @@ pub(crate) async fn delete_object_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: ObjectDeleteRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    accept_object_tombstone(state, brain_id, folder_id, object_id, actor, request).map(Json)
+    let notification_brain_id = brain_id.clone();
+    let response = accept_object_tombstone(
+        state.clone(),
+        brain_id,
+        folder_id,
+        object_id,
+        actor,
+        request,
+    )?;
+    if !response.duplicate {
+        state.publish_brain_update(
+            notification_brain_id,
+            response.sequence,
+            BrainUpdateReason::ContentUpdated,
+        );
+    }
+    Ok(Json(response))
 }
 
 pub(crate) async fn get_object_handler(
@@ -198,7 +263,8 @@ pub(crate) async fn submit_sync_record_handler(
         .get("recordType")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "recordType is required"))?;
-    match record_type {
+    let notification_brain_id = brain_id.clone();
+    let response = match record_type {
         "folder_object_revision" => {
             let request: ObjectWriteRequest = serde_json::from_value(value)
                 .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid revision record"))?;
@@ -210,20 +276,42 @@ pub(crate) async fn submit_sync_record_handler(
                 FolderObjectOperation::Create
             };
             accept_object_revision(
-                state, brain_id, folder_id, object_id, actor, request, operation,
+                state.clone(),
+                brain_id,
+                folder_id,
+                object_id,
+                actor,
+                request,
+                operation,
             )
-            .map(Json)
         }
         "folder_object_tombstone" => {
             let request: ObjectDeleteRequest = serde_json::from_value(value)
                 .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid tombstone record"))?;
             let folder_id = request_field(&body, "folderId")?;
             let object_id = request_field(&body, "objectId")?;
-            accept_object_tombstone(state, brain_id, folder_id, object_id, actor, request).map(Json)
+            accept_object_tombstone(
+                state.clone(),
+                brain_id,
+                folder_id,
+                object_id,
+                actor,
+                request,
+            )
         }
-        _ => Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "unsupported recordType",
-        )),
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "unsupported recordType",
+            ));
+        }
+    }?;
+    if !response.duplicate {
+        state.publish_brain_update(
+            notification_brain_id,
+            response.sequence,
+            BrainUpdateReason::ContentUpdated,
+        );
     }
+    Ok(Json(response))
 }

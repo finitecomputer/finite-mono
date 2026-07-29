@@ -1,6 +1,7 @@
 //! FiniteBrain HTTP server and API surface.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::io::Read;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -11,6 +12,7 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, OriginalUri, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -123,6 +125,23 @@ pub struct ProductClientConfigResponse {
     pub default_brain_id: String,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrainUpdateReason {
+    ContentUpdated,
+    AccessUpdated,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainUpdateNotification {
+    pub brain_id: String,
+    pub latest_sequence: u64,
+    pub reason: BrainUpdateReason,
+    #[serde(skip)]
+    pub notify_npubs: Vec<String>,
+}
+
 /// Shared server state.
 #[derive(Clone)]
 pub struct ServerState {
@@ -139,6 +158,7 @@ pub struct ServerState {
     invite_mailer: Option<BrainInviteMailer>,
     smoke_nip07_signer_secret: Option<Arc<str>>,
     agent_bootstrap_authorities: Option<AgentBootstrapAuthorities>,
+    brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
 }
 
 type EmailProofVerifier = Arc<dyn Fn(&str, &UserId) -> Result<(), EmailProofFailure> + Send + Sync>;
@@ -212,6 +232,7 @@ impl ServerState {
     pub fn new(store: BrainStore, public_base_url: impl Into<String>) -> Self {
         let public_base_url = public_base_url.into();
         let cors_allowed_origins = cors_allowed_origins_from_public_base_url(&public_base_url);
+        let (brain_updates, _) = tokio::sync::broadcast::channel(256);
         Self {
             store: Arc::new(Mutex::new(store)),
             public_base_url: Arc::<str>::from(public_base_url),
@@ -229,7 +250,48 @@ impl ServerState {
             invite_mailer: None,
             smoke_nip07_signer_secret: None,
             agent_bootstrap_authorities: None,
+            brain_updates,
         }
+    }
+
+    fn publish_brain_update(
+        &self,
+        brain_id: impl Into<String>,
+        latest_sequence: u64,
+        reason: BrainUpdateReason,
+    ) {
+        let _ = self.brain_updates.send(BrainUpdateNotification {
+            brain_id: brain_id.into(),
+            latest_sequence,
+            reason,
+            notify_npubs: Vec::new(),
+        });
+    }
+
+    fn publish_access_update_for(&self, brain_id: &BrainId, target_npub: &str) {
+        let Ok(store) = self.store.lock() else { return };
+        let Ok(bootstrap) = store.sync_bootstrap(brain_id) else {
+            return;
+        };
+        let _ = self.brain_updates.send(BrainUpdateNotification {
+            brain_id: brain_id.as_str().to_owned(),
+            latest_sequence: bootstrap.latest_sequence,
+            reason: BrainUpdateReason::AccessUpdated,
+            notify_npubs: vec![target_npub.to_owned()],
+        });
+    }
+
+    fn actor_can_see_brain(&self, actor: &str, brain_id: &str) -> bool {
+        let Ok(brain_id) = BrainId::new(brain_id) else {
+            return false;
+        };
+        let Ok(store) = self.store.lock() else {
+            return false;
+        };
+        store
+            .load_brain(&brain_id)
+            .ok()
+            .is_some_and(|stored| ensure_metadata_visible(&stored, actor).is_ok())
     }
 
     /// Override the auth validation clock for deterministic tests.
@@ -605,6 +667,7 @@ pub fn router_with_state(state: ServerState) -> Router {
 
 fn normal_signed_api_router() -> Router<ServerState> {
     Router::new()
+        .route("/brain-updates", get(brain_updates_handler))
         .route(
             "/brains",
             get(list_brains_handler).post(create_brain_handler),
@@ -2731,6 +2794,23 @@ mod tests {
             "https://finite.example/smoke",
         );
         assert!(path_state.cors_origin_allowed("https://finite.example"));
+    }
+
+    #[tokio::test]
+    async fn brain_update_notification_carries_the_authoritative_cursor() {
+        let state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL);
+        let mut updates = state.brain_updates.subscribe();
+        state.publish_brain_update("acme", 42, BrainUpdateReason::ContentUpdated);
+
+        assert_eq!(
+            updates.recv().await.unwrap(),
+            BrainUpdateNotification {
+                brain_id: "acme".to_owned(),
+                latest_sequence: 42,
+                reason: BrainUpdateReason::ContentUpdated,
+                notify_npubs: Vec::new(),
+            }
+        );
     }
 
     #[tokio::test]

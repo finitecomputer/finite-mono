@@ -1,4 +1,5 @@
 use std::env;
+use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -11,6 +12,68 @@ use crate::{
 
 pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
     "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST";
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrainUpdateNotification {
+    pub brain_id: String,
+    pub latest_sequence: u64,
+    pub reason: String,
+}
+
+pub(crate) fn read_brain_update_stream(
+    env: &CliEnvironment,
+    sender: &std::sync::mpsc::Sender<Result<BrainUpdateNotification, String>>,
+) -> Result<(), CliError> {
+    let server_url = server_url_for_command(env, &[])?;
+    let path = "/v1/brain-updates";
+    let transport_url = absolute_server_url(&server_url, path);
+    let authorization_url = authorization_url_for_request(env, &server_url, path);
+    let signer = load_signer(env)?;
+    let authorization = signed_http_auth_header(&signer.keys, "GET", &authorization_url, None)?;
+    let response = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .build()
+        .get(&transport_url)
+        .set("Accept", "text/event-stream")
+        .set("Authorization", &authorization)
+        .call()
+        .map_err(|error| CliError::Http(error.to_string()))?;
+    let _ = sender.send(Ok(BrainUpdateNotification {
+        brain_id: String::new(),
+        latest_sequence: 0,
+        reason: "stream_catch_up".to_owned(),
+    }));
+    let mut event = String::new();
+    let mut data = String::new();
+    for line in BufReader::new(response.into_reader()).lines() {
+        let line = line.map_err(|error| CliError::Http(error.to_string()))?;
+        if line.is_empty() {
+            if event == "brain_update" && !data.is_empty() {
+                match serde_json::from_str(&data) {
+                    Ok(notification) => {
+                        if sender.send(Ok(notification)).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error.to_string()));
+                    }
+                }
+            }
+            event.clear();
+            data.clear();
+        } else if let Some(value) = line.strip_prefix("event:") {
+            event = value.trim().to_owned();
+        } else if let Some(value) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(value.trim_start());
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn check_signed_brain_access(env: &CliEnvironment, server_url: &str) -> HealthCheck {
     match signed_json_request_to_server(env, server_url, "GET", "/v1/brains", None) {

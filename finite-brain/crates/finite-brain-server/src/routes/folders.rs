@@ -132,6 +132,13 @@ pub(crate) async fn delete_folder_handler(
             Some(&expectation),
         )?
     };
+    if !outcome.duplicate {
+        state.publish_brain_update(
+            brain_id.as_str(),
+            outcome.sequence,
+            BrainUpdateReason::AccessUpdated,
+        );
+    }
     Ok(Json(FolderDeleteResponse {
         sequence: outcome.sequence,
         duplicate: outcome.duplicate,
@@ -187,7 +194,10 @@ pub(crate) async fn create_folder_handler(
     )?;
     let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
 
-    run_as_admin(state, brain_id, actor, |store, brain_id| {
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let notification_actor = actor.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.create_folder_with_control_records(
             brain_id,
             &folder,
@@ -195,8 +205,9 @@ pub(crate) async fn create_folder_handler(
             &grants,
             &control_records,
         )
-    })
-    .map(Json)
+    })?;
+    notification_state.publish_access_update_for(&notification_brain_id, &notification_actor);
+    Ok(Json(response))
 }
 
 pub(crate) async fn finish_folder_setup_handler(
@@ -238,15 +249,19 @@ pub(crate) async fn finish_folder_setup_handler(
     )?;
     let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
 
-    run_as_admin(state, brain_id, actor, |store, brain_id| {
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let notification_actor = actor.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.finish_folder_setup_with_control_records(
             brain_id,
             &folder_id,
             &grants,
             &control_records,
         )
-    })
-    .map(Json)
+    })?;
+    notification_state.publish_access_update_for(&notification_brain_id, &notification_actor);
+    Ok(Json(response))
 }
 
 pub(crate) async fn grant_folder_access_handler(
@@ -316,6 +331,7 @@ pub(crate) async fn grant_folder_access_handler(
             GrantFolderAccessResponseOutcome::AlreadyHasAccess
         }
     };
+    state.publish_access_update_for(&brain_id, target.as_str());
     Ok(Json(GrantFolderAccessResponse { metadata, outcome }))
 }
 
@@ -393,7 +409,9 @@ pub(crate) async fn remove_folder_access_handler(
     }
     let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
 
-    run_as_admin(state, brain_id, actor, |store, brain_id| {
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.rotate_folder_key_for_access_removal_with_control_records(
             brain_id,
             &folder_id,
@@ -404,6 +422,7 @@ pub(crate) async fn remove_folder_access_handler(
             &updated_at,
             &control_records,
         )
-    })
-    .map(Json)
+    })?;
+    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
+    Ok(Json(response))
 }

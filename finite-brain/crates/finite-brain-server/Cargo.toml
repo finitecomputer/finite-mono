@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 axum = { version = "0.8.7", features = ["json", "tokio", "http1"] }
+async-stream = "0.3.6"
 base64 = "0.22.1"
 finite-brain-core = { path = "../finite-brain-core" }
 finite-brain-store = { path = "../finite-brain-store" }

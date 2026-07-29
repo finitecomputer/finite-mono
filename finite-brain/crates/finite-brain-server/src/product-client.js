@@ -72,6 +72,9 @@ const FiniteBrainProductClient = (() => {
     accessFolderDropdownOpen: false,
     accessFolderFocusedIndex: 0,
     accessFolderDropdownListenerBound: false,
+    brainUpdateAbortController: null,
+    brainUpdateReconnectTimer: null,
+    brainUpdateContentTimer: null,
   };
   const handledAccessFailures = new WeakSet();
   const handledSessionLockFailures = new WeakSet();
@@ -497,6 +500,7 @@ const FiniteBrainProductClient = (() => {
   }
 
   function resetBrainSessionState(options = {}) {
+    stopBrainUpdateNotifications();
     const returnToSettings =
       options.preserveManageBrainsReturnToSettings === false ? null : nestedManageBrainsReturnToken();
     state.sessionEpoch += 1;
@@ -3426,6 +3430,15 @@ const FiniteBrainProductClient = (() => {
         continue;
       }
       next.pages.set(key, object);
+    }
+    return next;
+  }
+
+  function projectionForAccessUpdate(projection, readableFolderIds) {
+    const readable = new Set(readableFolderIds || []);
+    const next = createClientProjection();
+    for (const [key, draft] of projection.localDrafts) {
+      if (readable.has(key.split("/", 1)[0])) next.localDrafts.set(key, draft);
     }
     return next;
   }
@@ -9172,6 +9185,7 @@ const FiniteBrainProductClient = (() => {
     state.metadata = metadata;
     state.keyring = state.keyring || createSessionKeyring();
     state.sessionStatus = SESSION_STATUS.UNLOCKED;
+    startBrainUpdateNotifications();
     await loadVisibleBrains();
     requireCurrentSessionEpoch(creation.sessionEpoch);
     render();
@@ -9566,6 +9580,7 @@ const FiniteBrainProductClient = (() => {
       selectDefaultReaderTargets();
       renderGraphView();
       state.sessionStatus = SESSION_STATUS.UNLOCKED;
+      startBrainUpdateNotifications();
       if (applyPendingInviteNavigation()) {
         state.sessionNotice = "Invitation details are ready in this open Brain.";
       }
@@ -9604,6 +9619,136 @@ const FiniteBrainProductClient = (() => {
     } finally {
       if (state.sessionEpoch === sessionEpoch) state.readerBusy = false;
       render();
+    }
+  }
+
+  function parseBrainUpdateEventBlock(block) {
+    let event = "message";
+    const data = [];
+    for (const line of String(block || "").split(/\r?\n/u)) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+    }
+    if (event !== "brain_update" || !data.length) return null;
+    try {
+      const value = JSON.parse(data.join("\n"));
+      if (
+        typeof value?.brainId !== "string" ||
+        !Number.isSafeInteger(value?.latestSequence) ||
+        !["content_updated", "access_updated"].includes(value?.reason)
+      ) return null;
+      return value;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function applyBrainUpdateNotification(notification) {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) return;
+    if (notification?.reason === "access_updated" && notification.brainId !== state.activeBrainId) {
+      const response = await protectedRequest("/v1/brains");
+      state.visibleBrains = (response.brains || []).map(normalizeVisibleBrain).filter(Boolean);
+      render();
+      return;
+    }
+    if (notification?.brainId !== state.activeBrainId) return;
+    if (notification.reason === "content_updated") {
+      clearTimeout(state.brainUpdateContentTimer);
+      state.brainUpdateContentTimer = setTimeout(() => {
+        state.brainUpdateContentTimer = null;
+        refreshReader().catch((error) => {
+          state.lastError = error;
+          render();
+        });
+      }, 250);
+      return;
+    }
+    if (notification.reason === "access_updated") {
+      clearTimeout(state.brainUpdateContentTimer);
+      state.brainUpdateContentTimer = null;
+      await reconcileBrainAccessUpdate();
+    }
+  }
+
+  async function reconcileBrainAccessUpdate() {
+    const sessionEpoch = state.sessionEpoch;
+    const brainId = state.activeBrainId;
+    const response = await protectedRequest("/v1/brains");
+    requireCurrentSessionEpoch(sessionEpoch);
+    state.visibleBrains = (response.brains || []).map(normalizeVisibleBrain).filter(Boolean);
+    if (!state.visibleBrains.some((brain) => brain.brainId === brainId)) {
+      resetBrainSessionState({ preserveManageBrainsReturnToSettings: false });
+      state.activeBrainId = null;
+      state.sessionNotice = BRAIN_ACCESS_CHANGED_NOTICE;
+      render();
+      return;
+    }
+    await loadBrainMetadata();
+    requireCurrentSessionEpoch(sessionEpoch);
+    const previousKeyring = state.keyring;
+    const nextKeyring = createSessionKeyring();
+    await openAvailableFolderKeyGrants({ keyring: nextKeyring, brainId });
+    requireCurrentSessionEpoch(sessionEpoch);
+    const readableFolderIds = nextKeyring.openedGrants.map((grant) => grant.folderId);
+    const nextProjection = projectionForAccessUpdate(state.projection, readableFolderIds);
+    state.keyring = nextKeyring;
+    state.projection = nextProjection;
+    await pullSyncBootstrap();
+    requireCurrentSessionEpoch(sessionEpoch);
+    clearSessionKeyring(previousKeyring);
+    selectDefaultReaderTargets();
+    render();
+  }
+
+  function stopBrainUpdateNotifications() {
+    clearTimeout(state.brainUpdateReconnectTimer);
+    clearTimeout(state.brainUpdateContentTimer);
+    state.brainUpdateReconnectTimer = null;
+    state.brainUpdateContentTimer = null;
+    state.brainUpdateAbortController?.abort?.();
+    state.brainUpdateAbortController = null;
+  }
+
+  async function startBrainUpdateNotifications() {
+    if (state.sessionStatus !== SESSION_STATUS.UNLOCKED || state.brainUpdateAbortController) return;
+    const sessionEpoch = state.sessionEpoch;
+    const path = "/v1/brain-updates";
+    const controller = new AbortController();
+    state.brainUpdateAbortController = controller;
+    try {
+      const response = await fetch(path, {
+        headers: { Authorization: await signAuthHeader(path) },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw protectedRequestError(path, response.status, await response.text());
+      const reader = response.body?.getReader?.();
+      if (!reader) throw new Error("Brain Update Notification stream is unavailable");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (sessionOperationIsCurrent(state.sessionEpoch, sessionEpoch, state.sessionStatus)) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/gu, "\n");
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary >= 0) {
+          const notification = parseBrainUpdateEventBlock(buffer.slice(0, boundary));
+          buffer = buffer.slice(boundary + 2);
+          if (notification) await applyBrainUpdateNotification(notification);
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) log("Brain Update Notification stream disconnected.", { error: error.message });
+    } finally {
+      if (state.brainUpdateAbortController === controller) state.brainUpdateAbortController = null;
+      if (sessionOperationIsCurrent(state.sessionEpoch, sessionEpoch, state.sessionStatus)) {
+        state.brainUpdateReconnectTimer = setTimeout(() => {
+          state.brainUpdateReconnectTimer = null;
+          refreshReader()
+            .then(startBrainUpdateNotifications)
+            .catch((error) => log("Brain update catch-up failed.", { error: error.message }));
+        }, 1000);
+      }
     }
   }
 
@@ -12764,6 +12909,12 @@ const FiniteBrainProductClient = (() => {
     markdownFromEditorElement,
     markdownPreviewBlocks,
     mergeSyncProjection,
+    parseBrainUpdateEventBlock,
+    projectionForAccessUpdate,
+    applyBrainUpdateNotification,
+    reconcileBrainAccessUpdate,
+    startBrainUpdateNotifications,
+    stopBrainUpdateNotifications,
     metadataBrainRole,
     metadataFolderRows,
     metadataMountRows,

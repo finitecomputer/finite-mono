@@ -96,6 +96,9 @@ lat1-secret-bootstrap-contract:
 
 # Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
 brain-product-matrix:
+    node finite-brain/crates/finite-brain-server/src/product-client.test.js
+    cargo test --locked -p finite-brain-server brain_update_notification_carries_the_authoritative_cursor
+    cargo test --locked -p finite-brain-cli supervisor_discovers_every_opened_brain_working_tree
     FINITE_BRAIN_COLLABORATION_SMOKE_REPORT="$PWD/target/brain-product-matrix/organization-collaboration.json" cargo test --locked -p finite-brain-cli --test fbrain_process_acceptance built_fbrain_process_two_independent_homes_open_restricted_collaboration -- --nocapture
     scripts/check-brain-collaboration-smoke-report.py "$PWD/target/brain-product-matrix/organization-collaboration.json"
     scripts/devfinity-brain-product-matrix

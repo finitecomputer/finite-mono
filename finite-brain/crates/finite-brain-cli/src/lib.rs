@@ -42,10 +42,13 @@ pub(crate) use sync_engine::*;
 pub(crate) use wiki::*;
 pub(crate) use working_tree_security::*;
 
+use notify::{RecursiveMode, Watcher};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use finite_brain_core::portability::{
     BrainDirectoryBrainSummary, BrainDirectoryManifest, BrainDirectoryPath,
@@ -654,7 +657,161 @@ fn daemon<W: Write>(
             }
         }
         "watch" => daemon_watch(args, env, json, output),
+        "supervise" => daemon_supervise(args, env, json, output),
         other => Err(CliError::InvalidCommand(format!("daemon {other}"))),
+    }
+}
+
+fn opened_working_trees(root: &Path) -> Result<Vec<(String, PathBuf)>, CliError> {
+    let mut trees = Vec::new();
+    if !root.is_dir() {
+        return Ok(trees);
+    }
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if !path.is_dir() || !path.join(".finitebrain/agent-state.json").is_file() {
+            continue;
+        }
+        let state = read_agent_state(&path)?;
+        trees.push((state.brain_id, path));
+    }
+    trees.sort_by(|left, right| left.1.cmp(&right.1));
+    Ok(trees)
+}
+
+fn acquire_supervisor_lock(root: &Path) -> Result<std::fs::File, CliError> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(root.join(".fbrain-supervisor.lock"))?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+        |_| CliError::InvalidInput("a Brain sync supervisor is already running".to_owned()),
+    )?;
+    Ok(lock)
+}
+
+pub(crate) fn supervisor_is_running(root: &Path) -> bool {
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(".fbrain-supervisor.lock"))
+    else {
+        return false;
+    };
+    match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {
+            let _ = rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock);
+            false
+        }
+        Err(error) => error == rustix::io::Errno::WOULDBLOCK,
+    }
+}
+
+fn daemon_supervise<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let root = env.working_tree_root.as_deref().ok_or_else(|| {
+        CliError::InvalidInput("daemon supervise requires FBRAIN_WORKING_TREE_ROOT".to_owned())
+    })?;
+    fs::create_dir_all(root)?;
+    let _supervisor_lock = acquire_supervisor_lock(root)?;
+    let max_events =
+        option_value(args, "--max-events").and_then(|value| value.parse::<usize>().ok());
+    let (sender, receiver) = mpsc::channel::<Result<BrainUpdateNotification, String>>();
+    let file_sender = sender.clone();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event {
+            for path in event.paths {
+                if path
+                    .components()
+                    .any(|part| part.as_os_str() == ".finitebrain")
+                {
+                    continue;
+                }
+                let _ = file_sender.send(Ok(BrainUpdateNotification {
+                    brain_id: String::new(),
+                    latest_sequence: 0,
+                    reason: "local_updated".to_owned(),
+                }));
+                break;
+            }
+        }
+    })
+    .map_err(|error| CliError::InvalidInput(format!("filesystem watcher failed: {error}")))?;
+    watcher
+        .watch(root, RecursiveMode::Recursive)
+        .map_err(|error| {
+            CliError::InvalidInput(format!("could not watch Brain Working Trees: {error}"))
+        })?;
+
+    // Catch up every already-open Working Tree before trusting live hints.
+    let _ = sender.send(Ok(BrainUpdateNotification {
+        brain_id: String::new(),
+        latest_sequence: 0,
+        reason: "startup_catch_up".to_owned(),
+    }));
+
+    let stream_env = env.clone();
+    std::thread::spawn(move || {
+        loop {
+            if let Err(error) = read_brain_update_stream(&stream_env, &sender) {
+                let _ = sender.send(Err(error.to_string()));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+
+    let mut handled = 0_usize;
+    for event in receiver {
+        let notification = match event {
+            Ok(notification) => notification,
+            Err(error) => {
+                writeln!(output, "brain update stream reconnecting: {error}")?;
+                continue;
+            }
+        };
+        let _notification_cursor = notification.latest_sequence;
+        let _notification_reason = &notification.reason;
+        for (brain_id, path) in opened_working_trees(root)? {
+            if !notification.brain_id.is_empty() && notification.brain_id != brain_id {
+                continue;
+            }
+            let mut tree_env = env.clone();
+            tree_env.cwd = path;
+            let local_paths = if notification.reason == "local_updated" {
+                let paths = pending_working_tree_change_paths(&tree_env.cwd)?;
+                if paths.is_empty() {
+                    continue;
+                }
+                Some(paths)
+            } else {
+                None
+            };
+            if let Err(error) = sync_once_with_local_paths(
+                &tree_env,
+                &[],
+                "daemon.supervise.notification",
+                local_paths,
+            ) {
+                writeln!(output, "Brain {brain_id} sync blocked: {error}")?;
+            }
+        }
+        handled += 1;
+        if max_events.is_some_and(|limit| handled >= limit) {
+            break;
+        }
+    }
+    if json {
+        write_json(
+            output,
+            &serde_json::json!({"state":"stopped","events":handled}),
+        )
+    } else {
+        writeln!(output, "daemon supervise stopped events={handled}").map_err(Into::into)
     }
 }
 
@@ -11174,5 +11331,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(opened.folder_key, folder_key.to_base64());
+    }
+
+    #[test]
+    fn supervisor_discovers_every_opened_brain_working_tree() {
+        let workspace = tempfile::tempdir().unwrap();
+        let personal = workspace.path().join("personal");
+        let organization = workspace.path().join("organization");
+        initialize_private_working_tree(&personal).unwrap();
+        initialize_private_working_tree(&organization).unwrap();
+        write_agent_state(
+            &personal,
+            &AgentState::new("personal-brain", "2026-07-29T00:00:00Z"),
+        )
+        .unwrap();
+        write_agent_state(
+            &organization,
+            &AgentState::new("organization-brain", "2026-07-29T00:00:00Z"),
+        )
+        .unwrap();
+        fs::create_dir(workspace.path().join("ordinary-folder")).unwrap();
+
+        let discovered = opened_working_trees(workspace.path()).unwrap();
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|(brain_id, _)| brain_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["organization-brain", "personal-brain"]
+        );
+
+        let first = acquire_supervisor_lock(workspace.path()).unwrap();
+        assert!(supervisor_is_running(workspace.path()));
+        assert!(acquire_supervisor_lock(workspace.path()).is_err());
+        drop(first);
+        assert!(!supervisor_is_running(workspace.path()));
     }
 }

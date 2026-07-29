@@ -52,7 +52,7 @@ pub(crate) fn auth_status(env: &CliEnvironment) -> Result<AuthStatus, CliError> 
 
 pub(crate) fn daemon_status(env: &CliEnvironment) -> Result<DaemonStatus, CliError> {
     let state = load_current_agent_state(env)?;
-    Ok(daemon_status_from_state(&state))
+    Ok(daemon_status_from_state(&state, live_supervisor_state(env)))
 }
 
 pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliError> {
@@ -99,7 +99,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
                 .to_owned(),
         );
     }
-    if state.daemon.state != DaemonRunState::Running {
+    if !live_supervisor_state(env).unwrap_or(state.daemon.state == DaemonRunState::Running) {
         blocked.push("daemon not running".to_owned());
     }
     if !open_conflicts.is_empty() {
@@ -109,7 +109,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
         brain_id: Some(state.brain_id.clone()),
         working_tree_path: Some(root.display().to_string()),
         auth,
-        daemon: daemon_status_from_state(&state),
+        daemon: daemon_status_from_state(&state, live_supervisor_state(env)),
         sync: SyncStatus {
             mode: state.sync.mode,
             status: state.sync.status,
@@ -120,9 +120,16 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
     })
 }
 
-fn daemon_status_from_state(state: &AgentState) -> DaemonStatus {
+fn live_supervisor_state(env: &CliEnvironment) -> Option<bool> {
+    env.working_tree_root
+        .as_deref()
+        .map(crate::supervisor_is_running)
+}
+
+fn daemon_status_from_state(state: &AgentState, live_supervisor: Option<bool>) -> DaemonStatus {
+    let running = live_supervisor.unwrap_or(state.daemon.state == DaemonRunState::Running);
     DaemonStatus {
-        state: state.daemon.state.to_string(),
+        state: if running { "running" } else { "stopped" }.to_owned(),
         sync_mode: state.sync.mode.clone(),
         last_started_at: state.daemon.last_started_at.clone(),
         last_tick_at: state.daemon.last_tick_at.clone(),

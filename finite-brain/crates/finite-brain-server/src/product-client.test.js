@@ -7696,6 +7696,30 @@ assert.equal(
   assert.equal(elements.get("clientActionFeedback").hidden, true);
   assert.equal(elements.get("clientActionFeedback").textContent, "");
 
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(client.parseBrainUpdateEventBlock(
+      'event: brain_update\ndata: {"brainId":"org-1","latestSequence":42,"reason":"content_updated"}'
+    ))),
+    { brainId: "org-1", latestSequence: 42, reason: "content_updated" },
+    "The live stream must decode a valid Brain Update Notification"
+  );
+  assert.equal(
+    client.parseBrainUpdateEventBlock(
+      'event: brain_update\ndata: {"brainId":"org-1","latestSequence":42,"reason":"unknown"}'
+    ),
+    null,
+    "The live stream must ignore unknown notification reasons"
+  );
+  const accessProjection = client.createClientProjection();
+  accessProjection.pages.set("revoked/page", { text: "must disappear" });
+  accessProjection.pages.set("kept/page", { text: "will be reloaded authoritatively" });
+  accessProjection.localDrafts.set("revoked/page", { text: "revoked draft" });
+  accessProjection.localDrafts.set("kept/page", { text: "kept draft" });
+  const reconciledProjection = client.projectionForAccessUpdate(accessProjection, ["kept"]);
+  assert.equal(reconciledProjection.pages.size, 0, "Access reconciliation purges decrypted pages");
+  assert.equal(reconciledProjection.localDrafts.has("revoked/page"), false);
+  assert.equal(reconciledProjection.localDrafts.has("kept/page"), true);
+
   console.log("product-client deterministic seams ok");
 })().catch((error) => {
   console.error(error);

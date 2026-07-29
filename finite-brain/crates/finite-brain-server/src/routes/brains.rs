@@ -373,10 +373,13 @@ pub(crate) async fn add_member_handler(
         None,
     )?;
     let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
-    run_as_admin(state, brain_id, actor, |store, brain_id| {
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.add_member_with_control_records(brain_id, &target, &control_records)
-    })
-    .map(Json)
+    })?;
+    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
+    Ok(Json(response))
 }
 
 pub(crate) async fn remove_member_handler(
@@ -487,7 +490,9 @@ pub(crate) async fn remove_member_handler(
         .or_default()
         .push(admin_access_change_sync_record(&actor, &event, &payload)?);
     let actor_user_id = UserId::new(&actor)?;
-    run_as_admin(state, brain_id, actor, |store, brain_id| {
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.remove_member_with_rotations_and_control_records(
             brain_id,
             &actor_user_id,
@@ -497,8 +502,9 @@ pub(crate) async fn remove_member_handler(
             &updated_at,
             &control_records_by_brain,
         )
-    })
-    .map(Json)
+    })?;
+    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
+    Ok(Json(response))
 }
 
 pub(crate) async fn add_admin_handler(
@@ -525,10 +531,13 @@ pub(crate) async fn add_admin_handler(
         None,
     )?;
     let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
-    run_as_admin(state, brain_id, actor, |store, brain_id| {
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.add_admin_with_control_records(brain_id, &target, &control_records)
-    })
-    .map(Json)
+    })?;
+    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
+    Ok(Json(response))
 }
 
 pub(crate) async fn remove_admin_handler(
@@ -555,10 +564,13 @@ pub(crate) async fn remove_admin_handler(
         None,
     )?;
     let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
-    run_as_admin(state, brain_id, actor, |store, brain_id| {
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.remove_admin_with_control_records(brain_id, &target, &control_records)
-    })
-    .map(Json)
+    })?;
+    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
+    Ok(Json(response))
 }
 
 pub(crate) async fn list_brain_invitations_handler(

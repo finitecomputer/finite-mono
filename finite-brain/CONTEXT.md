@@ -549,6 +549,15 @@ available Folder Keys for the acting Member Identity, detects file changes,
 syncs with the server, and records blocked states that require controller
 resolution.
 
+### Brain Update Notification
+
+A server-sent, content-free hint that tells a connected trusted client that an
+accessible Brain may have a newer authoritative sequence or changed access.
+Clients briefly coalesce bursts of these notifications, then reconcile through
+the normal authenticated sync contract. A Brain Update Notification is not a
+durable sync record or source of truth; missed, delayed, duplicated, or
+reordered notifications never replace sequence-based catch-up.
+
 ### Local Agent Signer
 
 A trusted signer available to the Agent Runtime instead of a browser Brain
