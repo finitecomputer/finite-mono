@@ -6,6 +6,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -94,6 +96,7 @@ impl ManagedProcess {
 pub enum StackProfile {
     AppleSaas,
     ServicesOnly,
+    TestInfrastructure,
 }
 
 impl StackProfile {
@@ -105,7 +108,12 @@ impl StackProfile {
         match self {
             Self::AppleSaas => "apple-saas",
             Self::ServicesOnly => "services-only",
+            Self::TestInfrastructure => "test-infrastructure",
         }
+    }
+
+    fn is_test_infrastructure(self) -> bool {
+        matches!(self, Self::TestInfrastructure)
     }
 }
 
@@ -354,6 +362,14 @@ impl Stack {
         self
     }
 
+    pub fn with_postgres_port(mut self, port: u16) -> Result<Self> {
+        if port == 0 {
+            bail!("devfinity Postgres port must be non-zero");
+        }
+        self.ports.postgres = port;
+        Ok(self)
+    }
+
     pub fn with_workos_staging(mut self) -> Result<Self> {
         self.workos_mode = WorkosMode::Staging(load_workos_staging_config(&self.repo_root)?);
         Ok(self)
@@ -419,25 +435,30 @@ impl Stack {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
-        for dir in [
-            &self.state_dir,
-            &self.run_dir,
-            &self.logs_dir,
-            &self.pids_dir,
-            &self.postgres_dir(),
-            &self.core_dir(),
-            &self.dashboard_dir(),
-            &self.finitechat_dir(),
-            &self.hosted_web_device_dir(),
-            &self.finitesites_dir(),
-            &self.finite_identity_dir(),
-            &self.finite_brain_dir(),
-            &self.finite_home_dir(),
-            &self.runtime_image_dir(),
-            &self.runner_dir(),
-            &self.workos_fixture_dir(),
-        ] {
-            fs::create_dir_all(dir)
+        let mut dirs = vec![
+            self.state_dir.clone(),
+            self.run_dir.clone(),
+            self.logs_dir.clone(),
+            self.pids_dir.clone(),
+            self.postgres_dir(),
+        ];
+        if !self.profile.is_test_infrastructure() {
+            dirs.extend([
+                self.core_dir(),
+                self.dashboard_dir(),
+                self.finitechat_dir(),
+                self.hosted_web_device_dir(),
+                self.finitesites_dir(),
+                self.finite_identity_dir(),
+                self.finite_brain_dir(),
+                self.finite_home_dir(),
+                self.runtime_image_dir(),
+                self.runner_dir(),
+                self.workos_fixture_dir(),
+            ]);
+        }
+        for dir in dirs {
+            fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
         Ok(())
@@ -445,7 +466,11 @@ impl Stack {
 
     pub fn write_files(&self) -> Result<()> {
         self.ensure_dirs()?;
-        self.write_secret_files()?;
+        if self.profile.is_test_infrastructure() {
+            self.remove_secret_files();
+        } else {
+            self.write_secret_files()?;
+        }
         self.write_env_file()?;
         self.write_postgres_script()?;
         fs::write(&self.process_compose_file, self.process_compose_yaml())
@@ -617,6 +642,14 @@ impl Stack {
     }
 
     pub fn print_summary(&self) {
+        if self.profile.is_test_infrastructure() {
+            println!("devfinity managed command infrastructure");
+            println!("  profile:  {}", self.profile.as_str());
+            println!("  state:    {}", self.run_dir.display());
+            println!("  logs:     {}", self.logs_dir.display());
+            println!("  postgres: 127.0.0.1:{}", self.ports.postgres);
+            return;
+        }
         println!("devfinity local stack");
         println!("  profile:    {}", self.profile.as_str());
         println!("  state:      {}", self.run_dir.display());
@@ -715,12 +748,23 @@ impl Stack {
                 Err(error) => Err(error),
             };
 
-        if let Err(error) = guard.shutdown() {
-            eprintln!("devfinity cleanup after wrapped command failed: {error:#}");
-        }
+        let cleanup = guard.shutdown();
         self.remove_secret_files();
 
-        outcome
+        match (outcome, cleanup) {
+            (Ok(code), Ok(())) => Ok(code),
+            (Ok(code), Err(error)) if code != ExitCode::SUCCESS => {
+                eprintln!("devfinity cleanup after failed wrapped command also failed: {error:#}");
+                Ok(code)
+            }
+            (Ok(_), Err(error)) => {
+                Err(error).context("devfinity cleanup after wrapped command failed")
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup_error)) => Err(error).context(format!(
+                "devfinity cleanup after infrastructure failure also failed: {cleanup_error:#}"
+            )),
+        }
     }
 
     pub fn prepare_for_start(&self) -> Result<()> {
@@ -866,6 +910,10 @@ impl Stack {
         );
         let _ = writeln!(yaml, "log_level: info");
         let _ = writeln!(yaml, "processes:");
+        if self.profile.is_test_infrastructure() {
+            self.write_postgres(&mut yaml);
+            return yaml;
+        }
         self.write_rust_build(&mut yaml);
         if self.workos_mode.is_fixture() {
             self.write_workos_fixture(&mut yaml);
@@ -922,6 +970,11 @@ impl Stack {
 
     fn write_postgres(&self, yaml: &mut String) {
         let process = ManagedProcess::Postgres;
+        let readiness_database = if self.profile.is_test_infrastructure() {
+            "postgres"
+        } else {
+            "finite_saas_core"
+        };
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
@@ -944,8 +997,8 @@ impl Stack {
             yaml,
             "        command: {}",
             yaml_string(&format!(
-                "psql -h 127.0.0.1 -p {} -U postgres -d finite_saas_core -tAc 'select 1' >/dev/null",
-                self.ports.postgres
+                "psql -h 127.0.0.1 -p {} -U postgres -d {readiness_database} -tAc 'select 1' >/dev/null",
+                self.ports.postgres,
             ))
         );
         self.write_probe_timing(yaml, 3, 2, 5, 30);
@@ -985,6 +1038,15 @@ impl Stack {
 
     fn write_postgres_script(&self) -> Result<()> {
         let script = self.postgres_script_path();
+        let create_application_database = if self.profile.is_test_infrastructure() {
+            ""
+        } else {
+            r#"
+if ! psql -h 127.0.0.1 -p "$port" -U postgres -d postgres -tAc "select 1 from pg_database where datname = '$database'" | grep -q 1; then
+  createdb -h 127.0.0.1 -p "$port" -U postgres "$database"
+fi
+"#
+        };
         let contents = format!(
             r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -1020,14 +1082,11 @@ until pg_isready -h 127.0.0.1 -p "$port" -U postgres >/dev/null 2>&1; do
   sleep 0.2
 done
 
-if ! psql -h 127.0.0.1 -p "$port" -U postgres -d postgres -tAc "select 1 from pg_database where datname = '$database'" | grep -q 1; then
-  createdb -h 127.0.0.1 -p "$port" -U postgres "$database"
-fi
-
+{create_application_database}
 wait "$postgres_pid"
 "#,
             pgdata = shell_quote(&self.postgres_data_dir().display().to_string()),
-            port = self.ports.postgres
+            port = self.ports.postgres,
         );
 
         fs::write(&script, contents)
@@ -2096,9 +2155,32 @@ wait "$postgres_pid"
             .current_dir(&self.repo_root)
             .envs(self.env_values());
         scrub_devfinity_secrets(&mut child_command);
-        let status = child_command.status().with_context(|| {
+        if self.profile.is_test_infrastructure() {
+            // A developer's shell may point the product at a persistent Core
+            // database. The test profile owns only its maintenance Postgres
+            // URL and must never leak that ambient application connection into
+            // the wrapped suite.
+            child_command.env_remove("FC_CORE_DATABASE_URL");
+        }
+        #[cfg(unix)]
+        child_command.process_group(0);
+        let runtime = tokio::runtime::Runtime::new()
+            .context("failed to create devfinity command signal runtime")?;
+        let mut child = child_command.spawn().with_context(|| {
             format!("failed to run devfinity command `{}`", shell_words(command))
         })?;
+        let status = match runtime.block_on(wait_for_wrapped_command(&mut child)) {
+            Ok(status) => status,
+            Err(error) => {
+                signal_process_group(child.id(), "TERM");
+                return match runtime.block_on(wait_for_signaled_command(&mut child)) {
+                    Ok(_) => Err(error),
+                    Err(cleanup_error) => Err(error).context(format!(
+                        "failed to stop wrapped command after wait failure: {cleanup_error:#}"
+                    )),
+                };
+            }
+        };
         Ok(status_to_exit_code(status))
     }
 
@@ -2289,6 +2371,9 @@ wait "$postgres_pid"
     }
 
     fn enabled_processes(&self) -> Vec<ManagedProcess> {
+        if self.profile.is_test_infrastructure() {
+            return vec![ManagedProcess::ProcessCompose, ManagedProcess::Postgres];
+        }
         ManagedProcess::ALL
             .into_iter()
             .filter(|process| {
@@ -2314,6 +2399,13 @@ wait "$postgres_pid"
     }
 
     fn service_checks(&self) -> Vec<ServiceCheck> {
+        if self.profile.is_test_infrastructure() {
+            return vec![check_tcp_service(
+                ManagedProcess::Postgres,
+                "127.0.0.1",
+                self.ports.postgres,
+            )];
+        }
         let mut checks = vec![
             check_tcp_service(ManagedProcess::Postgres, "127.0.0.1", self.ports.postgres),
             check_http_service(
@@ -2371,6 +2463,13 @@ wait "$postgres_pid"
     }
 
     fn urls_text(&self) -> String {
+        if self.profile.is_test_infrastructure() {
+            return format!(
+                "profile={}\npostgres=127.0.0.1:{}\n",
+                self.profile.as_str(),
+                self.ports.postgres
+            );
+        }
         let mut urls = format!(
             concat!(
                 "profile={}\n",
@@ -2492,6 +2591,13 @@ wait "$postgres_pid"
         )
     }
 
+    fn postgres_test_url(&self) -> String {
+        format!(
+            "postgres://postgres:finite-local@127.0.0.1:{}/postgres",
+            self.ports.postgres
+        )
+    }
+
     fn postgres_dir(&self) -> PathBuf {
         self.process_state_dir(ManagedProcess::Postgres)
     }
@@ -2596,6 +2702,24 @@ wait "$postgres_pid"
     }
 
     fn env_values(&self) -> Vec<(&'static str, String)> {
+        if self.profile.is_test_infrastructure() {
+            return vec![
+                ("DEVFINITY_STATE_DIR", self.run_dir.display().to_string()),
+                (
+                    "DEVFINITY_PROCESS_COMPOSE_FILE",
+                    self.process_compose_file.display().to_string(),
+                ),
+                (
+                    "DEVFINITY_PROCESS_COMPOSE_SOCKET",
+                    self.process_compose_socket.display().to_string(),
+                ),
+                ("DEVFINITY_LOGS_DIR", self.logs_dir.display().to_string()),
+                ("DEVFINITY_PIDS_DIR", self.pids_dir.display().to_string()),
+                ("DEVFINITY_POSTGRES_PORT", self.ports.postgres.to_string()),
+                ("FC_CORE_POSTGRES_TEST_URL", self.postgres_test_url()),
+                ("DEVFINITY_PROFILE", self.profile.as_str().to_string()),
+            ];
+        }
         let mut values = vec![
             ("DEVFINITY_STATE_DIR", self.run_dir.display().to_string()),
             (
@@ -3001,7 +3125,15 @@ fn run_status_with_pid_file(mut command: Command, pid_file: &Path) -> Result<Exi
 fn status_to_exit_code(status: std::process::ExitStatus) -> ExitCode {
     match status.code() {
         Some(code) if (0..=255).contains(&code) => ExitCode::from(code as u8),
-        _ => ExitCode::FAILURE,
+        _ => {
+            #[cfg(unix)]
+            if let Some(signal) = status.signal()
+                && let Ok(code) = u8::try_from(128 + signal)
+            {
+                return ExitCode::from(code);
+            }
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -3018,6 +3150,100 @@ fn wait_child_exit(child: &mut Child, timeout: Duration) -> Result<Option<ExitSt
             return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+async fn wait_for_wrapped_command(child: &mut Child) -> Result<ExitStatus> {
+    let shutdown = wrapped_command_shutdown_signal();
+    tokio::pin!(shutdown);
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to wait for wrapped devfinity command")?
+        {
+            return Ok(status);
+        }
+        tokio::select! {
+            signal = &mut shutdown => {
+                let signal = signal?;
+                eprintln!(
+                    "devfinity received {signal}; forwarding it to wrapped command process group {}",
+                    child.id()
+                );
+                signal_process_group(child.id(), signal);
+                return wait_for_signaled_command(child).await;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+    }
+}
+
+async fn wait_for_signaled_command(child: &mut Child) -> Result<ExitStatus> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to wait for interrupted devfinity command")?
+        {
+            return Ok(status);
+        }
+        if started.elapsed() >= Duration::from_secs(10) {
+            eprintln!(
+                "wrapped devfinity command did not exit after interruption; killing process group {}",
+                child.id()
+            );
+            signal_process_group(child.id(), "KILL");
+            return child
+                .wait()
+                .context("failed to reap killed devfinity command");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn wrapped_command_shutdown_signal() -> Result<&'static str> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("failed to install SIGTERM handler")?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result.context("failed to listen for Ctrl-C")?;
+            Ok("INT")
+        }
+        _ = terminate.recv() => Ok("TERM"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wrapped_command_shutdown_signal() -> Result<&'static str> {
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to listen for Ctrl-C")?;
+    Ok("INT")
+}
+
+fn signal_process_group(pid: u32, signal: &str) {
+    #[cfg(unix)]
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .status();
+    #[cfg(not(unix))]
+    let status = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .args(["/T", "/F"])
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("failed to signal wrapped command process group {pid}: exited with {status}")
+        }
+        Err(error) => {
+            eprintln!("failed to signal wrapped command process group {pid}: {error}")
+        }
     }
 }
 
@@ -3777,6 +4003,95 @@ mod tests {
         assert!(yaml.contains("finitesites:\n        condition: process_healthy"));
         assert!(!yaml.contains("postgres:16-alpine"));
         assert!(!yaml.contains("fpk_"));
+    }
+
+    #[test]
+    fn test_infrastructure_profile_contains_only_postgres() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity-test"))
+            .unwrap()
+            .with_profile(StackProfile::TestInfrastructure)
+            .with_postgres_port(24_321)
+            .unwrap();
+        let yaml = stack.process_compose_yaml();
+
+        assert!(yaml.contains("\n  postgres:\n"));
+        assert!(yaml.contains("-d postgres -tAc 'select 1'"));
+        assert!(!yaml.contains("-d finite_saas_core"));
+        for excluded in [
+            "\n  rust-build:\n",
+            "\n  workos-fixture:\n",
+            "\n  core:\n",
+            "\n  finitechat:\n",
+            "\n  hosted-web-device:\n",
+            "\n  finitesites:\n",
+            "\n  finite-identity:\n",
+            "\n  finite-brain:\n",
+            "\n  dashboard-deps:\n",
+            "\n  dashboard:\n",
+            "\n  runtime-image:\n",
+            "\n  runner:\n",
+        ] {
+            assert!(
+                !yaml.contains(excluded),
+                "test infrastructure unexpectedly contains {excluded}"
+            );
+        }
+        assert_eq!(
+            stack.enabled_processes(),
+            vec![ManagedProcess::ProcessCompose, ManagedProcess::Postgres]
+        );
+        assert_eq!(stack.service_checks().len(), 1);
+    }
+
+    #[test]
+    fn test_infrastructure_exports_only_managed_postgres_contract() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity-test"))
+            .unwrap()
+            .with_profile(StackProfile::TestInfrastructure)
+            .with_postgres_port(24_322)
+            .unwrap();
+        let environment = stack.env_values();
+
+        assert!(environment.contains(&(
+            "FC_CORE_POSTGRES_TEST_URL",
+            "postgres://postgres:finite-local@127.0.0.1:24322/postgres".to_string()
+        )));
+        assert!(environment.contains(&("DEVFINITY_PROFILE", "test-infrastructure".to_string())));
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| *name == "FC_CORE_DATABASE_URL")
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| *name == "FINITECHAT_HOSTED_API_TOKEN")
+        );
+    }
+
+    #[test]
+    fn test_infrastructure_does_not_create_the_product_database() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf())
+            .unwrap()
+            .with_profile(StackProfile::TestInfrastructure);
+        stack.ensure_dirs().unwrap();
+        stack.write_postgres_script().unwrap();
+
+        let script = fs::read_to_string(stack.postgres_script_path()).unwrap();
+        assert!(!script.contains("createdb"));
+        assert!(!script.contains("select 1 from pg_database"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signaled_child_status_uses_the_shell_exit_code() {
+        let status = Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+
+        assert_eq!(status_to_exit_code(status), ExitCode::from(143));
     }
 
     #[test]

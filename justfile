@@ -21,9 +21,9 @@ check:
 fmt:
     cargo fmt --all
 
-# Runs all rust tests
+# Runs all Rust tests with isolated devfinity-managed test infrastructure
 test:
-    cargo test --workspace --locked
+    cargo run --quiet --locked -p devfinity -- run -- cargo test --workspace --locked
 
 # Runs the opt-in full-history Device convergence stress test.
 chat-history-stress:

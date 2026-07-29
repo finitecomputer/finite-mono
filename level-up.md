@@ -40,22 +40,22 @@ the normal developer and CI paths.
 
 ## P0 — Immediate confidence and simplification
 
-### 1. [ ] Make `just test` truthful and deterministic
+### 1. [x] Make `just test` truthful and deterministic
 
-The root [`just test`](justfile) command runs
-`cargo test --workspace --locked`. During the audit, a full run failed three
-Phala Runner tests while an immediate package rerun passed all 135 tests. This
-is consistent with a nondeterministic isolation or shared-state problem.
+Completed as a hard cut on 2026-07-29. The root [`just test`](justfile) command
+now runs `cargo test --workspace --locked` through `devfinity run`, and CI calls
+that same recipe. Devfinity always starts only an isolated Nix-provided
+Postgres 16 instance for the command; there is no optional infrastructure flag
+or parallel CI-only Postgres definition.
 
-Devfinity already owns a Nix-provided Postgres 16 process, including its data
-directory, port, initialization, readiness, and shutdown. The missing contract
-is orchestration: local `just test` bypasses devfinity, CI provisions a separate
-GitHub Actions Postgres service, and devfinity exports the application
-`FC_CORE_DATABASE_URL` rather than the maintenance
-`FC_CORE_POSTGRES_TEST_URL` required by the test harness.
+During the audit, a full run failed three Phala Runner tests while an immediate
+package rerun passed all 135 tests. The affected fake HTTP servers had
+scheduler-sensitive polling and one-second deadlines. Their blocking fixture
+lifecycles are now deterministic under parallel load, including the analogous
+Kata fixture exposed by the repeated-run gate.
 
-When that maintenance URL is missing, Core's real-Postgres harness returns
-success without running:
+Core's real-Postgres harnesses now fail loudly when their required maintenance
+URL is missing instead of returning success without running:
 
 - [`finite-saas-core/src/store.rs`](finitecomputer-v2/crates/finite-saas-core/src/store.rs)
 - [`launch_code_migration.rs`](finitecomputer-v2/crates/finite-saas-core/tests/launch_code_migration.rs)
@@ -72,40 +72,40 @@ The intended ownership boundary is:
 
 Tasks:
 
-- [ ] Add a general `devfinity run -- <command> [args...]` interface that runs
+- [x] Add a general `devfinity run -- <command> [args...]` interface that runs
   an argument-vector child command by reusing devfinity's existing
   wrapped-command lifecycle.
-- [ ] Give `devfinity run` a lightweight baseline profile that always starts
+- [x] Give `devfinity run` a lightweight baseline profile that always starts
   only an isolated Postgres 16 instance, waits for readiness, and adds its
   maintenance URL as `FC_CORE_POSTGRES_TEST_URL`; do not expose Postgres as an
   optional user-facing flag or start the complete product stack.
-- [ ] Isolate every invocation's temporary state and port, forward
+- [x] Isolate every invocation's temporary state and port, forward
   interruption, preserve the child's exact exit status, and tear infrastructure
   down on every exit path. Callers that need shell evaluation can explicitly
   use `bash -lc`.
-- [ ] Change `just test` to run
+- [x] Change `just test` to run
   `devfinity run -- cargo test --workspace --locked`; make CI invoke that same
   recipe and remove its separately defined GitHub Actions Postgres service.
-- [ ] Make Core's Postgres test harness fail loudly if it is invoked without
+- [x] Make Core's Postgres test harness fail loudly if it is invoked without
   the required maintenance URL; required tests must never return success
   without executing.
-- [ ] Fix the affected Phala tests by isolating environment, ports, fixtures,
-  clocks, temporary state, and process-global state, adding deterministic
-  clock, sleeper, backoff, random, or I/O seams where needed.
+- [x] Fix the affected Phala and analogous Kata tests by replacing
+  scheduler-sensitive polling fixture servers with bounded blocking I/O and
+  deterministic shutdown.
 
 Definition of done:
 
-- [ ] `devfinity run -- <command>` can wrap arbitrary commands and always
+- [x] `devfinity run -- <command>` can wrap arbitrary commands and always
   provisions their baseline Postgres test infrastructure.
-- [ ] `just test` expands to
+- [x] `just test` expands to
   `devfinity run -- cargo test --workspace --locked`; local and CI callers use
   that identical entry point without selecting or preconfiguring
   infrastructure.
-- [ ] Core's database-backed tests cannot report success without executing.
-- [ ] A failing or interrupted test run tears down its Postgres process and
+- [x] Core's database-backed tests cannot report success without executing.
+- [x] A failing or interrupted test run tears down its Postgres process and
   temporary state while preserving the test command's failure status, and
   parallel worktrees do not share ports, databases, or filesystem state.
-- [ ] The affected Runner package passes at least 20 repeated parallel runs.
+- [x] The affected Runner package passes at least 20 repeated parallel runs.
 
 ### 2. [ ] Close the Hosted Chat P0 contract gap
 
@@ -507,13 +507,13 @@ Definition of done:
 
 ### Days 1–3
 
-- [ ] Add `devfinity run -- <command>` with automatic isolated Postgres
+- [x] Add `devfinity run -- <command>` with automatic isolated Postgres
   setup, environment injection, and teardown.
-- [ ] Wire `just test` and CI through
+- [x] Wire `just test` and CI through
   `devfinity run -- cargo test --workspace --locked`.
-- [ ] Make Core's Postgres tests fail closed when their maintenance connection
+- [x] Make Core's Postgres tests fail closed when their maintenance connection
   is unavailable.
-- [ ] Fix and repeatedly prove the affected Runner tests.
+- [x] Fix and repeatedly prove the affected Runner tests.
 
 ### Days 2–4
 
@@ -538,7 +538,7 @@ Definition of done:
 
 ## Program-level completion criteria
 
-- [ ] `just test` is green, hermetic, and cannot silently skip required tests.
+- [x] `just test` is green, hermetic, and cannot silently skip required tests.
 - [ ] Hosted Chat control flow uses stable machine-readable codes.
 - [ ] Core has one authoritative business implementation.
 - [ ] Production crates no longer depend on archived component repositories.
