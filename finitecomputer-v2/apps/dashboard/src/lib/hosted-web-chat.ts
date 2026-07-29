@@ -22,10 +22,12 @@ import {
   hostedDeviceReconcileDevice,
   hostedDeviceNewChat,
   hostedDeviceRuntimeCommand,
+  hostedDeviceSearch,
   hostedDeviceState,
   hostedDeviceUpdates,
   HostedDeviceRequestError,
   type HostedChatAction,
+  type HostedChatSearchResult,
   type HostedChatState,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
@@ -251,6 +253,41 @@ export async function dispatchHostedWebChatAction(machineId: string, payload: un
     });
   }
   return hostedDeviceAction(context.config, context.account, action);
+}
+
+export async function searchHostedWebChats(
+  machineId: string,
+  payload: unknown
+): Promise<HostedChatSearchResult[]> {
+  const context = await hostedWebChatContext(machineId);
+  const input = parseHostedChatSearchRequest(payload);
+  const bound = await hostedDeviceOpenAgentBinding(
+    context.config,
+    context.account,
+    context.projectId
+  );
+  if (bound.hosted_agent_binding?.canonical_room_id !== input.room_id) {
+    throw new HostedWebChatError("Chat search must stay in the Agent conversation.", 409);
+  }
+  return hostedDeviceSearch(context.config, context.account, {
+    ...input,
+    limit: 30,
+  });
+}
+
+export function parseHostedChatSearchRequest(payload: unknown) {
+  const record = objectRecord(payload, "Chat search request");
+  const query = typeof record.query === "string" ? record.query.trim() : "";
+  const roomId = typeof record.room_id === "string" ? record.room_id : "";
+  if (
+    Object.keys(record).some((key) => !["query", "room_id"].includes(key))
+    || query.length < 2
+    || query.length > 256
+    || !roomId
+  ) {
+    throw new HostedWebChatError("Invalid chat search request.", 400);
+  }
+  return { room_id: roomId, query };
 }
 
 export function isCanonicalNewChatTarget(

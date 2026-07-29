@@ -439,6 +439,27 @@ pub struct AppChatSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ChatSearchQuery {
+    pub room_id: String,
+    pub query: String,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ChatSearchResult {
+    pub room_id: String,
+    pub topic_id: String,
+    pub topic_title: String,
+    pub chat_id: String,
+    pub chat_title: String,
+    pub message_id: Option<String>,
+    pub excerpt: String,
+    pub timestamp_unix_seconds: u64,
+    pub archived: bool,
+    pub match_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct AppTopicSummary {
     pub room_id: String,
     pub topic_id: String,
@@ -847,6 +868,10 @@ enum AppRuntimeCommand {
         action: AppAction,
         response: Option<mpsc::SyncSender<Result<AppState, FiniteChatCoreError>>>,
     },
+    SearchChats {
+        query: ChatSearchQuery,
+        response: mpsc::SyncSender<Result<Vec<ChatSearchResult>, FiniteChatCoreError>>,
+    },
     WaitPlan {
         timeout_millis: u64,
         response: mpsc::SyncSender<Result<AppRuntimeWaitPlan, FiniteChatCoreError>>,
@@ -970,6 +995,12 @@ struct AppRuntimeState {
     /// selection. A device-link bootstrap may replace that provisional route
     /// once; explicit navigation and an accepted bootstrap both lock it.
     selection_is_explicit_or_bootstrapped: bool,
+}
+
+struct ChatSearchCandidate {
+    result: ChatSearchResult,
+    title_match: bool,
+    latest_seq: u64,
 }
 
 struct SendAttachmentInput {
@@ -1260,6 +1291,26 @@ impl FiniteChatRuntime {
             .recv()
             .map_err(|_| FiniteChatCoreError::Client {
                 reason: "runtime actor stopped before completing command".to_owned(),
+            })?
+    }
+
+    pub fn search_chats(
+        &self,
+        query: ChatSearchQuery,
+    ) -> Result<Vec<ChatSearchResult>, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::SearchChats {
+                query,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before completing chat search".to_owned(),
             })?
     }
 
@@ -1860,6 +1911,9 @@ fn spawn_app_runtime_worker(
                         }
                     }
                 }
+                AppRuntimeCommand::SearchChats { query, response } => {
+                    let _ = response.send(state.search_chats(query));
+                }
                 AppRuntimeCommand::WaitPlan {
                     timeout_millis,
                     response,
@@ -2239,6 +2293,133 @@ impl AppRuntimeState {
         }
         state.load_profile_cache()?;
         Ok(state)
+    }
+
+    fn search_chats(
+        &self,
+        input: ChatSearchQuery,
+    ) -> Result<Vec<ChatSearchResult>, FiniteChatCoreError> {
+        let query = input.query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        if input.room_id.trim() != input.room_id
+            || input.room_id.is_empty()
+            || input.room_id.len() > MAX_OBJECT_ID_BYTES as usize
+            || query.len() > 256
+            || !(1..=50).contains(&input.limit)
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "chat search request is invalid".to_owned(),
+            });
+        }
+
+        let normalized = query.to_lowercase();
+        let mut candidates = BTreeMap::<(String, String), ChatSearchCandidate>::new();
+        for topic in self
+            .app
+            .topics
+            .iter()
+            .filter(|topic| topic.room_id == input.room_id)
+        {
+            for chat in &topic.chats {
+                let title_match = topic.title.to_lowercase().contains(&normalized)
+                    || chat.title.to_lowercase().contains(&normalized);
+                if title_match {
+                    candidates.insert(
+                        (topic.topic_id.clone(), chat.chat_id.clone()),
+                        ChatSearchCandidate {
+                            result: ChatSearchResult {
+                                room_id: topic.room_id.clone(),
+                                topic_id: topic.topic_id.clone(),
+                                topic_title: topic.title.clone(),
+                                chat_id: chat.chat_id.clone(),
+                                chat_title: chat.title.clone(),
+                                message_id: None,
+                                excerpt: chat.last_message_preview.clone(),
+                                timestamp_unix_seconds: 0,
+                                archived: chat.archived,
+                                match_count: 1,
+                            },
+                            title_match: true,
+                            latest_seq: chat.updated_seq,
+                        },
+                    );
+                }
+            }
+        }
+
+        for message in self
+            .chat_projection
+            .messages
+            .values()
+            .filter(|message| message.room_id == input.room_id)
+        {
+            let (Some(topic_id), Some(chat_id)) =
+                (message.conversation_id.as_ref(), message.chat_id.as_ref())
+            else {
+                continue;
+            };
+            let Some(topic) = self
+                .app
+                .topics
+                .iter()
+                .find(|topic| topic.room_id == input.room_id && topic.topic_id == *topic_id)
+            else {
+                continue;
+            };
+            let Some(chat) = topic.chats.iter().find(|chat| chat.chat_id == *chat_id) else {
+                continue;
+            };
+            let content = if message.display_content.trim().is_empty() {
+                message.text.as_str()
+            } else {
+                message.display_content.as_str()
+            };
+            if !content.to_lowercase().contains(&normalized) {
+                continue;
+            }
+            let key = (topic_id.clone(), chat_id.clone());
+            let candidate = candidates
+                .entry(key)
+                .or_insert_with(|| ChatSearchCandidate {
+                    result: ChatSearchResult {
+                        room_id: input.room_id.clone(),
+                        topic_id: topic_id.clone(),
+                        topic_title: topic.title.clone(),
+                        chat_id: chat_id.clone(),
+                        chat_title: chat.title.clone(),
+                        message_id: None,
+                        excerpt: String::new(),
+                        timestamp_unix_seconds: 0,
+                        archived: chat.archived,
+                        match_count: 0,
+                    },
+                    title_match: false,
+                    latest_seq: 0,
+                });
+            candidate.result.match_count = candidate.result.match_count.saturating_add(1);
+            if message.seq >= candidate.latest_seq || candidate.result.message_id.is_none() {
+                candidate.latest_seq = message.seq;
+                candidate.result.message_id = Some(message.message_id.clone());
+                candidate.result.excerpt = chat_search_excerpt(content);
+                candidate.result.timestamp_unix_seconds = message.timestamp_unix_seconds;
+            }
+        }
+
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .title_match
+                .cmp(&left.title_match)
+                .then_with(|| right.latest_seq.cmp(&left.latest_seq))
+                .then_with(|| left.result.chat_title.cmp(&right.result.chat_title))
+        });
+        Ok(candidates
+            .into_iter()
+            .take(input.limit as usize)
+            .map(|candidate| candidate.result)
+            .collect())
     }
 
     fn prepare_dispatch(&mut self, action: &AppAction) -> bool {
@@ -10477,6 +10658,15 @@ fn message_preview(message: &ChatMessage) -> String {
     }
 }
 
+fn chat_search_excerpt(content: &str) -> String {
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut excerpt = collapsed.chars().take(180).collect::<String>();
+    if collapsed.chars().count() > 180 {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
 fn topic_summary_from_projection(
     entry: &ConversationProjectionEntry,
     messages: Vec<&ChatMessage>,
@@ -11983,6 +12173,31 @@ mod tests {
             })
             .map(|chat| chat.title.as_str());
         assert_eq!(stable_title, Some("second Home chat"));
+
+        let search_results = app
+            .search_chats(ChatSearchQuery {
+                room_id: room_id.clone(),
+                query: "LATER RESPONSE".to_owned(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(search_results.len(), 1);
+        assert_eq!(search_results[0].chat_id, second_chat_id);
+        assert_eq!(search_results[0].match_count, 1);
+        assert!(
+            search_results[0]
+                .excerpt
+                .contains("later response must not rename")
+        );
+        assert!(
+            app.search_chats(ChatSearchQuery {
+                room_id: room_id.clone(),
+                query: "x".repeat(257),
+                limit: 10,
+            })
+            .is_err(),
+            "search limits are enforced before projection access"
+        );
 
         let reopened_first = app
             .dispatch_and_wait(AppAction::OpenChat {

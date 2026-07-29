@@ -25,7 +25,11 @@ import {
   type ElectronChatRuntime,
   type ElectronLocalDevice,
 } from "@/lib/electron-chat-runtime";
-import type { HostedChatAction, HostedChatState } from "@/lib/hosted-web-device";
+import type {
+  HostedChatAction,
+  HostedChatSearchResult,
+  HostedChatState,
+} from "@/lib/hosted-web-device";
 import {
   beginHostedChatStreamConnection,
   hostedChatStreamSnapshotProvesRestart,
@@ -76,6 +80,11 @@ type HostedChatContextValue = {
   recoverLocalDevice: () => Promise<HostedChatRetryAttempt>;
   dispatch: (action: HostedChatAction) => Promise<HostedChatState>;
   dispatchQuiet: (action: HostedChatAction) => Promise<HostedChatState | null>;
+  searchChats: (
+    roomId: string,
+    query: string,
+    signal?: AbortSignal
+  ) => Promise<HostedChatSearchResult[]>;
   uploadAttachments: (formData: FormData) => Promise<HostedChatState>;
   attachmentUrl: (address: ElectronAttachmentAddress) => string;
 };
@@ -459,6 +468,16 @@ export function HostedChatProvider({
     }
   }, [requestActionSnapshot]);
 
+  const searchChats = useCallback((
+    roomId: string,
+    query: string,
+    signal?: AbortSignal
+  ) => hostedChatRequest<HostedChatSearchResult[]>(`${apiBase}/search`, {
+    method: "POST",
+    body: JSON.stringify({ room_id: roomId, query }),
+    signal,
+  }), [apiBase]);
+
   const uploadAttachments = useCallback((formData: FormData) => runtime
     ? requestElectronMutationSnapshot(async (bridge) =>
       bridge.uploadDaemonAttachments(await electronAttachmentUpload(formData)))
@@ -631,6 +650,7 @@ export function HostedChatProvider({
       recoverLocalDevice,
       dispatch,
       dispatchQuiet,
+      searchChats,
       uploadAttachments,
       attachmentUrl,
     }}>

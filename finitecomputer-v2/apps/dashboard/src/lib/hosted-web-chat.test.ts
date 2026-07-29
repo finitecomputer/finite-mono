@@ -8,6 +8,7 @@ import {
   isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
   parseHostedChatAction,
+  parseHostedChatSearchRequest,
   parseHostedDeviceReconcileJsonRequest,
   parseHostedDeviceReconcileRequest,
 } from "@/lib/hosted-web-chat";
@@ -84,6 +85,30 @@ test("unexpected chat infrastructure errors are replaced with plain product copy
     hostedWebChatErrorMessage(new HostedWebChatError("Sign in again to use chat.", 401)),
     "Sign in again to use chat."
   );
+});
+
+test("chat search accepts one bounded canonical-room query shape", () => {
+  assert.deepEqual(
+    parseHostedChatSearchRequest({
+      room_id: "canonical-room",
+      query: "  disaster recovery  ",
+    }),
+    { room_id: "canonical-room", query: "disaster recovery" }
+  );
+
+  for (const payload of [
+    null,
+    {},
+    { room_id: "", query: "recovery" },
+    { room_id: "canonical-room", query: "x" },
+    { room_id: "canonical-room", query: "x".repeat(257) },
+    { room_id: "canonical-room", query: "recovery", limit: 5000 },
+  ]) {
+    assert.throws(
+      () => parseHostedChatSearchRequest(payload),
+      (error: unknown) => error instanceof HostedWebChatError && error.status === 400
+    );
+  }
 });
 
 test("hosted-device authorization recovery recognizes its service-unavailable contract", () => {

@@ -36,6 +36,19 @@ export type HostedChatSummary = {
   archived: boolean;
 };
 
+export type HostedChatSearchResult = {
+  room_id: string;
+  topic_id: string;
+  topic_title: string;
+  chat_id: string;
+  chat_title: string;
+  message_id?: string | null;
+  excerpt: string;
+  timestamp_unix_seconds: number;
+  archived: boolean;
+  match_count: number;
+};
+
 export type HostedChatTopic = {
   room_id: string;
   topic_id: string;
@@ -361,6 +374,22 @@ export async function hostedDeviceState(
   account: AccountAuthContext
 ) {
   return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/state");
+}
+
+export async function hostedDeviceSearch(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: { room_id: string; query: string; limit: number }
+) {
+  return hostedDeviceJson<HostedChatSearchResult[]>(
+    config,
+    account,
+    "/v1/app/search",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    }
+  );
 }
 
 export async function hostedDeviceBrainIdentityProvider(
