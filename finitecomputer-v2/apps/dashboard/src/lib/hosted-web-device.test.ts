@@ -12,6 +12,7 @@ import {
   hostedDeviceLinkStatus,
   hostedDeviceReconcileDevice,
   hostedDeviceRuntimeCommand,
+  hostedDeviceSearch,
   hostedDeviceSitesIdentityProvider,
 } from "@/lib/hosted-web-device";
 
@@ -44,6 +45,33 @@ test("hostedDeviceHeaders binds the internal call to the verified WorkOS user", 
   );
   assert.equal(headers.get("authorization"), "Bearer secret");
   assert.equal(headers.get("x-finite-workos-user-id"), "user_paul");
+});
+
+test("chat search uses the narrow WorkOS-bound device endpoint", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedUrl = "";
+  let observedBody = "";
+  global.fetch = (async (input, init) => {
+    observedUrl = String(input);
+    observedBody = String(init?.body);
+    return Response.json([]);
+  }) as typeof fetch;
+
+  await hostedDeviceSearch(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    verifiedAccount,
+    { room_id: "room-a", query: "recovery", limit: 30 }
+  );
+
+  assert.equal(observedUrl, "https://device.internal/v1/app/search");
+  assert.deepEqual(JSON.parse(observedBody), {
+    room_id: "room-a",
+    query: "recovery",
+    limit: 30,
+  });
 });
 
 test("Brain identity operations use the narrow WorkOS-bound custody endpoint", async (context) => {

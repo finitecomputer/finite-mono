@@ -31,6 +31,7 @@ use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
 };
+use crate::context_catalog::{ContextCatalog, ContextSearchRequestV1};
 use crate::ledger::{CommandDecision, Ledger, hex_digest};
 use crate::supervisor::{ProcessSpec, SupervisorHandle, SupervisorStatus, start_supervisor};
 use crate::transport::BridgeClient;
@@ -48,10 +49,13 @@ const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
 const GOOGLE_APPLY_SCHEMA: &str = "finite.agent.google.apply.v1";
+const CONTEXT_SEARCH_SCHEMA: &str = "finite.agent.context.search.v1";
+const CONTEXT_SEARCH_COMMAND: &str = "agent.context.search";
 const AEON_HERMES_PROBE_MARKER: &str = "FINITE_AEON_HERMES_PROBE ";
 const SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
 const SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
 const UNVERIFIED_HERMES_GENERATION: u64 = u64::MAX;
+const MAX_CONTEXT_SITES_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct StartupSpecializationBundleConfig {
@@ -73,6 +77,9 @@ impl std::fmt::Debug for StartupSpecializationBundleConfig {
 pub struct DaemonConfig {
     pub agent_home: PathBuf,
     pub hermes_home: PathBuf,
+    pub workspace: PathBuf,
+    pub managed_skill_roots: Vec<PathBuf>,
+    pub fsite_bin: PathBuf,
     pub bridge_url: String,
     pub bridge_addr: String,
     pub finitechat_bin: PathBuf,
@@ -123,6 +130,18 @@ impl DaemonConfig {
         let hermes_home = std::env::var("HERMES_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| agent_home.join("hermes-home"));
+        let workspace = std::env::var("FINITECHAT_WORKSPACE")
+            .or_else(|_| std::env::var("FINITE_CONFIG_WORKSPACE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/data/workspace"));
+        let managed_skill_roots = [
+            "FINITE_CONFIG_MANAGED_SKILLS_DIR",
+            "FINITE_CONFIG_SHARED_MANAGED_SKILLS_DIR",
+        ]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(PathBuf::from)
+        .collect();
         let bridge_addr = std::env::var("FINITE_AGENTD_BRIDGE_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:37633".to_owned());
         if !bridge_addr.starts_with("127.0.0.1:") && !bridge_addr.starts_with("localhost:") {
@@ -140,6 +159,11 @@ impl DaemonConfig {
         Ok(Self {
             agent_home,
             hermes_home,
+            workspace,
+            managed_skill_roots,
+            fsite_bin: PathBuf::from(
+                std::env::var("FSITE_BIN").unwrap_or_else(|_| "/usr/local/bin/fsite".to_owned()),
+            ),
             bridge_url: format!("http://{bridge_addr}"),
             bridge_addr,
             finitechat_bin: PathBuf::from(
@@ -330,6 +354,12 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         ledger,
         config_manager,
         connection_manager,
+        context_catalog: ContextCatalog::new(
+            config.workspace,
+            config.hermes_home.clone(),
+            config.managed_skill_roots,
+        ),
+        fsite_bin: config.fsite_bin,
         hermes_home: config.hermes_home,
         hermes_probe_python: config.hermes_probe_python,
         hermes_probe_script: config.hermes_probe_script,
@@ -509,6 +539,8 @@ struct CommandExecutor {
     ledger: Ledger,
     config_manager: ConfigManager,
     connection_manager: ConnectionManager,
+    context_catalog: ContextCatalog,
+    fsite_bin: PathBuf,
     hermes_home: PathBuf,
     hermes_probe_python: PathBuf,
     hermes_probe_script: PathBuf,
@@ -596,6 +628,11 @@ impl CommandExecutor {
             }
         } else if !authorized {
             failure_result(request, AgentdError::Unauthorized)
+        } else if request.command == CONTEXT_SEARCH_COMMAND {
+            match self.execute(request).await {
+                Ok(body) => success_result(request, body)?,
+                Err(error) => failure_result(request, error),
+            }
         } else {
             match self.ledger.begin_command(request) {
                 Ok(CommandDecision::Replay(result)) => result,
@@ -619,14 +656,16 @@ impl CommandExecutor {
             })
             .await?;
         self.bridge.acknowledge(&delivery).await?;
-        if let Err(error) = self
-            .publish_status(&delivery.room_id, delivery.conversation_id.clone())
-            .await
-        {
-            eprintln!(
-                "finite-agentd: runtime status publish will wait for the next command: {}",
-                error.public_message()
-            );
+        if request.command != CONTEXT_SEARCH_COMMAND {
+            if let Err(error) = self
+                .publish_status(&delivery.room_id, delivery.conversation_id.clone())
+                .await
+            {
+                eprintln!(
+                    "finite-agentd: runtime status publish will wait for the next command: {}",
+                    error.public_message()
+                );
+            }
         }
         Ok(())
     }
@@ -653,6 +692,17 @@ impl CommandExecutor {
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(serde_json::to_value(self.connection_manager.status()?)?)
+            }
+            CONTEXT_SEARCH_COMMAND => {
+                let body = parse_body::<ContextSearchRequestV1>(request, CONTEXT_SEARCH_SCHEMA)?;
+                let sites_json = self.list_context_sites().await;
+                let catalog = self.context_catalog.clone();
+                let results = tokio::task::spawn_blocking(move || {
+                    catalog.search(body, sites_json.as_deref())
+                })
+                .await
+                .map_err(|error| AgentdError::Config(error.to_string()))??;
+                Ok(json!({ "results": results }))
             }
             "agent.inference.apply" => {
                 let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
@@ -797,6 +847,27 @@ impl CommandExecutor {
             self.supervisor.restart_hermes().await?;
         }
         Ok(serde_json::to_value(result)?)
+    }
+
+    async fn list_context_sites(&self) -> Option<String> {
+        if !self.fsite_bin.is_file() {
+            return None;
+        }
+        let output = tokio::time::timeout(
+            Duration::from_secs(4),
+            TokioCommand::new(&self.fsite_bin)
+                .args(["project", "list", "--output", "json"])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        if !output.status.success() || output.stdout.len() > MAX_CONTEXT_SITES_BYTES {
+            return None;
+        }
+        String::from_utf8(output.stdout).ok()
     }
 
     async fn apply_inference_plan(

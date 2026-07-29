@@ -31,8 +31,8 @@ use finitechat_core::device_link::{
 };
 use finitechat_core::{
     AppAction, AppProfileChatBootstrapInput, AppProfileChatBootstrapPreparedCommit, AppState,
-    AppTopicSummary, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
-    OpenOptions, OutboundAttachment, account_id_from_npub,
+    AppTopicSummary, ChatMediaAttachment, ChatMediaKind, ChatSearchQuery, ChatSearchResult,
+    FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment, account_id_from_npub,
     finite_sites_native_viewer_session_proof,
 };
 use finitechat_http::{
@@ -433,6 +433,7 @@ fn app_with_test_options(
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/app/state", get(app_state))
+        .route("/v1/app/search", post(search_chats))
         .route("/v1/app/actions", post(dispatch_action))
         .route("/v1/app/new-chat", post(start_new_chat))
         .route(
@@ -1428,6 +1429,19 @@ async fn app_state(
     let user_id = authorized_user(&state, &headers)?;
     let runtime = state.runtime_for(&user_id)?;
     Ok(Json(redacted_state(runtime.state()?)))
+}
+
+async fn search_chats(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(query): Json<ChatSearchQuery>,
+) -> Result<Json<Vec<ChatSearchResult>>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    let runtime = state.runtime_for(&user_id)?;
+    let results = tokio::task::spawn_blocking(move || runtime.search_chats(query))
+        .await
+        .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(results))
 }
 
 #[derive(Clone, Debug, Deserialize)]

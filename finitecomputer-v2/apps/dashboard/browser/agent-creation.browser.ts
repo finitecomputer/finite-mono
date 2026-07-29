@@ -1207,7 +1207,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         status: "complete",
       });
       hostedDevice.emit();
-      await expectVisibleText(page, "Working · 1 step");
+      await expectVisibleText(page, "Working · 1 action");
 
       hostedDevice.state.app.typing_members = [];
       hostedDevice.state.app.messages.push({
@@ -1215,7 +1215,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         final_delivery: true,
       });
       hostedDevice.emit();
-      await expectVisibleText(page, "Worked through 1 step");
+      await expectVisibleText(page, "Work complete · 1 action");
       await page
         .getByText("Completed Oslo Bot is working", { exact: true })
         .waitFor({ state: "hidden", timeout: 15_000 });
