@@ -1254,8 +1254,22 @@ function ToolRollup({
     : running
       ? steps.length > 0 ? `Working · ${steps.length} ${pluralize("step", steps.length)}` : "Working"
       : `Worked through ${steps.length || messages.length} ${pluralize("step", steps.length || messages.length)}`;
+  const shouldAutoOpen = running || waitingForUser;
+  const disclosureRef = useRef<HTMLDetailsElement>(null);
+  const disclosureInitializedRef = useRef(false);
+  useLayoutEffect(() => {
+    if (!shouldAutoOpen || disclosureInitializedRef.current || !disclosureRef.current) return;
+    disclosureInitializedRef.current = true;
+    disclosureRef.current.open = true;
+  }, [shouldAutoOpen]);
   return (
-    <details className="finite-chat__tool-rollup" open={running || waitingForUser || undefined}>
+    <details
+      ref={disclosureRef}
+      className="finite-chat__tool-rollup"
+      onToggle={() => {
+        disclosureInitializedRef.current = true;
+      }}
+    >
       <summary>
         {running ? <Loader2Icon className="size-4 finite-chat__spin" /> : <WrenchIcon className="size-4" />}
         <span>{label}</span>
