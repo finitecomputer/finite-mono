@@ -1673,7 +1673,7 @@ wait "$postgres_pid"
                     shell_quote(&self.dashboard_auth_secret_file().display().to_string())
                 ),
                 format!(
-                    "exec pnpm run dev -- --hostname 127.0.0.1 --port {}",
+                    "exec pnpm run dev --hostname 127.0.0.1 --port {}",
                     self.ports.dashboard
                 ),
             ],
@@ -3763,6 +3763,8 @@ mod tests {
         assert!(!yaml.contains("FC_CORE_RUNNER_API_TOKEN="));
         assert!(!yaml.contains("FC_FINITE_PRIVATE_USAGE_API_TOKEN="));
         assert!(yaml.contains("pnpm install --frozen-lockfile"));
+        assert!(yaml.contains("exec pnpm run dev --hostname 127.0.0.1 --port 13002"));
+        assert!(!yaml.contains("pnpm run dev -- --hostname"));
         assert!(
             yaml.contains("dashboard-deps:\n        condition: process_completed_successfully")
         );

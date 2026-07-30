@@ -12,7 +12,7 @@ web-design:
 
 # Selects the live design fixture state: healthy, unavailable, or recovering.
 web-design-state scenario:
-    cd ../finitecomputer-v2/apps/dashboard && pnpm run design:state -- {{ quote(scenario) }}
+    cd ../finitecomputer-v2/apps/dashboard && pnpm run design:state {{ quote(scenario) }}
 
 # Explicitly removes only the durable local web design conversation.
 web-design-reset:
