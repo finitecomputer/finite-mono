@@ -13440,6 +13440,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow full-history stress test; run `just chat-history-stress`"]
     fn late_same_account_device_converges_topics_named_chats_and_archives_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));

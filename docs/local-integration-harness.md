@@ -150,6 +150,32 @@ limit), requests `--fresh` explicitly, verifies
 the service spine, and tears it down. `--fresh` is rejected for the default SaaS
 profile so a routine start can never erase agent data.
 
+## Managed test commands
+
+`devfinity run -- <command> [args...]` is the general test-command wrapper. It
+creates an isolated temporary state directory and kernel-assigned port, starts
+only the Nix-provided Postgres 16 process, waits for it, exports its maintenance
+connection as `FC_CORE_POSTGRES_TEST_URL`, and then executes the exact argument
+vector without an implicit shell. The child exit status is preserved, and
+Postgres plus the temporary state are removed on success, failure, or
+interruption.
+
+The repository gate is:
+
+```sh
+just test
+```
+
+That recipe wraps `cargo test --workspace --locked`; CI invokes the same recipe.
+Calling the Core Postgres tests without this managed environment is an error,
+not a reason to skip them. Commands that intentionally need shell evaluation
+must opt into it explicitly:
+
+```sh
+cargo run --locked -p devfinity -- run -- \
+  bash -lc 'cargo test -p example && echo done'
+```
+
 ## Apple Container host networking
 
 Devfinity first checks for Apple's official `host.container.internal` bridge.
@@ -183,9 +209,9 @@ just dev status
 just dev cleanup
 ```
 
-Passing a command after `--` starts the selected stack headlessly, waits for its
-services, runs the command with non-secret generated environment variables, and
-tears down the supervised host processes afterward.
+Passing a command after `just dev up --` starts the selected product stack
+headlessly, waits for its services, runs the command with non-secret generated
+environment variables, and tears down the supervised host processes afterward.
 
 `cleanup` is best-effort recovery for process-compose and its host process
 trees. Detached Apple Agent Runtimes intentionally remain alive so local Chat

@@ -67,6 +67,10 @@ import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
 import { runtimeCanPresentActivity } from "@/lib/runtime-presentation";
 import {
+  PENDING_CHAT_REFRESH_DELAY_MS,
+  pendingChatRefreshIsDue,
+} from "@/lib/hosted-web-chat-refresh";
+import {
   AUDIO_RECORDING_BITS_PER_SECOND,
   audioRecordingErrorMessage,
   audioRecordingDurationLabel,
@@ -80,10 +84,13 @@ import {
   activityLeaseIsFresh,
   beginPendingChatTurn,
   attachmentSendError,
+  chatContentIsRenderable,
+  isAskForInputToolMessage,
   liveActivityLabel as sharedLiveActivityLabel,
   messageContent,
   pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
+  pendingTurnRecoveryIsFresh,
   reconcilePendingChatTurns,
   transcriptItems,
   type ChatSelection,
@@ -138,6 +145,7 @@ export function HostedWebChat({
     recoverLocalDevice,
     dispatch,
     dispatchQuiet,
+    refreshPendingChat,
     uploadAttachments,
     attachmentUrl,
   } = useHostedChat();
@@ -178,6 +186,12 @@ export function HostedWebChat({
   const audioRecordingFailedRef = useRef(false);
   const audioRecordingMountedRef = useRef(true);
   const markedReadSeqRef = useRef(new Map<string, number>());
+  const pendingRefreshProgressRef = useRef<{
+    key: string;
+    observedAtMs: number;
+    observedSeq: number;
+    refreshedAtMs: number | null;
+  } | null>(null);
   const mobilePreview = useMediaQuery("(max-width: 980px)");
   useEffect(() => {
     if (!state || streamConnected) {
@@ -284,6 +298,10 @@ export function HostedWebChat({
       pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
       && pendingTurnMatchesSelection(turn, selectedChatSelection)
   );
+  const latestVisibleMessageSeq = Math.max(
+    0,
+    ...messages.map((message) => message.seq)
+  );
 
   useEffect(() => {
     if (!streamConnected) {
@@ -325,8 +343,7 @@ export function HostedWebChat({
     if (!state) return;
     setPendingAgentTurns((turns) => {
       const fresh = turns.filter(
-        (turn) =>
-          pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
+        (turn) => pendingTurnRecoveryIsFresh(turn, leaseNowMs)
       );
       const pending = reconcilePendingChatTurns(
         fresh,
@@ -335,7 +352,59 @@ export function HostedWebChat({
       );
       return pending.length === turns.length ? turns : pending;
     });
-  }, [leaseNowMs, state, streamConnected]);
+  }, [leaseNowMs, state]);
+
+  useEffect(() => {
+    const turn = pendingAgentTurns.find((candidate) =>
+      pendingTurnMatchesSelection(candidate, selectedChatSelection)
+    );
+    if (!turn || !selectedRoom || !selectedTopic || !selectedChat) {
+      pendingRefreshProgressRef.current = null;
+      return;
+    }
+    const key = [
+      turn.room_id,
+      turn.topic_id ?? "",
+      turn.chat_id ?? "",
+      turn.started_at_ms,
+    ].join(":");
+    const progress = pendingRefreshProgressRef.current;
+    if (
+      !progress
+      || progress.key !== key
+      || latestVisibleMessageSeq > progress.observedSeq
+    ) {
+      pendingRefreshProgressRef.current = {
+        key,
+        observedAtMs: leaseNowMs,
+        observedSeq: latestVisibleMessageSeq,
+        refreshedAtMs: null,
+      };
+      return;
+    }
+    if (!pendingChatRefreshIsDue(
+      leaseNowMs,
+      progress.observedAtMs,
+      progress.refreshedAtMs,
+      PENDING_CHAT_REFRESH_DELAY_MS
+    )) return;
+    progress.refreshedAtMs = leaseNowMs;
+    void refreshPendingChat({
+      room_id: selectedRoom.room_id,
+      topic_id: selectedTopic.topic_id,
+      chat_id: selectedChat.chat_id,
+      after_seq: latestVisibleMessageSeq,
+    });
+  }, [
+    leaseNowMs,
+    latestVisibleMessageSeq,
+    pendingAgentTurns,
+    refreshPendingChat,
+    selectedChat,
+    selectedChatSelection,
+    selectedRoom,
+    selectedTopic,
+  ]);
 
   useEffect(() => {
     if (!selectedRoom) return;
@@ -762,9 +831,21 @@ export function HostedWebChat({
     ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
     : null;
   const latestTranscriptItem = transcript[transcript.length - 1];
-  const activeToolRollupId = activityLabel && latestTranscriptItem?.type === "tools"
+  const waitingToolRollupId = latestTranscriptItem?.type === "tools"
+    && isAskForInputToolMessage(
+      latestTranscriptItem.messages[latestTranscriptItem.messages.length - 1]!
+    )
     ? latestTranscriptItem.id
     : null;
+  const activeToolRollupId = activityLabel
+    && !waitingToolRollupId
+    && latestTranscriptItem?.type === "tools"
+    ? latestTranscriptItem.id
+    : null;
+  const hasRenderableChatContent = chatContentIsRenderable(
+    transcript.length,
+    activityLabel
+  );
 
   return (
     <div className="finite-chat finite-chat--embedded">
@@ -840,13 +921,13 @@ export function HostedWebChat({
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
-                {selectedRoom && selectionPending && messages.length === 0 ? (
+                {selectedRoom && selectionPending && !hasRenderableChatContent ? (
                   <ChatLoading label="Opening chat…" />
                 ) : null}
-                {selectedRoom && !selectionPending && messages.length === 0 ? (
+                {selectedRoom && !selectionPending && !hasRenderableChatContent ? (
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
                 ) : null}
-                {messages.length > 0 ? (
+                {hasRenderableChatContent ? (
                   <div className="finite-chat__messages" aria-live="polite">
                     {selectedRoom?.can_load_older && messages[0] ? (
                       <button
@@ -878,10 +959,13 @@ export function HostedWebChat({
                           key={item.id}
                           messages={item.messages}
                           active={item.id === activeToolRollupId}
+                          waitingForUser={item.id === waitingToolRollupId}
                         />
                       )
                     )}
-                    {activityLabel ? <LiveActivity label={activityLabel} /> : null}
+                    {activityLabel && !waitingToolRollupId
+                      ? <LiveActivity label={activityLabel} />
+                      : null}
                   </div>
                 ) : null}
               </div>
@@ -1156,17 +1240,22 @@ function LiveActivity({ label }: { label: string }) {
 function ToolRollup({
   messages,
   active,
+  waitingForUser,
 }: {
   messages: HostedChatMessage[];
   active: boolean;
+  waitingForUser: boolean;
 }) {
-  const running = active || messages.some((message) => message.status === "running");
+  const running = !waitingForUser
+    && (active || messages.some((message) => message.status === "running"));
   const steps = messages.flatMap((message) => messageContent(message).split(/\n+/u).filter(Boolean));
-  const label = running
-    ? steps.length > 0 ? `Working · ${steps.length} ${pluralize("step", steps.length)}` : "Working"
-    : `Worked through ${steps.length || messages.length} ${pluralize("step", steps.length || messages.length)}`;
+  const label = waitingForUser
+    ? "Waiting for you"
+    : running
+      ? steps.length > 0 ? `Working · ${steps.length} ${pluralize("step", steps.length)}` : "Working"
+      : `Worked through ${steps.length || messages.length} ${pluralize("step", steps.length || messages.length)}`;
   return (
-    <details className="finite-chat__tool-rollup" open={running || undefined}>
+    <details className="finite-chat__tool-rollup" open={running || waitingForUser || undefined}>
       <summary>
         {running ? <Loader2Icon className="size-4 finite-chat__spin" /> : <WrenchIcon className="size-4" />}
         <span>{label}</span>

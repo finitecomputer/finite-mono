@@ -30,8 +30,11 @@ export type TranscriptItem =
   | { type: "tools"; id: string; messages: ChatMessage[] };
 
 const TOOL_LINE_RE = /^(?:⚙️?|🔧|🛠️?|🔍|🔎|📖|💻|🌐|⚡)\s+/u;
+const REMOTE_WORKING_STATUS_RE = /^⏳\s+Working\s+—/u;
+const ASK_FOR_INPUT_TOOL_RE = /^❓\s+Asking\b/u;
 
 export const LIVE_ACTIVITY_LEASE_MS = 15_000;
+export const PENDING_TURN_RECOVERY_WINDOW_MS = 5 * 60_000;
 
 export function selectedChat(state: AppState | null, preferAgentRoom = false): ChatSelection {
   if (!state) return { room: null, topic: null, chat: null };
@@ -108,7 +111,10 @@ export function transcriptItems(
     const fromUserPrincipal = ownAccountId
       ? message.sender_account_id === ownAccountId
       : message.is_mine;
-    if (!fromUserPrincipal && messageKind(message) === "status") continue;
+    if (
+      !fromUserPrincipal
+      && (messageKind(message) === "status" || isRemoteWorkingStatusMessage(message))
+    ) continue;
     if (!fromUserPrincipal && messageKind(message) === "tool") {
       const previous = items[items.length - 1];
       if (previous?.type === "tools") {
@@ -132,6 +138,22 @@ export function transcriptItems(
 
 export function messageContent(message: ChatMessage) {
   return message.display_content || message.text || "";
+}
+
+export function isRemoteWorkingStatusMessage(message: ChatMessage) {
+  return REMOTE_WORKING_STATUS_RE.test(messageContent(message).trim());
+}
+
+export function isAskForInputToolMessage(message: ChatMessage) {
+  return message.kind === "tool"
+    && ASK_FOR_INPUT_TOOL_RE.test(messageContent(message).trim());
+}
+
+export function chatContentIsRenderable(
+  transcriptItemCount: number,
+  activityLabel: string | null
+) {
+  return transcriptItemCount > 0 || Boolean(activityLabel);
 }
 
 export function attachmentSendError(
@@ -230,6 +252,15 @@ export function pendingTurnLeaseIsFresh(
   leaseMs = LIVE_ACTIVITY_LEASE_MS
 ) {
   return activityLeaseIsFresh(streamConnected, turn.started_at_ms, nowMs, leaseMs);
+}
+
+export function pendingTurnRecoveryIsFresh(
+  turn: PendingChatTurn,
+  nowMs = Date.now(),
+  recoveryWindowMs = PENDING_TURN_RECOVERY_WINDOW_MS
+) {
+  return nowMs >= turn.started_at_ms
+    && nowMs - turn.started_at_ms < recoveryWindowMs;
 }
 
 export function pendingTurnMatchesSelection(

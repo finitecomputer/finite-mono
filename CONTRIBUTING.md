@@ -110,7 +110,7 @@ Run the gate proportionate to the surface you changed:
 just web-check       # dashboard unit tests, lint, and production build
 just check           # cargo check --workspace --locked
 just fmt             # rustfmt
-just test            # cargo test --workspace --locked
+just test            # isolated Postgres + cargo test --workspace --locked
 just dev smoke       # portable services-only integration smoke (Linux CI)
 just dev saas-smoke  # real Apple Runtime + Hosted Web chat + restart healing
 ```

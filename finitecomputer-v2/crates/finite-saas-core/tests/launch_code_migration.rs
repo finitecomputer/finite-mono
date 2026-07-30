@@ -40,9 +40,8 @@ where
     F: FnOnce(Client) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let Ok(admin_url) = std::env::var("FC_CORE_POSTGRES_TEST_URL") else {
-        return;
-    };
+    let admin_url = std::env::var("FC_CORE_POSTGRES_TEST_URL")
+        .expect("FC_CORE_POSTGRES_TEST_URL is required for Core migration tests; run `just test`");
 
     let (admin, admin_connection) = tokio_postgres::connect(&admin_url, NoTls).await.unwrap();
     let admin_connection = tokio::spawn(async move {

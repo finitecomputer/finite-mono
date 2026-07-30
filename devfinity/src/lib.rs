@@ -3,9 +3,11 @@ use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -95,6 +97,7 @@ pub enum StackProfile {
     AppleSaas,
     DockerSaas,
     ServicesOnly,
+    TestInfrastructure,
 }
 
 impl StackProfile {
@@ -129,8 +132,39 @@ impl StackProfile {
             Self::AppleSaas => "apple-saas",
             Self::DockerSaas => "docker-saas",
             Self::ServicesOnly => "services-only",
+            Self::TestInfrastructure => "test-infrastructure",
         }
     }
+
+    fn is_test_infrastructure(self) -> bool {
+        matches!(self, Self::TestInfrastructure)
+    }
+}
+
+#[derive(Debug)]
+struct RetryablePostgresStartup {
+    port: u16,
+    reason: String,
+}
+
+impl std::fmt::Display for RetryablePostgresStartup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "managed Postgres failed before proving ownership of reserved port {} ({})",
+            self.port, self.reason
+        )
+    }
+}
+
+impl std::error::Error for RetryablePostgresStartup {}
+
+pub fn is_retryable_postgres_startup(error: &anyhow::Error) -> bool {
+    error.chain().next().is_some_and(|outermost| {
+        outermost
+            .downcast_ref::<RetryablePostgresStartup>()
+            .is_some()
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,6 +322,7 @@ pub struct Stack {
     process_compose_control_dir: PathBuf,
     process_compose_socket: PathBuf,
     ports: Ports,
+    postgres_instance_id: String,
     core_token: String,
     hosted_web_device_token: String,
     sites_viewer_session_token: String,
@@ -352,6 +387,7 @@ impl Stack {
                 workos_fixture: offset_port(14199, port_offset)?,
                 runtime_agent: runtime_agent_port,
             },
+            postgres_instance_id: random_postgres_instance_id()?,
             core_token: "devfinity-core-service-token".to_string(),
             hosted_web_device_token: "devfinity-hosted-web-device-token".to_string(),
             sites_viewer_session_token:
@@ -373,6 +409,14 @@ impl Stack {
     pub fn with_fresh_services_state(mut self, fresh: bool) -> Self {
         self.fresh_services_state = fresh;
         self
+    }
+
+    pub fn with_postgres_port(mut self, port: u16) -> Result<Self> {
+        if port == 0 {
+            bail!("devfinity Postgres port must be non-zero");
+        }
+        self.ports.postgres = port;
+        Ok(self)
     }
 
     pub fn with_workos_staging(mut self) -> Result<Self> {
@@ -456,25 +500,30 @@ impl Stack {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
-        for dir in [
-            &self.state_dir,
-            &self.run_dir,
-            &self.logs_dir,
-            &self.pids_dir,
-            &self.postgres_dir(),
-            &self.core_dir(),
-            &self.dashboard_dir(),
-            &self.finitechat_dir(),
-            &self.hosted_web_device_dir(),
-            &self.finitesites_dir(),
-            &self.finite_identity_dir(),
-            &self.finite_brain_dir(),
-            &self.finite_home_dir(),
-            &self.runtime_image_dir(),
-            &self.runner_dir(),
-            &self.workos_fixture_dir(),
-        ] {
-            fs::create_dir_all(dir)
+        let mut dirs = vec![
+            self.state_dir.clone(),
+            self.run_dir.clone(),
+            self.logs_dir.clone(),
+            self.pids_dir.clone(),
+            self.postgres_dir(),
+        ];
+        if !self.profile.is_test_infrastructure() {
+            dirs.extend([
+                self.core_dir(),
+                self.dashboard_dir(),
+                self.finitechat_dir(),
+                self.hosted_web_device_dir(),
+                self.finitesites_dir(),
+                self.finite_identity_dir(),
+                self.finite_brain_dir(),
+                self.finite_home_dir(),
+                self.runtime_image_dir(),
+                self.runner_dir(),
+                self.workos_fixture_dir(),
+            ]);
+        }
+        for dir in dirs {
+            fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
         Ok(())
@@ -482,7 +531,11 @@ impl Stack {
 
     pub fn write_files(&self) -> Result<()> {
         self.ensure_dirs()?;
-        self.write_secret_files()?;
+        if self.profile.is_test_infrastructure() {
+            self.remove_secret_files();
+        } else {
+            self.write_secret_files()?;
+        }
         self.write_env_file()?;
         self.write_postgres_script()?;
         fs::write(&self.process_compose_file, self.process_compose_yaml())
@@ -654,6 +707,14 @@ impl Stack {
     }
 
     pub fn print_summary(&self) {
+        if self.profile.is_test_infrastructure() {
+            println!("devfinity managed command infrastructure");
+            println!("  profile:  {}", self.profile.as_str());
+            println!("  state:    {}", self.run_dir.display());
+            println!("  logs:     {}", self.logs_dir.display());
+            println!("  postgres: 127.0.0.1:{}", self.ports.postgres);
+            return;
+        }
         println!("devfinity local stack");
         println!("  profile:    {}", self.profile.as_str());
         println!("  state:      {}", self.run_dir.display());
@@ -725,12 +786,56 @@ impl Stack {
     }
 
     pub fn run_wrapped_command(&self, command: &[String]) -> Result<ExitCode> {
+        self.run_wrapped_command_inner(command, None)
+    }
+
+    pub fn run_wrapped_command_with_postgres_port_reservation(
+        &self,
+        command: &[String],
+        port_reservation: TcpListener,
+    ) -> Result<ExitCode> {
+        if !self.profile.is_test_infrastructure() {
+            bail!("a Postgres port reservation is only valid for test infrastructure");
+        }
+        let address = port_reservation
+            .local_addr()
+            .context("failed to inspect the reserved Postgres port")?;
+        if address.ip() != std::net::Ipv4Addr::LOCALHOST || address.port() != self.ports.postgres {
+            bail!(
+                "reserved Postgres listener {address} does not match 127.0.0.1:{}",
+                self.ports.postgres
+            );
+        }
+        self.run_wrapped_command_inner(command, Some(port_reservation))
+    }
+
+    fn run_wrapped_command_inner(
+        &self,
+        command: &[String],
+        port_reservation: Option<TcpListener>,
+    ) -> Result<ExitCode> {
         if command.is_empty() {
             bail!("wrapped command cannot be empty");
         }
 
+        let runtime = tokio::runtime::Runtime::new()
+            .context("failed to create devfinity lifecycle runtime")?;
+        let mut shutdown_signals = {
+            let _runtime_context = runtime.enter();
+            ShutdownSignals::new().context("failed to install devfinity signal handlers")?
+        };
         self.ensure_process_compose_available()?;
-        self.prepare_for_start()?;
+        if let Some(reservation) = port_reservation.as_ref() {
+            self.prepare_for_start_with_postgres_port_reservation(reservation)?;
+        } else {
+            self.prepare_for_start()?;
+        }
+        // PostgreSQL cannot inherit this ordinary TCP listener. Keep the
+        // kernel reservation through all synchronous preparation, release it
+        // immediately before supervisor spawn, and prove ownership with the
+        // per-run Postgres instance id. A lost handoff becomes a typed,
+        // retryable startup result; an open foreign listener is never ready.
+        drop(port_reservation);
         let mut guard = self.start_process_compose_headless()?;
         // Cold-cache CI needs a bigger window: the stack's cargo processes may
         // still be compiling when a warm-cache 180s would already have expired.
@@ -746,22 +851,71 @@ impl Stack {
                     180
                 }
             });
-        let outcome =
-            match self.wait_for_services_ready(Duration::from_secs(ready_timeout), &mut guard) {
-                Ok(()) => self.run_stack_command(command),
-                Err(error) => Err(error),
-            };
+        let outcome = runtime.block_on(async {
+            match self
+                .wait_for_services_ready(
+                    Duration::from_secs(ready_timeout),
+                    &mut guard,
+                    &mut shutdown_signals,
+                )
+                .await?
+            {
+                ReadinessOutcome::Ready => {
+                    self.run_stack_command(command, &mut shutdown_signals).await
+                }
+                ReadinessOutcome::Interrupted(signal) => {
+                    eprintln!(
+                        "devfinity received {} while infrastructure was starting",
+                        signal.name()
+                    );
+                    Ok(ExitCode::from(signal.exit_code()))
+                }
+            }
+        });
 
-        if let Err(error) = guard.shutdown() {
-            eprintln!("devfinity cleanup after wrapped command failed: {error:#}");
-        }
+        let cleanup = guard.shutdown();
         self.remove_secret_files();
 
-        outcome
+        match (outcome, cleanup) {
+            (Ok(code), Ok(())) => Ok(code),
+            (Ok(code), Err(error)) if code != ExitCode::SUCCESS => {
+                eprintln!("devfinity cleanup after failed wrapped command also failed: {error:#}");
+                Ok(code)
+            }
+            (Ok(_), Err(error)) => {
+                Err(error).context("devfinity cleanup after wrapped command failed")
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup_error)) => Err(error).context(format!(
+                "devfinity cleanup after infrastructure failure also failed: {cleanup_error:#}"
+            )),
+        }
     }
 
     pub fn prepare_for_start(&self) -> Result<()> {
-        self.ensure_postgres_not_running()?;
+        self.prepare_for_start_inner(false)
+    }
+
+    fn prepare_for_start_with_postgres_port_reservation(
+        &self,
+        reservation: &TcpListener,
+    ) -> Result<()> {
+        let address = reservation
+            .local_addr()
+            .context("failed to inspect the reserved Postgres port")?;
+        if address.port() != self.ports.postgres {
+            bail!(
+                "reserved Postgres port {} does not match configured port {}",
+                address.port(),
+                self.ports.postgres
+            );
+        }
+        self.prepare_for_start_inner(true)
+    }
+
+    fn prepare_for_start_inner(&self, postgres_port_is_reserved: bool) -> Result<()> {
+        remove_file_best_effort(&self.postgres_startup_status_path());
+        self.ensure_postgres_not_running(postgres_port_is_reserved)?;
         if self.fresh_services_state {
             if self.profile != StackProfile::ServicesOnly {
                 bail!("fresh state is only supported by the services-only smoke profile");
@@ -903,6 +1057,10 @@ impl Stack {
         );
         let _ = writeln!(yaml, "log_level: info");
         let _ = writeln!(yaml, "processes:");
+        if self.profile.is_test_infrastructure() {
+            self.write_postgres(&mut yaml);
+            return yaml;
+        }
         self.write_rust_build(&mut yaml);
         if self.workos_mode.is_fixture() {
             self.write_workos_fixture(&mut yaml);
@@ -959,6 +1117,11 @@ impl Stack {
 
     fn write_postgres(&self, yaml: &mut String) {
         let process = ManagedProcess::Postgres;
+        let readiness_database = if self.profile.is_test_infrastructure() {
+            "postgres"
+        } else {
+            "finite_saas_core"
+        };
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
@@ -981,8 +1144,9 @@ impl Stack {
             yaml,
             "        command: {}",
             yaml_string(&format!(
-                "psql -h 127.0.0.1 -p {} -U postgres -d finite_saas_core -tAc 'select 1' >/dev/null",
-                self.ports.postgres
+                "test \"$(env -u PGSERVICE -u PGSERVICEFILE -u PGOPTIONS PGCONNECT_TIMEOUT=1 PGSSLMODE=disable psql -X -h 127.0.0.1 -p {} -U postgres -d {readiness_database} --no-password -Atqc 'show cluster_name' 2>/dev/null)\" = {}",
+                self.ports.postgres,
+                shell_quote(&self.postgres_instance_id),
             ))
         );
         self.write_probe_timing(yaml, 3, 2, 5, 30);
@@ -1022,6 +1186,15 @@ impl Stack {
 
     fn write_postgres_script(&self) -> Result<()> {
         let script = self.postgres_script_path();
+        let create_application_database = if self.profile.is_test_infrastructure() {
+            ""
+        } else {
+            r#"
+if ! psql -h 127.0.0.1 -p "$port" -U postgres -d postgres -tAc "select 1 from pg_database where datname = '$database'" | grep -q 1; then
+  createdb -h 127.0.0.1 -p "$port" -U postgres "$database"
+fi
+"#
+        };
         let contents = format!(
             r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -1029,8 +1202,13 @@ set -euo pipefail
 export PGDATA={pgdata}
 database=finite_saas_core
 port={port}
+instance_id={instance_id}
+startup_status={startup_status}
 
 mkdir -p "$PGDATA"
+rm -f "$startup_status" "$startup_status.tmp"
+unset PGSERVICE PGSERVICEFILE PGOPTIONS
+export PGSSLMODE=disable
 
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
   initdb -D "$PGDATA" --username=postgres --auth=trust --no-locale --encoding=UTF8
@@ -1039,7 +1217,8 @@ fi
 # TCP only: the nixpkgs default socket dir (/run/postgresql) is not writable
 # on CI runners, and run-dir paths exceed the 103-byte unix socket limit on
 # macOS. Everything in this stack connects via 127.0.0.1.
-postgres -D "$PGDATA" -h 127.0.0.1 -p "$port" -c unix_socket_directories='' &
+postgres -D "$PGDATA" -h 127.0.0.1 -p "$port" \
+  -c unix_socket_directories='' -c "cluster_name=$instance_id" &
 postgres_pid=$!
 
 shutdown() {{
@@ -1049,22 +1228,47 @@ shutdown() {{
 }}
 trap shutdown INT TERM
 
-until pg_isready -h 127.0.0.1 -p "$port" -U postgres >/dev/null 2>&1; do
+record_startup_failure() {{
+  status="$1"
+  reason=startup-failed
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    reason=port-unavailable
+  fi
+  printf '%s\n' "$reason" > "$startup_status.tmp"
+  mv "$startup_status.tmp" "$startup_status"
+  if [ "$status" -eq 0 ]; then
+    status=1
+  fi
+  exit "$status"
+}}
+
+while true; do
   if ! kill -0 "$postgres_pid" >/dev/null 2>&1; then
+    set +e
     wait "$postgres_pid"
-    exit $?
+    status=$?
+    set -e
+    record_startup_failure "$status"
+  fi
+
+  actual_instance_id="$(
+    PGCONNECT_TIMEOUT=1 psql -X -h 127.0.0.1 -p "$port" -U postgres \
+      -d postgres --no-password -Atqc 'show cluster_name' 2>/dev/null || true
+  )"
+  if [ "$actual_instance_id" = "$instance_id" ]; then
+    break
   fi
   sleep 0.2
 done
 
-if ! psql -h 127.0.0.1 -p "$port" -U postgres -d postgres -tAc "select 1 from pg_database where datname = '$database'" | grep -q 1; then
-  createdb -h 127.0.0.1 -p "$port" -U postgres "$database"
-fi
-
+{create_application_database}
 wait "$postgres_pid"
 "#,
             pgdata = shell_quote(&self.postgres_data_dir().display().to_string()),
-            port = self.ports.postgres
+            port = self.ports.postgres,
+            instance_id = shell_quote(&self.postgres_instance_id),
+            startup_status =
+                shell_quote(&self.postgres_startup_status_path().display().to_string()),
         );
 
         fs::write(&script, contents)
@@ -2051,7 +2255,7 @@ wait "$postgres_pid"
         matches!(status, Ok(status) if status.success())
     }
 
-    fn ensure_postgres_not_running(&self) -> Result<()> {
+    fn ensure_postgres_not_running(&self, postgres_port_is_reserved: bool) -> Result<()> {
         let pid_file = self.pid_file(ManagedProcess::Postgres);
         if let Some(pid) = read_pid_file(&pid_file)?
             && process_alive(pid)
@@ -2062,7 +2266,7 @@ wait "$postgres_pid"
             );
         }
 
-        if connect_tcp("127.0.0.1", self.ports.postgres).is_ok() {
+        if !postgres_port_is_reserved && connect_tcp("127.0.0.1", self.ports.postgres).is_ok() {
             bail!(
                 "tcp 127.0.0.1:{} is already accepting connections; stop the existing service or run `devfinity cleanup` before starting devfinity",
                 self.ports.postgres
@@ -2102,14 +2306,19 @@ wait "$postgres_pid"
         })
     }
 
-    fn wait_for_services_ready(
+    async fn wait_for_services_ready(
         &self,
         timeout: Duration,
         guard: &mut ProcessComposeGuard<'_>,
-    ) -> Result<()> {
+        shutdown_signals: &mut ShutdownSignals,
+    ) -> Result<ReadinessOutcome> {
         let started = Instant::now();
         let mut last_report = Instant::now() - Duration::from_secs(5);
         loop {
+            if let Some(signal) = shutdown_signals.pending().await? {
+                return Ok(ReadinessOutcome::Interrupted(signal));
+            }
+            self.ensure_postgres_startup_active()?;
             if let Some(status) = guard
                 .child
                 .try_wait()
@@ -2119,10 +2328,23 @@ wait "$postgres_pid"
             }
 
             let checks = self.service_checks();
-            let pending = pending_service_checks(&checks);
+            let mut pending = pending_service_checks(&checks);
+            #[cfg(debug_assertions)]
+            if pending.is_empty()
+                && let Some(path) =
+                    nonempty_env_value("DEVFINITY_TEST_HOLD_BEFORE_READY_FILE").map(PathBuf::from)
+            {
+                if !path.exists() {
+                    fs::write(&path, b"managed services ready; command not started\n")
+                        .with_context(|| {
+                            format!("failed to write readiness test barrier {}", path.display())
+                        })?;
+                }
+                pending.push("test readiness barrier".to_string());
+            }
             if pending.is_empty() {
                 println!("devfinity stack is ready");
-                return Ok(());
+                return Ok(ReadinessOutcome::Ready);
             }
 
             if started.elapsed() >= timeout {
@@ -2137,11 +2359,27 @@ wait "$postgres_pid"
                 println!("waiting for devfinity stack: {}", pending.join(", "));
                 last_report = Instant::now();
             }
-            std::thread::sleep(Duration::from_millis(750));
+            tokio::select! {
+                signal = shutdown_signals.recv() => {
+                    return Ok(ReadinessOutcome::Interrupted(signal?));
+                }
+                _ = tokio::time::sleep(Duration::from_millis(750)) => {}
+            }
         }
     }
 
-    fn run_stack_command(&self, command: &[String]) -> Result<ExitCode> {
+    async fn run_stack_command(
+        &self,
+        command: &[String],
+        shutdown_signals: &mut ShutdownSignals,
+    ) -> Result<ExitCode> {
+        if let Some(signal) = shutdown_signals.pending().await? {
+            eprintln!(
+                "devfinity received {} before the wrapped command started",
+                signal.name()
+            );
+            return Ok(ExitCode::from(signal.exit_code()));
+        }
         let program = &command[0];
         let args = &command[1..];
         println!("running devfinity command: {}", shell_words(command));
@@ -2151,9 +2389,30 @@ wait "$postgres_pid"
             .current_dir(&self.repo_root)
             .envs(self.env_values());
         scrub_devfinity_secrets(&mut child_command);
-        let status = child_command.status().with_context(|| {
+        if self.profile.is_test_infrastructure() {
+            // A developer's shell may point the product at a persistent Core
+            // database. The test profile owns only its maintenance Postgres
+            // URL and must never leak that ambient application connection into
+            // the wrapped suite.
+            child_command.env_remove("FC_CORE_DATABASE_URL");
+        }
+        #[cfg(unix)]
+        child_command.process_group(0);
+        let mut child = child_command.spawn().with_context(|| {
             format!("failed to run devfinity command `{}`", shell_words(command))
         })?;
+        let status = match wait_for_wrapped_command(&mut child, shutdown_signals).await {
+            Ok(status) => status,
+            Err(error) => {
+                signal_process_group(child.id(), "TERM");
+                return match wait_for_signaled_command(&mut child).await {
+                    Ok(_) => Err(error),
+                    Err(cleanup_error) => Err(error).context(format!(
+                        "failed to stop wrapped command after wait failure: {cleanup_error:#}"
+                    )),
+                };
+            }
+        };
         Ok(status_to_exit_code(status))
     }
 
@@ -2352,6 +2611,9 @@ wait "$postgres_pid"
     }
 
     fn enabled_processes(&self) -> Vec<ManagedProcess> {
+        if self.profile.is_test_infrastructure() {
+            return vec![ManagedProcess::ProcessCompose, ManagedProcess::Postgres];
+        }
         ManagedProcess::ALL
             .into_iter()
             .filter(|process| {
@@ -2377,6 +2639,13 @@ wait "$postgres_pid"
     }
 
     fn service_checks(&self) -> Vec<ServiceCheck> {
+        if self.profile.is_test_infrastructure() {
+            return vec![check_postgres_service(
+                ManagedProcess::Postgres,
+                self.ports.postgres,
+                &self.postgres_instance_id,
+            )];
+        }
         let mut checks = vec![
             check_tcp_service(ManagedProcess::Postgres, "127.0.0.1", self.ports.postgres),
             check_http_service(
@@ -2434,6 +2703,13 @@ wait "$postgres_pid"
     }
 
     fn urls_text(&self) -> String {
+        if self.profile.is_test_infrastructure() {
+            return format!(
+                "profile={}\npostgres=127.0.0.1:{}\n",
+                self.profile.as_str(),
+                self.ports.postgres
+            );
+        }
         let mut urls = format!(
             concat!(
                 "profile={}\n",
@@ -2555,6 +2831,13 @@ wait "$postgres_pid"
         )
     }
 
+    fn postgres_test_url(&self) -> String {
+        format!(
+            "postgres://postgres:finite-local@127.0.0.1:{}/postgres",
+            self.ports.postgres
+        )
+    }
+
     fn postgres_dir(&self) -> PathBuf {
         self.process_state_dir(ManagedProcess::Postgres)
     }
@@ -2565,6 +2848,41 @@ wait "$postgres_pid"
 
     fn postgres_script_path(&self) -> PathBuf {
         self.run_dir.join("run-postgres.sh")
+    }
+
+    fn postgres_startup_status_path(&self) -> PathBuf {
+        self.postgres_dir().join("startup-status")
+    }
+
+    fn postgres_startup_status(&self) -> Result<Option<String>> {
+        let path = self.postgres_startup_status_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let status = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let status = status.trim();
+        match status {
+            "port-unavailable" | "startup-failed" => Ok(Some(status.to_string())),
+            _ => bail!(
+                "managed Postgres wrote invalid startup status {status:?} to {}",
+                path.display()
+            ),
+        }
+    }
+
+    fn ensure_postgres_startup_active(&self) -> Result<()> {
+        match self.postgres_startup_status()?.as_deref() {
+            None => Ok(()),
+            Some(reason @ ("port-unavailable" | "startup-failed")) => {
+                Err(RetryablePostgresStartup {
+                    port: self.ports.postgres,
+                    reason: reason.to_string(),
+                }
+                .into())
+            }
+            Some(status) => bail!("managed Postgres wrote unexpected startup status {status:?}"),
+        }
     }
 
     fn core_dir(&self) -> PathBuf {
@@ -2659,6 +2977,24 @@ wait "$postgres_pid"
     }
 
     fn env_values(&self) -> Vec<(&'static str, String)> {
+        if self.profile.is_test_infrastructure() {
+            return vec![
+                ("DEVFINITY_STATE_DIR", self.run_dir.display().to_string()),
+                (
+                    "DEVFINITY_PROCESS_COMPOSE_FILE",
+                    self.process_compose_file.display().to_string(),
+                ),
+                (
+                    "DEVFINITY_PROCESS_COMPOSE_SOCKET",
+                    self.process_compose_socket.display().to_string(),
+                ),
+                ("DEVFINITY_LOGS_DIR", self.logs_dir.display().to_string()),
+                ("DEVFINITY_PIDS_DIR", self.pids_dir.display().to_string()),
+                ("DEVFINITY_POSTGRES_PORT", self.ports.postgres.to_string()),
+                ("FC_CORE_POSTGRES_TEST_URL", self.postgres_test_url()),
+                ("DEVFINITY_PROFILE", self.profile.as_str().to_string()),
+            ];
+        }
         let mut values = vec![
             ("DEVFINITY_STATE_DIR", self.run_dir.display().to_string()),
             (
@@ -2752,6 +3088,96 @@ wait "$postgres_pid"
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownSignal {
+    Interrupt,
+    Terminate,
+}
+
+impl ShutdownSignal {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Interrupt => "INT",
+            Self::Terminate => "TERM",
+        }
+    }
+
+    fn exit_code(self) -> u8 {
+        match self {
+            Self::Interrupt => 130,
+            Self::Terminate => 143,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessOutcome {
+    Ready,
+    Interrupted(ShutdownSignal),
+}
+
+struct ShutdownSignals {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    fn new() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            let interrupt =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .context("failed to install SIGINT handler")?;
+            let terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .context("failed to install SIGTERM handler")?;
+            Ok(Self {
+                interrupt,
+                terminate,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    async fn pending(&mut self) -> Result<Option<ShutdownSignal>> {
+        tokio::select! {
+            biased;
+            signal = self.recv() => Ok(Some(signal?)),
+            _ = tokio::time::sleep(Duration::ZERO) => Ok(None),
+        }
+    }
+
+    async fn recv(&mut self) -> Result<ShutdownSignal> {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                signal = self.interrupt.recv() => {
+                    signal
+                        .map(|()| ShutdownSignal::Interrupt)
+                        .ok_or_else(|| anyhow!("SIGINT signal stream closed"))
+                }
+                signal = self.terminate.recv() => {
+                    signal
+                        .map(|()| ShutdownSignal::Terminate)
+                        .ok_or_else(|| anyhow!("SIGTERM signal stream closed"))
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .context("failed to listen for Ctrl-C")?;
+            Ok(ShutdownSignal::Interrupt)
+        }
+    }
+}
+
 struct ProcessComposeGuard<'a> {
     stack: &'a Stack,
     child: Child,
@@ -2764,7 +3190,7 @@ impl ProcessComposeGuard<'_> {
         if self.shutdown_complete {
             return Ok(());
         }
-        self.shutdown_complete = true;
+        let mut failures = Vec::new();
 
         if self.stack.process_compose_socket.exists() && self.stack.process_compose_available() {
             let mut command = self.stack.process_compose_control_command();
@@ -2772,16 +3198,40 @@ impl ProcessComposeGuard<'_> {
             run_best_effort(&mut command, "stop devfinity process-compose stack");
         }
 
-        if wait_child_exit(&mut self.child, Duration::from_secs(10))?.is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        match wait_child_exit(&mut self.child, Duration::from_secs(10)) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(error) = self.child.kill() {
+                    failures.push(format!(
+                        "failed to kill process-compose supervisor: {error}"
+                    ));
+                }
+                if let Err(error) = self.child.wait() {
+                    failures.push(format!(
+                        "failed to reap process-compose supervisor: {error}"
+                    ));
+                }
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "failed while waiting for process-compose: {error:#}"
+                ));
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
         }
         self.stack.cleanup_managed_processes();
         self.stack.remove_secret_files();
         remove_file_best_effort(&self.stack.process_compose_socket);
         self.stack.remove_process_compose_control_dir();
         remove_file_best_effort(&self.pid_file);
-        Ok(())
+        self.shutdown_complete = true;
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!("{}", failures.join("; "))
+        }
     }
 }
 
@@ -2969,6 +3419,63 @@ fn check_tcp_service(process: ManagedProcess, host: &str, port: u16) -> ServiceC
     }
 }
 
+fn check_postgres_service(
+    process: ManagedProcess,
+    port: u16,
+    expected_instance_id: &str,
+) -> ServiceCheck {
+    let output = Command::new("psql")
+        .args([
+            "-X",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "-U",
+            "postgres",
+            "-d",
+            "postgres",
+            "--no-password",
+            "-Atqc",
+            "show cluster_name",
+        ])
+        .env("PGCONNECT_TIMEOUT", "1")
+        .env("PGSSLMODE", "disable")
+        .env_remove("PGSERVICE")
+        .env_remove("PGSERVICEFILE")
+        .env_remove("PGOPTIONS")
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let actual = String::from_utf8_lossy(&output.stdout);
+            if actual.trim() == expected_instance_id {
+                ServiceCheck::new(
+                    process,
+                    "healthy",
+                    format!("owned Postgres instance {expected_instance_id}"),
+                )
+            } else {
+                ServiceCheck::new(
+                    process,
+                    "foreign",
+                    "Postgres instance id did not match this devfinity run".to_string(),
+                )
+            }
+        }
+        Ok(output) => ServiceCheck::new(
+            process,
+            "down",
+            format!("Postgres ownership probe exited with {}", output.status),
+        ),
+        Err(error) => ServiceCheck::new(
+            process,
+            "down",
+            format!("failed to run Postgres ownership probe: {error}"),
+        ),
+    }
+}
+
 fn check_http_service(process: ManagedProcess, host: &str, port: u16, path: &str) -> ServiceCheck {
     match http_status_line(host, port, path) {
         Ok(status_line) => {
@@ -3065,7 +3572,15 @@ fn run_status_with_pid_file(mut command: Command, pid_file: &Path) -> Result<Exi
 fn status_to_exit_code(status: std::process::ExitStatus) -> ExitCode {
     match status.code() {
         Some(code) if (0..=255).contains(&code) => ExitCode::from(code as u8),
-        _ => ExitCode::FAILURE,
+        _ => {
+            #[cfg(unix)]
+            if let Some(signal) = status.signal()
+                && let Ok(code) = u8::try_from(128 + signal)
+            {
+                return ExitCode::from(code);
+            }
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -3082,6 +3597,81 @@ fn wait_child_exit(child: &mut Child, timeout: Duration) -> Result<Option<ExitSt
             return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+async fn wait_for_wrapped_command(
+    child: &mut Child,
+    shutdown_signals: &mut ShutdownSignals,
+) -> Result<ExitStatus> {
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to wait for wrapped devfinity command")?
+        {
+            return Ok(status);
+        }
+        tokio::select! {
+            signal = shutdown_signals.recv() => {
+                let signal = signal?;
+                eprintln!(
+                    "devfinity received {}; forwarding it to wrapped command process group {}",
+                    signal.name(),
+                    child.id()
+                );
+                signal_process_group(child.id(), signal.name());
+                return wait_for_signaled_command(child).await;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+    }
+}
+
+async fn wait_for_signaled_command(child: &mut Child) -> Result<ExitStatus> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to wait for interrupted devfinity command")?
+        {
+            return Ok(status);
+        }
+        if started.elapsed() >= Duration::from_secs(10) {
+            eprintln!(
+                "wrapped devfinity command did not exit after interruption; killing process group {}",
+                child.id()
+            );
+            signal_process_group(child.id(), "KILL");
+            return child
+                .wait()
+                .context("failed to reap killed devfinity command");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn signal_process_group(pid: u32, signal: &str) {
+    #[cfg(unix)]
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .status();
+    #[cfg(not(unix))]
+    let status = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .args(["/T", "/F"])
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            eprintln!("failed to signal wrapped command process group {pid}: exited with {status}")
+        }
+        Err(error) => {
+            eprintln!("failed to signal wrapped command process group {pid}: {error}")
+        }
     }
 }
 
@@ -3225,6 +3815,19 @@ fn random_local_secret() -> Result<String> {
     getrandom::fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!("local credential generation failed: {error:?}"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn random_postgres_instance_id() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow!("Postgres instance-id generation failed: {error:?}"))?;
+    Ok(format!(
+        "devfinity-{}",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -3834,7 +4437,7 @@ mod tests {
         assert!(yaml.contains("DEVFINITY_MANAGED_PROCESS=1"));
         assert!(yaml.contains("pids/core.pid"));
         assert!(yaml.contains("run-postgres.sh"));
-        assert!(yaml.contains("psql -h 127.0.0.1"));
+        assert!(yaml.contains("psql -X -h 127.0.0.1"));
         assert!(yaml.contains("cargo run -p finitechat-hosted-device"));
         assert!(yaml.contains("FINITECHAT_HOSTED_DATA_ROOT="));
         assert!(yaml.contains("FC_HOSTED_WEB_DEVICE_URL="));
@@ -3844,6 +4447,141 @@ mod tests {
         assert!(yaml.contains("finitesites:\n        condition: process_healthy"));
         assert!(!yaml.contains("postgres:16-alpine"));
         assert!(!yaml.contains("fpk_"));
+    }
+
+    #[test]
+    fn test_infrastructure_profile_contains_only_postgres() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity-test"))
+            .unwrap()
+            .with_profile(StackProfile::TestInfrastructure)
+            .with_postgres_port(24_321)
+            .unwrap();
+        let yaml = stack.process_compose_yaml();
+
+        assert!(yaml.contains("\n  postgres:\n"));
+        assert!(yaml.contains("-Atqc 'show cluster_name'"));
+        assert!(yaml.contains(&stack.postgres_instance_id));
+        assert!(!yaml.contains("-tAc 'select 1'"));
+        assert!(!yaml.contains("-d finite_saas_core"));
+        for excluded in [
+            "\n  rust-build:\n",
+            "\n  workos-fixture:\n",
+            "\n  core:\n",
+            "\n  finitechat:\n",
+            "\n  hosted-web-device:\n",
+            "\n  finitesites:\n",
+            "\n  finite-identity:\n",
+            "\n  finite-brain:\n",
+            "\n  dashboard-deps:\n",
+            "\n  dashboard:\n",
+            "\n  runtime-image:\n",
+            "\n  runner:\n",
+        ] {
+            assert!(
+                !yaml.contains(excluded),
+                "test infrastructure unexpectedly contains {excluded}"
+            );
+        }
+        assert_eq!(
+            stack.enabled_processes(),
+            vec![ManagedProcess::ProcessCompose, ManagedProcess::Postgres]
+        );
+        assert_eq!(stack.service_checks().len(), 1);
+    }
+
+    #[test]
+    fn test_infrastructure_exports_only_managed_postgres_contract() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity-test"))
+            .unwrap()
+            .with_profile(StackProfile::TestInfrastructure)
+            .with_postgres_port(24_322)
+            .unwrap();
+        let environment = stack.env_values();
+
+        assert!(environment.contains(&(
+            "FC_CORE_POSTGRES_TEST_URL",
+            "postgres://postgres:finite-local@127.0.0.1:24322/postgres".to_string()
+        )));
+        assert!(environment.contains(&("DEVFINITY_PROFILE", "test-infrastructure".to_string())));
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| *name == "FC_CORE_DATABASE_URL")
+        );
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| *name == "FINITECHAT_HOSTED_API_TOKEN")
+        );
+    }
+
+    #[test]
+    fn test_infrastructure_does_not_treat_an_open_tcp_port_as_postgres() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let check = check_postgres_service(ManagedProcess::Postgres, port, "expected-instance");
+
+        assert!(!check.is_ready());
+        assert_ne!(check.state, "healthy");
+        accept.join().unwrap();
+    }
+
+    #[test]
+    fn test_infrastructure_does_not_create_the_product_database() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf())
+            .unwrap()
+            .with_profile(StackProfile::TestInfrastructure);
+        stack.ensure_dirs().unwrap();
+        stack.write_postgres_script().unwrap();
+
+        let script = fs::read_to_string(stack.postgres_script_path()).unwrap();
+        assert!(!script.contains("createdb"));
+        assert!(!script.contains("select 1 from pg_database"));
+        assert!(script.contains("-c \"cluster_name=$instance_id\""));
+        assert!(script.contains(&stack.postgres_instance_id));
+        assert!(script.contains("reason=port-unavailable"));
+        assert!(script.contains("startup-status"));
+    }
+
+    #[test]
+    fn early_postgres_startup_failures_are_retryable() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let stack = Stack::new(state_dir.path().to_path_buf())
+            .unwrap()
+            .with_profile(StackProfile::TestInfrastructure)
+            .with_postgres_port(24_323)
+            .unwrap();
+        stack.ensure_dirs().unwrap();
+
+        for status in ["port-unavailable", "startup-failed"] {
+            fs::write(stack.postgres_startup_status_path(), format!("{status}\n")).unwrap();
+            let error = stack.ensure_postgres_startup_active().unwrap_err();
+            assert!(
+                is_retryable_postgres_startup(&error),
+                "{status} was not retryable: {error:#}"
+            );
+            let cleanup_failure = error.context("process-compose cleanup also failed");
+            assert!(
+                !is_retryable_postgres_startup(&cleanup_failure),
+                "a cleanup failure must prevent retrying the prior startup: {cleanup_failure:#}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signaled_child_status_uses_the_shell_exit_code() {
+        let status = Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+
+        assert_eq!(status_to_exit_code(status), ExitCode::from(143));
     }
 
     #[test]
