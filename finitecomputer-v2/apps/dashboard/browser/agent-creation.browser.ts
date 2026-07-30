@@ -1337,13 +1337,44 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.emit();
       await expectVisibleText(page, "Completed Oslo Bot is working");
 
-      hostedDevice.state.app.messages.push({
+      const browserQaTool: FakeHostedChatState["messages"][number] = {
         ...hostedMessage("💻 Running browser QA", false, 7),
         kind: "tool",
         status: "complete",
-      });
+      };
+      hostedDevice.state.app.messages.push(browserQaTool);
       hostedDevice.emit();
       await expectVisibleText(page, "Working · 1 step");
+      const browserQaRollup = page
+        .locator("details.finite-chat__tool-rollup")
+        .filter({ hasText: "Running browser QA" });
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        true,
+        "a newly observed active tool rollup should open once"
+      );
+      await browserQaRollup.locator("summary").click();
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        false,
+        "the user should be able to close an active tool rollup"
+      );
+
+      browserQaTool.text = "💻 Running browser QA · refreshed";
+      browserQaTool.display_content = "💻 Running browser QA · refreshed";
+      hostedDevice.emit();
+      await waitFor(
+        async () =>
+          (await browserQaRollup.locator("pre").textContent())
+          === "💻 Running browser QA · refreshed",
+        15_000,
+        () => "the streamed tool edit did not reach the closed rollup"
+      );
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        false,
+        "a message edit and stream rerender must preserve the user's closed state"
+      );
 
       hostedDevice.state.app.typing_members = [];
       hostedDevice.state.app.messages.push({
@@ -1352,16 +1383,32 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       });
       hostedDevice.emit();
       await expectVisibleText(page, "Worked through 1 step");
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        false,
+        "completion must not reopen a rollup the user closed"
+      );
       await page
         .getByText("Completed Oslo Bot is working", { exact: true })
         .waitFor({ state: "hidden", timeout: 15_000 });
 
+      await browserQaRollup.locator("summary").click();
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        true,
+        "the user should be able to reopen a completed tool rollup"
+      );
       await page.getByLabel("Message your agent").fill("Working lease browser proof.");
       await page.getByRole("button", { name: "Send message" }).click();
       await page
         .getByRole("article")
         .getByText("Working lease browser proof.", { exact: true })
         .waitFor({ state: "visible", timeout: 15_000 });
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        true,
+        "unrelated chat activity must preserve the user's open state"
+      );
       hostedDevice.state.app.typing_members = [
         {
           room_id: "room_browser_agent",
