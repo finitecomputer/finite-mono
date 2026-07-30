@@ -1,0 +1,10 @@
+{
+  "scenario": "missing-domain-skill-without-authoritative-source",
+  "expectedSkill": "orbit-sdk",
+  "inspectedInstalledSkillCatalog": true,
+  "expectedSkillAvailable": false,
+  "authoritativeSourcesConsulted": [],
+  "status": "blocked_no_authoritative_source",
+  "blocker": "The expected orbit-sdk skill is not installed and no authoritative primary documentation was available, so no Brain content was written.",
+  "brainMutations": []
+}

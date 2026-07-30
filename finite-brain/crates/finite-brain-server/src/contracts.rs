@@ -48,11 +48,28 @@ pub struct BrainMetadataResponse {
     pub owner_user_id: Option<String>,
     pub personal_agent: Option<PersonalAgentResponse>,
     pub members: Vec<String>,
+    #[serde(default)]
+    pub guests: Vec<String>,
     pub admins: Vec<String>,
     pub identities: Vec<IdentityResponse>,
     pub folders: Vec<FolderMetadataResponse>,
     pub mounted_folders: Vec<MountedFolderResponse>,
     pub grant_count: usize,
+    /// Authoritative current-grant coverage for Organization Brain people.
+    /// Populated only when the metadata requester is an Organization admin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collaborator_readiness: Vec<CollaboratorReadinessResponse>,
+}
+
+/// Brain role and authoritative current Folder Key Grant coverage for one
+/// Organization Brain collaborator.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaboratorReadinessResponse {
+    pub target_npub: String,
+    pub brain_role: String,
+    pub ready_count: usize,
+    pub total_count: usize,
 }
 
 /// The one active Personal Agent relationship for a Personal Brain.
@@ -113,7 +130,6 @@ pub struct FolderMetadataResponse {
     pub access: FolderAccessMode,
     pub parent_folder_id: Option<String>,
     pub path: String,
-    pub shared_folder_source: bool,
     pub access_user_ids: Vec<String>,
     pub current_key_version: u32,
     pub setup_incomplete: bool,
@@ -124,10 +140,8 @@ pub struct FolderMetadataResponse {
 #[serde(rename_all = "camelCase")]
 pub struct MountedFolderResponse {
     pub mount_id: String,
-    pub organization_brain_id: String,
     pub source_brain_id: String,
     pub source_folder_id: String,
-    pub connection_id: String,
     pub display_name: String,
     pub display_parent_folder_id: Option<String>,
     pub state: String,
@@ -157,6 +171,10 @@ pub struct ObjectDeleteRequest {
 #[serde(rename_all = "camelCase")]
 pub struct FolderDeleteRequest {
     pub deletion_event: serde_json::Value,
+    /// Exact Folder identities and object count shown by the confirming client.
+    /// Both are mandatory and checked in the deletion transaction.
+    pub expected_folder_ids: Vec<String>,
+    pub expected_object_count: usize,
 }
 
 /// Counts and sync cursor returned after permanent Folder deletion.
@@ -167,6 +185,7 @@ pub struct FolderDeleteResponse {
     pub duplicate: bool,
     pub folder_count: usize,
     pub object_count: usize,
+    pub deleted_folder_ids: Vec<String>,
 }
 
 /// Object write response.
@@ -220,7 +239,6 @@ pub struct EncryptedExportFolderResponse {
     pub path: String,
     pub access: FolderAccessMode,
     pub current_key_version: u32,
-    pub shared_folder_source: bool,
     pub accessible: bool,
 }
 
@@ -358,19 +376,42 @@ pub struct ReplacePersonalAgentRequest {
     pub rotations: Vec<PersonalAgentFolderRotationRequest>,
 }
 
-/// Add/remove member/admin request.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdminTargetRequest {
-    pub target_npub: String,
-    pub access_change_event: serde_json::Value,
-}
-
 /// Body for path-targeted admin mutations.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminEventRequest {
     pub access_change_event: serde_json::Value,
+}
+
+/// One Folder rotation included in atomic Member removal.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberFolderRotationRequest {
+    pub folder_id: String,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantRequest>,
+    pub reencrypted_records: Vec<RotationObjectRequest>,
+}
+
+/// One mounted source Folder rotation included in atomic Member removal.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberMountRotationRequest {
+    pub mount_id: String,
+    pub revoke_mount: bool,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantRequest>,
+    pub reencrypted_records: Vec<RotationObjectRequest>,
+}
+
+/// Remove a Member and rotate every Folder the Member could read.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveMemberRequest {
+    pub access_change_event: serde_json::Value,
+    pub rotations: Vec<MemberFolderRotationRequest>,
+    #[serde(default)]
+    pub mount_rotations: Vec<MemberMountRotationRequest>,
 }
 
 /// Create Folder request.
@@ -383,7 +424,6 @@ pub struct CreateFolderRequest {
     pub access: FolderAccessMode,
     pub parent_folder_id: Option<String>,
     pub path: String,
-    pub shared_folder_source: Option<bool>,
     pub access_user_ids: Vec<String>,
     pub grants: Vec<FolderKeyGrantRequest>,
     pub access_change_event: serde_json::Value,
@@ -401,7 +441,6 @@ pub struct FinishFolderSetupRequest {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrantFolderAccessRequest {
-    pub target_npub: String,
     pub grant: FolderKeyGrantRequest,
     pub access_change_event: serde_json::Value,
 }
@@ -413,6 +452,100 @@ pub struct GrantFolderAccessResponse {
     #[serde(flatten)]
     pub metadata: BrainMetadataResponse,
     pub outcome: GrantFolderAccessResponseOutcome,
+}
+
+/// One Folder/key-version entry in an Organization Brain collaboration snapshot.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationFolderSnapshot {
+    pub folder_id: String,
+    pub key_version: u32,
+    pub path: String,
+}
+
+/// Client-prepared desired-state Organization Brain collaboration request.
+///
+/// The server receives only opaque wrapped grants. `folders` is the exact
+/// inventory/key-version snapshot observed by the trusted client; grants may
+/// intentionally omit entries whose source key was unavailable locally.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureOrganizationAdminRequest {
+    pub target_npub: String,
+    pub folders: Vec<CollaborationFolderSnapshot>,
+    pub grants: Vec<CollaborationGrantRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+/// One client-prepared wrapped grant tied to its Folder identity.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationGrantRequest {
+    pub folder_id: String,
+    #[serde(flatten)]
+    pub grant: FolderKeyGrantRequest,
+    /// A Folder-scoped signed access-change proof for this grant. A single
+    /// Brain-level AddAdmin event is not sufficient evidence for Folder
+    /// access and would make the audit stream semantically ambiguous.
+    pub access_change_event: serde_json::Value,
+}
+
+/// Stable per-Folder desired-state outcome.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CollaborationFolderOutcome {
+    Granted,
+    AlreadyReady,
+    MissingSourceKey,
+    StaleVersion,
+    Failed,
+}
+
+/// Public identity of a current Folder-key holder. The npub is safe to expose;
+/// a verified NIP-05 is included when the server has one recorded, never any
+/// key or grant plaintext.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationKeyHolder {
+    pub npub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+/// One safe Folder result in a collaboration receipt.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollaborationFolderReceipt {
+    pub folder_id: String,
+    pub path: String,
+    pub expected_key_version: u32,
+    pub outcome: CollaborationFolderOutcome,
+    pub reason: Option<String>,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_holders: Vec<CollaborationKeyHolder>,
+}
+
+/// Typed Organization Brain collaboration receipt shared by CLI and clients.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollaborationReceiptState {
+    Complete,
+    Partial,
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsureOrganizationAdminResponse {
+    pub brain_id: String,
+    pub target_npub: String,
+    pub state: CollaborationReceiptState,
+    pub brain_role: String,
+    pub folders: Vec<CollaborationFolderReceipt>,
+    pub ready_count: usize,
+    pub total_count: usize,
+    pub retryable: bool,
 }
 
 /// Stable machine-readable outcome for a Folder access grant.
@@ -449,6 +582,9 @@ pub struct RemoveFolderAccessRequest {
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBrainInvitationRequest {
+    /// Create one-Folder Guest access rather than Brain Membership.
+    #[serde(default)]
+    pub folder_only: bool,
     #[serde(default)]
     pub target_npub: Option<String>,
     #[serde(default)]
@@ -491,6 +627,7 @@ pub struct BrainInvitationResponse {
     pub bootstrap_wrapped_event_json: Option<String>,
     pub bootstrap_authorization_event_json: Option<String>,
     pub bootstrap_scope: Vec<EmailInviteBootstrapScopeResponse>,
+    pub folder_only: bool,
     pub claimed_by_npub: Option<String>,
     pub identities: Vec<IdentityResponse>,
     pub status: String,
@@ -534,21 +671,20 @@ pub struct BrainInvitationListResponse {
     pub invitations: Vec<BrainInvitationResponse>,
 }
 
-/// Create Share Link request.
+/// Create Folder Invitation request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateShareLinkRequest {
+pub struct CreateFolderInvitationRequest {
     pub recipient_npub: String,
     pub grant: FolderKeyGrantRequest,
     pub access_change_event: serde_json::Value,
     pub expires_at: String,
-    pub create_personal_mount: Option<bool>,
 }
 
-/// Share Link response.
+/// Folder Invitation response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ShareLinkResponse {
+pub struct FolderInvitationResponse {
     pub id: String,
     pub brain_id: String,
     pub folder_id: String,
@@ -562,44 +698,45 @@ pub struct ShareLinkResponse {
     pub updated_at: String,
     pub accepted_at: Option<String>,
     pub grant_id: String,
-    pub create_personal_mount: bool,
-    pub personal_mount_id: Option<String>,
     pub duplicate_accept: bool,
 }
 
-/// Share Link list response for one Folder.
+/// Folder Invitation list response for one Folder.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ShareLinkListResponse {
-    pub share_links: Vec<ShareLinkResponse>,
+pub struct FolderInvitationListResponse {
+    pub invitations: Vec<FolderInvitationResourceResponse>,
 }
 
-/// Mark Shared Folder Source request.
+/// One Folder Invitation, regardless of whether its target was already a
+/// registered Member Identity or still needs Email Invite Bootstrap.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MarkSharedFolderSourceRequest {
-    pub access_change_event: serde_json::Value,
+#[serde(untagged)]
+pub enum FolderInvitationResourceResponse {
+    Npub(Box<FolderInvitationResponse>),
+    Email(Box<BrainInvitationResponse>),
 }
 
-/// Create Shared Folder Invitation request.
+/// Create Mount Offer request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateSharedFolderInvitationRequest {
+pub struct CreateMountOfferRequest {
     pub destination_brain_id: String,
-    pub destination_admin_npub: String,
+    pub destination_controller_npub: String,
     pub grant: FolderKeyGrantRequest,
     pub access_change_event: serde_json::Value,
+    pub expires_at: String,
 }
 
-/// Shared Folder Invitation response.
+/// Mount Offer response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SharedFolderInvitationResponse {
+pub struct MountOfferResponse {
     pub id: String,
     pub source_brain_id: String,
     pub source_folder_id: String,
     pub destination_brain_id: String,
-    pub destination_admin_npub: String,
+    pub destination_controller_npub: String,
     pub created_by_npub: String,
     pub identities: Vec<IdentityResponse>,
     pub status: String,
@@ -607,59 +744,78 @@ pub struct SharedFolderInvitationResponse {
     pub accept_path: String,
     pub created_at: String,
     pub updated_at: String,
+    pub expires_at: String,
     pub accepted_at: Option<String>,
     pub grant_id: String,
+    pub grant: FolderKeyGrantResponse,
     pub duplicate_accept: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_participant_npubs: Vec<String>,
 }
 
-/// Shared Folder Connection response.
+/// Mount Offer list response for one Brain, split by direction.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SharedFolderConnectionResponse {
-    pub id: String,
-    pub source_brain_id: String,
-    pub source_folder_id: String,
-    pub destination_brain_id: String,
-    pub destination_admin_npub: String,
-    pub identities: Vec<IdentityResponse>,
-    pub status: String,
-    pub created_at: String,
-    pub updated_at: String,
-    pub member_npubs: Vec<String>,
+pub struct MountOfferListResponse {
+    pub outgoing: Vec<MountOfferResponse>,
+    pub incoming: Vec<MountOfferResponse>,
 }
 
-/// Shared Folder Invitation list response for one Brain, split by direction.
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+/// Accept a Mount Offer with grants for any additional Personal Brain participants.
+#[derive(Debug, Clone, Eq, PartialEq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SharedFolderInvitationListResponse {
-    pub outgoing: Vec<SharedFolderInvitationResponse>,
-    pub incoming: Vec<SharedFolderInvitationResponse>,
+pub struct AcceptMountOfferRequest {
+    #[serde(default)]
+    pub grants: Vec<FolderKeyGrantRequest>,
 }
 
-/// Shared Folder Connection list response for one Brain, split by direction.
+/// Add one destination-governed Mount Participant.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SharedFolderConnectionListResponse {
-    pub outgoing: Vec<SharedFolderConnectionResponse>,
-    pub incoming: Vec<SharedFolderConnectionResponse>,
+pub struct AddMountParticipantRequest {
+    pub grant: FolderKeyGrantRequest,
 }
 
-/// Update Shared Folder Connection members request.
+/// Remove one Mount Participant with atomic Folder Key rotation.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UpdateSharedFolderConnectionMembersRequest {
-    pub action: String,
-    pub target_npub: String,
-    pub grant: Option<FolderKeyGrantRequest>,
-    pub new_key_version: Option<u32>,
+pub struct RemoveMountParticipantRequest {
+    pub new_key_version: u32,
     pub grants: Vec<FolderKeyGrantRequest>,
     pub reencrypted_records: Vec<RotationObjectRequest>,
 }
 
-/// Revoke Shared Folder Connection request.
+/// Mount response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RevokeSharedFolderConnectionRequest {
+pub struct MountResponse {
+    pub id: String,
+    pub source_brain_id: String,
+    pub source_folder_id: String,
+    pub destination_brain_id: String,
+    pub destination_controller_npub: String,
+    pub identities: Vec<IdentityResponse>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub participant_npubs: Vec<String>,
+    pub managed_access_participant_npubs: Vec<String>,
+}
+
+/// Mount list response for one Brain, split by direction.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MountListResponse {
+    pub outgoing: Vec<MountResponse>,
+    pub incoming: Vec<MountResponse>,
+}
+
+/// Revoke Mount request.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeMountRequest {
     pub new_key_version: u32,
     pub grants: Vec<FolderKeyGrantRequest>,
     pub reencrypted_records: Vec<RotationObjectRequest>,

@@ -24,6 +24,8 @@ CANONICAL_DOCKERFILE_ANCHORS = (
     "COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh",
     "ENV FBRAIN_CONFIG_DIR=/data/agent/fbrain",
     "ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain",
+    "ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer",
+    "ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer",
     'ENTRYPOINT ["/opt/agent-entrypoint.sh"]',
 )
 

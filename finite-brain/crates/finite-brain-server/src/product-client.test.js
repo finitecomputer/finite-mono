@@ -68,15 +68,29 @@ function interactiveElement(ownerDocument = null) {
     listeners.set(type, listener);
   };
   target.click = () => listeners.get("click")?.({ currentTarget: target, target });
+  target.dispatch = (type) => listeners.get(type)?.({ currentTarget: target, target });
   return target;
 }
 
 const elements = new Map();
+const createdObjectUrls = [];
+const revokedObjectUrls = [];
+class TestURL extends URL {
+  static createObjectURL() {
+    const value = `blob:finite-brain-test-${createdObjectUrls.length + 1}`;
+    createdObjectUrls.push(value);
+    return value;
+  }
+
+  static revokeObjectURL(value) {
+    revokedObjectUrls.push(value);
+  }
+}
 const context = {
   TextDecoder,
   TextEncoder,
   Uint8Array,
-  URL,
+  URL: TestURL,
   URLSearchParams,
   clearInterval,
   clearTimeout,
@@ -124,6 +138,16 @@ const source = fs.readFileSync(path.join(__dirname, "product-client.js"), "utf8"
 const htmlSource = fs.readFileSync(path.join(__dirname, "product-client.html"), "utf8");
 const cssSource = fs.readFileSync(path.join(__dirname, "product-client.css"), "utf8");
 
+const resetBrainSessionSource = source.slice(
+  source.indexOf("function resetBrainSessionState"),
+  source.indexOf("function lockSession")
+);
+assert.match(
+  resetBrainSessionSource,
+  /releaseAssetDownloadUrl\(\)/u,
+  "Locking or replacing a Brain session must revoke any outstanding Asset object URL"
+);
+
 const hostedStartupSource = source.slice(
   source.indexOf("async function detectSigner()"),
   source.indexOf("async function connectBrainIdentityProvider")
@@ -151,6 +175,46 @@ assert.match(
   /options\.expectedBrainId \|\| exportedBrain\?\.brain\?\.id/u,
   "Scoped grant opening must preserve an explicit Brain ID and understand the current export shape"
 );
+const brainUpdateNotificationSource = source.slice(
+  source.indexOf("async function startBrainUpdateNotifications"),
+  source.indexOf("function activePageInput")
+);
+assert.match(
+  brainUpdateNotificationSource,
+  /response\.status === 404 \|\| response\.status === 405/u,
+  "Old servers must be classified as notification-capability unsupported"
+);
+assert.match(
+  brainUpdateNotificationSource,
+  /brainUpdateNotificationsUnsupported \? 30000 : 1000/u,
+  "Unsupported notification capability must use slow renegotiation instead of a fast loop"
+);
+const brainUpdateReconnectSource = brainUpdateNotificationSource.slice(
+  brainUpdateNotificationSource.indexOf("} finally {")
+);
+assert.doesNotMatch(
+  brainUpdateReconnectSource,
+  /refreshReader\(\)/u,
+  "Reconnect scheduling must not poll Brain contents; successful subscription performs catch-up"
+);
+const accessReconciliationSource = source.slice(
+  source.indexOf("async function applyBrainUpdateNotification"),
+  source.indexOf("function stopBrainUpdateNotifications")
+);
+assert.match(
+  accessReconciliationSource,
+  /state\.reconciliationGeneration \+= 1/u,
+  "Access changes must invalidate any older in-flight content reconciliation"
+);
+const pullSyncSource = source.slice(
+  source.indexOf("async function pullSyncBootstrap"),
+  source.indexOf("function renderGraphView")
+);
+assert.equal(
+  (pullSyncSource.match(/requireCurrentReconciliationGeneration/g) || []).length,
+  2,
+  "A content pull must revalidate access generation before decrypting and before publishing"
+);
 vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
@@ -168,6 +232,10 @@ assert.equal(
   }),
   "Brain should understand the selected runtime identity as a Personal Agent hint"
 );
+const sessionAssetUrl = client.installSessionAssetDownloadUrl({});
+assert.equal(sessionAssetUrl, "blob:finite-brain-test-1");
+client.lockSession();
+assert.deepEqual(revokedObjectUrls, [sessionAssetUrl]);
 assert.equal(
   client.suggestedAgentIdentityFromNavigation(
     "?agentEmail=not-an-email&agentNpub=not-an-npub"
@@ -338,8 +406,11 @@ function invitationPanelTestSeams() {
     ...context,
     document: {
       ...context.document,
+      createElement() {
+        return interactiveElement(this);
+      },
       getElementById(id) {
-        if (!testElements.has(id)) testElements.set(id, element());
+        if (!testElements.has(id)) testElements.set(id, interactiveElement(this));
         return testElements.get(id);
       },
     },
@@ -359,7 +430,7 @@ function invitationPanelTestSeams() {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, handleBrainInvitationInput, renderBrainInvitationPanel, revokeBrainInvitationById });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, buildBrainInvitationRequest, handleBrainInvitationInput, initialBrainInvitationFolders, rememberIdentity, renderBrainAccessManagement, renderBrainInvitationFolderOptions, renderBrainInvitationList, renderBrainInvitationPanel, renderFolderShareLinkList, replacePersonalAgentFromPanel, resetBrainSessionState, revokeBrainInvitationById });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(seamSource, source, "The invitation test must capture the Product Client's real panel seams");
   vm.runInNewContext(seamSource, testContext, { filename: "product-client-invitation-panel.test.js" });
@@ -367,6 +438,80 @@ function invitationPanelTestSeams() {
     testContext.window.FiniteBrainProductClient.createNip07BrainIdentityProvider(testContext.window.nostr)
   );
   assert.ok(seams, "The Product Client must expose the captured invitation panel seams to this deterministic test");
+  return { context: testContext, elements: testElements, seams };
+}
+
+function brainPeopleTestSeams() {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      createElement() {
+        return interactiveElement(this);
+      },
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, interactiveElement(this));
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_PEOPLE_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_PEOPLE_TEST_SEAMS__?.({ state, renderBrainPeopleList });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(seamSource, source, "The people test must capture the Product Client's real render seam");
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-people.test.js" });
+  assert.ok(seams, "The Product Client must expose the captured people render seam");
+  return { context: testContext, elements: testElements, seams };
+}
+
+function organizationCollaborationPanelTestSeams() {
+  const testElements = new Map();
+  const testContext = {
+    ...context,
+    document: {
+      ...context.document,
+      createElement() {
+        return interactiveElement(this);
+      },
+      getElementById(id) {
+        if (!testElements.has(id)) testElements.set(id, interactiveElement(this));
+        return testElements.get(id);
+      },
+    },
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_COLLABORATION_PANEL_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  const seamSource = source.replace(
+    "  return {\n    accessActionRoute,",
+    "  window.__FINITE_BRAIN_CAPTURE_COLLABORATION_PANEL_TEST_SEAMS__?.({ state, addBrainAdminFromPanel, renderBrainPeopleList });\n\n  return {\n    accessActionRoute,"
+  );
+  assert.notEqual(
+    seamSource,
+    source,
+    "The collaboration test must capture the Product Client's real panel seams"
+  );
+  vm.runInNewContext(seamSource, testContext, {
+    filename: "product-client-organization-collaboration-panel.test.js",
+  });
+  assert.ok(seams, "The Product Client must expose the captured collaboration panel seams");
   return { context: testContext, elements: testElements, seams };
 }
 
@@ -534,13 +679,10 @@ for (const [inputId, buttonId] of [
   ["accessShareTargetInput", "createShareLinkButton"],
   ["accessShareExpiresAtInput", "createShareLinkButton"],
   ["accessShareLinkInput", "acceptShareLinkButton"],
-  ["brainInviteTargetNpubInput", "createBrainInvitationButton"],
-  ["brainInviteFoldersInput", "createBrainInvitationButton"],
+  ["brainInviteRecipientEmailInput", "createBrainInvitationButton"],
   ["brainInviteExpiresAtInput", "createBrainInvitationButton"],
   ["brainInviteCodeInput", "getBrainInvitationButton"],
   ["brainInviteEmailInput", "getEmailInviteInstructionsButton"],
-  ["brainInviteEmailProofCreatedAtInput", "getEmailInviteInstructionsButton"],
-  ["brainInviteSecretInput", "getEmailInviteInstructionsButton"],
 ]) {
   assert.equal(
     keyboardNavigation.primaryFormActionForInput(inputId),
@@ -869,6 +1011,16 @@ for (const invitationAcceptanceSource of [
   );
 }
 assert.ok(
+  createOrganizationBrainFromInputSource.indexOf("const name = input?.value.trim()")
+    < createOrganizationBrainFromInputSource.indexOf("await beginExplicitBrainCreation()"),
+  "Organization creation must snapshot its submitted name before an async session transition"
+);
+assert.ok(
+  createOrganizationBrainFromInputSource.indexOf("const includeAgentAdmin = Boolean")
+    < createOrganizationBrainFromInputSource.indexOf("await beginExplicitBrainCreation()"),
+  "Organization creation must snapshot its Agent choice before an async session transition"
+);
+assert.ok(
   createOrganizationBrainFromInputSource.indexOf("state.pendingOrganizationCreation = null;")
     > createOrganizationBrainFromInputSource.indexOf("await finishExplicitBrainCreation(metadata, creation);"),
   "An ambiguous post-create refresh failure must retain the stable Organization Brain retry identity"
@@ -895,8 +1047,8 @@ assert.match(
 );
 assert.match(
   htmlSource,
-  /id="brainInviteSecretInput"[\s\S]{0,180}type="password"/,
-  "Manually entered Invite Secrets must remain masked"
+  /id="brainInviteSecretInput"[^>]*type="hidden"/,
+  "Client-only Invite Secrets must travel in private link state instead of a visible form field"
 );
 assert.match(
   source,
@@ -975,7 +1127,6 @@ const folderRows = client.metadataFolderRows({
       accessUserIds: [],
       currentKeyVersion: 1,
       setupIncomplete: false,
-      sharedFolderSource: false,
     },
     {
       id: "restricted",
@@ -984,22 +1135,20 @@ const folderRows = client.metadataFolderRows({
       accessUserIds: [],
       currentKeyVersion: 3,
       setupIncomplete: false,
-      sharedFolderSource: true,
     },
   ],
 });
 assert.equal(folderRows[0].status, "ready");
 assert.equal(folderRows[1].status, "locked");
-assert.match(folderRows[1].detail, /source/);
 assert.match(folderRows[1].detail, /locked/);
 const badgeLabels = (badges) => Array.from(badges, (badge) => badge.label);
 assert.deepEqual(
   badgeLabels(client.accessBadgesForFolder(folderRows[1], new Set(["restricted@3"]))),
-  ["restricted", "shared", "locked", "key open", "v3"]
+  ["restricted", "locked", "key open", "v3"]
 );
 assert.deepEqual(
   badgeLabels(client.accessBadgesForFolder(folderRows[1], new Set(["restricted@2"]))),
-  ["restricted", "shared", "locked", "v3"]
+  ["restricted", "locked", "v3"]
 );
 assert.deepEqual(
   badgeLabels(client.sidebarAccessBadgesForFolder(folderRows[0])),
@@ -1035,6 +1184,20 @@ assert.equal(
     members: ["npub-admin", "npub-member"],
   }),
   "2 members"
+);
+assert.equal(
+  JSON.stringify(client.buildAccessList(
+    { access: "restricted", accessUserIds: ["npub-guest"] },
+    { kind: "organization", admins: [], members: [], guests: ["npub-guest"] }
+  )),
+  JSON.stringify([{
+    canMutate: false,
+    id: "npub-guest",
+    name: "Private member",
+    role: "guest",
+    type: "guest",
+    removable: true,
+  }])
 );
 assert.match(htmlSource, /id="accessFolderButton"/);
 assert.equal((htmlSource.match(/id="accessFolderButton"/g) || []).length, 1);
@@ -1079,23 +1242,39 @@ assert.match(htmlSource, /class="access-action-stack"/);
 assert.match(htmlSource, /class="access-state-stack"/);
 assert.match(htmlSource, /id="accessAddPersonPanel"/);
 assert.match(htmlSource, />\s*Grant folder access\s*</);
-assert.match(htmlSource, />\s*Choose folder and Member Identity\s*</);
+assert.match(htmlSource, />\s*Choose a Folder and enter an email\s*</);
 assert.match(htmlSource, /id="accessAdvancedSection"/);
-assert.match(htmlSource, />\s*Restricted folder link\s*</);
+assert.match(htmlSource, />\s*Private, single-use invitation\s*</);
 assert.match(htmlSource, /id="accessSidebarCount"/);
 assert.match(htmlSource, /id="accessShareHint"/);
-assert.match(htmlSource, /id="accessShareMountHint"/);
-assert.match(htmlSource, />\s*Add a shortcut to their Personal Brain\s*</);
-assert.match(
-  htmlSource,
-  /adds a shortcut to the shared Folder in their Personal Brain\. It does not copy data or change Folder access\./
-);
+assert.doesNotMatch(htmlSource, /id="accessShareMountInput"/);
+assert.doesNotMatch(htmlSource, /id="accessShareMountHint"/);
+assert.doesNotMatch(htmlSource, />\s*Add a shortcut to their Personal Brain\s*</);
 assert.doesNotMatch(htmlSource, />\s*Create personal mount\s*</);
 assert.doesNotMatch(htmlSource, />\s*Folder \+ person\s*</);
 assert.doesNotMatch(htmlSource, />\s*Single-use Folder access\s*</);
 assert.doesNotMatch(htmlSource, />\s*Share with link\s*</);
-assert.match(htmlSource, /placeholder="npub… or name@domain"/);
-assert.doesNotMatch(htmlSource, /id="accessShareTargetInput"[\s\S]{0,160}placeholder="name@example\.com"/);
+assert.doesNotMatch(
+  htmlSource,
+  /npub/i,
+  "Product Client markup must never expose a public-key identity in a form or visible fallback"
+);
+for (const inputId of [
+  "accessAddPersonInput",
+  "accessShareTargetInput",
+  "brainInviteRecipientEmailInput",
+  "brainMemberEmailInput",
+  "brainAdminEmailInput",
+  "brainInviteEmailInput",
+  "personalAgentEmailInput",
+  "managePersonalAgentEmailInput",
+]) {
+  assert.match(
+    htmlSource,
+    new RegExp(`<input(?=[^>]*id="${inputId}")(?=[^>]*type="email")(?=[^>]*autocomplete="email")(?=[^>]*inputmode="email")[^>]*>`, "s"),
+    `${inputId} must use the browser's email input contract`
+  );
+}
 assert.match(htmlSource, /id="accessFolderPanel"/);
 assert.match(htmlSource, /id="brainPeopleList"/);
 assert.match(htmlSource, /id="brainPeopleSection"/);
@@ -1103,12 +1282,14 @@ assert.doesNotMatch(htmlSource, /agentWorkspacePairing/);
 assert.match(htmlSource, /id="brainPeopleActionPanel"/);
 assert.match(htmlSource, /class="brain-access-action-grid"/);
 assert.match(htmlSource, />\s*Manage members\s*</);
-assert.match(htmlSource, />\s*Add or promote existing identities\s*</);
+assert.match(htmlSource, />\s*Invite, add, or promote by email\s*</);
 assert.match(htmlSource, />\s*Invite someone\s*</);
-assert.match(htmlSource, />\s*Email or Member Identity\s*</);
-assert.match(htmlSource, />\s*Folder access plan\s*</);
-assert.match(htmlSource, />\s*Add member now\s*</);
-assert.match(htmlSource, />\s*Make admin\s*</);
+assert.match(htmlSource, />\s*Email address\s*</);
+assert.match(htmlSource, />\s*Folder access\s*</);
+assert.doesNotMatch(htmlSource, />\s*Folder access plan\s*</);
+assert.match(htmlSource, />\s*Add existing member\s*</);
+assert.match(htmlSource, />\s*Add administrator\s*</);
+assert.match(htmlSource, /Brain role and current Folder access are shown separately\./);
 assert.match(htmlSource, />\s*Join a Brain\s*</);
 assert.match(htmlSource, />\s*Verify email and load access\s*</);
 assert.match(htmlSource, />\s*Join Brain\s*</);
@@ -1116,10 +1297,10 @@ assert.doesNotMatch(htmlSource, />\s*Invite, add, or promote\s*</);
 assert.doesNotMatch(htmlSource, />\s*Accept received invite\s*</);
 assert.doesNotMatch(htmlSource, />\s*Choose folder and person\s*</);
 assert.doesNotMatch(htmlSource, />\s*Brain people\s*</);
-assert.doesNotMatch(source, /Invite, add, or promote/);
+assert.match(source, /Invite, add, or promote by email/);
 assert.doesNotMatch(source, /Accept received invite/);
 assert.doesNotMatch(source, /Admin-only controls/);
-assert.match(source, /Member Identities or Links/);
+assert.match(source, /People or Links/);
 assert.match(htmlSource, /id="folderShareLinkListSection"/);
 assert.match(htmlSource, /id="brainInvitationListSection"/);
 assert.match(htmlSource, /id="sharedFolderSection"/);
@@ -1150,7 +1331,6 @@ assert.match(cssSource, /\.access-advanced-summary,\s*\.access-admin-summary\s*\
 assert.match(cssSource, /\.access-advanced-summary \.icon,\s*\.access-admin-summary \.icon\s*\{/s);
 assert.match(cssSource, /#accessAddPersonPanel\s+\.access-folder-selector\s*\{[^}]*margin:\s*0;/s);
 assert.match(cssSource, /#accessAddPersonPanel\s+\.access-advanced-content\s*\{[^}]*display:\s*grid;[^}]*gap:\s*12px;/s);
-assert.match(cssSource, /\.access-checkbox-hint\s*\{[^}]*margin:\s*-6px 0 0 23px;/s);
 assert.match(cssSource, /\.brain-management-section/);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*overflow-x:\s*hidden;/s);
 assert.match(cssSource, /#accessSidebarPanel\s*\{[^}]*--access-panel-inset:\s*10px;/s);
@@ -1184,7 +1364,8 @@ const unresolvedOrgPeopleRows = client.brainPeopleRows({
   admins: ["npub-admin"],
 });
 assert.equal(
-  JSON.stringify(unresolvedOrgPeopleRows.map(({ id, name, role, status, type, removable }) => ({
+  JSON.stringify(unresolvedOrgPeopleRows.map(({ canMutate, id, name, role, status, type, removable }) => ({
+    canMutate,
     id,
     name,
     role,
@@ -1194,36 +1375,254 @@ assert.equal(
   }))),
   JSON.stringify([
     {
+      canMutate: false,
       id: "npub-admin",
-      name: "npub-admin",
+      name: "Private member",
       role: "admin",
-      status: "No email or NIP-05 metadata loaded",
+      status: "Email unavailable",
       type: "admin",
       removable: true,
     },
     {
+      canMutate: false,
       id: "npub-member",
-      name: "npub-member",
+      name: "Private member",
       role: "member",
-      status: "No email or NIP-05 metadata loaded",
+      status: "Email unavailable",
       type: "member",
       removable: true,
     },
   ])
 );
 assert.equal(
-  JSON.stringify(unresolvedOrgPeopleRows[0].details.slice(0, 2)),
+  JSON.stringify(unresolvedOrgPeopleRows[0].details),
   JSON.stringify([
-    { label: "Email / NIP-05", value: "Not resolved in this client" },
-    { label: "Public key", value: "npub-admin" },
+    { label: "Email", value: "Not available" },
   ])
+);
+const authoritativeOrgPeopleRows = client.brainPeopleRows({
+  kind: "organization",
+  members: ["npub-admin", "npub-ready"],
+  admins: ["npub-admin", "npub-ready"],
+  collaboratorReadiness: [
+    {
+      targetNpub: "npub-admin",
+      brainRole: "admin",
+      readyCount: 1,
+      totalCount: 2,
+    },
+    {
+      targetNpub: "npub-ready",
+      brainRole: "admin",
+      readyCount: 2,
+      totalCount: 2,
+    },
+  ],
+});
+assert.equal(
+  JSON.stringify(authoritativeOrgPeopleRows.map((row) => ({
+    brainRoleLabel: row.brainRoleLabel,
+    collaborationState: row.collaborationState,
+    folderReadinessLabel: row.folderReadinessLabel,
+    repairable: row.repairable,
+  }))),
+  JSON.stringify([
+    {
+      brainRoleLabel: "Admin",
+      collaborationState: "partial",
+      folderReadinessLabel: "1/2 — needs repair",
+      repairable: true,
+    },
+    {
+      brainRoleLabel: "Admin",
+      collaborationState: "complete",
+      folderReadinessLabel: "2/2 — ready",
+      repairable: false,
+    },
+  ]),
+);
+const unresolvedIncompleteAdmin = client.brainPeopleRows({
+  kind: "organization",
+  members: ["npub-incomplete"],
+  admins: ["npub-incomplete"],
+  collaboratorReadiness: [
+    {
+      targetNpub: "npub-incomplete",
+      brainRole: "admin",
+      readyCount: 0,
+      totalCount: 2,
+    },
+  ],
+})[0];
+assert.equal(unresolvedIncompleteAdmin.name, "Private member");
+assert.equal(unresolvedIncompleteAdmin.canMutate, false);
+assert.equal(
+  unresolvedIncompleteAdmin.repairable,
+  true,
+  "Missing display email must not suppress a safe desired-state repair",
+);
+const peoplePanel = brainPeopleTestSeams();
+const peopleActorHex = "00".repeat(32);
+const peopleActorNpub = client.npubFromHex(peopleActorHex);
+peoplePanel.seams.state.pubkeyHex = peopleActorHex;
+peoplePanel.seams.state.signerStatus = "connected";
+peoplePanel.seams.state.accessBusy = false;
+const peopleMetadata = {
+  kind: "organization",
+  members: [peopleActorNpub, "npub-incomplete"],
+  admins: [peopleActorNpub, "npub-incomplete"],
+  collaboratorReadiness: [
+    {
+      targetNpub: peopleActorNpub,
+      brainRole: "admin",
+      readyCount: 2,
+      totalCount: 2,
+    },
+    {
+      targetNpub: "npub-incomplete",
+      brainRole: "admin",
+      readyCount: 0,
+      totalCount: 2,
+    },
+  ],
+};
+peoplePanel.seams.renderBrainPeopleList(peopleMetadata);
+const renderedPeopleNodes = [];
+const collectPeopleNodes = (node) => {
+  renderedPeopleNodes.push(node);
+  for (const child of node?.children || []) collectPeopleNodes(child);
+};
+collectPeopleNodes(peoplePanel.context.document.getElementById("brainPeopleList"));
+const unresolvedRepairButton = renderedPeopleNodes.find(
+  (node) => node?.textContent === "Repair Folder access",
+);
+assert.ok(unresolvedRepairButton, "An initially incomplete admin renders a repair action");
+assert.equal(
+  unresolvedRepairButton.getAttribute("aria-label"),
+  "Repair Folder access for Private member",
+);
+peoplePanel.seams.renderBrainPeopleList({
+  kind: "personal",
+  ownerUserId: peopleActorNpub,
+});
+const renderedPersonalNodes = [];
+const collectPersonalNodes = (node) => {
+  renderedPersonalNodes.push(node);
+  for (const child of node?.children || []) collectPersonalNodes(child);
+};
+collectPersonalNodes(peoplePanel.context.document.getElementById("brainPeopleList"));
+assert.equal(
+  renderedPersonalNodes.some((node) =>
+    String(node?.className || "").includes("access-person-readiness")
+  ),
+  false,
+  "Personal Brain people output must not inherit Organization collaboration readiness",
+);
+assert.equal(
+  JSON.stringify(
+  client.collaborationReceiptPresentation(
+    {
+      state: "complete",
+      brainRole: "admin",
+      readyCount: 2,
+      totalCount: 2,
+      folders: [
+        { path: "General", outcome: "alreadyReady", retryable: false },
+        { path: "Private", outcome: "granted", retryable: false },
+      ],
+    },
+    "beta@finite.vip",
+  )),
+  JSON.stringify({
+    tone: "ready",
+    title: "Admin access ready",
+    detail: "beta@finite.vip has Brain role: Admin and Folder access: 2/2.",
+    retryable: false,
+    unreadyFolders: [],
+  }),
+);
+assert.equal(
+  JSON.stringify(
+  client.collaborationReceiptPresentation(
+    {
+      state: "partial",
+      brainRole: "admin",
+      readyCount: 1,
+      totalCount: 2,
+      retryable: true,
+      folders: [
+        { path: "General", outcome: "alreadyReady", retryable: false },
+        { path: "Private", outcome: "staleVersion", retryable: true },
+      ],
+    },
+    "beta@finite.vip",
+  )),
+  JSON.stringify({
+    tone: "warn",
+    title: "Admin access needs repair",
+    detail: "beta@finite.vip has Brain role: Admin and Folder access: 1/2. Needs repair: Private.",
+    retryable: true,
+    unreadyFolders: ["Private"],
+  }),
+);
+assert.equal(
+  JSON.stringify(
+  client.collaborationReceiptPresentation(
+    {
+      state: "indeterminate",
+      brainRole: "admin",
+      readyCount: 0,
+      totalCount: 2,
+      retryable: true,
+      folders: [],
+    },
+    "beta@finite.vip",
+  )),
+  JSON.stringify({
+    tone: "warn",
+    title: "Admin access needs checking",
+    detail: "The result could not be confirmed. Check this collaborator’s Folder access, then repair if needed.",
+    retryable: true,
+    unreadyFolders: [],
+  }),
+);
+assert.doesNotMatch(
+  JSON.stringify(
+    client.collaborationReceiptPresentation(
+      {
+        state: "indeterminate",
+        providerError: "secret-provider-stack npub1advanced raw-folder-key",
+        folders: [],
+      },
+      "beta@finite.vip",
+    ),
+  ),
+  /secret-provider-stack|npub1advanced|raw-folder-key/,
+);
+assert.match(
+  source,
+  /if \(person\.removable && person\.canMutate && canManage\)/,
+  "Unresolved identity rows must fail closed before rendering a destructive action"
+);
+assert.match(
+  source,
+  /if \(oldAgent && !oldAgentEmail\) \{[\s\S]{0,180}Current Personal Agent email is unavailable/,
+  "Personal Agent replacement and removal must fail closed until the existing email is resolved"
+);
+assert.equal(
+  (source.match(/if \(person\.removable && person\.canMutate && canManage\)/g) || []).length,
+  2,
+  "Both Brain-member and Folder-access removal controls must require a resolved email"
 );
 const unresolvedOwnerRows = client.brainPeopleRows({
   kind: "personal",
   ownerUserId: "npub-owner",
 });
+assert.equal(unresolvedOwnerRows[0].brainRoleLabel, null);
+assert.equal(unresolvedOwnerRows[0].folderReadinessLabel, null);
 assert.equal(
-  JSON.stringify(unresolvedOwnerRows.map(({ id, name, role, status, type, removable }) => ({
+  JSON.stringify(unresolvedOwnerRows.map(({ canMutate, id, name, role, status, type, removable }) => ({
+    canMutate,
     id,
     name,
     role,
@@ -1233,10 +1632,11 @@ assert.equal(
   }))),
   JSON.stringify([
     {
+      canMutate: false,
       id: "npub-owner",
-      name: "npub-owner",
+      name: "Private member",
       role: "owner",
-      status: "No email or NIP-05 metadata loaded",
+      status: "Email unavailable",
       type: "owner",
       removable: false,
     },
@@ -1252,9 +1652,19 @@ assert.equal(
     },
     "connected"
   ).map((badge) => badge.label)),
-  JSON.stringify(["signer connected", "organization", "1 folders", "2 grants", "1 mounts"])
+  JSON.stringify(["connection ready", "organization", "1 folders", "2 grants", "1 mounts"])
 );
 assert.equal(client.personalBrainIdForPubkey("ab".repeat(32)), "personal-abababababababab");
+const firstSameNameBrainId = client.brainIdFromName("org", "Same Name", {
+  createdAt: 1_784_739_617_779,
+  entropy: new Uint8Array(8).fill(0x11),
+});
+const secondSameNameBrainId = client.brainIdFromName("org", "Same Name", {
+  createdAt: 1_784_739_617_779,
+  entropy: new Uint8Array(8).fill(0x22),
+});
+assert.notEqual(firstSameNameBrainId, secondSameNameBrainId);
+assert.match(firstSameNameBrainId, /^org-same-name-[a-z0-9]+-(?:11){8}$/u);
 assert.equal(client.brainTargetFromSearch("?brainId=org-acme"), "org-acme");
 assert.equal(client.brainTargetFromSearch("?brainId=../../personal"), null);
 assert.equal(
@@ -1372,7 +1782,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.equal(clipboardFeedbackState.clientActionFeedback, null);
   assert.equal(
     clipboardFeedbackElement.textContent,
-    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+    "Action could not be completed. Try again. If it continues, check your connection and Brain status."
   );
   assert.doesNotMatch(clipboardFeedbackElement.textContent, /later-action-failure-detail-sentinel/);
   assert.equal(await clipboardFeedback.seams.copyToClipboard(copiedPageId), true);
@@ -1569,7 +1979,7 @@ async function assertClipboardInvitationFeedbackContracts() {
   assert.equal(await copyBeforeNewerAction, true);
   assert.equal(
     newerActionElement.textContent,
-    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+    "Action could not be completed. Try again. If it continues, check your connection and Brain status."
   );
   assert.doesNotMatch(newerActionElement.textContent, /(?:copy-before-newer-action|newer-action-detail)-sentinel/);
 }
@@ -1794,42 +2204,42 @@ function assertModalFocusAndContextRouteContracts() {
 assert.equal(
   JSON.stringify(client.sessionStatusView("locked")),
   JSON.stringify({
-    action: "Unlock session",
-    detail: "Folder Keys and temporary plaintext are cleared. Unlock to reopen encrypted grants.",
+    action: "Open Brain",
+    detail: "Your private content is closed on this device.",
     locked: true,
-    title: "Session locked",
+    title: "Brain locked",
   })
 );
 assert.equal(
   JSON.stringify(client.sessionStatusView("unlocked")),
   JSON.stringify({
-    action: "Lock session",
-    detail: "Readable content and Session Folder Keys are held in memory for this session.",
+    action: "Lock Brain",
+    detail: "Your Brain is open and ready on this device.",
     locked: false,
-    title: "Session unlocked",
+    title: "Brain ready",
   })
 );
 assert.equal(
   JSON.stringify(client.sessionStatusView("resuming")),
   JSON.stringify({
-    action: "Lock session",
-    detail: "Opening encrypted Folder Key Grants and rebuilding the temporary client view.",
+    action: "Lock Brain",
+    detail: "Opening your private content on this device.",
     locked: false,
-    title: "Unlocking session",
+    title: "Opening Brain",
   })
 );
 const activeBrainAccessLoss = client.protectedRequestError(
-  "/_admin/brains/acme/metadata",
+  "/v1/brains/acme/metadata",
   403,
   { error: "brain access required" }
 );
 assert.equal(activeBrainAccessLoss.status, 403);
 assert.equal(activeBrainAccessLoss.reason, "brain access required");
-assert.equal(activeBrainAccessLoss.path, "/_admin/brains/acme/metadata");
+assert.equal(activeBrainAccessLoss.path, "/v1/brains/acme/metadata");
 for (const path of [
-  "/_admin/brains/acme/metadata",
-  "/_admin/brains/acme/export",
-  "/_admin/brains/acme/sync/bootstrap",
+  "/v1/brains/acme/metadata",
+  "/v1/brains/acme/export",
+  "/v1/brains/acme/sync/bootstrap",
 ]) {
   assert.equal(
     client.isActiveBrainAuthorizationLoss(
@@ -1841,12 +2251,12 @@ for (const path of [
   );
 }
 for (const [status, reason, path] of [
-  [401, "brain access required", "/_admin/brains/acme/metadata"],
-  [403, "replayed Nostr authorization event", "/_admin/brains/acme/metadata"],
-  [403, "stale Nostr event timestamp", "/_admin/brains/acme/metadata"],
-  [403, "brain admin access required", "/_admin/brains/acme/invitations"],
-  [403, "folder access required", "/_admin/brains/acme/folders/restricted/objects/page"],
-  [403, "brain access required", "/_admin/brains/other/metadata"],
+  [401, "brain access required", "/v1/brains/acme/metadata"],
+  [403, "replayed Nostr authorization event", "/v1/brains/acme/metadata"],
+  [403, "stale Nostr event timestamp", "/v1/brains/acme/metadata"],
+  [403, "brain admin access required", "/v1/brains/acme/invitations"],
+  [403, "folder access required", "/v1/brains/acme/folders/restricted/objects/page"],
+  [403, "brain access required", "/v1/brains/other/metadata"],
 ]) {
   assert.equal(
     client.isActiveBrainAuthorizationLoss(client.protectedRequestError(path, status, { error: reason }), "acme"),
@@ -1855,9 +2265,9 @@ for (const [status, reason, path] of [
   );
 }
 assert.match(htmlSource, /id="sessionSecurityStatus"[^>]*aria-live="polite"/);
-assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Session locked</);
-assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Unlock session</);
-assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock session</);
+assert.match(htmlSource, /id="sessionSecurityTitle"[^>]*>Brain locked</);
+assert.match(htmlSource, /id="resumeSessionButton"[^>]*>Open Brain</);
+assert.match(htmlSource, /id="lockSessionButton"[^>]*>Lock Brain</);
 assert.match(htmlSource, /<meta name="color-scheme" content="dark light"\s*\/>/);
 assert.match(
   htmlSource,
@@ -1911,7 +2321,7 @@ assert.doesNotMatch(source, /sessionAccountBrainButton[\s\S]{0,180}openSettingsM
 assert.match(htmlSource, /id="manageBrainsModal"[^>]*role="dialog"[^>]*aria-modal="true"/s);
 assert.match(htmlSource, /id="manageBrainsList"/);
 assert.match(htmlSource, /id="manageBrainsLoadButton"/);
-assert.match(htmlSource, /id="manageBrainsLoadButton"[^>]*>Unlock Brain</);
+assert.match(htmlSource, /id="manageBrainsLoadButton"[^>]*>Open Brain</);
 assert.doesNotMatch(htmlSource, /id="accessLoadBrainButton"/);
 assert.match(htmlSource, /id="manageBrainsConnectSignerButton"/);
 assert.match(htmlSource, /id="manageCreateOrganizationBrainButton"/);
@@ -1930,7 +2340,9 @@ assert.match(htmlSource, /id="settingsNavBrain"[^>]*role="tab"/);
 assert.match(htmlSource, /id="settingsNavAccess"[^>]*role="tab"[^>]*aria-controls="settingsAccessPanel"/);
 assert.match(htmlSource, /id="settingsNavInvitations"[^>]*role="tab"[^>]*aria-controls="settingsInvitationsPanel"/);
 assert.match(htmlSource, /id="settingsSessionPanel"[^>]*role="tabpanel"[^>]*aria-labelledby="settingsSessionTitle"/);
-assert.match(htmlSource, /id="settingsSessionTitle"[^>]*>Session and signer</);
+assert.match(htmlSource, /id="settingsSessionTitle"[^>]*>Brain health</);
+assert.match(htmlSource, />\s*Health\s*</);
+assert.match(htmlSource, />\s*Connection and privacy\s*</);
 assert.match(htmlSource, /id="settingsBrainPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsAccessPanel"[^>]*role="tabpanel"/);
 assert.match(htmlSource, /id="settingsAccessPanelMount"/);
@@ -1954,20 +2366,18 @@ assert.doesNotMatch(
   /id="accessResultPanel"/,
   "Invitation feedback must not be stranded inside the hidden Access section"
 );
-assert.match(htmlSource, /id="settingsConnectSignerButton"/);
 assert.match(htmlSource, /id="settingsSignerTitle"/);
 assert.match(htmlSource, /id="settingsSignerDetail"/);
 assert.match(
   htmlSource,
-  /The server cannot reconstruct a lost Folder Key or sole signer\. Treat a Brain as durable only after a separate recovery path has reopened it on a replacement client\./,
-  "Settings must disclose the current recovery limitation without inventing a recovery control"
+  /Recovery is proven only when the same Recovery Set restores this Brain onto an empty replacement device\./,
+  "Settings must state the tested empty-target recovery boundary without inventing a recovery control"
 );
+assert.match(htmlSource, /id="brainInviteSecretInput"[^>]*type="hidden"/);
+assert.doesNotMatch(htmlSource, /id="brainInviteEmailProofCreatedAtInput"/);
+assert.doesNotMatch(htmlSource, /Private Invite Secret|Email proof time/);
 assert.match(htmlSource, /id="settingsManageBrainsButton"/);
-assert.doesNotMatch(
-  htmlSource.slice(htmlSource.indexOf('id="settingsBrainPanel"'), htmlSource.indexOf('id="settingsAccessPanel"')),
-  /id="settingsConnectSignerButton"/,
-  "Signer connection must live in Session rather than a duplicate Brain action"
-);
+assert.doesNotMatch(htmlSource, /id="settingsConnectSignerButton"/);
 assert.match(source, /openSettingsModal\("session"\)/);
 assert.match(source, /settingsNavAccess[\s\S]{0,120}setSettingsSection\("access"\)/);
 assert.match(source, /settingsNavInvitations[\s\S]{0,120}setSettingsSection\("invitations"\)/);
@@ -1982,17 +2392,17 @@ assert.match(source, /settingsNav\.hidden = sessionOnly;/);
 assert.match(source, /panel\.hidden = false;[\s\S]{0,120}panel\.open = true;/);
 assert.match(
   createBrainInvitationFromPanelSource,
-  /They can claim the encrypted Folder Key Grants in the invitation scope after proving the invited email\.[\s\S]{0,260}They can join with this one-time invite; grant any required Folder Keys after they join\./s,
-  "Invitation creation must distinguish email grant claim from direct Member Identity membership"
+  /They can claim the selected Folder access after verifying the invited email\.[\s\S]{0,260}They can join with this one-time invite; an admin may still need to finish their Folder access\./s,
+  "Invitation creation must distinguish email access claim from existing-account membership"
 );
 assert.match(
   acceptBrainInvitationFromPanelSource,
-  /An admin must grant any required Folder Keys before encrypted content can open\./,
-  "Direct invitation acceptance must not promise Folder Keys"
+  /An admin must finish granting access before private content can open\./,
+  "Direct invitation acceptance must not promise private content access"
 );
 assert.match(
   loadEmailInviteInstructionsFromPanelSource,
-  /Email verified[\s\S]{0,220}can claim encrypted Folder Key Grants/,
+  /Email verified[\s\S]{0,220}Selected Folder access is ready to claim/,
   "Email invitation flow must keep the grant claim explicit"
 );
 assert.match(source, /ribbonAccessButton[\s\S]{0,120}openSettingsModal\("access"\)/);
@@ -2074,6 +2484,42 @@ assert.match(
   /\.page-surface\s*\{[^}]*grid-template-rows:\s*auto minmax\(0, 1fr\) auto;/s,
   "The Page header needs its own grid row so the explicit Save action is visible"
 );
+assert.match(
+  cssSource,
+  /\.page-workspace\s*\{[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s,
+  "The Page workspace must constrain its reader row to the embedded viewport",
+);
+assert.match(
+  htmlSource,
+  /id="toggleBacklinksButton"[\s\S]*?aria-expanded="false"/,
+  "Backlinks need an explicit closed-by-default toggle",
+);
+assert.match(
+  htmlSource,
+  /id="pageLinkContextPanel"[\s\S]*?hidden/,
+  "The secondary backlinks sidebar must be hidden by default",
+);
+assert.match(
+  cssSource,
+  /\.page-workspace\[data-backlinks-open="true"\]\s*\{[^}]*grid-template-columns:/s,
+  "The backlinks column must only consume layout space while open",
+);
+assert.match(
+  cssSource,
+  /\.page-link-context\s*\{[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s,
+  "The open backlinks panel must contain horizontal overflow and scroll vertically",
+);
+assert.match(source, /state\.backlinksOpen = !state\.backlinksOpen;/);
+assert.match(
+  cssSource,
+  /\.page-surface\s*\{[^}]*min-height:\s*0;[^}]*height:\s*100%;[^}]*overflow:\s*hidden;/s,
+  "The Page surface must allow its note row to shrink and scroll",
+);
+assert.match(
+  cssSource,
+  /\.note-content\s*\{[^}]*min-height:\s*0;[^}]*height:\s*100%;[^}]*overflow:\s*auto;[^}]*overscroll-behavior:\s*contain;/s,
+  "Long notes must scroll inside the embedded reader",
+);
 assert.doesNotMatch(
   cssSource,
   /\.page-header\s*\{[^}]*display:\s*none;/s,
@@ -2084,8 +2530,8 @@ assert.match(cssSource, /\.settings-invitations-section\s*\{/);
 assert.match(cssSource, /#settingsInvitationsPanelMount\s*\{/);
 assert.match(cssSource, /@media \(max-width: 640px\)/);
 assert.match(cssSource, /\.settings-modal-layout\s*\{[^}]*display:\s*flex;/s);
-assert.match(htmlSource, /<span class="pill ready">email or npub<\/span>/);
-assert.doesNotMatch(htmlSource, /<span class="pill ready">new Member Identity<\/span>/);
+assert.doesNotMatch(htmlSource, /Member Identity/i);
+assert.doesNotMatch(htmlSource, /Connect signer/i);
 assert.match(source, /clearSessionSecretsAndPlaintext\(state\)/);
 assert.equal(client.sessionGrantOpeningAllowed("locked"), false);
 assert.equal(client.sessionGrantOpeningAllowed("resuming"), true);
@@ -2189,7 +2635,7 @@ assert.deepEqual(
 );
 assert.equal(
   client.clientFailureMessage(Object.assign(new Error("raw target detail"), { code: "brain_target_unavailable" })),
-  "That Brain is not yet available to this account. Refresh or check your access."
+  "You do not have access to that Brain yet. Refresh or check your invitation."
 );
 assert.equal(
   client.clientFailureMessage(Object.assign(new Error("raw setup detail"), { code: "brain_setup_cancelled" })),
@@ -2201,7 +2647,7 @@ assert.equal(
 );
 assert.equal(
   client.clientFailureMessage(new Error("Session is locked. Unlock the session before refreshing")),
-  "Your Brain session is locked. Unlock it and try again."
+  "Your Brain is locked. Open it and try again."
 );
 assert.equal(client.signerIdentityChanged(null, "aa".repeat(32)), false);
 assert.equal(client.signerIdentityChanged("aa".repeat(32), "aa".repeat(32)), false);
@@ -2899,7 +3345,213 @@ assert.equal(
   "Rendered contextual links use the same CommonMark targets as health and Graph View"
 );
 
+function brainNotificationBehaviorTestSeams(options = {}) {
+  const timers = [];
+  const testContext = {
+    ...context,
+    AbortController: class {
+      constructor() {
+        this.signal = { aborted: false };
+      }
+      abort() {
+        this.signal.aborted = true;
+      }
+    },
+    clearTimeout(timer) {
+      if (timer) timer.cleared = true;
+    },
+    setTimeout(callback, delay) {
+      const timer = { callback, cleared: false, delay };
+      timers.push(timer);
+      return timer;
+    },
+    fetch: options.fetch,
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      __FINITE_BRAIN_TEST_SIGN_AUTH_HEADER__: async () => "Nostr test",
+      __FINITE_BRAIN_TEST_REFRESH_READER__: options.refreshReader,
+      __FINITE_BRAIN_TEST_PROTECTED_REQUEST__: options.protectedRequest,
+      __FINITE_BRAIN_TEST_LOAD_METADATA__: options.loadBrainMetadata,
+      __FINITE_BRAIN_TEST_OPEN_GRANTS__: options.openGrants,
+      __FINITE_BRAIN_TEST_PULL_SYNC__: options.pullSync,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_NOTIFICATION_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  let seamSource = source
+    .replace(
+      "  async function signAuthHeader(path, options = {}) {",
+      "  async function signAuthHeader(path, options = {}) {\n    if (window.__FINITE_BRAIN_TEST_SIGN_AUTH_HEADER__) return window.__FINITE_BRAIN_TEST_SIGN_AUTH_HEADER__(path, options);"
+    )
+    .replace(
+      "  async function protectedRequest(path, options = {}) {",
+      "  async function protectedRequest(path, options = {}) {\n    if (window.__FINITE_BRAIN_TEST_PROTECTED_REQUEST__) return window.__FINITE_BRAIN_TEST_PROTECTED_REQUEST__(path, options);"
+    )
+    .replace(
+      "  async function refreshReader() {",
+      "  async function refreshReader() {\n    if (window.__FINITE_BRAIN_TEST_REFRESH_READER__) return window.__FINITE_BRAIN_TEST_REFRESH_READER__();"
+    )
+    .replace(
+      "  async function loadBrainMetadata(options = {}) {",
+      "  async function loadBrainMetadata(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_LOAD_METADATA__) return window.__FINITE_BRAIN_TEST_LOAD_METADATA__({ state, options });"
+    )
+    .replace(
+      "  async function openAvailableFolderKeyGrants(options = {}) {",
+      "  async function openAvailableFolderKeyGrants(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_OPEN_GRANTS__) return window.__FINITE_BRAIN_TEST_OPEN_GRANTS__(options);"
+    )
+    .replace(
+      "  async function pullSyncBootstrapExclusive(options = {}) {",
+      "  async function pullSyncBootstrapExclusive(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_PULL_SYNC__) return window.__FINITE_BRAIN_TEST_PULL_SYNC__({ state, options });"
+    )
+    .replace(
+      "  return {\n    accessActionRoute,",
+      "  window.__FINITE_BRAIN_CAPTURE_NOTIFICATION_TEST_SEAMS__?.({ state, applyBrainUpdateNotification, createClientProjection, createSessionKeyring, lockSession, pullSyncBootstrap, runSerializedBrainReconciliation, startBrainUpdateNotifications, stopBrainUpdateNotifications });\n\n  return {\n    accessActionRoute,"
+    );
+  assert.notEqual(seamSource, source);
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-notifications.test.js" });
+  assert.ok(seams);
+  return { seams, timers };
+}
+
 (async () => {
+  const serialization = brainNotificationBehaviorTestSeams({
+    fetch: async () => ({ ok: false, status: 404, text: async () => "missing" }),
+  });
+  const serializationOrder = [];
+  let releaseFirst;
+  const first = serialization.seams.runSerializedBrainReconciliation(async () => {
+    serializationOrder.push("first-start");
+    await new Promise((resolve) => { releaseFirst = resolve; });
+    serializationOrder.push("first-end");
+  });
+  const second = serialization.seams.runSerializedBrainReconciliation(async () => {
+    serializationOrder.push("second");
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(serializationOrder, ["first-start"]);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(serializationOrder, ["first-start", "first-end", "second"]);
+
+  let releaseStalePull;
+  let stalePullStarted;
+  const stalePullStartedPromise = new Promise((resolve) => { stalePullStarted = resolve; });
+  let syncRequestCount = 0;
+  const accessPreemption = brainNotificationBehaviorTestSeams({
+    fetch: async () => { throw new Error("SSE not used in preemption test"); },
+    protectedRequest: async (path) => {
+      if (path.endsWith("/sync/bootstrap")) {
+        syncRequestCount += 1;
+        if (syncRequestCount === 1) {
+          stalePullStarted();
+          await new Promise((resolve) => { releaseStalePull = resolve; });
+        }
+        return { latestSequence: 0, objects: [] };
+      }
+      assert.equal(path, "/v1/brains");
+      return { brains: [{ brainId: "acme", kind: "organization", name: "Acme", role: "member" }] };
+    },
+    loadBrainMetadata: async ({ state }) => { state.metadata = { folders: [] }; },
+    openGrants: async ({ keyring }) => { keyring.openedGrants.push({ folderId: "kept" }); },
+  });
+  accessPreemption.seams.state.sessionStatus = "unlocked";
+  accessPreemption.seams.state.activeBrainId = "acme";
+  accessPreemption.seams.state.keyring = accessPreemption.seams.createSessionKeyring();
+  accessPreemption.seams.state.projection = accessPreemption.seams.createClientProjection();
+  const stalePull = accessPreemption.seams.pullSyncBootstrap();
+  await stalePullStartedPromise;
+  const queuedStalePull = accessPreemption.seams.pullSyncBootstrap();
+  const accessUpdate = accessPreemption.seams.applyBrainUpdateNotification({
+    brainId: "acme",
+    latestSequence: 1,
+    reason: "access_updated",
+  });
+  releaseStalePull();
+  await assert.rejects(stalePull, /Brain access changed/u);
+  await assert.rejects(
+    queuedStalePull,
+    /Brain access changed/u,
+    "Content work queued before an access hint must not run ahead of revocation"
+  );
+  await accessUpdate;
+  assert.equal(syncRequestCount, 2, "Access reconciliation runs after invalidating the stale pull");
+
+  let refreshCount = 0;
+  let fetchCount = 0;
+  const streamReaders = [
+    { read: async () => ({ done: true }) },
+    { read: async () => new Promise(() => {}) },
+  ];
+  const liveNotifications = brainNotificationBehaviorTestSeams({
+    fetch: async () => {
+      const reader = streamReaders[fetchCount];
+      fetchCount += 1;
+      return {
+        body: { getReader: () => reader },
+        ok: true,
+        status: 200,
+        text: async () => "",
+      };
+    },
+    refreshReader: async () => { refreshCount += 1; },
+  });
+  liveNotifications.seams.state.sessionStatus = "unlocked";
+  const firstStream = liveNotifications.seams.startBrainUpdateNotifications();
+  await firstStream;
+  assert.equal(refreshCount, 1, "A live subscription performs one authoritative catch-up");
+  const reconnectTimer = liveNotifications.timers.at(-1);
+  assert.equal(reconnectTimer.delay, 1000);
+  reconnectTimer.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refreshCount, 2, "EOF reconnect performs catch-up only after resubscribing");
+  const activeController = liveNotifications.seams.state.brainUpdateAbortController;
+  liveNotifications.seams.lockSession();
+  assert.equal(activeController.signal.aborted, true);
+  assert.equal(liveNotifications.seams.state.brainUpdateReconnectTimer, null);
+
+  const unsupportedNotifications = brainNotificationBehaviorTestSeams({
+    fetch: async () => ({ ok: false, status: 404, text: async () => "missing" }),
+    refreshReader: async () => { throw new Error("unsupported transport must not poll content"); },
+  });
+  unsupportedNotifications.seams.state.sessionStatus = "unlocked";
+  await unsupportedNotifications.seams.startBrainUpdateNotifications();
+  assert.equal(unsupportedNotifications.timers.at(-1).delay, 30000);
+
+  const folderAccess = brainNotificationBehaviorTestSeams({
+    fetch: async () => { throw new Error("SSE not used in access test"); },
+    protectedRequest: async (path) => {
+      assert.equal(path, "/v1/brains");
+      return { brains: [{ brainId: "acme", kind: "organization", name: "Acme", role: "member" }] };
+    },
+    loadBrainMetadata: async ({ state }) => { state.metadata = { folders: [] }; },
+    openGrants: async ({ keyring }) => { keyring.openedGrants.push({ folderId: "kept" }); },
+    pullSync: async () => {},
+  });
+  const accessState = folderAccess.seams.state;
+  accessState.sessionStatus = "unlocked";
+  accessState.activeBrainId = "acme";
+  accessState.keyring = folderAccess.seams.createSessionKeyring();
+  accessState.keyring.openedGrants.push({ folderId: "revoked" });
+  const previousKeyring = accessState.keyring;
+  accessState.projection = folderAccess.seams.createClientProjection();
+  accessState.projection.pages.set("revoked/page", { text: "secret" });
+  accessState.projection.pages.set("kept/page", { text: "kept" });
+  accessState.projection.localDrafts.set("revoked/page", { text: "secret draft" });
+  accessState.projection.localDrafts.set("kept/page", { text: "kept draft" });
+  await folderAccess.seams.applyBrainUpdateNotification({
+    brainId: "acme",
+    latestSequence: 9,
+    reason: "access_updated",
+  });
+  assert.equal(accessState.projection.pages.size, 0);
+  assert.equal(accessState.projection.localDrafts.has("revoked/page"), false);
+  assert.equal(accessState.projection.localDrafts.has("kept/page"), true);
+  assert.equal(previousKeyring.openedGrants.length, 0, "The superseded keyring is cleared");
+
   const rawNip07Provider = {
     async getPublicKey() {
       return "11".repeat(32);
@@ -3126,7 +3778,7 @@ assert.equal(
   assert.equal(missingBrainIdentityProvider.label, "setup required");
   assert.equal(
     missingBrainIdentityProvider.detail,
-    "Set up your Finite Chat Hosted Device before opening Brain."
+    "Finish setting up your Finite account in Chat before opening Brain."
   );
   assert.equal(missingBrainIdentityProvider.canConnect, false);
   assert.equal(
@@ -3168,13 +3820,13 @@ assert.equal(
     () =>
       brainIdentityProvider.authorizeHttpRequest({
         method: "GET",
-        url: "http://attacker.test/_admin/brains",
+        url: "http://attacker.test/v1/brains",
         bodyText: "",
         eventTemplate: {
           kind: 27235,
           created_at: 1,
           tags: [
-            ["u", "http://attacker.test/_admin/brains"],
+            ["u", "http://attacker.test/v1/brains"],
             ["method", "GET"],
             ["nonce", "ab".repeat(16)],
           ],
@@ -3187,13 +3839,13 @@ assert.equal(
     () =>
       brainIdentityProvider.authorizeHttpRequest({
         method: "GET",
-        url: "http://finite.test/_admin/brains",
+        url: "http://finite.test/v1/brains",
         bodyText: "",
         eventTemplate: {
           kind: 27235,
           created_at: 1,
           tags: [
-            ["u", "http://attacker.test/_admin/brains"],
+            ["u", "http://attacker.test/v1/brains"],
             ["method", "GET"],
             ["nonce", "ab".repeat(16)],
           ],
@@ -3205,7 +3857,7 @@ assert.equal(
   const brainAuthHeader = await client.buildBrainAuthorizationHeader(
     brainIdentityProvider,
     { authScheme: "Nostr", publicBaseUrl: "http://finite.test" },
-    "/_admin/brains",
+    "/v1/brains",
     { method: "GET" }
   );
   assert.match(brainAuthHeader, /^Nostr /);
@@ -3310,18 +3962,18 @@ assert.equal(
 
   const event = await client.buildAuthEventTemplate(
     "post",
-    "http://finite.test/_admin/brains/smoke/metadata",
+    "http://finite.test/v1/brains/smoke/metadata",
     "{\"name\":\"Smoke\"}"
   );
   const repeatedEvent = await client.buildAuthEventTemplate(
     "post",
-    "http://finite.test/_admin/brains/smoke/metadata",
+    "http://finite.test/v1/brains/smoke/metadata",
     "{\"name\":\"Smoke\"}"
   );
   assert.equal(event.kind, 27235);
   assert.deepEqual(Array.from(event.tags[0]), [
     "u",
-    "http://finite.test/_admin/brains/smoke/metadata",
+    "http://finite.test/v1/brains/smoke/metadata",
   ]);
   assert.deepEqual(Array.from(event.tags[1]), ["method", "POST"]);
   assert.equal(event.tags[2][0], "nonce");
@@ -3370,7 +4022,15 @@ assert.equal(
     verifiedAt: "2026-07-06T00:00:00Z",
   });
   assert.equal(client.identityDisplay(authorNpub), "alice@example.com");
-  assert.equal(client.identityDisplay(otherNpub), client.shortKey(otherNpub));
+  assert.equal(client.identityDisplay(otherNpub), "Private member");
+  assert.equal(
+    client.brainPeopleRows({
+      kind: "organization",
+      members: [authorNpub, otherNpub],
+      admins: [authorNpub],
+    })[0].canMutate,
+    true
+  );
   assert.equal(
     client.brainPeopleRows({
       kind: "organization",
@@ -3385,7 +4045,7 @@ assert.equal(
       members: [authorNpub, otherNpub],
       admins: [authorNpub],
     })[1].name,
-    client.shortKey(otherNpub)
+    "Private member"
   );
 
   const devGrant = {
@@ -3468,11 +4128,12 @@ assert.equal(
   const peerSigner = client.createLocalNip07ProviderFromSecret(peerSignerSecret);
   const localPublicKey = await localSigner.getPublicKey();
   const peerPublicKey = await peerSigner.getPublicKey();
+  const peerNpub = client.npubFromHex(peerPublicKey);
   assert.equal(localPublicKey, client.inviteUnwrapKeypairFromSecret(localSignerSecret).publicKeyHex);
   const localSigned = await localSigner.signEvent({
     kind: 27235,
     created_at: 1780000000,
-    tags: [["u", "http://finite.test/_admin/brains"]],
+    tags: [["u", "http://finite.test/v1/brains"]],
     content: "",
   });
   assert.equal(localSigned.pubkey, localPublicKey);
@@ -3502,6 +4163,672 @@ assert.equal(
   };
   client.configureBrainIdentityProvider(client.createNip07BrainIdentityProvider(context.window.nostr));
   await client.connectBrainIdentityProvider({ loadVisibleBrains: false });
+  const collaborationRequest = await client.buildOrganizationAdminCollaborationRequest({
+    brainId: "smoke",
+    targetNpub: peerNpub,
+    issuerNpub: authorNpub,
+    metadata: {
+      kind: "organization",
+      folders: [
+        {
+          id: "general",
+          path: "General",
+          access: "all_members",
+          currentKeyVersion: 1,
+        },
+        {
+          id: "private",
+          path: "Private",
+          access: "restricted",
+          currentKeyVersion: 3,
+        },
+      ],
+    },
+    keyring,
+    createdAtUnix: 1_780_000_000,
+  });
+  assert.equal(
+    JSON.stringify(collaborationRequest.folders),
+    JSON.stringify([
+      { folderId: "general", keyVersion: 1, path: "General" },
+      { folderId: "private", keyVersion: 3, path: "Private" },
+    ]),
+    "Collaboration snapshots every current Folder and key version",
+  );
+  assert.equal(collaborationRequest.targetNpub, peerNpub);
+  assert.equal(collaborationRequest.accessChangeEvent.tags[2][1], "add-admin");
+  assert.equal(collaborationRequest.grants.length, 1);
+  assert.equal(collaborationRequest.grants[0].folderId, "general");
+  assert.equal(collaborationRequest.grants[0].recipientNpub, peerNpub);
+  assert.equal(collaborationRequest.grants[0].accessChangeEvent.tags[2][1], "grant-folder-access");
+  assert.equal(collaborationRequest.grants[0].wrappedEventJson.includes(folderKey), false);
+  const collaborationSubmissions = [];
+  const collaborationResponses = [
+    {
+      brainId: "smoke",
+      state: "partial",
+      brainRole: "admin",
+      targetNpub: peerNpub,
+      folders: [
+        {
+          folderId: "general",
+          path: "General",
+          expectedKeyVersion: 1,
+          outcome: "granted",
+          reason: null,
+          retryable: false,
+        },
+        {
+          folderId: "private",
+          path: "Private",
+          expectedKeyVersion: 3,
+          outcome: "missingSourceKey",
+          reason: "sourceKeyUnavailable",
+          retryable: true,
+        },
+      ],
+      readyCount: 1,
+      totalCount: 2,
+      retryable: true,
+    },
+    {
+      brainId: "smoke",
+      state: "complete",
+      brainRole: "admin",
+      targetNpub: peerNpub,
+      folders: [
+        {
+          folderId: "general",
+          path: "General",
+          expectedKeyVersion: 1,
+          outcome: "alreadyReady",
+          reason: null,
+          retryable: false,
+        },
+        {
+          folderId: "private",
+          path: "Private",
+          expectedKeyVersion: 3,
+          outcome: "granted",
+          reason: null,
+          retryable: false,
+        },
+      ],
+      readyCount: 2,
+      totalCount: 2,
+      retryable: false,
+    },
+  ];
+  const sendCollaboration = async (path, options) => {
+    collaborationSubmissions.push({ path, options });
+    return collaborationResponses.shift();
+  };
+  const partialCollaboration = await client.submitOrganizationAdminCollaboration({
+    brainId: "smoke",
+    request: collaborationRequest,
+    send: sendCollaboration,
+  });
+  const repairCollaborationRequest = JSON.parse(JSON.stringify(collaborationRequest));
+  repairCollaborationRequest.grants.push({
+    folderId: "private",
+    id: "grant-private-repair",
+    keyVersion: 3,
+    recipientNpub: peerNpub,
+    wrappedEventJson: "opaque-repair-envelope",
+    createdAt: "2026-07-23T12:00:00Z",
+    accessChangeEvent: { tags: [["action", "grant-folder-access"]] },
+  });
+  const repairedCollaboration = await client.submitOrganizationAdminCollaboration({
+    brainId: "smoke",
+    request: repairCollaborationRequest,
+    send: sendCollaboration,
+  });
+  assert.equal(partialCollaboration.state, "partial");
+  assert.equal(repairedCollaboration.state, "complete");
+  assert.equal(collaborationSubmissions.length, 2);
+  assert.equal(
+    collaborationSubmissions[0].path,
+    "/v1/brains/smoke/collaborators/ensure-admin",
+  );
+  assert.equal(collaborationSubmissions[0].options.method, "POST");
+  const initialIntent = JSON.parse(collaborationSubmissions[0].options.body);
+  const repairIntent = JSON.parse(collaborationSubmissions[1].options.body);
+  assert.equal(initialIntent.targetNpub, repairIntent.targetNpub);
+  assert.equal(JSON.stringify(initialIntent.folders), JSON.stringify(repairIntent.folders));
+  assert.equal(
+    repairIntent.accessChangeEvent.tags[2][1],
+    "add-admin",
+    "Repair repeats the administrator desired state with newly available grants",
+  );
+  assert.equal(
+    JSON.parse(collaborationSubmissions[0].options.body).accessChangeEvent.tags[2][1],
+    "add-admin",
+  );
+  const malformedCollaboration = await client.submitOrganizationAdminCollaboration({
+    brainId: "smoke",
+    request: collaborationRequest,
+    send: async () => "not-json",
+  });
+  assert.equal(malformedCollaboration.state, "indeterminate");
+  assert.equal(malformedCollaboration.totalCount, 2);
+  const validPartialReceipt = collaborationResponses[0] || {
+    brainId: "smoke",
+    state: "partial",
+    brainRole: "admin",
+    targetNpub: peerNpub,
+    folders: [
+      {
+        folderId: "general",
+        path: "General",
+        expectedKeyVersion: 1,
+        outcome: "alreadyReady",
+        reason: null,
+        retryable: false,
+      },
+      {
+        folderId: "private",
+        path: "Private",
+        expectedKeyVersion: 3,
+        outcome: "missingSourceKey",
+        reason: "sourceKeyUnavailable",
+        retryable: true,
+      },
+    ],
+    readyCount: 1,
+    totalCount: 2,
+    retryable: true,
+  };
+  const mismatchedReceiptCases = [
+    [
+      "wrong Folder identity",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 0 ? { ...folder, folderId: "wrong-folder" } : folder
+        ),
+      },
+    ],
+    [
+      "wrong Folder key version",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 0 ? { ...folder, expectedKeyVersion: 99 } : folder
+        ),
+      },
+    ],
+    [
+      "duplicate Folder identity",
+      {
+        ...validPartialReceipt,
+        folders: [
+          validPartialReceipt.folders[0],
+          { ...validPartialReceipt.folders[0] },
+        ],
+      },
+    ],
+    [
+      "missing Folder",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.slice(0, 1),
+        totalCount: 1,
+      },
+    ],
+    [
+      "extra Folder",
+      {
+        ...validPartialReceipt,
+        folders: [
+          ...validPartialReceipt.folders,
+          {
+            folderId: "extra",
+            path: "Extra",
+            expectedKeyVersion: 1,
+            outcome: "failed",
+            reason: "unexpected",
+            retryable: true,
+          },
+        ],
+        totalCount: 3,
+      },
+    ],
+    [
+      "invalid outcome",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 1 ? { ...folder, outcome: "looksReady" } : folder
+        ),
+      },
+    ],
+    [
+      "ready outcome marked retryable",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 0 ? { ...folder, retryable: true } : folder
+        ),
+      },
+    ],
+    [
+      "incomplete outcome marked non-retryable",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 1 ? { ...folder, retryable: false } : folder
+        ),
+      },
+    ],
+    [
+      "complete state with incomplete Folder",
+      {
+        ...validPartialReceipt,
+        state: "complete",
+        retryable: false,
+      },
+    ],
+    [
+      "partial state marked non-retryable",
+      {
+        ...validPartialReceipt,
+        retryable: false,
+      },
+    ],
+    [
+      "Folder path mismatch",
+      {
+        ...validPartialReceipt,
+        folders: validPartialReceipt.folders.map((folder, index) =>
+          index === 0 ? { ...folder, path: "Misleading path" } : folder
+        ),
+      },
+    ],
+  ];
+  for (const [label, response] of mismatchedReceiptCases) {
+    const result = await client.submitOrganizationAdminCollaboration({
+      brainId: "smoke",
+      request: collaborationRequest,
+      send: async () => response,
+    });
+    assert.equal(
+      result.state,
+      "indeterminate",
+      `A 2xx receipt with ${label} must never be presented as authoritative`,
+    );
+    assert.equal(result.totalCount, collaborationRequest.folders.length);
+  }
+  const transportCollaboration = await client.submitOrganizationAdminCollaboration({
+    brainId: "smoke",
+    request: collaborationRequest,
+    send: async () => {
+      throw new Error("provider stack secret diagnostics");
+    },
+  });
+  assert.equal(transportCollaboration.state, "indeterminate");
+  assert.doesNotMatch(JSON.stringify(transportCollaboration), /provider stack|secret diagnostics/);
+  await assert.rejects(
+    () =>
+      client.submitOrganizationAdminCollaboration({
+        brainId: "smoke",
+        request: collaborationRequest,
+        send: async () => {
+          const error = new Error("forbidden raw provider detail");
+          error.status = 403;
+          throw error;
+        },
+      }),
+    /forbidden raw provider detail/,
+    "Authoritative HTTP rejection remains a rejection for the caller to present safely",
+  );
+
+  const collaborationPanel = organizationCollaborationPanelTestSeams();
+  const collaborationPanelClient =
+    collaborationPanel.context.window.FiniteBrainProductClient;
+  const collaborationActorHex = "00".repeat(32);
+  const collaborationActorNpub =
+    collaborationPanelClient.npubFromHex(collaborationActorHex);
+  collaborationPanel.context.window.nostr = {
+    getPublicKey: async () => collaborationActorHex,
+    signEvent: async (template) => ({
+      ...template,
+      id: `panel-signed-${template.kind}-${template.created_at}`,
+      pubkey: collaborationActorHex,
+      sig: "panel-signature",
+    }),
+  };
+  collaborationPanelClient.configureBrainIdentityProvider(
+    collaborationPanelClient.createNip07BrainIdentityProvider(
+      collaborationPanel.context.window.nostr
+    )
+  );
+  const collaborationPanelState = collaborationPanel.seams.state;
+  collaborationPanelState.activeBrainId = "acme";
+  collaborationPanelState.config = {
+    authScheme: "Nostr",
+    publicBaseUrl: "http://finite.test",
+  };
+  collaborationPanelState.keyring = collaborationPanelClient.createSessionKeyring();
+  collaborationPanelState.metadata = {
+    brainId: "acme",
+    kind: "organization",
+    name: "Acme",
+    admins: [collaborationActorNpub],
+    members: [collaborationActorNpub],
+    folders: [
+      {
+        id: "private",
+        path: "Private",
+        access: "restricted",
+        currentKeyVersion: 4,
+      },
+    ],
+  };
+  collaborationPanelState.pubkeyHex = collaborationActorHex;
+  collaborationPanelState.sessionEpoch = 20;
+  collaborationPanelState.sessionStatus = "unlocked";
+  collaborationPanelState.signerStatus = "connected";
+  collaborationPanel.context.document.getElementById("brainAdminEmailInput").value =
+    "  BETA@FINITE.VIP  ";
+  const collaborationPanelPosts = [];
+  let collaborationPanelRound = 0;
+  const collaborationPanelMetadata = (readyCount) => ({
+    ...collaborationPanelState.metadata,
+    admins: [collaborationActorNpub, peerNpub],
+    members: [collaborationActorNpub, peerNpub],
+    collaboratorReadiness: [
+      {
+        targetNpub: collaborationActorNpub,
+        readyCount: 1,
+        totalCount: 1,
+        unreadyFolders: [],
+      },
+      {
+        targetNpub: peerNpub,
+        readyCount,
+        totalCount: 1,
+        unreadyFolders:
+          readyCount === 1
+            ? []
+            : [
+                {
+                  folderId: "private",
+                  path: "Private",
+                  expectedKeyVersion: 4,
+                  reason: "sourceKeyUnavailable",
+                },
+              ],
+      },
+    ],
+  });
+  const collaborationPanelReceipt = (stateValue) => ({
+    brainId: "acme",
+    targetNpub: peerNpub,
+    state: stateValue,
+    brainRole: "admin",
+    folders: [
+      {
+        folderId: "private",
+        path: "Private",
+        expectedKeyVersion: 4,
+        outcome: stateValue === "complete" ? "alreadyReady" : "missingSourceKey",
+        reason: stateValue === "complete" ? null : "sourceKeyUnavailable",
+        retryable: stateValue !== "complete",
+      },
+    ],
+    readyCount: stateValue === "complete" ? 1 : 0,
+    totalCount: 1,
+    retryable: stateValue !== "complete",
+  });
+  collaborationPanel.context.fetch = async (requestPath, options = {}) => {
+    if (requestPath === "/v1/identities/resolve") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            npub: peerNpub,
+            preferredNip05: "beta@finite.vip",
+          }),
+      };
+    }
+    if (
+      requestPath ===
+      "/v1/brains/acme/collaborators/ensure-admin"
+    ) {
+      collaborationPanelPosts.push({
+        path: requestPath,
+        body: JSON.parse(options.body),
+        authorization: options.headers?.Authorization,
+      });
+      collaborationPanelRound += 1;
+      const response =
+        collaborationPanelRound === 1
+          ? collaborationPanelReceipt("partial")
+          : collaborationPanelRound === 2
+            ? collaborationPanelReceipt("complete")
+            : {
+                ...collaborationPanelReceipt("complete"),
+                folders: [
+                  {
+                    ...collaborationPanelReceipt("complete").folders[0],
+                    folderId: "wrong-folder",
+                  },
+                ],
+              };
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(response),
+      };
+    }
+    if (requestPath === "/v1/brains/acme/metadata") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify(
+            collaborationPanelMetadata(collaborationPanelRound >= 2 ? 1 : 0)
+          ),
+      };
+    }
+    throw new Error(`Unexpected collaboration panel request: ${requestPath}`);
+  };
+
+  const addedCollaboration =
+    await collaborationPanel.seams.addBrainAdminFromPanel();
+  assert.equal(addedCollaboration.state, "partial");
+  assert.equal(collaborationPanelPosts.length, 1);
+  assert.equal(
+    collaborationPanelPosts[0].path,
+    "/v1/brains/acme/collaborators/ensure-admin",
+    "The actual Add Admin handler posts to the desired-state endpoint",
+  );
+  assert.equal(collaborationPanelPosts[0].body.targetNpub, peerNpub);
+  assert.match(
+    collaborationPanelPosts[0].authorization,
+    /^Nostr /,
+    "The Add Admin handler submits the request through the signed HTTP boundary",
+  );
+  assert.equal(
+    JSON.stringify(collaborationPanelPosts[0].body.folders),
+    JSON.stringify([{ folderId: "private", keyVersion: 4, path: "Private" }]),
+  );
+  assert.equal(
+    collaborationPanelPosts[0].body.accessChangeEvent.tags[2][1],
+    "add-admin",
+  );
+  assert.equal(collaborationPanelState.accessResult.title, "Admin access needs repair");
+  assert.match(collaborationPanelState.accessResult.detail, /Folder access: 0\/1/);
+  assert.match(collaborationPanelState.accessResult.detail, /Private/);
+  assert.equal(
+    collaborationPanel.elements.get("accessResultPanel").children[0].textContent,
+    "Admin access needs repair",
+    "Partial collaboration output is rendered in the accessible result panel",
+  );
+
+  collaborationPanel.seams.renderBrainPeopleList(
+    collaborationPanelMetadata(0)
+  );
+  const renderedRepairButton = collaborationPanel.elements
+    .get("brainPeopleList")
+    .children.flatMap((item) => item.children)
+    .find((child) =>
+      String(child.className).includes("access-repair-person")
+    );
+  assert.ok(
+    renderedRepairButton,
+    "The incomplete collaborator renders a repair action",
+  );
+  renderedRepairButton.click();
+  for (let attempt = 0; attempt < 20 && collaborationPanelPosts.length < 2; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(
+    collaborationPanelPosts.length,
+    2,
+    "Clicking the rendered Repair action submits the desired state again",
+  );
+  assert.equal(
+    collaborationPanelPosts[1].path,
+    collaborationPanelPosts[0].path,
+  );
+  assert.equal(
+    JSON.stringify(collaborationPanelPosts[1].body.folders),
+    JSON.stringify(collaborationPanelPosts[0].body.folders),
+  );
+  assert.equal(
+    collaborationPanelPosts[1].body.accessChangeEvent.tags[2][1],
+    "add-admin",
+  );
+  for (
+    let attempt = 0;
+    attempt < 20 &&
+    collaborationPanelState.accessResult?.title !== "Admin access ready";
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(collaborationPanelState.accessResult.title, "Admin access ready");
+  assert.match(collaborationPanelState.accessResult.detail, /Folder access: 1\/1/);
+  assert.equal(
+    collaborationPanel.elements.get("accessResultPanel").children[0].textContent,
+    "Admin access ready",
+    "Complete collaboration output is rendered in the accessible result panel",
+  );
+
+  collaborationPanel.context.document.getElementById("brainAdminEmailInput").value =
+    "beta@finite.vip";
+  const uncertainCollaboration =
+    await collaborationPanel.seams.addBrainAdminFromPanel();
+  assert.equal(uncertainCollaboration.state, "indeterminate");
+  assert.equal(
+    collaborationPanelState.accessResult.title,
+    "Admin access needs checking",
+  );
+  assert.match(
+    collaborationPanelState.accessResult.detail,
+    /could not be confirmed/,
+  );
+  assert.equal(
+    collaborationPanel.elements.get("accessResultPanel").children[0].textContent,
+    "Admin access needs checking",
+    "Indeterminate collaboration output is rendered in the accessible result panel",
+  );
+
+  const staleCollaborationPanel = organizationCollaborationPanelTestSeams();
+  const staleCollaborationClient =
+    staleCollaborationPanel.context.window.FiniteBrainProductClient;
+  staleCollaborationPanel.context.window.nostr = collaborationPanel.context.window.nostr;
+  staleCollaborationClient.configureBrainIdentityProvider(
+    staleCollaborationClient.createNip07BrainIdentityProvider(
+      staleCollaborationPanel.context.window.nostr
+    )
+  );
+  const staleCollaborationState = staleCollaborationPanel.seams.state;
+  staleCollaborationState.activeBrainId = "old-brain";
+  staleCollaborationState.config = {
+    authScheme: "Nostr",
+    publicBaseUrl: "http://finite.test",
+  };
+  staleCollaborationState.keyring = staleCollaborationClient.createSessionKeyring();
+  staleCollaborationState.metadata = {
+    brainId: "old-brain",
+    kind: "organization",
+    admins: [collaborationActorNpub],
+    members: [collaborationActorNpub],
+    folders: [],
+  };
+  staleCollaborationState.pubkeyHex = collaborationActorHex;
+  staleCollaborationState.sessionEpoch = 70;
+  staleCollaborationState.sessionStatus = "unlocked";
+  staleCollaborationState.signerStatus = "connected";
+  staleCollaborationPanel.context.document.getElementById("brainAdminEmailInput").value =
+    "beta@finite.vip";
+  let releaseStaleSubmission;
+  let staleSubmissionStarted = false;
+  const staleSubmissionText = new Promise((resolve) => {
+    releaseStaleSubmission = resolve;
+  });
+  staleCollaborationPanel.context.fetch = async (requestPath) => {
+    if (requestPath === "/v1/identities/resolve") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            npub: peerNpub,
+            preferredNip05: "beta@finite.vip",
+          }),
+      };
+    }
+    assert.equal(
+      requestPath,
+      "/v1/brains/old-brain/collaborators/ensure-admin",
+    );
+    staleSubmissionStarted = true;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => staleSubmissionText,
+    };
+  };
+  const staleAdd = staleCollaborationPanel.seams.addBrainAdminFromPanel();
+  for (
+    let attempt = 0;
+    attempt < 20 && !staleSubmissionStarted;
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(staleSubmissionStarted, true);
+  staleCollaborationState.activeBrainId = "replacement-brain";
+  staleCollaborationState.sessionEpoch = 71;
+  staleCollaborationState.accessResult = {
+    tone: "ready",
+    title: "Replacement Brain state",
+    detail: "Must remain untouched",
+  };
+  releaseStaleSubmission(
+    JSON.stringify({
+      brainId: "old-brain",
+      targetNpub: peerNpub,
+      state: "complete",
+      brainRole: "admin",
+      folders: [],
+      readyCount: 0,
+      totalCount: 0,
+      retryable: false,
+    })
+  );
+  await assert.rejects(staleAdd, /Session changed/);
+  assert.equal(staleCollaborationState.activeBrainId, "replacement-brain");
+  assert.equal(
+    staleCollaborationState.accessResult.title,
+    "Replacement Brain state",
+    "An old Add Admin failure must not render into the replacement Brain",
+  );
+
   const accessEvent = await client.buildAdminAccessChangeEvent({
     ...accessPayload,
     createdAtUnix: Date.parse(accessPayload.createdAt) / 1000,
@@ -3538,6 +4865,10 @@ assert.equal(
     JSON.stringify(["getting-started", "restricted"])
   );
   assert.equal(
+    JSON.stringify(client.initialBrainInvitationFolders(["restricted", "restricted", "notes"])),
+    JSON.stringify(["restricted", "notes"])
+  );
+  assert.equal(
     JSON.stringify(
       client.buildBrainInvitationRequest({
       targetNpub: otherNpub,
@@ -3551,12 +4882,12 @@ assert.equal(
       expiresAt: "2026-07-04T00:00:00.000Z",
     })
   );
-  assert.equal(client.brainInvitationCreatePath("smoke org"), "/_admin/brains/smoke%20org/invitations");
-  assert.equal(client.brainInvitationLinkPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode");
-  assert.equal(client.brainInvitationAcceptPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode/accept");
-  assert.equal(client.emailInviteBootstrapPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode/bootstrap");
-  assert.equal(client.emailInviteInstructionsPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode/instructions");
-  assert.equal(client.emailInviteClaimPath("invite/code"), "/_admin/brain-invitation-links/invite%2Fcode/claim");
+  assert.equal(client.brainInvitationCreatePath("smoke org"), "/v1/brains/smoke%20org/invitations");
+  assert.equal(client.brainInvitationLinkPath("invite/code"), "/v1/brain-invitation-links/invite%2Fcode");
+  assert.equal(client.brainInvitationAcceptPath("invite/code"), "/v1/brain-invitation-links/invite%2Fcode/accept");
+  assert.equal(client.emailInviteBootstrapPath("invite/code"), "/v1/brain-invitation-links/invite%2Fcode/bootstrap");
+  assert.equal(client.emailInviteInstructionsPath("invite/code"), "/v1/brain-invitation-links/invite%2Fcode/instructions");
+  assert.equal(client.emailInviteClaimPath("invite/code"), "/v1/brain-invitation-links/invite%2Fcode/claim");
   assert.equal(
     client.emailInviteClientUrl({
       publicBaseUrl: "https://finite.test/app/",
@@ -3569,20 +4900,20 @@ assert.equal(
   assert.equal(client.brainInvitationIdentifierHint("invite-0fe6eda60e1bf6e662acb8e2b5c425d9"), null);
   assert.match(
     client.brainInvitationIdentifierHint("invitation-4f82a37c1b82bcdd54973c466cdde914"),
-    /invitation id/
+    /internal invitation reference/
   );
   assert.match(client.brainInvitationIdentifierHint("4f82a37c1b82bcdd54973c466cdde914"), /start with invite-/);
   assert.match(
     client.brainInvitationUnavailableDetail(new Error("brain invitation unavailable")),
-    /Check the Invite Code, active signer/
+    /Check the Invite Code, secure connection/
   );
   assert.equal(
     client.brainInvitationRevokePath("smoke org", "invitation/one"),
-    "/_admin/brains/smoke%20org/invitations/invitation%2Fone"
+    "/v1/invitations/invitation%2Fone"
   );
   assert.match(htmlSource, /id="brainInviteUrlInput"/);
   assert.match(htmlSource, /id="brainInviteEmailInput"/);
-  assert.match(htmlSource, /id="brainInviteEmailProofCreatedAtInput"/);
+  assert.doesNotMatch(htmlSource, /id="brainInviteEmailProofCreatedAtInput"/);
   assert.match(htmlSource, /id="brainInviteSecretInput"/);
   assert.match(htmlSource, /id="brainInviteConnectSignerButton"/);
   assert.match(htmlSource, /id="getEmailInviteInstructionsButton"/);
@@ -3591,12 +4922,12 @@ assert.equal(
     code: "invite-pending",
     email: "member@example.com",
     inviteSecret: "manual-invite-secret",
-    organizationBrain: true,
+    canManageInvitations: true,
     sessionStatus: "locked",
     signerCanConnect: true,
     signerStatus: "unavailable",
   });
-  assert.match(lockedInvitationControls.hint, /Unlock the session/);
+  assert.match(lockedInvitationControls.hint, /Open the Brain/);
   assert.equal(lockedInvitationControls.connectDisabled, false);
   assert.equal(lockedInvitationControls.createDisabled, true);
   assert.equal(lockedInvitationControls.inspectDisabled, true);
@@ -3608,7 +4939,7 @@ assert.equal(
     code: "invite-pending",
     email: "member@example.com",
     inviteSecret: "manual-invite-secret",
-    organizationBrain: true,
+    canManageInvitations: true,
     sessionStatus: "unlocked",
     signerCanConnect: true,
     signerStatus: "connected",
@@ -3618,6 +4949,18 @@ assert.equal(
   assert.equal(unlockedInvitationControls.emailScopeDisabled, false);
   assert.equal(unlockedInvitationControls.acceptDisabled, false);
   assert.equal(unlockedInvitationControls.revokeDisabled, false);
+  const incompleteEmailInvitationControls = client.brainInvitationPanelState({
+    code: "invite-pending",
+    email: "member@example.com",
+    inviteSecret: "",
+    canManageInvitations: true,
+    sessionStatus: "unlocked",
+    signerCanConnect: true,
+    signerStatus: "connected",
+  });
+  assert.equal(incompleteEmailInvitationControls.acceptDisabled, true);
+  assert.equal(incompleteEmailInvitationControls.emailScopeDisabled, true);
+  assert.match(incompleteEmailInvitationControls.hint, /Open the private invite link/);
 
   assert.equal(
     JSON.stringify(
@@ -3677,13 +5020,150 @@ assert.equal(
   );
   assert.match(
     source,
-    /for \(const inputId of \[\s*"brainInviteCodeInput",\s*"brainInviteEmailInput",\s*"brainInviteEmailProofCreatedAtInput",\s*"brainInviteSecretInput",\s*\]\) \{[\s\S]{0,180}handleBrainInvitationInput\(inputId\)/,
-    "Invitation inputs must update the panel as the Member changes code, email proof, or Invite Secret"
+    /for \(const inputId of \[\s*"brainInviteCodeInput",\s*"brainInviteEmailInput",\s*\]\) \{[\s\S]{0,180}handleBrainInvitationInput\(inputId\)/,
+    "Visible invitation inputs must update the panel as the member changes the code or email"
   );
 
   const invitationPanel = invitationPanelTestSeams();
   const invitationState = invitationPanel.seams.state;
   const invitationElement = (id) => invitationPanel.context.document.getElementById(id);
+  const renderedText = (node) =>
+    [node?.textContent || "", ...(node?.children || []).map(renderedText)].join(" ").trim();
+
+  invitationState.accessBusy = false;
+  invitationState.brainInvitations = [
+    {
+      createdAt: "2026-07-01T00:00:00.000Z",
+      expiresAt: "2026-08-01T00:00:00.000Z",
+      id: "invitation-private-target",
+      inviteCode: "invite-visible-full-code",
+      status: "pending",
+      userId: otherNpub,
+    },
+  ];
+  invitationPanel.seams.renderBrainInvitationList();
+  const renderedInvitationRow = invitationElement("brainInvitationList").children[0];
+  assert.match(renderedText(renderedInvitationRow), /invite-visible-full-code/);
+  assert.match(renderedText(renderedInvitationRow), /Revoke/);
+
+  invitationState.folderShareLinksFolderId = "restricted-finance";
+  invitationState.folderShareLinks = [
+    {
+      createdAt: "2026-07-01T00:00:00.000Z",
+      expiresAt: "2026-08-01T00:00:00.000Z",
+      id: "share-visible-full-code",
+      recipientNpub: otherNpub,
+      status: "pending",
+    },
+  ];
+  invitationPanel.seams.renderFolderShareLinkList({ id: "restricted-finance" });
+  const renderedShareRow = invitationElement("folderShareLinkList").children[0];
+  assert.match(renderedText(renderedShareRow), /share-visible-full-code/);
+  assert.match(renderedText(renderedShareRow), /Revoke/);
+
+  invitationState.metadata = {
+    kind: "organization",
+    folders: [
+      { id: "standard", path: "Standard", access: "all_members", currentKeyVersion: 1 },
+      {
+        id: "restricted-finance",
+        path: "Finance",
+        access: "restricted",
+        currentKeyVersion: 1,
+      },
+      {
+        id: "restricted-research",
+        path: "Research",
+        access: "restricted",
+        currentKeyVersion: 1,
+      },
+    ],
+  };
+  invitationPanel.seams.renderBrainInvitationFolderOptions();
+  const folderChoices = invitationElement("brainInviteFoldersOptions").children;
+  assert.equal(folderChoices.length, 2);
+  assert.deepEqual(
+    folderChoices.map((choice) => choice.children[1].textContent),
+    ["Finance", "Research"]
+  );
+  const financeCheckbox = folderChoices[0].children[0];
+  financeCheckbox.checked = true;
+  financeCheckbox.dispatch("change");
+  assert.equal(
+    JSON.stringify(invitationPanel.seams.initialBrainInvitationFolders()),
+    JSON.stringify(["restricted-finance"])
+  );
+  assert.equal(
+    JSON.stringify(
+      invitationPanel.seams.buildBrainInvitationRequest({
+        targetNpub: otherNpub,
+        initialFolderAccess: invitationPanel.seams.initialBrainInvitationFolders(),
+        expiresAt: "2026-08-01T00:00:00.000Z",
+      }).initialFolderAccess
+    ),
+    JSON.stringify(["restricted-finance"])
+  );
+  invitationPanel.seams.resetBrainSessionState({ preserveManageBrainsReturnToSettings: false });
+  assert.equal(
+    JSON.stringify(invitationPanel.seams.initialBrainInvitationFolders()),
+    JSON.stringify([])
+  );
+
+  invitationState.accessBusy = false;
+  invitationState.activeBrainId = "personal-owner";
+  invitationState.pubkeyHex = "00".repeat(32);
+  invitationState.sessionStatus = "unlocked";
+  invitationState.signerStatus = "connected";
+  invitationState.metadata = {
+    brainId: "personal-owner",
+    kind: "personal",
+    ownerUserId: authorNpub,
+    personalAgent: { agentNpub: otherNpub },
+  };
+  invitationPanel.seams.renderBrainAccessManagement(invitationState.metadata);
+  assert.equal(
+    invitationElement("brainInvitationActionSection").hidden,
+    false,
+    "Personal Brain operational authority must expose universal Brain Invitations"
+  );
+  assert.equal(
+    invitationElement("brainInvitationListSection").hidden,
+    false,
+    "Personal Brain operational authority must expose its Brain Invitation lifecycle"
+  );
+  assert.equal(
+    invitationElement("sharedFolderSection").hidden,
+    false,
+    "Personal Brain operational authority must expose universal Mount workflows"
+  );
+  assert.equal(
+    invitationElement("brainPeopleSection").hidden,
+    true,
+    "Organization Member and admin-role controls remain Organization-only"
+  );
+  assert.match(
+    invitationElement("personalAgentCurrent").textContent,
+    /email unavailable/
+  );
+  assert.equal(invitationElement("replacePersonalAgentButton").disabled, true);
+  assert.equal(invitationElement("removePersonalAgentButton").disabled, true);
+  await assert.rejects(
+    () => invitationPanel.seams.replacePersonalAgentFromPanel(true),
+    /Current Personal Agent email is unavailable/
+  );
+  invitationPanel.seams.rememberIdentity({
+    npub: otherNpub,
+    nip05: "agent@finite.vip",
+    verifiedAt: "2026-07-01T00:00:00.000Z",
+  });
+  invitationPanel.seams.renderBrainAccessManagement(invitationState.metadata);
+  assert.equal(
+    invitationElement("personalAgentCurrent").textContent,
+    "Current: agent@finite.vip"
+  );
+  assert.equal(invitationElement("replacePersonalAgentButton").disabled, false);
+  assert.equal(invitationElement("removePersonalAgentButton").disabled, false);
+
   invitationState.accessBusy = false;
   invitationState.metadata = { kind: "organization" };
   invitationState.sessionStatus = "locked";
@@ -3695,7 +5175,7 @@ assert.equal(
   assert.equal(invitationElement("brainInviteConnectSignerButton").disabled, false);
   assert.equal(invitationElement("getBrainInvitationButton").disabled, true);
   assert.equal(invitationElement("acceptBrainInvitationButton").disabled, true);
-  assert.match(invitationElement("brainInvitationHint").textContent, /Unlock the session/);
+  assert.match(invitationElement("brainInvitationHint").textContent, /Open the Brain/);
 
   invitationState.sessionStatus = "unlocked";
   invitationState.signerStatus = "connected";
@@ -3731,7 +5211,7 @@ assert.equal(
   invitationState.sessionStatus = "locked";
   await assert.rejects(
     () => invitationPanel.seams.revokeBrainInvitationById("invitation-pending-row"),
-    /Session is locked\. Unlock the session before revoking an invitation/
+    /Brain is locked\. Open the Brain before revoking an invitation/
   );
 
   const nip44VectorSender = client.inviteUnwrapKeypairFromSecret("2".padStart(64, "0"));
@@ -3767,6 +5247,11 @@ assert.equal(
     ],
   };
   assert.equal(client.canonicalInviteEmail(" Friend@Example.COM "), "friend@example.com");
+  assert.throws(
+    () => client.canonicalInviteEmail(client.npubFromHex("44".repeat(32))),
+    /must be an email address/,
+    "Public-key identities must never pass the Product Client's email form boundary"
+  );
   assert.equal(
     JSON.stringify(
       client.emailInviteScope(emailMetadata, "restricted").map((folder) => [
@@ -3788,6 +5273,16 @@ assert.equal(
     version: "finite-folder-key-grant-v1",
     brainId: "smoke",
     folderId: "getting-started",
+    keyVersion: 1,
+    issuerNpub: authorNpub,
+    recipientNpub: authorNpub,
+    folderKey,
+    issuedAt: "2026-06-24T00:00:00.000Z",
+  });
+  await client.openFolderKeyGrantPlaintext(emailKeyring, {
+    version: "finite-folder-key-grant-v1",
+    brainId: "smoke",
+    folderId: "brain-ops",
     keyVersion: 1,
     issuerNpub: authorNpub,
     recipientNpub: authorNpub,
@@ -3850,6 +5345,48 @@ assert.equal(
     brainId: "smoke",
   });
   assert.equal(JSON.stringify(scopedEmailInviteRequest.body.initialFolderAccess), JSON.stringify(["restricted"]));
+  const adminOnlyFolder = emailMetadata.folders.find((folder) => folder.id === "brain-ops");
+  const folderEmailInviteRequest = await client.buildEmailBrainInvitationRequest(emailKeyring, {
+    createdAtUnix: 1780000402,
+    expiresAt: "2026-07-04T00:00:00.000Z",
+    folderOnly: true,
+    grantIdFactory: () => "folder-only-bootstrap",
+    initialFolderAccess: ["brain-ops"],
+    inviteKeypair,
+    issuerNpub: authorNpub,
+    provider: { signEvent: emailInviteSigner, nip44: { encrypt: fakeEncrypt, decrypt: fakeDecrypt } },
+    scope: client.emailFolderInviteScope(adminOnlyFolder),
+    signEvent: emailInviteSigner,
+    target: "new-folder-guest@example.com",
+    brainId: "smoke",
+  });
+  assert.equal(folderEmailInviteRequest.body.folderOnly, true);
+  assert.equal(
+    JSON.stringify(folderEmailInviteRequest.body.initialFolderAccess),
+    JSON.stringify(["brain-ops"])
+  );
+  assert.equal(
+    JSON.stringify(folderEmailInviteRequest.scope),
+    JSON.stringify([{ folderId: "brain-ops", access: "admin_only", keyVersion: 1 }])
+  );
+  assert.equal(
+    JSON.stringify(client.emailFolderInviteScope({
+      id: "personal-owner",
+      access: "owner",
+      currentKeyVersion: 2,
+    })),
+    JSON.stringify([{ folderId: "personal-owner", access: "owner", keyVersion: 2 }]),
+    "Personal Brain Folder invitations preserve the Folder's native owner access mode"
+  );
+  assert.equal(
+    JSON.stringify(client.emailFolderInviteScope({
+      id: "organization-restricted",
+      access: "restricted",
+      currentKeyVersion: 4,
+    })),
+    JSON.stringify([{ folderId: "organization-restricted", access: "restricted", keyVersion: 4 }]),
+    "Organization Brain Folder invitations preserve the Folder's native restricted access mode"
+  );
 
   const emailInvitation = {
     brainId: "smoke",
@@ -4167,7 +5704,11 @@ assert.equal(
   assert.equal(boundWrapperGrant.id, "grant-bound-wrapper");
   assert.equal(boundProviderEncryptCalls, 2);
 
-  assert.match(htmlSource, /id="brainInviteFoldersInput"(?![^>]*\svalue=)/);
+  assert.doesNotMatch(htmlSource, /id="brainInviteFoldersInput"/);
+  assert.match(htmlSource, /id="brainInviteFoldersOptions"/);
+  assert.doesNotMatch(source, /\$\("brainInviteFoldersInput"\)/);
+  assert.match(source, /Invite code \$\{row\.inviteCode\}/);
+  assert.match(source, /Folder Invitation \$\{linkRow\.id\}/);
   assert.match(htmlSource, />Invite code<\/span>/);
   assert.doesNotMatch(htmlSource, /Invite code or id/);
   assert.match(htmlSource, /id="pageFolderIdInput"(?![^>]*\svalue=)/);
@@ -4430,7 +5971,32 @@ assert.equal(
   assert.equal(openedAsset.text, undefined);
   assert.equal(client.buildGraphProjection([openedAsset]).nodes.length, 0);
   assert.equal(client.searchPageRows("source", [openedAsset]).length, 0);
-  assert.equal(client.readerPageRows("general", [openedAsset]).length, 0);
+  const assetRow = client.readerPageRows("general", [openedAsset])[0];
+  assert.equal(assetRow.label, "source.pdf");
+  assert.equal(assetRow.detail, "Asset · application/pdf · 11 bytes");
+  const download = client.assetDownloadDescriptor(openedAsset);
+  assert.equal(download.filename, "source.pdf");
+  assert.equal(download.contentType, "application/pdf");
+  assert.equal(new TextDecoder().decode(download.bytes), "%PDF asset\n");
+  assert.equal(
+    client.assetDownloadDescriptor({ ...openedAsset, filename: "../unsafe\nname.pdf" }).filename,
+    ".._unsafe_name.pdf"
+  );
+  const revokedAssetProjection = client.projectionForAccessUpdate(
+    {
+      pages: new Map([["general/obj_cli_asset001", openedAsset]]),
+      seenEventIds: new Set(),
+      localDrafts: new Map(),
+      conflicts: [],
+    },
+    []
+  );
+  assert.equal(revokedAssetProjection.pages.size, 0);
+  assert.equal(
+    client.readerPageRows("general", [...revokedAssetProjection.pages.values()]).length,
+    0,
+    "Folder revocation must remove an Asset from the readable sidebar projection"
+  );
   await assert.rejects(
     () =>
       client.encodeFolderObjectAssetPlaintext(
@@ -4613,7 +6179,6 @@ assert.equal(
           accessUserIds: [],
           currentKeyVersion: 1,
           setupIncomplete: false,
-          sharedFolderSource: false,
         },
         {
           id: "restricted",
@@ -4622,7 +6187,6 @@ assert.equal(
           accessUserIds: [],
           currentKeyVersion: 1,
           setupIncomplete: false,
-          sharedFolderSource: false,
         },
       ],
     },
@@ -4710,7 +6274,6 @@ assert.equal(
         access_user_ids: [],
         current_key_version: 2,
         setup_incomplete: false,
-        shared_folder_source: false,
       },
       {
         id: "brain-ops",
@@ -4719,7 +6282,6 @@ assert.equal(
         accessUserIds: [],
         currentKeyVersion: 1,
         setupIncomplete: false,
-        sharedFolderSource: false,
       },
     ],
   });
@@ -5332,7 +6894,6 @@ assert.equal(
           accessUserIds: [],
           currentKeyVersion: 1,
           setupIncomplete: false,
-          sharedFolderSource: false,
         },
       ],
     },
@@ -6004,7 +7565,7 @@ assert.equal(
   });
   assert.equal(preparedImport.writes.length, 3);
   assert.equal(preparedImport.skipped.length, 0);
-  assert.match(preparedImport.writes[0].path, /\/_admin\/brains\/smoke\/folders\/general\/objects\/obj_/);
+  assert.match(preparedImport.writes[0].path, /\/v1\/brains\/smoke\/folders\/general\/objects\/obj_/);
   assert.equal(preparedImport.writes[0].body.revisionEvent.kind, 30078);
 
   assert.throws(
@@ -6222,7 +7783,7 @@ assert.equal(
         {
           destinationBrainId: "partner",
           id: "sfc-outgoing",
-          memberNpubs: ["npub1a", "npub1b"],
+          participantNpubs: ["npub1a", "npub1b"],
           sourceFolderId: "playbooks",
           sourceBrainId: "dest",
           status: "active",
@@ -6276,7 +7837,7 @@ assert.equal(
       accessLoss.context.window.nostr
     )
   );
-  accessLoss.context.fetch = async (path) => path === "/_admin/brains"
+  accessLoss.context.fetch = async (path) => path === "/v1/brains"
     ? {
         ok: true,
         status: 200,
@@ -6307,12 +7868,12 @@ assert.equal(
   accessLoss.context.document.getElementById("pageDraftInput").value = "plaintext-draft-sentinel";
   let capturedAccessLoss = null;
   await assert.rejects(
-    () => accessLoss.seams.protectedRequest("/_admin/brains/acme/metadata"),
+    () => accessLoss.seams.protectedRequest("/v1/brains/acme/metadata"),
     (error) => {
       capturedAccessLoss = error;
       assert.equal(error.status, 403);
       assert.equal(error.reason, "brain access required");
-      assert.equal(error.path, "/_admin/brains/acme/metadata");
+      assert.equal(error.path, "/v1/brains/acme/metadata");
       return true;
     }
   );
@@ -6415,16 +7976,16 @@ assert.equal(
   assert.equal(elements.get("clientActionFeedback").hidden, false);
   assert.equal(
     elements.get("clientActionFeedback").textContent,
-    "Action could not be completed. Try again. If it continues, check your connection, signer, and unlocked session."
+    "Action could not be completed. Try again. If it continues, check your connection and Brain status."
   );
   assert.doesNotMatch(elements.get("clientActionFeedback").textContent, /invite-secret-sentinel/);
   client.lockSession();
   assert.equal(elements.get("pageDraftInput").value, "");
   assert.equal(elements.get("brainInviteSecretInput").value, "");
-  assert.equal(elements.get("sessionSecurityTitle").textContent, "Session locked");
+  assert.equal(elements.get("sessionSecurityTitle").textContent, "Brain locked");
   assert.equal(
     elements.get("readerPageContent").textContent,
-    "Session locked. Unlock to reopen encrypted Folder Key Grants."
+    "Brain locked. Open it to view your private content."
   );
   assert.equal(elements.get("graphCanvas").children.length, 0);
   assert.equal(elements.get("graphStats").textContent, "0 nodes / 0 links");
@@ -6432,6 +7993,30 @@ assert.equal(
   assert.equal(elements.get("obsidianNewFolderButton").disabled, true);
   assert.equal(elements.get("clientActionFeedback").hidden, true);
   assert.equal(elements.get("clientActionFeedback").textContent, "");
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(client.parseBrainUpdateEventBlock(
+      'event: brain_update\ndata: {"brainId":"org-1","latestSequence":42,"reason":"content_updated"}'
+    ))),
+    { brainId: "org-1", latestSequence: 42, reason: "content_updated" },
+    "The live stream must decode a valid Brain Update Notification"
+  );
+  assert.equal(
+    client.parseBrainUpdateEventBlock(
+      'event: brain_update\ndata: {"brainId":"org-1","latestSequence":42,"reason":"unknown"}'
+    ),
+    null,
+    "The live stream must ignore unknown notification reasons"
+  );
+  const accessProjection = client.createClientProjection();
+  accessProjection.pages.set("revoked/page", { text: "must disappear" });
+  accessProjection.pages.set("kept/page", { text: "will be reloaded authoritatively" });
+  accessProjection.localDrafts.set("revoked/page", { text: "revoked draft" });
+  accessProjection.localDrafts.set("kept/page", { text: "kept draft" });
+  const reconciledProjection = client.projectionForAccessUpdate(accessProjection, ["kept"]);
+  assert.equal(reconciledProjection.pages.size, 0, "Access reconciliation purges decrypted pages");
+  assert.equal(reconciledProjection.localDrafts.has("revoked/page"), false);
+  assert.equal(reconciledProjection.localDrafts.has("kept/page"), true);
 
   console.log("product-client deterministic seams ok");
 })().catch((error) => {

@@ -113,9 +113,8 @@ function renderMetadata(metadata) {
   setList(
     "folderList",
     (metadata.folders || []).map((folder) => {
-      const source = folder.sharedFolderSource ? " source" : "";
       const setup = folder.setupIncomplete ? " setup incomplete" : "";
-      return `${folder.path} (${folder.access}, v${folder.currentKeyVersion}${source}${setup})`;
+      return `${folder.path} (${folder.access}, v${folder.currentKeyVersion}${setup})`;
     }),
     "No folders loaded"
   );
@@ -187,17 +186,17 @@ function rememberLifecycle(result) {
   }
   if (result.recipientNpub && result.folderId && result.acceptPath) {
     $("shareLinkId").value = result.id;
-    appendList("invitationList", `share link ${result.id} ${result.status}`);
+    appendList("invitationList", `Folder Invitation ${result.id} ${result.status}`);
   }
   if (result.sourceBrainId && result.destinationBrainId && result.acceptPath) {
     $("sharedInvitationId").value = result.id;
-    appendList("invitationList", `shared invitation ${result.id} ${result.status}`);
+    appendList("invitationList", `Mount Offer ${result.id} ${result.status}`);
   }
-  if (result.memberNpubs) {
+  if (result.participantNpubs) {
     $("connectionId").value = result.id;
     appendList(
       "mountList",
-      `connection ${result.id} ${result.status} (${result.memberNpubs.length} members)`
+      `Mount ${result.id} ${result.status} (${result.participantNpubs.length} participants)`
     );
   }
 }
@@ -225,41 +224,41 @@ $("bootstrapButton").addEventListener("click", () =>
 
 $("metadataButton").addEventListener("click", async () => {
   const result = await run("Loading metadata", () =>
-    request(`/_admin/brains/${encodeURIComponent(brainId())}/metadata`)
+    request(`/v1/brains/${encodeURIComponent(brainId())}/metadata`)
   );
   if (result) renderMetadata(result);
 });
 
 $("syncButton").addEventListener("click", async () => {
   const result = await run("Loading sync bootstrap", () =>
-    request(`/_admin/brains/${encodeURIComponent(brainId())}/sync/bootstrap`)
+    request(`/v1/brains/${encodeURIComponent(brainId())}/sync/bootstrap`)
   );
   if (result) renderSync(result);
 });
 
 $("mountsButton").addEventListener("click", async () => {
-  const result = await run("Loading organization mounts", () =>
-    request(`/_admin/brains/${encodeURIComponent(brainId())}/organization-folder-mounts`)
+  const result = await run("Loading mounts", () =>
+    request(`/v1/brains/${encodeURIComponent(brainId())}/mounts`)
   );
   if (result) renderMounts(result);
 });
 
 $("exportButton").addEventListener("click", async () => {
   const result = await run("Loading encrypted export", () =>
-    request(`/_admin/brains/${encodeURIComponent(brainId())}/export`)
+    request(`/v1/brains/${encodeURIComponent(brainId())}/export`)
   );
   if (result) renderExport(result);
 });
 
 $("searchButton").addEventListener("click", () =>
   run("Checking search privacy boundary", () =>
-    request(`/_admin/brains/${encodeURIComponent(brainId())}/search?q=smoke`)
+    request(`/v1/brains/${encodeURIComponent(brainId())}/search?q=smoke`)
   )
 );
 
 $("createBrainButton").addEventListener("click", () =>
   run("Creating brain", () =>
-    request("/_admin/brains", {
+    request("/v1/brains", {
       method: "POST",
       body: $("createBrainBody").value,
     })
@@ -268,7 +267,7 @@ $("createBrainButton").addEventListener("click", () =>
 
 $("createFolderButton").addEventListener("click", async () => {
   const result = await run("Creating folder", () =>
-    request(`/_admin/brains/${encodeURIComponent(brainId())}/folders`, {
+    request(`/v1/brains/${encodeURIComponent(brainId())}/folders`, {
       method: "POST",
       body: $("createFolderBody").value,
     })
@@ -279,7 +278,7 @@ $("createFolderButton").addEventListener("click", async () => {
 $("putObjectButton").addEventListener("click", () =>
   run("Putting object", () =>
     request(
-      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
+      `/v1/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
       )}/objects/${encodeURIComponent(objectId())}`,
       {
@@ -293,7 +292,7 @@ $("putObjectButton").addEventListener("click", () =>
 $("getObjectButton").addEventListener("click", () =>
   run("Getting object", () =>
     request(
-      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
+      `/v1/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
       )}/objects/${encodeURIComponent(objectId())}`
     )
@@ -302,7 +301,7 @@ $("getObjectButton").addEventListener("click", () =>
 
 $("submitSyncButton").addEventListener("click", () =>
   run("Submitting sync record", () =>
-    request(`/_admin/brains/${encodeURIComponent(brainId())}/sync/records`, {
+    request(`/v1/brains/${encodeURIComponent(brainId())}/sync/records`, {
       method: "POST",
       body: $("syncPayload").value,
     })
@@ -311,7 +310,7 @@ $("submitSyncButton").addEventListener("click", () =>
 
 $("createBrainInvitationButton").addEventListener("click", () =>
   run("Creating brain invitation", () =>
-    request(`/_admin/brains/${encodeURIComponent(brainId())}/invitations`, {
+    request(`/v1/brains/${encodeURIComponent(brainId())}/invitations`, {
       method: "POST",
       body: $("brainInvitationBody").value,
     })
@@ -320,24 +319,24 @@ $("createBrainInvitationButton").addEventListener("click", () =>
 
 $("getBrainInvitationButton").addEventListener("click", () =>
   run("Getting brain invitation", () =>
-    request(`/_admin/brain-invitation-links/${encodeURIComponent(inviteCode())}`)
+    request(`/v1/brain-invitation-links/${encodeURIComponent(inviteCode())}`)
   )
 );
 
 $("acceptBrainInvitationButton").addEventListener("click", () =>
   run("Accepting brain invitation", () =>
-    request(`/_admin/brain-invitation-links/${encodeURIComponent(inviteCode())}/accept`, {
+    request(`/v1/brain-invitation-links/${encodeURIComponent(inviteCode())}/accept`, {
       method: "POST",
     })
   )
 );
 
 $("createShareLinkButton").addEventListener("click", () =>
-  run("Creating share link", () =>
+  run("Creating Folder invitation", () =>
     request(
-      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
+      `/v1/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
-      )}/share-links`,
+      )}/invitations`,
       {
         method: "POST",
         body: $("shareLinkBody").value,
@@ -347,48 +346,33 @@ $("createShareLinkButton").addEventListener("click", () =>
 );
 
 $("getShareLinkButton").addEventListener("click", () =>
-  run("Getting share link", () =>
-    request(`/_admin/share-links/${encodeURIComponent(shareLinkId())}`)
+  run("Getting Folder invitation", () =>
+    request(`/v1/invitations/${encodeURIComponent(shareLinkId())}`)
   )
 );
 
 $("acceptShareLinkButton").addEventListener("click", () =>
-  run("Accepting share link", () =>
-    request(`/_admin/share-links/${encodeURIComponent(shareLinkId())}/accept`, {
+  run("Accepting Folder invitation", () =>
+    request(`/v1/invitations/${encodeURIComponent(shareLinkId())}/accept`, {
       method: "POST",
     })
   )
 );
 
 $("revokeShareLinkButton").addEventListener("click", () =>
-  run("Revoking share link", () =>
-    request(`/_admin/share-links/${encodeURIComponent(shareLinkId())}`, {
+  run("Revoking Folder invitation", () =>
+    request(`/v1/invitations/${encodeURIComponent(shareLinkId())}`, {
       method: "DELETE",
     })
   )
 );
 
-$("markShareSourceButton").addEventListener("click", async () => {
-  const result = await run("Marking shared folder source", () =>
-    request(
-      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
-        folderId()
-      )}/share-source`,
-      {
-        method: "POST",
-        body: JSON.stringify({ accessChangeEvent: {} }, null, 2),
-      }
-    )
-  );
-  if (result) renderMetadata(result);
-});
-
 $("createSharedInvitationButton").addEventListener("click", () =>
-  run("Creating shared folder invitation", () =>
+  run("Creating mount offer", () =>
     request(
-      `/_admin/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
+      `/v1/brains/${encodeURIComponent(brainId())}/folders/${encodeURIComponent(
         folderId()
-      )}/shared-folder-invitations`,
+      )}/mount-offers`,
       {
         method: "POST",
         body: $("sharedFolderBody").value,
@@ -398,31 +382,22 @@ $("createSharedInvitationButton").addEventListener("click", () =>
 );
 
 $("getSharedInvitationButton").addEventListener("click", () =>
-  run("Getting shared folder invitation", () =>
-    request(`/_admin/shared-folder-invitations/${encodeURIComponent(sharedInvitationId())}`)
+  run("Getting mount offer", () =>
+    request(`/v1/mount-offers/${encodeURIComponent(sharedInvitationId())}`)
   )
 );
 
 $("acceptSharedInvitationButton").addEventListener("click", () =>
-  run("Accepting shared folder invitation", () =>
-    request(`/_admin/shared-folder-invitations/${encodeURIComponent(sharedInvitationId())}/accept`, {
+  run("Accepting mount offer", () =>
+    request(`/v1/mount-offers/${encodeURIComponent(sharedInvitationId())}/accept`, {
       method: "POST",
     })
   )
 );
 
-$("updateConnectionButton").addEventListener("click", () =>
-  run("Updating connection members", () =>
-    request(`/_admin/shared-folder-connections/${encodeURIComponent(connectionId())}/members`, {
-      method: "PATCH",
-      body: $("sharedFolderBody").value,
-    })
-  )
-);
-
 $("revokeConnectionButton").addEventListener("click", () =>
-  run("Revoking connection", () =>
-    request(`/_admin/shared-folder-connections/${encodeURIComponent(connectionId())}`, {
+  run("Revoking mount", () =>
+    request(`/v1/mounts/${encodeURIComponent(connectionId())}`, {
       method: "DELETE",
       body: $("sharedFolderBody").value,
     })
@@ -433,5 +408,5 @@ emptyList("summaryList", "No brain loaded");
 emptyList("folderList", "No folders loaded");
 emptyList("objectList", "No sync state loaded");
 emptyList("grantList", "No grant state loaded");
-emptyList("invitationList", "No invitations or Share Links loaded");
+emptyList("invitationList", "No Brain or Folder Invitations loaded");
 emptyList("mountList", "No connections or mounts loaded");

@@ -110,6 +110,7 @@ fbrain open <brain-id>
 cd "${FBRAIN_WORKING_TREE_ROOT:-.}/<brain-id>"
 fbrain sync now --summary
 fbrain conflicts --json
+fbrain search "credential rotation" --json
 fbrain status --json
 fbrain activity
 fbrain folder list --brain <brain-id>
@@ -155,6 +156,19 @@ loopback addresses, or the exact development host explicitly named by
   state. Prefer global `--config-dir` in scripts and agent runtimes.
 - `FBRAIN_WORKING_TREE_ROOT`: optional default parent for `fbrain open`; hosted
   Agent Runtimes set this below `/data/workspace`.
+
+`fbrain search <query>` uses private, persistent per-Folder BM25 indexes over
+the readable Markdown Sections in the current Brain Working Tree. It searches
+all readable Folders by default; repeat `--folder <id-or-path>` to narrow the
+scope. If mounted Folders reuse an ID, select one with
+`--folder <source-brain-id>:<folder-id>`. Use `--limit <1-50>` to bound
+evidence and `--json` for agents; JSON evidence includes `sourceBrainId`.
+Each Folder keeps its own BM25 corpus; query-time BM25 relevance is normalized
+within that Folder before the candidate lists are merged, with raw BM25 as the
+cross-Folder tie-break. The final lexical order therefore remains BM25-derived
+without comparing unnormalized per-Folder scales.
+Search indexes are disposable derived state under `.finitebrain/`, never synced
+knowledge or a Recovery Set.
 
 ## Test Expectations
 

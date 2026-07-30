@@ -40,16 +40,16 @@
             <input id="inviteCode" placeholder="invite-..." />
           </label>
           <label>
-            Share Link id
-            <input id="shareLinkId" placeholder="share-link-..." />
+            Folder Invitation id
+            <input id="shareLinkId" placeholder="folder-invitation-..." />
           </label>
           <label>
-            Shared Folder Invitation id
-            <input id="sharedInvitationId" placeholder="shared-folder-invitation-..." />
+            Mount Offer id
+            <input id="sharedInvitationId" placeholder="mount-offer-..." />
           </label>
           <label>
-            Connection id
-            <input id="connectionId" placeholder="connection-..." />
+            Mount id
+            <input id="connectionId" placeholder="mount-..." />
           </label>
         </div>
         <p class="note">
@@ -86,7 +86,6 @@
   "access": "restricted",
   "parentFolderId": "general",
   "path": "general/Restricted",
-  "sharedFolderSource": false,
   "accessUserIds": [],
   "grants": [],
   "accessChangeEvent": {}
@@ -112,7 +111,7 @@
           <button id="acceptBrainInvitationButton" type="button">POST accept invitation</button>
         </details>
         <details>
-          <summary>Share Link body</summary>
+          <summary>Folder Invitation body</summary>
           <textarea id="shareLinkBody" rows="9" spellcheck="false">{
   "recipientNpub": "npub...",
   "grant": {
@@ -122,33 +121,31 @@
     "wrappedEventJson": "{\"kind\":1059}"
   },
   "accessChangeEvent": {},
-  "expiresAt": "2026-06-30T00:00:00.000Z",
-  "createPersonalMount": true
+  "expiresAt": "2026-07-31T00:00:00Z"
 }</textarea>
-          <button id="createShareLinkButton" type="button">POST share link</button>
-          <button id="getShareLinkButton" type="button">GET share link</button>
-          <button id="acceptShareLinkButton" type="button">POST accept share link</button>
-          <button id="revokeShareLinkButton" type="button">DELETE share link</button>
+          <button id="createShareLinkButton" type="button">POST Folder Invitation</button>
+          <button id="getShareLinkButton" type="button">GET Folder Invitation</button>
+          <button id="acceptShareLinkButton" type="button">POST accept Folder Invitation</button>
+          <button id="revokeShareLinkButton" type="button">DELETE Folder Invitation</button>
         </details>
         <details>
-          <summary>Shared Folder / Connection body</summary>
+          <summary>Mount Offer body</summary>
           <textarea id="sharedFolderBody" rows="11" spellcheck="false">{
   "destinationBrainId": "destination",
-  "destinationAdminNpub": "npub...",
+  "destinationControllerNpub": "npub...",
   "grant": {
     "id": "grant-shared-dev",
     "keyVersion": 1,
     "recipientNpub": "npub...",
     "wrappedEventJson": "{\"kind\":1059}"
   },
-  "accessChangeEvent": {}
+  "accessChangeEvent": {},
+  "expiresAt": "2026-07-31T00:00:00Z"
 }</textarea>
-          <button id="markShareSourceButton" type="button">POST mark source</button>
-          <button id="createSharedInvitationButton" type="button">POST shared invitation</button>
-          <button id="getSharedInvitationButton" type="button">GET shared invitation</button>
-          <button id="acceptSharedInvitationButton" type="button">POST accept shared invitation</button>
-          <button id="updateConnectionButton" type="button">PATCH connection members</button>
-          <button id="revokeConnectionButton" type="button">DELETE connection</button>
+          <button id="createSharedInvitationButton" type="button">POST Mount Offer</button>
+          <button id="getSharedInvitationButton" type="button">GET Mount Offer</button>
+          <button id="acceptSharedInvitationButton" type="button">POST accept Mount Offer</button>
+          <button id="revokeConnectionButton" type="button">DELETE Mount</button>
         </details>
       </section>
 
@@ -172,7 +169,7 @@
             <ul id="grantList" class="list"></ul>
           </div>
           <div>
-            <p class="label">Invitations and Share Links</p>
+            <p class="label">Brain and Folder Invitations</p>
             <ul id="invitationList" class="list"></ul>
           </div>
           <div>

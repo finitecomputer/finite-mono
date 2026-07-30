@@ -105,8 +105,112 @@ user; an authorized Member must explicitly grant it the required access and
 Folder Key Grants. In a Personal Brain, the owner or the first account-bound
 agent's bootstrap flow may establish one distinct Agent Principal as the
 Personal Agent; that relationship grants full operational Brain access without
-transferring ownership. Other limited Member Identities receive only their
-explicit restricted-Folder access.
+transferring ownership. Other Folder-limited identities are Guests and receive
+only their explicit Folder access, independently of the Folder's native access
+mode.
+
+### Brain Role
+
+A Member Identity's Brain-wide authorization relationship, such as Member,
+admin, or owner. A Brain Role does not by itself prove that the Member Identity
+can decrypt a Folder; readable Folder content also requires current Folder
+Access and a current Folder Key Grant. Guest is a Folder-limited relationship,
+not a Brain Role. _Avoid_: Brain Access.
+
+### Member
+
+A Member Identity that belongs to a Brain. In either a Personal Brain or an
+Organization Brain, a Member is entitled to every current and future
+all-members Folder, while restricted Folders still require explicit Folder
+Access Readiness. Removing Membership removes all of that identity's access to
+the Brain rather than converting it into a Guest. _Avoid_: Collaborator, User.
+
+### Guest
+
+A Member Identity that does not belong to a Brain broadly but has explicit
+Folder Access Readiness for one or more Folders in it. A Guest never inherits
+access to all-members Folders merely because it can open an invited or mounted
+Folder. Explicit Guest access is independent of the Folder's native access mode.
+When the identity has no direct Folder access and participates in no Mount for
+that Brain, the active Guest relationship ends while its audit history remains.
+_Avoid_: Limited Member, External Member.
+
+### Brain Invitation
+
+A pending, single-recipient, single-use offer to become a Member of a Brain. It
+may be sent from either a Personal Brain or an Organization Brain, but only the
+addressed email or Member Identity may accept it. It expires if unused and
+acceptance never transfers Personal Brain ownership or implicitly grants an
+Organization Brain admin role. Cancellation applies only while pending;
+acceptance consumes the invitation and later membership removal is a separate
+administrative operation. _Avoid_: Brain Share.
+
+### Folder Invitation
+
+A pending, single-recipient, single-use offer of Folder Access Readiness for one
+Folder. It may be sent from either a Personal Brain or an Organization Brain,
+only the addressed email or Member Identity may accept it, creates a Guest
+relationship when needed, expires if unused, and does not create a relationship
+with another Brain. Cancellation applies only while pending; acceptance consumes
+the invitation and later Folder Access Revocation is a separate administrative
+operation. _Avoid_: Share Link, Folder Share.
+
+### Mount Offer
+
+A pending, single-use offer to connect one source Folder to one named
+destination Brain. It is addressed to one destination owner or admin and cannot
+be accepted into another Brain. Acceptance creates a Shared Folder Connection
+and Folder Mount rather than copying or changing the native access mode of the
+Folder. Any Folder may be offered without first becoming a special share source,
+and an unused offer expires. _Avoid_: Shared Folder Invitation.
+
+### Shared Folder Connection
+
+The durable, revocable relationship that makes one source Folder a shared
+workspace in a destination Brain. Either Brain may be Personal or Organization;
+each side retains its own governance, destination participants are Guests of
+the source Brain, and either side may end the relationship. _Avoid_: Folder
+Share.
+
+### Mount Participant
+
+A destination Brain owner, Personal Agent, admin, or Member selected by that
+Brain's governance to use a Folder Mount. A Mount Participant is a Guest of the
+source Brain and requires Folder Access Readiness for the mounted source
+Folder; a destination Guest is not eligible. _Avoid_: Connection Member, Shared
+Folder Member.
+
+### Folder Mount
+
+The destination Brain's visible reference to a source Folder through a Shared
+Folder Connection. A Folder Mount is not a copy and does not by itself grant
+Folder Access Readiness. It cannot itself become the source of another Folder
+Invitation or Mount Offer; only the native source Brain may extend access.
+_Avoid_: Shared Folder, Synced Folder.
+
+### Folder Access Readiness
+
+The observable state in which a Member Identity is entitled to a Folder under
+current policy and holds a valid Folder Key Grant for the Folder's current key
+version. Policy entitlement without a current grant is incomplete and must not
+be presented as readable access. _Avoid_: Effective Access.
+
+### Folder Access Revocation
+
+The atomic, client-owned transition that removes one or more identities from a
+Folder and advances its Folder Key while granting the new current key to every
+remaining authorized identity. It prevents future access but does not claim to
+erase plaintext or earlier key material already obtained. Removing a Member
+applies this transition to every Folder the identity could access. _Avoid_:
+Ungrant, Link Revocation.
+
+### Organization Brain Collaboration
+
+The desired state in which a target Member Identity has the requested
+Organization Brain Role and Folder Access Readiness for every current Folder
+included by the collaboration scope. The default admin collaboration scope is
+all existing Organization Brain Folders; a partial collaboration names every
+unready Folder and remains safe to retry. _Avoid_: Admin Sharing, Brain Access.
 
 ### User Nostr Identity
 
@@ -136,11 +240,13 @@ cannot be established, no Brain is created. This is a Brain-enforced
 bootstrap, not a sequence of later membership mutations. The managed
 FiniteBrain skill passes the requester from authenticated message metadata,
 never from identity text supplied in the conversation. If that authenticated
-requester metadata is
-unavailable, the agent does not guess or create an agent-only Brain; it briefly
+requester metadata is unavailable, the agent does not guess, require a raw
+requester identity argument, or create an agent-only Brain; the agent-facing
+CLI has no requester-identity override. It briefly
 asks the user to retry from an authenticated chat context. This rule does not
-auto-enroll an agent when a human creates an Organization Brain directly in the
-Product Client; agents are added explicitly in that path.
+auto-enroll an agent when a human creates an Organization Brain directly in
+the Product Client or CLI; the signing human is the initial admin and agents
+are added explicitly in that path.
 
 A clear natural-language request to create the Organization Brain is sufficient
 authorization for this bootstrap. The agent does not add another confirmation
@@ -173,13 +279,13 @@ already shows history; Brain does not impersonate the human owner.
 The product role of an Agent Principal added by the owner or established during
 account-bound agent bootstrap in a Personal Brain. A Personal Agent has full
 operational and collaboration authority across all current and future Brain
-content, while ownership, recovery, Brain deletion, and post-bootstrap control
-of the Personal Agent relationship remain exclusive to the human owner. A
-Personal Brain has exactly one Personal Agent in the current product scope;
-multi-agent operation belongs in Organization Brains. The owner may replace the
-Personal Agent through one atomic key-rotating relationship swap, but the
-removed agent cannot re-enroll itself. _Avoid_: Delegated Agent, Personal Brain
-Admin.
+content, including accepted Folder Mounts, while ownership, recovery, Brain
+deletion, and post-bootstrap control of the Personal Agent relationship remain
+exclusive to the human owner. A Personal Brain has exactly one Personal Agent
+in the current product scope; multi-agent operation belongs in Organization
+Brains. The owner may replace the Personal Agent through one atomic
+key-rotating relationship swap, but the removed agent cannot re-enroll itself.
+_Avoid_: Delegated Agent, Personal Brain Admin.
 
 Owner-initiated removal or replacement revokes the Personal Agent relationship
 and rotates current Folder Keys without deleting the Personal Brain or its
@@ -347,6 +453,35 @@ define who can read it. Folder-local `_index.md`, `config.md`, and `log.md`
 describe only that Folder. Root/global indexes must not leak private Folder
 titles, summaries, sources, or activity.
 
+### Hybrid Wiki Search
+
+The agent-facing local retrieval capability over the readable Markdown in a
+Vault Working Tree. It combines lexical and semantic relevance when available,
+falls back to lexical relevance alone, and returns one merged result list from
+the acting Member Identity's readable Folders. It returns locations in the
+original Pages rather than creating another knowledge authority.
+
+### Markdown Section
+
+The canonical Hybrid Wiki Search retrieval unit: the readable content under a
+Markdown heading together with its Page path, Page title, and heading ancestry.
+A Page without headings is one Markdown Section, and bounded subdivisions of a
+long section retain the same document context.
+
+### Embedding Provider
+
+The replaceable capability that converts a Markdown Section or search query
+into a semantic vector for Hybrid Wiki Search. Provider model identity and
+version belong to the derived index lifecycle; the provider does not become a
+knowledge authority or modify the underlying Page.
+
+### Search Evidence
+
+A ranked Hybrid Wiki Search result that identifies an original Markdown
+Section, its location, a short excerpt, local-sync disposition, and contributing
+retrieval signals. Search Evidence guides an agent to source Pages; it is not a
+generated answer or a new durable knowledge artifact.
+
 ### Asset
 
 An encrypted non-Markdown source file stored inside a Folder, such as a PDF,
@@ -413,6 +548,15 @@ The resident trusted-client process that watches a Brain Working Tree, opens
 available Folder Keys for the acting Member Identity, detects file changes,
 syncs with the server, and records blocked states that require controller
 resolution.
+
+### Brain Update Notification
+
+A server-sent, content-free hint that tells a connected trusted client that an
+accessible Brain may have a newer authoritative sequence or changed access.
+Clients briefly coalesce bursts of these notifications, then reconcile through
+the normal authenticated sync contract. A Brain Update Notification is not a
+durable sync record or source of truth; missed, delayed, duplicated, or
+reordered notifications never replace sequence-based catch-up.
 
 ### Local Agent Signer
 

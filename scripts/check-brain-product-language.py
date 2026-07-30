@@ -24,6 +24,7 @@ DOCUMENTED_EXCEPTIONS = {
     ROOT / "finite-brain/crates/finite-brain-store/src/schema.rs",
     ROOT / "finite-brain/docs/adr/0027-use-brain-as-the-product-language-for-knowledge-spaces.md",
     ROOT / "finite-brain/docs/specs/brain-language-and-setup-reconciliation-spec.md",
+    ROOT / "finite-brain/docs/specs/intent-based-access-invitations-and-mounts-spec.md",
 }
 TEXT_SUFFIXES = {
     ".css", ".html", ".js", ".json", ".md", ".mjs", ".rs", ".sh", ".toml", ".ts", ".tsx"

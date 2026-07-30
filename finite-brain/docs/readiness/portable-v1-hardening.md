@@ -28,7 +28,7 @@ staging PR.
 | Request body size | Axum `DefaultBodyLimit` caps extracted request bodies at `1 MiB`. | `protected_create_rejects_oversized_request_body` |
 | Sync pull page size | Store clamps client `limit` to `MAX_PULL_LIMIT = 1000`. | `sync_pull_caps_large_client_limits` |
 | Retention floor | Cursors below the retained floor return `410 Gone` and require rebootstrap. | `sync_cursor_expiry_requires_rebootstrap`; server route coverage |
-| Retry/idempotency | Duplicate sync writes are keyed by event id and return the original sequence. Invitation/share accepts are retry-safe only for the same target npub. | duplicate sync, Brain Invitation, Share Link, and Shared Folder tests |
+| Retry/idempotency | Duplicate sync writes are keyed by event id and return the original sequence. Brain Invitation, Folder Invitation, and Mount Offer accepts are retry-safe only for the same target npub. | duplicate sync, Brain Invitation, Folder Invitation, and Mount tests |
 | Protected route rate limits | Authenticated routes are counted per signer, method, and path. Portable v1 defaults to 120 requests per 60 seconds. Deployments can override the in-process bounds through `ServerState::with_rate_limit`. | `protected_routes_enforce_configured_rate_limits` |
 
 ## Backup And Restore
@@ -106,13 +106,13 @@ Evidence:
 
 | Flow | Evidence |
 | --- | --- |
-| Brain bootstrap | core bootstrap tests; server `POST /_admin/brains`; Smoke UI create brain control |
+| Brain bootstrap | core bootstrap tests; server `POST /v1/brains`; Smoke UI create brain control |
 | Folder creation | store transactional folder tests; server restricted Folder route; Smoke UI create Folder control |
 | Encrypted object write/read/sync pull | core crypto tests; server object create/update/move/delete/pull test; Smoke UI object/sync controls |
 | Access grant/removal/rotation | store grant/removal rotation tests; server admin route test |
 | Brain Invitation accept | store and server singleton npub-bound invitation tests; Smoke UI invitation controls |
-| Share Link accept | store and server singleton npub-scoped Share Link tests; Smoke UI Share Link controls |
-| Mounted Folder projection | shared Folder connection store/server tests; Smoke UI mount/connection controls |
+| Folder Invitation accept | store and server singleton targeted Folder Invitation tests; Product Client Folder Invitation controls |
+| Mounted Folder projection | Shared Folder Connection store/server tests; Product Client Mount controls |
 | Export/import | encrypted export route/store tests; core OKF export/import/search tests; Product Client OKF import execution tests |
 | Locked/setup-needed states | setup incomplete repair tests; Smoke UI setup/error state chips |
 | Local development UI | `smoke_ui_serves_static_assets_and_sqlite_flow_works` verifies static assets and SQLite-backed route flow; Product Client route smoke covers `/client`, `/client/config.json`, `/client/app.js`, and `/client/app.css` |

@@ -20,6 +20,11 @@ pub(crate) fn validate_sync_input(input: &SyncRecordInput) -> Result<(), StoreEr
             reason: "payload JSON is required".to_owned(),
         });
     }
+    serde_json::from_str::<serde_json::Value>(input.payload_json()).map_err(|_| {
+        StoreError::InvalidRecord {
+            reason: "payload JSON is invalid".to_owned(),
+        }
+    })?;
     let expected_kind = match input {
         SyncRecordInput::Control(record)
             if record.record_type == SyncRecordType::FolderKeyGrant =>
@@ -186,6 +191,21 @@ pub(crate) fn insert_sync_record(
             input.record_event_kind()
         ],
     )?;
+    Ok(())
+}
+
+pub(crate) fn append_sync_records(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    inputs: &[SyncRecordInput],
+) -> Result<(), StoreError> {
+    for input in inputs {
+        validate_sync_input(input)?;
+        validate_sync_conflict(tx, brain_id, input)?;
+        let sequence = next_sequence(tx, brain_id)?;
+        insert_sync_record(tx, brain_id, sequence, input)?;
+        project_sync_record(tx, brain_id, input)?;
+    }
     Ok(())
 }
 

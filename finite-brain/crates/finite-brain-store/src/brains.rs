@@ -171,13 +171,17 @@ impl BrainStore {
         identity_aliases: &[IdentityAlias],
     ) -> Result<(), StoreError> {
         if output.brain.folders.len() > MAX_BOOTSTRAP_FOLDERS {
-            return Err(StoreError::BrokenInvariant {
-                reason: format!("bootstrap folder count exceeds limit {MAX_BOOTSTRAP_FOLDERS}"),
+            return Err(StoreError::CapacityExceeded {
+                limit: "brain_folders".to_owned(),
+                max: MAX_BOOTSTRAP_FOLDERS,
+                current: output.brain.folders.len(),
             });
         }
         if grants.len() > MAX_BOOTSTRAP_GRANTS {
-            return Err(StoreError::BrokenInvariant {
-                reason: format!("bootstrap grant count exceeds limit {MAX_BOOTSTRAP_GRANTS}"),
+            return Err(StoreError::CapacityExceeded {
+                limit: "folder_key_grants".to_owned(),
+                max: MAX_BOOTSTRAP_GRANTS,
+                current: grants.len(),
             });
         }
         validate_bootstrap_output(output)?;
@@ -243,7 +247,8 @@ impl BrainStore {
                            WHEN v.owner_user_id = ?1 THEN 'owner'
                            WHEN pa.agent_npub = ?1 THEN 'personal_agent'
                            WHEN va.user_id IS NOT NULL THEN 'admin'
-                           ELSE 'member'
+                           WHEN vm.user_id IS NOT NULL THEN 'member'
+                           ELSE 'guest'
                        END AS role,
                        NULL AS invite_code
                 FROM brains v
@@ -255,16 +260,11 @@ impl BrainStore {
                   ON vm.brain_id = v.id AND vm.user_id = ?1
                 WHERE v.owner_user_id = ?1
                    OR pa.agent_npub = ?1
-                   OR (
-                       vm.user_id IS NOT NULL
-                       AND (
-                           v.kind = 'organization'
-                           OR EXISTS (
-                               SELECT 1
-                               FROM folder_access fa
-                               WHERE fa.brain_id = v.id AND fa.user_id = ?1
-                           )
-                       )
+                   OR vm.user_id IS NOT NULL
+                   OR EXISTS (
+                       SELECT 1
+                       FROM folder_access fa
+                       WHERE fa.brain_id = v.id AND fa.user_id = ?1
                    )
 
                 UNION ALL
@@ -310,6 +310,7 @@ impl BrainStore {
                     "personal_agent" => VisibleBrainRole::PersonalAgent,
                     "admin" => VisibleBrainRole::Admin,
                     "member" => VisibleBrainRole::Member,
+                    "guest" => VisibleBrainRole::Guest,
                     "invited" => VisibleBrainRole::Invited,
                     _ => {
                         return Err(StoreError::BrokenInvariant {
@@ -323,33 +324,69 @@ impl BrainStore {
         Ok(brains)
     }
 
-    /// Add an Organization Brain Member.
+    /// Add a Member to either Brain kind.
     pub fn add_member(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
-        self.require_organization_brain(brain_id)?;
-        self.conn.execute(
+        self.add_member_with_control_records(brain_id, user_id, &[])
+    }
+
+    /// Add a Member and append its signed administrative record atomically.
+    pub fn add_member_with_control_records(
+        &mut self,
+        brain_id: &BrainId,
+        user_id: &UserId,
+        control_records: &[SyncRecordInput],
+    ) -> Result<(), StoreError> {
+        self.load_core_brain(brain_id)?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
             params![brain_id.as_str(), user_id.as_str()],
         )?;
+        sync_records::append_sync_records(&tx, brain_id, control_records)?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Add an Organization Brain Admin. The user must already be a member.
     pub fn add_admin(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
+        self.add_admin_with_control_records(brain_id, user_id, &[])
+    }
+
+    /// Add an Organization Brain Admin and append its signed record atomically.
+    pub fn add_admin_with_control_records(
+        &mut self,
+        brain_id: &BrainId,
+        user_id: &UserId,
+        control_records: &[SyncRecordInput],
+    ) -> Result<(), StoreError> {
         self.require_organization_brain(brain_id)?;
         if !self.member_exists(brain_id, user_id)? {
             return Err(StoreError::BrokenInvariant {
                 reason: "brain admin must already be a brain member".to_owned(),
             });
         }
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT INTO brain_admins (brain_id, user_id) VALUES (?1, ?2)",
             params![brain_id.as_str(), user_id.as_str()],
         )?;
+        sync_records::append_sync_records(&tx, brain_id, control_records)?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Remove an Organization Brain Admin while preserving at least one admin.
     pub fn remove_admin(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
+        self.remove_admin_with_control_records(brain_id, user_id, &[])
+    }
+
+    /// Remove an Organization Brain Admin and append its signed record atomically.
+    pub fn remove_admin_with_control_records(
+        &mut self,
+        brain_id: &BrainId,
+        user_id: &UserId,
+        control_records: &[SyncRecordInput],
+    ) -> Result<(), StoreError> {
         let brain = self.load_core_brain(brain_id)?;
         if brain.kind != BrainKind::Organization {
             return Err(StoreError::BrokenInvariant {
@@ -367,25 +404,23 @@ impl BrainStore {
             });
         }
 
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
             params![brain_id.as_str(), user_id.as_str()],
         )?;
+        sync_records::append_sync_records(&tx, brain_id, control_records)?;
+        tx.commit()?;
         Ok(())
     }
 
-    /// Remove an Organization Brain Member after admin and restricted access cleanup.
+    /// Remove a Brain Member after role and restricted access cleanup.
     pub fn remove_member(
         &mut self,
         brain_id: &BrainId,
         user_id: &UserId,
     ) -> Result<(), StoreError> {
         let brain = self.load_core_brain(brain_id)?;
-        if brain.kind != BrainKind::Organization {
-            return Err(StoreError::BrokenInvariant {
-                reason: "member/admin mutation requires an organization brain".to_owned(),
-            });
-        }
         if brain.admins.contains(user_id) {
             return Err(StoreError::BrokenInvariant {
                 reason: "remove admin role before removing member".to_owned(),
@@ -402,7 +437,7 @@ impl BrainStore {
         }
         if self.member_has_restricted_access(brain_id, user_id)? {
             return Err(StoreError::BrokenInvariant {
-                reason: "remove restricted folder access before removing member".to_owned(),
+                reason: "remove explicit Folder access before removing member".to_owned(),
             });
         }
 

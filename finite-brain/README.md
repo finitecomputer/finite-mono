@@ -115,7 +115,7 @@ with the human User Nostr Identity.
 
 User-first creation resolves the Managed Agent Email before creating the empty
 Personal Brain. Agent-first creation uses the signed
-`POST /_admin/personal-brain-bootstrap` route; Brain derives the owning account
+`POST /v1/personal-brain-bootstrap` route; Brain derives the owning account
 through Core and the human public identity through Finite Identity. Chat does
 not issue a Brain setup ticket or grant.
 
@@ -151,6 +151,7 @@ fbrain --config-dir "$FBRAIN_CONFIG_DIR" doctor
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" repair # only when doctor reports an insecure boundary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" sync now --summary
 fbrain --config-dir "$FBRAIN_CONFIG_DIR" conflicts --json
+fbrain --config-dir "$FBRAIN_CONFIG_DIR" search "credential rotation" --json
 ```
 
 A Brain Working Tree is intentional persistent plaintext on the Trusted Device.
