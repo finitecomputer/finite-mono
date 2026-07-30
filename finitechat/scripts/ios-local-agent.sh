@@ -108,7 +108,7 @@ printf '%s\n' "${ios_device_id}" >"${state_root}/ios-device-id.txt"
 
 if [[ ! -x "${dashboard_root}/node_modules/.bin/next" ]]; then
   echo "Preparing dashboard dependencies..."
-  (cd "${dashboard_root}" && npm ci)
+  (cd "${dashboard_root}" && pnpm install --frozen-lockfile)
 fi
 
 echo "Building local chat services..."

@@ -1673,7 +1673,7 @@ wait "$postgres_pid"
                     shell_quote(&self.dashboard_auth_secret_file().display().to_string())
                 ),
                 format!(
-                    "exec npm run dev -- --hostname 127.0.0.1 --port {}",
+                    "exec pnpm run dev -- --hostname 127.0.0.1 --port {}",
                     self.ports.dashboard
                 ),
             ],
@@ -1769,7 +1769,7 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
-            "Install dashboard npm dependencies",
+            "Install dashboard pnpm dependencies",
             &dashboard_dir,
             process,
         );
@@ -1778,9 +1778,9 @@ wait "$postgres_pid"
             process,
             &[
                 String::from(
-                    "if [ ! -x node_modules/.bin/next ] || [ ! -f node_modules/.package-lock.json ] || find package.json package-lock.json -newer node_modules/.package-lock.json -print -quit | grep -q .; then",
+                    "if [ ! -x node_modules/.bin/next ] || [ ! -f node_modules/.pnpm/lock.yaml ] || find package.json pnpm-lock.yaml -newer node_modules/.pnpm/lock.yaml -print -quit | grep -q .; then",
                 ),
-                String::from("  npm ci"),
+                String::from("  pnpm install --frozen-lockfile"),
                 String::from("else"),
                 String::from("  echo \"dashboard dependencies already installed\""),
                 String::from("fi"),
@@ -2275,9 +2275,13 @@ wait "$postgres_pid"
                     ManagedProcess::Runner => {
                         vec![String::from("finite-saas-runner"), String::from("serve")]
                     }
-                    ManagedProcess::DashboardDeps => vec![String::from("npm"), String::from("ci")],
+                    ManagedProcess::DashboardDeps => vec![
+                        String::from("pnpm"),
+                        String::from("install"),
+                        String::from("--frozen-lockfile"),
+                    ],
                     ManagedProcess::Dashboard => vec![
-                        String::from("npm"),
+                        String::from("pnpm"),
                         String::from("run"),
                         String::from("dev"),
                         self.ports.dashboard.to_string(),
@@ -3758,7 +3762,7 @@ mod tests {
         assert!(!yaml.contains("FC_DASHBOARD_DEV_LAUNCH_CODE"));
         assert!(!yaml.contains("FC_CORE_RUNNER_API_TOKEN="));
         assert!(!yaml.contains("FC_FINITE_PRIVATE_USAGE_API_TOKEN="));
-        assert!(yaml.contains("npm ci"));
+        assert!(yaml.contains("pnpm install --frozen-lockfile"));
         assert!(
             yaml.contains("dashboard-deps:\n        condition: process_completed_successfully")
         );

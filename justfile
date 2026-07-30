@@ -31,7 +31,7 @@ chat-history-stress:
 
 # Web-only contributor gate: dashboard unit tests, lint, and production build.
 web-check:
-    cd finitecomputer-v2/apps/dashboard && npm ci && npm test && npm run lint && npm run build
+    cd finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run build
 
 # Static contract: first-party Brain surfaces use only the Greenfield Brain vocabulary.
 brain-language-check:
@@ -99,23 +99,23 @@ chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity
     cargo test --locked -p finitechat-hosted-device --test http
     cargo test --locked -p finitechat-daemon
-    cd finitechat/apps/electron-chat && npm ci && npm run check
+    cd finitechat/apps/electron-chat && pnpm install --frozen-lockfile && pnpm run check
 
 # Reproducible local/CI gate for every surface changed by Electron parity.
 chat-electron-check:
     cargo test --locked -p finitechat-daemon
     cargo test --locked -p finitechat-core --test electron_device_parity
     cargo test --locked -p finitechat-hosted-device
-    cd finitechat/apps/electron-chat && npm ci && npm run check
-    cd finitecomputer-v2/apps/dashboard && npm ci && npm test && npm run lint && npm run build
+    cd finitechat/apps/electron-chat && pnpm install --frozen-lockfile && pnpm run check
+    cd finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run build
 
 # Build the macOS Electron app. It is ad-hoc signed by default; release callers
 # supply FINITECHAT_CODESIGN_IDENTITY (and optionally a temporary keychain) for
-# Developer ID signing. npm never invokes Cargo; this recipe supplies the exact
+# Developer ID signing. pnpm never invokes Cargo; this recipe supplies the exact
 # release daemon copied into app resources.
 chat-electron-package:
     cargo build --locked --release -p finitechat-daemon
-    cd finitechat/apps/electron-chat && npm ci && FINITECHAT_DAEMON_BINARY="{{justfile_directory()}}/target/release/finitechatd" npm run package:mac
+    cd finitechat/apps/electron-chat && pnpm install --frozen-lockfile && FINITECHAT_DAEMON_BINARY="{{ justfile_directory() }}/target/release/finitechatd" pnpm run package:mac
 
 # Regenerate the native iOS bridge/project and prove the unsigned Release
 # configuration Xcode Cloud will archive.
@@ -125,4 +125,4 @@ ios-cloud-preflight:
 # Opt-in Stripe test-mode clock E2E. Credentials come from the caller's
 # environment and the harness never prints their values.
 stripe-billing-clock:
-    cd finitecomputer-v2/apps/dashboard && npm ci && npm run test:stripe-billing-clock
+    cd finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm run test:stripe-billing-clock

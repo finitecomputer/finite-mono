@@ -66,27 +66,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: finitecomputer-v2/apps/dashboard/package-lock.json
+          cache: pnpm
+          cache-dependency-path: finitecomputer-v2/apps/dashboard/pnpm-lock.yaml
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Lint dashboard
-        run: npm run lint
+        run: pnpm run lint
 
       - name: Test dashboard
-        run: npm test
+        run: pnpm test
 
       - name: Test dashboard product flows
-        run: npm run test:browser
+        run: pnpm run test:browser
 
       - name: Build dashboard
-        run: npm run build
+        run: pnpm run build
 
   electron-alpha:
     name: Electron production-dashboard alpha
