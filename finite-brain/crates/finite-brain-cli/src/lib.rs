@@ -115,6 +115,12 @@ where
         env.config_dir = expand_cli_path(&config_dir);
     }
     let json = take_flag(&mut args, "--json");
+    if args
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
+    {
+        return help(output);
+    }
     let command = args.first().cloned().unwrap_or_else(|| "help".to_owned());
     match command.as_str() {
         "help" | "--help" | "-h" => help(output),
@@ -4502,6 +4508,33 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("collaborator ensure-admin --brain <brain-id>"));
         assert!(!text.contains("admin-ensure"));
+    }
+
+    #[test]
+    fn nested_help_returns_before_command_side_effects() {
+        let tmp = TempDir::new().unwrap();
+        let watched_root = tmp.path().join("must-not-be-created");
+        let mut output = Vec::new();
+
+        run_with_env(
+            [
+                "daemon",
+                "supervise",
+                "--working-tree-root",
+                watched_root.to_str().unwrap(),
+                "--help",
+            ],
+            env_for(&tmp),
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("daemon status|start|stop")
+        );
+        assert!(!watched_root.exists());
     }
 
     #[test]

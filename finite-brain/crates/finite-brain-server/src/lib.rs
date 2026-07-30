@@ -670,12 +670,20 @@ pub fn router_with_state(state: ServerState) -> Router {
         )
         .route("/client/config.json", get(product_client_config_handler))
         .merge(signed_routes)
+        .fallback(api_route_not_found_handler)
         .layer(middleware::from_fn_with_state(
             cors_state,
             cors_allowlist_middleware,
         ))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
+}
+
+async fn api_route_not_found_handler() -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        "Brain API route not found; this client may use a retired Brain protocol. Upgrade fbrain and retry",
+    )
 }
 
 fn normal_signed_api_router() -> Router<ServerState> {
@@ -3014,6 +3022,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            let body: ApiErrorBody = read_json(response).await;
+            assert_eq!(
+                body.error,
+                "Brain API route not found; this client may use a retired Brain protocol. Upgrade fbrain and retry",
+                "{path}"
+            );
         }
     }
 
