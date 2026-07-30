@@ -3073,7 +3073,15 @@ async function waitForDashboard(port: number, output: () => string) {
 }
 
 async function expectVisibleText(page: Page, text: string) {
-  await page.getByText(text, { exact: true }).waitFor({ state: "visible", timeout: 15_000 });
+  // Next.js copies the page's h1 into its persistent, visually-hidden route
+  // announcer (#__next-route-announcer__) after client-side transitions, so an
+  // unscoped text match can resolve to two mounted elements and trip strict
+  // mode depending on announcer timing. The announcer is never page content;
+  // exclude it.
+  await page
+    .getByText(text, { exact: true })
+    .and(page.locator(":not(#__next-route-announcer__)"))
+    .waitFor({ state: "visible", timeout: 15_000 });
 }
 
 async function waitFor(
