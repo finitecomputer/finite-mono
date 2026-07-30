@@ -489,6 +489,18 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         },
       };
     }
+    case "AnswerClarification": {
+      const value = objectRecord(input, operation);
+      return {
+        AnswerClarification: {
+          room_id: boundedString(value.room_id, "room_id"),
+          topic_id: boundedString(value.topic_id, "topic_id"),
+          chat_id: boundedString(value.chat_id, "chat_id"),
+          request_id: boundedString(value.request_id, "request_id"),
+          text: boundedString(value.text, "text", 64 * 1024),
+        },
+      };
+    }
     case "LoadOlderMessages": {
       const value = objectRecord(input, operation);
       return {
