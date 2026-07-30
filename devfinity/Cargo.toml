@@ -21,10 +21,10 @@ rand = "0.8"
 rsa = { version = "0.9", features = ["pem"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
 finitechat-core = { path = "../finitechat/crates/finitechat-core" }
 serde_json = { workspace = true }
-tempfile = { workspace = true }
 ureq = { workspace = true }
