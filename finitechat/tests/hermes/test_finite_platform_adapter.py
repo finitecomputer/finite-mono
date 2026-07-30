@@ -604,6 +604,74 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             module._finite_private_control_request = original
         self.assertEqual(called, [])
 
+    def test_compaction_callback_is_exact_scoped_activity_until_turn_completion(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        agent_module = types.ModuleType("agent")
+        agent_module.__path__ = []
+        compression_module = types.ModuleType("agent.conversation_compression")
+        canonical_status = "canonical Hermes compaction callback"
+        cast(Any, compression_module).COMPACTION_STATUS = canonical_status
+        event = MessageEvent(
+            text="hello",
+            source=types.SimpleNamespace(chat_id="room-agent-1"),
+            raw_message={
+                "room_id": "room-agent-1",
+                "conversation_id": "topic-build",
+                "segment_id": "chat-build-1",
+            },
+        )
+
+        async def exercise():
+            started = await adapter.send_or_update_status(
+                "room-agent-1",
+                "lifecycle",
+                canonical_status,
+                metadata={
+                    "conversation_id": "topic-build",
+                    "segment_id": "chat-build-1",
+                    "thread_id": "chat-build-1",
+                },
+            )
+            self.assertTrue(started.success)
+            await adapter.on_processing_complete(
+                event,
+                types.SimpleNamespace(value="failure"),
+            )
+            prose = await adapter.send_or_update_status(
+                "room-agent-1",
+                "lifecycle",
+                "I am compacting context in an ordinary sentence.",
+                metadata={
+                    "conversation_id": "topic-build",
+                    "segment_id": "chat-build-1",
+                },
+            )
+            self.assertTrue(prose.success)
+
+        with patch.dict(
+            sys.modules,
+            {
+                "agent": agent_module,
+                "agent.conversation_compression": compression_module,
+            },
+        ):
+            asyncio.run(exercise())
+
+        self.assertEqual([call[0] for call in calls], ["activity", "activity", "send"])
+        started = calls[0][1]
+        finished = calls[1][1]
+        self.assertEqual(started["conversation_id"], "topic-build")
+        self.assertEqual(started["segment_id"], "chat-build-1")
+        self.assertEqual(started["activity_kind"], "hermes.compaction")
+        self.assertEqual(started["action"], "set")
+        self.assertEqual(started["payload"]["phase"], "started")
+        self.assertEqual(finished["activity_kind"], "hermes.compaction")
+        self.assertEqual(finished["activity_id"], started["activity_id"])
+        self.assertEqual(finished["action"], "clear")
+        self.assertEqual(calls[2][1]["kind"], "message")
+
     def test_check_requirements_uses_finitechat_bin_not_finitecomputer(self):
         old_value = os.environ.get("FINITECHAT_BIN")
         os.environ["FINITECHAT_BIN"] = "/bin/echo"

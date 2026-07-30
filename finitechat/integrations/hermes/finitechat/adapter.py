@@ -53,6 +53,8 @@ STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
 SERVICE_TRANSPORT_RETRY_SECS = 0.1
 ACTIVITY_CONTROL_TIMEOUT_SECS = 1.5
 PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
+COMPACTION_ACTIVITY_KIND = "hermes.compaction"
+COMPACTION_ACTIVITY_TTL_MILLIS = 5 * 60 * 1000
 ADMISSION_RECHECK_SECS = 0.05
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
@@ -464,6 +466,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._outbound_message_kinds: dict[str, str] = {}
         self._outbound_message_order: list[str] = []
         self._inbound_chat_routes: dict[tuple[str, str], tuple[str | None, str | None]] = {}
+        self._active_compactions: dict[tuple[str, str | None, str | None], str] = {}
         # The Rust inbox is the durable queue. Keep at most its first blocked
         # ordinary text event per Hermes session in memory while the current
         # owner task finishes. Later events remain only in the inbox and are
@@ -538,14 +541,24 @@ class FiniteChatAdapter(BasePlatformAdapter):
         logger.info("[finitechat] disconnected")
 
     async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
-        """Surface a claimed quota notice after Hermes' final response delivery.
+        """Finish scoped compaction activity, then surface any quota notice.
 
         Hermes 0.18.2 invokes this hook once after the final response (including
-        streamed delivery), and not after each model/tool subcall. Core claims a
-        threshold before returning it, so delivery is intentionally at-most-once:
-        a process crash between the Core response and Finite Chat send can omit a
-        transient notice, while the dashboard continues to show authoritative state.
+        streamed delivery), and not after each model/tool subcall. It therefore
+        bounds a compaction lease even on cancellation or failure. Core claims a
+        quota threshold before returning it, so notice delivery is intentionally
+        at-most-once: a process crash between the Core response and Finite Chat
+        send can omit a transient notice, while the dashboard continues to show
+        authoritative state.
         """
+        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+        room_id = str(getattr(event.source, "chat_id", "") or raw_message.get("room_id") or "")
+        metadata = self._route_metadata(
+            _string_or_none(raw_message.get("conversation_id")),
+            _string_or_none(raw_message.get("segment_id")),
+        )
+        await self._finish_compaction_activity(room_id, metadata)
+
         outcome_name = str(getattr(outcome, "value", getattr(outcome, "name", outcome))).lower()
         if outcome_name != "success":
             return
@@ -558,13 +571,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         message = str(notice.get("message") or "").strip()
         if not message:
             return
-        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
-        metadata = self._route_metadata(
-            _string_or_none(raw_message.get("conversation_id")),
-            _string_or_none(raw_message.get("segment_id")),
-        )
         result = await self.send(
-            chat_id=str(getattr(event.source, "chat_id", "") or raw_message.get("room_id") or ""),
+            chat_id=room_id,
             content=message,
             metadata=metadata,
         )
@@ -572,6 +580,32 @@ class FiniteChatAdapter(BasePlatformAdapter):
             logger.warning(
                 "[finitechat] could not deliver Finite Private usage notice: %s", result.error
             )
+
+    async def send_or_update_status(
+        self,
+        chat_id: str,
+        status_key: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Adapt Hermes' explicit compaction callback into scoped live activity.
+
+        Hermes 0.18.2 routes its exported ``COMPACTION_STATUS`` constant through
+        ``status_callback("lifecycle", ...)``. Matching that canonical callback
+        contract keeps compaction out of the durable transcript; arbitrary prose
+        that happens to mention compression continues through normal delivery.
+        """
+        try:
+            from agent.conversation_compression import COMPACTION_STATUS
+        except ImportError:
+            COMPACTION_STATUS = None
+        if (
+            status_key == "lifecycle"
+            and COMPACTION_STATUS is not None
+            and content == COMPACTION_STATUS
+        ):
+            return await self._start_compaction_activity(chat_id, metadata)
+        return await self.send(chat_id=chat_id, content=content, metadata=metadata)
 
     async def send(
         self,
@@ -1172,6 +1206,72 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if activity_set:
             self._active_activity_routes.add(self._activity_route(payload))
         return activity_set
+
+    async def _start_compaction_activity(
+        self,
+        room_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> SendResult:
+        payload = self._activity_payload(room_id, metadata, action="set")
+        route = self._activity_route(payload)
+        activity_id = self._active_compactions.get(route)
+        if activity_id is None:
+            activity_id = hashlib.sha256(
+                "\0".join(
+                    (
+                        route[0],
+                        route[1] or "",
+                        route[2] or "",
+                        str(time.time_ns()),
+                    )
+                ).encode()
+            ).hexdigest()[:32]
+        payload.update(
+            {
+                "activity_kind": COMPACTION_ACTIVITY_KIND,
+                "activity_id": activity_id,
+                "payload": {
+                    "schema": "finitechat.hermes.compaction.v1",
+                    "phase": "started",
+                },
+                "expires_in_millis": COMPACTION_ACTIVITY_TTL_MILLIS,
+            }
+        )
+        activity_set = await self._run_activity_control(
+            "set compaction",
+            self._finitechat_json("activity", payload, timeout=15),
+        )
+        if activity_set:
+            self._active_compactions[route] = activity_id
+        return SendResult(
+            success=activity_set,
+            error=None if activity_set else "could not publish compaction activity",
+            retryable=not activity_set,
+        )
+
+    async def _finish_compaction_activity(
+        self,
+        room_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        route_payload = self._activity_payload(room_id, metadata, action="clear")
+        route = self._activity_route(route_payload)
+        activity_id = self._active_compactions.get(route)
+        if activity_id is None:
+            return
+        route_payload.update(
+            {
+                "activity_kind": COMPACTION_ACTIVITY_KIND,
+                "activity_id": activity_id,
+                "payload": None,
+                "expires_in_millis": COMPACTION_ACTIVITY_TTL_MILLIS,
+            }
+        )
+        if await self._run_activity_control(
+            "clear compaction",
+            self._finitechat_json("activity", route_payload, timeout=15),
+        ):
+            self._active_compactions.pop(route, None)
 
     async def _clear_processing_activity(
         self,

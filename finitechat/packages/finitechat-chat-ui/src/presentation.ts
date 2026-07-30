@@ -337,11 +337,17 @@ export function liveActivityLabel(
   fallbackName = "Someone",
   awaitingReply = false
 ) {
+  const compacting = members.find(
+    (member) => member.activity_kind === "hermes.compaction"
+  );
   const working = members.find((member) => member.activity_kind === "working");
   const thinking = members.find((member) => member.activity_kind === "thinking");
   const typing = members.find((member) => member.activity_kind === "typing");
-  const member = working ?? thinking ?? typing ?? members[0];
+  const member = compacting ?? working ?? thinking ?? typing ?? members[0];
   const name = member?.display_name || fallbackName;
+  if (member?.activity_kind === "hermes.compaction") {
+    return `${name} is compacting context`;
+  }
   if (member?.activity_kind === "working" || (!member && awaitingReply)) {
     return `${name} is working`;
   }

@@ -172,7 +172,7 @@ test("pending turn recovery outlives presentation without inventing indefinite w
   assert.equal(pendingTurnRecoveryIsFresh(turn, 310_000), false);
 });
 
-test("working presentation remains visible across an activity gap and outranks typing", () => {
+test("working and compaction presentation follow typed activity priority", () => {
   assert.equal(liveActivityLabel([], "Sol", true), "Sol is working");
   assert.equal(
     liveActivityLabel(
@@ -196,6 +196,29 @@ test("working presentation remains visible across an activity gap and outranks t
       true
     ),
     "Sol is working"
+  );
+  assert.equal(
+    liveActivityLabel(
+      [
+        {
+          room_id: "room-agent",
+          account_id: "agent-account",
+          device_id: "agent-working",
+          display_name: "Sol",
+          activity_kind: "working",
+        },
+        {
+          room_id: "room-agent",
+          account_id: "agent-account",
+          device_id: "agent-compacting",
+          display_name: "Sol",
+          activity_kind: "hermes.compaction",
+        },
+      ],
+      "Sol",
+      true
+    ),
+    "Sol is compacting context"
   );
 });
 

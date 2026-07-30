@@ -9,8 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.conversation_compression import COMPACTION_STATUS
 from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
-from gateway.platforms.base import build_session_key
+from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome, build_session_key
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource, build_session_context, build_session_context_prompt
 from gateway.session_context import get_session_env
@@ -153,6 +154,70 @@ class PinnedHermesSenderContextTests(unittest.TestCase):
 
 
 class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_018_compaction_callback_is_ephemeral_and_exact_route_scoped(self):
+        module = PINNED_ADAPTER_MODULE
+        adapter = module.FiniteChatAdapter(
+            PlatformConfig(
+                enabled=True,
+                typing_indicator=False,
+                home_channel=HomeChannel(
+                    platform=module._finite_platform(),
+                    chat_id="room-agent-1",
+                    name="Finite Chat",
+                ),
+                extra={
+                    "home": "/tmp/finite-agent-home",
+                    "finitechat_bin": "/bin/echo",
+                },
+            )
+        )
+        bridge_calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            bridge_calls.append((action, payload, timeout))
+            return module._FiniteChatResult(True, {}, None, False)
+
+        adapter._finitechat_json = fake_json
+        metadata = {
+            "conversation_id": "topic-build",
+            "segment_id": "chat-build-1",
+            "thread_id": "chat-build-1",
+        }
+        started = await adapter.send_or_update_status(
+            "room-agent-1",
+            "lifecycle",
+            COMPACTION_STATUS,
+            metadata=metadata,
+        )
+        self.assertTrue(started.success)
+
+        event = MessageEvent(
+            text="continue after compaction",
+            message_type=MessageType.TEXT,
+            source=adapter.build_source(
+                chat_id="room-agent-1",
+                chat_type="dm",
+                user_id="alice",
+                thread_id="chat-build-1",
+            ),
+            raw_message={
+                "room_id": "room-agent-1",
+                "conversation_id": "topic-build",
+                "segment_id": "chat-build-1",
+            },
+        )
+        await adapter.on_processing_complete(event, ProcessingOutcome.FAILURE)
+
+        self.assertEqual([call[0] for call in bridge_calls], ["activity", "activity"])
+        start_payload = bridge_calls[0][1]
+        finish_payload = bridge_calls[1][1]
+        self.assertEqual(start_payload["activity_kind"], "hermes.compaction")
+        self.assertEqual(start_payload["conversation_id"], "topic-build")
+        self.assertEqual(start_payload["segment_id"], "chat-build-1")
+        self.assertEqual(start_payload["action"], "set")
+        self.assertEqual(finish_payload["activity_id"], start_payload["activity_id"])
+        self.assertEqual(finish_payload["action"], "clear")
+
     async def test_real_018_owner_task_blocks_ack_until_followup_turn_begins(self):
         module = PINNED_ADAPTER_MODULE
         adapter = module.FiniteChatAdapter(

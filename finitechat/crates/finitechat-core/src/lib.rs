@@ -47,16 +47,17 @@ use finitechat_proto::{
     DeviceLinkBootstrapRoomV2, DeviceLinkBootstrapSelectionV2, DeviceLinkBootstrapV2, DeviceRef,
     DurableAppEventKind, EphemeralActivityAccepted, EphemeralActivityActionV1,
     EphemeralActivityIngressContext, EphemeralActivityProjection, EphemeralActivityProjectionEntry,
-    EventAccepted, FINITECHAT_ACTIVITY_KIND_THINKING, FINITECHAT_ACTIVITY_KIND_TYPING,
-    FINITECHAT_ACTIVITY_KIND_WORKING, FINITECHAT_CHAT_ARCHIVE_EVENT_V1,
-    FINITECHAT_CHAT_RENAME_EVENT_V1, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2,
-    GenericActivityKindV1, ListAccountRoomsRequest, LogEntryKind, MAX_CHAT_TITLE_BYTES,
-    MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS, MAX_DEVICE_LINK_BOOTSTRAP_EVENTS,
-    MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS,
-    MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES, MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol,
-    RuntimeActivityClearV1, RuntimeCommandRequestV1, RuntimeCommandResultV1,
-    RuntimeStateSnapshotV1, SubmitCommitRequest, delivery_member_id_for_device, nprofile_decode,
-    npub_decode, npub_encode, nsec_decode, nsec_encode, validate_item_count, validate_string_bytes,
+    EventAccepted, FINITECHAT_ACTIVITY_KIND_HERMES_COMPACTION, FINITECHAT_ACTIVITY_KIND_THINKING,
+    FINITECHAT_ACTIVITY_KIND_TYPING, FINITECHAT_ACTIVITY_KIND_WORKING,
+    FINITECHAT_CHAT_ARCHIVE_EVENT_V1, FINITECHAT_CHAT_RENAME_EVENT_V1,
+    FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2, GenericActivityKindV1, ListAccountRoomsRequest,
+    LogEntryKind, MAX_CHAT_TITLE_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS,
+    MAX_DEVICE_LINK_BOOTSTRAP_EVENTS, MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES,
+    MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS, MAX_KEY_PACKAGES_PER_DEVICE, MAX_OBJECT_ID_BYTES,
+    MAX_STAGED_WELCOMES_PER_COMMIT, RoomProtocol, RuntimeActivityClearV1, RuntimeCommandRequestV1,
+    RuntimeCommandResultV1, RuntimeStateSnapshotV1, SubmitCommitRequest,
+    delivery_member_id_for_device, nprofile_decode, npub_decode, npub_encode, nsec_decode,
+    nsec_encode, validate_item_count, validate_string_bytes,
 };
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -9946,17 +9947,19 @@ fn typing_member_from_activity(
 }
 
 fn is_chat_live_indicator_activity(activity_kind: &str) -> bool {
-    activity_kind == FINITECHAT_ACTIVITY_KIND_TYPING
+    activity_kind == FINITECHAT_ACTIVITY_KIND_HERMES_COMPACTION
+        || activity_kind == FINITECHAT_ACTIVITY_KIND_TYPING
         || activity_kind == FINITECHAT_ACTIVITY_KIND_THINKING
         || activity_kind == FINITECHAT_ACTIVITY_KIND_WORKING
 }
 
 fn live_indicator_activity_priority(activity_kind: &str) -> u8 {
     match activity_kind {
-        FINITECHAT_ACTIVITY_KIND_WORKING => 0,
-        FINITECHAT_ACTIVITY_KIND_THINKING => 1,
-        FINITECHAT_ACTIVITY_KIND_TYPING => 2,
-        _ => 3,
+        FINITECHAT_ACTIVITY_KIND_HERMES_COMPACTION => 0,
+        FINITECHAT_ACTIVITY_KIND_WORKING => 1,
+        FINITECHAT_ACTIVITY_KIND_THINKING => 2,
+        FINITECHAT_ACTIVITY_KIND_TYPING => 3,
+        _ => 4,
     }
 }
 
@@ -17590,6 +17593,45 @@ mod tests {
         assert_eq!(
             alice_state.typing_members[0].activity_kind,
             FINITECHAT_ACTIVITY_KIND_WORKING
+        );
+
+        hermes
+            .append_ephemeral_activity_and_wait(AppBridgeActivityInput {
+                room_id: room_id.clone(),
+                conversation_id: Some(topic_id.clone()),
+                segment_id: Some(chat_id.clone()),
+                activity_kind: FINITECHAT_ACTIVITY_KIND_HERMES_COMPACTION.to_owned(),
+                activity_id: Some("compaction-turn-a".to_owned()),
+                action: EphemeralActivityActionV1::Set,
+                payload: br#"{"schema":"finitechat.hermes.compaction.v1","phase":"started"}"#
+                    .to_vec(),
+                expires_in_millis: 5 * 60 * 1000,
+            })
+            .unwrap();
+        let alice_state = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        assert_eq!(alice_state.typing_members.len(), 1);
+        assert_eq!(
+            alice_state.typing_members[0].activity_kind, FINITECHAT_ACTIVITY_KIND_HERMES_COMPACTION,
+            "typed compaction outranks the generic working lease"
+        );
+
+        hermes
+            .append_ephemeral_activity_and_wait(AppBridgeActivityInput {
+                room_id: room_id.clone(),
+                conversation_id: Some(topic_id.clone()),
+                segment_id: Some(chat_id.clone()),
+                activity_kind: FINITECHAT_ACTIVITY_KIND_HERMES_COMPACTION.to_owned(),
+                activity_id: Some("compaction-turn-a".to_owned()),
+                action: EphemeralActivityActionV1::Clear,
+                payload: Vec::new(),
+                expires_in_millis: 5 * 60 * 1000,
+            })
+            .unwrap();
+        let alice_state = alice.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        assert_eq!(alice_state.typing_members.len(), 1);
+        assert_eq!(
+            alice_state.typing_members[0].activity_kind, FINITECHAT_ACTIVITY_KIND_WORKING,
+            "finishing compaction reveals the still-live generic working lease"
         );
 
         hermes

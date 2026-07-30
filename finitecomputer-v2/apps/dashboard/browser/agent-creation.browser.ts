@@ -141,7 +141,7 @@ type FakeHostedChatState = {
     account_id: string;
     device_id: string;
     display_name: string;
-    activity_kind: "typing" | "thinking" | "working";
+    activity_kind: "typing" | "thinking" | "working" | "hermes.compaction";
   }>;
   hosted_agent_binding: {
     version: number;
@@ -1335,6 +1335,15 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         },
       ];
       hostedDevice.emit();
+      await expectVisibleText(page, "Completed Oslo Bot is working");
+      hostedDevice.state.app.typing_members[0]!.activity_kind = "hermes.compaction";
+      hostedDevice.emit();
+      await expectVisibleText(page, "Completed Oslo Bot is compacting context");
+      hostedDevice.state.app.typing_members[0]!.activity_kind = "working";
+      hostedDevice.emit();
+      await page
+        .getByText("Completed Oslo Bot is compacting context", { exact: true })
+        .waitFor({ state: "hidden", timeout: 15_000 });
       await expectVisibleText(page, "Completed Oslo Bot is working");
 
       const browserQaTool: FakeHostedChatState["messages"][number] = {

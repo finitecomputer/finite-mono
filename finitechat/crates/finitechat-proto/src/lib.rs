@@ -88,6 +88,9 @@ pub const FINITECHAT_ACTIVITY_KIND_WORKING: &str = "working";
 pub const FINITECHAT_ACTIVITY_KIND_UPLOADING: &str = "uploading";
 pub const FINITECHAT_ACTIVITY_KIND_RECORDING: &str = "recording";
 pub const FINITECHAT_ACTIVITY_KIND_PRESENT: &str = "present";
+/// Hermes-owned activity projected by Finite Chat without making it a generic
+/// cross-platform activity kind. Older clients safely ignore namespaced kinds.
+pub const FINITECHAT_ACTIVITY_KIND_HERMES_COMPACTION: &str = "hermes.compaction";
 pub const FINITECHAT_ACTIVITY_TYPING_EXPIRY_MILLIS: u64 = 30 * 1000;
 pub const FINITECHAT_ACTIVITY_PRESENT_EXPIRY_MILLIS: u64 = 2 * 60 * 1000;
 pub const FINITECHAT_ACTIVITY_WORKING_EXPIRY_MILLIS: u64 = 5 * 60 * 1000;
