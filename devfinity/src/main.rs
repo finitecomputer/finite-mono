@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
@@ -9,7 +9,11 @@ use devfinity::workos_fixture::{
     FixturePaths, prepare_if_missing as prepare_workos_fixture_if_missing,
     serve as serve_workos_fixture,
 };
-use devfinity::{ProcessComposeMode, Stack, StackProfile, store_inference_key};
+use devfinity::{
+    ProcessComposeMode, Stack, StackProfile, is_retryable_postgres_startup, store_inference_key,
+};
+
+const MAX_POSTGRES_PORT_ATTEMPTS: usize = 5;
 
 #[derive(Debug, Parser)]
 #[command(name = "devfinity")]
@@ -129,53 +133,7 @@ fn run() -> anyhow::Result<ExitCode> {
             };
             stack.run_process_compose_up(mode, args.dry_run)
         }
-        Command::Run(args) => {
-            std::fs::create_dir_all(&cli.state_dir).with_context(|| {
-                format!(
-                    "failed to create devfinity state root {}",
-                    cli.state_dir.display()
-                )
-            })?;
-            let state_dir = tempfile::Builder::new()
-                .prefix("run-")
-                .tempdir_in(&cli.state_dir)
-                .context("failed to create isolated devfinity run state")?;
-            let outcome = (|| {
-                let port_reservation = TcpListener::bind(("127.0.0.1", 0))
-                    .context("failed to reserve an isolated Postgres port")?;
-                let postgres_port = port_reservation
-                    .local_addr()
-                    .context("failed to inspect the reserved Postgres port")?
-                    .port();
-                let stack = Stack::new(state_dir.path().to_path_buf())?
-                    .with_profile(StackProfile::TestInfrastructure)
-                    .with_postgres_port(postgres_port)?;
-                stack.write_files()?;
-                // Devfinity invocations reserve distinct kernel-assigned ports
-                // while generating their configuration. Release immediately
-                // before process-compose binds Postgres to the selected port.
-                drop(port_reservation);
-                stack.run_wrapped_command(&args.command)
-            })();
-            let cleanup = state_dir.close();
-
-            match (outcome, cleanup) {
-                (Ok(code), Ok(())) => Ok(code),
-                (Ok(code), Err(error)) if code != ExitCode::SUCCESS => {
-                    eprintln!(
-                        "devfinity temporary-state cleanup after failed command also failed: {error}"
-                    );
-                    Ok(code)
-                }
-                (Ok(_), Err(error)) => {
-                    Err(error).context("failed to remove devfinity temporary run state")
-                }
-                (Err(error), Ok(())) => Err(error),
-                (Err(error), Err(cleanup_error)) => Err(error).context(format!(
-                    "devfinity temporary-state cleanup also failed: {cleanup_error}"
-                )),
-            }
-        }
+        Command::Run(args) => run_isolated_command(&cli.state_dir, &args.command),
         Command::Status => {
             let mut stack = Stack::new(cli.state_dir)?;
             let _ = stack.prepare_host_environment(true);
@@ -201,10 +159,97 @@ fn run() -> anyhow::Result<ExitCode> {
     }
 }
 
+fn run_isolated_command(state_root: &Path, command: &[String]) -> anyhow::Result<ExitCode> {
+    run_isolated_command_with(
+        state_root,
+        |state_dir, port_reservation| {
+            let postgres_port = port_reservation
+                .local_addr()
+                .context("failed to inspect the reserved Postgres port")?
+                .port();
+            let stack = Stack::new(state_dir.to_path_buf())?
+                .with_profile(StackProfile::TestInfrastructure)
+                .with_postgres_port(postgres_port)?;
+            stack.write_files()?;
+            stack.run_wrapped_command_with_postgres_port_reservation(command, port_reservation)
+        },
+        is_retryable_postgres_startup,
+    )
+}
+
+fn run_isolated_command_with<RunAttempt, Retryable>(
+    state_root: &Path,
+    mut run_attempt: RunAttempt,
+    retryable: Retryable,
+) -> anyhow::Result<ExitCode>
+where
+    RunAttempt: FnMut(&Path, TcpListener) -> anyhow::Result<ExitCode>,
+    Retryable: Fn(&anyhow::Error) -> bool,
+{
+    std::fs::create_dir_all(state_root).with_context(|| {
+        format!(
+            "failed to create devfinity state root {}",
+            state_root.display()
+        )
+    })?;
+
+    for attempt in 1..=MAX_POSTGRES_PORT_ATTEMPTS {
+        let state_dir = tempfile::Builder::new()
+            .prefix("run-")
+            .tempdir_in(state_root)
+            .context("failed to create isolated devfinity run state")?;
+        let outcome = (|| {
+            let port_reservation = TcpListener::bind(("127.0.0.1", 0))
+                .context("failed to reserve an isolated Postgres port")?;
+            run_attempt(state_dir.path(), port_reservation)
+        })();
+        let retry_startup = outcome.as_ref().is_err_and(&retryable);
+        let cleanup = state_dir.close();
+
+        if retry_startup {
+            let error = outcome.expect_err("startup retry requires a failed attempt");
+            cleanup.context("failed to remove retryable devfinity run state")?;
+            if attempt == MAX_POSTGRES_PORT_ATTEMPTS {
+                return Err(error).context(format!(
+                    "failed to start an owned Postgres instance after {attempt} isolated attempts"
+                ));
+            }
+            eprintln!(
+                "devfinity Postgres did not claim its reserved port; retrying with fresh state and a new port ({attempt}/{MAX_POSTGRES_PORT_ATTEMPTS}): {error}"
+            );
+            continue;
+        }
+
+        return match (outcome, cleanup) {
+            (Ok(code), Ok(())) => Ok(code),
+            (Ok(code), Err(error)) if code != ExitCode::SUCCESS => {
+                eprintln!(
+                    "devfinity temporary-state cleanup after failed command also failed: {error}"
+                );
+                Ok(code)
+            }
+            (Ok(_), Err(error)) => {
+                Err(error).context("failed to remove devfinity temporary run state")
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup_error)) => Err(error).context(format!(
+                "devfinity temporary-state cleanup also failed: {cleanup_error}"
+            )),
+        };
+    }
+
+    unreachable!("bounded Postgres port attempts always return")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use std::net::TcpStream;
+    use std::process::ExitCode;
+
+    use anyhow::anyhow;
     use clap::Parser;
+
+    use super::{Cli, Command, run_isolated_command_with};
 
     #[test]
     fn run_command_preserves_child_argv_after_delimiter() {
@@ -228,5 +273,54 @@ mod tests {
     #[test]
     fn run_command_requires_a_child_command() {
         assert!(Cli::try_parse_from(["devfinity", "run"]).is_err());
+    }
+
+    #[test]
+    fn isolated_command_retries_only_after_fresh_state_and_port_reservation() {
+        let state_root = tempfile::tempdir().unwrap();
+        let mut attempts = 0;
+        let mut attempt_paths = Vec::new();
+
+        let code = run_isolated_command_with(
+            state_root.path(),
+            |state_dir, port_reservation| {
+                attempts += 1;
+                attempt_paths.push(state_dir.to_path_buf());
+                TcpStream::connect(port_reservation.local_addr().unwrap()).unwrap();
+                if attempts == 1 {
+                    Err(anyhow!("retry selected Postgres port"))
+                } else {
+                    Ok(ExitCode::SUCCESS)
+                }
+            },
+            |error| error.to_string() == "retry selected Postgres port",
+        )
+        .unwrap();
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(attempts, 2);
+        assert_ne!(attempt_paths[0], attempt_paths[1]);
+        assert!(attempt_paths.iter().all(|path| !path.exists()));
+        assert_eq!(std::fs::read_dir(state_root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn isolated_command_does_not_retry_an_unrelated_failure() {
+        let state_root = tempfile::tempdir().unwrap();
+        let mut attempts = 0;
+
+        let error = run_isolated_command_with(
+            state_root.path(),
+            |_state_dir, _port_reservation| {
+                attempts += 1;
+                Err(anyhow!("fatal infrastructure failure"))
+            },
+            |_error| false,
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts, 1);
+        assert!(error.to_string().contains("fatal infrastructure failure"));
+        assert_eq!(std::fs::read_dir(state_root.path()).unwrap().count(), 0);
     }
 }
