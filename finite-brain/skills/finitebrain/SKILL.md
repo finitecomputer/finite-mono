@@ -21,8 +21,9 @@ The signing identity is the current Finite Home's Local Identity Key.
 fbrain doctor
 fbrain auth status --json
 fbrain brain list --json
-fbrain open personal
-# Enter the Working Tree path reported by open.
+open_result="$(fbrain open personal --json)"
+brain_tree="$(printf '%s' "$open_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nextCommandWorkingDirectory"])')"
+cd "$brain_tree"
 fbrain sync now --summary
 fbrain conflicts --json
 ```

@@ -106,8 +106,9 @@ directory. Do not print or request secrets during normal agent work.
 ```sh
 fbrain doctor
 fbrain brain list --json
-fbrain open personal
-# Enter the Working Tree path reported by open.
+open_result="$(fbrain open personal --json)"
+brain_tree="$(printf '%s' "$open_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nextCommandWorkingDirectory"])')"
+cd "$brain_tree"
 fbrain status --json
 fbrain sync status --json
 fbrain sync now --summary

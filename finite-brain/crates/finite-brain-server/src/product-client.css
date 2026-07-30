@@ -5622,3 +5622,26 @@ button.command-palette-row.active {
     padding-right: 8px;
   }
 }
+.asset-detail dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.5rem 1rem;
+}
+
+.asset-detail dt {
+  color: var(--text-muted);
+}
+
+.asset-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.asset-download-button {
+  margin-top: 1rem;
+}
+
+.obsidian-page-button.asset .obsidian-file-title::before {
+  content: "Asset · ";
+  color: var(--text-muted);
+}

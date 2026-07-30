@@ -73,11 +73,24 @@ function interactiveElement(ownerDocument = null) {
 }
 
 const elements = new Map();
+const createdObjectUrls = [];
+const revokedObjectUrls = [];
+class TestURL extends URL {
+  static createObjectURL() {
+    const value = `blob:finite-brain-test-${createdObjectUrls.length + 1}`;
+    createdObjectUrls.push(value);
+    return value;
+  }
+
+  static revokeObjectURL(value) {
+    revokedObjectUrls.push(value);
+  }
+}
 const context = {
   TextDecoder,
   TextEncoder,
   Uint8Array,
-  URL,
+  URL: TestURL,
   URLSearchParams,
   clearInterval,
   clearTimeout,
@@ -125,6 +138,16 @@ const source = fs.readFileSync(path.join(__dirname, "product-client.js"), "utf8"
 const htmlSource = fs.readFileSync(path.join(__dirname, "product-client.html"), "utf8");
 const cssSource = fs.readFileSync(path.join(__dirname, "product-client.css"), "utf8");
 
+const resetBrainSessionSource = source.slice(
+  source.indexOf("function resetBrainSessionState"),
+  source.indexOf("function lockSession")
+);
+assert.match(
+  resetBrainSessionSource,
+  /releaseAssetDownloadUrl\(\)/u,
+  "Locking or replacing a Brain session must revoke any outstanding Asset object URL"
+);
+
 const hostedStartupSource = source.slice(
   source.indexOf("async function detectSigner()"),
   source.indexOf("async function connectBrainIdentityProvider")
@@ -152,6 +175,46 @@ assert.match(
   /options\.expectedBrainId \|\| exportedBrain\?\.brain\?\.id/u,
   "Scoped grant opening must preserve an explicit Brain ID and understand the current export shape"
 );
+const brainUpdateNotificationSource = source.slice(
+  source.indexOf("async function startBrainUpdateNotifications"),
+  source.indexOf("function activePageInput")
+);
+assert.match(
+  brainUpdateNotificationSource,
+  /response\.status === 404 \|\| response\.status === 405/u,
+  "Old servers must be classified as notification-capability unsupported"
+);
+assert.match(
+  brainUpdateNotificationSource,
+  /brainUpdateNotificationsUnsupported \? 30000 : 1000/u,
+  "Unsupported notification capability must use slow renegotiation instead of a fast loop"
+);
+const brainUpdateReconnectSource = brainUpdateNotificationSource.slice(
+  brainUpdateNotificationSource.indexOf("} finally {")
+);
+assert.doesNotMatch(
+  brainUpdateReconnectSource,
+  /refreshReader\(\)/u,
+  "Reconnect scheduling must not poll Brain contents; successful subscription performs catch-up"
+);
+const accessReconciliationSource = source.slice(
+  source.indexOf("async function applyBrainUpdateNotification"),
+  source.indexOf("function stopBrainUpdateNotifications")
+);
+assert.match(
+  accessReconciliationSource,
+  /state\.reconciliationGeneration \+= 1/u,
+  "Access changes must invalidate any older in-flight content reconciliation"
+);
+const pullSyncSource = source.slice(
+  source.indexOf("async function pullSyncBootstrap"),
+  source.indexOf("function renderGraphView")
+);
+assert.equal(
+  (pullSyncSource.match(/requireCurrentReconciliationGeneration/g) || []).length,
+  2,
+  "A content pull must revalidate access generation before decrypting and before publishing"
+);
 vm.runInNewContext(source, context, { filename: "product-client.js" });
 
 const client = context.window.FiniteBrainProductClient;
@@ -169,6 +232,10 @@ assert.equal(
   }),
   "Brain should understand the selected runtime identity as a Personal Agent hint"
 );
+const sessionAssetUrl = client.installSessionAssetDownloadUrl({});
+assert.equal(sessionAssetUrl, "blob:finite-brain-test-1");
+client.lockSession();
+assert.deepEqual(revokedObjectUrls, [sessionAssetUrl]);
 assert.equal(
   client.suggestedAgentIdentityFromNavigation(
     "?agentEmail=not-an-email&agentNpub=not-an-npub"
@@ -3278,7 +3345,213 @@ assert.equal(
   "Rendered contextual links use the same CommonMark targets as health and Graph View"
 );
 
+function brainNotificationBehaviorTestSeams(options = {}) {
+  const timers = [];
+  const testContext = {
+    ...context,
+    AbortController: class {
+      constructor() {
+        this.signal = { aborted: false };
+      }
+      abort() {
+        this.signal.aborted = true;
+      }
+    },
+    clearTimeout(timer) {
+      if (timer) timer.cleared = true;
+    },
+    setTimeout(callback, delay) {
+      const timer = { callback, cleared: false, delay };
+      timers.push(timer);
+      return timer;
+    },
+    fetch: options.fetch,
+    window: {
+      ...context.window,
+      __FINITE_BRAIN_DISABLE_AUTOSTART__: true,
+      __FINITE_BRAIN_TEST_SIGN_AUTH_HEADER__: async () => "Nostr test",
+      __FINITE_BRAIN_TEST_REFRESH_READER__: options.refreshReader,
+      __FINITE_BRAIN_TEST_PROTECTED_REQUEST__: options.protectedRequest,
+      __FINITE_BRAIN_TEST_LOAD_METADATA__: options.loadBrainMetadata,
+      __FINITE_BRAIN_TEST_OPEN_GRANTS__: options.openGrants,
+      __FINITE_BRAIN_TEST_PULL_SYNC__: options.pullSync,
+    },
+  };
+  testContext.globalThis = testContext;
+  let seams = null;
+  testContext.window.__FINITE_BRAIN_CAPTURE_NOTIFICATION_TEST_SEAMS__ = (value) => {
+    seams = value;
+  };
+  let seamSource = source
+    .replace(
+      "  async function signAuthHeader(path, options = {}) {",
+      "  async function signAuthHeader(path, options = {}) {\n    if (window.__FINITE_BRAIN_TEST_SIGN_AUTH_HEADER__) return window.__FINITE_BRAIN_TEST_SIGN_AUTH_HEADER__(path, options);"
+    )
+    .replace(
+      "  async function protectedRequest(path, options = {}) {",
+      "  async function protectedRequest(path, options = {}) {\n    if (window.__FINITE_BRAIN_TEST_PROTECTED_REQUEST__) return window.__FINITE_BRAIN_TEST_PROTECTED_REQUEST__(path, options);"
+    )
+    .replace(
+      "  async function refreshReader() {",
+      "  async function refreshReader() {\n    if (window.__FINITE_BRAIN_TEST_REFRESH_READER__) return window.__FINITE_BRAIN_TEST_REFRESH_READER__();"
+    )
+    .replace(
+      "  async function loadBrainMetadata(options = {}) {",
+      "  async function loadBrainMetadata(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_LOAD_METADATA__) return window.__FINITE_BRAIN_TEST_LOAD_METADATA__({ state, options });"
+    )
+    .replace(
+      "  async function openAvailableFolderKeyGrants(options = {}) {",
+      "  async function openAvailableFolderKeyGrants(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_OPEN_GRANTS__) return window.__FINITE_BRAIN_TEST_OPEN_GRANTS__(options);"
+    )
+    .replace(
+      "  async function pullSyncBootstrapExclusive(options = {}) {",
+      "  async function pullSyncBootstrapExclusive(options = {}) {\n    if (window.__FINITE_BRAIN_TEST_PULL_SYNC__) return window.__FINITE_BRAIN_TEST_PULL_SYNC__({ state, options });"
+    )
+    .replace(
+      "  return {\n    accessActionRoute,",
+      "  window.__FINITE_BRAIN_CAPTURE_NOTIFICATION_TEST_SEAMS__?.({ state, applyBrainUpdateNotification, createClientProjection, createSessionKeyring, lockSession, pullSyncBootstrap, runSerializedBrainReconciliation, startBrainUpdateNotifications, stopBrainUpdateNotifications });\n\n  return {\n    accessActionRoute,"
+    );
+  assert.notEqual(seamSource, source);
+  vm.runInNewContext(seamSource, testContext, { filename: "product-client-notifications.test.js" });
+  assert.ok(seams);
+  return { seams, timers };
+}
+
 (async () => {
+  const serialization = brainNotificationBehaviorTestSeams({
+    fetch: async () => ({ ok: false, status: 404, text: async () => "missing" }),
+  });
+  const serializationOrder = [];
+  let releaseFirst;
+  const first = serialization.seams.runSerializedBrainReconciliation(async () => {
+    serializationOrder.push("first-start");
+    await new Promise((resolve) => { releaseFirst = resolve; });
+    serializationOrder.push("first-end");
+  });
+  const second = serialization.seams.runSerializedBrainReconciliation(async () => {
+    serializationOrder.push("second");
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(serializationOrder, ["first-start"]);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(serializationOrder, ["first-start", "first-end", "second"]);
+
+  let releaseStalePull;
+  let stalePullStarted;
+  const stalePullStartedPromise = new Promise((resolve) => { stalePullStarted = resolve; });
+  let syncRequestCount = 0;
+  const accessPreemption = brainNotificationBehaviorTestSeams({
+    fetch: async () => { throw new Error("SSE not used in preemption test"); },
+    protectedRequest: async (path) => {
+      if (path.endsWith("/sync/bootstrap")) {
+        syncRequestCount += 1;
+        if (syncRequestCount === 1) {
+          stalePullStarted();
+          await new Promise((resolve) => { releaseStalePull = resolve; });
+        }
+        return { latestSequence: 0, objects: [] };
+      }
+      assert.equal(path, "/v1/brains");
+      return { brains: [{ brainId: "acme", kind: "organization", name: "Acme", role: "member" }] };
+    },
+    loadBrainMetadata: async ({ state }) => { state.metadata = { folders: [] }; },
+    openGrants: async ({ keyring }) => { keyring.openedGrants.push({ folderId: "kept" }); },
+  });
+  accessPreemption.seams.state.sessionStatus = "unlocked";
+  accessPreemption.seams.state.activeBrainId = "acme";
+  accessPreemption.seams.state.keyring = accessPreemption.seams.createSessionKeyring();
+  accessPreemption.seams.state.projection = accessPreemption.seams.createClientProjection();
+  const stalePull = accessPreemption.seams.pullSyncBootstrap();
+  await stalePullStartedPromise;
+  const queuedStalePull = accessPreemption.seams.pullSyncBootstrap();
+  const accessUpdate = accessPreemption.seams.applyBrainUpdateNotification({
+    brainId: "acme",
+    latestSequence: 1,
+    reason: "access_updated",
+  });
+  releaseStalePull();
+  await assert.rejects(stalePull, /Brain access changed/u);
+  await assert.rejects(
+    queuedStalePull,
+    /Brain access changed/u,
+    "Content work queued before an access hint must not run ahead of revocation"
+  );
+  await accessUpdate;
+  assert.equal(syncRequestCount, 2, "Access reconciliation runs after invalidating the stale pull");
+
+  let refreshCount = 0;
+  let fetchCount = 0;
+  const streamReaders = [
+    { read: async () => ({ done: true }) },
+    { read: async () => new Promise(() => {}) },
+  ];
+  const liveNotifications = brainNotificationBehaviorTestSeams({
+    fetch: async () => {
+      const reader = streamReaders[fetchCount];
+      fetchCount += 1;
+      return {
+        body: { getReader: () => reader },
+        ok: true,
+        status: 200,
+        text: async () => "",
+      };
+    },
+    refreshReader: async () => { refreshCount += 1; },
+  });
+  liveNotifications.seams.state.sessionStatus = "unlocked";
+  const firstStream = liveNotifications.seams.startBrainUpdateNotifications();
+  await firstStream;
+  assert.equal(refreshCount, 1, "A live subscription performs one authoritative catch-up");
+  const reconnectTimer = liveNotifications.timers.at(-1);
+  assert.equal(reconnectTimer.delay, 1000);
+  reconnectTimer.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refreshCount, 2, "EOF reconnect performs catch-up only after resubscribing");
+  const activeController = liveNotifications.seams.state.brainUpdateAbortController;
+  liveNotifications.seams.lockSession();
+  assert.equal(activeController.signal.aborted, true);
+  assert.equal(liveNotifications.seams.state.brainUpdateReconnectTimer, null);
+
+  const unsupportedNotifications = brainNotificationBehaviorTestSeams({
+    fetch: async () => ({ ok: false, status: 404, text: async () => "missing" }),
+    refreshReader: async () => { throw new Error("unsupported transport must not poll content"); },
+  });
+  unsupportedNotifications.seams.state.sessionStatus = "unlocked";
+  await unsupportedNotifications.seams.startBrainUpdateNotifications();
+  assert.equal(unsupportedNotifications.timers.at(-1).delay, 30000);
+
+  const folderAccess = brainNotificationBehaviorTestSeams({
+    fetch: async () => { throw new Error("SSE not used in access test"); },
+    protectedRequest: async (path) => {
+      assert.equal(path, "/v1/brains");
+      return { brains: [{ brainId: "acme", kind: "organization", name: "Acme", role: "member" }] };
+    },
+    loadBrainMetadata: async ({ state }) => { state.metadata = { folders: [] }; },
+    openGrants: async ({ keyring }) => { keyring.openedGrants.push({ folderId: "kept" }); },
+    pullSync: async () => {},
+  });
+  const accessState = folderAccess.seams.state;
+  accessState.sessionStatus = "unlocked";
+  accessState.activeBrainId = "acme";
+  accessState.keyring = folderAccess.seams.createSessionKeyring();
+  accessState.keyring.openedGrants.push({ folderId: "revoked" });
+  const previousKeyring = accessState.keyring;
+  accessState.projection = folderAccess.seams.createClientProjection();
+  accessState.projection.pages.set("revoked/page", { text: "secret" });
+  accessState.projection.pages.set("kept/page", { text: "kept" });
+  accessState.projection.localDrafts.set("revoked/page", { text: "secret draft" });
+  accessState.projection.localDrafts.set("kept/page", { text: "kept draft" });
+  await folderAccess.seams.applyBrainUpdateNotification({
+    brainId: "acme",
+    latestSequence: 9,
+    reason: "access_updated",
+  });
+  assert.equal(accessState.projection.pages.size, 0);
+  assert.equal(accessState.projection.localDrafts.has("revoked/page"), false);
+  assert.equal(accessState.projection.localDrafts.has("kept/page"), true);
+  assert.equal(previousKeyring.openedGrants.length, 0, "The superseded keyring is cleared");
+
   const rawNip07Provider = {
     async getPublicKey() {
       return "11".repeat(32);
@@ -5698,7 +5971,32 @@ assert.equal(
   assert.equal(openedAsset.text, undefined);
   assert.equal(client.buildGraphProjection([openedAsset]).nodes.length, 0);
   assert.equal(client.searchPageRows("source", [openedAsset]).length, 0);
-  assert.equal(client.readerPageRows("general", [openedAsset]).length, 0);
+  const assetRow = client.readerPageRows("general", [openedAsset])[0];
+  assert.equal(assetRow.label, "source.pdf");
+  assert.equal(assetRow.detail, "Asset · application/pdf · 11 bytes");
+  const download = client.assetDownloadDescriptor(openedAsset);
+  assert.equal(download.filename, "source.pdf");
+  assert.equal(download.contentType, "application/pdf");
+  assert.equal(new TextDecoder().decode(download.bytes), "%PDF asset\n");
+  assert.equal(
+    client.assetDownloadDescriptor({ ...openedAsset, filename: "../unsafe\nname.pdf" }).filename,
+    ".._unsafe_name.pdf"
+  );
+  const revokedAssetProjection = client.projectionForAccessUpdate(
+    {
+      pages: new Map([["general/obj_cli_asset001", openedAsset]]),
+      seenEventIds: new Set(),
+      localDrafts: new Map(),
+      conflicts: [],
+    },
+    []
+  );
+  assert.equal(revokedAssetProjection.pages.size, 0);
+  assert.equal(
+    client.readerPageRows("general", [...revokedAssetProjection.pages.values()]).length,
+    0,
+    "Folder revocation must remove an Asset from the readable sidebar projection"
+  );
   await assert.rejects(
     () =>
       client.encodeFolderObjectAssetPlaintext(

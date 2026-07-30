@@ -1,6 +1,8 @@
 use std::env;
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::{
@@ -19,11 +21,14 @@ pub(crate) struct BrainUpdateNotification {
     pub brain_id: String,
     pub latest_sequence: u64,
     pub reason: String,
+    #[serde(skip)]
+    pub transport_epoch: u64,
 }
 
 pub(crate) fn read_brain_update_stream(
     env: &CliEnvironment,
     sender: &std::sync::mpsc::Sender<Result<BrainUpdateNotification, String>>,
+    connected: &mut bool,
 ) -> Result<(), CliError> {
     let server_url = server_url_for_command(env, &[])?;
     let path = "/v1/brain-updates";
@@ -38,11 +43,18 @@ pub(crate) fn read_brain_update_stream(
         .set("Accept", "text/event-stream")
         .set("Authorization", &authorization)
         .call()
-        .map_err(|error| CliError::Http(error.to_string()))?;
+        .map_err(|error| match error {
+            ureq::Error::Status(404 | 405, _) => CliError::Unsupported(
+                "Brain Update Notifications are not supported by this server".to_owned(),
+            ),
+            error => CliError::Http(error.to_string()),
+        })?;
+    *connected = true;
     let _ = sender.send(Ok(BrainUpdateNotification {
         brain_id: String::new(),
         latest_sequence: 0,
         reason: "stream_catch_up".to_owned(),
+        transport_epoch: 0,
     }));
     let mut event = String::new();
     let mut data = String::new();
@@ -99,6 +111,36 @@ pub(crate) fn sync_once_with_local_paths(
     discovered_local_paths: Option<Vec<String>>,
 ) -> Result<SyncOnceReport, CliError> {
     let root = find_agent_state(&env.cwd).ok().flatten();
+    // The notification supervisor and an explicit `fbrain sync now` are
+    // separate processes. Serialize every writer for a Brain through the
+    // stable Runtime config directory so replacing a Working Tree root cannot
+    // create a second lock domain around the same authoritative Brain.
+    let _sync_lock = root
+        .as_deref()
+        .map(|root| {
+            let brain_id = read_agent_state(root)?.brain_id;
+            acquire_brain_sync_lock(env, &brain_id)
+        })
+        .transpose()?;
+    sync_once_with_local_paths_holding_lock(env, args, activity_kind, discovered_local_paths, root)
+}
+
+pub(crate) fn sync_once_holding_brain_lock(
+    env: &CliEnvironment,
+    args: &[String],
+    activity_kind: &str,
+) -> Result<SyncOnceReport, CliError> {
+    let root = find_agent_state(&env.cwd).ok().flatten();
+    sync_once_with_local_paths_holding_lock(env, args, activity_kind, None, root)
+}
+
+fn sync_once_with_local_paths_holding_lock(
+    env: &CliEnvironment,
+    args: &[String],
+    activity_kind: &str,
+    discovered_local_paths: Option<Vec<String>>,
+    root: Option<PathBuf>,
+) -> Result<SyncOnceReport, CliError> {
     let local_paths = discovered_local_paths.map_or_else(
         || {
             root.as_deref()
@@ -108,6 +150,19 @@ pub(crate) fn sync_once_with_local_paths(
         |paths| Ok(Some(paths)),
     );
     let report = run_working_tree_sync(env, args, activity_kind);
+    if report.as_ref().is_err_and(is_brain_access_loss) {
+        let _ = mutate_agent_state(env, |state, now| {
+            state.sync.status = "paused-access-revoked".to_owned();
+            state.daemon.last_error =
+                Some("authoritative Brain access is no longer available".to_owned());
+            state.add_activity(
+                now,
+                "daemon.access_paused",
+                "Brain sync paused after authoritative access loss; local files and unsynced edits were preserved",
+            );
+            Ok(())
+        });
+    }
     let reconciliation = root.as_deref().map(|root| match &report {
         Ok(report) => reconcile_search_changes(root, report),
         Err(_) => match &local_paths {
@@ -146,6 +201,38 @@ pub(crate) fn sync_once_with_local_paths(
         None => {}
     }
     report
+}
+
+pub(crate) fn acquire_brain_sync_lock(
+    env: &CliEnvironment,
+    brain_id: &str,
+) -> Result<std::fs::File, CliError> {
+    let lock_directory = env.config_dir.join("sync-locks");
+    fs::create_dir_all(&lock_directory)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_directory.join(format!("{brain_id}.lock")))?;
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+    Ok(lock)
+}
+
+pub(crate) fn is_brain_access_loss(error: &CliError) -> bool {
+    if let CliError::SyncStage { source, .. } = error {
+        return is_brain_access_loss(source);
+    }
+    matches!(
+        error,
+        CliError::HttpStatus { status: 403, body }
+            if {
+                let canonical = body.to_ascii_lowercase();
+                canonical.contains("brain access required")
+                    || canonical.contains("brain_access_required")
+            }
+    )
 }
 
 pub(crate) fn signed_json_request(
@@ -550,5 +637,26 @@ mod tests {
     fn body_read_failure_preserves_authoritative_non_success_status() {
         let error = body_read_error(409, "connection reset".to_owned());
         assert!(matches!(error, CliError::HttpStatus { status: 409, .. }));
+    }
+
+    #[test]
+    fn only_authoritative_brain_access_rejection_pauses_sync() {
+        assert!(is_brain_access_loss(&CliError::HttpStatus {
+            status: 403,
+            body: r#"{"error":"brain access required"}"#.to_owned(),
+        }));
+        assert!(!is_brain_access_loss(&CliError::HttpStatus {
+            status: 403,
+            body: "folder access required".to_owned(),
+        }));
+        assert!(!is_brain_access_loss(&CliError::Http("offline".to_owned())));
+        assert!(is_brain_access_loss(&CliError::SyncStage {
+            stage: "fetch incremental remote sync".to_owned(),
+            root: std::path::PathBuf::from("/tmp/brain"),
+            source: Box::new(CliError::HttpStatus {
+                status: 403,
+                body: "brain_access_required".to_owned(),
+            }),
+        }));
     }
 }

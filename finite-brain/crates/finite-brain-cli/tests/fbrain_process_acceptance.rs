@@ -1,12 +1,13 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::process::{Command, Output};
-use std::sync::mpsc;
+use std::process::{Child, Command, Output};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,15 @@ struct CollaborationSmokeReport {
     current_boundary: &'static str,
     passed_boundaries: Vec<&'static str>,
     completed: bool,
+}
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 impl CollaborationSmokeReport {
@@ -271,6 +281,101 @@ fn spawn_requester_authorities(
     (identity_url, core_url)
 }
 
+fn spawn_brain_updates_404_proxy(
+    upstream_url: &str,
+) -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<AtomicBool>,
+    thread::JoinHandle<()>,
+) {
+    let upstream = upstream_url
+        .strip_prefix("http://")
+        .expect("test Brain server uses HTTP")
+        .to_owned();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let notification_requests = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let request_counter = Arc::clone(&notification_requests);
+    let thread_stop = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !thread_stop.load(Ordering::SeqCst) {
+            let (mut client, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("old-server proxy accept failed: {error}"),
+            };
+            let upstream = upstream.clone();
+            let request_counter = Arc::clone(&request_counter);
+            thread::spawn(move || {
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 8192];
+                    let bytes = client.read(&mut chunk).unwrap_or(0);
+                    if bytes == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..bytes]);
+                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                let request_line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                if request_line.contains(" /v1/brain-updates ") {
+                    request_counter.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"error":"not_found"}"#;
+                    write!(
+                        client,
+                        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                    return;
+                }
+                let header_end = request
+                    .windows(4)
+                    .position(|part| part == b"\r\n\r\n")
+                    .unwrap();
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let mut forwarded_request = headers
+                    .lines()
+                    .filter(|line| !line.to_ascii_lowercase().starts_with("connection:"))
+                    .collect::<Vec<_>>()
+                    .join("\r\n")
+                    .into_bytes();
+                forwarded_request.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+                forwarded_request.extend_from_slice(&request[header_end + 4..]);
+                let mut server = TcpStream::connect(&upstream).unwrap();
+                server.write_all(&forwarded_request).unwrap();
+                let _ = std::io::copy(&mut server, &mut client);
+            });
+        }
+    });
+    (url, notification_requests, stop, handle)
+}
+
 fn fbrain() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fbrain"))
 }
@@ -486,6 +591,331 @@ fn setup_access_loss_tree(scratch: &TempDir) -> PathBuf {
     agent["conflicts"] = json!([]);
     write_json(&agent_path, &agent);
     tree
+}
+
+#[test]
+fn supervisor_keeps_local_sync_when_old_server_has_no_notification_route() {
+    let scratch = TempDir::new().unwrap();
+    let owner_home = scratch.path().join("owner-home");
+    let agent_home = scratch.path().join("agent-home");
+    fs::create_dir_all(&owner_home).unwrap();
+    fs::create_dir_all(&agent_home).unwrap();
+    let owner_secret = scratch.path().join("owner-secret");
+    let agent_secret = scratch.path().join("agent-secret");
+    fs::write(
+        &owner_secret,
+        "0000000000000000000000000000000000000000000000000000000000000001\n",
+    )
+    .unwrap();
+    fs::write(
+        &agent_secret,
+        "0000000000000000000000000000000000000000000000000000000000000003\n",
+    )
+    .unwrap();
+    for (home, secret) in [(&owner_home, &owner_secret), (&agent_home, &agent_secret)] {
+        let imported = run(
+            home,
+            home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+    }
+    let public_key = |home: &Path| {
+        let output = run(home, home, &["signer", "public-key", "--json"]);
+        assert!(output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        value["npub"].as_str().unwrap().to_owned()
+    };
+    let owner_npub = public_key(&owner_home);
+    let agent_npub = public_key(&agent_home);
+    let (server_url, server_shutdown, server_thread) =
+        spawn_real_brain_server(&agent_npub, &agent_npub, &owner_npub, &owner_npub);
+    let (proxy_url, notification_requests, proxy_stop, proxy_thread) =
+        spawn_brain_updates_404_proxy(&server_url);
+
+    let working_tree_root = scratch.path().join("supervised-trees");
+    fs::create_dir_all(&working_tree_root).unwrap();
+    let supervisor_log_path = scratch.path().join("supervisor.log");
+    let supervisor_log = fs::File::create(&supervisor_log_path).unwrap();
+    let supervisor = command(&agent_home, &agent_home)
+        .env("FINITE_BRAIN_SERVER_URL", &proxy_url)
+        .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+        .env("FBRAIN_WORKING_TREE_ROOT", &working_tree_root)
+        .args(["daemon", "supervise"])
+        .stdout(Stdio::from(supervisor_log.try_clone().unwrap()))
+        .stderr(Stdio::from(supervisor_log))
+        .spawn()
+        .unwrap();
+    let mut supervisor = ChildGuard(supervisor);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while notification_requests.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(notification_requests.load(Ordering::SeqCst), 1);
+
+    let run_server = |cwd: &Path, args: &[&str]| {
+        command(&agent_home, cwd)
+            .env("FINITE_BRAIN_SERVER_URL", &proxy_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let tree = working_tree_root.join("personal-a");
+    let opened = run_server(
+        &agent_home,
+        &["open", "personal-a", tree.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    let folder = run_server(&tree, &["folder", "create", "Notes", "--json"]);
+    assert!(
+        folder.status.success(),
+        "{}",
+        String::from_utf8_lossy(&folder.stderr)
+    );
+    let mirror = scratch.path().join("mirror");
+    let opened_mirror = run_server(
+        &agent_home,
+        &["open", "personal-a", mirror.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        opened_mirror.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened_mirror.stderr)
+    );
+
+    let expected = "# Automatic local sync\n\nOld-server compatibility proof.\n";
+    fs::write(tree.join("Notes/automatic.md"), expected).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let synced = run_server(&mirror, &["sync", "now", "--json"]);
+        assert!(
+            synced.status.success(),
+            "{}",
+            String::from_utf8_lossy(&synced.stderr)
+        );
+        if fs::read_to_string(mirror.join("Notes/automatic.md"))
+            .ok()
+            .as_deref()
+            == Some(expected)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervised local edit did not reach a second Working Tree\nlog:\n{}\nstate:\n{}",
+            fs::read_to_string(&supervisor_log_path).unwrap_or_default(),
+            fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap_or_default(),
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    fs::rename(
+        &working_tree_root,
+        scratch.path().join("retired-supervised-trees"),
+    )
+    .unwrap();
+    fs::create_dir_all(&working_tree_root).unwrap();
+    let reopened = run_server(
+        &agent_home,
+        &["open", "personal-a", tree.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        reopened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reopened.stderr)
+    );
+    let reset_expected = "# Automatic local sync after reset\n\nRoot lifecycle proof.\n";
+    fs::write(tree.join("Notes/after-root-reset.md"), reset_expected).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let synced = run_server(&mirror, &["sync", "now", "--json"]);
+        assert!(
+            synced.status.success(),
+            "{}",
+            String::from_utf8_lossy(&synced.stderr)
+        );
+        if fs::read_to_string(mirror.join("Notes/after-root-reset.md"))
+            .ok()
+            .as_deref()
+            == Some(reset_expected)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervisor did not recover after its entire Working Tree root was replaced\nlog:\n{}\nstate:\n{}",
+            fs::read_to_string(&supervisor_log_path).unwrap_or_default(),
+            fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap_or_default(),
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(supervisor.0.try_wait().unwrap().is_none());
+    assert_eq!(notification_requests.load(Ordering::SeqCst), 1);
+    let state: Value =
+        serde_json::from_slice(&fs::read(tree.join(".finitebrain/agent-state.json")).unwrap())
+            .unwrap();
+    assert!(
+        !state["sync"]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("blocked:")
+    );
+    assert!(state["daemon"]["lastError"].is_null());
+
+    drop(supervisor);
+    proxy_stop.store(true, Ordering::SeqCst);
+    proxy_thread.join().unwrap();
+    server_shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+#[test]
+fn supervisor_catches_up_remote_updates_after_repeated_working_tree_root_replacement() {
+    let scratch = TempDir::new().unwrap();
+    let owner_home = scratch.path().join("owner-home");
+    let agent_home = scratch.path().join("agent-home");
+    fs::create_dir_all(&owner_home).unwrap();
+    fs::create_dir_all(&agent_home).unwrap();
+    let owner_secret = scratch.path().join("owner-secret");
+    let agent_secret = scratch.path().join("agent-secret");
+    fs::write(
+        &owner_secret,
+        "0000000000000000000000000000000000000000000000000000000000000001\n",
+    )
+    .unwrap();
+    fs::write(
+        &agent_secret,
+        "0000000000000000000000000000000000000000000000000000000000000003\n",
+    )
+    .unwrap();
+    for (home, secret) in [(&owner_home, &owner_secret), (&agent_home, &agent_secret)] {
+        let imported = run(
+            home,
+            home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+    }
+    let public_key = |home: &Path| {
+        let output = run(home, home, &["signer", "public-key", "--json"]);
+        assert!(output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        value["npub"].as_str().unwrap().to_owned()
+    };
+    let owner_npub = public_key(&owner_home);
+    let agent_npub = public_key(&agent_home);
+    let (server_url, server_shutdown, server_thread) =
+        spawn_real_brain_server(&agent_npub, &agent_npub, &owner_npub, &owner_npub);
+    let run_server = |home: &Path, cwd: &Path, args: &[&str]| {
+        command(home, cwd)
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let working_tree_root = scratch.path().join("supervised-trees");
+    fs::create_dir_all(&working_tree_root).unwrap();
+    let supervisor_log_path = scratch.path().join("supervisor.log");
+    let supervisor_log = fs::File::create(&supervisor_log_path).unwrap();
+    let supervisor = command(&agent_home, &agent_home)
+        .env("FINITE_BRAIN_SERVER_URL", &server_url)
+        .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+        .env("FBRAIN_WORKING_TREE_ROOT", &working_tree_root)
+        .args(["daemon", "supervise"])
+        .stdout(Stdio::from(supervisor_log.try_clone().unwrap()))
+        .stderr(Stdio::from(supervisor_log))
+        .spawn()
+        .unwrap();
+    let mut supervisor = ChildGuard(supervisor);
+
+    let tree = working_tree_root.join("personal-a");
+    for reset in 0..3 {
+        if reset > 0 {
+            fs::rename(
+                &working_tree_root,
+                scratch
+                    .path()
+                    .join(format!("retired-supervised-trees-{reset}")),
+            )
+            .unwrap();
+            fs::create_dir_all(&working_tree_root).unwrap();
+        }
+        let opened = run_server(
+            &agent_home,
+            &agent_home,
+            &["open", "personal-a", tree.to_str().unwrap(), "--json"],
+        );
+        assert!(
+            opened.status.success(),
+            "{}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+    }
+
+    let owner_tree = scratch.path().join("owner-tree");
+    let opened_owner = run_server(
+        &owner_home,
+        &owner_home,
+        &["open", "personal-a", owner_tree.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        opened_owner.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened_owner.stderr)
+    );
+    let created = run_server(
+        &owner_home,
+        &owner_tree,
+        &["folder", "create", "Remote Notification Folder", "--json"],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !tree.join("Remote Notification Folder").is_dir() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        tree.join("Remote Notification Folder").is_dir(),
+        "supervisor did not catch up a remote update after repeated Working Tree root replacement\nlog:\n{}\nstate:\n{}",
+        fs::read_to_string(&supervisor_log_path).unwrap_or_default(),
+        fs::read_to_string(tree.join(".finitebrain/agent-state.json")).unwrap_or_default(),
+    );
+    assert!(supervisor.0.try_wait().unwrap().is_none());
+
+    drop(supervisor);
+    server_shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
 }
 
 #[test]
@@ -1225,6 +1655,10 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         fs::read_to_string(tree_b.join("Restricted/secret.md")).unwrap(),
         "# Restricted\n\nRecipient-readable proof.\n"
     );
+    let org_instructions = fs::read_to_string(tree_b.join("AGENTS.md")).unwrap();
+    assert!(org_instructions.contains("FiniteBrain Organization Brain Working Tree"));
+    assert!(org_instructions.contains(&format!("Acting Member Identity: `{target_npub}`")));
+    assert!(org_instructions.contains("Acting Brain role: `admin`"));
     assert_eq!(
         assert_canonical_folder_projection(&tree_b.join("Restricted"), "restricted"),
         restricted_instructions
@@ -1271,6 +1705,10 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     let opened_personal: Value = serde_json::from_slice(&opened_personal.stdout).unwrap();
     assert_eq!(opened_personal["brainId"], "personal-a");
+    assert_eq!(
+        opened_personal["nextCommandWorkingDirectory"],
+        opened_personal["path"]
+    );
     let tree_personal_a = PathBuf::from(
         opened_personal["path"]
             .as_str()
@@ -1321,6 +1759,10 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         String::from_utf8_lossy(&synced_personal_folders.stderr)
     );
     assert_canonical_folder_projection(&tree_personal_a.join("Personal Team"), "personal-team");
+    let personal_instructions = fs::read_to_string(tree_personal_a.join("AGENTS.md")).unwrap();
+    assert!(personal_instructions.contains("FiniteBrain Personal Brain Working Tree"));
+    assert!(personal_instructions.contains(&format!("Acting Member Identity: `{owner_npub}`")));
+    assert!(personal_instructions.contains("Acting Brain role: `owner`"));
     assert_canonical_folder_projection(
         &tree_personal_a.join("Personal Private"),
         "personal-private",
@@ -1681,6 +2123,10 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         fs::read_to_string(member_tree.join("Member Scope/invited.md")).unwrap(),
         "# Member Scope\n\nInvited Member access proof.\n"
     );
+    let member_instructions = fs::read_to_string(member_tree.join("AGENTS.md")).unwrap();
+    assert!(member_instructions.contains("FiniteBrain Organization Brain Working Tree"));
+    assert!(member_instructions.contains(&format!("Acting Member Identity: `{target_npub}`")));
+    assert!(member_instructions.contains("Acting Brain role: `member`"));
     assert!(
         !member_tree.join("Member Unrelated/private.md").exists(),
         "an existing Member must not receive an unrelated restricted Folder key grant"
@@ -2079,6 +2525,24 @@ fn spawn_access_loss_sync_server() -> (String, thread::JoinHandle<Vec<String>>) 
             .unwrap();
         }
         requests
+    });
+    (endpoint, worker)
+}
+
+fn spawn_brain_access_revoked_server() -> (String, thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let worker = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request_line = read_http_request_line(&mut stream);
+        let body = r#"{"error":"brain access required"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request_line
     });
     (endpoint, worker)
 }
@@ -2661,6 +3125,47 @@ fn built_fbrain_disable_drains_admitted_query_embedding_before_returning() {
         "{}",
         String::from_utf8_lossy(&disabled.stderr)
     );
+}
+
+#[test]
+fn built_fbrain_full_brain_access_loss_pauses_without_deleting_local_work() {
+    let scratch = TempDir::new().unwrap();
+    let tree = setup_access_loss_tree(&scratch);
+    let preserved = tree.join("General/unsynced-after-revocation.md");
+    fs::write(&preserved, "# Preserved\n\nUnsynced local work.\n").unwrap();
+    let (endpoint, server) = spawn_brain_access_revoked_server();
+
+    let sync = run(
+        scratch.path(),
+        &tree,
+        &["sync", "now", "--server", &endpoint, "--json"],
+    );
+    let request = server.join().unwrap();
+    assert!(request.contains("/v1/brains/brain/export"), "{request}");
+    assert!(!sync.status.success());
+    assert!(String::from_utf8_lossy(&sync.stderr).contains("brain access required"));
+    assert_eq!(
+        fs::read_to_string(&preserved).unwrap(),
+        "# Preserved\n\nUnsynced local work.\n"
+    );
+    assert!(tree.join("General/nested/strong-a.md").is_file());
+
+    let state: Value =
+        serde_json::from_slice(&fs::read(tree.join(".finitebrain/agent-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["sync"]["status"], "paused-access-revoked");
+    assert!(
+        state["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["kind"] == "daemon.access_paused")
+    );
+
+    let status = run(scratch.path(), &tree, &["daemon", "status", "--json"]);
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["state"], "paused");
 }
 
 #[test]

@@ -1258,6 +1258,7 @@ fn open_folder_index(path: &Path) -> Result<Connection, CliError> {
             path.display()
         )));
     }
+    prepare_private_sqlite_file(path)?;
     let connection = Connection::open(path).map_err(search_index_error)?;
     // The index is derived and always rebuildable. An in-memory rollback journal
     // preserves atomic transactions without writing section plaintext to sidecars.
@@ -1272,6 +1273,46 @@ fn open_folder_index(path: &Path) -> Result<Connection, CliError> {
         .map_err(search_index_error)?;
     set_private_file_permissions(path)?;
     Ok(connection)
+}
+
+fn prepare_private_sqlite_file(path: &Path) -> Result<(), CliError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(CliError::SearchIndex(format!(
+                "refusing non-file Folder index at {}",
+                path.display()
+            )));
+        }
+        Ok(_) => {
+            set_private_file_permissions(path)?;
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut options = OpenOptions::new();
+    options.create_new(true).read(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    match options.open(path) {
+        Ok(file) => {
+            set_private_file_permissions(path)?;
+            file.sync_all()?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(CliError::SearchIndex(format!(
+                    "refusing non-file Folder index at {}",
+                    path.display()
+                )));
+            }
+            set_private_file_permissions(path)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn initialize_index_schema(
@@ -2498,6 +2539,24 @@ fn search_index_error(error: rusqlite::Error) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn search_index_is_private_from_its_first_observable_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = tempfile::tempdir().unwrap();
+        fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = scratch.path().join("folder/index.sqlite3");
+        create_private_directory_if_missing(path.parent().unwrap()).unwrap();
+
+        prepare_private_sqlite_file(&path).unwrap();
+
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn oversized_sections_split_near_paragraphs_with_context_and_overlap() {

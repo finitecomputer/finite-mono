@@ -43,12 +43,13 @@ pub(crate) use wiki::*;
 pub(crate) use working_tree_security::*;
 
 use notify::{RecursiveMode, Watcher};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use finite_brain_core::portability::{
     BrainDirectoryBrainSummary, BrainDirectoryManifest, BrainDirectoryPath,
@@ -664,38 +665,72 @@ fn daemon<W: Write>(
 
 fn opened_working_trees(root: &Path) -> Result<Vec<(String, PathBuf)>, CliError> {
     let mut trees = Vec::new();
-    if !root.is_dir() {
-        return Ok(trees);
-    }
-    for entry in fs::read_dir(root)? {
-        let path = entry?.path();
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(trees),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let path = entry.path();
         if !path.is_dir() || !path.join(".finitebrain/agent-state.json").is_file() {
             continue;
         }
-        let state = read_agent_state(&path)?;
+        let state = match read_agent_state(&path) {
+            Ok(state) => state,
+            Err(CliError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
         trees.push((state.brain_id, path));
     }
     trees.sort_by(|left, right| left.1.cmp(&right.1));
+    let mut paths_by_brain = BTreeMap::<&str, &Path>::new();
+    for (brain_id, path) in &trees {
+        if let Some(existing) = paths_by_brain.insert(brain_id, path) {
+            return Err(CliError::InvalidInput(format!(
+                "Brain {} is open in multiple Working Trees ({} and {}); close one before supervising sync",
+                brain_id,
+                existing.display(),
+                path.display()
+            )));
+        }
+    }
     Ok(trees)
 }
 
-fn acquire_supervisor_lock(root: &Path) -> Result<std::fs::File, CliError> {
+fn opened_working_trees_during_supervision(
+    root: &Path,
+) -> Result<Vec<(String, PathBuf)>, CliError> {
+    match opened_working_trees(root) {
+        Ok(trees) => Ok(trees),
+        Err(error) if transient_working_tree_gap(&error) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn acquire_supervisor_lock(env: &CliEnvironment) -> Result<std::fs::File, CliError> {
+    fs::create_dir_all(&env.config_dir)?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
-        .open(root.join(".fbrain-supervisor.lock"))?;
+        .open(env.config_dir.join("fbrain-supervisor.lock"))?;
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
         |_| CliError::InvalidInput("a Brain sync supervisor is already running".to_owned()),
     )?;
     Ok(lock)
 }
 
-pub(crate) fn supervisor_is_running(root: &Path) -> bool {
+pub(crate) fn supervisor_is_running(env: &CliEnvironment) -> bool {
     let Ok(lock) = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(root.join(".fbrain-supervisor.lock"))
+        .open(env.config_dir.join("fbrain-supervisor.lock"))
     else {
         return false;
     };
@@ -708,6 +743,44 @@ pub(crate) fn supervisor_is_running(root: &Path) -> bool {
     }
 }
 
+struct BrainSyncWorker {
+    path: PathBuf,
+    instance: WorkingTreeInstance,
+    sender: mpsc::Sender<BrainUpdateNotification>,
+    cancelled: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkingTreeInstance {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn working_tree_instance(path: &Path) -> Result<WorkingTreeInstance, CliError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(path)?;
+    Ok(WorkingTreeInstance {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn working_tree_instance(path: &Path) -> Result<WorkingTreeInstance, CliError> {
+    let metadata = fs::symlink_metadata(path)?;
+    let modified = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(WorkingTreeInstance {
+        device: metadata.len(),
+        inode: modified.as_nanos() as u64,
+    })
+}
+
 fn daemon_supervise<W: Write>(
     args: &[String],
     env: &CliEnvironment,
@@ -718,91 +791,360 @@ fn daemon_supervise<W: Write>(
         CliError::InvalidInput("daemon supervise requires FBRAIN_WORKING_TREE_ROOT".to_owned())
     })?;
     fs::create_dir_all(root)?;
-    let _supervisor_lock = acquire_supervisor_lock(root)?;
+    let _supervisor_lock = acquire_supervisor_lock(env)?;
     let max_events =
         option_value(args, "--max-events").and_then(|value| value.parse::<usize>().ok());
     let (sender, receiver) = mpsc::channel::<Result<BrainUpdateNotification, String>>();
     let file_sender = sender.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event {
-            for path in event.paths {
-                if path
-                    .components()
-                    .any(|part| part.as_os_str() == ".finitebrain")
-                {
-                    continue;
+    let notification_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let watched_root = notification_root.clone();
+    let mut watcher =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+            Ok(event) => {
+                let event_kind = event.kind;
+                for path in event.paths {
+                    let Some(reason) =
+                        filesystem_notification_reason(&event_kind, &path, &watched_root)
+                    else {
+                        continue;
+                    };
+                    let _ = file_sender.send(Ok(BrainUpdateNotification {
+                        brain_id: String::new(),
+                        latest_sequence: 0,
+                        reason: reason.to_owned(),
+                        transport_epoch: 0,
+                    }));
+                    break;
                 }
-                let _ = file_sender.send(Ok(BrainUpdateNotification {
-                    brain_id: String::new(),
-                    latest_sequence: 0,
-                    reason: "local_updated".to_owned(),
-                }));
-                break;
             }
-        }
-    })
-    .map_err(|error| CliError::InvalidInput(format!("filesystem watcher failed: {error}")))?;
+            Err(error) => {
+                let _ = file_sender.send(Err(format!("filesystem watcher failed: {error}")));
+            }
+        })
+        .map_err(|error| CliError::InvalidInput(format!("filesystem watcher failed: {error}")))?;
     watcher
         .watch(root, RecursiveMode::Recursive)
         .map_err(|error| {
             CliError::InvalidInput(format!("could not watch Brain Working Trees: {error}"))
         })?;
+    let mut parent_watcher = if let Some(parent) = notification_root.parent() {
+        let parent_sender = sender.clone();
+        let parent_root = notification_root.clone();
+        let mut parent_watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+                Ok(event) => {
+                    let event_kind = event.kind;
+                    for path in event.paths {
+                        let Some(reason) =
+                            filesystem_notification_reason(&event_kind, &path, &parent_root)
+                        else {
+                            continue;
+                        };
+                        let _ = parent_sender.send(Ok(BrainUpdateNotification {
+                            brain_id: String::new(),
+                            latest_sequence: 0,
+                            reason: reason.to_owned(),
+                            transport_epoch: 0,
+                        }));
+                        break;
+                    }
+                }
+                Err(error) => {
+                    let _ = parent_sender
+                        .send(Err(format!("filesystem parent watcher failed: {error}")));
+                }
+            })
+            .map_err(|error| {
+                CliError::InvalidInput(format!("filesystem parent watcher failed: {error}"))
+            })?;
+        parent_watcher
+            .watch(parent, RecursiveMode::NonRecursive)
+            .map_err(|error| {
+                CliError::InvalidInput(format!(
+                    "could not watch Brain Working Tree parent: {error}"
+                ))
+            })?;
+        Some(parent_watcher)
+    } else {
+        None
+    };
+    let mut explicitly_watched_trees = BTreeSet::<PathBuf>::new();
 
     // Catch up every already-open Working Tree before trusting live hints.
     let _ = sender.send(Ok(BrainUpdateNotification {
         brain_id: String::new(),
         latest_sequence: 0,
         reason: "startup_catch_up".to_owned(),
+        transport_epoch: 0,
     }));
 
     let stream_env = env.clone();
+    let notifications_unsupported = Arc::new(AtomicBool::new(false));
+    let stream_notifications_unsupported = Arc::clone(&notifications_unsupported);
     std::thread::spawn(move || {
+        let mut retry_delay = Duration::from_secs(1);
+        let mut unsupported_announced = false;
         loop {
-            if let Err(error) = read_brain_update_stream(&stream_env, &sender) {
-                let _ = sender.send(Err(error.to_string()));
+            let mut stream_connected = false;
+            match read_brain_update_stream(&stream_env, &sender, &mut stream_connected) {
+                Err(CliError::Unsupported(_)) => {
+                    stream_notifications_unsupported.store(true, Ordering::SeqCst);
+                    if !unsupported_announced {
+                        let _ = sender.send(Ok(BrainUpdateNotification {
+                            brain_id: String::new(),
+                            latest_sequence: 0,
+                            reason: "notifications_unsupported".to_owned(),
+                            transport_epoch: 0,
+                        }));
+                        unsupported_announced = true;
+                    }
+                    // This only renegotiates the notification capability; Brain
+                    // contents are never polled. It lets an Agent Runtime recover
+                    // in place when an N-1 server is upgraded underneath it.
+                    std::thread::sleep(Duration::from_secs(30));
+                }
+                Err(error) => {
+                    unsupported_announced = false;
+                    let _ = sender.send(Err(error.to_string()));
+                    if stream_connected {
+                        retry_delay = Duration::from_secs(1);
+                    }
+                    std::thread::sleep(retry_delay);
+                    retry_delay = brain_update_retry_delay(retry_delay, false);
+                }
+                Ok(()) => {
+                    stream_notifications_unsupported.store(false, Ordering::SeqCst);
+                    unsupported_announced = false;
+                    retry_delay = Duration::from_secs(1);
+                    std::thread::sleep(retry_delay);
+                }
             }
-            std::thread::sleep(Duration::from_secs(1));
         }
     });
 
+    let (result_sender, result_receiver) = mpsc::channel::<(String, Result<(), String>)>();
+    let transport_epoch = Arc::new(AtomicU64::new(0));
+    let mut workers = BTreeMap::<String, BrainSyncWorker>::new();
     let mut handled = 0_usize;
-    for event in receiver {
-        let notification = match event {
+    let mut pending_event = None;
+    while let Some(event) = next_supervisor_event(&receiver, &mut pending_event) {
+        while let Ok((brain_id, result)) = result_receiver.try_recv() {
+            if let Err(error) = result {
+                writeln!(output, "Brain {brain_id} sync blocked: {error}")?;
+            }
+        }
+        let mut notification = match event {
             Ok(notification) => notification,
+            Err(error) if error.starts_with("filesystem ") => {
+                writeln!(output, "{error}; running authoritative catch-up")?;
+                explicitly_watched_trees.clear();
+                if error.starts_with("filesystem parent watcher") {
+                    if let (Some(parent), Some(parent_watcher)) =
+                        (notification_root.parent(), parent_watcher.as_mut())
+                    {
+                        parent_watcher
+                            .watch(parent, RecursiveMode::NonRecursive)
+                            .map_err(|error| {
+                                CliError::InvalidInput(format!(
+                                    "could not restore Brain Working Tree parent watch: {error}"
+                                ))
+                            })?;
+                    }
+                } else if root.is_dir() {
+                    match watcher.watch(root, RecursiveMode::Recursive) {
+                        Ok(()) => {}
+                        Err(error) if notify_path_temporarily_missing(&error) => {}
+                        Err(error) => {
+                            return Err(CliError::InvalidInput(format!(
+                                "could not restore Brain Working Tree watch: {error}"
+                            )));
+                        }
+                    }
+                }
+                BrainUpdateNotification {
+                    brain_id: String::new(),
+                    latest_sequence: 0,
+                    reason: "filesystem_catch_up".to_owned(),
+                    transport_epoch: 0,
+                }
+            }
             Err(error) => {
+                transport_epoch.fetch_add(1, Ordering::SeqCst);
                 writeln!(output, "brain update stream reconnecting: {error}")?;
-                continue;
+                for (_, path) in opened_working_trees_during_supervision(root)? {
+                    let mut tree_env = env.clone();
+                    tree_env.cwd = path;
+                    let _ = mutate_agent_state(&tree_env, |state, now| {
+                        state.daemon.notification_status = Some("reconnecting".to_owned());
+                        state.daemon.last_error = Some(error.clone());
+                        state.add_activity(
+                            now,
+                            "daemon.reconnecting",
+                            "Brain Update Notification stream disconnected; authoritative catch-up will run after reconnect",
+                        );
+                        Ok(())
+                    });
+                }
+                // A broken response body can discard the notification that
+                // exposed the transport failure. Reconcile immediately from
+                // the authoritative cursor; do not extend staleness until a
+                // later connection happens to succeed.
+                BrainUpdateNotification {
+                    brain_id: String::new(),
+                    latest_sequence: 0,
+                    reason: "stream_error_catch_up".to_owned(),
+                    transport_epoch: 0,
+                }
             }
         };
+        if notification.reason == "stream_catch_up" {
+            notifications_unsupported.store(false, Ordering::SeqCst);
+            notification.transport_epoch = transport_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            for (_, path) in opened_working_trees_during_supervision(root)? {
+                let mut tree_env = env.clone();
+                tree_env.cwd = path;
+                let _ = mutate_agent_state(&tree_env, |state, _| {
+                    state.daemon.notification_status = None;
+                    Ok(())
+                });
+            }
+        } else {
+            notification.transport_epoch = transport_epoch.load(Ordering::SeqCst);
+        }
         let _notification_cursor = notification.latest_sequence;
         let _notification_reason = &notification.reason;
-        for (brain_id, path) in opened_working_trees(root)? {
+        if notification.reason == "working_tree_root_removed" {
+            explicitly_watched_trees.clear();
+            retire_brain_sync_workers(&mut workers)?;
+            handled += 1;
+            if max_events.is_some_and(|limit| handled >= limit) {
+                break;
+            }
+            continue;
+        }
+        if notification.reason == "working_tree_root_reopened" {
+            explicitly_watched_trees.clear();
+            retire_brain_sync_workers(&mut workers)?;
+            match watcher.watch(root, RecursiveMode::Recursive) {
+                Ok(()) => {}
+                Err(error) if notify_path_temporarily_missing(&error) => continue,
+                Err(error) => {
+                    return Err(CliError::InvalidInput(format!(
+                        "could not rewatch Brain Working Tree root: {error}"
+                    )));
+                }
+            }
+        }
+        let opened_trees = opened_working_trees_during_supervision(root)?;
+        let opened_paths = opened_trees
+            .iter()
+            .filter_map(|(brain_id, path)| {
+                working_tree_instance(path)
+                    .ok()
+                    .map(|instance| (brain_id.clone(), (path.clone(), instance)))
+            })
+            .collect::<BTreeMap<String, (PathBuf, WorkingTreeInstance)>>();
+        let retired_brains = workers
+            .iter()
+            .filter_map(|(brain_id, worker)| {
+                (opened_paths.get(brain_id) != Some(&(worker.path.clone(), worker.instance)))
+                    .then_some(brain_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for brain_id in retired_brains {
+            if let Some(worker) = workers.remove(&brain_id) {
+                explicitly_watched_trees.remove(&worker.path);
+                let _ = watcher.unwatch(&worker.path);
+                retire_brain_sync_worker(worker)?;
+            }
+        }
+        for (_, path) in &opened_trees {
+            if explicitly_watched_trees.insert(path.clone()) {
+                match watcher.watch(path, RecursiveMode::Recursive) {
+                    Ok(()) => {}
+                    Err(error) if notify_path_temporarily_missing(&error) => {
+                        explicitly_watched_trees.remove(path);
+                        continue;
+                    }
+                    Err(error) => {
+                        explicitly_watched_trees.remove(path);
+                        return Err(CliError::InvalidInput(format!(
+                            "could not watch Brain Working Tree {}: {error}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
+        }
+        for (brain_id, path) in opened_trees {
+            if notifications_unsupported.load(Ordering::SeqCst) {
+                let mut tree_env = env.clone();
+                tree_env.cwd = path.clone();
+                let _ = mutate_agent_state(&tree_env, |state, _| {
+                    state.daemon.notification_status = Some("unsupported".to_owned());
+                    Ok(())
+                });
+            }
+            if !workers.contains_key(&brain_id) {
+                let instance = match working_tree_instance(&path) {
+                    Ok(instance) => instance,
+                    Err(CliError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let (worker_sender, worker_receiver) = mpsc::channel();
+                let worker_env = env.clone();
+                let worker_brain_id = brain_id.clone();
+                let worker_result_sender = result_sender.clone();
+                let worker_transport_epoch = Arc::clone(&transport_epoch);
+                let worker_path = path.clone();
+                let worker_cancelled = Arc::new(AtomicBool::new(false));
+                let thread_cancelled = Arc::clone(&worker_cancelled);
+                let handle = std::thread::spawn(move || {
+                    run_brain_sync_worker(
+                        worker_env,
+                        worker_path,
+                        worker_brain_id,
+                        worker_receiver,
+                        worker_result_sender,
+                        worker_transport_epoch,
+                        thread_cancelled,
+                    );
+                });
+                workers.insert(
+                    brain_id.clone(),
+                    BrainSyncWorker {
+                        path,
+                        instance,
+                        sender: worker_sender,
+                        cancelled: worker_cancelled,
+                        handle,
+                    },
+                );
+            }
             if !notification.brain_id.is_empty() && notification.brain_id != brain_id {
                 continue;
             }
-            let mut tree_env = env.clone();
-            tree_env.cwd = path;
-            let local_paths = if notification.reason == "local_updated" {
-                let paths = pending_working_tree_change_paths(&tree_env.cwd)?;
-                if paths.is_empty() {
-                    continue;
-                }
-                Some(paths)
-            } else {
-                None
-            };
-            if let Err(error) = sync_once_with_local_paths(
-                &tree_env,
-                &[],
-                "daemon.supervise.notification",
-                local_paths,
-            ) {
-                writeln!(output, "Brain {brain_id} sync blocked: {error}")?;
-            }
+            workers
+                .get(&brain_id)
+                .expect("Brain worker was inserted")
+                .sender
+                .send(notification.clone())
+                .map_err(|_| {
+                    CliError::InvalidInput(format!("Brain {brain_id} sync worker stopped"))
+                })?;
         }
         handled += 1;
         if max_events.is_some_and(|limit| handled >= limit) {
             break;
+        }
+    }
+    drop(result_sender);
+    retire_brain_sync_workers(&mut workers)?;
+    while let Ok((brain_id, result)) = result_receiver.try_recv() {
+        if let Err(error) = result {
+            writeln!(output, "Brain {brain_id} sync blocked: {error}")?;
         }
     }
     if json {
@@ -812,6 +1154,307 @@ fn daemon_supervise<W: Write>(
         )
     } else {
         writeln!(output, "daemon supervise stopped events={handled}").map_err(Into::into)
+    }
+}
+
+fn next_supervisor_event(
+    receiver: &mpsc::Receiver<Result<BrainUpdateNotification, String>>,
+    pending: &mut Option<Result<BrainUpdateNotification, String>>,
+) -> Option<Result<BrainUpdateNotification, String>> {
+    let event = pending.take().or_else(|| receiver.recv().ok())?;
+    if !matches!(&event, Ok(notification) if notification.reason == "local_updated") {
+        return Some(event);
+    }
+
+    // One projection write can produce hundreds of filesystem callbacks. Do
+    // Working Tree discovery once for that contiguous burst, but never discard
+    // a transport, access, or lifecycle event that arrives behind it.
+    loop {
+        match receiver.try_recv() {
+            Ok(Ok(notification)) if notification.reason == "local_updated" => continue,
+            Ok(next) => {
+                *pending = Some(next);
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    Some(event)
+}
+
+fn brain_update_retry_delay(previous: Duration, stream_connected: bool) -> Duration {
+    if stream_connected {
+        Duration::from_secs(1)
+    } else {
+        // A notification reconnect is cheap and carries no Brain contents. Keep
+        // enough backoff to protect an unavailable server, but bound the stale
+        // window: the next successful SSE connection performs an authoritative
+        // sequence catch-up, so a long transport backoff directly becomes a
+        // user-visible synchronization delay.
+        (previous * 2).min(Duration::from_secs(5))
+    }
+}
+
+fn retire_brain_sync_worker(worker: BrainSyncWorker) -> Result<(), CliError> {
+    worker.cancelled.store(true, Ordering::SeqCst);
+    drop(worker.sender);
+    worker
+        .handle
+        .join()
+        .map_err(|_| CliError::InvalidInput("Brain sync worker panicked".to_owned()))
+}
+
+fn retire_brain_sync_workers(
+    workers: &mut BTreeMap<String, BrainSyncWorker>,
+) -> Result<(), CliError> {
+    let workers = std::mem::take(workers);
+    for (_, worker) in workers {
+        retire_brain_sync_worker(worker)?;
+    }
+    Ok(())
+}
+
+fn filesystem_notification_reason(
+    event_kind: &notify::EventKind,
+    path: &Path,
+    root: &Path,
+) -> Option<&'static str> {
+    if path == root
+        && matches!(
+            event_kind,
+            notify::EventKind::Remove(_)
+                | notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::From | notify::event::RenameMode::Both
+                ))
+        )
+    {
+        return Some("working_tree_root_removed");
+    }
+    if path == root && matches!(event_kind, notify::EventKind::Create(_)) {
+        return Some("working_tree_root_reopened");
+    }
+    if !path.starts_with(root) {
+        return None;
+    }
+    let internal = path
+        .components()
+        .any(|part| part.as_os_str() == ".finitebrain");
+    if !internal {
+        return Some("local_updated");
+    }
+    (matches!(event_kind, notify::EventKind::Create(_))
+        && path.file_name().and_then(|name| name.to_str()) == Some("agent-state.json"))
+    .then_some("working_tree_opened")
+}
+
+fn notify_path_temporarily_missing(error: &notify::Error) -> bool {
+    match &error.kind {
+        notify::ErrorKind::PathNotFound => true,
+        notify::ErrorKind::Io(error) => error.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+fn notification_priority(reason: &str) -> u8 {
+    match reason {
+        "access_updated" => 4,
+        "stream_catch_up" | "stream_error_catch_up" => 3,
+        "notifications_unsupported" | "working_tree_opened" => 2,
+        "local_updated" => 1,
+        _ => 2,
+    }
+}
+
+fn run_brain_sync_worker(
+    base_env: CliEnvironment,
+    path: PathBuf,
+    brain_id: String,
+    receiver: mpsc::Receiver<BrainUpdateNotification>,
+    result_sender: mpsc::Sender<(String, Result<(), String>)>,
+    transport_epoch: Arc<AtomicU64>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let mut tree_env = base_env;
+    tree_env.cwd = path;
+    run_coalesced_notification_queue_until_cancelled(receiver, &cancelled, |notification| {
+        let result = retry_transient_notification_work(&cancelled, || {
+            let paused_for_access =
+                read_agent_state(&tree_env.cwd)?.sync.status == "paused-access-revoked";
+            if paused_for_access && notification.reason == "local_updated" {
+                return Ok(());
+            }
+            let local_paths = if notification.reason == "local_updated" {
+                let paths = pending_working_tree_change_paths(&tree_env.cwd)?;
+                if paths.is_empty() {
+                    return Ok(());
+                }
+                Some(paths)
+            } else {
+                None
+            };
+            sync_once_with_local_paths(
+                &tree_env,
+                &[],
+                "daemon.supervise.notification",
+                local_paths,
+            )?;
+            Ok::<(), CliError>(())
+        })
+        .map_err(|error| error.to_string());
+        persist_brain_worker_outcome(&tree_env, &notification, &transport_epoch, &result);
+        let _ = result_sender.send((brain_id.clone(), result));
+    });
+}
+
+fn retry_transient_notification_work<T>(
+    cancelled: &AtomicBool,
+    mut work: impl FnMut() -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    retry_transient_notification_work_with_limit(cancelled, 8, &mut work)
+}
+
+fn retry_transient_notification_work_with_limit<T>(
+    cancelled: &AtomicBool,
+    max_attempts: u8,
+    mut work: impl FnMut() -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let mut delay = Duration::from_millis(50);
+    let mut attempts = 0_u8;
+    loop {
+        attempts = attempts.saturating_add(1);
+        match work() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if transient_working_tree_gap(&error)
+                    && !cancelled.load(Ordering::SeqCst)
+                    && attempts < max_attempts =>
+            {
+                let deadline = Instant::now() + delay;
+                while Instant::now() < deadline {
+                    if cancelled.load(Ordering::SeqCst) {
+                        return Err(error);
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                delay = (delay * 2).min(Duration::from_secs(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn transient_working_tree_gap(error: &CliError) -> bool {
+    matches!(error, CliError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+        || error.to_string().contains("No such file or directory")
+}
+
+fn persist_brain_worker_outcome(
+    tree_env: &CliEnvironment,
+    notification: &BrainUpdateNotification,
+    transport_epoch: &AtomicU64,
+    result: &Result<(), String>,
+) {
+    match result {
+        Ok(()) if notification.reason == "notifications_unsupported" => {
+            let _ = mutate_agent_state(tree_env, |state, _| {
+                state.daemon.notification_status = Some("unsupported".to_owned());
+                state.daemon.last_error = None;
+                Ok(())
+            });
+        }
+        Ok(())
+            if notification.reason == "stream_catch_up"
+                && transport_epoch.load(Ordering::SeqCst) == notification.transport_epoch =>
+        {
+            let _ = mutate_agent_state(tree_env, |state, _| {
+                state.daemon.notification_status = None;
+                state.daemon.last_error = None;
+                Ok(())
+            });
+        }
+        Err(error) => {
+            let _ = mutate_agent_state(tree_env, |state, now| {
+                if state.sync.status != "paused-access-revoked" {
+                    state.sync.status = format!("blocked: {error}");
+                }
+                state.daemon.failure_count = state.daemon.failure_count.saturating_add(1);
+                state.daemon.last_error = Some(error.clone());
+                state.add_activity(
+                    now,
+                    "daemon.sync_blocked",
+                    format!("Brain sync blocked: {error}"),
+                );
+                Ok(())
+            });
+        }
+        Ok(()) => {
+            let _ = mutate_agent_state(tree_env, |state, _| {
+                if state.daemon.notification_status.is_none() {
+                    state.daemon.last_error = None;
+                }
+                Ok(())
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+fn run_coalesced_notification_queue(
+    receiver: mpsc::Receiver<BrainUpdateNotification>,
+    mut handle: impl FnMut(BrainUpdateNotification),
+) {
+    let cancelled = AtomicBool::new(false);
+    run_coalesced_notification_queue_until_cancelled(receiver, &cancelled, &mut handle);
+}
+
+fn run_coalesced_notification_queue_until_cancelled(
+    receiver: mpsc::Receiver<BrainUpdateNotification>,
+    cancelled: &AtomicBool,
+    mut handle: impl FnMut(BrainUpdateNotification),
+) {
+    while let Ok(mut notification) = receiver.recv() {
+        if cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        if !matches!(
+            notification.reason.as_str(),
+            "content_updated" | "local_updated"
+        ) {
+            handle(notification);
+            continue;
+        }
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let next = match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
+                Ok(next) => next,
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            };
+            notification.latest_sequence = notification.latest_sequence.max(next.latest_sequence);
+            if notification_priority(&next.reason) > notification_priority(&notification.reason) {
+                notification.brain_id = next.brain_id;
+                notification.reason = next.reason;
+                notification.transport_epoch = next.transport_epoch;
+            }
+            if !matches!(
+                notification.reason.as_str(),
+                "content_updated" | "local_updated"
+            ) {
+                // Access hints and lifecycle work bypass the remaining content
+                // and filesystem debounce. Their full reconciliation subsumes
+                // queued work.
+                break;
+            }
+        }
+        if cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        handle(notification);
     }
 }
 
@@ -1290,6 +1933,7 @@ fn open_brain<W: Write>(
     };
     let brain_id =
         BrainId::new(resolved_brain).map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let working_tree_lock = acquire_brain_sync_lock(env, brain_id.as_str())?;
     let path = positional_values(args)
         .get(1)
         .map(PathBuf::from)
@@ -1392,7 +2036,11 @@ fn open_brain<W: Write>(
     write_agent_state(&path, &state)?;
     let mut opened_env = env.clone();
     opened_env.cwd = path.clone();
-    let sync_status = match sync_once(
+    // Keep initialization, initial reconciliation, and any blocked-state
+    // publication inside one lock acquisition. A supervisor may otherwise
+    // enter between these phases and replace a manifest that `open` is about
+    // to read or update.
+    let sync_status = match sync_once_holding_brain_lock(
         &opened_env,
         args,
         if reopening {
@@ -1415,6 +2063,7 @@ fn open_brain<W: Write>(
             format!("blocked: {error}")
         }
     };
+    drop(working_tree_lock);
 
     if json {
         write_json(
@@ -1422,6 +2071,7 @@ fn open_brain<W: Write>(
             &serde_json::json!({
                 "brainId": brain_id.as_str(),
                 "path": path,
+                "nextCommandWorkingDirectory": path,
                 "daemon": "running",
                 "syncMode": "automatic",
                 "syncStatus": sync_status,
@@ -1430,6 +2080,11 @@ fn open_brain<W: Write>(
         )
     } else {
         writeln!(output, "opened Brain Working Tree {}", path.display())?;
+        writeln!(
+            output,
+            "run every subsequent context-sensitive fbrain command from {}",
+            path.display()
+        )?;
         writeln!(
             output,
             "member-authored plaintext persists until this Working Tree is explicitly removed"
@@ -1975,6 +2630,11 @@ fn folder<W: Write>(
                 None => name.clone(),
             };
             let role = option_value(args, "--role").unwrap_or_else(|| "folder".to_owned());
+            // The server publishes a Brain Update Notification as soon as it
+            // accepts this mutation. Keep the authoritative write and its
+            // local Working Tree projection in the same lock domain as the
+            // supervisor, otherwise catch-up can run between those phases.
+            let _working_tree_lock = acquire_brain_sync_lock(env, &brain_id)?;
             let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             if let Some(existing) = metadata
                 .folders
@@ -2044,6 +2704,7 @@ fn folder<W: Write>(
                 .get(1)
                 .ok_or(CliError::MissingArgument("folder-id"))?;
             let brain_id = command_brain_id(args, env)?;
+            let _working_tree_lock = acquire_brain_sync_lock(env, &brain_id)?;
             let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let folder = metadata
                 .folders
@@ -2524,6 +3185,7 @@ fn admin_operation<W: Write>(
                 None,
             )?;
             let metadata = fetch_brain_metadata(env, args, &brain_id)?;
+            let post_removal_metadata = metadata_after_member_removal(&metadata, &target);
             let mut rotations = Vec::new();
             for folder in &metadata.folders {
                 let recipients =
@@ -2532,7 +3194,12 @@ fn admin_operation<W: Write>(
                     continue;
                 }
                 let prepared = prepare_folder_access_removal(
-                    env, args, &metadata, &brain_id, &folder.id, &target,
+                    env,
+                    args,
+                    &post_removal_metadata,
+                    &brain_id,
+                    &folder.id,
+                    &target,
                 )?;
                 rotations.push(serde_json::json!({
                     "folderId": folder.id,
@@ -2747,6 +3414,12 @@ fn admin_operation<W: Write>(
             "admin {namespace} {action}"
         ))),
     }
+}
+
+fn metadata_after_member_removal(metadata: &BrainMetadataView, target: &str) -> BrainMetadataView {
+    let mut updated = metadata.clone();
+    updated.members.retain(|member| member != target);
+    updated
 }
 
 fn admin<W: Write>(
@@ -3699,6 +4372,117 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    #[test]
+    fn filesystem_hints_discover_new_working_trees_without_syncing_internal_churn() {
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Create(notify::event::CreateKind::File),
+                Path::new("/brain/.finitebrain/agent-state.json"),
+                Path::new("/brain"),
+            ),
+            Some("working_tree_opened")
+        );
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                Path::new("/brain/page.md"),
+                Path::new("/brain"),
+            ),
+            Some("local_updated")
+        );
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                Path::new("/brain/.finitebrain/working-tree-state.json"),
+                Path::new("/brain"),
+            ),
+            None
+        );
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                Path::new("/brain/.finitebrain/agent-state.json"),
+                Path::new("/brain"),
+            ),
+            None
+        );
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Create(notify::event::CreateKind::Folder),
+                Path::new("/brain"),
+                Path::new("/brain"),
+            ),
+            Some("working_tree_root_reopened")
+        );
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Remove(notify::event::RemoveKind::Folder),
+                Path::new("/brain"),
+                Path::new("/brain"),
+            ),
+            Some("working_tree_root_removed")
+        );
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                    notify::event::RenameMode::Both,
+                )),
+                Path::new("/brain"),
+                Path::new("/brain"),
+            ),
+            Some("working_tree_root_removed")
+        );
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                Path::new("/unrelated/page.md"),
+                Path::new("/brain"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn working_tree_discovery_tolerates_concurrent_atomic_state_replacement() {
+        let scratch = TempDir::new().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let root = scratch.path().join("finitebrain");
+        create_private_directory_if_missing(&root).unwrap();
+        let tree = root.join("personal-brain");
+        initialize_private_working_tree(&tree).unwrap();
+        write_agent_state(
+            &tree,
+            &AgentState::new("personal-brain", "2026-07-29T00:00:00Z"),
+        )
+        .unwrap();
+
+        let writer_tree = tree.clone();
+        let writer = thread::spawn(move || {
+            for tick in 0..500 {
+                let mut state = read_agent_state(&writer_tree).unwrap();
+                state.daemon.tick_count = tick;
+                write_agent_state(&writer_tree, &state).unwrap();
+            }
+        });
+        for _ in 0..500 {
+            let trees = opened_working_trees(&root).unwrap();
+            assert!(trees.is_empty() || trees == vec![("personal-brain".to_owned(), tree.clone())]);
+        }
+        writer.join().unwrap();
+        assert_eq!(
+            opened_working_trees(&root).unwrap(),
+            vec![("personal-brain".to_owned(), tree)]
+        );
+    }
+
+    #[test]
+    fn working_tree_discovery_treats_a_replaced_root_gap_as_empty() {
+        let scratch = TempDir::new().unwrap();
+        let root = scratch.path().join("finitebrain");
+        assert_eq!(opened_working_trees(&root).unwrap(), Vec::new());
+    }
 
     #[test]
     fn collaboration_help_exposes_only_the_supported_command() {
@@ -5876,7 +6660,7 @@ mod tests {
         let json: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(json["brainId"], "agent-brain");
         assert_eq!(json["auth"]["state"], "authenticated");
-        assert_eq!(json["daemon"]["state"], "running");
+        assert_eq!(json["daemon"]["state"], "blocked");
         assert_eq!(json["sync"]["mode"], "automatic");
     }
 
@@ -7727,7 +8511,7 @@ mod tests {
         let mut output = Vec::new();
         run_with_env(["daemon", "start", "--json"], env.clone(), &mut output).unwrap();
         let json: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(json["state"], "running");
+        assert_eq!(json["state"], "blocked");
 
         let mut state = read_agent_state(&tree).unwrap();
         state.conflicts.push(ConflictEntry {
@@ -11293,6 +12077,31 @@ mod tests {
     }
 
     #[test]
+    fn member_removal_rotations_use_the_post_removal_roster() {
+        let metadata = BrainMetadataView {
+            brain_id: "org".to_owned(),
+            kind: "organization".to_owned(),
+            name: "Org".to_owned(),
+            owner_user_id: None,
+            personal_agent: None,
+            members: vec!["npub-admin".to_owned(), "npub-removed".to_owned()],
+            guests: Vec::new(),
+            admins: vec!["npub-admin".to_owned()],
+            folders: Vec::new(),
+            mounted_folders: Vec::new(),
+            grant_count: 0,
+        };
+
+        let post_removal = metadata_after_member_removal(&metadata, "npub-removed");
+
+        assert_eq!(post_removal.members, vec!["npub-admin".to_owned()]);
+        assert_eq!(
+            folder_required_recipients(&post_removal, "all_members", &[]).unwrap(),
+            vec!["npub-admin".to_owned()]
+        );
+    }
+
+    #[test]
     fn cli_folder_grants_open_through_the_canonical_hosted_contract() {
         let tmp = TempDir::new().unwrap();
         let env = env_for(&tmp);
@@ -11361,10 +12170,497 @@ mod tests {
             vec!["organization-brain", "personal-brain"]
         );
 
-        let first = acquire_supervisor_lock(workspace.path()).unwrap();
-        assert!(supervisor_is_running(workspace.path()));
-        assert!(acquire_supervisor_lock(workspace.path()).is_err());
+        let duplicate = workspace.path().join("personal-copy");
+        initialize_private_working_tree(&duplicate).unwrap();
+        write_agent_state(
+            &duplicate,
+            &AgentState::new("personal-brain", "2026-07-29T00:00:00Z"),
+        )
+        .unwrap();
+        assert!(
+            opened_working_trees(workspace.path())
+                .unwrap_err()
+                .to_string()
+                .contains("open in multiple Working Trees")
+        );
+        fs::remove_dir_all(duplicate).unwrap();
+
+        let mut env = env_for(&workspace);
+        env.config_dir = workspace.path().join("config");
+        let first = acquire_supervisor_lock(&env).unwrap();
+        assert!(supervisor_is_running(&env));
+        assert!(acquire_supervisor_lock(&env).is_err());
+        let replaced_root = workspace.path().join("replaced-root");
+        fs::rename(workspace.path().join("personal"), &replaced_root).unwrap();
+        fs::create_dir(workspace.path().join("personal")).unwrap();
+        assert!(supervisor_is_running(&env));
+        assert!(acquire_supervisor_lock(&env).is_err());
         drop(first);
-        assert!(!supervisor_is_running(workspace.path()));
+        assert!(!supervisor_is_running(&env));
+    }
+
+    #[test]
+    fn retiring_a_brain_worker_waits_for_in_flight_work_before_replacement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (worker_sender, worker_receiver) = mpsc::channel::<BrainUpdateNotification>();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _notification = worker_receiver.recv().unwrap();
+            started_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+        });
+        let worker = BrainSyncWorker {
+            path: workspace.path().join("brain"),
+            instance: WorkingTreeInstance {
+                device: 0,
+                inode: 0,
+            },
+            sender: worker_sender.clone(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            handle,
+        };
+        worker_sender
+            .send(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 1,
+                reason: "content_updated".to_owned(),
+                transport_epoch: 0,
+            })
+            .unwrap();
+        started_receiver.recv().unwrap();
+        drop(worker_sender);
+
+        let (retired_sender, retired_receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            retired_sender
+                .send(retire_brain_sync_worker(worker))
+                .unwrap();
+        });
+        assert!(
+            retired_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "retirement must not detach an in-flight writer"
+        );
+        release_sender.send(()).unwrap();
+        retired_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn retiring_a_brain_worker_discards_queued_notifications() {
+        let (worker_sender, worker_receiver) = mpsc::channel::<BrainUpdateNotification>();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let handled = Arc::new(AtomicU64::new(0));
+        let thread_handled = Arc::clone(&handled);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread_cancelled = Arc::clone(&cancelled);
+        let handle = std::thread::spawn(move || {
+            run_coalesced_notification_queue_until_cancelled(
+                worker_receiver,
+                &thread_cancelled,
+                |_| {
+                    let count = thread_handled.fetch_add(1, Ordering::SeqCst);
+                    if count == 0 {
+                        started_sender.send(()).unwrap();
+                        release_receiver.recv().unwrap();
+                    }
+                },
+            );
+        });
+        let worker = BrainSyncWorker {
+            path: PathBuf::from("brain"),
+            instance: WorkingTreeInstance {
+                device: 0,
+                inode: 0,
+            },
+            sender: worker_sender.clone(),
+            cancelled,
+            handle,
+        };
+        for sequence in 1..=3 {
+            worker_sender
+                .send(BrainUpdateNotification {
+                    brain_id: "brain".to_owned(),
+                    latest_sequence: sequence,
+                    reason: "local_updated".to_owned(),
+                    transport_epoch: 0,
+                })
+                .unwrap();
+        }
+        started_receiver.recv().unwrap();
+        drop(worker_sender);
+
+        let (retired_sender, retired_receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            retired_sender
+                .send(retire_brain_sync_worker(worker))
+                .unwrap();
+        });
+        release_sender.send(()).unwrap();
+        retired_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(handled.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn notification_work_retries_a_transient_working_tree_gap() {
+        let cancelled = AtomicBool::new(false);
+        let attempts = AtomicU64::new(0);
+
+        let value = retry_transient_notification_work(&cancelled, || {
+            if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Err(CliError::Io(std::io::Error::from(
+                    std::io::ErrorKind::NotFound,
+                )));
+            }
+            Ok("caught-up")
+        })
+        .unwrap();
+
+        assert_eq!(value, "caught-up");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn notification_work_releases_a_worker_after_a_persistent_working_tree_gap() {
+        let cancelled = AtomicBool::new(false);
+        let attempts = AtomicU64::new(0);
+
+        let error = retry_transient_notification_work_with_limit(&cancelled, 3, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(CliError::Io(std::io::Error::from(
+                std::io::ErrorKind::NotFound,
+            )))
+        })
+        .unwrap_err();
+
+        assert!(transient_working_tree_gap(&error));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn supervision_recognizes_context_wrapped_missing_tree_errors() {
+        let error = CliError::InvalidInput(
+            "read Agent State failed: No such file or directory (os error 2)".to_owned(),
+        );
+
+        assert!(transient_working_tree_gap(&error));
+    }
+
+    #[test]
+    fn per_brain_notification_workers_do_not_let_one_block_another() {
+        let (blocked_sender, blocked_receiver) = mpsc::channel();
+        let (free_sender, free_receiver) = mpsc::channel();
+        let (blocked_started_sender, blocked_started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let (free_done_sender, free_done_receiver) = mpsc::channel();
+
+        let blocked = std::thread::spawn(move || {
+            run_coalesced_notification_queue(blocked_receiver, |_| {
+                blocked_started_sender.send(()).unwrap();
+                release_receiver.recv().unwrap();
+            });
+        });
+        let free = std::thread::spawn(move || {
+            run_coalesced_notification_queue(free_receiver, |_| {
+                free_done_sender.send(()).unwrap();
+            });
+        });
+
+        blocked_sender
+            .send(BrainUpdateNotification {
+                brain_id: "blocked".to_owned(),
+                latest_sequence: 1,
+                reason: "content_updated".to_owned(),
+                transport_epoch: 0,
+            })
+            .unwrap();
+        blocked_started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        free_sender
+            .send(BrainUpdateNotification {
+                brain_id: "free".to_owned(),
+                latest_sequence: 1,
+                reason: "content_updated".to_owned(),
+                transport_epoch: 0,
+            })
+            .unwrap();
+        free_done_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Brain B must reconcile while Brain A remains blocked");
+
+        release_sender.send(()).unwrap();
+        drop(blocked_sender);
+        drop(free_sender);
+        blocked.join().unwrap();
+        free.join().unwrap();
+    }
+
+    #[test]
+    fn same_brain_notification_queue_coalesces_and_prioritizes_access() {
+        let (sender, receiver) = mpsc::channel();
+        let (handled_sender, handled_receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_coalesced_notification_queue(receiver, |notification| {
+                handled_sender.send(notification).unwrap();
+            });
+        });
+
+        let started = Instant::now();
+        sender
+            .send(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 2,
+                reason: "content_updated".to_owned(),
+                transport_epoch: 0,
+            })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        sender
+            .send(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 4,
+                reason: "content_updated".to_owned(),
+                transport_epoch: 0,
+            })
+            .unwrap();
+        let coalesced = handled_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(225));
+        assert_eq!(coalesced.latest_sequence, 4);
+        assert_eq!(coalesced.reason, "content_updated");
+
+        sender
+            .send(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 5,
+                reason: "content_updated".to_owned(),
+                transport_epoch: 0,
+            })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let access_sent = Instant::now();
+        sender
+            .send(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 6,
+                reason: "access_updated".to_owned(),
+                transport_epoch: 0,
+            })
+            .unwrap();
+        let access = handled_receiver
+            .recv_timeout(Duration::from_millis(150))
+            .expect("access update must bypass the content debounce");
+        assert!(access_sent.elapsed() < Duration::from_millis(150));
+        assert_eq!(access.latest_sequence, 6);
+        assert_eq!(access.reason, "access_updated");
+
+        sender
+            .send(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 7,
+                reason: "content_updated".to_owned(),
+                transport_epoch: 2,
+            })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        sender
+            .send(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 8,
+                reason: "stream_catch_up".to_owned(),
+                transport_epoch: 3,
+            })
+            .unwrap();
+        let catch_up = handled_receiver
+            .recv_timeout(Duration::from_millis(150))
+            .expect("stream catch-up must bypass content debounce and retain its epoch");
+        assert_eq!(catch_up.latest_sequence, 8);
+        assert_eq!(catch_up.reason, "stream_catch_up");
+        assert_eq!(catch_up.transport_epoch, 3);
+
+        drop(sender);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn access_update_bypasses_a_local_filesystem_notification_burst() {
+        let (sender, receiver) = mpsc::channel();
+        let (handled_sender, handled_receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_coalesced_notification_queue(receiver, |notification| {
+                handled_sender.send(notification).unwrap();
+            });
+        });
+
+        for _ in 0..100 {
+            sender
+                .send(BrainUpdateNotification {
+                    brain_id: String::new(),
+                    latest_sequence: 0,
+                    reason: "local_updated".to_owned(),
+                    transport_epoch: 1,
+                })
+                .unwrap();
+        }
+        sender
+            .send(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 7,
+                reason: "access_updated".to_owned(),
+                transport_epoch: 1,
+            })
+            .unwrap();
+
+        let first = handled_receiver
+            .recv_timeout(Duration::from_millis(150))
+            .expect("access update must bypass a generated-file notification burst");
+        assert_eq!(first.reason, "access_updated");
+        assert_eq!(first.brain_id, "brain");
+        assert_eq!(first.latest_sequence, 7);
+
+        drop(sender);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn supervisor_ingress_collapses_a_local_burst_without_dropping_access() {
+        let (sender, receiver) = mpsc::channel();
+        for _ in 0..100 {
+            sender
+                .send(Ok(BrainUpdateNotification {
+                    brain_id: String::new(),
+                    latest_sequence: 0,
+                    reason: "local_updated".to_owned(),
+                    transport_epoch: 1,
+                }))
+                .unwrap();
+        }
+        sender
+            .send(Ok(BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 7,
+                reason: "access_updated".to_owned(),
+                transport_epoch: 1,
+            }))
+            .unwrap();
+
+        let mut pending = None;
+        let local = next_supervisor_event(&receiver, &mut pending)
+            .expect("the collapsed local burst must still trigger one reconciliation")
+            .unwrap();
+        assert_eq!(local.reason, "local_updated");
+
+        let access = next_supervisor_event(&receiver, &mut pending)
+            .expect("the access update behind the local burst must be preserved")
+            .unwrap();
+        assert_eq!(access.reason, "access_updated");
+        assert_eq!(access.brain_id, "brain");
+        assert_eq!(access.latest_sequence, 7);
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn established_brain_update_stream_resets_reconnect_backoff() {
+        assert_eq!(
+            brain_update_retry_delay(Duration::from_secs(30), true),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            brain_update_retry_delay(Duration::from_secs(8), false),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            brain_update_retry_delay(Duration::from_secs(30), false),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn worker_outcome_preserves_newer_transport_failure_and_persists_sync_failure() {
+        let workspace = tempfile::tempdir().unwrap();
+        initialize_private_working_tree(workspace.path()).unwrap();
+        let mut state = AgentState::new("brain", "2026-07-29T00:00:00Z");
+        state.daemon.notification_status = Some("reconnecting".to_owned());
+        write_agent_state(workspace.path(), &state).unwrap();
+        let env = env_for(&workspace);
+        let epoch = AtomicU64::new(2);
+        let unsupported = BrainUpdateNotification {
+            brain_id: "brain".to_owned(),
+            latest_sequence: 0,
+            reason: "notifications_unsupported".to_owned(),
+            transport_epoch: 0,
+        };
+        persist_brain_worker_outcome(&env, &unsupported, &epoch, &Ok(()));
+        let unsupported_status = daemon_status(&env).unwrap();
+        assert_eq!(unsupported_status.state, "degraded");
+        assert_eq!(
+            unsupported_status.notification_status.as_deref(),
+            Some("unsupported")
+        );
+        let _ = mutate_agent_state(&env, |state, _| {
+            state.daemon.notification_status = Some("reconnecting".to_owned());
+            Ok(())
+        });
+        let stale_catch_up = BrainUpdateNotification {
+            brain_id: "brain".to_owned(),
+            latest_sequence: 3,
+            reason: "stream_catch_up".to_owned(),
+            transport_epoch: 1,
+        };
+        persist_brain_worker_outcome(&env, &stale_catch_up, &epoch, &Ok(()));
+        assert_eq!(
+            read_agent_state(workspace.path())
+                .unwrap()
+                .daemon
+                .notification_status
+                .as_deref(),
+            Some("reconnecting")
+        );
+
+        let current_catch_up = BrainUpdateNotification {
+            transport_epoch: 2,
+            ..stale_catch_up.clone()
+        };
+        persist_brain_worker_outcome(&env, &current_catch_up, &epoch, &Ok(()));
+        assert_eq!(
+            read_agent_state(workspace.path())
+                .unwrap()
+                .daemon
+                .notification_status,
+            None
+        );
+
+        persist_brain_worker_outcome(
+            &env,
+            &BrainUpdateNotification {
+                brain_id: "brain".to_owned(),
+                latest_sequence: 4,
+                reason: "content_updated".to_owned(),
+                transport_epoch: 2,
+            },
+            &epoch,
+            &Err("synthetic sync failure".to_owned()),
+        );
+        let failed = read_agent_state(workspace.path()).unwrap();
+        assert!(failed.sync.status.starts_with("blocked:"));
+        assert_eq!(failed.daemon.failure_count, 1);
+        assert_eq!(
+            failed.daemon.last_error.as_deref(),
+            Some("synthetic sync failure")
+        );
     }
 }

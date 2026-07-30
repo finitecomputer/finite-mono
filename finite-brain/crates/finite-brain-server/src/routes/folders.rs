@@ -196,7 +196,6 @@ pub(crate) async fn create_folder_handler(
 
     let notification_state = state.clone();
     let notification_brain_id = brain_id.clone();
-    let notification_actor = actor.clone();
     let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.create_folder_with_control_records(
             brain_id,
@@ -206,7 +205,10 @@ pub(crate) async fn create_folder_handler(
             &control_records,
         )
     })?;
-    notification_state.publish_access_update_for(&notification_brain_id, &notification_actor);
+    // A newly created all-members Folder changes every member's authoritative
+    // view. Broadcast the hint; stream-time authorization still filters it to
+    // actors who can currently see this Brain.
+    notification_state.publish_access_update(&notification_brain_id);
     Ok(Json(response))
 }
 
@@ -251,7 +253,6 @@ pub(crate) async fn finish_folder_setup_handler(
 
     let notification_state = state.clone();
     let notification_brain_id = brain_id.clone();
-    let notification_actor = actor.clone();
     let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.finish_folder_setup_with_control_records(
             brain_id,
@@ -260,7 +261,7 @@ pub(crate) async fn finish_folder_setup_handler(
             &control_records,
         )
     })?;
-    notification_state.publish_access_update_for(&notification_brain_id, &notification_actor);
+    notification_state.publish_access_update(&notification_brain_id);
     Ok(Json(response))
 }
 

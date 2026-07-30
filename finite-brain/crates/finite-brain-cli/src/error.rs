@@ -5,6 +5,11 @@ use std::path::PathBuf;
 /// CLI error.
 #[derive(Debug)]
 pub enum CliError {
+    SyncStage {
+        stage: String,
+        root: PathBuf,
+        source: Box<CliError>,
+    },
     Io(std::io::Error),
     Json(serde_json::Error),
     SearchIndex(String),
@@ -58,6 +63,11 @@ pub enum CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SyncStage {
+                stage,
+                root,
+                source,
+            } => write!(f, "{stage} failed for {}: {source}", root.display()),
             Self::Io(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::SearchIndex(reason) => write!(f, "search index error: {reason}"),
@@ -116,7 +126,16 @@ impl fmt::Display for CliError {
     }
 }
 
-impl Error for CliError {}
+impl Error for CliError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::SyncStage { source, .. } => Some(source.as_ref()),
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for CliError {
     fn from(value: std::io::Error) -> Self {

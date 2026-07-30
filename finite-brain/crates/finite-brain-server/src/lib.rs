@@ -281,6 +281,19 @@ impl ServerState {
         });
     }
 
+    fn publish_access_update(&self, brain_id: &BrainId) {
+        let Ok(store) = self.store.lock() else { return };
+        let Ok(bootstrap) = store.sync_bootstrap(brain_id) else {
+            return;
+        };
+        let _ = self.brain_updates.send(BrainUpdateNotification {
+            brain_id: brain_id.as_str().to_owned(),
+            latest_sequence: bootstrap.latest_sequence,
+            reason: BrainUpdateReason::AccessUpdated,
+            notify_npubs: Vec::new(),
+        });
+    }
+
     fn actor_can_see_brain(&self, actor: &str, brain_id: &str) -> bool {
         let Ok(brain_id) = BrainId::new(brain_id) else {
             return false;
@@ -2760,6 +2773,7 @@ mod tests {
         GiftWrapValidation, HttpAuthEventRequest, build_rumor, encode_http_auth_header,
         open_gift_wrap, sign_http_auth_event, wrap_rumor,
     };
+    use http_body_util::BodyExt;
     use nostr::event::FinalizeEvent;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use tower::ServiceExt;
@@ -2811,6 +2825,177 @@ mod tests {
                 notify_npubs: Vec::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn brain_update_route_authenticates_filters_serializes_and_releases_subscribers() {
+        let admin_keys = Keys::generate();
+        let outsider_keys = Keys::generate();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let create = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let baseline = state.brain_updates.receiver_count();
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/brain-updates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            unauthorized.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+        assert_eq!(state.brain_updates.receiver_count(), baseline);
+
+        let response = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brain-updates",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.brain_updates.receiver_count(), baseline + 1);
+        let mut body = response.into_body();
+        let ready = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::str::from_utf8(ready.data_ref().unwrap())
+                .unwrap()
+                .contains("event: ready")
+        );
+        let outsider_response = authed_request(
+            router,
+            &outsider_keys,
+            "GET",
+            "/v1/brain-updates",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(outsider_response.status(), StatusCode::OK);
+        assert_eq!(state.brain_updates.receiver_count(), baseline + 2);
+        let mut outsider_body = outsider_response.into_body();
+        tokio::time::timeout(Duration::from_secs(1), outsider_body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        state.publish_brain_update("private-other", 91, BrainUpdateReason::ContentUpdated);
+        state.publish_brain_update("acme", 42, BrainUpdateReason::ContentUpdated);
+        let update = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let update = std::str::from_utf8(update.data_ref().unwrap()).unwrap();
+        assert!(update.contains("event: brain_update"));
+        let data = update
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("serialized update data");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(data).unwrap(),
+            serde_json::json!({
+                "brainId": "acme",
+                "latestSequence": 42,
+                "reason": "content_updated"
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), outsider_body.frame())
+                .await
+                .is_err(),
+            "an identity without Brain access must not receive its update"
+        );
+
+        let admin_npub = npub(&admin_keys);
+        let _ = state.brain_updates.send(BrainUpdateNotification {
+            brain_id: "no-longer-visible".to_owned(),
+            latest_sequence: 43,
+            reason: BrainUpdateReason::AccessUpdated,
+            notify_npubs: vec![admin_npub],
+        });
+        let targeted = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::str::from_utf8(targeted.data_ref().unwrap())
+                .unwrap()
+                .contains("no-longer-visible")
+        );
+
+        let sequence_before_rejections = state
+            .store
+            .lock()
+            .unwrap()
+            .sync_bootstrap(&BrainId::new("acme").unwrap())
+            .unwrap()
+            .latest_sequence;
+        let rejected_object = authed_request(
+            router_with_state(state.clone()),
+            &admin_keys,
+            "PUT",
+            "/v1/brains/acme/folders/missing/objects/rejected",
+            Some("{}".to_owned()),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert!(rejected_object.status().is_client_error());
+        let rejected_access = authed_request(
+            router_with_state(state.clone()),
+            &admin_keys,
+            "PUT",
+            &format!("/v1/admin/brains/acme/members/{}", npub(&outsider_keys)),
+            Some("{}".to_owned()),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert!(rejected_access.status().is_client_error());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), body.frame())
+                .await
+                .is_err(),
+            "rejected authoritative writes must not publish notifications"
+        );
+        assert_eq!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .sync_bootstrap(&BrainId::new("acme").unwrap())
+                .unwrap()
+                .latest_sequence,
+            sequence_before_rejections
+        );
+
+        drop(body);
+        drop(outsider_body);
+        tokio::task::yield_now().await;
+        assert_eq!(state.brain_updates.receiver_count(), baseline);
     }
 
     #[tokio::test]
@@ -4290,11 +4475,33 @@ mod tests {
         let agent_keys = Keys::generate();
         let owner_npub = npub(&owner_keys);
         let agent_npub = npub(&agent_keys);
-        let router = personal_test_router(&owner_keys, &agent_keys);
+        let state = personal_test_state(&owner_keys, &agent_keys);
+        let router = router_with_state(state);
+        let updates = authed_request(
+            router.clone(),
+            &agent_keys,
+            "GET",
+            "/v1/brain-updates",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(updates.status(), StatusCode::OK);
+        let mut updates = updates.into_body();
+        let ready = tokio::time::timeout(Duration::from_secs(1), updates.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            std::str::from_utf8(ready.data_ref().unwrap())
+                .unwrap()
+                .contains("event: ready")
+        );
 
         for (actor, folder_id, name, now) in [
-            (&owner_keys, "owner-notes", "Owner notes", TEST_NOW + 1),
-            (&agent_keys, "agent-notes", "Agent notes", TEST_NOW + 2),
+            (&owner_keys, "owner-notes", "Owner notes", TEST_NOW + 2),
+            (&agent_keys, "agent-notes", "Agent notes", TEST_NOW + 3),
         ] {
             let body = serde_json::json!({
                 "folderId": folder_id,
@@ -4339,16 +4546,26 @@ mod tests {
             let status = created.status();
             let text = read_text(created).await;
             assert_eq!(status, StatusCode::OK, "{text}");
+
+            let update = tokio::time::timeout(Duration::from_secs(1), updates.frame())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let update = std::str::from_utf8(update.data_ref().unwrap()).unwrap();
+            assert!(update.contains("event: brain_update"));
+            assert!(update.contains(r#""brainId":"personal""#));
+            assert!(update.contains(r#""reason":"access_updated""#));
         }
 
         let agent_metadata =
-            get_metadata(router.clone(), &agent_keys, "personal", TEST_NOW + 3).await;
+            get_metadata(router.clone(), &agent_keys, "personal", TEST_NOW + 4).await;
         assert_eq!(agent_metadata.status(), StatusCode::OK);
         let agent_metadata: BrainMetadataResponse = read_json(agent_metadata).await;
         assert_eq!(agent_metadata.folders.len(), 2);
         assert_eq!(agent_metadata.grant_count, 4);
         let owner_metadata =
-            get_metadata(router.clone(), &owner_keys, "personal", TEST_NOW + 3).await;
+            get_metadata(router.clone(), &owner_keys, "personal", TEST_NOW + 4).await;
         let owner_metadata: BrainMetadataResponse = read_json(owner_metadata).await;
         assert_eq!(owner_metadata.grant_count, 4);
         assert_eq!(agent_metadata, owner_metadata);
@@ -4359,7 +4576,7 @@ mod tests {
             "GET",
             "/v1/brains/personal/agent-workspace-pairings",
             None,
-            TEST_NOW + 4,
+            TEST_NOW + 5,
         )
         .await;
         assert_eq!(retired_pairing_route.status(), StatusCode::NOT_FOUND);
@@ -7180,7 +7397,22 @@ mod tests {
         let admin_keys = Keys::generate();
         let member_keys = Keys::generate();
         let member_npub = npub(&member_keys);
-        let router = router_with_test_org_folders(&admin_keys).await;
+        let state = test_state();
+        let mut updates = state.brain_updates.subscribe();
+        let router = router_with_state(state);
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+        while updates.try_recv().is_ok() {}
 
         let add_member_body = serde_json::json!({
             "targetNpub": member_npub,
@@ -7207,6 +7439,7 @@ mod tests {
         assert_eq!(add_member.status(), StatusCode::OK);
         let metadata: BrainMetadataResponse = read_json(add_member).await;
         assert!(metadata.members.contains(&member_npub));
+        while updates.try_recv().is_ok() {}
 
         let create_folder_body = serde_json::json!({
             "folderId": "strategy",
@@ -7242,6 +7475,13 @@ mod tests {
         .await;
         assert_eq!(create_folder.status(), StatusCode::OK);
         let metadata: BrainMetadataResponse = read_json(create_folder).await;
+        let create_update = updates.try_recv().unwrap();
+        assert_eq!(create_update.brain_id, "acme");
+        assert_eq!(create_update.reason, BrainUpdateReason::AccessUpdated);
+        assert!(
+            create_update.notify_npubs.is_empty(),
+            "Folder creation must notify every currently authorized member"
+        );
         let strategy = metadata
             .folders
             .iter()

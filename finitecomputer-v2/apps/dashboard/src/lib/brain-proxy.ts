@@ -73,8 +73,9 @@ export async function proxyBrainRequest(
   request.signal.addEventListener("abort", abortForClient, { once: true });
   if (request.signal.aborted) controller.abort();
   const timeout = setTimeout(() => controller.abort(), BRAIN_PROXY_TIMEOUT_MS);
+  const clearDeadline = () => clearTimeout(timeout);
   const cleanup = () => {
-    clearTimeout(timeout);
+    clearDeadline();
     request.signal.removeEventListener("abort", abortForClient);
   };
   try {
@@ -100,6 +101,9 @@ export async function proxyBrainRequest(
         { error: "Brain returned an unexpected redirect." },
         { status: 502 },
       );
+    }
+    if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
+      clearDeadline();
     }
     if (
       options.clientCapability &&

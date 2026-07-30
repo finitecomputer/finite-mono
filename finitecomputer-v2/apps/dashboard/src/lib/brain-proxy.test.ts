@@ -5,9 +5,11 @@ import {
   BRAIN_CLIENT_CONTENT_SECURITY_POLICY,
   brainProxyRequestHeaders,
   brainUpstreamOrigin,
+  proxyBrainRequest,
   readBoundedBrainRequestBody,
   responseStatusHasNoBody,
 } from "./brain-proxy";
+import { NextRequest } from "next/server";
 
 test("Brain client CSP permits its bounded confirmation dialogs", () => {
   assert.match(BRAIN_CLIENT_CONTENT_SECURITY_POLICY, /sandbox[^;]*\ballow-modals\b/u);
@@ -98,4 +100,48 @@ test("Brain proxy body reads stop when their deadline aborts", async () => {
     reading,
     (error: unknown) => error instanceof DOMException && error.name === "AbortError",
   );
+});
+
+test("Brain update notification streams remain open past the ordinary request deadline", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalUpstream = process.env.FC_BRAIN_UPSTREAM_URL;
+  process.env.FC_BRAIN_UPSTREAM_URL = "http://brain.internal";
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  globalThis.fetch = async (_input, init) => {
+    const signal = init?.signal;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          const timer = setTimeout(() => {
+            controller.enqueue(new TextEncoder().encode("event: brain_update\ndata: {}\n\n"));
+            controller.close();
+          }, 60_001);
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              controller.error(new DOMException("upstream aborted", "AbortError"));
+            },
+            { once: true },
+          );
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  try {
+    const response = await proxyBrainRequest(
+      new NextRequest("https://finite.computer/v1/brain-updates"),
+      "/v1",
+      ["brain-updates"],
+    );
+    const body = response.text();
+    t.mock.timers.tick(60_001);
+    assert.match(await body, /event: brain_update/u);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUpstream === undefined) delete process.env.FC_BRAIN_UPSTREAM_URL;
+    else process.env.FC_BRAIN_UPSTREAM_URL = originalUpstream;
+  }
 });

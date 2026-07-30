@@ -37,6 +37,24 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+def free_devfinity_offset() -> int:
+    bases = [14200, 13002, 15432, 18787, 38918, 18789, 18788, 18790, 18002, 14199]
+    for offset in range(1_000, 20_000):
+        probes: list[socket.socket] = []
+        try:
+            for base in bases:
+                probe = socket.socket()
+                probe.bind(("127.0.0.1", base + offset))
+                probes.append(probe)
+            return offset
+        except OSError:
+            pass
+        finally:
+            for probe in probes:
+                probe.close()
+    raise RuntimeError("could not reserve a collision-free devfinity port offset")
+
+
 class MatrixModel:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -351,13 +369,20 @@ def main() -> int:
     model = MatrixModel()
     server = start_model(model)
     model_port = int(server.server_address[1])
+    evidence_path = state_dir / "brain-product-matrix-evidence.json"
     env = os.environ.copy()
     env.update({
         "DEVFINITY_STATE_DIR": str(state_dir),
         "DEVFINITY_RUNTIME_AGENT_PORT": str(free_port()),
+        "DEVFINITY_PORT_OFFSET": str(free_devfinity_offset()),
+        # A cold Nix/Rust build on constrained CI or a busy developer machine
+        # can exceed the default 30-minute readiness window before any service
+        # starts. Product assertions retain their own bounded timeouts.
+        "DEVFINITY_READY_TIMEOUT_SECS": "3600",
         "DEVFINITY_BRAIN_ONLY_SMOKE": "1",
         "DEVFINITY_BRAIN_PRODUCT_MATRIX": "1",
         "DEVFINITY_BRAIN_PRODUCT_MATRIX_DISPOSABLE_STATE": str(state_dir / "runs/default"),
+        "DEVFINITY_BRAIN_MATRIX_EVIDENCE": str(evidence_path),
         "FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE": "finite-matrix-local-non-secret",
         "FC_RUNNER_FINITE_PRIVATE_BASE_URL": f"http://host.docker.internal:{model_port}/v1",
         "FC_RUNNER_FINITE_PRIVATE_MODEL": "finite-brain-matrix",
@@ -381,8 +406,19 @@ def main() -> int:
         if completed.returncode == 0 and required <= model.scenarios:
             if model.managed_skill_reads < 6 or not model.authenticated_requester_context_used:
                 raise RuntimeError("matrix did not prove managed skill and requester identity seams")
+            if not evidence_path.is_file():
+                raise RuntimeError("matrix did not emit cross-client Brain evidence")
             outcome = "passed"
-        report = model.report() | {"status": outcome, "processExitCode": completed.returncode}
+        evidence = (
+            json.loads(evidence_path.read_text())
+            if evidence_path.is_file()
+            else {"status": "missing"}
+        )
+        report = model.report() | {
+            "status": outcome,
+            "processExitCode": completed.returncode,
+            "productEvidence": evidence,
+        }
         report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
         return 0 if outcome == "passed" else completed.returncode or 1
     finally:

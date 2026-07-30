@@ -324,6 +324,8 @@ pub struct WorkingTreeMaterializeInput {
     pub generated_at: String,
     /// Acting npub.
     pub generated_by_npub: UserId,
+    /// Acting Brain role (`owner`, `personal_agent`, `admin`, `member`, or `guest`).
+    pub acting_role: String,
     /// Source Brain metadata.
     pub brain: Brain,
     /// Decrypted pages visible to the actor.
@@ -763,6 +765,7 @@ mod tests {
         let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: opened_pages.clone(),
             opened_assets,
@@ -787,6 +790,11 @@ mod tests {
                 .contains_key(".finitebrain/working-tree-state.json")
         );
         assert!(projection.files.contains_key("AGENTS.md"));
+        let root_instructions = projection.files.get("AGENTS.md").unwrap();
+        assert!(root_instructions.contains("FiniteBrain Organization Brain Working Tree"));
+        assert!(root_instructions.contains("Brain ID: `acme`"));
+        assert!(root_instructions.contains("Acting Member Identity: `npub-admin`"));
+        assert!(root_instructions.contains("Acting Brain role: `admin`"));
         assert!(projection.files.contains_key("_index.md"));
         assert!(projection.files.contains_key("_wiki/index.md"));
         assert!(projection.files.contains_key("Concepts/AGENTS.md"));
@@ -898,6 +906,7 @@ mod tests {
         let error = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: Vec::new(),
             opened_assets: vec![opened_asset],
@@ -932,6 +941,7 @@ mod tests {
         let error = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: Vec::new(),
             opened_assets,
@@ -953,6 +963,7 @@ mod tests {
         let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: vec![
                 page(
@@ -1000,6 +1011,7 @@ mod tests {
         let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: vec![opened],
             opened_assets: Vec::new(),

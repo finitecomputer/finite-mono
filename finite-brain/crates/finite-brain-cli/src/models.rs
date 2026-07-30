@@ -37,6 +37,7 @@ impl AgentState {
                 last_started_at: None,
                 last_tick_at: None,
                 last_error: None,
+                notification_status: None,
                 tick_count: 0,
                 failure_count: 0,
                 retry_backoff_millis: 0,
@@ -112,6 +113,8 @@ pub(crate) struct DaemonState {
     pub(crate) last_tick_at: Option<String>,
     #[serde(default)]
     pub(crate) last_error: Option<String>,
+    #[serde(default)]
+    pub(crate) notification_status: Option<String>,
     #[serde(default)]
     pub(crate) tick_count: u64,
     #[serde(default)]
@@ -233,6 +236,7 @@ pub(crate) struct AuthStatus {
 pub(crate) struct DaemonStatus {
     pub(crate) state: String,
     pub(crate) sync_mode: String,
+    pub(crate) notification_status: Option<String>,
     pub(crate) last_started_at: Option<String>,
     pub(crate) last_tick_at: Option<String>,
     pub(crate) last_error: Option<String>,

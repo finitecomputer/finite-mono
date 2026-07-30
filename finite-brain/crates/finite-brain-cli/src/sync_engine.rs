@@ -53,14 +53,18 @@ pub(crate) fn run_working_tree_sync(
     args: &[String],
     activity_kind: &str,
 ) -> Result<SyncOnceReport, CliError> {
-    let root = current_tree_root(env)?;
-    let agent_state = read_agent_state(&root)?;
-    let prior_tree_state = read_working_tree_state(&root)?;
+    let root = current_tree_root(env)
+        .map_err(|error| sync_stage_error("locate Working Tree", &env.cwd, error))?;
+    let agent_state = read_agent_state(&root)
+        .map_err(|error| sync_stage_error("read Agent State", &root, error))?;
+    let prior_tree_state = read_working_tree_state(&root)
+        .map_err(|error| sync_stage_error("read Working Tree state", &root, error))?;
     let prior_export_path = root.join(".finitebrain/encrypted-sync/export.json");
     let prior_export = prior_export_path
         .is_file()
         .then(|| read_json_file(&prior_export_path))
-        .transpose()?;
+        .transpose()
+        .map_err(|error| sync_stage_error("read prior encrypted export", &root, error))?;
     let server_url = server_url_for_command(env, args)?;
     let auth = load_signer(env)?;
     let export = fetch_encrypted_export(env, &server_url, &agent_state.brain_id)?;
@@ -68,11 +72,20 @@ pub(crate) fn run_working_tree_sync(
         .folder_roots
         .iter()
         .any(|folder| folder.source_brain_id.is_some());
-    let mut mounted_exports = if has_known_mounts {
-        fetch_mounted_folder_sync_contexts(env, &server_url, &agent_state.brain_id, &export)?
+    let mut mounted_discovery = if has_known_mounts {
+        Some(fetch_mounted_folder_sync_contexts(
+            env,
+            &server_url,
+            &agent_state.brain_id,
+            &export,
+        )?)
     } else {
-        Vec::new()
+        None
     };
+    let mut mounted_exports = mounted_discovery
+        .as_mut()
+        .map(|discovery| std::mem::take(&mut discovery.contexts))
+        .unwrap_or_default();
     let mut session_keys = SessionFolderKeyring::default();
     open_export_folder_key_grants_into_session(&auth, &export, &mut session_keys)?;
     for mounted in &mounted_exports {
@@ -92,10 +105,12 @@ pub(crate) fn run_working_tree_sync(
         &export,
         &mounted_exports,
         &session_keys,
-    )?;
+    )
+    .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
     let force_bootstrap_reason = sync_bootstrap_reason(&local_result, newly_readable_keys);
     let remote_result = if let Some(reason) = force_bootstrap_reason {
-        fetch_bootstrap_remote_sync(env, &server_url, &agent_state.brain_id, reason)?
+        fetch_bootstrap_remote_sync(env, &server_url, &agent_state.brain_id, reason)
+            .map_err(|error| sync_stage_error("fetch remote bootstrap", &root, error))?
     } else {
         fetch_incremental_remote_sync(
             env,
@@ -103,11 +118,17 @@ pub(crate) fn run_working_tree_sync(
             &server_url,
             &agent_state.brain_id,
             prior_tree_state.sync.latest_sequence,
-        )?
+        )
+        .map_err(|error| sync_stage_error("fetch incremental remote sync", &root, error))?
     };
     if !has_known_mounts {
-        mounted_exports =
-            fetch_mounted_folder_sync_contexts(env, &server_url, &agent_state.brain_id, &export)?;
+        mounted_discovery = Some(fetch_mounted_folder_sync_contexts(
+            env,
+            &server_url,
+            &agent_state.brain_id,
+            &export,
+        )?);
+        mounted_exports = std::mem::take(&mut mounted_discovery.as_mut().unwrap().contexts);
         for mounted in &mounted_exports {
             open_export_folder_key_grants_into_session(&auth, &mounted.export, &mut session_keys)?;
         }
@@ -119,18 +140,21 @@ pub(crate) fn run_working_tree_sync(
         env,
         root: &root,
         actor_npub: &auth.npub,
+        metadata: mounted_discovery.as_ref().unwrap().metadata.as_ref(),
         export: &export,
         bootstrap: &remote_result.bootstrap,
         mounted_folders: &mounted_materializations,
         path_overrides: &local_result.path_overrides,
         session_keys: &session_keys,
         prior_state: Some(&prior_tree_state),
-    })?;
+    })
+    .map_err(|error| sync_stage_error("materialize remote projection", &root, error))?;
     restore_conflicted_files(
         &root,
         &local_result.conflicted_markdown,
         &local_result.conflicted_assets,
-    )?;
+    )
+    .map_err(|error| sync_stage_error("restore conflicted files", &root, error))?;
     let mut deleted_routes = deleted_folder_routes(&export, &remote_result.bootstrap)?;
     for mounted in &mounted_materializations {
         deleted_routes.extend(deleted_folder_routes(&mounted.export, &mounted.bootstrap)?);
@@ -141,10 +165,13 @@ pub(crate) fn run_working_tree_sync(
         prior_export.as_ref(),
         &deleted_routes,
         &export.brain.id,
-    )?;
-    write_sync_evidence(&root, &export, &remote_result.bootstrap)?;
+    )
+    .map_err(|error| sync_stage_error("remove deleted Folder roots", &root, error))?;
+    write_sync_evidence(&root, &export, &remote_result.bootstrap)
+        .map_err(|error| sync_stage_error("write sync evidence", &root, error))?;
 
-    let applied_tree_state = read_working_tree_state(&root)?;
+    let applied_tree_state = read_working_tree_state(&root)
+        .map_err(|error| sync_stage_error("read applied Working Tree state", &root, error))?;
     let remote_changes = sync_record_reports(
         &remote_result.records,
         &prior_tree_state,
@@ -192,7 +219,8 @@ pub(crate) fn run_working_tree_sync(
                 local_result.pushed_count, local_result.conflict_count
             ),
         );
-    })?;
+    })
+    .map_err(|error| sync_stage_error("record sync outcome", &root, error))?;
 
     Ok(SyncOnceReport {
         status,
@@ -208,6 +236,14 @@ pub(crate) fn run_working_tree_sync(
         local_changes: local_result.changes,
         remote_changes,
     })
+}
+
+fn sync_stage_error(stage: &str, root: &Path, error: CliError) -> CliError {
+    CliError::SyncStage {
+        stage: stage.to_owned(),
+        root: root.to_path_buf(),
+        source: Box::new(error),
+    }
 }
 
 pub(crate) fn open_brain_session_folder_keys(
@@ -914,10 +950,13 @@ fn fetch_mounted_folder_sync_contexts(
     server_url: &str,
     brain_id: &str,
     export: &CliEncryptedBrainExport,
-) -> Result<Vec<MountedFolderSyncContext>, CliError> {
+) -> Result<MountedFolderSyncDiscovery, CliError> {
+    // Role-bearing Working Tree context must come from authoritative metadata.
+    // A transient metadata failure may not invent a role: preserve the prior
+    // generated root instructions by omitting their replacement in this pass.
     let metadata = match fetch_brain_metadata_for_sync(env, server_url, brain_id) {
-        Ok(metadata) => metadata,
-        Err(CliError::Http(_)) | Err(CliError::HttpStatus { .. }) => return Ok(Vec::new()),
+        Ok(metadata) => Some(metadata),
+        Err(CliError::Http(_)) | Err(CliError::HttpStatus { .. }) => None,
         Err(error) => return Err(error),
     };
     let mut used_paths = export
@@ -927,9 +966,11 @@ fn fetch_mounted_folder_sync_contexts(
         .collect::<BTreeSet<_>>();
     let mut contexts = Vec::new();
     for mount in metadata
-        .mounted_folders
+        .as_ref()
         .into_iter()
+        .flat_map(|metadata| &metadata.mounted_folders)
         .filter(|mount| mount.state == "available")
+        .cloned()
     {
         let source_export = fetch_encrypted_export(env, server_url, &mount.source_brain_id)?;
         let display_path = mounted_folder_display_path(&mut used_paths, &mount, &source_export)?;
@@ -939,7 +980,12 @@ fn fetch_mounted_folder_sync_contexts(
             display_path,
         });
     }
-    Ok(contexts)
+    Ok(MountedFolderSyncDiscovery { metadata, contexts })
+}
+
+struct MountedFolderSyncDiscovery {
+    metadata: Option<CliBrainMetadata>,
+    contexts: Vec<MountedFolderSyncContext>,
 }
 
 fn fetch_mounted_folder_materializations(
@@ -1676,6 +1722,7 @@ struct MaterializeRemoteProjectionContext<'a> {
     env: &'a CliEnvironment,
     root: &'a Path,
     actor_npub: &'a str,
+    metadata: Option<&'a CliBrainMetadata>,
     export: &'a CliEncryptedBrainExport,
     bootstrap: &'a CliSyncBootstrap,
     mounted_folders: &'a [MountedFolderMaterializeContext],
@@ -1691,6 +1738,7 @@ fn materialize_remote_projection(
         env,
         root,
         actor_npub,
+        metadata,
         export,
         bootstrap,
         mounted_folders,
@@ -1793,6 +1841,9 @@ fn materialize_remote_projection(
         generated_at: timestamp(env),
         generated_by_npub: UserId::new(actor_npub.to_owned())
             .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+        acting_role: metadata
+            .map(|metadata| brain_role_for_actor(&brain, metadata, actor_npub))
+            .unwrap_or_else(|| "unknown".to_owned()),
         brain,
         opened_pages,
         opened_assets,
@@ -1800,6 +1851,12 @@ fn materialize_remote_projection(
         latest_sequence: bootstrap.latest_sequence,
     })
     .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    if metadata.is_none() {
+        // Never overwrite previously authoritative role context with a guess.
+        // On a first materialization this intentionally leaves root context
+        // absent until metadata can be fetched successfully.
+        projection.files.remove("AGENTS.md");
+    }
     add_empty_readable_folders(&mut projection, export, None, &readable_folder_routes, None)?;
     for mounted in mounted_folders {
         add_empty_readable_folders(
@@ -1825,6 +1882,47 @@ fn materialize_remote_projection(
     remove_obsolete_compiled_convention_markers(root, &projection.state.folder_roots)?;
     write_projection_files(root, &projection.files, &projection.binary_files)?;
     Ok(())
+}
+
+fn brain_role_for_actor(brain: &Brain, metadata: &CliBrainMetadata, actor_npub: &str) -> String {
+    if brain.kind == BrainKind::Personal {
+        if brain
+            .owner_user_id
+            .as_ref()
+            .is_some_and(|owner| owner.as_str() == actor_npub)
+        {
+            "owner"
+        } else if metadata
+            .personal_agent
+            .as_ref()
+            .is_some_and(|agent| agent.agent_npub == actor_npub)
+        {
+            "personal_agent"
+        } else if brain
+            .members
+            .iter()
+            .any(|member| member.user_id.as_str() == actor_npub)
+        {
+            "member"
+        } else {
+            "guest"
+        }
+    } else if brain
+        .admins
+        .iter()
+        .any(|admin| admin.as_str() == actor_npub)
+    {
+        "admin"
+    } else if brain
+        .members
+        .iter()
+        .any(|member| member.user_id.as_str() == actor_npub)
+    {
+        "member"
+    } else {
+        "guest"
+    }
+    .to_owned()
 }
 
 fn preserve_unreadable_prior_projection(
@@ -1955,8 +2053,18 @@ fn remove_deleted_folder_roots(
         }
     }
     for deleted_path in deleted_paths {
+        if deleted_path.is_empty() || deleted_path == "." {
+            continue;
+        }
         let path = SafeRelativePath::new("folder_path", deleted_path)
             .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+        // The empty display path represents the Brain's logical root folder.
+        // It is not a removable directory: joining it to `root` resolves to the
+        // Working Tree itself and would also delete the local `.finitebrain`
+        // control state needed to recover and continue syncing.
+        if path.as_str().is_empty() || path.as_str() == "." {
+            continue;
+        }
         let path = root.join(path.as_str());
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
@@ -3117,11 +3225,19 @@ struct CliSyncObject {
     deleted: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CliBrainMetadata {
     #[serde(default)]
+    personal_agent: Option<CliPersonalAgent>,
+    #[serde(default)]
     mounted_folders: Vec<CliMountedFolder>,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliPersonalAgent {
+    agent_npub: String,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -3212,6 +3328,37 @@ mod tests {
         .unwrap();
 
         assert!(!temp.path().join("Parent").exists());
+    }
+
+    #[test]
+    fn deleted_logical_root_folder_never_removes_working_tree() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join(".finitebrain")).unwrap();
+        fs::write(temp.path().join(".finitebrain/agent-state.json"), "state").unwrap();
+        let prior_state = BrainWorkingTreeStateManifest {
+            version: "finite-brain-working-tree-state-v1".to_owned(),
+            folder_roots: vec![WorkingTreeFolderRoot {
+                folder_id: "root-folder".to_owned(),
+                source_brain_id: None,
+                path: ".".to_owned(),
+                can_read: true,
+                metadata_only: false,
+            }],
+            objects: vec![],
+            sync: WorkingTreeSyncState { latest_sequence: 1 },
+        };
+
+        remove_deleted_folder_roots(
+            temp.path(),
+            &prior_state,
+            None,
+            &BTreeSet::from([("brain".to_owned(), "root-folder".to_owned())]),
+            "brain",
+        )
+        .unwrap();
+
+        assert!(temp.path().is_dir());
+        assert!(temp.path().join(".finitebrain/agent-state.json").is_file());
     }
 
     #[test]
@@ -3659,6 +3806,7 @@ mod tests {
         let mut projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-26T23:30:00Z".to_owned(),
             generated_by_npub: UserId::new("npub-owner").unwrap(),
+            acting_role: "owner".to_owned(),
             brain,
             opened_pages: Vec::new(),
             opened_assets: Vec::new(),
@@ -3712,6 +3860,61 @@ mod tests {
                 .get("home/AGENTS.md")
                 .unwrap()
                 .contains("wiki/")
+        );
+    }
+
+    #[test]
+    fn working_tree_role_uses_authoritative_brain_and_personal_agent_metadata() {
+        let mut brain = Brain {
+            id: BrainId::new("brain").unwrap(),
+            kind: BrainKind::Personal,
+            name: DisplayName::new("brain_name", "Brain").unwrap(),
+            owner_user_id: Some(UserId::new("npub-owner").unwrap()),
+            folders: Vec::new(),
+            members: Vec::new(),
+            admins: Vec::new(),
+        };
+        let metadata = CliBrainMetadata {
+            personal_agent: Some(CliPersonalAgent {
+                agent_npub: "npub-agent".to_owned(),
+            }),
+            mounted_folders: Vec::new(),
+        };
+        assert_eq!(
+            brain_role_for_actor(&brain, &metadata, "npub-owner"),
+            "owner"
+        );
+        assert_eq!(
+            brain_role_for_actor(&brain, &metadata, "npub-agent"),
+            "personal_agent"
+        );
+        brain.members = vec![finite_brain_core::BrainMember {
+            user_id: UserId::new("npub-personal-member").unwrap(),
+            folder_access: BTreeSet::new(),
+        }];
+        assert_eq!(
+            brain_role_for_actor(&brain, &metadata, "npub-personal-member"),
+            "member"
+        );
+        assert_eq!(
+            brain_role_for_actor(&brain, &metadata, "npub-guest"),
+            "guest"
+        );
+
+        brain.kind = BrainKind::Organization;
+        brain.owner_user_id = None;
+        brain.admins = vec![UserId::new("npub-admin").unwrap()];
+        brain.members = vec![finite_brain_core::BrainMember {
+            user_id: UserId::new("npub-member").unwrap(),
+            folder_access: BTreeSet::new(),
+        }];
+        assert_eq!(
+            brain_role_for_actor(&brain, &metadata, "npub-admin"),
+            "admin"
+        );
+        assert_eq!(
+            brain_role_for_actor(&brain, &metadata, "npub-member"),
+            "member"
         );
     }
 
@@ -3836,6 +4039,7 @@ mod tests {
             env: &env,
             root,
             actor_npub: "npub-owner",
+            metadata: Some(&CliBrainMetadata::default()),
             export: &export,
             bootstrap: &bootstrap,
             mounted_folders: &[],
@@ -3915,6 +4119,7 @@ mod tests {
             env: &env,
             root,
             actor_npub: "npub-owner",
+            metadata: Some(&CliBrainMetadata::default()),
             export: &export,
             bootstrap: &empty_bootstrap,
             mounted_folders: &[],
@@ -3976,6 +4181,7 @@ mod tests {
                 env: &env,
                 root,
                 actor_npub: "npub-owner",
+                metadata: Some(&CliBrainMetadata::default()),
                 export: &export,
                 bootstrap: &populated_bootstrap,
                 mounted_folders: &[],
@@ -4151,6 +4357,7 @@ mod tests {
             env: &env,
             root,
             actor_npub: "npub-dest",
+            metadata: Some(&CliBrainMetadata::default()),
             export: &destination_export,
             bootstrap: &CliSyncBootstrap {
                 latest_sequence: 2,
@@ -4292,6 +4499,7 @@ mod tests {
             env: &env,
             root,
             actor_npub: "npub-owner",
+            metadata: Some(&CliBrainMetadata::default()),
             export: &export,
             bootstrap: &bootstrap,
             mounted_folders: &[],

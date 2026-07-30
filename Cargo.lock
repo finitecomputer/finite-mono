@@ -1112,6 +1112,7 @@ dependencies = [
  "finite-brain-core",
  "finite-brain-store",
  "finite-nostr",
+ "http-body-util",
  "nostr",
  "serde",
  "serde_json",

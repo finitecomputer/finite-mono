@@ -10,6 +10,9 @@ const FiniteBrainProductClient = (() => {
     signerStatus: "checking",
     sessionStatus: SESSION_STATUS.LOCKED,
     sessionEpoch: 0,
+    reconciliationGeneration: 0,
+    brainReconciliationQueue: Promise.resolve(),
+    brainReconciliationAbortController: null,
     sessionNotice: null,
     pubkeyHex: null,
     activeBrainId: null,
@@ -75,6 +78,8 @@ const FiniteBrainProductClient = (() => {
     brainUpdateAbortController: null,
     brainUpdateReconnectTimer: null,
     brainUpdateContentTimer: null,
+    brainUpdateNotificationsUnsupported: false,
+    assetDownloadUrl: null,
   };
   const handledAccessFailures = new WeakSet();
   const handledSessionLockFailures = new WeakSet();
@@ -500,10 +505,15 @@ const FiniteBrainProductClient = (() => {
   }
 
   function resetBrainSessionState(options = {}) {
+    releaseAssetDownloadUrl();
     stopBrainUpdateNotifications();
     const returnToSettings =
       options.preserveManageBrainsReturnToSettings === false ? null : nestedManageBrainsReturnToken();
     state.sessionEpoch += 1;
+    state.reconciliationGeneration += 1;
+    state.brainReconciliationAbortController?.abort?.();
+    state.brainReconciliationAbortController = null;
+    state.brainReconciliationQueue = Promise.resolve();
     pendingInviteNavigation = null;
     clearSessionSecretsAndPlaintext(state);
     if (returnToSettings) state.manageBrainsReturnToSettings = returnToSettings;
@@ -641,6 +651,38 @@ const FiniteBrainProductClient = (() => {
       clearSessionOwnedDom();
     }
     throw new Error("Session changed while protected client work was in progress; unlock again");
+  }
+
+  function requireCurrentReconciliationGeneration(generation) {
+    if (state.reconciliationGeneration === generation) return;
+    throw new Error("Brain access changed while protected content was refreshing");
+  }
+
+  function runSerializedBrainReconciliation(operation) {
+    const previous = state.brainReconciliationQueue.catch(() => {});
+    const current = previous.then(operation);
+    state.brainReconciliationQueue = current.catch(() => {});
+    return current;
+  }
+
+  function runAbortableBrainReconciliation(operation) {
+    const enqueuedGeneration = state.reconciliationGeneration;
+    return runSerializedBrainReconciliation(async () => {
+      requireCurrentReconciliationGeneration(enqueuedGeneration);
+      const controller = new AbortController();
+      const reconciliationGeneration = enqueuedGeneration;
+      state.brainReconciliationAbortController = controller;
+      try {
+        return await operation({
+          reconciliationGeneration,
+          signal: controller.signal,
+        });
+      } finally {
+        if (state.brainReconciliationAbortController === controller) {
+          state.brainReconciliationAbortController = null;
+        }
+      }
+    });
   }
 
   function setActiveBrainId(brainId, options = {}) {
@@ -3172,6 +3214,7 @@ const FiniteBrainProductClient = (() => {
         objectId: input.objectId,
         path: opened.path,
         revision: input.revision,
+        size: opened.size,
         status: "ready",
         type: "asset",
       };
@@ -5129,6 +5172,22 @@ const FiniteBrainProductClient = (() => {
     return page?.status === "ready" && !isAssetObject(page) && pageTextIsPresent(page);
   }
 
+  function isReadableAsset(object) {
+    return object?.status === "ready" && isAssetObject(object) && object.bytes instanceof Uint8Array;
+  }
+
+  function assetDownloadDescriptor(asset) {
+    if (!isReadableAsset(asset)) throw new Error("Asset is not readable in this Brain session");
+    const filename = String(asset.filename || asset.path?.split("/").at(-1) || "asset")
+      .replace(/[\u0000-\u001f\u007f\\/]/gu, "_")
+      .slice(0, 255);
+    return {
+      bytes: new Uint8Array(asset.bytes),
+      contentType: String(asset.contentType || "application/octet-stream"),
+      filename: !filename || filename === "." || filename === ".." ? "asset" : filename,
+    };
+  }
+
   function readablePages() {
     return projectionPages().filter(isReadablePage);
   }
@@ -5137,9 +5196,8 @@ const FiniteBrainProductClient = (() => {
     const pageCounts = new Map();
     const readableCounts = new Map();
     for (const page of pages) {
-      if (isAssetObject(page)) continue;
       pageCounts.set(page.folderId, (pageCounts.get(page.folderId) || 0) + 1);
-      if (isReadablePage(page)) {
+      if (isReadablePage(page) || isReadableAsset(page)) {
         readableCounts.set(page.folderId, (readableCounts.get(page.folderId) || 0) + 1);
       }
     }
@@ -5194,8 +5252,16 @@ const FiniteBrainProductClient = (() => {
   function readerPageRows(folderId, pages = projectionPages()) {
     return pages
       .filter((page) => !folderId || page.folderId === folderId)
-      .filter((page) => !isAssetObject(page))
       .map((page) => {
+        if (isAssetObject(page)) {
+          const size = Number(page.size ?? page.bytes?.length ?? 0);
+          return {
+            ...page,
+            title: page.filename || page.path?.split("/").at(-1) || page.objectId,
+            label: page.filename || page.path?.split("/").at(-1) || page.objectId,
+            detail: `Asset · ${page.contentType || "application/octet-stream"} · ${size} bytes`,
+          };
+        }
         const title = pageTitleForPage(page);
         return {
           ...page,
@@ -5474,6 +5540,14 @@ const FiniteBrainProductClient = (() => {
     actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null
   ) {
     if (!target) return [];
+    if (target.type === "asset") {
+      return [
+        { action: "open-page", label: "Open Asset" },
+        { separator: true },
+        { action: "copy-page-id", label: "Copy Asset ID" },
+        { action: "copy-folder-id", label: "Copy Folder ID" },
+      ];
+    }
     if (target.type === "page") {
       const discardLocalDraft = pageDeletionDisposition(target) === "discard-local";
       const pageKeyValue = target.pageKey || pageKey(target.folderId, target.objectId);
@@ -6828,6 +6902,7 @@ const FiniteBrainProductClient = (() => {
 
   function renderPageContent(page) {
     const content = $("readerPageContent");
+    releaseAssetDownloadUrl();
     content.replaceChildren();
     setPageContentEditable(content, false);
     if (!page) {
@@ -6836,6 +6911,10 @@ const FiniteBrainProductClient = (() => {
         state.sessionStatus === SESSION_STATUS.UNLOCKED
           ? "Open a brain to read pages."
           : "Brain locked. Open it to view your private content.";
+      return;
+    }
+    if (isReadableAsset(page)) {
+      renderAssetContent(content, page);
       return;
     }
     if (!isReadablePage(page)) {
@@ -6855,6 +6934,52 @@ const FiniteBrainProductClient = (() => {
       state.searchHighlightShouldScroll = false;
       scrollReaderSearchMatchIntoView(matches[0]);
     }
+  }
+
+  function releaseAssetDownloadUrl() {
+    if (!state.assetDownloadUrl) return;
+    URL.revokeObjectURL?.(state.assetDownloadUrl);
+    state.assetDownloadUrl = null;
+  }
+
+  function installSessionAssetDownloadUrl(blob) {
+    releaseAssetDownloadUrl();
+    state.assetDownloadUrl = URL.createObjectURL(blob);
+    return state.assetDownloadUrl;
+  }
+
+  function renderAssetContent(content, asset) {
+    releaseAssetDownloadUrl();
+    const descriptor = assetDownloadDescriptor(asset);
+    content.className = "note-content asset-detail";
+    const details = document.createElement("dl");
+    for (const [label, value] of [
+      ["Filename", descriptor.filename],
+      ["Path", asset.path],
+      ["Content type", descriptor.contentType],
+      ["Size", `${descriptor.bytes.length} bytes`],
+    ]) {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const description = document.createElement("dd");
+      description.textContent = value;
+      details.append(term, description);
+    }
+    const download = document.createElement("button");
+    download.type = "button";
+    download.className = "asset-download-button";
+    download.textContent = "Download Asset";
+    download.addEventListener("click", () => {
+      installSessionAssetDownloadUrl(
+        new Blob([descriptor.bytes], { type: descriptor.contentType })
+      );
+      const anchor = document.createElement("a");
+      anchor.href = state.assetDownloadUrl;
+      anchor.download = descriptor.filename;
+      anchor.click();
+      setTimeout(releaseAssetDownloadUrl, 0);
+    });
+    content.append(details, download);
   }
 
   function renderPageStatus(page) {
@@ -8809,11 +8934,11 @@ const FiniteBrainProductClient = (() => {
           const pageButton = obsidianTreeButton(
             pageRow.label,
             pageRow.status === "ready" ? "" : "Locked",
-            `obsidian-page-button ${pageRow.status}${pageRow.key === state.selectedPageKey ? " active" : ""}`,
+            `obsidian-page-button${isAssetObject(pageRow) ? " asset" : ""} ${pageRow.status}${pageRow.key === state.selectedPageKey ? " active" : ""}`,
             () => selectReaderPage(pageRow.key),
             {
               contextTarget: {
-                type: "page",
+                type: isAssetObject(pageRow) ? "asset" : "page",
                 folderId: pageRow.folderId,
                 localDraft: Boolean(pageRow.localDraft),
                 objectId: pageRow.objectId,
@@ -8846,7 +8971,7 @@ const FiniteBrainProductClient = (() => {
     setText("readerPagePath", pagePathLabel(page));
     setPill(
       "readerPageMeta",
-      page.localDraft ? "draft" : `rev ${page.revision || 0}`,
+      isAssetObject(page) ? "asset" : page.localDraft ? "draft" : `rev ${page.revision || 0}`,
       page.status === "ready" ? "ready" : "warn"
     );
     renderPageContent(page);
@@ -9012,6 +9137,7 @@ const FiniteBrainProductClient = (() => {
       method: options.method || "GET",
       headers,
       body: options.body || undefined,
+      signal: options.signal,
     });
     requireCurrentSessionEpoch(sessionEpoch);
     const text = await response.text();
@@ -9042,7 +9168,10 @@ const FiniteBrainProductClient = (() => {
       return [];
     }
     const previousIds = new Set(state.visibleBrains.map((brain) => normalizeVisibleBrain(brain)?.brainId).filter(Boolean));
-    const response = await protectedRequest("/v1/brains");
+    const response = await protectedRequest("/v1/brains", { signal: options.signal });
+    if (options.reconciliationGeneration != null) {
+      requireCurrentReconciliationGeneration(options.reconciliationGeneration);
+    }
     state.visibleBrains = (response.brains || []).map(normalizeVisibleBrain).filter(Boolean);
     const selection = selectAccessibleBrain({
       brains: state.visibleBrains,
@@ -9067,12 +9196,12 @@ const FiniteBrainProductClient = (() => {
     return state.visibleBrains;
   }
 
-  async function loadVisibleBrainsWithTargetRetry() {
+  async function loadVisibleBrainsWithTargetRetry(options = {}) {
     try {
-      return await loadVisibleBrains();
+      return await loadVisibleBrains(options);
     } catch (error) {
       if (error?.code !== "brain_target_unavailable") throw error;
-      return loadVisibleBrains();
+      return loadVisibleBrains(options);
     }
   }
 
@@ -9341,7 +9470,10 @@ const FiniteBrainProductClient = (() => {
     }
     if (!state.activeBrainId) throw new Error("Choose a Brain to open");
     const path = `/v1/brains/${encodeURIComponent(state.activeBrainId)}/metadata`;
-    const metadata = await protectedRequest(path);
+    const metadata = await protectedRequest(path, { signal: options.signal });
+    if (options.reconciliationGeneration != null) {
+      requireCurrentReconciliationGeneration(options.reconciliationGeneration);
+    }
     state.metadata = metadata;
     rememberVisibleBrain(metadata);
     log("Loaded Brain metadata.", metadata);
@@ -9599,6 +9731,10 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function refreshReader() {
+    return runAbortableBrainReconciliation(refreshReaderExclusive);
+  }
+
+  async function refreshReaderExclusive({ reconciliationGeneration, signal }) {
     if (state.sessionStatus !== SESSION_STATUS.UNLOCKED) {
       throw new Error("Brain is locked. Open the Brain before refreshing private content");
     }
@@ -9606,11 +9742,15 @@ const FiniteBrainProductClient = (() => {
     state.readerBusy = true;
     render();
     try {
-      await loadVisibleBrainsWithTargetRetry();
+      await loadVisibleBrainsWithTargetRetry({ reconciliationGeneration, signal });
       requireCurrentSessionEpoch(sessionEpoch);
-      await loadBrainMetadata();
+      requireCurrentReconciliationGeneration(reconciliationGeneration);
+      await loadBrainMetadata({ reconciliationGeneration, signal });
       requireCurrentSessionEpoch(sessionEpoch);
-      if (state.keyring?.openedGrants.length) await pullSyncBootstrap();
+      requireCurrentReconciliationGeneration(reconciliationGeneration);
+      if (state.keyring?.openedGrants.length) {
+        await pullSyncBootstrapExclusive({ reconciliationGeneration, signal });
+      }
       requireCurrentSessionEpoch(sessionEpoch);
       selectDefaultReaderTargets();
       log("Refreshed Brain reader.", {
@@ -9666,15 +9806,26 @@ const FiniteBrainProductClient = (() => {
     if (notification.reason === "access_updated") {
       clearTimeout(state.brainUpdateContentTimer);
       state.brainUpdateContentTimer = null;
-      await reconcileBrainAccessUpdate();
+      state.reconciliationGeneration += 1;
+      const reconciliationGeneration = state.reconciliationGeneration;
+      state.brainReconciliationAbortController?.abort?.();
+      await reconcileBrainAccessUpdate(reconciliationGeneration);
     }
   }
 
-  async function reconcileBrainAccessUpdate() {
+  async function reconcileBrainAccessUpdate(reconciliationGeneration) {
+    return runSerializedBrainReconciliation(() =>
+      reconcileBrainAccessUpdateExclusive(reconciliationGeneration)
+    );
+  }
+
+  async function reconcileBrainAccessUpdateExclusive(reconciliationGeneration) {
+    requireCurrentReconciliationGeneration(reconciliationGeneration);
     const sessionEpoch = state.sessionEpoch;
     const brainId = state.activeBrainId;
     const response = await protectedRequest("/v1/brains");
     requireCurrentSessionEpoch(sessionEpoch);
+    requireCurrentReconciliationGeneration(reconciliationGeneration);
     state.visibleBrains = (response.brains || []).map(normalizeVisibleBrain).filter(Boolean);
     if (!state.visibleBrains.some((brain) => brain.brainId === brainId)) {
       resetBrainSessionState({ preserveManageBrainsReturnToSettings: false });
@@ -9683,8 +9834,9 @@ const FiniteBrainProductClient = (() => {
       render();
       return;
     }
-    await loadBrainMetadata();
+    await loadBrainMetadata({ reconciliationGeneration });
     requireCurrentSessionEpoch(sessionEpoch);
+    requireCurrentReconciliationGeneration(reconciliationGeneration);
     const previousKeyring = state.keyring;
     const nextKeyring = createSessionKeyring();
     await openAvailableFolderKeyGrants({ keyring: nextKeyring, brainId });
@@ -9693,7 +9845,7 @@ const FiniteBrainProductClient = (() => {
     const nextProjection = projectionForAccessUpdate(state.projection, readableFolderIds);
     state.keyring = nextKeyring;
     state.projection = nextProjection;
-    await pullSyncBootstrap();
+    await pullSyncBootstrapExclusive({ reconciliationGeneration });
     requireCurrentSessionEpoch(sessionEpoch);
     clearSessionKeyring(previousKeyring);
     selectDefaultReaderTargets();
@@ -9720,9 +9872,19 @@ const FiniteBrainProductClient = (() => {
         headers: { Authorization: await signAuthHeader(path) },
         signal: controller.signal,
       });
+      if (response.status === 404 || response.status === 405) {
+        state.brainUpdateNotificationsUnsupported = true;
+        throw protectedRequestError(path, response.status, await response.text());
+      }
       if (!response.ok) throw protectedRequestError(path, response.status, await response.text());
+      state.brainUpdateNotificationsUnsupported = false;
       const reader = response.body?.getReader?.();
       if (!reader) throw new Error("Brain Update Notification stream is unavailable");
+      // The subscription is now live. Reconcile once so an authoritative
+      // update committed between the prior pull and this subscription cannot
+      // fall into a connection race. Later changes arrive as lightweight
+      // notification hints through the stream.
+      await refreshReader();
       const decoder = new TextDecoder();
       let buffer = "";
       while (sessionOperationIsCurrent(state.sessionEpoch, sessionEpoch, state.sessionStatus)) {
@@ -9742,12 +9904,13 @@ const FiniteBrainProductClient = (() => {
     } finally {
       if (state.brainUpdateAbortController === controller) state.brainUpdateAbortController = null;
       if (sessionOperationIsCurrent(state.sessionEpoch, sessionEpoch, state.sessionStatus)) {
+        const retryDelay = state.brainUpdateNotificationsUnsupported ? 30000 : 1000;
         state.brainUpdateReconnectTimer = setTimeout(() => {
           state.brainUpdateReconnectTimer = null;
-          refreshReader()
-            .then(startBrainUpdateNotifications)
-            .catch((error) => log("Brain update catch-up failed.", { error: error.message }));
-        }, 1000);
+          startBrainUpdateNotifications().catch((error) =>
+            log("Brain update reconnect failed.", { error: error.message })
+          );
+        }, retryDelay);
       }
     }
   }
@@ -12226,15 +12389,23 @@ const FiniteBrainProductClient = (() => {
   }
 
   async function pullSyncBootstrap() {
+    return runAbortableBrainReconciliation(pullSyncBootstrapExclusive);
+  }
+
+  async function pullSyncBootstrapExclusive(options = {}) {
     const sessionEpoch = state.sessionEpoch;
+    const reconciliationGeneration =
+      options.reconciliationGeneration ?? state.reconciliationGeneration;
     const keyring = state.keyring;
     const projection = state.projection;
     const brainId = state.activeBrainId;
     const path = `/v1/brains/${encodeURIComponent(brainId)}/sync/bootstrap`;
-    const sync = await protectedRequest(path);
+    const sync = await protectedRequest(path, { signal: options.signal });
     requireCurrentSessionEpoch(sessionEpoch);
+    requireCurrentReconciliationGeneration(reconciliationGeneration);
     const openedSync = await openSyncObjects(keyring, sync);
     requireCurrentSessionEpoch(sessionEpoch);
+    requireCurrentReconciliationGeneration(reconciliationGeneration);
     state.projection = mergeSyncProjection(projection, openedSync);
     log("Pulled sync bootstrap into local projection.", {
       conflicts: state.projection.conflicts,
@@ -12832,6 +13003,9 @@ const FiniteBrainProductClient = (() => {
     accessIntentValue,
     accessPanelState,
     accessPeopleSummary,
+    assetDownloadDescriptor,
+    applyBrainUpdateNotification,
+    installSessionAssetDownloadUrl,
     actorHasDestructiveAuthority,
     actorCanCreateFolder,
     adminAccessChangeTags,
@@ -12913,6 +13087,7 @@ const FiniteBrainProductClient = (() => {
     projectionForAccessUpdate,
     applyBrainUpdateNotification,
     reconcileBrainAccessUpdate,
+    runSerializedBrainReconciliation,
     startBrainUpdateNotifications,
     stopBrainUpdateNotifications,
     metadataBrainRole,

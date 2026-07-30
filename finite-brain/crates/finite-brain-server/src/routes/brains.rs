@@ -489,9 +489,9 @@ pub(crate) async fn remove_member_handler(
         .entry(brain_id.clone())
         .or_default()
         .push(admin_access_change_sync_record(&actor, &event, &payload)?);
+    let notification_brain_ids = control_records_by_brain.keys().cloned().collect::<Vec<_>>();
     let actor_user_id = UserId::new(&actor)?;
     let notification_state = state.clone();
-    let notification_brain_id = brain_id.clone();
     let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.remove_member_with_rotations_and_control_records(
             brain_id,
@@ -503,7 +503,9 @@ pub(crate) async fn remove_member_handler(
             &control_records_by_brain,
         )
     })?;
-    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
+    for affected_brain_id in notification_brain_ids {
+        notification_state.publish_access_update_for(&affected_brain_id, target.as_str());
+    }
     Ok(Json(response))
 }
 

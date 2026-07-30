@@ -1,4 +1,5 @@
 use super::*;
+use crate::BrainKind;
 
 pub const FOLDER_CONVENTION_DIRECTORIES: [&str; 6] = [
     "raw",
@@ -209,7 +210,7 @@ pub fn materialize_brain_working_tree(
     insert_working_tree_file(
         &mut files,
         "AGENTS.md",
-        root_agents_file(&input.generated_by_npub),
+        root_agents_file(&input.brain, &input.generated_by_npub, &input.acting_role),
     )?;
     insert_working_tree_file(&mut files, "_index.md", root_working_tree_index(&state))?;
     insert_working_tree_file(
@@ -359,9 +360,14 @@ fn safe_locked_reason(reason: &str) -> &'static str {
     }
 }
 
-fn root_agents_file(actor: &UserId) -> String {
+fn root_agents_file(brain: &Brain, actor: &UserId, acting_role: &str) -> String {
+    let kind = match brain.kind {
+        BrainKind::Personal => "Personal Brain",
+        BrainKind::Organization => "Organization Brain",
+    };
     format!(
-        "# FiniteBrain Personal Agent Working Tree\n\nActing principal: {actor}\n\n- Read and write the materialized Folders available to this principal.\n- Store non-Markdown sources under a Folder's `raw/assets/` and pair each Asset with a Markdown Source Note.\n- Do not write decrypted content into `.finitebrain/encrypted-sync`.\n- Changes must be returned through the Product Client encrypted sync path.\n"
+        "# FiniteBrain {kind} Working Tree\n\nBrain ID: `{brain_id}`\nActing Member Identity: `{actor}`\nActing Brain role: `{acting_role}`\n\n- Read and write the materialized Folders available to this identity and role.\n- Store non-Markdown sources under a Folder's `raw/assets/` and pair each Asset with a Markdown Source Note.\n- Do not write decrypted content into `.finitebrain/encrypted-sync`.\n- Changes must be returned through the Product Client encrypted sync path.\n",
+        brain_id = brain.id,
     )
 }
 

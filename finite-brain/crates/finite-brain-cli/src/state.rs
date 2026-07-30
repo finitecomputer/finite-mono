@@ -7,10 +7,9 @@ use serde::Deserialize;
 
 use crate::{
     AccessExplanation, AgentState, AuthStatus, CliEnvironment, CliError, ConflictState,
-    DaemonRunState, DaemonStatus, StatusReport, SyncStatus, identity_paths, load_identity_optional,
-    option_value, timestamp, validate_private_working_tree,
-    validate_working_tree_managed_structure, write_json_file,
-    write_private_file_atomic_for_migration,
+    DaemonStatus, StatusReport, SyncStatus, identity_paths, load_identity_optional, option_value,
+    timestamp, validate_private_working_tree, validate_working_tree_managed_structure,
+    write_json_file, write_private_file_atomic_for_migration,
 };
 
 pub(crate) fn write_working_tree_state(
@@ -66,6 +65,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
             daemon: DaemonStatus {
                 state: "missing".to_owned(),
                 sync_mode: "automatic".to_owned(),
+                notification_status: None,
                 last_started_at: None,
                 last_tick_at: None,
                 last_error: None,
@@ -99,7 +99,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
                 .to_owned(),
         );
     }
-    if !live_supervisor_state(env).unwrap_or(state.daemon.state == DaemonRunState::Running) {
+    if !live_supervisor_state(env) {
         blocked.push("daemon not running".to_owned());
     }
     if !open_conflicts.is_empty() {
@@ -120,17 +120,30 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
     })
 }
 
-fn live_supervisor_state(env: &CliEnvironment) -> Option<bool> {
-    env.working_tree_root
-        .as_deref()
-        .map(crate::supervisor_is_running)
+fn live_supervisor_state(env: &CliEnvironment) -> bool {
+    crate::supervisor_is_running(env)
 }
 
-fn daemon_status_from_state(state: &AgentState, live_supervisor: Option<bool>) -> DaemonStatus {
-    let running = live_supervisor.unwrap_or(state.daemon.state == DaemonRunState::Running);
+fn daemon_status_from_state(state: &AgentState, running: bool) -> DaemonStatus {
+    let live_state = if state.sync.status == "paused-access-revoked" {
+        "paused"
+    } else if state.daemon.notification_status.as_deref() == Some("reconnecting")
+        || state.sync.status == "reconnecting"
+    {
+        "reconnecting"
+    } else if state.daemon.notification_status.as_deref() == Some("unsupported") {
+        "degraded"
+    } else if state.sync.status.starts_with("blocked") {
+        "blocked"
+    } else if running {
+        "running"
+    } else {
+        "stopped"
+    };
     DaemonStatus {
-        state: if running { "running" } else { "stopped" }.to_owned(),
+        state: live_state.to_owned(),
         sync_mode: state.sync.mode.clone(),
+        notification_status: state.daemon.notification_status.clone(),
         last_started_at: state.daemon.last_started_at.clone(),
         last_tick_at: state.daemon.last_tick_at.clone(),
         last_error: state.daemon.last_error.clone(),
