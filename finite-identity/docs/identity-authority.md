@@ -192,6 +192,20 @@ Products may keep short-lived Resolution Caches for latency, but the cache is
 never the source of truth. Missing, expired, or uncertain answers must fail
 closed.
 
+Resolve and classify a Finite NIP-05 Name before a typed CLI uses it:
+
+```http
+POST /api/v1/nip05-resolution
+Content-Type: application/json
+
+{ "name": "cheater-a1b2c3d4e5f6g7h8@finite.vip" }
+```
+
+The response contains the canonical `name`, hex `pubkey`, `npub`, and a `kind`
+of `mailbox` or `managed_agent`. A Managed Agent NIP-05 is not deliverable and
+must be rejected by email-delivery flags. Unknown names return 404; names
+outside the Authority's Finite VIP Domain return 400.
+
 ### Operator Endpoints
 
 Operator endpoints require:
@@ -200,7 +214,7 @@ Operator endpoints require:
 X-Finite-Operator-Token: <configured-token>
 ```
 
-Register a canonical Managed Agent Email after a runtime publishes its Agent
+Register a canonical Managed Agent NIP-05 after a runtime publishes its Agent
 Principal Key:
 
 ```http

@@ -45,6 +45,7 @@ fsite auth register --output json
 fsite project init --config finite.toml --dry-run --output json
 fsite project init --config finite.toml --output json
 fsite project grant PROJECT --npub AGENT_NPUB --output json
+fsite project grant PROJECT --nip05 AGENT_NIP05 --output json
 fsite project grant PROJECT --email editor@example.com --send-invite --output json
 fsite project share PROJECT OUTPUT --shared --add-email viewer@example.com --send-invite --output json
 fsite auth login editor@example.com
