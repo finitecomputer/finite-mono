@@ -1125,9 +1125,13 @@ impl PhalaApiConfig {
     fn for_fake_server(base_url: String) -> Self {
         Self {
             base_url,
-            connect_timeout: Duration::from_secs(1),
-            read_timeout: Duration::from_secs(1),
-            write_timeout: Duration::from_secs(1),
+            // The fixture server runs in the same heavily parallel test
+            // process. Keep these bounded but large enough that scheduler
+            // contention cannot turn a valid fixture response into a transport
+            // error before its server thread is scheduled.
+            connect_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(5),
+            write_timeout: Duration::from_secs(5),
             retry_policy: RetryPolicy {
                 max_retries: 2,
                 base_delay: Duration::ZERO,
@@ -2774,7 +2778,6 @@ mod tests {
     impl FakePhalaServer {
         fn start(responses: Vec<FixtureResponse>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
             let address = listener.local_addr().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
             let requests_thread = requests.clone();
@@ -2783,25 +2786,23 @@ mod tests {
             let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
             let responses_thread = responses.clone();
             let thread = thread::spawn(move || {
-                while !stop_thread.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            if let Some(request) = read_request(&mut stream) {
-                                requests_thread.lock().unwrap().push(request);
-                            }
-                            match responses_thread.lock().unwrap().pop_front() {
-                                Some(FixtureResponse::Http {
-                                    status,
-                                    headers,
-                                    body,
-                                }) => write_response(&mut stream, status, &headers, body),
-                                Some(FixtureResponse::Close) | None => {}
-                            }
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(2));
-                        }
-                        Err(_) => break,
+                while let Ok((mut stream, _)) = listener.accept() {
+                    // Drop connects once to wake the blocking accept.
+                    // Check the stop flag before consuming a response.
+                    if stop_thread.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some(request) = read_request(&mut stream) else {
+                        continue;
+                    };
+                    requests_thread.lock().unwrap().push(request);
+                    match responses_thread.lock().unwrap().pop_front() {
+                        Some(FixtureResponse::Http {
+                            status,
+                            headers,
+                            body,
+                        }) => write_response(&mut stream, status, &headers, body),
+                        Some(FixtureResponse::Close) | None => {}
                     }
                 }
             });
@@ -2840,7 +2841,7 @@ mod tests {
     }
 
     fn read_request(stream: &mut TcpStream) -> Option<CapturedRequest> {
-        stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
         let mut bytes = Vec::new();
         let mut chunk = [0_u8; 4096];
         let header_end = loop {
@@ -2906,7 +2907,7 @@ mod tests {
         }
         response.push_str("\r\n");
         response.push_str(body);
-        stream.write_all(response.as_bytes()).unwrap();
+        let _ = stream.write_all(response.as_bytes());
     }
 
     fn json_response(body: &'static str) -> FixtureResponse {

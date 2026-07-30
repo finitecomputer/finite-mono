@@ -9972,16 +9972,17 @@ mod tests {
 
     /// Run `test` against an isolated, migrated Postgres database. The database
     /// is dropped afterward even if the test body panics (the panic is
-    /// re-raised so the test still fails). Returns without running when
-    /// `FC_CORE_POSTGRES_TEST_URL` is unset, matching the previous gating.
+    /// re-raised so the test still fails). `just test` supplies the required
+    /// maintenance connection through devfinity; running this suite without
+    /// that infrastructure is an error.
     async fn with_isolated_postgres<F, Fut>(test: F)
     where
         F: FnOnce(TestDb) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let Ok(admin_url) = std::env::var("FC_CORE_POSTGRES_TEST_URL") else {
-            return;
-        };
+        let admin_url = std::env::var("FC_CORE_POSTGRES_TEST_URL").expect(
+            "FC_CORE_POSTGRES_TEST_URL is required for Core Postgres tests; run `just test`",
+        );
 
         // Maintenance connection used only to CREATE/DROP the per-test database.
         let (admin, admin_conn) = tokio_postgres::connect(&admin_url, NoTls).await.unwrap();
