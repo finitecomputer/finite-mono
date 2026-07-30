@@ -255,7 +255,11 @@ fn project_list_help() -> &'static str {
 }
 
 fn auth_help() -> &'static str {
-    "usage:\n  fsite auth status [--output json]\n  fsite auth import [--file PATH] [--output json]\n  fsite auth register [--output json]\n  fsite auth link-email MAILBOX [--output json]\n  fsite auth login MAILBOX\n  fsite auth redeem MAILBOX TOKEN [--link-native] [--output json]\n  fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]\n\nAuthenticate this machine for Finite Sites. Status shows the shared Finite identity key every Finite tool in this Finite Home uses; import adopts an existing secret as that identity. Mailbox flags require a deliverable address. NIP-05 flags resolve through Finite Identity and always use the native key."
+    "usage:\n  fsite auth status [--output json]\n  fsite auth import [--file PATH] [--output json]\n  fsite auth register [--output json]\n  fsite auth sites-key request MAILBOX\n  fsite auth sites-key add MAILBOX TOKEN [--output json]\n  fsite auth sites-key revoke MAILBOX TOKEN NPUB [--output json]\n  fsite auth link-email MAILBOX [--output json]\n  fsite auth login MAILBOX\n  fsite auth redeem MAILBOX TOKEN [--link-native] [--output json]\n  fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]\n\nAuthenticate this machine for Finite Sites. A Sites keyset is product-scoped: fresh mailbox proof can add or revoke an npub without changing that mailbox's Chat NIP-05 or Brain encryption identity. Status shows the shared Finite identity key every Finite tool in this Finite Home uses; import adopts an existing secret as that identity. Mailbox flags require a deliverable address. NIP-05 flags resolve through Finite Identity and always use the native key."
+}
+
+fn auth_sites_key_help() -> &'static str {
+    "usage:\n  fsite auth sites-key request MAILBOX\n  fsite auth sites-key add MAILBOX TOKEN [--output json]\n  fsite auth sites-key revoke MAILBOX TOKEN NPUB [--output json]\n\nRequest fresh mailbox proof, add this Finite Home's npub to the mailbox's Sites-only Authorized Key set, or revoke a target npub. These operations do not create an Identity Principal Link and do not change Chat or Brain identity."
 }
 
 fn auth_register_help() -> &'static str {
@@ -1555,12 +1559,128 @@ fn auth_command(args: &[String]) -> Result<(), CliError> {
         "status" => auth_status(rest),
         "import" => auth_import(rest),
         "register" => auth_register(rest),
+        "sites-key" => auth_sites_key(rest),
         "link-email" => auth_link_email(rest),
         "login" => auth_login(rest),
         "redeem" => auth_redeem(rest),
         "git" => auth_git(rest),
         other => Err(CliError::Usage(format!("unknown auth command `{other}`"))),
     }
+}
+
+fn auth_sites_key(args: &[String]) -> Result<(), CliError> {
+    let Some((subcommand, rest)) = args.split_first() else {
+        return Err(CliError::Usage(auth_sites_key_help().to_string()));
+    };
+    match subcommand.as_str() {
+        value if is_help_arg(value) => print_help(auth_sites_key_help()),
+        "request" => {
+            let [email] = rest else {
+                return Err(CliError::Usage(auth_sites_key_help().to_string()));
+            };
+            let email = MailboxAddress::parse(email, "MAILBOX")?;
+            reject_managed_agent_email(&email)?;
+            let response =
+                api::IdentityAuthorityClient::from_env().request_email_challenge(email.as_str())?;
+            println!("sent Sites key verification for {}", response.email);
+            println!(
+                "next: fsite auth sites-key add {} TOKEN_FROM_EMAIL --output json",
+                response.email
+            );
+            Ok(())
+        }
+        "add" => {
+            let (positionals, output_json) = parse_sites_key_args(rest)?;
+            let [email, token] = positionals.as_slice() else {
+                return Err(CliError::Usage(auth_sites_key_help().to_string()));
+            };
+            let email = MailboxAddress::parse(email, "MAILBOX")?;
+            reject_managed_agent_email(&email)?;
+            let key = keys::load_or_generate_user_key()?;
+            let proof = api::IdentityAuthorityClient::from_env().redeem_mailbox_proof(
+                &key,
+                email.as_str(),
+                token,
+            )?;
+            if proof.pubkey != key.pubkey {
+                return Err(CliError::Api(
+                    "Identity Authority returned a mailbox proof for a different npub".to_string(),
+                ));
+            }
+            let response =
+                api::Client::from_env().register_sites_authorized_key(&key, &proof.proof)?;
+            print_sites_authorized_key_response(&response, output_json)
+        }
+        "revoke" => {
+            let (positionals, output_json) = parse_sites_key_args(rest)?;
+            let [email, token, target_npub] = positionals.as_slice() else {
+                return Err(CliError::Usage(auth_sites_key_help().to_string()));
+            };
+            let email = MailboxAddress::parse(email, "MAILBOX")?;
+            reject_managed_agent_email(&email)?;
+            let target_npub = NativeNpub::parse(target_npub, "NPUB")?;
+            let key = keys::load_or_generate_user_key()?;
+            let proof = api::IdentityAuthorityClient::from_env().redeem_mailbox_proof(
+                &key,
+                email.as_str(),
+                token,
+            )?;
+            if proof.pubkey != key.pubkey {
+                return Err(CliError::Api(
+                    "Identity Authority returned a mailbox proof for a different npub".to_string(),
+                ));
+            }
+            let response = api::Client::from_env().revoke_sites_authorized_key(
+                &key,
+                &proof.proof,
+                target_npub.as_str(),
+            )?;
+            print_sites_authorized_key_response(&response, output_json)
+        }
+        other => Err(CliError::Usage(format!(
+            "unknown auth sites-key command `{other}`\n{}",
+            auth_sites_key_help()
+        ))),
+    }
+}
+
+fn parse_sites_key_args(args: &[String]) -> Result<(Vec<String>, bool), CliError> {
+    let mut positionals = Vec::new();
+    let mut output_json = false;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--output" {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+            if value != "json" {
+                return Err(CliError::Usage("--output must be json".to_string()));
+            }
+            output_json = true;
+            index += 2;
+        } else {
+            positionals.push(args[index].clone());
+            index += 1;
+        }
+    }
+    Ok((positionals, output_json))
+}
+
+fn print_sites_authorized_key_response(
+    response: &finitesites_proto::dto::SitesAuthorizedKeyResponse,
+    output_json: bool,
+) -> Result<(), CliError> {
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(response).expect("response serializes")
+        );
+    } else {
+        println!("mailbox: {}", response.email);
+        println!("npub:    {}", response.npub);
+        println!("active:  {}", response.active);
+    }
+    Ok(())
 }
 
 fn auth_register(args: &[String]) -> Result<(), CliError> {
