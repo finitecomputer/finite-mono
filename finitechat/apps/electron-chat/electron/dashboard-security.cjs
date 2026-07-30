@@ -16,6 +16,7 @@ const desktopChatActions = new Set([
   "SendMessage",
   "SendTopicMessage",
   "SendChatMessage",
+  "SendChatMessageWithReferences",
   "LoadOlderMessages",
   "MarkRoomRead",
   "SetTyping",

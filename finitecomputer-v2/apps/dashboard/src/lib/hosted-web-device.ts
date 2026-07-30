@@ -36,6 +36,31 @@ export type HostedChatSummary = {
   archived: boolean;
 };
 
+export type HostedChatSearchResult = {
+  room_id: string;
+  topic_id: string;
+  topic_title: string;
+  chat_id: string;
+  chat_title: string;
+  message_id?: string | null;
+  excerpt: string;
+  timestamp_unix_seconds: number;
+  archived: boolean;
+  match_count: number;
+};
+
+export type HostedChatReferenceSearchResult = {
+  kind: "file" | "skill" | "site";
+  id: string;
+  label: string;
+  detail: string;
+  path?: string | null;
+  description?: string | null;
+  url?: string | null;
+  fingerprint?: string | null;
+  updated_at_ms: number;
+};
+
 export type HostedChatTopic = {
   room_id: string;
   topic_id: string;
@@ -83,6 +108,7 @@ export type HostedChatMessage = {
   text: string;
   display_content: string;
   rich_text_json?: string;
+  references?: HostedChatReference[];
   reply_to_message_id?: string | null;
   is_mine: boolean;
   outbound_delivery?: HostedChatOutboundDelivery | null;
@@ -93,6 +119,17 @@ export type HostedChatMessage = {
   edit_of_message_id?: string | null;
   timestamp_unix_seconds: number;
   display_timestamp: string;
+};
+
+export type HostedChatReference = {
+  kind: "file" | "skill" | "site";
+  id: string;
+  label: string;
+  detail: string;
+  token: string;
+  path?: string | null;
+  url?: string | null;
+  fingerprint?: string | null;
 };
 
 export type HostedChatTypingMember = {
@@ -226,6 +263,15 @@ export type HostedChatAction =
         topic_id: string;
         chat_id: string;
         text: string;
+      };
+    }
+  | {
+      SendChatMessageWithReferences: {
+        room_id: string;
+        topic_id: string;
+        chat_id: string;
+        text: string;
+        references: HostedChatReference[];
       };
     }
   | { LoadOlderMessages: { room_id: string; before_message_id: string; limit: number } }
@@ -377,6 +423,22 @@ export async function hostedDeviceState(
   account: AccountAuthContext
 ) {
   return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/state");
+}
+
+export async function hostedDeviceSearch(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: { room_id: string; query: string; limit: number }
+) {
+  return hostedDeviceJson<HostedChatSearchResult[]>(
+    config,
+    account,
+    "/v1/app/search",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    }
+  );
 }
 
 export async function hostedDeviceBrainIdentityProvider(

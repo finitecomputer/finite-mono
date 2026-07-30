@@ -22,10 +22,14 @@ import {
   hostedDeviceReconcileDevice,
   hostedDeviceNewChat,
   hostedDeviceRuntimeCommand,
+  hostedDeviceSearch,
   hostedDeviceState,
   hostedDeviceUpdates,
   HostedDeviceRequestError,
   type HostedChatAction,
+  type HostedChatReference,
+  type HostedChatReferenceSearchResult,
+  type HostedChatSearchResult,
   type HostedChatState,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
@@ -37,6 +41,7 @@ const AGENT_BINDING_AUTHORIZATION_REQUIRED =
 const AGENT_BINDING_RECOVERY_REQUIRED =
   `canonical Agent conversation requires recovery: ${AGENT_BINDING_AUTHORIZATION_REQUIRED}`;
 const MAX_DEVICE_ID_BYTES = 128;
+const MAX_CHAT_REFERENCE_COUNT = 12;
 
 export const MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES = 4 * 1024;
 
@@ -251,6 +256,131 @@ export async function dispatchHostedWebChatAction(machineId: string, payload: un
     });
   }
   return hostedDeviceAction(context.config, context.account, action);
+}
+
+export async function searchHostedWebChats(
+  machineId: string,
+  payload: unknown
+): Promise<HostedChatSearchResult[]> {
+  const context = await hostedWebChatContext(machineId);
+  const input = parseHostedChatSearchRequest(payload);
+  const bound = await hostedDeviceOpenAgentBinding(
+    context.config,
+    context.account,
+    context.projectId
+  );
+  if (bound.hosted_agent_binding?.canonical_room_id !== input.room_id) {
+    throw new HostedWebChatError("Chat search must stay in the Agent conversation.", 409);
+  }
+  return hostedDeviceSearch(context.config, context.account, {
+    ...input,
+    limit: 30,
+  });
+}
+
+export async function searchHostedChatReferences(
+  machineId: string,
+  payload: unknown
+): Promise<HostedChatReferenceSearchResult[]> {
+  const context = await hostedWebChatContext(machineId);
+  const input = parseHostedChatReferenceSearchRequest(payload);
+  const bound = await hostedDeviceOpenAgentBinding(
+    context.config,
+    context.account,
+    context.projectId
+  );
+  const binding = bound.hosted_agent_binding;
+  if (
+    !binding
+    || binding.canonical_room_id !== input.room_id
+    || !bound.topics.some(
+      (topic) =>
+        topic.room_id === binding.canonical_room_id
+        && topic.topic_id === input.topic_id
+    )
+  ) {
+    throw new HostedWebChatError("Reference search must stay in the Agent conversation.", 409);
+  }
+  const response = await hostedDeviceRuntimeCommand(context.config, context.account, {
+    room_id: binding.canonical_room_id,
+    conversation_id: input.topic_id,
+    target_account_id: binding.agent_account_id,
+    command: "agent.context.search",
+    schema: "finite.agent.context.search.v1",
+    body: { query: input.query, limit: 30 },
+    wait_millis: 15_000,
+  });
+  assertCommandSucceeded(response);
+  return parseHostedChatReferenceSearchResults(response.body);
+}
+
+export function parseHostedChatReferenceSearchRequest(payload: unknown) {
+  const record = objectRecord(payload, "Chat reference search request");
+  const query = typeof record.query === "string" ? record.query.trim() : "";
+  const roomId = typeof record.room_id === "string" ? record.room_id : "";
+  const topicId = typeof record.topic_id === "string" ? record.topic_id : "";
+  if (
+    Object.keys(record).some((key) => !["query", "room_id", "topic_id"].includes(key))
+    || query.length > 128
+    || !roomId
+    || !topicId
+  ) {
+    throw new HostedWebChatError("Invalid chat reference search request.", 400);
+  }
+  return { room_id: roomId, topic_id: topicId, query };
+}
+
+function parseHostedChatReferenceSearchResults(
+  payload: unknown
+): HostedChatReferenceSearchResult[] {
+  if (!payload || typeof payload !== "object") {
+    throw new HostedWebChatError("The Agent returned an invalid reference catalog.", 502);
+  }
+  const results = (payload as { results?: unknown }).results;
+  if (!Array.isArray(results) || results.length > 40) {
+    throw new HostedWebChatError("The Agent returned an invalid reference catalog.", 502);
+  }
+  return results.map((value) => {
+    if (!value || typeof value !== "object") {
+      throw new HostedWebChatError("The Agent returned an invalid reference.", 502);
+    }
+    const entry = value as Record<string, unknown>;
+    if (
+      (entry.kind !== "file" && entry.kind !== "skill" && entry.kind !== "site")
+      || typeof entry.id !== "string"
+      || typeof entry.label !== "string"
+      || typeof entry.detail !== "string"
+      || typeof entry.updated_at_ms !== "number"
+    ) {
+      throw new HostedWebChatError("The Agent returned an invalid reference.", 502);
+    }
+    return {
+      kind: entry.kind,
+      id: entry.id,
+      label: entry.label,
+      detail: entry.detail,
+      path: typeof entry.path === "string" ? entry.path : null,
+      description: typeof entry.description === "string" ? entry.description : null,
+      url: typeof entry.url === "string" ? entry.url : null,
+      fingerprint: typeof entry.fingerprint === "string" ? entry.fingerprint : null,
+      updated_at_ms: entry.updated_at_ms,
+    };
+  });
+}
+
+export function parseHostedChatSearchRequest(payload: unknown) {
+  const record = objectRecord(payload, "Chat search request");
+  const query = typeof record.query === "string" ? record.query.trim() : "";
+  const roomId = typeof record.room_id === "string" ? record.room_id : "";
+  if (
+    Object.keys(record).some((key) => !["query", "room_id"].includes(key))
+    || query.length < 2
+    || query.length > 256
+    || !roomId
+  ) {
+    throw new HostedWebChatError("Invalid chat search request.", 400);
+  }
+  return { room_id: roomId, query };
 }
 
 export function isCanonicalNewChatTarget(
@@ -489,6 +619,18 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         },
       };
     }
+    case "SendChatMessageWithReferences": {
+      const value = objectRecord(input, operation);
+      return {
+        SendChatMessageWithReferences: {
+          room_id: boundedString(value.room_id, "room_id"),
+          topic_id: boundedString(value.topic_id, "topic_id"),
+          chat_id: boundedString(value.chat_id, "chat_id"),
+          text: boundedString(value.text, "text", 64 * 1024),
+          references: parseChatReferences(value.references),
+        },
+      };
+    }
     case "LoadOlderMessages": {
       const value = objectRecord(input, operation);
       return {
@@ -532,6 +674,50 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
     default:
       throw new HostedWebChatError(`Unsupported chat action: ${operation}`, 400);
   }
+}
+
+function parseChatReferences(value: unknown): HostedChatReference[] {
+  if (
+    !Array.isArray(value)
+    || value.length === 0
+    || value.length > MAX_CHAT_REFERENCE_COUNT
+  ) {
+    throw new HostedWebChatError("Invalid chat references.", 400);
+  }
+  return value.map((candidate) => {
+    const reference = objectRecord(candidate, "chat reference");
+    if (
+      reference.kind !== "file"
+      && reference.kind !== "skill"
+      && reference.kind !== "site"
+    ) {
+      throw new HostedWebChatError("Invalid chat reference kind.", 400);
+    }
+    const kind = reference.kind;
+    const path = optionalBoundedString(reference.path, "reference.path", 1024);
+    const url = optionalBoundedString(reference.url, "reference.url", 2048);
+    const fingerprint = optionalBoundedString(
+      reference.fingerprint,
+      "reference.fingerprint",
+      256
+    );
+    if (reference.kind === "file" && !path) {
+      throw new HostedWebChatError("File references require a path.", 400);
+    }
+    if (reference.kind === "site" && !url) {
+      throw new HostedWebChatError("Site references require a URL.", 400);
+    }
+    return {
+      kind,
+      id: boundedString(reference.id, "reference.id", 512),
+      label: boundedString(reference.label, "reference.label", 256),
+      detail: boundedString(reference.detail, "reference.detail", 1024),
+      token: boundedString(reference.token, "reference.token", 512),
+      ...(path ? { path } : {}),
+      ...(url ? { url } : {}),
+      ...(fingerprint ? { fingerprint } : {}),
+    };
+  });
 }
 
 function objectRecord(value: unknown, label: string): Record<string, unknown> {

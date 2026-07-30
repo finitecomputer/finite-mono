@@ -1,6 +1,6 @@
 "use client";
 
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import {
   FormEvent,
   useCallback,
@@ -17,11 +17,14 @@ import { Drawer } from "vaul";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  AtSignIcon,
+  CheckIcon,
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
   ExternalLinkIcon,
   FileTextIcon,
+  Globe2Icon,
   Loader2Icon,
   MicIcon,
   MonitorIcon,
@@ -62,6 +65,20 @@ import type {
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
+import {
+  activeAtQuery,
+  chatReferencePayloads,
+  hasInlineReferenceAt,
+  inlineReferenceToken,
+  insertAtReference,
+  messageChatReferences,
+  rankLocalReferences,
+  retainInlineReferences,
+  runtimeReference,
+  uploadedFileReferences,
+  type ActiveAtQuery,
+  type ChatReference,
+} from "@/lib/chat-references";
 import { electronDeviceLinkPresentation } from "@/lib/electron-chat-runtime";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
@@ -145,6 +162,7 @@ export function HostedWebChat({
     recoverLocalDevice,
     dispatch,
     dispatchQuiet,
+    searchReferences,
     refreshPendingChat,
     uploadAttachments,
     attachmentUrl,
@@ -154,6 +172,13 @@ export function HostedWebChat({
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [references, setReferences] = useState<ChatReference[]>([]);
+  const [atQuery, setAtQuery] = useState<ActiveAtQuery | null>(null);
+  const [remoteReferences, setRemoteReferences] = useState<ChatReference[]>([]);
+  const [remoteReferenceQuery, setRemoteReferenceQuery] = useState<string | null>(null);
+  const [referenceSearchLoading, setReferenceSearchLoading] = useState(false);
+  const [referenceSearchError, setReferenceSearchError] = useState<string | null>(null);
+  const [selectedReferenceId, setSelectedReferenceId] = useState<string | null>(null);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);
   const [leaseNowMs, setLeaseNowMs] = useState(() => Date.now());
@@ -170,6 +195,7 @@ export function HostedWebChat({
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerMirrorRef = useRef<HTMLDivElement>(null);
   const typingRoomRef = useRef<string | null>(null);
   const typingTimerRef = useRef<number | null>(null);
   const latestSiteIdRef = useRef<string | null>(null);
@@ -292,7 +318,49 @@ export function HostedWebChat({
     ]
   );
   const sites = useMemo(() => sitesFromMessages(messages), [messages]);
+  const historicalReferenceFingerprints = useMemo(() => {
+    const fingerprints = new Map<string, string>();
+    for (const message of messages) {
+      for (const reference of messageChatReferences(message)) {
+        if (reference.fingerprint) {
+          fingerprints.set(referenceIdentity(reference), reference.fingerprint);
+        }
+      }
+    }
+    return fingerprints;
+  }, [messages]);
+  const localReferences = useMemo(
+    () => [
+      ...uploadedFileReferences(messages),
+      ...sites.map((site): ChatReference => ({
+        kind: "site",
+        id: `site:${site.id}`,
+        label: site.label,
+        detail: site.url,
+        url: site.url,
+      })),
+    ],
+    [messages, sites]
+  );
+  const referenceResults = useMemo(() => {
+    if (!atQuery) return [];
+    const local = rankLocalReferences(localReferences, atQuery.query);
+    const seen = new Set(local.map(referenceIdentity));
+    return [
+      ...local,
+      ...rankLocalReferences(remoteReferences, atQuery.query)
+        .filter((reference) => !seen.has(referenceIdentity(reference))),
+    ].filter(
+      (reference) =>
+        !references.some(
+          (selected) => referenceIdentity(selected) === referenceIdentity(reference)
+        )
+    );
+  }, [atQuery, localReferences, references, remoteReferences]);
   const activeSite = sites.find((site) => site.id === activeSiteId) ?? sites[0] ?? null;
+  const selectedAtReferenceIndex = selectedReferenceId
+    ? referenceResults.findIndex((reference) => reference.id === selectedReferenceId)
+    : -1;
   const awaitingReply = pendingAgentTurns.some(
     (turn) =>
       pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
@@ -302,6 +370,75 @@ export function HostedWebChat({
     0,
     ...messages.map((message) => message.seq)
   );
+
+  useEffect(() => {
+    if (!atQuery || !selectedRoom || !selectedTopic) {
+      setReferenceSearchLoading(false);
+      return;
+    }
+    if (
+      remoteReferenceQuery !== null
+      && (
+        atQuery.query === remoteReferenceQuery
+        || (remoteReferenceQuery.length > 0 && atQuery.query.startsWith(remoteReferenceQuery))
+      )
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    const requestedQuery = atQuery.query;
+    const timer = window.setTimeout(() => {
+      setReferenceSearchLoading(true);
+      setReferenceSearchError(null);
+      void searchReferences(
+        selectedRoom.room_id,
+        selectedTopic.topic_id,
+        requestedQuery,
+        controller.signal
+      )
+        .then((results) => {
+          setRemoteReferences(results.map((result) => {
+            const reference = runtimeReference(result);
+            const previous = historicalReferenceFingerprints.get(referenceIdentity(reference));
+            return previous && reference.fingerprint && previous !== reference.fingerprint
+              ? { ...reference, detail: `Updated since attached · ${reference.detail}` }
+              : reference;
+          }));
+          setRemoteReferenceQuery(requestedQuery);
+        })
+        .catch((error) => {
+          if (!(error instanceof DOMException && error.name === "AbortError")) {
+            setRemoteReferences([]);
+            setRemoteReferenceQuery(null);
+            setReferenceSearchError("Agent files, skills, and sites are unavailable.");
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setReferenceSearchLoading(false);
+        });
+    }, 240);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    atQuery,
+    historicalReferenceFingerprints,
+    remoteReferenceQuery,
+    searchReferences,
+    selectedRoom,
+    selectedTopic,
+  ]);
+
+  useEffect(() => {
+    if (referenceResults.length === 0) {
+      setSelectedReferenceId(null);
+      return;
+    }
+    if (!selectedReferenceId || !referenceResults.some((result) => result.id === selectedReferenceId)) {
+      setSelectedReferenceId(referenceResults[0]!.id);
+    }
+  }, [referenceResults, selectedReferenceId]);
 
   useEffect(() => {
     if (!streamConnected) {
@@ -448,6 +585,11 @@ export function HostedWebChat({
     if (!textarea) return;
     textarea.style.height = "0px";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+    const mirror = composerMirrorRef.current;
+    if (mirror) {
+      mirror.scrollTop = textarea.scrollTop;
+      mirror.scrollLeft = textarea.scrollLeft;
+    }
   }, [attachments.length, draft]);
 
   useEffect(() => {
@@ -557,14 +699,25 @@ export function HostedWebChat({
         if (selectedTopic) formData.set("topic_id", selectedTopic.topic_id);
         if (selectedChat) formData.set("chat_id", selectedChat.chat_id);
         formData.set("caption", text);
+        if (references.length > 0) {
+          formData.set("references", JSON.stringify(chatReferencePayloads(references)));
+        }
         for (const attachment of attachments) formData.append("files", attachment.file);
         next = await uploadAttachments(formData);
         const uploadError = attachmentSendError(next);
         if (uploadError) throw new Error(uploadError);
       } else {
-        next = await dispatch(messageAction(selectedRoom.room_id, text, selectedTopic, selectedChat));
+        next = await dispatch(messageAction(
+          selectedRoom.room_id,
+          text,
+          selectedTopic,
+          selectedChat,
+          references,
+        ));
       }
       setDraft("");
+      setReferences([]);
+      setAtQuery(null);
       setAttachments((current) => {
         current.forEach(revokeAttachmentPreview);
         return [];
@@ -617,6 +770,46 @@ export function HostedWebChat({
           previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
         })),
       ];
+    });
+  }
+
+  async function selectAtReference(reference: ChatReference) {
+    if (!atQuery) return;
+    setActionError(null);
+    if (reference.attachment) {
+      try {
+        const href = attachmentUrl(reference.attachment);
+        const response = await fetch(href);
+        if (!response.ok) throw new Error("The uploaded file could not be opened.");
+        const blob = await response.blob();
+        if (blob.size > MAX_ATTACHMENT_BYTES) {
+          throw new Error(`${reference.label} is larger than ${formatBytes(MAX_ATTACHMENT_BYTES)}.`);
+        }
+        addFiles([
+          new File([blob], reference.label, {
+            type: reference.attachment.mime_type || blob.type,
+            lastModified: Date.now(),
+          }),
+        ]);
+      } catch (error) {
+        setActionError(hostedChatErrorMessage(error));
+        return;
+      }
+    }
+    const inserted = insertAtReference(draft, atQuery, reference, references);
+    setDraft(inserted.text);
+    if (!reference.attachment) {
+      setReferences((current) => (
+        current.some((entry) => entry.id === reference.id)
+          ? current
+          : [...current, inserted.reference]
+      ));
+    }
+    setAtQuery(null);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      textarea?.focus();
+      textarea?.setSelectionRange(inserted.cursor, inserted.cursor);
     });
   }
 
@@ -831,15 +1024,15 @@ export function HostedWebChat({
     ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
     : null;
   const latestTranscriptItem = transcript[transcript.length - 1];
-  const waitingToolRollupId = latestTranscriptItem?.type === "tools"
+  const waitingWorkReceiptId = latestTranscriptItem?.type === "work"
     && isAskForInputToolMessage(
-      latestTranscriptItem.messages[latestTranscriptItem.messages.length - 1]!
+      latestTranscriptItem.entries[latestTranscriptItem.entries.length - 1]!.message
     )
     ? latestTranscriptItem.id
     : null;
-  const activeToolRollupId = activityLabel
-    && !waitingToolRollupId
-    && latestTranscriptItem?.type === "tools"
+  const activeWorkReceiptId = activityLabel
+    && !waitingWorkReceiptId
+    && latestTranscriptItem?.type === "work"
     ? latestTranscriptItem.id
     : null;
   const hasRenderableChatContent = chatContentIsRenderable(
@@ -928,7 +1121,7 @@ export function HostedWebChat({
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
                 ) : null}
                 {hasRenderableChatContent ? (
-                  <div className="finite-chat__messages" aria-live="polite">
+                  <div className="finite-chat__messages">
                     {selectedRoom?.can_load_older && messages[0] ? (
                       <button
                         type="button"
@@ -955,15 +1148,15 @@ export function HostedWebChat({
                           ownAccountId={state?.identity.account_id ?? ""}
                         />
                       ) : (
-                        <ToolRollup
+                        <WorkReceipt
                           key={item.id}
-                          messages={item.messages}
-                          active={item.id === activeToolRollupId}
-                          waitingForUser={item.id === waitingToolRollupId}
+                          entries={item.entries}
+                          active={item.id === activeWorkReceiptId}
+                          waitingForUser={item.id === waitingWorkReceiptId}
                         />
                       )
                     )}
-                    {activityLabel && !waitingToolRollupId
+                    {activityLabel && !waitingWorkReceiptId
                       ? <LiveActivity label={activityLabel} />
                       : null}
                   </div>
@@ -1058,28 +1251,101 @@ export function HostedWebChat({
                       ))}
                     </div>
                   ) : null}
-                  <textarea
-                    ref={textareaRef}
-                    aria-label="Message your agent"
-                    placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
-                    value={draft}
-                    disabled={!connected || sending}
-                    rows={1}
-                    onBlur={() => stopTyping(selectedRoom?.room_id)}
-                    onChange={(event) => {
-                      setDraft(event.target.value);
-                      noteTyping(event.target.value);
-                    }}
-                    onPaste={(event) => {
-                      if (event.clipboardData.files.length > 0) addFiles(event.clipboardData.files);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        event.currentTarget.form?.requestSubmit();
+                  {atQuery ? (
+                    <AtReferenceMenu
+                      loading={referenceSearchLoading}
+                      error={referenceSearchError}
+                      query={atQuery.query}
+                      results={referenceResults}
+                      selectedId={selectedReferenceId}
+                      onHighlight={setSelectedReferenceId}
+                      onSelect={(reference) => void selectAtReference(reference)}
+                    />
+                  ) : null}
+                  <div className="finite-chat__composer-editor">
+                    <div
+                      ref={composerMirrorRef}
+                      className="finite-chat__composer-mirror"
+                      aria-hidden
+                    >
+                      {inlineReferencedContent(draft, references)}
+                    </div>
+                    <textarea
+                      ref={textareaRef}
+                      role={atQuery ? "combobox" : undefined}
+                      aria-autocomplete={atQuery ? "list" : undefined}
+                      aria-controls={atQuery ? "finite-chat-at-results" : undefined}
+                      aria-expanded={atQuery ? true : undefined}
+                      aria-activedescendant={
+                        atQuery && selectedAtReferenceIndex >= 0
+                          ? `finite-chat-at-result-${selectedAtReferenceIndex}`
+                          : undefined
                       }
-                    }}
-                  />
+                      aria-label="Message your agent"
+                      placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
+                      value={draft}
+                      disabled={!connected || sending}
+                      rows={1}
+                      onBlur={() => stopTyping(selectedRoom?.room_id)}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        const nextReferences = retainInlineReferences(value, references);
+                        setDraft(value);
+                        setReferences(nextReferences);
+                        setAtQuery(activeAtQuery(
+                          value,
+                          event.target.selectionStart ?? value.length,
+                          nextReferences,
+                        ));
+                        noteTyping(value);
+                      }}
+                      onClick={(event) => {
+                        setAtQuery(activeAtQuery(
+                          draft,
+                          event.currentTarget.selectionStart ?? draft.length,
+                          references,
+                        ));
+                      }}
+                      onPaste={(event) => {
+                        if (event.clipboardData.files.length > 0) addFiles(event.clipboardData.files);
+                      }}
+                      onScroll={(event) => {
+                        const mirror = composerMirrorRef.current;
+                        if (!mirror) return;
+                        mirror.scrollTop = event.currentTarget.scrollTop;
+                        mirror.scrollLeft = event.currentTarget.scrollLeft;
+                      }}
+                      onKeyDown={(event) => {
+                        if (atQuery && referenceResults.length > 0) {
+                          const selectedIndex = Math.max(
+                            0,
+                            referenceResults.findIndex((reference) => reference.id === selectedReferenceId)
+                          );
+                          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                            event.preventDefault();
+                            const direction = event.key === "ArrowDown" ? 1 : -1;
+                            const next = (selectedIndex + direction + referenceResults.length) % referenceResults.length;
+                            setSelectedReferenceId(referenceResults[next]!.id);
+                            return;
+                          }
+                          if (event.key === "Enter" || event.key === "Tab") {
+                            event.preventDefault();
+                            void selectAtReference(referenceResults[selectedIndex]!);
+                            return;
+                          }
+                        }
+                        if (atQuery && event.key === "Escape") {
+                          event.preventDefault();
+                          setAtQuery(null);
+                          return;
+                        }
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          event.currentTarget.form?.requestSubmit();
+                        }
+                      }}
+                    />
+                  </div>
                   <div className="finite-chat__composer-actions">
                     <div className="finite-chat__composer-left">
                       <input
@@ -1148,7 +1414,7 @@ export function HostedWebChat({
                       aria-label="Send message"
                       disabled={
                         !connected
-                        || (!draft.trim() && attachments.length === 0)
+                        || (!draft.trim() && attachments.length === 0 && references.length === 0)
                         || sending
                         || audioRecordingState !== "idle"
                       }
@@ -1237,35 +1503,83 @@ function LiveActivity({ label }: { label: string }) {
   );
 }
 
-function ToolRollup({
-  messages,
+function WorkReceipt({
+  entries,
   active,
   waitingForUser,
 }: {
-  messages: HostedChatMessage[];
+  entries: Array<{
+    kind: "commentary" | "tool";
+    message: HostedChatMessage;
+  }>;
   active: boolean;
   waitingForUser: boolean;
 }) {
+  const toolEntries = entries.filter((entry) => entry.kind === "tool");
+  const actionCount = toolEntries.reduce(
+    (count, entry) =>
+      count + Math.max(1, messageContent(entry.message).split(/\n+/u).filter(Boolean).length),
+    0
+  );
+  const latestCommentary = entries.findLast((entry) => entry.kind === "commentary");
+  const update = summarizeWorkUpdate(
+    latestCommentary ? messageContent(latestCommentary.message) : ""
+  );
   const running = !waitingForUser
-    && (active || messages.some((message) => message.status === "running"));
-  const steps = messages.flatMap((message) => messageContent(message).split(/\n+/u).filter(Boolean));
+    && (active || toolEntries.some((entry) => entry.message.status === "running"));
   const label = waitingForUser
     ? "Waiting for you"
-    : running
-      ? steps.length > 0 ? `Working · ${steps.length} ${pluralize("step", steps.length)}` : "Working"
-      : `Worked through ${steps.length || messages.length} ${pluralize("step", steps.length || messages.length)}`;
+    : `${running ? "Working" : "Work complete"} · ${actionCount} ${pluralize("action", actionCount)}`;
   return (
-    <details className="finite-chat__tool-rollup" open={running || waitingForUser || undefined}>
+    <details
+      className={`finite-chat__work-receipt ${running ? "is-active" : ""}`}
+      open={waitingForUser || undefined}
+    >
       <summary>
-        {running ? <Loader2Icon className="size-4 finite-chat__spin" /> : <WrenchIcon className="size-4" />}
-        <span>{label}</span>
+        {running ? <Loader2Icon className="size-4 finite-chat__spin" /> : <CheckIcon className="size-4" />}
+        <span
+          className="finite-chat__work-receipt-state"
+          aria-live={active ? "polite" : "off"}
+          aria-atomic="true"
+        >
+          <strong>{label}</strong>
+          <small>
+            {update || (
+              waitingForUser
+                ? "Your answer is needed to continue"
+                : running
+                  ? "Using tools and reviewing results"
+                  : "Details available"
+            )}
+          </small>
+        </span>
         <ChevronRightIcon className="size-4" />
       </summary>
-      <div className="finite-chat__tool-rollup-body">
-        {messages.map((message) => <pre key={message.message_id}>{messageContent(message) || "Done"}</pre>)}
+      <div className="finite-chat__work-receipt-body">
+        {entries.map((entry) =>
+          entry.kind === "tool" ? (
+            <pre key={entry.message.message_id}>{messageContent(entry.message) || "Done"}</pre>
+          ) : (
+            <div className="finite-chat__work-receipt-update" key={entry.message.message_id}>
+              <span>Update</span>
+              <p>{messageContent(entry.message)}</p>
+            </div>
+          )
+        )}
       </div>
     </details>
   );
+}
+
+function summarizeWorkUpdate(content: string) {
+  const summary = content
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/^(?:now\s+)?let me\s+/iu, "")
+    .replace(/:$/u, "");
+  if (!summary) return "";
+  const sentence = `${summary.charAt(0).toUpperCase()}${summary.slice(1)}`;
+  return sentence.length > 110 ? `${sentence.slice(0, 109).trimEnd()}…` : sentence;
 }
 
 function MessageRow({
@@ -1279,22 +1593,177 @@ function MessageRow({
 }) {
   const content = messageContent(message);
   if (message.sender_account_id === ownAccountId || (!ownAccountId && message.is_mine)) {
+    const references = messageChatReferences(message);
     return (
       <article className="finite-chat__message finite-chat__message--user">
         <div>
           <MessageAttachments attachmentUrl={attachmentUrl} message={message} compact />
-          {content ? <p>{content}</p> : null}
+          {content ? (
+            <InlineReferencedText
+              references={references}
+              text={content}
+            />
+          ) : null}
           <time className="finite-chat__message-time">{deliveryText(message) || message.display_timestamp}</time>
         </div>
       </article>
     );
   }
   return (
-    <article className="finite-chat__message finite-chat__message--agent">
+    <article className="finite-chat__message finite-chat__message--agent" aria-live="polite">
       <MessageAttachments attachmentUrl={attachmentUrl} message={message} />
       {content ? <MarkdownMessage text={content} /> : null}
       <time className="finite-chat__message-time">{message.display_timestamp}</time>
     </article>
+  );
+}
+
+function InlineReferencedText({
+  text,
+  references,
+}: {
+  text: string;
+  references: ChatReference[];
+}) {
+  return <p>{inlineReferencedContent(text, references)}</p>;
+}
+
+function inlineReferencedContent(
+  text: string,
+  references: ChatReference[],
+) {
+  const matches = references
+    .flatMap((reference) => {
+      const token = inlineReferenceToken(reference);
+      const results: Array<{ start: number; end: number; reference: ChatReference }> = [];
+      let start = text.indexOf(token);
+      while (start >= 0) {
+        if (hasInlineReferenceAt(text, start, token)) {
+          results.push({ start, end: start + token.length, reference });
+        }
+        start = text.indexOf(token, start + token.length);
+      }
+      return results;
+    })
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  const content: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.start < cursor) continue;
+    if (match.start > cursor) content.push(text.slice(cursor, match.start));
+    content.push(
+      <span
+        key={`${match.reference.kind}:${match.reference.id}:${match.start}`}
+        className="finite-chat__inline-reference"
+        title={`${referenceKindLabel(match.reference)} · ${match.reference.detail}`}
+      >
+        {text.slice(match.start, match.end)}
+      </span>
+    );
+    cursor = match.end;
+  }
+  if (cursor < text.length) content.push(text.slice(cursor));
+  return content;
+}
+
+function ReferenceIcon({ kind }: { kind: ChatReference["kind"] }) {
+  if (kind === "skill") return <WrenchIcon className="size-3.5" aria-hidden />;
+  if (kind === "site") return <Globe2Icon className="size-3.5" aria-hidden />;
+  return <FileTextIcon className="size-3.5" aria-hidden />;
+}
+
+function referenceKindLabel(reference: ChatReference) {
+  if (reference.kind === "skill") return "Skill";
+  if (reference.kind === "site") return "Site";
+  return reference.path ? "File" : "Upload";
+}
+
+function referenceIdentity(reference: ChatReference) {
+  if (reference.kind === "site") return `site:${reference.url ?? reference.id}`;
+  if (reference.kind === "skill") return `skill:${reference.label.toLowerCase()}`;
+  return `file:${reference.path ?? reference.id}`;
+}
+
+function AtReferenceMenu({
+  error,
+  loading,
+  query,
+  results,
+  selectedId,
+  onHighlight,
+  onSelect,
+}: {
+  error: string | null;
+  loading: boolean;
+  query: string;
+  results: ChatReference[];
+  selectedId: string | null;
+  onHighlight: (id: string) => void;
+  onSelect: (reference: ChatReference) => void;
+}) {
+  const [resultsHeight, setResultsHeight] = useState(0);
+  const resultsResizeObserverRef = useRef<ResizeObserver | null>(null);
+  const setResultsPanelRef = useCallback((node: HTMLDivElement | null) => {
+    resultsResizeObserverRef.current?.disconnect();
+    resultsResizeObserverRef.current = null;
+    if (!node) return;
+
+    const observer = new ResizeObserver(([entry]) => {
+      const borderBox = entry?.borderBoxSize[0];
+      setResultsHeight(Math.ceil(borderBox?.blockSize ?? entry?.contentRect.height ?? 0));
+    });
+    observer.observe(node);
+    resultsResizeObserverRef.current = observer;
+  }, []);
+
+  useEffect(() => () => {
+    resultsResizeObserverRef.current?.disconnect();
+  }, []);
+
+  return (
+    <div id="finite-chat-at-results" className="finite-chat__at-menu" role="listbox" aria-label="References" aria-busy={loading}>
+      <div className="finite-chat__at-menu-heading">
+        <span><AtSignIcon className="size-3.5" aria-hidden /> Add a reference</span>
+        <span>{query ? `“${query}”` : "Recent"}</span>
+      </div>
+      <div
+        className="finite-chat__at-menu-results-clip"
+        style={{ height: resultsHeight }}
+      >
+        <div ref={setResultsPanelRef} className="finite-chat__at-menu-results">
+          {results.length > 0 ? results.map((reference, index) => {
+            const selected = reference.id === selectedId;
+            return (
+              <button
+                key={`${reference.kind}:${reference.id}`}
+                id={`finite-chat-at-result-${index}`}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                className={selected ? "is-selected" : undefined}
+                onMouseMove={() => onHighlight(reference.id)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onSelect(reference)}
+              >
+                <span className={`finite-chat__at-result-icon is-${reference.kind}`}>
+                  <ReferenceIcon kind={reference.kind} />
+                </span>
+                <span className="finite-chat__at-result-copy">
+                  <strong>{reference.label}</strong>
+                  <span>{reference.detail}</span>
+                </span>
+                <span className="finite-chat__at-result-kind">{referenceKindLabel(reference)}</span>
+              </button>
+            );
+          }) : (
+            <p>{loading ? "Searching your Agent…" : error ?? "No matching references."}</p>
+          )}
+        </div>
+      </div>
+      {error && results.length > 0 ? (
+        <div className="finite-chat__at-menu-status">{error}</div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1482,7 +1951,24 @@ function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite,
   );
 }
 
-function messageAction(roomId: string, text: string, topic: HostedChatTopic | null, chat: HostedChatSummary | null): HostedChatAction {
+function messageAction(
+  roomId: string,
+  text: string,
+  topic: HostedChatTopic | null,
+  chat: HostedChatSummary | null,
+  references: ChatReference[],
+): HostedChatAction {
+  if (topic && chat && references.length > 0) {
+    return {
+      SendChatMessageWithReferences: {
+        room_id: roomId,
+        topic_id: topic.topic_id,
+        chat_id: chat.chat_id,
+        text,
+        references: chatReferencePayloads(references),
+      },
+    };
+  }
   if (topic && chat) return { SendChatMessage: { room_id: roomId, topic_id: topic.topic_id, chat_id: chat.chat_id, text } };
   if (topic) return { SendTopicMessage: { room_id: roomId, topic_id: topic.topic_id, text } };
   return { SendMessage: { room_id: roomId, text } };

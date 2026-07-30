@@ -164,6 +164,17 @@ export type OutboundDelivery = {
 export type ChatMessageKind = "message" | "status" | "tool" | "media" | string;
 export type ChatMessageStatus = "running" | "complete" | string;
 
+export type ChatReference = {
+  kind: "file" | "skill" | "site";
+  id: string;
+  label: string;
+  detail: string;
+  token: string;
+  path?: string | null;
+  url?: string | null;
+  fingerprint?: string | null;
+};
+
 export type ChatMessage = {
   room_id: string;
   seq: number;
@@ -177,6 +188,7 @@ export type ChatMessage = {
   text: string;
   display_content: string;
   rich_text_json?: string;
+  references?: ChatReference[];
   kind: ChatMessageKind;
   status: ChatMessageStatus;
   final_delivery: boolean;

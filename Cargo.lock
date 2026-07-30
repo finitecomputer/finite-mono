@@ -1051,6 +1051,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "walkdir",
 ]
 
 [[package]]

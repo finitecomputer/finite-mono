@@ -2655,6 +2655,16 @@ async fn attachment_bytes_are_isolated_redacted_and_survive_device_restart() {
         content_type: "image/png".to_owned(),
         bytes: plaintext.clone(),
     }];
+    let references = serde_json::json!([{
+        "kind": "file",
+        "id": "workspace:plans/README.md",
+        "label": "README.md",
+        "detail": "plans/README.md",
+        "token": "@README.md",
+        "path": "plans/README.md",
+        "fingerprint": "sha256:abc"
+    }])
+    .to_string();
     let response = upload_for(
         first_app.clone(),
         "user_paul",
@@ -2663,6 +2673,7 @@ async fn attachment_bytes_are_isolated_redacted_and_survive_device_restart() {
             ("topic_id", topic_id.as_str()),
             ("chat_id", chat_id.as_str()),
             ("caption", "A browser attachment"),
+            ("references", references.as_str()),
         ],
         &files,
         None,
@@ -2686,6 +2697,15 @@ async fn attachment_bytes_are_isolated_redacted_and_survive_device_restart() {
         .as_str()
         .unwrap()
         .to_owned();
+    assert_eq!(message["text"], "A browser attachment");
+    assert_eq!(message["display_content"], "A browser attachment");
+    assert_eq!(message["references"][0]["path"], "plans/README.md");
+    assert!(
+        !message["text"]
+            .as_str()
+            .unwrap()
+            .contains("File reference:")
+    );
     assert_eq!(message["media"][0]["local_path"], Value::Null);
     let gallery_item = uploaded["media_gallery"]["items"]
         .as_array()

@@ -21,6 +21,7 @@ pub const HERMES_METADATA_STATUS: &str = "_finitechat_status";
 pub const MAX_HERMES_POLL_EVENTS: u32 = 32;
 pub const MAX_HERMES_TEXT_BYTES: u32 = 64 * 1024;
 pub const MAX_HERMES_ATTACHMENTS: u32 = 16;
+pub const MAX_HERMES_CHAT_REFERENCES: u32 = 12;
 pub const MAX_HERMES_METADATA_BYTES: u32 = 32 * 1024;
 pub const MAX_HERMES_REPLY_TEXT_BYTES: u32 = 8 * 1024;
 pub const MAX_HERMES_POLL_TIMEOUT_MILLIS: u64 = 60 * 1000;
@@ -31,6 +32,7 @@ const _: () = {
     assert!(MAX_HERMES_TEXT_BYTES > 0);
     assert!(MAX_HERMES_TEXT_BYTES < MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_HERMES_ATTACHMENTS > 0);
+    assert!(MAX_HERMES_CHAT_REFERENCES > 0);
     assert!(MAX_HERMES_METADATA_BYTES > 0);
     assert!(MAX_HERMES_METADATA_BYTES < MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_HERMES_REPLY_TEXT_BYTES > 0);
@@ -96,6 +98,29 @@ pub enum HermesAttachmentKindV1 {
     Video,
     Audio,
     File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HermesChatReferenceKindV1 {
+    File,
+    Skill,
+    Site,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HermesChatReferenceV1 {
+    pub kind: HermesChatReferenceKindV1,
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -789,6 +814,11 @@ pub struct HermesMessagePayloadV1 {
     pub edit_of: Option<MessageId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<HermesAttachmentV1>,
+    /// Structured user-selected context. This stays outside `text` so older
+    /// readers render only the user's prose; the Hermes bridge projects these
+    /// records into its model-only `channel_prompt`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<HermesChatReferenceV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<MessageId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -808,6 +838,7 @@ impl HermesMessagePayloadV1 {
             status: request.status,
             edit_of: None,
             attachments: request.attachments.clone(),
+            references: Vec::new(),
             reply_to_message_id: request.reply_to_message_id.clone(),
             sender_name: None,
             metadata: request.metadata.clone(),
@@ -824,6 +855,7 @@ impl HermesMessagePayloadV1 {
             status: request.status,
             edit_of: Some(request.message_id.clone()),
             attachments: Vec::new(),
+            references: Vec::new(),
             reply_to_message_id: None,
             sender_name: None,
             metadata: request.metadata.clone(),
@@ -873,6 +905,15 @@ impl HermesMessagePayloadV1 {
         for attachment in &self.attachments {
             attachment.validate_limits()?;
         }
+        validate_item_count(
+            "hermes.payload.references",
+            self.references.len(),
+            MAX_HERMES_CHAT_REFERENCES,
+        )
+        .map_err(HermesBridgeError::from)?;
+        for reference in &self.references {
+            reference.validate_limits()?;
+        }
         Ok(())
     }
 
@@ -894,6 +935,7 @@ impl HermesMessagePayloadV1 {
             .first()
             .map(HermesAttachmentV1::message_type)
             .unwrap_or(HermesMessageTypeV1::Text);
+        let channel_prompt = chat_reference_channel_prompt(&self.references);
         HermesPollEventV1 {
             room_id: room_id.clone(),
             seq,
@@ -919,15 +961,99 @@ impl HermesMessagePayloadV1 {
             reply_to_message_id: self.reply_to_message_id,
             reply_to_text: None,
             auto_skill: None,
-            channel_prompt: None,
+            channel_prompt,
             internal: false,
         }
     }
 }
 
+impl HermesChatReferenceV1 {
+    pub fn validate_limits(&self) -> Result<(), HermesBridgeError> {
+        validate_string_bytes("hermes.reference.id", &self.id, 512)?;
+        validate_string_bytes("hermes.reference.label", &self.label, 256)?;
+        validate_string_bytes("hermes.reference.detail", &self.detail, 1024)?;
+        validate_string_bytes("hermes.reference.token", &self.token, 512)?;
+        validate_optional_string("hermes.reference.path", self.path.as_deref(), 1024)?;
+        validate_optional_string("hermes.reference.url", self.url.as_deref(), 2048)?;
+        validate_optional_string(
+            "hermes.reference.fingerprint",
+            self.fingerprint.as_deref(),
+            256,
+        )?;
+        match self.kind {
+            HermesChatReferenceKindV1::File if self.path.is_none() => {
+                return Err(HermesBridgeError::MissingField {
+                    field: "hermes.reference.path".to_owned(),
+                });
+            }
+            HermesChatReferenceKindV1::Site if self.url.is_none() => {
+                return Err(HermesBridgeError::MissingField {
+                    field: "hermes.reference.url".to_owned(),
+                });
+            }
+            HermesChatReferenceKindV1::File
+            | HermesChatReferenceKindV1::Skill
+            | HermesChatReferenceKindV1::Site => {}
+        }
+        Ok(())
+    }
+}
+
+fn chat_reference_channel_prompt(references: &[HermesChatReferenceV1]) -> Option<String> {
+    if references.is_empty() {
+        return None;
+    }
+    let instructions = references
+        .iter()
+        .map(|reference| match reference.kind {
+            HermesChatReferenceKindV1::Skill => format!(
+                "Skill reference: {}. Load and follow this skill for this turn. If it is unavailable or inappropriate, explain why and offer the closest alternative.",
+                json_string(&reference.label),
+            ),
+            HermesChatReferenceKindV1::Site => format!(
+                "Site reference: {} at {}. Use this exact Finite Site for the user's request; edit it only if existing authorization permits.",
+                json_string(&reference.label),
+                json_string(reference.url.as_deref().unwrap_or_default()),
+            ),
+            HermesChatReferenceKindV1::File => {
+                let version = reference.fingerprint.as_deref().map_or_else(String::new, |value| {
+                    format!(
+                        " It was selected with source fingerprint {}; verify the current file before use, and if it changed, tell the user and ask whether to use the update.",
+                        json_string(value),
+                    )
+                });
+                format!(
+                    "File reference: {}. Open and use this Agent workspace Markdown file for this turn.{version}",
+                    json_string(reference.path.as_deref().unwrap_or_default()),
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    debug_assert!(instructions.len() <= MAX_HERMES_METADATA_BYTES as usize);
+    Some(instructions)
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serializing a string cannot fail")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace_reference(path: &str, token: &str) -> HermesChatReferenceV1 {
+        HermesChatReferenceV1 {
+            kind: HermesChatReferenceKindV1::File,
+            id: format!("workspace:{path}"),
+            label: path.rsplit('/').next().unwrap_or(path).to_owned(),
+            detail: path.to_owned(),
+            token: token.to_owned(),
+            path: Some(path.to_owned()),
+            url: None,
+            fingerprint: Some("sha256:abc".to_owned()),
+        }
+    }
 
     #[test]
     fn source_maps_room_and_conversation_to_hermes_chat_and_thread() {
@@ -944,6 +1070,44 @@ mod tests {
         assert_eq!(source.thread_id.as_deref(), Some("topic-build"));
         assert_eq!(source.chat_type, HermesChatTypeV1::Dm);
         assert_eq!(source.user_id.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn chat_references_stay_out_of_legacy_visible_text_and_project_for_hermes() {
+        #[derive(Deserialize)]
+        struct LegacyVisiblePayload {
+            text: String,
+        }
+
+        let payload = HermesMessagePayloadV1 {
+            payload_type: HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            conversation_id: Some("topic-build".to_owned()),
+            segment_id: Some("chat-1".to_owned()),
+            text: "first line\nsecond line".to_owned(),
+            kind: HermesSendKindV1::Message,
+            status: HermesMessageStatusV1::Complete,
+            edit_of: None,
+            attachments: Vec::new(),
+            references: vec![workspace_reference("plans/README.md", "@README.md")],
+            reply_to_message_id: None,
+            sender_name: None,
+            metadata: BTreeMap::new(),
+        };
+        let encoded = payload.encode().expect("referenced payload encodes");
+        let legacy: LegacyVisiblePayload =
+            serde_json::from_slice(&encoded).expect("a predecessor reader ignores the new field");
+        assert_eq!(legacy.text, "first line\nsecond line");
+        assert!(!legacy.text.contains("File reference:"));
+        assert!(!legacy.text.contains("workspace:plans/README.md"));
+
+        let event = payload.into_poll_event("room-agent-1", 1, "message-1", "alice", "hosted-web");
+        assert_eq!(event.text, "first line\nsecond line");
+        assert!(
+            event
+                .channel_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("plans/README.md"))
+        );
     }
 
     #[test]

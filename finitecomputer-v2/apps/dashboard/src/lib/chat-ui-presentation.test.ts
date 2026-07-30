@@ -199,7 +199,7 @@ test("working presentation remains visible across an activity gap and outranks t
   );
 });
 
-test("the shared transcript hides status, groups tools, and collapses edits", () => {
+test("the shared transcript hides status, groups work, and collapses edits", () => {
   const status = message({
     messageId: "status-1",
     seq: 2,
@@ -229,12 +229,13 @@ test("the shared transcript hides status, groups tools, and collapses edits", ()
     "user-account"
   );
   assert.equal(transcript.length, 2);
-  assert.equal(transcript[0]?.type, "tools");
-  if (transcript[0]?.type === "tools") {
-    assert.equal(transcript[0].messages.length, 1);
-    assert.equal(transcript[0].messages[0]?.message_id, tool.message_id);
-    assert.equal(transcript[0].messages[0]?.display_content, "tool finished");
-    assert.equal(transcript[0].messages[0]?.status, "complete");
+  assert.equal(transcript[0]?.type, "work");
+  if (transcript[0]?.type === "work") {
+    assert.equal(transcript[0].entries.length, 1);
+    assert.equal(transcript[0].entries[0]?.kind, "tool");
+    assert.equal(transcript[0].entries[0]?.message.message_id, tool.message_id);
+    assert.equal(transcript[0].entries[0]?.message.display_content, "tool finished");
+    assert.equal(transcript[0].entries[0]?.message.status, "complete");
   }
   assert.equal(transcript[1]?.type, "message");
 });
@@ -299,11 +300,52 @@ test("append-only tools remain interspersed around assistant commentary", () => 
 
   assert.deepEqual(
     transcript.map((item) =>
-      item.type === "tools"
-        ? item.messages.map((entry) => entry.message_id).join(",")
+      item.type === "work"
+        ? item.entries.map((entry) => `${entry.kind}:${entry.message.message_id}`).join(",")
         : item.message.message_id
     ),
-    ["tool-a", "commentary", "tool-b", "final"]
+    ["tool:tool-a,commentary:commentary,tool:tool-b", "final"]
+  );
+  const work = transcript[0];
+  assert.equal(work?.type === "work" ? work.entries[2]?.message.status : null, "complete");
+});
+
+test("an unfinished work receipt preserves its running state", () => {
+  const tool = message({ messageId: "tool-running", seq: 2, kind: "tool", status: "running" });
+
+  const transcript = transcriptItems([tool], "user-account");
+  const work = transcript[0];
+
+  assert.equal(work?.type === "work" ? work.entries[0]?.message.status : null, "running");
+});
+
+test("legacy non-final agent prose remains visible when no tool activity identifies a work turn", () => {
+  const first = message({ messageId: "legacy-a", seq: 2 });
+  const second = message({ messageId: "legacy-b", seq: 3 });
+
+  const transcript = transcriptItems([first, second], "user-account");
+
+  assert.deepEqual(
+    transcript.map((item) => item.type === "message" ? item.message.message_id : item.id),
+    ["legacy-a", "legacy-b"]
+  );
+});
+
+test("a user message is a hard boundary between work receipts", () => {
+  const toolA = message({ messageId: "tool-a", seq: 2, kind: "tool" });
+  const user = message({
+    messageId: "user-follow-up",
+    seq: 3,
+    senderAccountId: "user-account",
+    isMine: true,
+  });
+  const toolB = message({ messageId: "tool-b", seq: 4, kind: "tool" });
+
+  const transcript = transcriptItems([toolA, user, toolB], "user-account");
+
+  assert.deepEqual(
+    transcript.map((item) => item.type === "work" ? item.id : item.message.message_id),
+    ["work-tool-a", "user-follow-up", "work-tool-b"]
   );
 });
 

@@ -34,6 +34,7 @@ Platform Channel:
 - `agent.hermes.restart`
 - `agent.chat.recover`
 - `agent.connections.status`
+- `agent.context.search`
 - `agent.inference.apply`
 - `agent.specialization.aeon.reconcile`
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
@@ -42,6 +43,12 @@ Platform Channel:
 - `agent.hermes.config.preview`
 - `agent.hermes.config.apply`
 - `agent.hermes.config.rollback`
+
+`agent.context.search` is read-only and bounded. It accepts a lexical query,
+not a filesystem path, and returns metadata for visible workspace Markdown,
+active User/Managed Skills, and Finite Sites returned by the resident
+`fsite project list` identity. It never follows workspace symlinks or exposes
+hidden files.
 
 Specialization reconciliation owns only the `auxiliary.vision` Hermes config
 field. Its typed AEON desired state includes the worker endpoint, canonical

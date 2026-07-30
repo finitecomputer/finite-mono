@@ -8,6 +8,8 @@ import {
   isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
   parseHostedChatAction,
+  parseHostedChatReferenceSearchRequest,
+  parseHostedChatSearchRequest,
   parseHostedDeviceReconcileJsonRequest,
   parseHostedDeviceReconcileRequest,
 } from "@/lib/hosted-web-chat";
@@ -86,6 +88,60 @@ test("unexpected chat infrastructure errors are replaced with plain product copy
   );
 });
 
+test("chat search accepts one bounded canonical-room query shape", () => {
+  assert.deepEqual(
+    parseHostedChatSearchRequest({
+      room_id: "canonical-room",
+      query: "  disaster recovery  ",
+    }),
+    { room_id: "canonical-room", query: "disaster recovery" }
+  );
+
+  for (const payload of [
+    null,
+    {},
+    { room_id: "", query: "recovery" },
+    { room_id: "canonical-room", query: "x" },
+    { room_id: "canonical-room", query: "x".repeat(257) },
+    { room_id: "canonical-room", query: "recovery", limit: 5000 },
+  ]) {
+    assert.throws(
+      () => parseHostedChatSearchRequest(payload),
+      (error: unknown) => error instanceof HostedWebChatError && error.status === 400
+    );
+  }
+});
+
+test("reference search accepts bare @ recents and stays bound to one room topic", () => {
+  assert.deepEqual(
+    parseHostedChatReferenceSearchRequest({
+      room_id: "canonical-room",
+      topic_id: "topic-1",
+      query: "  pricing  ",
+    }),
+    { room_id: "canonical-room", topic_id: "topic-1", query: "pricing" }
+  );
+  assert.deepEqual(
+    parseHostedChatReferenceSearchRequest({
+      room_id: "canonical-room",
+      topic_id: "topic-1",
+      query: "",
+    }),
+    { room_id: "canonical-room", topic_id: "topic-1", query: "" }
+  );
+  for (const payload of [
+    {},
+    { room_id: "canonical-room", topic_id: "", query: "" },
+    { room_id: "canonical-room", topic_id: "topic-1", query: "x".repeat(129) },
+    { room_id: "canonical-room", topic_id: "topic-1", query: "", path: "/data" },
+  ]) {
+    assert.throws(
+      () => parseHostedChatReferenceSearchRequest(payload),
+      (error: unknown) => error instanceof HostedWebChatError && error.status === 400
+    );
+  }
+});
+
 test("hosted-device authorization recovery recognizes its service-unavailable contract", () => {
   assert.equal(
     isAgentBindingAuthorizationRequired(
@@ -141,6 +197,36 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
         topic_id: "topic-1",
         reason: null,
         intent_key: "intent-1",
+      },
+    }
+  );
+
+  const reference = {
+    kind: "file",
+    id: "workspace:plans/README.md",
+    label: "README.md",
+    detail: "plans/README.md",
+    token: "@README.md",
+    path: "plans/README.md",
+    fingerprint: "sha256:abc",
+  };
+  assert.deepEqual(
+    parseHostedChatAction({
+      SendChatMessageWithReferences: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        chat_id: "chat-1",
+        text: "first line\nsecond line",
+        references: [reference],
+      },
+    }),
+    {
+      SendChatMessageWithReferences: {
+        room_id: "room-1",
+        topic_id: "topic-1",
+        chat_id: "chat-1",
+        text: "first line\nsecond line",
+        references: [reference],
       },
     }
   );
@@ -296,6 +382,26 @@ test("parseHostedChatAction rejects ambiguous and oversized input", () => {
   assert.throws(
     () => parseHostedChatAction({ SetTyping: { room_id: "room-1", is_typing: "yes" } }),
     /Invalid is_typing/
+  );
+  assert.throws(
+    () =>
+      parseHostedChatAction({
+        SendChatMessageWithReferences: {
+          room_id: "room-1",
+          topic_id: "topic-1",
+          chat_id: "chat-1",
+          text: "hello",
+          references: Array.from({ length: 13 }, (_, index) => ({
+            kind: "file",
+            id: `workspace:${index}.md`,
+            label: `${index}.md`,
+            detail: `${index}.md`,
+            token: `@${index}.md`,
+            path: `${index}.md`,
+          })),
+        },
+      }),
+    /Invalid chat references/
   );
 });
 

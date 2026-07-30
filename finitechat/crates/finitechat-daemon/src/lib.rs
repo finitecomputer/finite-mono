@@ -20,9 +20,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use finitechat_core::{
-    AppAction, AppState, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError,
-    FiniteChatRuntime, OutboundAttachment, nostr_identity_from_account_secret_hex,
-    nostr_identity_from_nsec,
+    AppAction, AppState, ChatMediaAttachment, ChatMediaKind, ChatSearchQuery, ChatSearchResult,
+    FiniteChatCoreError, FiniteChatRuntime, OutboundAttachment,
+    nostr_identity_from_account_secret_hex, nostr_identity_from_nsec,
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -181,6 +181,7 @@ fn app_with_attachment_cache_root(
     Ok(Router::new()
         .route("/v1/healthz", get(healthz))
         .route("/v1/app/state", get(app_state))
+        .route("/v1/app/search", post(search_chats))
         .route("/v1/app/actions", post(dispatch_action))
         .route(
             "/v1/app/new-chat",
@@ -271,6 +272,17 @@ async fn healthz(State(state): State<DaemonState>) -> Result<Json<HealthResponse
 
 async fn app_state(State(state): State<DaemonState>) -> Result<Json<AppState>, DaemonError> {
     Ok(Json(runtime_state(&state.runtime)?))
+}
+
+async fn search_chats(
+    State(state): State<DaemonState>,
+    Json(query): Json<ChatSearchQuery>,
+) -> Result<Json<Vec<ChatSearchResult>>, DaemonError> {
+    let runtime = Arc::clone(&state.runtime);
+    let results = tokio::task::spawn_blocking(move || runtime.search_chats(query))
+        .await
+        .map_err(|error| DaemonError::Task(error.to_string()))??;
+    Ok(Json(results))
 }
 
 async fn dispatch_action(

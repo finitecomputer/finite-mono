@@ -33,9 +33,9 @@ use finitechat_core::nip_ab::{
 };
 use finitechat_core::{
     AppAction, AppProfileChatBootstrapInput, AppProfileChatBootstrapPreparedCommit, AppState,
-    AppTopicSummary, ChatMediaAttachment, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
-    OpenOptions, OutboundAttachment, account_id_from_npub,
-    finite_sites_native_viewer_session_proof,
+    AppTopicSummary, ChatMediaAttachment, ChatMediaKind, ChatReference, ChatSearchQuery,
+    ChatSearchResult, FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
+    account_id_from_npub, finite_sites_native_viewer_session_proof,
 };
 use finitechat_http::{
     ExpirePairingSessionRequest, ExpirePairingSessionResponse, GetPairingSessionRequest,
@@ -499,6 +499,7 @@ fn app_with_test_options(
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/app/state", get(app_state))
+        .route("/v1/app/search", post(search_chats))
         .route("/v1/app/actions", post(dispatch_action))
         .route("/v1/app/new-chat", post(start_new_chat))
         .route(
@@ -2205,6 +2206,19 @@ async fn app_state(
     Ok(Json(redacted_state(runtime.state()?)))
 }
 
+async fn search_chats(
+    State(state): State<HostedDeviceState>,
+    headers: HeaderMap,
+    Json(query): Json<ChatSearchQuery>,
+) -> Result<Json<Vec<ChatSearchResult>>, HostedDeviceError> {
+    let user_id = authorized_user(&state, &headers)?;
+    let runtime = state.runtime_for(&user_id)?;
+    let results = tokio::task::spawn_blocking(move || runtime.search_chats(query))
+        .await
+        .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    Ok(Json(results))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct OpenAgentBindingRequest {
     project_id: String,
@@ -3576,6 +3590,7 @@ struct AttachmentUploadForm {
     topic_id: Option<String>,
     chat_id: Option<String>,
     caption: Option<String>,
+    references: Option<String>,
     reply_to_message_id: Option<String>,
     attachments: Vec<OutboundAttachment>,
     total_attachment_bytes: usize,
@@ -3662,6 +3677,12 @@ async fn upload_attachments(
                     read_single_text_field(form.caption.is_some(), field_name, &mut field).await?,
                 );
             }
+            "references" => {
+                form.references = Some(
+                    read_single_text_field(form.references.is_some(), field_name, &mut field)
+                        .await?,
+                );
+            }
             "reply_to_message_id" => {
                 form.reply_to_message_id = Some(
                     read_single_text_field(
@@ -3694,8 +3715,28 @@ async fn upload_attachments(
         ));
     }
     let caption = form.caption.unwrap_or_default().trim().to_owned();
+    let references = form
+        .references
+        .map(|encoded| {
+            serde_json::from_str::<Vec<ChatReference>>(&encoded).map_err(|_| {
+                HostedDeviceError::InvalidMultipart("references are invalid".to_owned())
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
     let reply_to_message_id = optional_text_field(form.reply_to_message_id);
     let action = match (topic_id, chat_id) {
+        (Some(topic_id), Some(chat_id)) if !references.is_empty() => {
+            AppAction::SendChatAttachmentsWithReferences {
+                room_id,
+                topic_id,
+                chat_id,
+                attachments: form.attachments,
+                caption,
+                reply_to_message_id,
+                references,
+            }
+        }
         (Some(topic_id), Some(chat_id)) => AppAction::SendChatAttachments {
             room_id,
             topic_id,

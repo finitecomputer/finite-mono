@@ -1,5 +1,6 @@
 mod config;
 mod connections;
+mod context_catalog;
 mod daemon;
 mod ledger;
 mod supervisor;
@@ -15,6 +16,7 @@ pub use config::{
     SpecializationPromptVersionsV1, SpecializationReconcileResultV1, VISION_CONFIG_PATH,
     redact_value,
 };
+pub use context_catalog::{ContextCatalog, ContextSearchRequestV1, ContextSearchResultV1};
 pub use daemon::{
     AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, StartupSpecializationBundleConfig,
     read_status, run_daemon,

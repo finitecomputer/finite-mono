@@ -37,9 +37,53 @@ const dashboardDir = process.cwd();
 const repoRoot = path.resolve(dashboardDir, "../../..");
 const stateDir = path.join(repoRoot, ".local-state", "web-design-fixture");
 const statePath = path.join(stateDir, "chat.json");
+const searchPreviewPath = path.join(stateDir, "search-preview.json");
 const attachmentsDir = path.join(stateDir, "attachments");
 const scenarioPath = path.join(stateDir, "scenario");
 const resetPath = path.join(stateDir, "reset-generation");
+
+type SearchPreviewResult = {
+  room_id: string;
+  topic_id: string;
+  topic_title: string;
+  chat_id: string;
+  chat_title: string;
+  message_id: string | null;
+  excerpt: string;
+  timestamp_unix_seconds: number;
+  archived: boolean;
+  match_count: number;
+};
+
+function loadSearchPreviewResults(query: string): Array<SearchPreviewResult> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(searchPreviewPath, "utf8"));
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is SearchPreviewResult => (
+        typeof item === "object"
+        && item !== null
+        && item.room_id === "room_design"
+        && typeof item.topic_id === "string"
+        && typeof item.topic_title === "string"
+        && typeof item.chat_id === "string"
+        && typeof item.chat_title === "string"
+        && (typeof item.message_id === "string" || item.message_id === null)
+        && typeof item.excerpt === "string"
+        && typeof item.timestamp_unix_seconds === "number"
+        && typeof item.archived === "boolean"
+        && typeof item.match_count === "number"
+      ))
+      .filter((item) => [
+        item.topic_title,
+        item.chat_title,
+        item.excerpt,
+      ].join(" ").toLowerCase().includes(query))
+      .slice(0, 20);
+  } catch {
+    return [];
+  }
+}
 
 function localChildEnvironment(): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { NODE_ENV: "development" };
@@ -321,6 +365,60 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
     writeJson(response, 200, appState());
     return;
   }
+  if (request.method === "POST" && requestPath === "/v1/app/search") {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    const query = typeof body.query === "string" ? body.query.trim().toLowerCase() : "";
+    const roomId = body.room_id;
+    if (query.length < 2 || roomId !== "room_design") {
+      writeJson(response, 400, { error: "invalid chat search request" });
+      return;
+    }
+    const matches = state.messages.filter((message) => {
+      const content = `${message.display_content ?? ""} ${message.text ?? ""}`.toLowerCase();
+      return content.includes(query);
+    });
+    const results: Array<SearchPreviewResult> = loadSearchPreviewResults(query);
+    if (
+      state.chatTitle.toLowerCase().includes(query)
+      || "general".includes(query)
+      || matches.length > 0
+    ) {
+      const latest = matches.at(-1);
+      results.push({
+        room_id: "room_design",
+        topic_id: "topic_design",
+        topic_title: "General",
+        chat_id: "chat_design",
+        chat_title: state.chatTitle,
+        message_id: typeof latest?.message_id === "string" ? latest.message_id : null,
+        excerpt: typeof latest?.display_content === "string"
+          ? latest.display_content
+          : typeof latest?.text === "string"
+            ? latest.text
+            : "",
+        timestamp_unix_seconds: typeof latest?.timestamp_unix_seconds === "number"
+          ? latest.timestamp_unix_seconds
+          : 0,
+        archived: state.chatArchived,
+        match_count: Math.max(matches.length, 1),
+      });
+    }
+    writeJson(response, 200, results
+      .sort((left, right) => right.timestamp_unix_seconds - left.timestamp_unix_seconds)
+      .map((result) => ({
+        room_id: result.room_id,
+        topic_id: result.topic_id,
+        topic_title: result.topic_title,
+        chat_id: result.chat_id,
+        chat_title: result.chat_title,
+        message_id: result.message_id,
+        excerpt: result.excerpt,
+        timestamp_unix_seconds: result.timestamp_unix_seconds,
+        archived: result.archived,
+        match_count: result.match_count,
+      })));
+    return;
+  }
   if (request.method === "GET" && requestPath.startsWith("/v1/app/attachments/")) {
     const attachmentId = requestPath.split("/").at(-1) ?? "";
     const attachment = attachments.get(attachmentId);
@@ -408,6 +506,55 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
     return;
   }
   if (request.method === "POST" && requestPath === "/v1/app/runtime-commands") {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    if (body.command === "agent.context.search") {
+      const commandBody = body.body as { query?: unknown } | undefined;
+      const query = typeof commandBody?.query === "string"
+        ? commandBody.query.toLowerCase()
+        : "";
+      const references = [
+        {
+          kind: "file",
+          id: "workspace:plans/pricing-plan.md",
+          label: "pricing-plan.md",
+          detail: "plans/pricing-plan.md",
+          path: "plans/pricing-plan.md",
+          description: "Pricing plan and packaging notes.",
+          fingerprint: "sha256:fixture-pricing",
+          updated_at_ms: 1_783_000_000_000,
+        },
+        {
+          kind: "skill",
+          id: "skill:strategy-review",
+          label: "strategy-review",
+          detail: "Managed skill",
+          description: "Review a product strategy and identify risks.",
+          fingerprint: "sha256:fixture-strategy",
+          updated_at_ms: 1_783_000_000_000,
+        },
+        {
+          kind: "site",
+          id: "site_fixture",
+          label: "finite-store",
+          detail: "commerce · https://finite-store.finite.chat/",
+          description: "owner access",
+          url: "https://finite-store.finite.chat/",
+          updated_at_ms: 0,
+        },
+      ].filter((reference) =>
+        !query
+        || `${reference.label} ${reference.detail} ${reference.description}`
+          .toLowerCase()
+          .includes(query)
+      );
+      writeJson(response, 200, {
+        request_id: "web-design-context-search",
+        status: "succeeded",
+        body: { results: references },
+        error: null,
+      });
+      return;
+    }
     writeJson(response, 200, {
       request_id: "web-design-command",
       status: "succeeded",

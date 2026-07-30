@@ -1,7 +1,14 @@
 "use client";
 
-import type { CSSProperties, FormEvent, ReactNode } from "react";
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import type { CSSProperties, FormEvent, KeyboardEvent, ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   ArchiveIcon,
@@ -13,6 +20,8 @@ import {
   PencilIcon,
   PlusIcon,
   RotateCcwIcon,
+  SearchIcon,
+  XIcon,
 } from "lucide-react";
 
 import { AccountMenu, AgentNavigation } from "@/components/agent-navigation";
@@ -35,6 +44,7 @@ import {
 } from "@/lib/electron-chat-runtime";
 import type {
   HostedChatAction,
+  HostedChatSearchResult,
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
@@ -70,6 +80,7 @@ export function AgentSidebar({
     load,
     recoverBinding,
     dispatch,
+    searchChats,
   } = useHostedChat();
   const hydrated = useSyncExternalStore(
     subscribeHydration,
@@ -93,6 +104,7 @@ export function AgentSidebar({
     chat: HostedChatSummary;
   } | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id ?? null;
   const topics = useMemo(
@@ -108,6 +120,21 @@ export function AgentSidebar({
   const selectedTopicId = state?.selected_topic_id ?? null;
   const selectedChatId = state?.selected_chat_id ?? null;
   const defaultNewChatTopic = canonicalNewChatTopic(topics);
+
+  useEffect(() => {
+    const openSearch = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.key.toLowerCase() === "k"
+        && (event.metaKey || event.ctrlKey)
+        && !event.altKey
+      ) {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", openSearch);
+    return () => window.removeEventListener("keydown", openSearch);
+  }, []);
 
   const act = useCallback(async (action: HostedChatAction) => {
     setBusy(true);
@@ -146,6 +173,17 @@ export function AgentSidebar({
         room_id: topic.room_id,
         topic_id: topic.topic_id,
         chat_id: chat.chat_id,
+      },
+    });
+  }
+
+  function openSearchResult(result: HostedChatSearchResult) {
+    setSearchOpen(false);
+    void act({
+      OpenChat: {
+        room_id: result.room_id,
+        topic_id: result.topic_id,
+        chat_id: result.chat_id,
       },
     });
   }
@@ -278,16 +316,28 @@ export function AgentSidebar({
           />
           <div className="finite-chat__sidebar-section-row">
             <span className="finite-chat__sidebar-section">Topics</span>
-            <button
-              type="button"
-              className="ocean-icon-button"
-              aria-label="New topic"
-              title="New topic"
-              disabled={busy || !canonicalRoomId}
-              onClick={() => setCreateTopicOpen(true)}
-            >
-              <PlusIcon className="size-3.5" />
-            </button>
+            <span className="finite-agent-sidebar__section-actions">
+              <button
+                type="button"
+                className="ocean-icon-button"
+                aria-label="Search chats"
+                title="Search chats (Command K)"
+                disabled={!canonicalRoomId}
+                onClick={() => setSearchOpen(true)}
+              >
+                <SearchIcon className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                className="ocean-icon-button"
+                aria-label="New topic"
+                title="New topic"
+                disabled={busy || !canonicalRoomId}
+                onClick={() => setCreateTopicOpen(true)}
+              >
+                <PlusIcon className="size-3.5" />
+              </button>
+            </span>
           </div>
           {!state && !transportError ? <p className="finite-agent-sidebar__status">Loading chats…</p> : null}
           {transportError ? (
@@ -456,6 +506,15 @@ export function AgentSidebar({
         </DialogContent>
       </Dialog>
 
+      {searchOpen ? (
+        <ChatSearchSpotlight
+          roomId={canonicalRoomId}
+          searchChats={searchChats}
+          onOpenChange={setSearchOpen}
+          onSelect={openSearchResult}
+        />
+      ) : null}
+
       <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => {
         if (!open) setRenameTarget(null);
       }}>
@@ -488,6 +547,262 @@ export function AgentSidebar({
       </Dialog>
     </>
   );
+}
+
+function ChatSearchSpotlight({
+  roomId,
+  searchChats,
+  onOpenChange,
+  onSelect,
+}: {
+  roomId: string | null;
+  searchChats: (
+    roomId: string,
+    query: string,
+    signal?: AbortSignal
+  ) => Promise<HostedChatSearchResult[]>;
+  onOpenChange: (open: boolean) => void;
+  onSelect: (result: HostedChatSearchResult) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<HostedChatSearchResult[]>([]);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [keyboardSelectionVisible, setKeyboardSelectionVisible] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [resultsHeight, setResultsHeight] = useState(0);
+  const resultsResizeObserverRef = useRef<ResizeObserver | null>(null);
+  const normalizedQuery = query.trim();
+
+  const setResultsPanelRef = useCallback((node: HTMLDivElement | null) => {
+    resultsResizeObserverRef.current?.disconnect();
+    resultsResizeObserverRef.current = null;
+    if (!node) return;
+
+    const observer = new ResizeObserver(([entry]) => {
+      const borderBox = entry?.borderBoxSize[0];
+      setResultsHeight(Math.ceil(borderBox?.blockSize ?? entry?.contentRect.height ?? 0));
+    });
+    observer.observe(node);
+    resultsResizeObserverRef.current = observer;
+  }, []);
+
+  useEffect(() => () => {
+    resultsResizeObserverRef.current?.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!roomId || normalizedQuery.length < 2) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      setError(null);
+      void searchChats(roomId, normalizedQuery, controller.signal)
+        .then((next) => {
+          setResults(next);
+          setSelectedIndex(0);
+          setKeyboardSelectionVisible(false);
+        })
+        .catch((caught) => {
+          if (caught instanceof DOMException && caught.name === "AbortError") return;
+          setResults([]);
+          setError(caught instanceof Error ? caught.message : "Search is temporarily unavailable.");
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false);
+        });
+    }, 140);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [normalizedQuery, roomId, searchChats]);
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (!results.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSelectedIndex((current) => (
+        keyboardSelectionVisible ? (current + 1) % results.length : 0
+      ));
+      setKeyboardSelectionVisible(true);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSelectedIndex((current) => (
+        keyboardSelectionVisible
+          ? (current - 1 + results.length) % results.length
+          : results.length - 1
+      ));
+      setKeyboardSelectionVisible(true);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const selected = results[selectedIndex];
+      if (selected) onSelect(selected);
+    }
+  }
+
+  const activeResultId = keyboardSelectionVisible && results[selectedIndex]
+    ? `finite-chat-search-result-${selectedIndex}`
+    : undefined;
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent
+        className="finite-chat-search sm:!max-w-2xl"
+        showCloseButton={false}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          inputRef.current?.focus();
+        }}
+      >
+        <DialogTitle className="sr-only">Search chats</DialogTitle>
+        <DialogDescription className="sr-only">
+          Search previous chat titles and messages.
+        </DialogDescription>
+        <div className="finite-chat-search__input-row">
+          <SearchIcon className="size-4" aria-hidden />
+          <input
+            ref={inputRef}
+            type="search"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-controls="finite-chat-search-results"
+            aria-expanded={results.length > 0}
+            aria-activedescendant={activeResultId}
+            aria-label="Search chats"
+            autoComplete="off"
+            placeholder="Search chats…"
+            value={query}
+            onChange={(event) => {
+              const next = event.target.value;
+              setQuery(next);
+              setKeyboardSelectionVisible(false);
+              if (next.trim().length < 2) {
+                setResults([]);
+                setSelectedIndex(0);
+                setLoading(false);
+                setError(null);
+              }
+            }}
+            onKeyDown={handleKeyDown}
+          />
+          {query ? (
+            <button
+              type="button"
+              className="finite-chat-search__clear"
+              aria-label="Clear search"
+              onClick={() => {
+                setQuery("");
+                setResults([]);
+                setSelectedIndex(0);
+                setKeyboardSelectionVisible(false);
+                setLoading(false);
+                setError(null);
+                inputRef.current?.focus();
+              }}
+            >
+              <XIcon className="size-4" aria-hidden />
+            </button>
+          ) : null}
+        </div>
+        <div
+          className="finite-chat-search__results-clip"
+          style={{ height: resultsHeight }}
+        >
+          <div
+            ref={setResultsPanelRef}
+            id="finite-chat-search-results"
+            className={`finite-chat-search__results ${normalizedQuery.length < 2 ? "is-idle" : ""}`}
+            role="listbox"
+            aria-busy={loading}
+          >
+            {normalizedQuery.length < 2 ? null : loading && results.length === 0 ? (
+              <p className="finite-chat-search__empty">Searching…</p>
+            ) : error ? (
+              <p className="finite-chat-search__empty is-error">{error}</p>
+            ) : results.length === 0 ? (
+              <div className="finite-chat-search__empty finite-chat-search__constellation">
+                <span className="finite-chat-search__stars" aria-hidden>
+                  <span>✦</span><span>·</span><span>⋆</span><span>·</span><span>✧</span>
+                </span>
+                <p>No chats found.</p>
+                <span className="finite-chat-search__stars is-offset" aria-hidden>
+                  <span>·</span><span>✧</span><span>·</span><span>✦</span><span>⋆</span>
+                </span>
+              </div>
+            ) : (
+              results.map((result, index) => (
+                <button
+                  id={`finite-chat-search-result-${index}`}
+                  key={`${result.topic_id}:${result.chat_id}`}
+                  type="button"
+                  className={`finite-chat-search__result ${
+                    keyboardSelectionVisible && index === selectedIndex ? "is-selected" : ""
+                  }`}
+                  role="option"
+                  aria-selected={keyboardSelectionVisible && index === selectedIndex}
+                  onMouseMove={() => {
+                    setSelectedIndex(index);
+                    setKeyboardSelectionVisible(false);
+                  }}
+                  onClick={() => onSelect(result)}
+                >
+                  <span className="finite-chat-search__result-main">
+                    <span className="finite-chat-search__result-heading">
+                      <span className="finite-chat-search__result-title">
+                        <HighlightedSearchText
+                          text={result.chat_title || "New chat"}
+                          query={normalizedQuery}
+                        />
+                      </span>
+                      <span className="finite-chat-search__result-meta">
+                        <HighlightedSearchText
+                          text={result.topic_title}
+                          query={normalizedQuery}
+                        />
+                      </span>
+                    </span>
+                    {result.excerpt.trim() ? (
+                      <span className="finite-chat-search__result-excerpt">
+                        <HighlightedSearchText
+                          text={result.excerpt}
+                          query={normalizedQuery}
+                        />
+                      </span>
+                    ) : null}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function HighlightedSearchText({ text, query }: { text: string; query: string }) {
+  const normalizedNeedle = query.trim().toLocaleLowerCase();
+  const normalizedText = text.toLocaleLowerCase();
+  if (!normalizedNeedle || !normalizedText.includes(normalizedNeedle)) return text;
+
+  const parts: Array<ReactNode> = [];
+  let cursor = 0;
+  let matchIndex = normalizedText.indexOf(normalizedNeedle);
+  while (matchIndex !== -1) {
+    if (matchIndex > cursor) parts.push(text.slice(cursor, matchIndex));
+    const matchEnd = matchIndex + normalizedNeedle.length;
+    parts.push(
+      <mark className="finite-chat-search__match" key={`${matchIndex}:${matchEnd}`}>
+        {text.slice(matchIndex, matchEnd)}
+      </mark>,
+    );
+    cursor = matchEnd;
+    matchIndex = normalizedText.indexOf(normalizedNeedle, cursor);
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
 }
 
 function ChatRow({

@@ -211,6 +211,7 @@ test("desktop chat bridge exposes an exact action allowlist", () => {
     "StartTopicChatIntent",
     "SetChatArchived",
     "SendChatMessage",
+    "SendChatMessageWithReferences",
     "RefreshDevices",
   ]) {
     const value = { [operation]: operation === "RefreshDevices" ? null : {} };

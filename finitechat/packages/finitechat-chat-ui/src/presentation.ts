@@ -25,9 +25,14 @@ export type PendingChatTurn = {
   started_at_ms: number;
 };
 
+export type WorkTranscriptEntry = {
+  kind: "commentary" | "tool";
+  message: ChatMessage;
+};
+
 export type TranscriptItem =
   | { type: "message"; message: ChatMessage }
-  | { type: "tools"; id: string; messages: ChatMessage[] };
+  | { type: "work"; id: string; entries: WorkTranscriptEntry[] };
 
 const TOOL_LINE_RE = /^(?:⚙️?|🔧|🛠️?|🔍|🔎|📖|💻|🌐|⚡)\s+/u;
 const REMOTE_WORKING_STATUS_RE = /^⏳\s+Working\s+—/u;
@@ -98,8 +103,10 @@ export function roomDetailsForSelection(
 
 /**
  * Project the durable message stream into the product transcript. Agent
- * status records are activity, not prose; adjacent tool records form one
- * inspectable work group; and edits replace the message they target.
+ * status records are activity, not prose; commentary and tools from one agent
+ * turn form one inspectable work receipt; and edits replace the message they
+ * target. A run without any tools remains ordinary prose for compatibility
+ * with legacy messages that predate final-delivery markers.
  */
 export function transcriptItems(
   messages: ChatMessage[],
@@ -107,32 +114,53 @@ export function transcriptItems(
 ): TranscriptItem[] {
   const projected = collapseMessageEdits(messages);
   const items: TranscriptItem[] = [];
+  let pendingWork: WorkTranscriptEntry[] = [];
+
+  const flushPendingWork = (complete = false) => {
+    if (pendingWork.length === 0) return;
+    if (pendingWork.some((entry) => entry.kind === "tool")) {
+      items.push({
+        type: "work",
+        id: `work-${pendingWork[0]!.message.message_id}`,
+        entries: complete
+          ? pendingWork.map((entry) => entry.kind === "tool"
+            ? { ...entry, message: { ...entry.message, status: "complete" } }
+            : entry)
+          : pendingWork,
+      });
+    } else {
+      items.push(...pendingWork.map((entry) => ({
+        type: "message" as const,
+        message: entry.message,
+      })));
+    }
+    pendingWork = [];
+  };
+
   for (const message of projected) {
     const fromUserPrincipal = ownAccountId
       ? message.sender_account_id === ownAccountId
       : message.is_mine;
+    const kind = messageKind(message);
     if (
       !fromUserPrincipal
-      && (messageKind(message) === "status" || isRemoteWorkingStatusMessage(message))
+      && (kind === "status" || isRemoteWorkingStatusMessage(message))
     ) continue;
-    if (!fromUserPrincipal && messageKind(message) === "tool") {
-      const previous = items[items.length - 1];
-      if (previous?.type === "tools") {
-        previous.messages.push(message);
-      } else {
-        items.push({ type: "tools", id: `tools-${message.message_id}`, messages: [message] });
-      }
+    if (
+      !fromUserPrincipal
+      && !message.final_delivery
+      && (kind === "message" || kind === "tool")
+    ) {
+      pendingWork.push({
+        kind: kind === "tool" ? "tool" : "commentary",
+        message,
+      });
       continue;
     }
-    const previous = items[items.length - 1];
-    if (previous?.type === "tools") {
-      previous.messages = previous.messages.map((toolMessage) => ({
-        ...toolMessage,
-        status: "complete",
-      }));
-    }
+    flushPendingWork(true);
     items.push({ type: "message", message });
   }
+  flushPendingWork();
   return items;
 }
 

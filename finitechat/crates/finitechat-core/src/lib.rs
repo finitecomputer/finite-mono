@@ -29,8 +29,8 @@ use finitechat_client::{
     run_room_sync_tick, run_runtime_sync_setup_tick,
 };
 use finitechat_hermes::{
-    HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1,
-    HermesSendKindV1,
+    HermesAttachmentKindV1, HermesAttachmentV1, HermesChatReferenceKindV1, HermesChatReferenceV1,
+    HermesMessagePayloadV1, HermesMessageStatusV1, HermesSendKindV1,
 };
 use finitechat_http::{
     FINITECHAT_SERVER_CONTRACT_VERSION, GetEphemeralActivitiesRequest, HealthResponse,
@@ -351,6 +351,29 @@ pub enum ChatMessageStatus {
     Complete,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatReferenceKind {
+    File,
+    Skill,
+    Site,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ChatReference {
+    pub kind: ChatReferenceKind,
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub token: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct ChatMessage {
     pub room_id: String,
@@ -371,6 +394,8 @@ pub struct ChatMessage {
     pub display_content: String,
     #[serde(default)]
     pub rich_text_json: String,
+    #[serde(default)]
+    pub references: Vec<ChatReference>,
     #[serde(default)]
     pub kind: ChatMessageKind,
     #[serde(default)]
@@ -446,6 +471,27 @@ pub struct AppChatSummary {
     pub active: bool,
     #[serde(default)]
     pub archived: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ChatSearchQuery {
+    pub room_id: String,
+    pub query: String,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ChatSearchResult {
+    pub room_id: String,
+    pub topic_id: String,
+    pub topic_title: String,
+    pub chat_id: String,
+    pub chat_title: String,
+    pub message_id: Option<String>,
+    pub excerpt: String,
+    pub timestamp_unix_seconds: u64,
+    pub archived: bool,
+    pub match_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
@@ -744,6 +790,13 @@ pub enum AppAction {
         chat_id: String,
         text: String,
     },
+    SendChatMessageWithReferences {
+        room_id: String,
+        topic_id: String,
+        chat_id: String,
+        text: String,
+        references: Vec<ChatReference>,
+    },
     SendReply {
         room_id: String,
         text: String,
@@ -789,6 +842,15 @@ pub enum AppAction {
         attachments: Vec<OutboundAttachment>,
         caption: String,
         reply_to_message_id: Option<String>,
+    },
+    SendChatAttachmentsWithReferences {
+        room_id: String,
+        topic_id: String,
+        chat_id: String,
+        attachments: Vec<OutboundAttachment>,
+        caption: String,
+        reply_to_message_id: Option<String>,
+        references: Vec<ChatReference>,
     },
     SendPoll {
         room_id: String,
@@ -881,6 +943,10 @@ enum AppRuntimeCommand {
     Dispatch {
         action: AppAction,
         response: Option<mpsc::SyncSender<Result<AppState, FiniteChatCoreError>>>,
+    },
+    SearchChats {
+        query: ChatSearchQuery,
+        response: mpsc::SyncSender<Result<Vec<ChatSearchResult>, FiniteChatCoreError>>,
     },
     WaitPlan {
         timeout_millis: u64,
@@ -1006,6 +1072,12 @@ struct AppRuntimeState {
     selection_is_explicit_or_bootstrapped: bool,
 }
 
+struct ChatSearchCandidate {
+    result: ChatSearchResult,
+    title_match: bool,
+    latest_seq: u64,
+}
+
 struct AcceptedDeviceLinkBootstrap {
     room_id: String,
     canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
@@ -1018,6 +1090,7 @@ struct SendAttachmentInput {
     attachments: Vec<OutboundAttachment>,
     caption: String,
     reply_to_message_id: Option<String>,
+    references: Vec<ChatReference>,
 }
 
 struct PreparedOutboundMessage {
@@ -1299,6 +1372,26 @@ impl FiniteChatRuntime {
             .recv()
             .map_err(|_| FiniteChatCoreError::Client {
                 reason: "runtime actor stopped before completing command".to_owned(),
+            })?
+    }
+
+    pub fn search_chats(
+        &self,
+        query: ChatSearchQuery,
+    ) -> Result<Vec<ChatSearchResult>, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::SearchChats {
+                query,
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before completing chat search".to_owned(),
             })?
     }
 
@@ -1899,6 +1992,9 @@ fn spawn_app_runtime_worker(
                         }
                     }
                 }
+                AppRuntimeCommand::SearchChats { query, response } => {
+                    let _ = response.send(state.search_chats(query));
+                }
                 AppRuntimeCommand::WaitPlan {
                     timeout_millis,
                     response,
@@ -2355,6 +2451,133 @@ impl AppRuntimeState {
         Ok(state)
     }
 
+    fn search_chats(
+        &self,
+        input: ChatSearchQuery,
+    ) -> Result<Vec<ChatSearchResult>, FiniteChatCoreError> {
+        let query = input.query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        if input.room_id.trim() != input.room_id
+            || input.room_id.is_empty()
+            || input.room_id.len() > MAX_OBJECT_ID_BYTES as usize
+            || query.len() > 256
+            || !(1..=50).contains(&input.limit)
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "chat search request is invalid".to_owned(),
+            });
+        }
+
+        let normalized = query.to_lowercase();
+        let mut candidates = BTreeMap::<(String, String), ChatSearchCandidate>::new();
+        for topic in self
+            .app
+            .topics
+            .iter()
+            .filter(|topic| topic.room_id == input.room_id)
+        {
+            for chat in &topic.chats {
+                let title_match = topic.title.to_lowercase().contains(&normalized)
+                    || chat.title.to_lowercase().contains(&normalized);
+                if title_match {
+                    candidates.insert(
+                        (topic.topic_id.clone(), chat.chat_id.clone()),
+                        ChatSearchCandidate {
+                            result: ChatSearchResult {
+                                room_id: topic.room_id.clone(),
+                                topic_id: topic.topic_id.clone(),
+                                topic_title: topic.title.clone(),
+                                chat_id: chat.chat_id.clone(),
+                                chat_title: chat.title.clone(),
+                                message_id: None,
+                                excerpt: chat.last_message_preview.clone(),
+                                timestamp_unix_seconds: 0,
+                                archived: chat.archived,
+                                match_count: 1,
+                            },
+                            title_match: true,
+                            latest_seq: chat.updated_seq,
+                        },
+                    );
+                }
+            }
+        }
+
+        for message in self
+            .chat_projection
+            .messages
+            .values()
+            .filter(|message| message.room_id == input.room_id)
+        {
+            let (Some(topic_id), Some(chat_id)) =
+                (message.conversation_id.as_ref(), message.chat_id.as_ref())
+            else {
+                continue;
+            };
+            let Some(topic) = self
+                .app
+                .topics
+                .iter()
+                .find(|topic| topic.room_id == input.room_id && topic.topic_id == *topic_id)
+            else {
+                continue;
+            };
+            let Some(chat) = topic.chats.iter().find(|chat| chat.chat_id == *chat_id) else {
+                continue;
+            };
+            let content = if message.display_content.trim().is_empty() {
+                message.text.as_str()
+            } else {
+                message.display_content.as_str()
+            };
+            if !content.to_lowercase().contains(&normalized) {
+                continue;
+            }
+            let key = (topic_id.clone(), chat_id.clone());
+            let candidate = candidates
+                .entry(key)
+                .or_insert_with(|| ChatSearchCandidate {
+                    result: ChatSearchResult {
+                        room_id: input.room_id.clone(),
+                        topic_id: topic_id.clone(),
+                        topic_title: topic.title.clone(),
+                        chat_id: chat_id.clone(),
+                        chat_title: chat.title.clone(),
+                        message_id: None,
+                        excerpt: String::new(),
+                        timestamp_unix_seconds: 0,
+                        archived: chat.archived,
+                        match_count: 0,
+                    },
+                    title_match: false,
+                    latest_seq: 0,
+                });
+            candidate.result.match_count = candidate.result.match_count.saturating_add(1);
+            if message.seq >= candidate.latest_seq || candidate.result.message_id.is_none() {
+                candidate.latest_seq = message.seq;
+                candidate.result.message_id = Some(message.message_id.clone());
+                candidate.result.excerpt = chat_search_excerpt(content);
+                candidate.result.timestamp_unix_seconds = message.timestamp_unix_seconds;
+            }
+        }
+
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .title_match
+                .cmp(&left.title_match)
+                .then_with(|| right.latest_seq.cmp(&left.latest_seq))
+                .then_with(|| left.result.chat_title.cmp(&right.result.chat_title))
+        });
+        Ok(candidates
+            .into_iter()
+            .take(input.limit as usize)
+            .map(|candidate| candidate.result)
+            .collect())
+    }
+
     fn prepare_dispatch(&mut self, action: &AppAction) -> bool {
         match action {
             AppAction::ScanTarget { .. } => {
@@ -2467,6 +2690,14 @@ impl AppRuntimeState {
                 chat_id,
                 text,
             } => self.send_chat_message(room_id, topic_id, chat_id, text)?,
+            AppAction::SendChatMessageWithReferences {
+                room_id,
+                topic_id,
+                chat_id,
+                text,
+                references,
+            } => self
+                .send_chat_message_with_references(room_id, topic_id, chat_id, text, references)?,
             AppAction::SendReply {
                 room_id,
                 text,
@@ -2499,6 +2730,7 @@ impl AppRuntimeState {
                 }],
                 caption,
                 reply_to_message_id,
+                references: Vec::new(),
             })?,
             AppAction::SendChatAttachment {
                 room_id,
@@ -2522,6 +2754,7 @@ impl AppRuntimeState {
                 }],
                 caption,
                 reply_to_message_id,
+                references: Vec::new(),
             })?,
             AppAction::SendAttachments {
                 room_id,
@@ -2535,6 +2768,7 @@ impl AppRuntimeState {
                 attachments,
                 caption,
                 reply_to_message_id,
+                references: Vec::new(),
             })?,
             AppAction::SendChatAttachments {
                 room_id,
@@ -2550,6 +2784,24 @@ impl AppRuntimeState {
                 attachments,
                 caption,
                 reply_to_message_id,
+                references: Vec::new(),
+            })?,
+            AppAction::SendChatAttachmentsWithReferences {
+                room_id,
+                topic_id,
+                chat_id,
+                attachments,
+                caption,
+                reply_to_message_id,
+                references,
+            } => self.send_chat_attachment(SendAttachmentInput {
+                room_id,
+                conversation_id: Some(topic_id),
+                chat_id: Some(chat_id),
+                attachments,
+                caption,
+                reply_to_message_id,
+                references,
             })?,
             AppAction::SendPoll {
                 room_id,
@@ -4449,6 +4701,25 @@ impl AppRuntimeState {
         )
     }
 
+    fn send_chat_message_with_references(
+        &mut self,
+        room_id: String,
+        topic_id: String,
+        chat_id: String,
+        text: String,
+        references: Vec<ChatReference>,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
+        self.send_message_with_conversation_and_chat_and_references(
+            room_id,
+            Some(topic_id),
+            Some(chat_id),
+            text,
+            None,
+            references,
+        )
+    }
+
     fn send_reply(
         &mut self,
         room_id: String,
@@ -4515,6 +4786,25 @@ impl AppRuntimeState {
         text: String,
         reply_to_message_id: Option<String>,
     ) -> Result<(), FiniteChatCoreError> {
+        self.send_message_with_conversation_and_chat_and_references(
+            room_id,
+            conversation_id,
+            chat_id,
+            text,
+            reply_to_message_id,
+            Vec::new(),
+        )
+    }
+
+    fn send_message_with_conversation_and_chat_and_references(
+        &mut self,
+        room_id: String,
+        conversation_id: Option<String>,
+        chat_id: Option<String>,
+        text: String,
+        reply_to_message_id: Option<String>,
+        references: Vec<ChatReference>,
+    ) -> Result<(), FiniteChatCoreError> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Ok(());
@@ -4530,6 +4820,7 @@ impl AppRuntimeState {
             reply_to_message_id.as_deref(),
             conversation_id.as_deref(),
             chat_id.as_deref(),
+            references,
         )?;
         let app_event_plaintext = encode_application_event_with_segment(
             DurableAppEventKind::ChatMessage,
@@ -4754,6 +5045,7 @@ impl AppRuntimeState {
         &mut self,
         mut input: SendAttachmentInput,
     ) -> Result<(), FiniteChatCoreError> {
+        validate_chat_references(&input.references)?;
         let room_id = input.room_id.clone();
         if !self.room_is_connected(&room_id) {
             return Err(FiniteChatCoreError::Client {
@@ -7925,6 +8217,7 @@ impl CoreState {
             attachments: input_attachments,
             caption,
             reply_to_message_id,
+            references,
         } = input;
         if input_attachments.is_empty() {
             return Err(FiniteChatCoreError::Client {
@@ -7947,6 +8240,7 @@ impl CoreState {
             reply_to_message_id.as_deref(),
             conversation_id.as_deref(),
             chat_id.as_deref(),
+            references,
         )?;
         let mut projection =
             self.send_chat_payload(&room_id, conversation_id, chat_id, chat_payload)?;
@@ -8998,6 +9292,7 @@ enum DecodedAppEvent {
 struct ChatProjectionPayload {
     text: String,
     display_content: String,
+    references: Vec<ChatReference>,
     kind: ChatMessageKind,
     status: ChatMessageStatus,
     final_delivery: bool,
@@ -9067,6 +9362,7 @@ fn project_chat_message(
         text: projection.text,
         display_content: projection.display_content,
         rich_text_json,
+        references: projection.references,
         kind: projection.kind,
         status: projection.status,
         final_delivery: projection.final_delivery,
@@ -9191,6 +9487,7 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         return ChatProjectionPayload {
             display_content: question.clone(),
             text: question,
+            references: Vec::new(),
             kind: ChatMessageKind::Message,
             status: ChatMessageStatus::Complete,
             final_delivery: false,
@@ -9204,9 +9501,11 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         };
     }
     if let Ok(Some(payload)) = HermesMessagePayloadV1::decode(payload_bytes) {
+        let references = payload.references.into_iter().map(chat_reference).collect();
         return ChatProjectionPayload {
             display_content: payload.text.clone(),
             text: payload.text,
+            references,
             kind: chat_message_kind(payload.kind),
             status: chat_message_status(payload.status),
             final_delivery: payload
@@ -9232,6 +9531,7 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
     ChatProjectionPayload {
         display_content: text.clone(),
         text,
+        references: Vec::new(),
         kind: ChatMessageKind::Message,
         status: ChatMessageStatus::Complete,
         final_delivery: false,
@@ -9242,6 +9542,23 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         sender_name: None,
         media: Vec::new(),
         poll: None,
+    }
+}
+
+fn chat_reference(reference: HermesChatReferenceV1) -> ChatReference {
+    ChatReference {
+        kind: match reference.kind {
+            HermesChatReferenceKindV1::File => ChatReferenceKind::File,
+            HermesChatReferenceKindV1::Skill => ChatReferenceKind::Skill,
+            HermesChatReferenceKindV1::Site => ChatReferenceKind::Site,
+        },
+        id: reference.id,
+        label: reference.label,
+        detail: reference.detail,
+        token: reference.token,
+        path: reference.path,
+        url: reference.url,
+        fingerprint: reference.fingerprint,
     }
 }
 
@@ -9547,7 +9864,7 @@ fn encode_text_message_payload(
     text: &str,
     reply_to_message_id: Option<&str>,
 ) -> Result<Vec<u8>, FiniteChatCoreError> {
-    encode_text_message_payload_scoped(text, reply_to_message_id, None, None)
+    encode_text_message_payload_scoped(text, reply_to_message_id, None, None, Vec::new())
 }
 
 fn encode_text_message_payload_scoped(
@@ -9555,6 +9872,7 @@ fn encode_text_message_payload_scoped(
     reply_to_message_id: Option<&str>,
     conversation_id: Option<&str>,
     chat_id: Option<&str>,
+    references: Vec<ChatReference>,
 ) -> Result<Vec<u8>, FiniteChatCoreError> {
     HermesMessagePayloadV1 {
         payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
@@ -9565,6 +9883,7 @@ fn encode_text_message_payload_scoped(
         status: finitechat_hermes::HermesMessageStatusV1::Complete,
         edit_of: None,
         attachments: Vec::new(),
+        references: references.into_iter().map(hermes_chat_reference).collect(),
         reply_to_message_id: reply_to_message_id.map(ToOwned::to_owned),
         sender_name: None,
         metadata: BTreeMap::new(),
@@ -9579,6 +9898,7 @@ fn encode_attachment_message_payload(
     reply_to_message_id: Option<&str>,
     conversation_id: Option<&str>,
     chat_id: Option<&str>,
+    references: Vec<ChatReference>,
 ) -> Result<Vec<u8>, FiniteChatCoreError> {
     validate_item_count(
         "attachments",
@@ -9595,12 +9915,45 @@ fn encode_attachment_message_payload(
         status: finitechat_hermes::HermesMessageStatusV1::Complete,
         edit_of: None,
         attachments,
+        references: references.into_iter().map(hermes_chat_reference).collect(),
         reply_to_message_id: reply_to_message_id.map(ToOwned::to_owned),
         sender_name: None,
         metadata: BTreeMap::new(),
     }
     .encode()
     .map_err(client_error)
+}
+
+fn hermes_chat_reference(reference: ChatReference) -> HermesChatReferenceV1 {
+    HermesChatReferenceV1 {
+        kind: match reference.kind {
+            ChatReferenceKind::File => HermesChatReferenceKindV1::File,
+            ChatReferenceKind::Skill => HermesChatReferenceKindV1::Skill,
+            ChatReferenceKind::Site => HermesChatReferenceKindV1::Site,
+        },
+        id: reference.id,
+        label: reference.label,
+        detail: reference.detail,
+        token: reference.token,
+        path: reference.path,
+        url: reference.url,
+        fingerprint: reference.fingerprint,
+    }
+}
+
+fn validate_chat_references(references: &[ChatReference]) -> Result<(), FiniteChatCoreError> {
+    validate_item_count(
+        "chat references",
+        references.len(),
+        finitechat_hermes::MAX_HERMES_CHAT_REFERENCES,
+    )
+    .map_err(client_error)?;
+    for reference in references {
+        hermes_chat_reference(reference.clone())
+            .validate_limits()
+            .map_err(client_error)?;
+    }
+    Ok(())
 }
 
 fn encode_poll_message_payload(
@@ -11056,6 +11409,15 @@ fn message_preview(message: &ChatMessage) -> String {
         ChatMediaKind::Video => "Video".to_owned(),
         ChatMediaKind::File => "File".to_owned(),
     }
+}
+
+fn chat_search_excerpt(content: &str) -> String {
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut excerpt = collapsed.chars().take(180).collect::<String>();
+    if collapsed.chars().count() > 180 {
+        excerpt.push('…');
+    }
+    excerpt
 }
 
 fn topic_summary_from_projection(
@@ -12668,6 +13030,31 @@ mod tests {
             .map(|chat| chat.title.as_str());
         assert_eq!(stable_title, Some("second Home chat"));
 
+        let search_results = app
+            .search_chats(ChatSearchQuery {
+                room_id: room_id.clone(),
+                query: "LATER RESPONSE".to_owned(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(search_results.len(), 1);
+        assert_eq!(search_results[0].chat_id, second_chat_id);
+        assert_eq!(search_results[0].match_count, 1);
+        assert!(
+            search_results[0]
+                .excerpt
+                .contains("later response must not rename")
+        );
+        assert!(
+            app.search_chats(ChatSearchQuery {
+                room_id: room_id.clone(),
+                query: "x".repeat(257),
+                limit: 10,
+            })
+            .is_err(),
+            "search limits are enforced before projection access"
+        );
+
         let reopened_first = app
             .dispatch_and_wait(AppAction::OpenChat {
                 room_id: room_id.clone(),
@@ -13717,6 +14104,7 @@ mod tests {
             status: finitechat_hermes::HermesMessageStatusV1::Complete,
             edit_of: None,
             attachments: Vec::new(),
+            references: Vec::new(),
             reply_to_message_id: None,
             sender_name: None,
             metadata: BTreeMap::new(),
@@ -13732,6 +14120,33 @@ mod tests {
     }
 
     #[test]
+    fn chat_projection_keeps_references_typed_and_visible_prose_unchanged() {
+        let reference = ChatReference {
+            kind: ChatReferenceKind::File,
+            id: "workspace:plans/README.md".to_owned(),
+            label: "README.md".to_owned(),
+            detail: "plans/README.md".to_owned(),
+            token: "@README.md".to_owned(),
+            path: Some("plans/README.md".to_owned()),
+            url: None,
+            fingerprint: Some("sha256:abc".to_owned()),
+        };
+        let payload = encode_text_message_payload_scoped(
+            "first line\nsecond line",
+            None,
+            Some("topic-build"),
+            Some("chat-1"),
+            vec![reference.clone()],
+        )
+        .expect("referenced message encodes");
+        let projection = chat_projection_payload(&payload);
+
+        assert_eq!(projection.text, "first line\nsecond line");
+        assert_eq!(projection.display_content, "first line\nsecond line");
+        assert_eq!(projection.references, [reference]);
+    }
+
+    #[test]
     fn chat_projection_preserves_hermes_presentation_and_old_state_defaults() {
         let payload = HermesMessagePayloadV1 {
             payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
@@ -13742,6 +14157,7 @@ mod tests {
             status: HermesMessageStatusV1::Running,
             edit_of: Some("tool-message-1".to_owned()),
             attachments: Vec::new(),
+            references: Vec::new(),
             reply_to_message_id: None,
             sender_name: Some("Hermes".to_owned()),
             metadata: BTreeMap::new(),
@@ -13877,6 +14293,7 @@ mod tests {
                 status: HermesMessageStatusV1::Complete,
                 edit_of: None,
                 attachments: Vec::new(),
+                references: Vec::new(),
                 reply_to_message_id: None,
                 sender_name: Some("Hermes".to_owned()),
                 metadata,
@@ -14463,6 +14880,7 @@ mod tests {
                     },
                 }),
             }],
+            references: Vec::new(),
             reply_to_message_id: Some("message-parent".to_owned()),
             sender_name: Some("Hermes User".to_owned()),
             metadata: BTreeMap::new(),
@@ -14525,6 +14943,7 @@ mod tests {
             status: finitechat_hermes::HermesMessageStatusV1::Complete,
             edit_of: None,
             attachments: Vec::new(),
+            references: Vec::new(),
             reply_to_message_id: None,
             sender_name: Some("Hermes".to_owned()),
             metadata: BTreeMap::new(),
@@ -20223,6 +20642,7 @@ mod tests {
             status: finitechat_hermes::HermesMessageStatusV1::Complete,
             edit_of: None,
             attachments: Vec::new(),
+            references: Vec::new(),
             reply_to_message_id: None,
             sender_name: None,
             metadata: Default::default(),
