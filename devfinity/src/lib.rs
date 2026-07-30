@@ -109,21 +109,23 @@ impl StackProfile {
         match self {
             Self::AppleSaas => "apple_container",
             Self::DockerSaas => "local_docker",
-            Self::ServicesOnly => "apple_container",
+            Self::ServicesOnly | Self::TestInfrastructure => "apple_container",
         }
     }
 
     fn runner_id(self) -> &'static str {
         match self {
             Self::DockerSaas => "devfinity-docker-runner",
-            Self::AppleSaas | Self::ServicesOnly => "devfinity-apple-runner",
+            Self::AppleSaas | Self::ServicesOnly | Self::TestInfrastructure => {
+                "devfinity-apple-runner"
+            }
         }
     }
 
     fn source_host_id(self) -> &'static str {
         match self {
             Self::DockerSaas => "devfinity-docker",
-            Self::AppleSaas | Self::ServicesOnly => "devfinity-apple",
+            Self::AppleSaas | Self::ServicesOnly | Self::TestInfrastructure => "devfinity-apple",
         }
     }
 
