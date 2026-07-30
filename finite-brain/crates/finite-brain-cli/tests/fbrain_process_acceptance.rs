@@ -919,6 +919,54 @@ fn supervisor_catches_up_remote_updates_after_repeated_working_tree_root_replace
 }
 
 #[test]
+fn supervisor_runs_with_builtin_working_tree_root_default_and_flag_override() {
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    // Neither FBRAIN_WORKING_TREE_ROOT nor a flag: the supervisor falls back
+    // to the hosted CLI default (current directory) instead of hard-erroring
+    // on the unset env var. The unreachable loopback server keeps the
+    // notification reconnect loop inert for the single handled event.
+    let defaulted = command(&home, &home)
+        .env("FINITE_BRAIN_SERVER_URL", "http://127.0.0.1:9")
+        .args(["daemon", "supervise", "--max-events", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        defaulted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&defaulted.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&defaulted.stdout).contains("daemon supervise stopped events=1"),
+        "{}",
+        String::from_utf8_lossy(&defaulted.stdout)
+    );
+
+    // An explicit --working-tree-root flag overrides the built-in default.
+    let flagged_root = scratch.path().join("flagged-trees");
+    let flagged = command(&home, &home)
+        .env("FINITE_BRAIN_SERVER_URL", "http://127.0.0.1:9")
+        .args([
+            "daemon",
+            "supervise",
+            "--working-tree-root",
+            flagged_root.to_str().unwrap(),
+            "--max-events",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        flagged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&flagged.stderr)
+    );
+    assert!(flagged_root.is_dir());
+}
+
+#[test]
 fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     let mut smoke = CollaborationSmokeReport::from_environment();
     let scratch = TempDir::new().unwrap();

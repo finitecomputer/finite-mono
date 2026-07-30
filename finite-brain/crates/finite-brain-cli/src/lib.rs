@@ -148,7 +148,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke"
     )?;
     Ok(())
 }
@@ -781,22 +781,33 @@ fn working_tree_instance(path: &Path) -> Result<WorkingTreeInstance, CliError> {
     })
 }
 
+/// Resolve the root `daemon supervise` watches: the `--working-tree-root`
+/// flag, then the Runtime-provided `FBRAIN_WORKING_TREE_ROOT`, then the
+/// hosted CLI default contract's current-directory fallback (the same
+/// fallback `open` uses). Hosted CLI defaults are built in per the CLI
+/// defaults rule (#246, #251): an unset env var is never a hard error.
+fn supervise_working_tree_root(args: &[String], env: &CliEnvironment) -> PathBuf {
+    option_value(args, "--working-tree-root")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| env.working_tree_root.clone())
+        .unwrap_or_else(|| env.cwd.clone())
+}
+
 fn daemon_supervise<W: Write>(
     args: &[String],
     env: &CliEnvironment,
     json: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
-    let root = env.working_tree_root.as_deref().ok_or_else(|| {
-        CliError::InvalidInput("daemon supervise requires FBRAIN_WORKING_TREE_ROOT".to_owned())
-    })?;
-    fs::create_dir_all(root)?;
+    let root = supervise_working_tree_root(args, env);
+    fs::create_dir_all(&root)?;
     let _supervisor_lock = acquire_supervisor_lock(env)?;
     let max_events =
         option_value(args, "--max-events").and_then(|value| value.parse::<usize>().ok());
     let (sender, receiver) = mpsc::channel::<Result<BrainUpdateNotification, String>>();
     let file_sender = sender.clone();
-    let notification_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let notification_root = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     let watched_root = notification_root.clone();
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
@@ -823,7 +834,7 @@ fn daemon_supervise<W: Write>(
         })
         .map_err(|error| CliError::InvalidInput(format!("filesystem watcher failed: {error}")))?;
     watcher
-        .watch(root, RecursiveMode::Recursive)
+        .watch(&root, RecursiveMode::Recursive)
         .map_err(|error| {
             CliError::InvalidInput(format!("could not watch Brain Working Trees: {error}"))
         })?;
@@ -951,7 +962,7 @@ fn daemon_supervise<W: Write>(
                             })?;
                     }
                 } else if root.is_dir() {
-                    match watcher.watch(root, RecursiveMode::Recursive) {
+                    match watcher.watch(&root, RecursiveMode::Recursive) {
                         Ok(()) => {}
                         Err(error) if notify_path_temporarily_missing(&error) => {}
                         Err(error) => {
@@ -971,7 +982,7 @@ fn daemon_supervise<W: Write>(
             Err(error) => {
                 transport_epoch.fetch_add(1, Ordering::SeqCst);
                 writeln!(output, "brain update stream reconnecting: {error}")?;
-                for (_, path) in opened_working_trees_during_supervision(root)? {
+                for (_, path) in opened_working_trees_during_supervision(&root)? {
                     let mut tree_env = env.clone();
                     tree_env.cwd = path;
                     let _ = mutate_agent_state(&tree_env, |state, now| {
@@ -1000,7 +1011,7 @@ fn daemon_supervise<W: Write>(
         if notification.reason == "stream_catch_up" {
             notifications_unsupported.store(false, Ordering::SeqCst);
             notification.transport_epoch = transport_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-            for (_, path) in opened_working_trees_during_supervision(root)? {
+            for (_, path) in opened_working_trees_during_supervision(&root)? {
                 let mut tree_env = env.clone();
                 tree_env.cwd = path;
                 let _ = mutate_agent_state(&tree_env, |state, _| {
@@ -1025,7 +1036,7 @@ fn daemon_supervise<W: Write>(
         if notification.reason == "working_tree_root_reopened" {
             explicitly_watched_trees.clear();
             retire_brain_sync_workers(&mut workers)?;
-            match watcher.watch(root, RecursiveMode::Recursive) {
+            match watcher.watch(&root, RecursiveMode::Recursive) {
                 Ok(()) => {}
                 Err(error) if notify_path_temporarily_missing(&error) => continue,
                 Err(error) => {
@@ -1035,7 +1046,7 @@ fn daemon_supervise<W: Write>(
                 }
             }
         }
-        let opened_trees = opened_working_trees_during_supervision(root)?;
+        let opened_trees = opened_working_trees_during_supervision(&root)?;
         let opened_paths = opened_trees
             .iter()
             .filter_map(|(brain_id, path)| {
@@ -12587,6 +12598,130 @@ mod tests {
             brain_update_retry_delay(Duration::from_secs(30), false),
             Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    fn supervise_working_tree_root_prefers_flag_then_runtime_env_then_default() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = env_for(&tmp);
+        // Built-in default: the current directory, the same fallback `open`
+        // uses. Never a hard error when FBRAIN_WORKING_TREE_ROOT is unset.
+        assert_eq!(supervise_working_tree_root(&[], &env), env.cwd);
+
+        // The Runtime-provided root beats the built-in default.
+        let runtime_root = tmp.path().join("data/workspace/finitebrain");
+        env.working_tree_root = Some(runtime_root.clone());
+        assert_eq!(supervise_working_tree_root(&[], &env), runtime_root);
+
+        // An explicit flag beats the Runtime-provided root.
+        let flag_root = tmp.path().join("flag-root");
+        let flag_args = vec![
+            "--working-tree-root".to_owned(),
+            flag_root.display().to_string(),
+        ];
+        assert_eq!(supervise_working_tree_root(&flag_args, &env), flag_root);
+
+        // An empty flag value is treated as unset, matching the empty-env
+        // filtering in CliEnvironment, not as the empty path.
+        let empty_flag_args = vec!["--working-tree-root".to_owned(), String::new()];
+        assert_eq!(
+            supervise_working_tree_root(&empty_flag_args, &env),
+            runtime_root
+        );
+    }
+
+    fn spawn_brain_update_stream_server(
+        status_line: &str,
+        body: String,
+    ) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let status_line = status_line.to_owned();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (request_line, _) = read_http_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            request_line
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn brain_update_stream_parses_events_and_survives_malformed_data() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let payload = concat!(
+            "event: ready\n",
+            "data: {}\n",
+            "\n",
+            "event: brain_update\n",
+            "data: {\"brainId\":\"acme\",\"latestSequence\":42,\"reason\":\"content_updated\"}\n",
+            "\n",
+            "event: brain_update\n",
+            "data: {not-json\n",
+            "\n",
+            "event: brain_update\n",
+            "data: {\"brainId\":\"acme\",\n",
+            "data: \"latestSequence\":43,\"reason\":\"access_updated\"}\n",
+            "\n",
+            "event: something_else\n",
+            "data: {\"brainId\":\"ignored\",\"latestSequence\":99,\"reason\":\"content_updated\"}\n",
+            "\n",
+        )
+        .to_owned();
+        let (url, server) = spawn_brain_update_stream_server("200 OK", payload);
+        let mut env = env_for(&tmp);
+        env.server_url = Some(url);
+        let (sender, receiver) = mpsc::channel();
+        let mut connected = false;
+
+        // A clean EOF is the reconnect signal: the reader returns Ok and the
+        // supervisor reopens the stream with an authoritative catch-up.
+        read_brain_update_stream(&env, &sender, &mut connected).unwrap();
+        assert_eq!(server.join().unwrap(), "GET /v1/brain-updates HTTP/1.1");
+        assert!(connected);
+
+        let first = receiver.recv().unwrap().unwrap();
+        assert_eq!(first.reason, "stream_catch_up");
+        let update = receiver.recv().unwrap().unwrap();
+        assert_eq!(update.brain_id, "acme");
+        assert_eq!(update.latest_sequence, 42);
+        assert_eq!(update.reason, "content_updated");
+        // Malformed data is reported to the supervisor (forcing an
+        // authoritative catch-up) without killing the stream.
+        receiver.recv().unwrap().unwrap_err();
+        let multiline = receiver.recv().unwrap().unwrap();
+        assert_eq!(multiline.brain_id, "acme");
+        assert_eq!(multiline.latest_sequence, 43);
+        assert_eq!(multiline.reason, "access_updated");
+        // Unknown event types are ignored.
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn brain_update_stream_treats_a_missing_route_as_unsupported() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(&tmp, TEST_SECRET_HEX);
+        let (url, server) = spawn_brain_update_stream_server("404 Not Found", String::new());
+        let mut env = env_for(&tmp);
+        env.server_url = Some(url);
+        let (sender, _receiver) = mpsc::channel();
+        let mut connected = false;
+
+        let error = read_brain_update_stream(&env, &sender, &mut connected).unwrap_err();
+        server.join().unwrap();
+        assert!(
+            matches!(error, CliError::Unsupported(_)),
+            "unexpected error: {error}"
+        );
+        assert!(!connected);
     }
 
     #[test]
