@@ -35,19 +35,44 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
     await page.getByLabel("Agent name").waitFor({ state: "visible" });
     await page.getByRole("link", { name: "Finite.Computer" }).waitFor({ state: "visible" });
-    await page.getByRole("button", { name: "Account menu" }).waitFor({ state: "visible" });
+    await page.getByRole("list", { name: "Agent setup progress" }).waitFor({
+      state: "visible",
+    });
+    assert.equal(
+      await page.getByRole("button", { name: "Account menu" }).count(),
+      0,
+      "immersive onboarding should not render the dashboard account menu"
+    );
     assert.equal(await page.getByText("Legacy Agent", { exact: true }).count(), 0);
     assert.equal(await page.getByRole("heading", { name: "Finite Private" }).count(), 0);
 
-    await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
-    await page.getByRole("heading", { name: "Finite Private usage" }).waitFor({ state: "visible" });
-    await page.getByText(/25% remains in your account-wide burst window/u).waitFor({
+    await page.goto(
+      `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_usage`
+    );
+    await page.getByRole("heading", { name: "Usage Agent" }).waitFor({ state: "visible" });
+    await page.getByRole("heading", { name: "Finite Private usage" }).waitFor({
       state: "visible",
     });
-    await page.getByText(/2026-07-21T20:00:00Z/u).waitFor({ state: "visible" });
+    await page.getByText(/Jul 21, 2026, 8:00 PM UTC/u).waitFor({ state: "visible" });
+    await page.locator("#finite-private + details").waitFor({ state: "visible" });
+    await page.locator("summary").filter({ hasText: /^Advanced$/u }).waitFor({
+      state: "visible",
+    });
     await page.getByRole("button", { name: "Use free daily reset" }).click();
     await waitFor(() => core.state.resetPosts === 1);
-    await page.getByText(/Usage reset.*2026-07-21T23:00:00Z/u).waitFor({ state: "visible" });
+    await page.getByText(/Usage reset.*Jul 21, 2026, 11:00 PM UTC/u).waitFor({
+      state: "visible",
+    });
+    await page.getByRole("button", { name: "Free reset used today" }).waitFor({
+      state: "visible",
+    });
+
+    await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+    await page.getByRole("heading", { name: "Finite Private usage" }).waitFor({ state: "visible" });
+    await page.getByText(/100% remains in your account-wide burst window/u).waitFor({
+      state: "visible",
+    });
+    await page.getByText(/Jul 21, 2026, 11:00 PM UTC/u).waitFor({ state: "visible" });
     await page.getByRole("button", { name: "Free reset used today" }).waitFor({
       state: "visible",
     });
@@ -111,6 +136,7 @@ function startDashboard(port: number, coreUrl: string) {
         FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_admin",
         FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: ADMIN_ACCESS_TOKEN,
         FC_WORKOS_OPERATOR_ORG_ID: OPERATOR_ORG_ID,
+        FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT: "1",
         FC_WORKOS_AUTH_ENABLED: "0",
         NEXT_DIST_DIR: ".next-browser-test",
       },
@@ -202,7 +228,7 @@ async function handleCoreRequest(
       email: "admin@finite.vip",
       workos_user_id: "user_admin",
       claimable_candidates: [],
-      projects: [legacyProject()],
+      projects: [legacyProject(), usageProject()],
       agent_creation_requests: [],
     });
     return;
@@ -312,6 +338,33 @@ function legacyProject() {
       contact_endpoint: null,
       runtime_status: "online",
       hermes_available: true,
+      created_at: "2026-05-28T12:00:00Z",
+      updated_at: "2026-05-28T12:01:00Z",
+    },
+  };
+}
+
+function usageProject() {
+  return {
+    project: {
+      id: "project_usage",
+      display_name: "Usage Agent",
+      created_at: "2026-05-28T12:00:00Z",
+      updated_at: "2026-05-28T12:01:00Z",
+    },
+    runtime: {
+      id: "runtime_usage",
+      project_id: "project_usage",
+      contact_endpoint: null,
+      runtime_status: "online",
+      hermes_available: true,
+      runtime_capabilities: {
+        restart: true,
+        recover_known_good_chat: true,
+        runtime_upgrade: false,
+        stop: true,
+        runtime_retirement: true,
+      },
       created_at: "2026-05-28T12:00:00Z",
       updated_at: "2026-05-28T12:01:00Z",
     },

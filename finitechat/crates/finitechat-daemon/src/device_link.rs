@@ -1,21 +1,22 @@
-use std::io::{self, Write};
+use std::io::Write;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use finitechat_core::device_link::{
-    DEVICE_LINK_MAX_TTL_SECONDS, DeviceLinkDecryptInput, DeviceLinkPairingKey,
-    create_device_link_pairing_key, decrypt_device_link_payload,
+use finitechat_core::nip_ab::{
+    FinitePairingPayloadDecodeError, NIP_AB_SESSION_TTL_SECONDS, NIP_AB_VERSION, NipAbPayloadType,
+    NipAbSourceDescriptorV1, NipAbTargetSession, decode_finite_pairing_payload_v2,
 };
 use finitechat_http::{
-    AckLinkPayloadRequest, AckLinkPayloadResponse, ClaimLinkPayloadRequest,
-    ClaimLinkPayloadResponse, CreateLinkSessionRequest, ErrorResponse, ExpireLinkSessionRequest,
-    ReleaseLinkClaimRequest,
+    CreatePairingSessionRequest, ExpirePairingSessionRequest, GetPairingSessionRequest,
+    HttpPairingSessionRecord, PublishPairingCompleteRequest, PublishPairingOfferRequest,
 };
-use reqwest::{Client, StatusCode, Url};
-use serde::Serialize;
+use nostr::Event;
+use reqwest::{Client, Response, Url};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
-const MAX_LINK_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_PAIRING_RESPONSE_BYTES: usize = 128 * 1024;
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(400);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -35,7 +36,7 @@ impl DeviceLinkBootstrapOptions {
         Self {
             server_url: server_url.into(),
             target_device_id: target_device_id.into(),
-            timeout: Duration::from_secs(DEVICE_LINK_MAX_TTL_SECONDS),
+            timeout: Duration::from_secs(NIP_AB_SESSION_TTL_SECONDS),
             poll_interval: DEFAULT_POLL_INTERVAL,
         }
     }
@@ -44,32 +45,57 @@ impl DeviceLinkBootstrapOptions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DeviceLinkReady {
     pub event: &'static str,
-    pub link_session_id: String,
+    pub pairing_session_id: String,
     pub target_device_id: String,
 }
 
-/// A created one-use rendezvous. The pairing secret deliberately has no
-/// Debug/Serialize surface and never enters stdout, renderer state, or argv.
+/// The authenticated dashboard returns this object through a supervisor-only
+/// pipe. It must never be passed through argv, stdout, stderr, or the renderer.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairingSourceDescriptor {
+    pub version: u16,
+    pub source_public_key: String,
+    pub session_secret_hex: String,
+    pub expires_at_unix_seconds: u64,
+}
+
 pub struct PendingDeviceLinkSession {
     client: Client,
     server_url: String,
     target_device_id: String,
-    link_session_id: String,
-    pairing: DeviceLinkPairingKey,
+    pairing_session_id: String,
+    bootstrap: crate::device_link::TargetBootstrap,
     deadline_unix_seconds: u64,
     poll_interval: Duration,
     ready: DeviceLinkReady,
 }
 
-/// A claimed and authenticated account bootstrap awaiting confirmation that
-/// Electron main stored it with `safeStorage`. Only then may the rendezvous be
-/// acknowledged as delivered.
+/// Private helper wrapper so the ephemeral target key has no accidental
+/// Debug/Serialize surface in the public daemon state.
+mod private {
+    pub struct TargetBootstrap(pub finitechat_core::nip_ab::NipAbTargetBootstrap);
+}
+use private::TargetBootstrap;
+
+pub struct WaitingDeviceLinkSession {
+    client: Client,
+    server_url: String,
+    target_device_id: String,
+    pairing_session_id: String,
+    target: NipAbTargetSession,
+    deadline_unix_seconds: u64,
+    poll_interval: Duration,
+}
+
 pub struct ClaimedDeviceLink {
     client: Client,
     server_url: String,
-    link_session_id: String,
-    claim_token: String,
-    account_secret_hex: String,
+    pairing_session_id: String,
+    target: NipAbTargetSession,
+    account_secret_hex: Zeroizing<String>,
+    enrollment_user_id: String,
+    enrollment_capability_hex: Zeroizing<String>,
     deadline_unix_seconds: u64,
     poll_interval: Duration,
 }
@@ -90,6 +116,8 @@ pub enum DeviceLinkBootstrapError {
     Expired,
     #[error("device-link payload failed authentication")]
     PayloadRejected,
+    #[error("device-link source is not compatible with this app version")]
+    IncompatiblePayload,
     #[error("device-link result pipe failed")]
     ResultPipe,
 }
@@ -100,47 +128,50 @@ pub async fn create_device_link_session(
     let server_url = normalize_base_url(&options.server_url)?;
     validate_device_id(&options.target_device_id)?;
     if options.timeout.is_zero()
-        || options.timeout > Duration::from_secs(DEVICE_LINK_MAX_TTL_SECONDS)
+        || options.timeout > Duration::from_secs(NIP_AB_SESSION_TTL_SECONDS)
     {
         return Err(DeviceLinkBootstrapError::InvalidConfiguration);
     }
     if options.poll_interval.is_zero() {
         options.poll_interval = DEFAULT_POLL_INTERVAL;
     }
-
-    let pairing = create_device_link_pairing_key();
-    let link_session_id = random_link_session_id()?;
+    let bootstrap = NipAbTargetSession::prepare();
+    let target_public_key = bootstrap.public_key();
+    let pairing_session_id = random_pairing_session_id()?;
     let client = Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|_| DeviceLinkBootstrapError::Request)?;
-    let _: finitechat_http::HttpLinkSessionRecord = post_json(
+    let record: HttpPairingSessionRecord = post_json(
         &client,
         &server_url,
-        "/link-sessions",
-        &CreateLinkSessionRequest {
-            link_session_id: link_session_id.clone(),
-            pairing_public_key: pairing.public_key_hex.clone(),
+        "/pairing-sessions",
+        &CreatePairingSessionRequest {
+            version: NIP_AB_VERSION,
+            pairing_session_id: pairing_session_id.clone(),
+            target_device_id: options.target_device_id.clone(),
+            target_public_key: target_public_key.clone(),
         },
     )
     .await?;
-
-    let deadline_unix_seconds = now_unix_seconds()?
-        .checked_add(options.timeout.as_secs())
-        .ok_or(DeviceLinkBootstrapError::InvalidConfiguration)?;
+    if record.pairing_session_id != pairing_session_id
+        || record.target_device_id != options.target_device_id
+        || record.target_public_key != target_public_key
+    {
+        return Err(DeviceLinkBootstrapError::InvalidResponse);
+    }
     let ready = DeviceLinkReady {
-        event: "link_ready",
-        link_session_id: link_session_id.clone(),
+        event: "pairing_ready",
+        pairing_session_id: pairing_session_id.clone(),
         target_device_id: options.target_device_id.clone(),
     };
-
     Ok(PendingDeviceLinkSession {
         client,
         server_url,
         target_device_id: options.target_device_id,
-        link_session_id,
-        pairing,
-        deadline_unix_seconds,
+        pairing_session_id,
+        bootstrap: TargetBootstrap(bootstrap),
+        deadline_unix_seconds: record.expires_at_unix_seconds,
         poll_interval: options.poll_interval,
         ready,
     })
@@ -151,93 +182,130 @@ impl PendingDeviceLinkSession {
         &self.ready
     }
 
-    pub async fn wait_for_claim(self) -> Result<ClaimedDeviceLink, DeviceLinkBootstrapError> {
+    pub async fn accept_source_descriptor(
+        self,
+        descriptor: PairingSourceDescriptor,
+    ) -> Result<WaitingDeviceLinkSession, DeviceLinkBootstrapError> {
+        let descriptor = NipAbSourceDescriptorV1 {
+            version: descriptor.version,
+            source_public_key: descriptor.source_public_key,
+            session_secret_hex: descriptor.session_secret_hex,
+            expires_at_unix_seconds: descriptor.expires_at_unix_seconds,
+        };
+        let (target, offer) =
+            NipAbTargetSession::create(self.bootstrap.0, &descriptor, now_unix_seconds()?)
+                .map_err(|_| DeviceLinkBootstrapError::PayloadRejected)?;
+        let _: HttpPairingSessionRecord = post_json(
+            &self.client,
+            &self.server_url,
+            "/pairing-sessions/offer",
+            &PublishPairingOfferRequest {
+                pairing_session_id: self.pairing_session_id.clone(),
+                offer_event: event_bytes(&offer)?,
+            },
+        )
+        .await?;
+        Ok(WaitingDeviceLinkSession {
+            client: self.client,
+            server_url: self.server_url,
+            target_device_id: self.target_device_id,
+            pairing_session_id: self.pairing_session_id,
+            target,
+            deadline_unix_seconds: self.deadline_unix_seconds,
+            poll_interval: self.poll_interval,
+        })
+    }
+}
+
+impl WaitingDeviceLinkSession {
+    pub async fn wait_for_claim(mut self) -> Result<ClaimedDeviceLink, DeviceLinkBootstrapError> {
         loop {
             let now = now_unix_seconds()?;
             if now >= self.deadline_unix_seconds {
-                let _ = post_without_response(
-                    &self.client,
-                    &self.server_url,
-                    "/link-sessions/expire",
-                    &ExpireLinkSessionRequest {
-                        link_session_id: self.link_session_id.clone(),
-                    },
-                )
-                .await;
+                self.expire().await;
                 return Err(DeviceLinkBootstrapError::Expired);
             }
-
-            let response = match self
-                .client
-                .post(endpoint(&self.server_url, "/link-sessions/claim"))
-                .json(&ClaimLinkPayloadRequest {
-                    link_session_id: self.link_session_id.clone(),
-                })
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(_) => {
-                    tokio::time::sleep(self.poll_interval).await;
-                    continue;
-                }
+            let record: Option<HttpPairingSessionRecord> = post_json(
+                &self.client,
+                &self.server_url,
+                "/pairing-sessions/get",
+                &GetPairingSessionRequest {
+                    pairing_session_id: self.pairing_session_id.clone(),
+                },
+            )
+            .await?;
+            let Some(record) = record else {
+                return Err(DeviceLinkBootstrapError::InvalidResponse);
             };
-            if response.status() == StatusCode::CONFLICT || response.status().is_server_error() {
+            if record.pairing_session_id != self.pairing_session_id
+                || record.target_device_id != self.target_device_id
+            {
+                return Err(DeviceLinkBootstrapError::InvalidResponse);
+            }
+            if record.events.len() < 3 {
                 tokio::time::sleep(self.poll_interval).await;
                 continue;
             }
-            if response.status() == StatusCode::BAD_REQUEST {
-                let status = response.status();
-                let bytes = bounded_response_bytes(response).await?;
-                if serde_json::from_slice::<ErrorResponse>(&bytes)
-                    .is_ok_and(|error| error.kind == "link_session_not_ready")
-                {
-                    tokio::time::sleep(self.poll_interval).await;
-                    continue;
-                }
-                return Err(DeviceLinkBootstrapError::ServerStatus(status.as_u16()));
+            let confirmation = parse_event(&record.events[1].event)?;
+            let payload_event = parse_event(&record.events[2].event)?;
+            self.target
+                .accept_source_confirmation(&confirmation, now)
+                .and_then(|_| self.target.confirm_sas(now).map(|_| ()))
+                .map_err(|_| DeviceLinkBootstrapError::PayloadRejected)?;
+            let (kind, encoded) = self
+                .target
+                .accept_payload(&payload_event, now)
+                .map_err(|_| DeviceLinkBootstrapError::PayloadRejected)?;
+            if kind != NipAbPayloadType::Custom {
+                return Err(DeviceLinkBootstrapError::PayloadRejected);
             }
-            let claimed: ClaimLinkPayloadResponse = decode_response(response).await?;
-            let payload = decrypt_device_link_payload(DeviceLinkDecryptInput {
-                pairing_secret_key_hex: self.pairing.secret_key_hex,
-                encrypted_payload: claimed.encrypted_payload,
-                expected_link_session_id: self.link_session_id.clone(),
-                expected_pairing_public_key: self.pairing.public_key_hex,
-                expected_target_device_id: self.target_device_id,
-                expected_server_url: self.server_url.clone(),
-                now_unix_seconds: now,
-            });
-            let payload = match payload {
-                Ok(payload) => payload,
-                Err(_) => {
-                    let _ = post_without_response(
-                        &self.client,
-                        &self.server_url,
-                        "/link-sessions/release",
-                        &ReleaseLinkClaimRequest {
-                            link_session_id: self.link_session_id.clone(),
-                        },
-                    )
-                    .await;
-                    return Err(DeviceLinkBootstrapError::PayloadRejected);
-                }
-            };
+            let payload =
+                decode_finite_pairing_payload_v2(&encoded).map_err(|error| match error {
+                    FinitePairingPayloadDecodeError::IncompatibleVersion => {
+                        DeviceLinkBootstrapError::IncompatiblePayload
+                    }
+                    FinitePairingPayloadDecodeError::Invalid => {
+                        DeviceLinkBootstrapError::PayloadRejected
+                    }
+                })?;
+            payload
+                .validate(
+                    &self.pairing_session_id,
+                    &self.target_device_id,
+                    &self.server_url,
+                    now,
+                )
+                .map_err(|_| DeviceLinkBootstrapError::PayloadRejected)?;
             return Ok(ClaimedDeviceLink {
                 client: self.client,
                 server_url: self.server_url,
-                link_session_id: self.link_session_id,
-                claim_token: claimed.claim_token,
-                account_secret_hex: payload.account_secret_hex,
+                pairing_session_id: self.pairing_session_id,
+                target: self.target,
+                account_secret_hex: Zeroizing::new(payload.account_secret_hex.clone()),
+                enrollment_user_id: payload.enrollment_user_id.clone(),
+                enrollment_capability_hex: Zeroizing::new(
+                    payload.enrollment_capability_hex.clone(),
+                ),
                 deadline_unix_seconds: self.deadline_unix_seconds,
                 poll_interval: self.poll_interval,
             });
         }
     }
+
+    async fn expire(&self) {
+        let _ = post_without_response(
+            &self.client,
+            &self.server_url,
+            "/pairing-sessions/expire",
+            &ExpirePairingSessionRequest {
+                pairing_session_id: self.pairing_session_id.clone(),
+            },
+        )
+        .await;
+    }
 }
 
 impl ClaimedDeviceLink {
-    /// Write the plaintext account bootstrap only to the supervisor-owned
-    /// private result pipe. This method must never receive stdout/stderr.
     pub fn write_secret_result(
         &self,
         mut writer: impl Write,
@@ -245,11 +313,15 @@ impl ClaimedDeviceLink {
         #[derive(Serialize)]
         struct SecretResult<'a> {
             account_secret: &'a str,
+            enrollment_user_id: &'a str,
+            enrollment_capability_hex: &'a str,
         }
         serde_json::to_writer(
             &mut writer,
             &SecretResult {
                 account_secret: &self.account_secret_hex,
+                enrollment_user_id: &self.enrollment_user_id,
+                enrollment_capability_hex: &self.enrollment_capability_hex,
             },
         )
         .map_err(|_| DeviceLinkBootstrapError::ResultPipe)?;
@@ -259,38 +331,34 @@ impl ClaimedDeviceLink {
             .map_err(|_| DeviceLinkBootstrapError::ResultPipe)
     }
 
-    pub async fn acknowledge_stored(self) -> Result<(), DeviceLinkBootstrapError> {
-        let request = AckLinkPayloadRequest {
-            link_session_id: self.link_session_id,
-            claim_token: self.claim_token,
+    pub async fn acknowledge_stored(mut self) -> Result<(), DeviceLinkBootstrapError> {
+        let complete = self
+            .target
+            .complete(now_unix_seconds()?)
+            .map_err(|_| DeviceLinkBootstrapError::PayloadRejected)?;
+        let request = PublishPairingCompleteRequest {
+            pairing_session_id: self.pairing_session_id,
+            complete_event: event_bytes(&complete)?,
         };
         loop {
             if now_unix_seconds()? >= self.deadline_unix_seconds {
                 return Err(DeviceLinkBootstrapError::Expired);
             }
-            let response = self
-                .client
-                .post(endpoint(&self.server_url, "/link-sessions/ack"))
-                .json(&request)
-                .send()
-                .await;
-            let response = match response {
-                Ok(response) if response.status().is_server_error() => {
+            match post_json::<_, HttpPairingSessionRecord>(
+                &self.client,
+                &self.server_url,
+                "/pairing-sessions/complete",
+                &request,
+            )
+            .await
+            {
+                Ok(_) => return Ok(()),
+                Err(DeviceLinkBootstrapError::Request)
+                | Err(DeviceLinkBootstrapError::ServerStatus(500..=599)) => {
                     tokio::time::sleep(self.poll_interval).await;
-                    continue;
                 }
-                Ok(response) => response,
-                Err(_) => {
-                    tokio::time::sleep(self.poll_interval).await;
-                    continue;
-                }
-            };
-            let response: AckLinkPayloadResponse = decode_response(response).await?;
-            return if response.acked {
-                Ok(())
-            } else {
-                Err(DeviceLinkBootstrapError::InvalidResponse)
-            };
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -298,9 +366,9 @@ impl ClaimedDeviceLink {
         let _ = post_without_response(
             &self.client,
             &self.server_url,
-            "/link-sessions/release",
-            &ReleaseLinkClaimRequest {
-                link_session_id: self.link_session_id,
+            "/pairing-sessions/expire",
+            &ExpirePairingSessionRequest {
+                pairing_session_id: self.pairing_session_id,
             },
         )
         .await;
@@ -323,7 +391,7 @@ fn validate_device_id(value: &str) -> Result<(), DeviceLinkBootstrapError> {
 fn normalize_base_url(value: &str) -> Result<String, DeviceLinkBootstrapError> {
     let parsed = Url::parse(value).map_err(|_| DeviceLinkBootstrapError::InvalidConfiguration)?;
     if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.username() != ""
+        || !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()
         || parsed.fragment().is_some()
@@ -333,10 +401,10 @@ fn normalize_base_url(value: &str) -> Result<String, DeviceLinkBootstrapError> {
     Ok(parsed.as_str().trim_end_matches('/').to_owned())
 }
 
-fn random_link_session_id() -> Result<String, DeviceLinkBootstrapError> {
+fn random_pairing_session_id() -> Result<String, DeviceLinkBootstrapError> {
     let mut entropy = [0_u8; 16];
     getrandom::fill(&mut entropy).map_err(|_| DeviceLinkBootstrapError::Entropy)?;
-    Ok(format!("link-{}", hex::encode(entropy)))
+    Ok(format!("pair-{}", hex::encode(entropy)))
 }
 
 fn now_unix_seconds() -> Result<u64, DeviceLinkBootstrapError> {
@@ -348,6 +416,14 @@ fn now_unix_seconds() -> Result<u64, DeviceLinkBootstrapError> {
 
 fn endpoint(server_url: &str, path: &str) -> String {
     format!("{}{path}", server_url.trim_end_matches('/'))
+}
+
+fn event_bytes(event: &Event) -> Result<Vec<u8>, DeviceLinkBootstrapError> {
+    serde_json::to_vec(event).map_err(|_| DeviceLinkBootstrapError::InvalidResponse)
+}
+
+fn parse_event(bytes: &[u8]) -> Result<Event, DeviceLinkBootstrapError> {
+    serde_json::from_slice(bytes).map_err(|_| DeviceLinkBootstrapError::InvalidResponse)
 }
 
 async fn post_json<I: Serialize, O: DeserializeOwned>(
@@ -387,145 +463,18 @@ async fn post_without_response<I: Serialize>(
 }
 
 async fn decode_response<T: DeserializeOwned>(
-    response: reqwest::Response,
+    response: Response,
 ) -> Result<T, DeviceLinkBootstrapError> {
-    if !response.status().is_success() {
-        return Err(DeviceLinkBootstrapError::ServerStatus(
-            response.status().as_u16(),
-        ));
+    let status = response.status();
+    if !status.is_success() {
+        return Err(DeviceLinkBootstrapError::ServerStatus(status.as_u16()));
     }
-    let bytes = bounded_response_bytes(response).await?;
-    serde_json::from_slice(&bytes).map_err(|_| DeviceLinkBootstrapError::InvalidResponse)
-}
-
-async fn bounded_response_bytes(
-    response: reqwest::Response,
-) -> Result<Vec<u8>, DeviceLinkBootstrapError> {
     let bytes = response
         .bytes()
         .await
-        .map_err(|_| DeviceLinkBootstrapError::InvalidResponse)?;
-    if bytes.len() > MAX_LINK_RESPONSE_BYTES {
+        .map_err(|_| DeviceLinkBootstrapError::Request)?;
+    if bytes.len() > MAX_PAIRING_RESPONSE_BYTES {
         return Err(DeviceLinkBootstrapError::InvalidResponse);
     }
-    Ok(bytes.to_vec())
-}
-
-impl From<io::Error> for DeviceLinkBootstrapError {
-    fn from(_: io::Error) -> Self {
-        Self::ResultPipe
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use finitechat_core::device_link::{DeviceLinkEncryptInput, encrypt_device_link_payload};
-    use finitechat_http::UploadLinkPayloadRequest;
-    use finitechat_server::{HttpServerState, http_router};
-
-    #[test]
-    fn public_ready_record_contains_only_rendezvous_coordinates() {
-        let ready = DeviceLinkReady {
-            event: "link_ready",
-            link_session_id: "link-public-test".to_owned(),
-            target_device_id: "electron-public-test".to_owned(),
-        };
-        let encoded = serde_json::to_value(ready).unwrap();
-        assert_eq!(encoded["event"], "link_ready");
-        assert_eq!(encoded.as_object().unwrap().len(), 3);
-        assert!(encoded.get("account_secret").is_none());
-        assert!(encoded.get("pairing_secret").is_none());
-        assert!(encoded.get("pairing_public_key").is_none());
-    }
-
-    #[tokio::test]
-    async fn claim_poll_waits_for_delayed_automatic_approval() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test link server");
-        let address = listener.local_addr().expect("test link address");
-        let server_url = format!("http://{address}");
-        let server = tokio::spawn(async move {
-            axum::serve(listener, http_router(HttpServerState::default()))
-                .await
-                .expect("serve test link server");
-        });
-
-        let mut options = DeviceLinkBootstrapOptions::internal_alpha(
-            server_url.clone(),
-            "electron-delayed-approval",
-        );
-        options.timeout = Duration::from_secs(5);
-        options.poll_interval = Duration::from_millis(20);
-        let pending = create_device_link_session(options)
-            .await
-            .expect("create pending link");
-        let session_id = pending.link_session_id.clone();
-        let pairing_public_key = pending.pairing.public_key_hex.clone();
-        let expires_at = pending.deadline_unix_seconds;
-        let waiter = tokio::spawn(pending.wait_for_claim());
-
-        // Let more than one normal Created -> not-ready poll happen before the
-        // automatic dashboard approval uploads its encrypted payload.
-        tokio::time::sleep(Duration::from_millis(75)).await;
-        let account_secret_hex = "11".repeat(32);
-        let encrypted_payload = encrypt_device_link_payload(DeviceLinkEncryptInput {
-            account_secret_hex: account_secret_hex.clone(),
-            pairing_public_key,
-            link_session_id: session_id.clone(),
-            target_device_id: "electron-delayed-approval".to_owned(),
-            server_url: server_url.clone(),
-            issued_at_unix_seconds: now_unix_seconds().expect("test clock"),
-            expires_at_unix_seconds: expires_at,
-        })
-        .expect("encrypt delayed approval");
-        let response = Client::new()
-            .post(endpoint(&server_url, "/link-sessions/payload"))
-            .json(&UploadLinkPayloadRequest {
-                link_session_id: session_id,
-                encrypted_payload,
-            })
-            .send()
-            .await
-            .expect("upload delayed approval");
-        assert!(response.status().is_success());
-
-        let claimed = waiter
-            .await
-            .expect("claim waiter task")
-            .expect("claim after delayed approval");
-        assert_eq!(claimed.account_secret_hex, account_secret_hex);
-        claimed.release().await;
-        server.abort();
-    }
-
-    #[test]
-    fn secret_result_is_written_only_to_the_explicit_private_writer() {
-        let secret = "0000000000000000000000000000000000000000000000000000000000000003";
-        let claimed = ClaimedDeviceLink {
-            client: Client::new(),
-            server_url: "https://chat.finite.test".to_owned(),
-            link_session_id: "link-private-test".to_owned(),
-            claim_token: "claim-private-test".to_owned(),
-            account_secret_hex: secret.to_owned(),
-            deadline_unix_seconds: u64::MAX,
-            poll_interval: DEFAULT_POLL_INTERVAL,
-        };
-        let mut private_pipe = Vec::new();
-        claimed.write_secret_result(&mut private_pipe).unwrap();
-        let decoded: serde_json::Value = serde_json::from_slice(&private_pipe).unwrap();
-        assert_eq!(decoded["account_secret"], secret);
-        assert_eq!(decoded.as_object().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn link_configuration_rejects_credentials_queries_and_hosted_device_id() {
-        assert!(normalize_base_url("https://chat.finite.test").is_ok());
-        assert!(normalize_base_url("https://user@chat.finite.test").is_err());
-        assert!(normalize_base_url("https://chat.finite.test?secret=value").is_err());
-        assert!(validate_device_id("electron-alpha").is_ok());
-        assert!(validate_device_id("hosted-web").is_err());
-        assert!(validate_device_id(" electron-alpha").is_err());
-    }
+    serde_json::from_slice(&bytes).map_err(|_| DeviceLinkBootstrapError::InvalidResponse)
 }

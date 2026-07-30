@@ -4,20 +4,35 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+enum ComposerFocusTarget: Hashable {
+    case home
+    case chat(String)
+}
+
 struct Composer: View {
     @Binding var text: String
     let replyTarget: ChatMessage?
     let canSubmit: Bool
+    var isSending = false
     @Binding var stagedAttachments: [StagedComposerAttachment]
     @Binding var isPhotoPickerPresented: Bool
     @Binding var selectedPhotoItems: [PhotosPickerItem]
-    @Binding var isInputFocused: Bool
-    let reportError: (String) -> Void
+    var focusedComposer: FocusState<ComposerFocusTarget?>.Binding
+    let focusTarget: ComposerFocusTarget
     let onCancelReply: () -> Void
     let onSend: () -> Void
-    let onStartVoiceRecording: () -> Void
-    let onAttach: () -> Void
-    let onCreatePoll: () -> Void
+    var placeholder = "Message"
+    var allowsPhotoAttachments = true
+    var messageFieldAccessibilityIdentifier = ComposerAccessibility.messageField
+    var sendAccessibilityLabel = "Send"
+    var sendAccessibilityIdentifier = "SendButton"
+    var outerHorizontalPadding: CGFloat = 16
+    var surfaceRadius: CGFloat = 28
+    var collapsesWhenIdle = false
+    var onStartVoiceRecording: (() -> Void)?
+    var onSelectPhotos: (() -> Void)?
+    var onAttach: (() -> Void)?
+    var onCreatePoll: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 8) {
@@ -45,105 +60,9 @@ struct Composer: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                ZStack(alignment: .topLeading) {
-                    if text.isEmpty {
-                        Text("Message")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 8)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
-                    }
-
-                    StickerAwareTextView(
-                        text: $text,
-                        isFocused: $isInputFocused,
-                        maxHeight: 150,
-                        onSend: onSend,
-                        onImagePaste: stagePastedAttachment
-                    )
-                    .frame(minHeight: 52)
-                    .accessibilityLabel("Message")
-                    .accessibilityIdentifier("ComposerMessageField")
-                }
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-
-                HStack(spacing: 12) {
-                    Menu {
-                        Button {
-                            isPhotoPickerPresented = true
-                        } label: {
-                            Label("Photos & Videos", systemImage: "photo.on.rectangle")
-                        }
-
-                        Button {
-                            onAttach()
-                        } label: {
-                            Label("Files", systemImage: "doc")
-                        }
-
-                        Button {
-                            onCreatePoll()
-                        } label: {
-                            Label("Poll", systemImage: "chart.bar.doc.horizontal")
-                        }
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.title3.weight(.regular))
-                            .frame(width: 34, height: 34)
-                            .contentShape(Circle())
-                    }
-                    .accessibilityLabel("Attach")
-                    .accessibilityIdentifier("AttachButton")
-                    .photosPicker(
-                        isPresented: $isPhotoPickerPresented,
-                        selection: $selectedPhotoItems,
-                        maxSelectionCount: remainingPhotoSelectionCount,
-                        matching: .any(of: [.images, .videos])
-                    )
-
-                    Spacer()
-
-                    if stagedAttachments.isEmpty {
-                        Button {
-                            onStartVoiceRecording()
-                        } label: {
-                            Image(systemName: "mic")
-                                .font(.title3.weight(.regular))
-                                .frame(width: 34, height: 34)
-                                .contentShape(Circle())
-                        }
-                        .accessibilityLabel("Record voice message")
-                        .accessibilityIdentifier("VoiceRecordButton")
-                    }
-
-                    if showsSendButton {
-                        Button {
-                            onSend()
-                        } label: {
-                            Image(systemName: "arrow.up")
-                                .font(.body.weight(.bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 34, height: 34)
-                                .background(Circle().fill(Color.accentColor))
-                        }
-                        .disabled(sendDisabled)
-                        .accessibilityLabel("Send")
-                        .accessibilityIdentifier("SendButton")
-                        .transition(.scale.combined(with: .opacity))
-                    }
-                }
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 10)
-            }
-            .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-            .modifier(ChatComposerSurface())
+            composerSurface
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, outerHorizontalPadding)
         .padding(.top, 8)
         .safeAreaPadding(.bottom, 8)
         .background(Color.clear)
@@ -151,53 +70,403 @@ struct Composer: View {
         .animation(.snappy(duration: 0.18), value: showsSendButton)
     }
 
+    private var composerSurface: some View {
+        VStack(alignment: .leading, spacing: isExpanded ? 10 : 0) {
+            messageField
+
+            if isExpanded {
+                HStack(spacing: 12) {
+                    attachmentControl
+                    Spacer()
+                    voiceControl
+                    sendControl
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isExpanded ? 92 : 54,
+            alignment: .topLeading
+        )
+        .modifier(ChatComposerSurface(radius: surfaceRadius))
+        .overlay {
+            if !isExpanded {
+                HStack(spacing: 10) {
+                    attachmentControl
+                    Spacer()
+                    voiceControl
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 14)
+                .transition(.opacity)
+            }
+        }
+    }
+
+    private var messageField: some View {
+        TextField(
+            placeholder,
+            text: $text,
+            prompt: Text(placeholder),
+            axis: .vertical
+        )
+        .textFieldStyle(.plain)
+        .lineLimit(1 ... (isExpanded ? 6 : 1))
+        .focused(focusedComposer, equals: focusTarget)
+        .onChange(of: text) { _, _ in
+            FinitePerformance.recordComposerEdit()
+        }
+        .accessibilityIdentifier(messageFieldAccessibilityIdentifier)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isExpanded ? 52 : 34
+        )
+        .padding(.leading, isExpanded ? 16 : 58)
+        .padding(.trailing, isExpanded ? 16 : 58)
+        .padding(.vertical, isExpanded ? 8 : 10)
+    }
+
+    @ViewBuilder
+    private var attachmentControl: some View {
+        if showsAttachmentMenu {
+            attachmentMenu
+                .disabled(isSending)
+        }
+    }
+
+    @ViewBuilder
+    private var voiceControl: some View {
+        if stagedAttachments.isEmpty, let onStartVoiceRecording {
+            Button {
+                onStartVoiceRecording()
+            } label: {
+                Image(systemName: "mic")
+                    .font(.title3.weight(.regular))
+                    .frame(width: 34, height: 34)
+                    .contentShape(Circle())
+            }
+            .disabled(isSending)
+            .accessibilityLabel("Record voice message")
+            .accessibilityIdentifier("VoiceRecordButton")
+        }
+    }
+
+    @ViewBuilder
+    private var sendControl: some View {
+        if showsSendButton {
+            Button {
+                onSend()
+            } label: {
+                if isSending {
+                    ProgressView()
+                        .tint(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(Color.accentColor))
+                } else {
+                    Image(systemName: "arrow.up")
+                        .font(.body.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(Color.accentColor))
+                }
+            }
+            .disabled(sendDisabled)
+            .accessibilityLabel(sendAccessibilityLabel)
+            .accessibilityIdentifier(sendAccessibilityIdentifier)
+            .transition(.scale.combined(with: .opacity))
+        }
+    }
+
+    @ViewBuilder
+    private var attachmentMenu: some View {
+        Menu {
+            if allowsPhotoAttachments {
+                Button {
+                    if let onSelectPhotos {
+                        onSelectPhotos()
+                    } else {
+                        isPhotoPickerPresented = true
+                    }
+                } label: {
+                    Label("Photos & Videos", systemImage: "photo.on.rectangle")
+                }
+            }
+
+            if let onAttach {
+                Button(action: onAttach) {
+                    Label("Files", systemImage: "doc")
+                }
+            }
+
+            if let onCreatePoll {
+                Button(action: onCreatePoll) {
+                    Label("Poll", systemImage: "chart.bar.doc.horizontal")
+                }
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.title3.weight(.regular))
+                .frame(width: 34, height: 34)
+                .contentShape(Circle())
+        }
+        .accessibilityLabel("Attach")
+        .accessibilityIdentifier("AttachButton")
+        .photosPicker(
+            isPresented: $isPhotoPickerPresented,
+            selection: $selectedPhotoItems,
+            maxSelectionCount: remainingPhotoSelectionCount,
+            matching: .any(of: [.images, .videos])
+        )
+    }
+
+    private var showsAttachmentMenu: Bool {
+        allowsPhotoAttachments || onAttach != nil || onCreatePoll != nil
+    }
+
     private var sendDisabled: Bool {
-        stagedAttachments.isEmpty && !canSubmit
+        isSending || (stagedAttachments.isEmpty && !canSubmit)
     }
 
     private var showsSendButton: Bool {
         !stagedAttachments.isEmpty || canSubmit
     }
 
+    private var isExpanded: Bool {
+        ComposerPresentation.isExpanded(
+            collapsesWhenIdle: collapsesWhenIdle,
+            isFocused: focusedComposer.wrappedValue == focusTarget,
+            hasText: !text.isEmpty,
+            hasReply: replyTarget != nil,
+            hasAttachments: !stagedAttachments.isEmpty
+        )
+    }
+
     private var remainingPhotoSelectionCount: Int {
         max(1, maxStagedComposerAttachments - stagedAttachments.count)
     }
+}
 
-    private func stagePastedAttachment(data: Data, mimeType: String) {
-        guard stagedAttachments.count < maxStagedComposerAttachments else {
-            reportError("Attachment limit is \(maxStagedComposerAttachments) files.")
-            return
-        }
+struct RoomComposer: View {
+    let canCompose: Bool
+    let replyTarget: ChatMessage?
+    @Binding var stagedAttachments: [StagedComposerAttachment]
+    @Binding var isPhotoPickerPresented: Bool
+    @Binding var selectedPhotoItems: [PhotosPickerItem]
+    var focusedComposer: FocusState<ComposerFocusTarget?>.Binding
+    let focusTarget: ComposerFocusTarget
+    let onCancelReply: () -> Void
+    let onSend: (String, @escaping (Bool) -> Void) -> Void
+    let onTypingIntentChange: (Bool) -> Void
+    var outerHorizontalPadding: CGFloat = 16
+    var surfaceRadius: CGFloat = 28
+    var onStartVoiceRecording: (() -> Void)?
+    var onAttach: (() -> Void)?
+    var onCreatePoll: (() -> Void)?
+    @State private var text: String
 
-        do {
-            let attachment = try StagedComposerAttachment(
-                pastedData: data,
-                mimeType: mimeType
-            )
-            withAnimation(.easeOut(duration: 0.16)) {
-                stagedAttachments.append(attachment)
+    init(
+        initialText: String,
+        canCompose: Bool,
+        replyTarget: ChatMessage?,
+        stagedAttachments: Binding<[StagedComposerAttachment]>,
+        isPhotoPickerPresented: Binding<Bool>,
+        selectedPhotoItems: Binding<[PhotosPickerItem]>,
+        focusedComposer: FocusState<ComposerFocusTarget?>.Binding,
+        focusTarget: ComposerFocusTarget,
+        onCancelReply: @escaping () -> Void,
+        onSend: @escaping (String, @escaping (Bool) -> Void) -> Void,
+        onTypingIntentChange: @escaping (Bool) -> Void,
+        outerHorizontalPadding: CGFloat = 16,
+        surfaceRadius: CGFloat = 28,
+        onStartVoiceRecording: (() -> Void)? = nil,
+        onAttach: (() -> Void)? = nil,
+        onCreatePoll: (() -> Void)? = nil
+    ) {
+        self.canCompose = canCompose
+        self.replyTarget = replyTarget
+        _stagedAttachments = stagedAttachments
+        _isPhotoPickerPresented = isPhotoPickerPresented
+        _selectedPhotoItems = selectedPhotoItems
+        self.focusedComposer = focusedComposer
+        self.focusTarget = focusTarget
+        self.onCancelReply = onCancelReply
+        self.onSend = onSend
+        self.onTypingIntentChange = onTypingIntentChange
+        self.outerHorizontalPadding = outerHorizontalPadding
+        self.surfaceRadius = surfaceRadius
+        self.onStartVoiceRecording = onStartVoiceRecording
+        self.onAttach = onAttach
+        self.onCreatePoll = onCreatePoll
+        _text = State(initialValue: initialText)
+    }
+
+    var body: some View {
+        Composer(
+            text: $text,
+            replyTarget: replyTarget,
+            canSubmit: canSubmit,
+            stagedAttachments: $stagedAttachments,
+            isPhotoPickerPresented: $isPhotoPickerPresented,
+            selectedPhotoItems: $selectedPhotoItems,
+            focusedComposer: focusedComposer,
+            focusTarget: focusTarget,
+            onCancelReply: onCancelReply,
+            onSend: send,
+            outerHorizontalPadding: outerHorizontalPadding,
+            surfaceRadius: surfaceRadius,
+            collapsesWhenIdle: true,
+            onStartVoiceRecording: onStartVoiceRecording,
+            onAttach: onAttach,
+            onCreatePoll: onCreatePoll
+        )
+        .task(id: hasMeaningfulText) {
+            if hasMeaningfulText {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
             }
-        } catch {
-            reportError(String(describing: error))
+            onTypingIntentChange(hasMeaningfulText)
+        }
+    }
+
+    private var hasMeaningfulText: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var canSubmit: Bool {
+        canCompose && hasMeaningfulText
+    }
+
+    private func send() {
+        onSend(text) { success in
+            guard success else { return }
+            text = ""
         }
     }
 }
 
+enum ComposerLaunchAction: Hashable {
+    case photos
+    case files
+    case voice
+}
+
+struct NewChatComposer: View {
+    var focusedComposer: FocusState<ComposerFocusTarget?>.Binding
+    let placeholder: String
+    let onStartChat: (String, ComposerLaunchAction?, @escaping (Bool) -> Void) -> Void
+    var onDraftPresenceChange: (Bool) -> Void = { _ in }
+    var outerHorizontalPadding: CGFloat = 16
+    var surfaceRadius: CGFloat = 28
+    @State private var stagedAttachments: [StagedComposerAttachment] = []
+    @State private var isPhotoPickerPresented = false
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    @State private var isStartingChat = false
+    @State private var text = ""
+
+    var body: some View {
+        Composer(
+            text: $text,
+            replyTarget: nil,
+            canSubmit: canSubmit,
+            isSending: isStartingChat,
+            stagedAttachments: $stagedAttachments,
+            isPhotoPickerPresented: $isPhotoPickerPresented,
+            selectedPhotoItems: $selectedPhotoItems,
+            focusedComposer: focusedComposer,
+            focusTarget: .home,
+            onCancelReply: {},
+            onSend: {
+                beginChat(launchAction: nil)
+            },
+            placeholder: placeholder,
+            messageFieldAccessibilityIdentifier: "HomeComposerField",
+            sendAccessibilityLabel: "Start new chat",
+            sendAccessibilityIdentifier: "HomeComposerSend",
+            outerHorizontalPadding: outerHorizontalPadding,
+            surfaceRadius: surfaceRadius,
+            onStartVoiceRecording: {
+                beginChat(launchAction: .voice)
+            },
+            onSelectPhotos: {
+                beginChat(launchAction: .photos)
+            },
+            onAttach: {
+                beginChat(launchAction: .files)
+            }
+        )
+        .onChange(of: hasDraft) { _, hasDraft in
+            onDraftPresenceChange(hasDraft)
+        }
+    }
+
+    private var hasDraft: Bool {
+        !text.isEmpty
+    }
+
+    private var canSubmit: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isStartingChat
+    }
+
+    private func beginChat(launchAction: ComposerLaunchAction?) {
+        guard !isStartingChat else { return }
+        let draft = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !draft.isEmpty || launchAction != nil else { return }
+
+        isStartingChat = true
+        onStartChat(draft, launchAction) { success in
+            isStartingChat = false
+            guard success else { return }
+            text = ""
+        }
+    }
+}
+
+enum ComposerAccessibility {
+    static let messageField = "ComposerMessageField"
+}
+
+enum ComposerPresentation {
+    static func isExpanded(
+        collapsesWhenIdle: Bool,
+        isFocused: Bool,
+        hasText: Bool,
+        hasReply: Bool,
+        hasAttachments: Bool
+    ) -> Bool {
+        !collapsesWhenIdle || isFocused || hasText || hasReply || hasAttachments
+    }
+}
+
 private struct ChatComposerSurface: ViewModifier {
+    let radius: CGFloat
+
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
             GlassEffectContainer(spacing: 0) {
                 content
-                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 28))
+                    .glassEffect(
+                        .regular.interactive(),
+                        in: .rect(cornerRadius: radius)
+                    )
             }
         } else {
             content
                 .background(
                     .ultraThinMaterial,
-                    in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    in: RoundedRectangle(
+                        cornerRadius: radius,
+                        style: .continuous
+                    )
                 )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    RoundedRectangle(
+                        cornerRadius: radius,
+                        style: .continuous
+                    )
                         .strokeBorder(Color(.separator).opacity(0.18), lineWidth: 0.5)
                 }
                 .shadow(color: .black.opacity(0.08), radius: 18, x: 0, y: 8)
@@ -257,18 +526,6 @@ struct StagedComposerAttachment: Identifiable {
                 kind: chatMediaKind(for: type)
             )
         }.value
-    }
-
-    init(pastedData data: Data, mimeType: String) throws {
-        let type = UTType(mimeType: mimeType)
-        let ext = defaultFilenameExtension(for: type)
-        let filename = "pasted-\(UUID().uuidString).\(ext)"
-        try self.init(
-            data: data,
-            filename: filename,
-            mimeType: type?.preferredMIMEType ?? mimeType,
-            kind: chatMediaKind(for: type)
-        )
     }
 
     private init(
@@ -362,296 +619,6 @@ private struct StagedAttachmentThumbnail: View {
                     .padding(6)
                 }
         }
-    }
-}
-
-struct StickerAwareTextView: UIViewRepresentable {
-    @Binding var text: String
-    @Binding var isFocused: Bool
-    var maxHeight: CGFloat = 150
-    var onSend: (() -> Void)?
-    var onImagePaste: ((Data, String) -> Void)?
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    func makeUIView(context: Context) -> PastableTextView {
-        let textView = PastableTextView()
-        textView.delegate = context.coordinator
-        textView.pasteDelegate = context.coordinator
-        textView.maxAllowedHeight = maxHeight
-        textView.onImagePaste = { data, mimeType in
-            onImagePaste?(data, mimeType)
-        }
-        textView.onReturnKey = {
-            onSend?()
-        }
-        textView.font = .preferredFont(forTextStyle: .body)
-        textView.backgroundColor = .clear
-        textView.textContainerInset = UIEdgeInsets(top: 7, left: 0, bottom: 7, right: 0)
-        textView.textContainer.lineFragmentPadding = 0
-        textView.isScrollEnabled = false
-        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        textView.setContentHuggingPriority(.defaultHigh, for: .vertical)
-        return textView
-    }
-
-    func updateUIView(_ uiView: PastableTextView, context: Context) {
-        context.coordinator.parent = self
-
-        if uiView.text != text {
-            uiView.text = text
-            uiView.recalculateHeight()
-        }
-        uiView.maxAllowedHeight = maxHeight
-        uiView.onImagePaste = { data, mimeType in
-            onImagePaste?(data, mimeType)
-        }
-        uiView.onReturnKey = {
-            onSend?()
-        }
-
-        if isFocused && !uiView.isFirstResponder {
-            DispatchQueue.main.async {
-                guard self.isFocused, !uiView.isFirstResponder else { return }
-                uiView.becomeFirstResponder()
-            }
-        } else if !isFocused && uiView.isFirstResponder {
-            DispatchQueue.main.async {
-                guard !self.isFocused, uiView.isFirstResponder else { return }
-                uiView.resignFirstResponder()
-            }
-        }
-    }
-
-    final class Coordinator: NSObject, UITextViewDelegate, UITextPasteDelegate {
-        var parent: StickerAwareTextView
-
-        init(parent: StickerAwareTextView) {
-            self.parent = parent
-        }
-
-        func textPasteConfigurationSupporting(
-            _ textPasteConfigurationSupporting: UITextPasteConfigurationSupporting,
-            transform item: UITextPasteItem
-        ) {
-            if let pasteType = preferredImagePasteType(for: item.itemProvider) {
-                item.itemProvider.loadDataRepresentation(
-                    forTypeIdentifier: pasteType.identifier
-                ) { [weak self] data, _ in
-                    guard let data else { return }
-                    DispatchQueue.main.async {
-                        guard let textView = textPasteConfigurationSupporting as? PastableTextView
-                        else { return }
-                        textView.onImagePaste?(data, pasteType.mimeType)
-                        self?.stripAttachments(in: textView)
-                    }
-                }
-                item.setNoResult()
-                return
-            }
-            item.setDefaultResult()
-        }
-
-        func textViewDidChange(_ textView: UITextView) {
-            (textView as? PastableTextView)?.recalculateHeight()
-
-            guard textView.text.contains("\u{FFFC}") else {
-                parent.text = textView.text
-                return
-            }
-
-            if let data = extractStickerImage(from: textView) {
-                stripAttachments(in: textView)
-                (textView as? PastableTextView)?.onImagePaste?(data, "image/png")
-                return
-            }
-
-            parent.text = textView.text
-        }
-
-        func textViewDidBeginEditing(_ textView: UITextView) {
-            parent.isFocused = true
-        }
-
-        func textViewDidEndEditing(_ textView: UITextView) {
-            parent.isFocused = false
-        }
-
-        private func extractStickerImage(from textView: UITextView) -> Data? {
-            let storage = textView.textStorage
-            let range = NSRange(location: 0, length: storage.length)
-
-            if #available(iOS 18.0, *) {
-                var result: Data?
-                storage.enumerateAttributes(in: range) { attributes, _, stop in
-                    for (_, value) in attributes {
-                        if let glyph = value as? NSAdaptiveImageGlyph,
-                           let image = UIImage(data: glyph.imageContent),
-                           let data = image.pngData()
-                        {
-                            result = data
-                            stop.pointee = true
-                            return
-                        }
-                    }
-                }
-                if result != nil {
-                    return result
-                }
-            }
-
-            var result: Data?
-            storage.enumerateAttribute(.attachment, in: range) { value, _, stop in
-                guard let attachment = value as? NSTextAttachment else { return }
-                if let data = attachment.contents {
-                    result = data
-                } else if let image = attachment.image, let data = image.pngData() {
-                    result = data
-                } else if let wrapper = attachment.fileWrapper,
-                          let data = wrapper.regularFileContents
-                {
-                    result = data
-                } else if let image = attachment.image(
-                    forBounds: attachment.bounds,
-                    textContainer: nil,
-                    characterIndex: 0
-                ),
-                    let data = image.pngData()
-                {
-                    result = data
-                }
-                if result != nil {
-                    stop.pointee = true
-                }
-            }
-            return result
-        }
-
-        private func stripAttachments(in textView: UITextView) {
-            let plain = textView.text.replacingOccurrences(of: "\u{FFFC}", with: "")
-            textView.text = plain
-            parent.text = plain
-        }
-
-        private func preferredImagePasteType(for provider: NSItemProvider) -> ImagePasteType? {
-            let preferredTypes: [UTType] = [.gif, .png, .jpeg]
-            for type in preferredTypes
-            where provider.hasItemConformingToTypeIdentifier(type.identifier) {
-                return ImagePasteType(type: type)
-            }
-
-            for identifier in provider.registeredTypeIdentifiers {
-                guard let type = UTType(identifier), type.conforms(to: .image) else {
-                    continue
-                }
-                return ImagePasteType(identifier: identifier, type: type)
-            }
-
-            if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-                return ImagePasteType(type: .image)
-            }
-            return nil
-        }
-    }
-}
-
-private struct ImagePasteType {
-    let identifier: String
-    let mimeType: String
-
-    init(type: UTType) {
-        self.init(identifier: type.identifier, type: type)
-    }
-
-    init(identifier: String, type: UTType) {
-        self.identifier = identifier
-        self.mimeType = type.preferredMIMEType ?? "image/png"
-    }
-}
-
-final class PastableTextView: UITextView {
-    var onImagePaste: ((Data, String) -> Void)?
-    var onReturnKey: (() -> Void)?
-    var maxAllowedHeight: CGFloat = 150
-
-    override init(frame: CGRect, textContainer: NSTextContainer?) {
-        super.init(frame: frame, textContainer: textContainer)
-        configureAccessibility()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        configureAccessibility()
-    }
-
-    override var intrinsicContentSize: CGSize {
-        let size = sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude))
-        return CGSize(width: UIView.noIntrinsicMetric, height: min(size.height, maxAllowedHeight))
-    }
-
-    private func configureAccessibility() {
-        accessibilityLabel = "Message"
-        accessibilityIdentifier = "ComposerMessageField"
-    }
-
-    func recalculateHeight() {
-        let contentHeight = sizeThatFits(
-            CGSize(width: bounds.width, height: .greatestFiniteMagnitude)
-        ).height
-        let shouldScroll = contentHeight > maxAllowedHeight
-        if isScrollEnabled != shouldScroll {
-            isScrollEnabled = shouldScroll
-        }
-        invalidateIntrinsicContentSize()
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        recalculateHeight()
-    }
-
-    override func paste(_ sender: Any?) {
-        let pasteboard = UIPasteboard.general
-
-        let types: [(identifier: String, mimeType: String)] = [
-            ("com.compuserve.gif", "image/gif"),
-            (UTType.gif.identifier, "image/gif"),
-            (UTType.png.identifier, "image/png"),
-            (UTType.jpeg.identifier, "image/jpeg")
-        ]
-        for type in types {
-            if let data = pasteboard.data(forPasteboardType: type.identifier) {
-                onImagePaste?(data, type.mimeType)
-                return
-            }
-        }
-
-        if pasteboard.hasImages, let image = pasteboard.image, let pngData = image.pngData() {
-            onImagePaste?(pngData, "image/png")
-            return
-        }
-
-        super.paste(sender)
-    }
-
-    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        if action == #selector(paste(_:)) && UIPasteboard.general.hasImages {
-            return true
-        }
-        return super.canPerformAction(action, withSender: sender)
-    }
-
-    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if let key = presses.first?.key,
-           key.keyCode == .keyboardReturnOrEnter,
-           !key.modifierFlags.contains(.shift)
-        {
-            onReturnKey?()
-            return
-        }
-        super.pressesBegan(presses, with: event)
     }
 }
 

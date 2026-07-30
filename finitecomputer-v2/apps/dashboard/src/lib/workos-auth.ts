@@ -41,6 +41,7 @@ const WORKOS_PROXY_BYPASS_PATHS = new Set([
   "/callback",
   "/health",
   "/api/brain/identity-provider",
+  "/api/device-links/enroll",
   "/api/stripe/webhook",
   "/login",
   "/logout",

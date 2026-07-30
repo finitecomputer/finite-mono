@@ -6,8 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use finitechat_core::{
-    AppAction, AppProfileSummary, AppRoomState, AppState, FiniteChatRuntime, HOME_CHAT_ID,
-    HOME_TOPIC_ID, OpenOptions, npub_from_account_id,
+    AppAction, AppProfileSummary, AppRoomState, AppState, DeviceLinkFanoutReport,
+    FiniteChatRuntime, HOME_CHAT_ID, HOME_TOPIC_ID, OpenOptions, npub_from_account_id,
 };
 use finitechat_hermes::HermesMessagePayloadV1;
 use finitechat_proto::{DecryptedApplicationEventV1, DurableAppEventKind};
@@ -16,6 +16,7 @@ use finitechat_server::{HttpServerState, http_router};
 const USER_SECRET: &str = "6b911fd37cdf5c81d4c0adb1ab7fa822ed253ab0ad9aa18d77257c88b29b718e";
 const AGENT_SECRET: &str = "4242424242424242424242424242424242424242424242424242424242424242";
 const PEER_SECRET: &str = "3131313131313131313131313131313131313131313131313131313131313131";
+const PRE_LINK_TRANSCRIPT_MESSAGES: usize = 130;
 
 #[test]
 fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
@@ -102,10 +103,10 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
     })
     .unwrap();
 
-    // Put the conversation foundations more than one bootstrap event window
-    // behind the live transcript. The bootstrap must still retain the topic
-    // metadata, selected segment start, and rename.
-    for index in 0..66 {
+    // Put the conversation foundations more than two bootstrap event windows
+    // behind the live transcript. Electron must receive the complete ordered
+    // journal across at least three chunks, not a representative tail.
+    for index in 0..PRE_LINK_TRANSCRIPT_MESSAGES {
         send_to_chat(
             &web,
             &agent_room_id,
@@ -124,28 +125,24 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
     sync(&agent);
 
     // The target publishes its own KeyPackages. Fanout still uses normal MLS
-    // Add/Welcome; the bounded application snapshot is sent only after those
-    // room memberships exist.
+    // Add/Welcome; the complete chunked transfer is sent only after those room
+    // memberships exist.
     sync(&electron);
-    let fanout = web
-        .link_device_and_wait(
-            "electron-device-parity-link".to_owned(),
-            "electron-alpha-test".to_owned(),
-        )
-        .unwrap();
+    let (fanout, electron_after_join) = drive_device_link_to_exact_receipts(
+        &web,
+        &electron,
+        "electron-device-parity-link",
+        "electron-alpha-test",
+    );
     assert!(fanout.fanout_complete);
     assert_eq!(fanout.room_count, 2);
-    let electron_after_join = sync(&electron);
+    let electron_after_join =
+        load_all_selected_history(&electron, electron_after_join, &agent_room_id);
     assert_room_connected(&electron_after_join, &legacy_room_id);
     assert_room_connected(&electron_after_join, &agent_room_id);
-    let activated = web
-        .link_device_and_wait(
-            "electron-device-parity-link".to_owned(),
-            "electron-alpha-test".to_owned(),
-        )
-        .unwrap();
-    assert_eq!(activated.active_room_count, 2);
+    assert_eq!(fanout.active_room_count, 2);
     assert_hydrated_agent_conversation(&electron_after_join, &agent_room_id, &topic_id, &chat_id);
+    assert_complete_pre_link_transcript(&electron_after_join, &topic_id, &chat_id);
     assert_eq!(
         electron_after_join
             .rooms
@@ -211,13 +208,8 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
         HOME_CHAT_ID,
     );
 
-    // Simulate Paul's pre-bootstrap persisted state: MLS rooms and identity are
-    // already linked, but local room metadata is the raw id and the arbitrary
-    // first room was persisted. Reopening the upgraded build requests a fresh
-    // typed snapshot from the existing Hosted Web Device—no re-pairing.
-    save_room_name(&electron, &legacy_room_id, &legacy_room_id);
-    save_room_name(&electron, &agent_room_id, &agent_room_id);
-
+    // A completed enrollment is self-contained. Restarting uses the exact
+    // durable receipts and never asks the source to replay bootstrap state.
     drop(electron);
     electron = open_runtime(
         &electron_store,
@@ -225,38 +217,10 @@ fn hosted_web_and_electron_continue_one_agent_chat_as_distinct_devices() {
         "electron-alpha-test",
         USER_SECRET,
     );
-    let legacy_reopened = sync(&electron);
-    assert_eq!(
-        legacy_reopened.selected_room_id.as_deref(),
-        Some(legacy_room_id.as_str())
-    );
-    sync(&web); // consumes the encrypted requests and emits target-bound replies
-    let repaired = sync(&electron);
-    assert_hydrated_agent_conversation(&repaired, &agent_room_id, &topic_id, &chat_id);
-    assert_unique_message_ids(&repaired);
-
-    // Duplicate/no-op sync is idempotent, and a later explicit selection stays
-    // selected across another process restart.
-    sync(&web);
-    assert_unique_message_ids(&sync(&electron));
-    electron
-        .dispatch_and_wait(AppAction::OpenRoom {
-            room_id: legacy_room_id.clone(),
-        })
-        .unwrap();
-    drop(electron);
-    electron = open_runtime(
-        &electron_store,
-        &server_url,
-        "electron-alpha-test",
-        USER_SECRET,
-    );
-    assert_selection(
-        &sync(&electron),
-        &legacy_room_id,
-        HOME_TOPIC_ID,
-        HOME_CHAT_ID,
-    );
+    let restarted = sync(&electron);
+    assert_unique_message_ids(&restarted);
+    assert_eq!(restarted.device_link_bootstrap_receipts.len(), 2);
+    assert_selection(&restarted, &legacy_room_id, HOME_TOPIC_ID, HOME_CHAT_ID);
 }
 
 fn open_runtime(
@@ -277,6 +241,68 @@ fn open_runtime(
 
 fn sync(runtime: &Arc<FiniteChatRuntime>) -> AppState {
     runtime.dispatch_and_wait(AppAction::StartRuntime).unwrap()
+}
+
+fn drive_device_link_to_exact_receipts(
+    source: &Arc<FiniteChatRuntime>,
+    target: &Arc<FiniteChatRuntime>,
+    fanout_id: &str,
+    target_device_id: &str,
+) -> (DeviceLinkFanoutReport, AppState) {
+    for _ in 0..100_000 {
+        let report = source
+            .link_device_and_wait(fanout_id.to_owned(), target_device_id.to_owned())
+            .unwrap();
+        let target_state = sync(target);
+        if report.fanout_complete
+            && report.bootstrap_manifests.len() == report.room_count as usize
+            && report.bootstrap_manifests.iter().all(|expected| {
+                target_state
+                    .device_link_bootstrap_receipts
+                    .iter()
+                    .any(|actual| {
+                        actual.bootstrap_id == expected.bootstrap_id
+                            && actual.room_id == expected.room_id
+                            && actual.manifest_sha256 == expected.manifest_sha256
+                    })
+            })
+        {
+            return (report, target_state);
+        }
+    }
+    panic!("device link did not converge to exact durable receipts");
+}
+
+fn load_all_selected_history(
+    runtime: &Arc<FiniteChatRuntime>,
+    mut state: AppState,
+    room_id: &str,
+) -> AppState {
+    for _ in 0..100 {
+        let can_load_older = state
+            .rooms
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .unwrap()
+            .can_load_older;
+        if !can_load_older {
+            return state;
+        }
+        let before_message_id = state
+            .messages
+            .first()
+            .expect("a paged transcript has an oldest visible message")
+            .message_id
+            .clone();
+        state = runtime
+            .dispatch_and_wait(AppAction::LoadOlderMessages {
+                room_id: room_id.to_owned(),
+                before_message_id,
+                limit: 64,
+            })
+            .unwrap();
+    }
+    panic!("Electron transcript pagination did not converge");
 }
 
 fn add_member(
@@ -382,9 +408,25 @@ fn assert_room_connected(state: &AppState, room_id: &str) {
 }
 
 fn assert_selection(state: &AppState, room_id: &str, topic_id: &str, chat_id: &str) {
-    assert_eq!(state.selected_room_id.as_deref(), Some(room_id));
-    assert_eq!(state.selected_topic_id.as_deref(), Some(topic_id));
-    assert_eq!(state.selected_chat_id.as_deref(), Some(chat_id));
+    assert_eq!(
+        state.selected_room_id.as_deref(),
+        Some(room_id),
+        "rooms={:#?}",
+        state.rooms
+    );
+    assert_eq!(
+        state.selected_topic_id.as_deref(),
+        Some(topic_id),
+        "rooms={:#?}; topics={:#?}",
+        state.rooms,
+        state.topics,
+    );
+    assert_eq!(
+        state.selected_chat_id.as_deref(),
+        Some(chat_id),
+        "topics={:#?}",
+        state.topics
+    );
 }
 
 fn assert_message_route(
@@ -480,6 +522,24 @@ fn assert_shared_order(left: &AppState, right: &AppState, expected: &[&str]) {
             .collect::<Vec<_>>(),
         expected
     );
+}
+
+fn assert_complete_pre_link_transcript(state: &AppState, topic_id: &str, chat_id: &str) {
+    let messages = state
+        .messages
+        .iter()
+        .filter(|message| message.text.starts_with("pre-link transcript "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages.len(),
+        PRE_LINK_TRANSCRIPT_MESSAGES,
+        "Electron must page through the complete pre-link transcript"
+    );
+    for (index, message) in messages.iter().enumerate() {
+        assert_eq!(message.text, format!("pre-link transcript {index:02}"));
+        assert_eq!(message.conversation_id.as_deref(), Some(topic_id));
+        assert_eq!(message.chat_id.as_deref(), Some(chat_id));
+    }
 }
 
 fn assert_unique_message_ids(state: &AppState) {

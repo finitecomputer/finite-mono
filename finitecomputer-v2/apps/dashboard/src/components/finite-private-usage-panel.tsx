@@ -9,16 +9,12 @@ import {
 } from "@/app/actions";
 import { FormActionButton } from "@/components/form-action-button";
 import type { CoreFinitePrivateUsageStatus } from "@/lib/core-client";
+import { formatUtcDateTime } from "@/lib/date-time";
 
 const INITIAL_STATE: FinitePrivateDailyResetActionState = {
   message: "",
   tone: null,
 };
-
-function utcLabel(value: string) {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf()) ? value : parsed.toISOString().replace(".000Z", "Z");
-}
 
 export function FinitePrivateUsagePanel({
   usage,
@@ -44,7 +40,10 @@ export function FinitePrivateUsagePanel({
           <h2 className="ocean-utility-card__title">Finite Private usage</h2>
           <p className="text-sm text-muted-foreground">
             {remainingPercent}% remains in your account-wide burst window. Resets at{" "}
-            <time dateTime={usage.burstResetAt}>{utcLabel(usage.burstResetAt)}</time>.
+            <time dateTime={usage.burstResetAt}>
+              {formatUtcDateTime(usage.burstResetAt)}
+            </time>
+            .
           </p>
         </div>
         <form action={formAction}>
@@ -63,7 +62,7 @@ export function FinitePrivateUsagePanel({
         <p className="mt-3 text-sm text-muted-foreground">
           Your next free reset is available at{" "}
           <time dateTime={usage.freeDailyResetAvailableAgainAt}>
-            {utcLabel(usage.freeDailyResetAvailableAgainAt)}
+            {formatUtcDateTime(usage.freeDailyResetAvailableAgainAt)}
           </time>
           .
         </p>

@@ -6,6 +6,7 @@ import {
   MAX_DEVICE_LINK_REQUEST_BYTES,
   deviceLinkBoundaryError,
   deviceLinkRouteError,
+  parseDeviceEnrollmentJsonRequest,
   parseDeviceLinkJsonRequest,
   parseDeviceLinkRequest,
   parseOptionalDeviceStatusTarget,
@@ -18,11 +19,11 @@ const ACCOUNT_ID = "a".repeat(64);
 test("device-link requests bind one exact session to one distinct Device", () => {
   assert.deepEqual(
     parseDeviceLinkRequest({
-      link_session_id: "link-alpha-01",
+      pairing_session_id: "pairing-alpha-01",
       target_device_id: "electron-paul-01",
     }),
     {
-      link_session_id: "link-alpha-01",
+      pairing_session_id: "pairing-alpha-01",
       target_device_id: "electron-paul-01",
     }
   );
@@ -32,15 +33,15 @@ test("device-link requests bind one exact session to one distinct Device", () =>
     [],
     {},
     {
-      link_session_id: "link-alpha",
+      pairing_session_id: "pairing-alpha",
       target_device_id: "electron-alpha",
       approval_secret: "do-not-accept",
     },
-    { link_session_id: " link-alpha", target_device_id: "electron-alpha" },
-    { link_session_id: "link-alpha", target_device_id: "hosted-web" },
-    { link_session_id: "link-alpha\n", target_device_id: "electron-alpha" },
-    { link_session_id: "link-alpha", target_device_id: `electron\u200b-alpha` },
-    { link_session_id: "link-alpha", target_device_id: "é".repeat(129) },
+    { pairing_session_id: " pairing-alpha", target_device_id: "electron-alpha" },
+    { pairing_session_id: "pairing-alpha", target_device_id: "hosted-web" },
+    { pairing_session_id: "pairing-alpha\n", target_device_id: "electron-alpha" },
+    { pairing_session_id: "pairing-alpha", target_device_id: `electron\u200b-alpha` },
+    { pairing_session_id: "pairing-alpha", target_device_id: "é".repeat(129) },
   ]) {
     assert.throws(
       () => parseDeviceLinkRequest(value),
@@ -54,12 +55,12 @@ test("device-link JSON parsing enforces media type and actual byte limits", asyn
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({
-      link_session_id: "link-alpha-01",
+      pairing_session_id: "pairing-alpha-01",
       target_device_id: "electron-paul-01",
     }),
   });
   assert.deepEqual(await parseDeviceLinkJsonRequest(valid), {
-    link_session_id: "link-alpha-01",
+    pairing_session_id: "pairing-alpha-01",
     target_device_id: "electron-paul-01",
   });
 
@@ -95,6 +96,37 @@ test("device-link JSON parsing enforces media type and actual byte limits", asyn
     parseDeviceLinkJsonRequest(oversizedActual),
     (error: unknown) => error instanceof DeviceLinkError && error.status === 413
   );
+});
+
+test("device enrollment accepts only the exact bounded resume capability", async () => {
+  const input = {
+    pairing_session_id: "pairing-alpha-01",
+    target_device_id: "electron-paul-01",
+    enrollment_user_id: "user_test",
+    enrollment_capability_hex: "ab".repeat(32),
+  };
+  const valid = new Request("https://finite.computer/api/device-links/enroll", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  assert.deepEqual(await parseDeviceEnrollmentJsonRequest(valid), input);
+
+  for (const value of [
+    { ...input, enrollment_capability_hex: "AB".repeat(32) },
+    { ...input, enrollment_user_id: " user_test" },
+    { ...input, access_token: "must-not-be-accepted" },
+  ]) {
+    const request = new Request("https://finite.computer/api/device-links/enroll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(value),
+    });
+    await assert.rejects(
+      parseDeviceEnrollmentJsonRequest(request),
+      (error: unknown) => error instanceof DeviceLinkError && error.status === 400
+    );
+  }
 });
 
 test("device-link boundary maps upstream failures to fixed public errors", () => {

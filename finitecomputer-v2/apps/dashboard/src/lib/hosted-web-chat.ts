@@ -27,6 +27,7 @@ import {
   hostedDeviceUpdates,
   HostedDeviceRequestError,
   type HostedChatAction,
+  type HostedChatReference,
   type HostedChatReferenceSearchResult,
   type HostedChatSearchResult,
   type HostedChatState,
@@ -40,6 +41,7 @@ const AGENT_BINDING_AUTHORIZATION_REQUIRED =
 const AGENT_BINDING_RECOVERY_REQUIRED =
   `canonical Agent conversation requires recovery: ${AGENT_BINDING_AUTHORIZATION_REQUIRED}`;
 const MAX_DEVICE_ID_BYTES = 128;
+const MAX_CHAT_REFERENCE_COUNT = 12;
 
 export const MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES = 4 * 1024;
 
@@ -617,6 +619,18 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         },
       };
     }
+    case "SendChatMessageWithReferences": {
+      const value = objectRecord(input, operation);
+      return {
+        SendChatMessageWithReferences: {
+          room_id: boundedString(value.room_id, "room_id"),
+          topic_id: boundedString(value.topic_id, "topic_id"),
+          chat_id: boundedString(value.chat_id, "chat_id"),
+          text: boundedString(value.text, "text", 64 * 1024),
+          references: parseChatReferences(value.references),
+        },
+      };
+    }
     case "LoadOlderMessages": {
       const value = objectRecord(input, operation);
       return {
@@ -660,6 +674,50 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
     default:
       throw new HostedWebChatError(`Unsupported chat action: ${operation}`, 400);
   }
+}
+
+function parseChatReferences(value: unknown): HostedChatReference[] {
+  if (
+    !Array.isArray(value)
+    || value.length === 0
+    || value.length > MAX_CHAT_REFERENCE_COUNT
+  ) {
+    throw new HostedWebChatError("Invalid chat references.", 400);
+  }
+  return value.map((candidate) => {
+    const reference = objectRecord(candidate, "chat reference");
+    if (
+      reference.kind !== "file"
+      && reference.kind !== "skill"
+      && reference.kind !== "site"
+    ) {
+      throw new HostedWebChatError("Invalid chat reference kind.", 400);
+    }
+    const kind = reference.kind;
+    const path = optionalBoundedString(reference.path, "reference.path", 1024);
+    const url = optionalBoundedString(reference.url, "reference.url", 2048);
+    const fingerprint = optionalBoundedString(
+      reference.fingerprint,
+      "reference.fingerprint",
+      256
+    );
+    if (reference.kind === "file" && !path) {
+      throw new HostedWebChatError("File references require a path.", 400);
+    }
+    if (reference.kind === "site" && !url) {
+      throw new HostedWebChatError("Site references require a URL.", 400);
+    }
+    return {
+      kind,
+      id: boundedString(reference.id, "reference.id", 512),
+      label: boundedString(reference.label, "reference.label", 256),
+      detail: boundedString(reference.detail, "reference.detail", 1024),
+      token: boundedString(reference.token, "reference.token", 512),
+      ...(path ? { path } : {}),
+      ...(url ? { url } : {}),
+      ...(fingerprint ? { fingerprint } : {}),
+    };
+  });
 }
 
 function objectRecord(value: unknown, label: string): Record<string, unknown> {

@@ -8,7 +8,7 @@ use crate::bindings;
 use crate::bindings::BuildProfile;
 use crate::cli::{CliError, JsonOk, human_log, json_print};
 use crate::config::load_rmp_toml;
-use crate::util::{discover_xcode_dev_dir, run_capture};
+use crate::util::{discover_xcode_dev_dir, run_capture, sanitize_apple_toolchain_environment};
 
 const IOS_DEVICE_STORE_DIR: &str = "FiniteChatStore";
 const IOS_DEVICE_STORE_SOURCE: &str = "Library/Application Support/FiniteChatStore";
@@ -70,6 +70,42 @@ fn kp_relay_csv_from_env() -> String {
     )
 }
 
+fn ios_simulator_launch_args() -> Vec<String> {
+    ios_simulator_launch_args_with(|key| std::env::var(key).ok())
+}
+
+fn ios_simulator_launch_args_with<F>(get: F) -> Vec<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut args = Vec::new();
+    for (environment_key, argument) in [
+        ("FINITECHAT_SERVER_URL", "--finitechat-server"),
+        ("FINITECHAT_DASHBOARD_URL", "--finitechat-dashboard"),
+        ("FINITECHAT_DEVICE_ID", "--finitechat-device"),
+    ] {
+        if let Some(value) = get(environment_key)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            args.push(argument.to_owned());
+            args.push(value);
+        }
+    }
+    if !args.is_empty() {
+        args.push("--finitechat-transient-config".to_owned());
+    }
+    if get("FINITECHAT_IOS_PERFORMANCE_PROBES").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    }) {
+        args.push("--finitechat-performance-probes".to_owned());
+    }
+    args
+}
+
 fn run_ios(
     root: &Path,
     json: bool,
@@ -82,8 +118,10 @@ fn run_ios(
     // historical behavior of provisioning/booting a default simulator.
     if let Some(requested) = args.udid.clone() {
         let dev_dir = discover_xcode_dev_dir()?;
-        let simulator_udids = collect_simulator_udids(&dev_dir).unwrap_or_default();
-        if classify_ios_udid(&requested, &simulator_udids) == IosTargetKind::PhysicalDevice {
+        let simulator_udids = collect_simulator_udids(&dev_dir);
+        if classify_ios_udid(&requested, simulator_udids.as_ref().ok())
+            == IosTargetKind::PhysicalDevice
+        {
             human_log(
                 verbose,
                 format!("routing --udid {requested} to physical iOS device install"),
@@ -106,11 +144,12 @@ fn run_ios(
         )?;
     }
 
+    let launch_args = ios_simulator_launch_args();
     launch_ios_simulator_app(
         &installed.dev_dir,
         &installed.udid,
         &installed.bundle_id,
-        &[],
+        &launch_args,
         verbose,
     )?;
 
@@ -169,18 +208,23 @@ pub(crate) enum IosTargetKind {
 /// Classify an explicitly requested iOS `--udid`.
 ///
 /// `simulator_udids` should be the set of UDIDs reported by `simctl list
-/// devices`. When that query succeeds the set is authoritative for simulators.
-/// When it is empty (query failed) we fall back to a shape heuristic: simulator
-/// UDIDs are standard 8-4-4-4-12 UUIDs (four dashes) while modern hardware UDIDs
-/// look like `XXXXXXXX-XXXXXXXXXXXXXXXX` (a single dash), so anything that is not
-/// simulator-shaped is treated as a physical device.
+/// devices`. When that query succeeds the set is authoritative for simulators:
+/// CoreDevice identifiers for physical devices are UUID-shaped too. Only when
+/// that query fails do we fall back to a shape heuristic. Simulator UDIDs are
+/// standard 8-4-4-4-12 UUIDs (four dashes), while hardware UDIDs look like
+/// `XXXXXXXX-XXXXXXXXXXXXXXXX` (a single dash).
 pub(crate) fn classify_ios_udid(
     udid: &str,
-    simulator_udids: &std::collections::HashSet<String>,
+    simulator_udids: Option<&std::collections::HashSet<String>>,
 ) -> IosTargetKind {
-    if simulator_udids.contains(udid) {
-        return IosTargetKind::Simulator;
+    if let Some(simulator_udids) = simulator_udids {
+        return if simulator_udids.contains(udid) {
+            IosTargetKind::Simulator
+        } else {
+            IosTargetKind::PhysicalDevice
+        };
     }
+
     if is_simulator_shaped_udid(udid) {
         IosTargetKind::Simulator
     } else {
@@ -285,10 +329,8 @@ pub(crate) fn build_install_ios_simulator(
         format!("xcodebuild ({xcode_config}, iphonesimulator, arch={xcode_arch})"),
     );
     let mut cmd = Command::new("/usr/bin/xcrun");
+    sanitize_apple_toolchain_environment(&mut cmd);
     cmd.env("DEVELOPER_DIR", &dev_dir)
-        .env_remove("LD")
-        .env_remove("CC")
-        .env_remove("CXX")
         .arg("xcodebuild")
         .arg("-project")
         .arg(&xcode_project_path)
@@ -303,7 +345,6 @@ pub(crate) fn build_install_ios_simulator(
         .arg("build")
         .arg(format!("ARCHS={xcode_arch}"))
         .arg("ONLY_ACTIVE_ARCH=YES")
-        .arg("CODE_SIGNING_ALLOWED=NO")
         .arg(format!("PRODUCT_BUNDLE_IDENTIFIER={bundle_id}"));
 
     let status = cmd
@@ -407,10 +448,8 @@ pub(crate) fn build_install_ios_device(
         format!("xcodebuild ({xcode_config}, iphoneos, arch={xcode_arch})"),
     );
     let mut cmd = Command::new("/usr/bin/xcrun");
+    sanitize_apple_toolchain_environment(&mut cmd);
     cmd.env("DEVELOPER_DIR", &dev_dir)
-        .env_remove("LD")
-        .env_remove("CC")
-        .env_remove("CXX")
         .arg("xcodebuild")
         .arg("-project")
         .arg(&xcode_project_path)
@@ -1936,10 +1975,8 @@ fn resolve_ios_app_path(
     xcode_arch: &str,
 ) -> Result<PathBuf, CliError> {
     let mut cmd = Command::new("/usr/bin/xcrun");
+    sanitize_apple_toolchain_environment(&mut cmd);
     cmd.env("DEVELOPER_DIR", dev_dir)
-        .env_remove("LD")
-        .env_remove("CC")
-        .env_remove("CXX")
         .arg("xcodebuild")
         .arg("-project")
         .arg(xcode_project_path)
@@ -2011,6 +2048,42 @@ mod tests {
     fn app_default_csv_helpers_are_empty_without_env() {
         assert_eq!(default_app_relay_csv(), "");
         assert_eq!(default_app_kp_relay_csv(), "");
+    }
+
+    #[test]
+    fn ios_simulator_launch_args_forward_local_device_link_environment() {
+        let args = ios_simulator_launch_args_with(|key| match key {
+            "FINITECHAT_SERVER_URL" => Some(" http://127.0.0.1:18788 ".to_owned()),
+            "FINITECHAT_DASHBOARD_URL" => Some("http://127.0.0.1:13002".to_owned()),
+            "FINITECHAT_DEVICE_ID" => Some("ios-local".to_owned()),
+            _ => None,
+        });
+        assert_eq!(
+            args,
+            vec![
+                "--finitechat-server",
+                "http://127.0.0.1:18788",
+                "--finitechat-dashboard",
+                "http://127.0.0.1:13002",
+                "--finitechat-device",
+                "ios-local",
+                "--finitechat-transient-config",
+            ]
+        );
+    }
+
+    #[test]
+    fn ios_simulator_launch_args_are_empty_without_overrides() {
+        assert!(ios_simulator_launch_args_with(|_| None).is_empty());
+    }
+
+    #[test]
+    fn ios_simulator_launch_args_enable_performance_probes_explicitly() {
+        let args = ios_simulator_launch_args_with(|key| match key {
+            "FINITECHAT_IOS_PERFORMANCE_PROBES" => Some("true".to_owned()),
+            _ => None,
+        });
+        assert_eq!(args, vec!["--finitechat-performance-probes"]);
     }
 
     #[test]
@@ -2122,25 +2195,29 @@ mod tests {
 
         // A UDID present in the queried simulator set is a simulator.
         assert_eq!(
-            classify_ios_udid("8C10824B-840E-5717-BC9C-55B537D33060", &sims),
+            classify_ios_udid("8C10824B-840E-5717-BC9C-55B537D33060", Some(&sims)),
             IosTargetKind::Simulator
         );
-        // Paulphone Air's hardware UDID (single dash, not in the set) is a device.
+        // A CoreDevice UUID and a hardware UDID not present in the authoritative
+        // simulator set both identify physical devices.
         assert_eq!(
-            classify_ios_udid("00008150-0010149A26F0401C", &sims),
+            classify_ios_udid("BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF", Some(&sims)),
+            IosTargetKind::PhysicalDevice
+        );
+        assert_eq!(
+            classify_ios_udid("00008150-0010149A26F0401C", Some(&sims)),
             IosTargetKind::PhysicalDevice
         );
 
-        // Fallback heuristic when the simctl query failed (empty set): a
+        // Fallback heuristic when the simctl query failed: a
         // UUID-shaped id is still treated as a simulator, a hardware-shaped id as
         // a device.
-        let empty = HashSet::new();
         assert_eq!(
-            classify_ios_udid("8C10824B-840E-5717-BC9C-55B537D33060", &empty),
+            classify_ios_udid("8C10824B-840E-5717-BC9C-55B537D33060", None),
             IosTargetKind::Simulator
         );
         assert_eq!(
-            classify_ios_udid("00008150-0010149A26F0401C", &empty),
+            classify_ios_udid("00008150-0010149A26F0401C", None),
             IosTargetKind::PhysicalDevice
         );
     }

@@ -13,7 +13,7 @@ use serde_json::Value;
 ///
 /// Bump this when client, Hermes bridge, or server behavior changes in a way
 /// that must not silently interoperate with an older deployed server.
-pub const FINITECHAT_SERVER_CONTRACT_VERSION: u32 = 5;
+pub const FINITECHAT_SERVER_CONTRACT_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponse {
@@ -362,81 +362,81 @@ pub struct HttpKeyPackageClaim {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateLinkSessionRequest {
-    pub link_session_id: String,
-    pub pairing_public_key: String,
+pub struct CreatePairingSessionRequest {
+    pub version: u16,
+    pub pairing_session_id: String,
+    pub target_device_id: String,
+    pub target_public_key: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GetLinkSessionRequest {
-    pub link_session_id: String,
+pub struct HttpNipAbSourceDescriptorV1 {
+    pub version: u16,
+    pub source_public_key: String,
+    pub session_secret_hex: String,
+    pub expires_at_unix_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UploadLinkPayloadRequest {
-    pub link_session_id: String,
-    pub encrypted_payload: Vec<u8>,
+pub struct GetPairingSessionRequest {
+    pub pairing_session_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimLinkPayloadRequest {
-    pub link_session_id: String,
+pub struct PublishPairingOfferRequest {
+    pub pairing_session_id: String,
+    pub offer_event: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaimLinkPayloadResponse {
-    pub encrypted_payload: Vec<u8>,
-    pub claim_token: String,
+pub struct PublishPairingResponseRequest {
+    pub pairing_session_id: String,
+    pub source_confirmation_event: Vec<u8>,
+    pub payload_event: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AckLinkPayloadRequest {
-    pub link_session_id: String,
-    pub claim_token: String,
+pub struct PublishPairingCompleteRequest {
+    pub pairing_session_id: String,
+    pub complete_event: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AckLinkPayloadResponse {
-    pub acked: bool,
+pub struct ExpirePairingSessionRequest {
+    pub pairing_session_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReleaseLinkClaimRequest {
-    pub link_session_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReleaseLinkClaimResponse {
-    pub released: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExpireLinkSessionRequest {
-    pub link_session_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExpireLinkSessionResponse {
+pub struct ExpirePairingSessionResponse {
     pub expired: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpLinkSessionRecord {
-    pub link_session_id: String,
-    pub pairing_public_key: String,
+pub struct HttpPairingSessionRecord {
+    pub version: u16,
+    pub pairing_session_id: String,
+    pub target_device_id: String,
+    pub target_public_key: String,
+    pub issued_at_unix_seconds: u64,
+    pub expires_at_unix_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<Vec<u8>>,
-    pub state: HttpLinkSessionState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claim_token: Option<String>,
+    pub source_public_key: Option<String>,
+    pub events: Vec<HttpPairingEventRecord>,
+    pub state: HttpPairingSessionState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HttpLinkSessionState {
+pub struct HttpPairingEventRecord {
+    pub seq: u16,
+    pub event: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HttpPairingSessionState {
     Created,
-    PayloadUploaded,
-    Claimed,
-    Delivered,
+    OfferPublished,
+    ResponsePublished,
+    Completed,
     Expired,
 }
 

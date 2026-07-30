@@ -4,6 +4,7 @@ const os = require("node:os");
 const { spawn } = require("node:child_process");
 const {
   app,
+  autoUpdater,
   BrowserWindow,
   ipcMain,
   protocol,
@@ -11,7 +12,9 @@ const {
   session,
   shell,
   systemPreferences,
+  WebContentsView,
 } = require("electron");
+const { createAppUpdater } = require("./app-updater.cjs");
 const {
   attachmentActionUsesBinaryTransport,
   forwardAttachmentUpload,
@@ -30,15 +33,17 @@ const {
   isGoogleWorkspaceStartUrl,
   normalizeDashboardBaseUrl,
   parseAccountBinding,
+  parseDeviceEnrollmentGrant,
   parseDeviceLinkPublicRequest,
   parseDeviceLinkPublicResponse,
   parseLocalDaemonIdentity,
+  retryableDashboardStatus,
   shouldExposeLocalChatBridge,
   trustedDashboardIpcFrame,
   trustedDashboardMicrophonePermission,
 } = require("./dashboard-security.cjs");
 const {
-  AccountSecretStore,
+  DeviceIdentityStore,
   DaemonUpdateRelay,
   DaemonSupervisor,
   DeviceLinkSupervisor,
@@ -47,10 +52,26 @@ const {
   deviceLinkFailureMessage,
   loadOrCreateDeviceId,
   markDeviceProfileInitialized,
+  removeDeprecatedDeviceLinkSetting,
   resolveDaemonBinary,
   startDaemonRuntime,
   validDeviceId,
 } = require("./daemon-process.cjs");
+const {
+  dashboardLoadErrorScript,
+  shouldReplaceFailedDashboardDocument,
+} = require("./dashboard-load-error.cjs");
+const {
+  completeDeviceSecretGrant,
+  waitForSourceEnrollment,
+  waitForTargetEnrollment,
+} = require("./device-link-orchestration.cjs");
+const {
+  electronDashboardChromeCss,
+  fullBleedWindowOptions,
+  navigationActionForUrl,
+  navigationToolbarBounds,
+} = require("./window-chrome.cjs");
 
 let mainWindow = null;
 let authWindow = null;
@@ -65,7 +86,7 @@ let updateGeneration = 0;
 let quitAfterDaemonStops = false;
 let daemonShutdownPromise = null;
 let daemonUpdateRelay = null;
-let accountSecretStore = null;
+let deviceIdentityStore = null;
 let localDeviceLifecycle = null;
 let verifiedLocalDevice = null;
 let localDeviceGeneration = 0;
@@ -90,6 +111,7 @@ const exposeLocalChatBridge = shouldExposeLocalChatBridge({
   isPackaged: app.isPackaged,
   disabledInDevelopment: process.env.FINITECHAT_DISABLE_LOCAL_CHAT_BRIDGE === "1",
 });
+const releaseAppUpdater = createAppUpdater({ app, autoUpdater });
 
 if (process.env.FINITECHAT_USER_DATA_DIR) {
   fs.mkdirSync(process.env.FINITECHAT_USER_DATA_DIR, { recursive: true, mode: 0o700 });
@@ -110,6 +132,7 @@ protocol.registerSchemesAsPrivileged([
 
 function commonWindowOptions() {
   return {
+    ...fullBleedWindowOptions(),
     width: 1280,
     height: 860,
     minWidth: 900,
@@ -118,6 +141,106 @@ function commonWindowOptions() {
     show: false,
     title: "Finite",
   };
+}
+
+function installNavigationToolbar(window) {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  const toolbar = new WebContentsView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  toolbar.setBackgroundColor("#00000000");
+  window.contentView.addChildView(toolbar);
+
+  const layout = () => {
+    if (!window.isDestroyed()) {
+      toolbar.setBounds(navigationToolbarBounds(window.getContentBounds()));
+    }
+  };
+  const update = () => {
+    if (window.isDestroyed() || toolbar.webContents.isDestroyed()) {
+      return;
+    }
+    const history = window.webContents.navigationHistory;
+    const state = {
+      canGoBack: history.canGoBack(),
+      canGoForward: history.canGoForward(),
+    };
+    void toolbar.webContents
+      .executeJavaScript(`globalThis.setNavigationState?.(${JSON.stringify(state)})`)
+      .catch(() => {
+        // The toolbar may close between the navigation event and this update.
+      });
+  };
+  const navigate = (action) => {
+    const history = window.webContents.navigationHistory;
+    if (action === "back" && history.canGoBack()) {
+      history.goBack();
+    } else if (action === "forward" && history.canGoForward()) {
+      history.goForward();
+    }
+  };
+
+  toolbar.webContents.on("will-navigate", (event) => {
+    event.preventDefault();
+    const action = navigationActionForUrl(event.url);
+    if (action) {
+      navigate(action);
+    }
+  });
+  toolbar.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  toolbar.webContents.on("did-finish-load", update);
+  window.webContents.on("did-navigate", update);
+  window.webContents.on("did-navigate-in-page", update);
+  window.webContents.on("did-stop-loading", update);
+  window.on("resize", layout);
+  window.on("closed", () => {
+    if (!toolbar.webContents.isDestroyed()) {
+      toolbar.webContents.close();
+    }
+  });
+
+  layout();
+  void toolbar.webContents.loadFile(path.join(__dirname, "navigation-toolbar.html"));
+}
+
+function installDashboardChrome(window) {
+  const dashboardChromeCss = electronDashboardChromeCss();
+  const apply = () => {
+    if (!window.isDestroyed()) {
+      void window.webContents.insertCSS(dashboardChromeCss).catch(() => {
+        // Navigation or shutdown may dispose the renderer before CSS is installed.
+      });
+    }
+  };
+  window.webContents.on("dom-ready", apply);
+}
+
+function showDashboardLoadError(details) {
+  const window = mainWindow;
+  if (
+    !window
+    || window.isDestroyed()
+    || window.webContents.isDestroyed()
+    || !isDashboardDocumentUrl(details.url, defaultDashboardUrl)
+    || !shouldReplaceFailedDashboardDocument(details, {
+      currentUrl: window.webContents.getURL(),
+      dashboardWebContentsId: window.webContents.id,
+    })
+  ) {
+    return;
+  }
+  void window.webContents
+    .executeJavaScript(dashboardLoadErrorScript(dashboardFailureLogoDataUrl()))
+    .catch(() => {
+      // A newer navigation or shutdown may dispose the failed document first.
+    });
 }
 
 function showWindowWhenReady(window) {
@@ -173,6 +296,7 @@ function createDashboardWindow(targetUrl = dashboardStartUrl) {
       webSecurity: true,
     },
   });
+  installDashboardChrome(mainWindow);
 
   showWindowWhenReady(mainWindow);
   mainWindow.on("closed", () => {
@@ -207,6 +331,14 @@ function createDashboardWindow(targetUrl = dashboardStartUrl) {
     if (isAllowedUnprivilegedNavigation(url, defaultDashboardUrl)) {
       transitionToAuth(url);
     }
+  });
+  mainWindow.webContents.on("did-navigate", (_event, url, statusCode) => {
+    showDashboardLoadError({
+      resourceType: "mainFrame",
+      statusCode,
+      url,
+      webContentsId: mainWindow?.webContents.id,
+    });
   });
   mainWindow.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
     if (!isMainFrame || isDashboardDocumentUrl(url, defaultDashboardUrl)) return;
@@ -258,6 +390,7 @@ function createAuthWindow(targetUrl = dashboardStartUrl) {
       webSecurity: true,
     },
   });
+  installNavigationToolbar(authWindow);
   showWindowWhenReady(authWindow);
   authWindow.on("closed", () => {
     authWindow = null;
@@ -302,6 +435,23 @@ function createAuthWindow(targetUrl = dashboardStartUrl) {
 
 function repoRoot() {
   return path.resolve(__dirname, "../../../..");
+}
+
+function dashboardFailureLogoDataUrl() {
+  const packagedAsset = path.join(__dirname, "finite-logo.svg");
+  const sourceAsset = path.join(
+    repoRoot(),
+    "finitecomputer-v2",
+    "apps",
+    "dashboard",
+    "public",
+    "finite-logo.svg"
+  );
+  const asset = fs.existsSync(packagedAsset) ? packagedAsset : sourceAsset;
+  const svg = fs
+    .readFileSync(asset, "utf8")
+    .replaceAll('fill="white"', 'fill="#0A84FF"');
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 }
 
 function registerAttachmentMediaProtocol() {
@@ -460,110 +610,62 @@ function identitySecretPath() {
   return path.join(daemonDataDir(), `account-secret.${daemonDeviceId()}.safe`);
 }
 
-function migrateLegacyIdentitySecret(targetPath) {
-  const legacyPath = legacyIdentitySecretPath();
-  if (
-    fs.existsSync(targetPath)
-    || !fs.existsSync(legacyPath)
-    || !fs.existsSync(path.join(daemonDataDir(), "client.sqlite3"))
-  ) {
-    return;
-  }
-  fs.mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
-  fs.renameSync(legacyPath, targetPath);
-}
-
 function identityStore() {
-  const secretPath = identitySecretPath();
-  if (!accountSecretStore || accountSecretStore.secretPath !== secretPath) {
-    migrateLegacyIdentitySecret(secretPath);
-    accountSecretStore = new AccountSecretStore({
-      secretPath,
+  const identityPath = identitySecretPath();
+  if (!deviceIdentityStore || deviceIdentityStore.identityPath !== identityPath) {
+    deviceIdentityStore = new DeviceIdentityStore({
+      identityPath,
       safeStorage,
     });
   }
-  return accountSecretStore;
+  return deviceIdentityStore;
 }
 
 function settingsPath() {
   return path.join(app.getPath("userData"), "desktop-settings.json");
 }
 
-function readDesktopSettings() {
-  try {
-    return JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      console.error(`failed to read Finite Chat desktop settings: ${error.message}`);
-    }
-    return {};
-  }
-}
-
-function writeDesktopSettings(settings) {
-  fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
-  const temporaryPath = `${settingsPath()}.${process.pid}.tmp`;
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporaryPath, settingsPath());
-}
-
-function pendingDeviceLink() {
-  const candidate = readDesktopSettings().pendingDeviceLink;
-  if (!candidate) return null;
-  try {
-    return parseDeviceLinkPublicRequest(candidate);
-  } catch {
-    throw new Error("Finite Chat desktop settings contain an invalid pending Device link");
-  }
-}
-
-function storePendingDeviceLink(value) {
-  const settings = readDesktopSettings();
-  settings.pendingDeviceLink = parseDeviceLinkPublicRequest(value);
-  writeDesktopSettings(settings);
-}
-
-function clearPendingDeviceLink(expected) {
-  const settings = readDesktopSettings();
-  if (!settings.pendingDeviceLink) return;
-  const current = parseDeviceLinkPublicRequest(settings.pendingDeviceLink);
-  const requested = parseDeviceLinkPublicRequest(expected);
+function clearPendingDeviceEnrollment(expected) {
+  const identity = readStoredIdentity();
+  if (!identity?.pending_enrollment) return;
+  const current = parseDeviceEnrollmentGrant(identity.pending_enrollment);
+  const requested = parseDeviceEnrollmentGrant(expected);
   if (
-    current.link_session_id !== requested.link_session_id
+    current.pairing_session_id !== requested.pairing_session_id
     || current.target_device_id !== requested.target_device_id
+    || current.enrollment_user_id !== requested.enrollment_user_id
+    || current.enrollment_capability_hex !== requested.enrollment_capability_hex
   ) {
     return;
   }
-  delete settings.pendingDeviceLink;
-  writeDesktopSettings(settings);
+  identityStore().write({
+    ...identity,
+    pending_enrollment: null,
+  });
 }
 
 function secureStorageAvailable() {
   return identityStore().isAvailable();
 }
 
-function readStoredAccountSecret() {
+function readStoredIdentity() {
   if (!secureStorageAvailable()) {
     return null;
   }
-  try {
-    return identityStore().read();
-  } catch (error) {
-    console.error(`failed to read stored Finite identity: ${error.message}`);
-    return null;
-  }
+  return identityStore().read();
 }
 
-function writeProvisionalAccountSecret(secret) {
-  identityStore().writeProvisional(secret);
+function readStoredAccountSecret() {
+  return readStoredIdentity()?.account_secret ?? null;
 }
 
-function promoteProvisionalAccountSecret() {
+function storeProvisionalIdentity(identity) {
+  identityStore().writeProvisional(identity);
   identityStore().promoteProvisional();
   fs.rmSync(legacyIdentitySecretPath(), { force: true });
 }
 
-function discardProvisionalAccountSecret() {
+function discardProvisionalIdentity() {
   try {
     identityStore().discardProvisional();
   } catch (error) {
@@ -825,7 +927,7 @@ function stopDaemon() {
       const link = activeDeviceLink;
       activeDeviceLink = null;
       await link.cancel();
-      discardProvisionalAccountSecret();
+      discardProvisionalIdentity();
     }
     if (daemonSupervisor) {
       await daemonSupervisor.stop();
@@ -966,13 +1068,21 @@ async function dashboardJson(pathname, init = {}) {
       signal: AbortSignal.timeout(15_000),
     });
   } catch {
-    throw new Error("Finite dashboard is unavailable right now");
+    throw Object.assign(
+      new Error("Finite dashboard is unavailable right now"),
+      { retryable: true }
+    );
   }
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
       throw new Error("Sign in again to prepare local chat on this desktop");
     }
-    throw new Error("Finite dashboard could not prepare local chat right now");
+    throw Object.assign(
+      new Error("Finite dashboard could not prepare local chat right now"),
+      {
+        retryable: retryableDashboardStatus(response.status),
+      }
+    );
   }
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("application/json")) {
@@ -1026,34 +1136,40 @@ async function dashboardDeviceLinkRequest(pathname, request) {
   return parseDeviceLinkPublicResponse(value, expected);
 }
 
-async function waitForDeviceLinkReady(request, initial = null, generation = null) {
-  const expected = parseDeviceLinkPublicRequest(request);
-  let current = initial ? parseDeviceLinkPublicResponse(initial, expected) : null;
-  while (true) {
-    if (generation !== null) assertLocalDeviceGeneration(generation);
-    if (!current) {
-      current = await dashboardDeviceLinkRequest("/api/device-links/status", expected);
-      if (generation !== null) assertLocalDeviceGeneration(generation);
-    }
-    if (current.status === "ready") {
-      return current;
-    }
-    if (
-      current.status === "expired"
-      || Date.now() >= current.expires_at_unix_seconds * 1_000
-    ) {
-      throw new Error("This desktop's automatic Device setup expired. Restart Finite and try again.");
-    }
-    deviceLinkStatus({
-      status: current.status === "joining_rooms" ? "joining_rooms" : "linking",
-    });
-    await delay(deviceLinkPollIntervalMs);
-    if (generation !== null) assertLocalDeviceGeneration(generation);
-    current = null;
-  }
+async function dashboardDeviceEnrollmentRequest(request) {
+  const expected = parseDeviceEnrollmentGrant(request);
+  const value = await dashboardJson("/api/device-links/enroll", {
+    method: "POST",
+    body: JSON.stringify(expected),
+  });
+  return parseDeviceLinkPublicResponse(value, expected);
 }
 
-async function createAndApproveDeviceLink(generation) {
+async function waitForDeviceEnrollmentReady(
+  request,
+  generation = null,
+  reportProgress = true
+) {
+  const expected = parseDeviceEnrollmentGrant(request);
+  return waitForSourceEnrollment({
+    request: expected,
+    pollEnrollment: dashboardDeviceEnrollmentRequest,
+    parseResponse: parseDeviceLinkPublicResponse,
+    isRetryableError: (error) => error?.retryable === true,
+    assertActive: generation === null
+      ? () => {}
+      : () => assertLocalDeviceGeneration(generation),
+    reportStatus: reportProgress ? deviceLinkStatus : () => {},
+    delay,
+    pollIntervalMs: deviceLinkPollIntervalMs,
+  });
+}
+
+async function createAndApproveDeviceLink(
+  generation,
+  expectedAccountId,
+  expectedDeviceId
+) {
   assertLocalDeviceGeneration(generation);
   if (!secureStorageAvailable()) {
     throw new Error("Secure storage is required to prepare local chat on this desktop");
@@ -1063,10 +1179,28 @@ async function createAndApproveDeviceLink(generation) {
     spawnProcess: spawn,
     binaryPath,
     serverUrl: defaultServerUrl,
-    deviceId: daemonDeviceId(),
+    deviceId: expectedDeviceId,
     cwd: app.isPackaged ? path.dirname(binaryPath) : repoRoot(),
-    storeAccountSecret: async (accountSecret) => writeProvisionalAccountSecret(accountSecret),
-    promoteAccountSecret: async () => promoteProvisionalAccountSecret(),
+    storeIdentityEnvelope: async (accountSecret, enrollmentGrant) => {
+      const envelope = {
+        version: 1,
+        account_secret: accountSecret,
+        expected_account_id: expectedAccountId,
+        expected_device_id: expectedDeviceId,
+        pending_enrollment: parseDeviceEnrollmentGrant(enrollmentGrant),
+      };
+      storeProvisionalIdentity(envelope);
+      const stored = readStoredIdentity();
+      if (
+        stored?.account_secret !== accountSecret
+        || stored.expected_account_id !== expectedAccountId
+        || stored.expected_device_id !== expectedDeviceId
+        || stored.pending_enrollment?.enrollment_capability_hex
+          !== enrollmentGrant.enrollment_capability_hex
+      ) {
+        throw new Error("Secure storage read-back did not match");
+      }
+    },
   });
   activeDeviceLink = link;
   try {
@@ -1078,17 +1212,32 @@ async function createAndApproveDeviceLink(generation) {
       throw new Error("Finite Chat Device setup was cancelled");
     }
     const request = parseDeviceLinkPublicRequest(ready);
-    storePendingDeviceLink(request);
     const approved = await dashboardDeviceLinkRequest("/api/device-links/approve", request);
+    const enrollment = await completeDeviceSecretGrant({
+      link,
+      request,
+      approved,
+      pollStatus: (pendingRequest) =>
+        dashboardDeviceLinkRequest("/api/device-links/status", pendingRequest),
+      parseResponse: parseDeviceLinkPublicResponse,
+      isRetryableError: (error) => error?.retryable === true,
+      assertActive: () => {
+        assertLocalDeviceGeneration(generation);
+        if (activeDeviceLink !== link) {
+          throw new Error("Finite Chat Device setup was cancelled");
+        }
+      },
+      reportStatus: deviceLinkStatus,
+      delay,
+      pollIntervalMs: deviceLinkPollIntervalMs,
+    });
     assertLocalDeviceGeneration(generation);
-    await link.completion;
-    assertLocalDeviceGeneration(generation);
-    return { request, approved };
+    return { request, enrollment };
   } catch (error) {
     if (activeDeviceLink === link) {
       await link.cancel().catch(() => {});
     }
-    discardProvisionalAccountSecret();
+    discardProvisionalIdentity();
     throw new Error(deviceLinkFailureMessage(error, error?.message || "This desktop could not be linked"));
   } finally {
     if (activeDeviceLink === link) {
@@ -1119,38 +1268,50 @@ async function ensureLocalDeviceNow(generation) {
   assertLocalDeviceGeneration(generation);
   deviceLinkStatus({ status: "preparing" });
   const deviceId = daemonDeviceId();
-  const binding = await currentDashboardAccountBinding(deviceId);
-  assertLocalDeviceGeneration(generation);
-  if (binding.local_device.status === "revoked") {
-    const recovery = {
-      status: "recovery_required",
-      reason: "device_revoked",
-      device_id: deviceId,
-      message:
-        "This desktop Device was revoked. Relink this Mac to create a fresh Device. Your existing encrypted local store will be kept as a backup.",
-    };
-    deviceLinkStatus(recovery);
-    return recovery;
+  let identity = readStoredIdentity();
+  if (!identity) {
+    // Capture the authenticated account exactly once before pairing. Do not
+    // ask the account-binding route to refresh this target Device: that
+    // reintroduces the Hosted control-plane dependency which enrollment is
+    // intended to replace.
+    const binding = await currentDashboardAccountBinding(null);
+    assertLocalDeviceGeneration(generation);
+    await createAndApproveDeviceLink(generation, binding.account_id, deviceId);
+    identity = readStoredIdentity();
+    if (!identity) {
+      throw new Error("Finite Chat could not read its securely stored identity");
+    }
   }
-  let pending = pendingDeviceLink();
-  let initial = null;
-  if (!readStoredAccountSecret()) {
-    const linked = await createAndApproveDeviceLink(generation);
-    pending = linked.request;
-    initial = linked.approved;
-  }
+  const pending = identity.pending_enrollment;
   assertLocalDeviceGeneration(generation);
   await startDaemon();
   assertLocalDeviceGeneration(generation);
+  let state;
   if (pending) {
-    await waitForDeviceLinkReady(pending, initial, generation);
-    clearPendingDeviceLink(pending);
+    const enrollment = parseDeviceEnrollmentGrant(pending);
+    const source = await waitForDeviceEnrollmentReady(enrollment, generation);
+    state = await waitForTargetEnrollment({
+      expectedAccountId: identity.expected_account_id,
+      expectedDeviceId: deviceId,
+      expectedManifests: source.bootstrap_manifests,
+      readState: requestDaemonState,
+      assertActive: () => assertLocalDeviceGeneration(generation),
+      reportStatus: deviceLinkStatus,
+      delay,
+      pollIntervalMs: deviceLinkPollIntervalMs,
+    });
+    clearPendingDeviceEnrollment(enrollment);
+  } else {
+    state = await requestDaemonState();
   }
-  const state = await requestDaemonState();
   assertLocalDeviceGeneration(generation);
-  const identity = parseLocalDaemonIdentity(state, binding.account_id);
+  const localIdentity = parseLocalDaemonIdentity(
+    state,
+    identity.expected_account_id,
+    identity.expected_device_id
+  );
   deviceLinkStatus({ status: "ready" });
-  return { status: "ready", ...identity };
+  return { status: "ready", ...localIdentity };
 }
 
 function ensureLocalDevice() {
@@ -1188,7 +1349,7 @@ async function cancelDeviceLink() {
   }
   activeDeviceLink = null;
   await link.cancel();
-  discardProvisionalAccountSecret();
+  discardProvisionalIdentity();
 }
 
 async function recoverRevokedLocalDevice() {
@@ -1211,7 +1372,7 @@ async function recoverRevokedLocalDevice() {
     secretFile: identitySecretPath(),
     deviceId,
   });
-  accountSecretStore = null;
+  deviceIdentityStore = null;
   daemonFailure = null;
   invalidateLocalDeviceVerification({ cancelLink: true });
   return ensureLocalDevice();
@@ -1244,10 +1405,12 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
-    discardProvisionalAccountSecret();
+    removeDeprecatedDeviceLinkSetting({ settingsFile: settingsPath() });
+    discardProvisionalIdentity();
     configureSessionSecurity();
     registerAttachmentMediaProtocol();
     createAuthWindow();
+    releaseAppUpdater.start();
   });
 
   app.on("activate", () => {

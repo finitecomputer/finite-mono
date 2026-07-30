@@ -24,7 +24,7 @@ enum NavigationChrome {
     }
 
     static func configure() {
-        apply(to: UINavigationBar.appearance(), appearance: appearanceWithoutSeparator())
+        // iOS 26 owns navigation-bar material and Liquid Glass transitions.
     }
 
     static func applyListNavigationChrome(to navigationBar: UINavigationBar) {
@@ -75,8 +75,6 @@ extension UINavigationBar: UINavigationBarAppearanceProxy {}
 struct ChatNavigationBarChromeModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .background(ChatNavigationBarChromeAnchor())
     }
 }
 

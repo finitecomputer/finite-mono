@@ -6,12 +6,15 @@ import {
   activitiesForChat,
   attachmentSendError,
   beginPendingChatTurn,
+  chatContentIsRenderable,
+  isAskForInputToolMessage,
   isUserPrincipalMessage,
   liveActivityLabel,
   messagesForChat,
   pendingTurnIsComplete,
   pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
+  pendingTurnRecoveryIsFresh,
   reconcilePendingChatTurns,
   selectedChat,
   transcriptItems,
@@ -155,6 +158,20 @@ test("working signals expire at the adapter lease and fail closed off-stream", (
   assert.equal(pendingTurnLeaseIsFresh(turn, false, 10_001), false);
 });
 
+test("pending turn recovery outlives presentation without inventing indefinite work", () => {
+  const state = appState();
+  const turn = beginPendingChatTurn(
+    selectedChat(state),
+    messagesForChat(state, selectedChat(state)),
+    10_000
+  );
+  assert(turn);
+
+  assert.equal(pendingTurnLeaseIsFresh(turn, true, 25_000), false);
+  assert.equal(pendingTurnRecoveryIsFresh(turn, 25_000), true);
+  assert.equal(pendingTurnRecoveryIsFresh(turn, 310_000), false);
+});
+
 test("working presentation remains visible across an activity gap and outranks typing", () => {
   assert.equal(liveActivityLabel([], "Sol", true), "Sol is working");
   assert.equal(
@@ -223,7 +240,57 @@ test("the shared transcript hides status, groups work, and collapses edits", () 
   assert.equal(transcript[1]?.type, "message");
 });
 
-test("one agent turn folds commentary and tools into one work receipt", () => {
+test("the shared transcript hides legacy remote working records without hiding user prose", () => {
+  const remoteWorking = message({
+    messageId: "remote-working",
+    seq: 2,
+    displayContent: "⏳ Working — 3 min — iteration 11/90, execute_code",
+  });
+  const userWorking = message({
+    messageId: "user-working",
+    seq: 3,
+    displayContent: "⏳ Working — this is text I typed",
+    senderAccountId: "user-account",
+    senderDeviceId: "hosted-web",
+    isMine: true,
+  });
+
+  const transcript = transcriptItems(
+    [remoteWorking, userWorking],
+    "user-account"
+  );
+
+  assert.equal(transcript.length, 1);
+  assert.equal(transcript[0]?.type, "message");
+  if (transcript[0]?.type === "message") {
+    assert.equal(transcript[0].message.message_id, "user-working");
+  }
+});
+
+test("ask-for-input tools and projected transcript visibility are explicit presentation states", () => {
+  const ask = message({
+    messageId: "ask",
+    seq: 2,
+    kind: "tool",
+    status: "complete",
+    displayContent: "❓ Asking Is this mapping correct?",
+  });
+  const ordinaryTool = message({
+    messageId: "tool",
+    seq: 3,
+    kind: "tool",
+    status: "running",
+    displayContent: "💻 Running a command",
+  });
+
+  assert.equal(isAskForInputToolMessage(ask), true);
+  assert.equal(isAskForInputToolMessage(ordinaryTool), false);
+  assert.equal(chatContentIsRenderable(0, null), false);
+  assert.equal(chatContentIsRenderable(1, null), true);
+  assert.equal(chatContentIsRenderable(0, "Agent is working"), true);
+});
+
+test("append-only tools remain interspersed around assistant commentary", () => {
   const toolA = message({ messageId: "tool-a", seq: 2, kind: "tool", status: "running" });
   const commentary = message({ messageId: "commentary", seq: 3 });
   const toolB = message({ messageId: "tool-b", seq: 4, kind: "tool", status: "running" });
@@ -405,6 +472,7 @@ function message({
   kind = "message",
   status = "complete",
   finalDelivery = false,
+  displayContent = messageId,
 }: {
   messageId: string;
   seq: number;
@@ -414,6 +482,7 @@ function message({
   kind?: ChatMessage["kind"];
   status?: ChatMessage["status"];
   finalDelivery?: boolean;
+  displayContent?: string;
 }): ChatMessage {
   return {
     room_id: "room-agent",
@@ -424,8 +493,8 @@ function message({
     sender_account_id: senderAccountId,
     sender_device_id: senderDeviceId,
     sender_display_name: senderAccountId === "agent-account" ? "Agent" : "Paul",
-    text: messageId,
-    display_content: messageId,
+    text: displayContent,
+    display_content: displayContent,
     kind,
     status,
     final_delivery: finalDelivery,

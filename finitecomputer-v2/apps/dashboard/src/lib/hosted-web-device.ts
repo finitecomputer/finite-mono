@@ -108,6 +108,7 @@ export type HostedChatMessage = {
   text: string;
   display_content: string;
   rich_text_json?: string;
+  references?: HostedChatReference[];
   reply_to_message_id?: string | null;
   is_mine: boolean;
   outbound_delivery?: HostedChatOutboundDelivery | null;
@@ -118,6 +119,17 @@ export type HostedChatMessage = {
   edit_of_message_id?: string | null;
   timestamp_unix_seconds: number;
   display_timestamp: string;
+};
+
+export type HostedChatReference = {
+  kind: "file" | "skill" | "site";
+  id: string;
+  label: string;
+  detail: string;
+  token: string;
+  path?: string | null;
+  url?: string | null;
+  fingerprint?: string | null;
 };
 
 export type HostedChatTypingMember = {
@@ -253,6 +265,15 @@ export type HostedChatAction =
         text: string;
       };
     }
+  | {
+      SendChatMessageWithReferences: {
+        room_id: string;
+        topic_id: string;
+        chat_id: string;
+        text: string;
+        references: HostedChatReference[];
+      };
+    }
   | { LoadOlderMessages: { room_id: string; before_message_id: string; limit: number } }
   | { MarkRoomRead: { room_id: string } }
   | { SetTyping: { room_id: string; is_typing: boolean } }
@@ -313,12 +334,17 @@ export type HostedRuntimeCommandResponse = {
 };
 
 export type HostedDeviceLinkRequest = {
-  link_session_id: string;
+  pairing_session_id: string;
   target_device_id: string;
 };
 
+export type HostedDeviceEnrollmentRequest = HostedDeviceLinkRequest & {
+  enrollment_user_id: string;
+  enrollment_capability_hex: string;
+};
+
 export type HostedDeviceLinkStatus =
-  | "awaiting_claim"
+  | "awaiting_offer"
   | "awaiting_key_package"
   | "joining_rooms"
   | "ready"
@@ -329,6 +355,17 @@ export type HostedDeviceLinkResponse = HostedDeviceLinkRequest & {
   expires_at_unix_seconds: number;
   room_count: number;
   active_room_count: number;
+  bootstrap_manifests: {
+    bootstrap_id: string;
+    room_id: string;
+    manifest_sha256: string;
+  }[];
+  source_descriptor?: {
+    version: number;
+    source_public_key: string;
+    session_secret_hex: string;
+    expires_at_unix_seconds: number;
+  };
 };
 
 export type HostedDeviceReconcileRequest = {
@@ -567,6 +604,27 @@ export async function hostedDeviceLinkStatus(
   return parseHostedDeviceLinkResponse(result, input);
 }
 
+export async function hostedDeviceResumeEnrollment(
+  config: HostedDeviceConfig,
+  input: HostedDeviceEnrollmentRequest
+) {
+  const response = await fetch(`${config.baseUrl}/v1/device-links/enroll`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${config.apiToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(input),
+    signal: AbortSignal.timeout(HOSTED_DEVICE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new HostedDeviceRequestError(await responseError(response), response.status);
+  }
+  return parseHostedDeviceLinkResponse(await response.json(), input);
+}
+
 export async function hostedDeviceReconcileDevice(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
@@ -660,16 +718,65 @@ async function hostedDeviceJson<T>(
   init: RequestInit = {},
   timeoutMs = HOSTED_DEVICE_TIMEOUT_MS
 ): Promise<T> {
-  const response = await fetch(`${config.baseUrl}${path}`, {
-    ...init,
-    cache: "no-store",
-    headers: hostedDeviceHeaders(config, account, typeof init.body === "string"),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  const diagnosticPath = hostedDeviceDiagnosticPath(path);
+  let response: Response;
+  try {
+    response = await fetch(`${config.baseUrl}${path}`, {
+      ...init,
+      cache: "no-store",
+      headers: hostedDeviceHeaders(config, account, typeof init.body === "string"),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    console.error("hosted-device request failed", {
+      path: diagnosticPath,
+      errorClass:
+        error instanceof DOMException && error.name === "TimeoutError"
+          ? "timeout"
+          : "transport",
+    });
+    throw error;
+  }
   if (!response.ok) {
+    console.error("hosted-device request failed", {
+      path: diagnosticPath,
+      status: response.status,
+      errorClass: "downstream_http",
+    });
     throw new HostedDeviceRequestError(await responseError(response), response.status);
   }
   return response.json() as Promise<T>;
+}
+
+export function hostedDeviceDiagnosticPath(path: string) {
+  const pathname = path.split("?", 1)[0];
+  if (pathname.startsWith("/v1/app/attachments/")) {
+    return "/v1/app/attachments/:room/:message/:attachment";
+  }
+  if (pathname.startsWith("/v1/device-links/")) {
+    return "/v1/device-links/:operation";
+  }
+  if (
+    new Set([
+      "/v1/app/actions",
+      "/v1/app/agent-bindings/authorize-bootstrap",
+      "/v1/app/agent-bindings/ensure",
+      "/v1/app/agent-bindings/open",
+      "/v1/app/attachments",
+      "/v1/app/new-chat",
+      "/v1/app/runtime-commands",
+      "/v1/app/state",
+    ]).has(pathname)
+  ) {
+    return pathname;
+  }
+  if (pathname.startsWith("/v1/brain/")) {
+    return "/v1/brain/:operation";
+  }
+  if (pathname.startsWith("/v1/sites/")) {
+    return "/v1/sites/:operation";
+  }
+  return "/unknown";
 }
 
 function parseHostedDeviceLinkResponse(
@@ -681,7 +788,7 @@ function parseHostedDeviceLinkResponse(
   }
   const record = value as Record<string, unknown>;
   const statuses = new Set<HostedDeviceLinkStatus>([
-    "awaiting_claim",
+    "awaiting_offer",
     "awaiting_key_package",
     "joining_rooms",
     "ready",
@@ -691,8 +798,20 @@ function parseHostedDeviceLinkResponse(
   const expiresAt = record.expires_at_unix_seconds;
   const roomCount = record.room_count;
   const activeRoomCount = record.active_room_count;
+  const bootstrapManifests =
+    record.bootstrap_manifests === undefined ? [] : record.bootstrap_manifests;
+  const manifestKeys = Array.isArray(bootstrapManifests)
+    ? bootstrapManifests.map((manifest) => {
+        if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+          return "";
+        }
+        const item = manifest as Record<string, unknown>;
+        return `${String(item.bootstrap_id)}\u0000${String(item.room_id)}`;
+      })
+    : [];
+  const descriptor = parsePairingSourceDescriptor(record.source_descriptor);
   if (
-    record.link_session_id !== expected.link_session_id ||
+    record.pairing_session_id !== expected.pairing_session_id ||
     record.target_device_id !== expected.target_device_id ||
     typeof status !== "string" ||
     !statuses.has(status as HostedDeviceLinkStatus) ||
@@ -702,19 +821,68 @@ function parseHostedDeviceLinkResponse(
     (roomCount as number) < 0 ||
     !Number.isSafeInteger(activeRoomCount) ||
     (activeRoomCount as number) < 0 ||
-    (activeRoomCount as number) > (roomCount as number)
+    (activeRoomCount as number) > (roomCount as number) ||
+    !Array.isArray(bootstrapManifests) ||
+    bootstrapManifests.some((manifest) => {
+      if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+        return true;
+      }
+      const item = manifest as Record<string, unknown>;
+      return (
+        Object.keys(item).sort().join(",") !==
+          "bootstrap_id,manifest_sha256,room_id" ||
+        typeof item.bootstrap_id !== "string" ||
+        item.bootstrap_id.length === 0 ||
+        typeof item.room_id !== "string" ||
+        item.room_id.length === 0 ||
+        typeof item.manifest_sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(item.manifest_sha256)
+      );
+    }) ||
+    new Set(manifestKeys).size !== manifestKeys.length ||
+    (status === "ready" && bootstrapManifests.length !== roomCount)
   ) {
     throw new Error("Device-link service returned an invalid response.");
   }
   // Project an exact allowlist. Even an accidentally expanded internal
   // response can never forward encrypted or signer material to the browser.
   return {
-    link_session_id: expected.link_session_id,
+    pairing_session_id: expected.pairing_session_id,
     target_device_id: expected.target_device_id,
     status: status as HostedDeviceLinkStatus,
     expires_at_unix_seconds: expiresAt as number,
     room_count: roomCount as number,
     active_room_count: activeRoomCount as number,
+    bootstrap_manifests: bootstrapManifests as HostedDeviceLinkResponse["bootstrap_manifests"],
+    ...(descriptor ? { source_descriptor: descriptor } : {}),
+  };
+}
+
+function parsePairingSourceDescriptor(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Device-link service returned an invalid source descriptor.");
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.join(",") !==
+      "expires_at_unix_seconds,session_secret_hex,source_public_key,version" ||
+    record.version !== 1 ||
+    typeof record.source_public_key !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(record.source_public_key) ||
+    typeof record.session_secret_hex !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(record.session_secret_hex) ||
+    !Number.isSafeInteger(record.expires_at_unix_seconds) ||
+    (record.expires_at_unix_seconds as number) < 0
+  ) {
+    throw new Error("Device-link service returned an invalid source descriptor.");
+  }
+  return {
+    version: 1,
+    source_public_key: record.source_public_key,
+    session_secret_hex: record.session_secret_hex,
+    expires_at_unix_seconds: record.expires_at_unix_seconds as number,
   };
 }
 

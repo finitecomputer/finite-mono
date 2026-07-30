@@ -52,6 +52,11 @@ commands against the owning source folder before relying on them.
 - [Agent Runtime upgrade and rollout post-mortem](postmortems/agent-runtime-upgrade-rollout-2026-07-16.md):
   why upgrades and deploys risked stranding Agents, which guardrails now exist,
   and the prioritized build, rollout, and recovery work still required.
+- [Production onboarding and chat causality post-mortem](postmortems/production-onboarding-chat-causality-2026-07-25.md):
+  the zero-creator onboarding gap, fresh-Agent identity-readiness race,
+  pre-pairing Hosted Chat incompatibility, and a causal-review framework for
+  state lineage, mixed versions, production reachability, and fewer better
+  tests.
 
 ## Imported Orientation Docs
 

@@ -1,6 +1,5 @@
 use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::DefaultBodyLimit;
 use axum::http::{Method, Request, Response, StatusCode};
 use finitechat_blob::BlobDescriptor;
 use finitechat_delivery::{
@@ -9,28 +8,26 @@ use finitechat_delivery::{
     HttpSyncPage, MAX_HTTP_ID_BYTES, MAX_HTTP_SYNC_PAGE_ENTRIES,
 };
 use finitechat_http::{
-    AckLinkPayloadRequest, AckLinkPayloadResponse, AckPushWakeRequest, AckPushWakeResponse,
-    AckWelcomeRequest, AckWelcomeResponse, ApplicationEffectCountsResponse,
-    ApplicationEffectRequest, BootstrapAccountRoomRequest, BootstrapAccountRoomResponse,
-    ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest, ClaimKeyPackagesRequest,
-    ClaimLinkPayloadRequest, ClaimLinkPayloadResponse, ClaimPushWakesRequest,
-    ClaimPushWakesResponse, ClaimWelcomesRequest, CreateLinkSessionRequest, DeviceLivenessRecord,
-    ErrorResponse, ExpireKeyPackageLeaseRequest, ExpireKeyPackageLeaseResponse,
-    ExpireLinkSessionRequest, FailPushWakeRequest, FailPushWakeResponse,
+    AckPushWakeRequest, AckPushWakeResponse, AckWelcomeRequest, AckWelcomeResponse,
+    ApplicationEffectCountsResponse, ApplicationEffectRequest, BootstrapAccountRoomRequest,
+    BootstrapAccountRoomResponse, ClaimKeyPackageForAccountRequest, ClaimKeyPackageRequest,
+    ClaimKeyPackagesRequest, ClaimPushWakesRequest, ClaimPushWakesResponse, ClaimWelcomesRequest,
+    CreatePairingSessionRequest, DeviceLivenessRecord, ErrorResponse, ExpireKeyPackageLeaseRequest,
+    ExpireKeyPackageLeaseResponse, FailPushWakeRequest, FailPushWakeResponse,
     FiniteAccountRoomCommitProjection, GetDeviceLivenessRequest, GetDeviceLivenessResponse,
-    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetLinkSessionRequest,
-    GetNostrProfilesRequest, GetNostrProfilesResponse, GroupSyncRequest,
+    GetKeyPackageAvailabilityRequest, GetKeyPackageAvailabilityResponse, GetNostrProfilesRequest,
+    GetNostrProfilesResponse, GetPairingSessionRequest, GroupSyncRequest,
     HttpApplicationDeliveryEffect, HttpClaimedWelcome, HttpKeyPackageClaim,
-    HttpKeyPackageInventory, HttpLinkSessionRecord, HttpLinkSessionState, InboxSyncRequest,
+    HttpKeyPackageInventory, HttpPairingSessionRecord, HttpPairingSessionState, InboxSyncRequest,
     KeyPackageInventoryRequest, LeaveRoomRequest, LeaveRoomResponse,
     ListAccountRoomDirectoryRequest, ListAccountRoomDirectoryResponse, NostrProfileRecord,
-    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishMessageRequest, PushPlatform,
-    PutNostrProfileRequest, RegisterPushTokenRequest, ReleaseLinkClaimRequest,
-    ReleaseLinkClaimResponse, RemovePushTokenRequest, RemovePushTokenResponse,
-    ReportInvalidCommitRequest, ReportInvalidCommitResponse, RevokeDeviceRequest,
-    SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent, SyncStreamRequest,
-    SyncWaitInbox, SyncWaitRequest, SyncWaitResponse, SyncWaitRoom, UpdateRoomAdminsRequest,
-    UpdateRoomAdminsResponse, UploadLinkPayloadRequest,
+    ObserveDeviceLivenessRequest, PublishKeyPackageResponse, PublishMessageRequest,
+    PublishPairingCompleteRequest, PublishPairingOfferRequest, PublishPairingResponseRequest,
+    PushPlatform, PutNostrProfileRequest, RegisterPushTokenRequest, RemovePushTokenRequest,
+    RemovePushTokenResponse, ReportInvalidCommitRequest, ReportInvalidCommitResponse,
+    RevokeDeviceRequest, SaveAccountRoomRequest, SaveAccountRoomResponse, SyncHintEvent,
+    SyncStreamRequest, SyncWaitInbox, SyncWaitRequest, SyncWaitResponse, SyncWaitRoom,
+    UpdateRoomAdminsRequest, UpdateRoomAdminsResponse,
 };
 use finitechat_proto::{
     AccountRoomDevice, AccountRoomRecord, AppendApplicationEventRequest,
@@ -42,10 +39,10 @@ use finitechat_proto::{
     ApplicationDeliveryPolicy, CommandInboxPolicy, DeviceRef, DurableAppEventKind, FiniteEnvelope,
     LogEntryKind, MAX_ACCOUNT_DEVICES_PER_ROOM, MAX_DEVICE_LIVENESS_EXPIRY_MILLIS,
     MAX_ENVELOPE_PAYLOAD_BYTES, MAX_EPHEMERAL_ACTIVITY_CACHE_ENTRIES_PER_ROUTE,
-    MAX_KEY_PACKAGES_PER_DEVICE, MAX_LINK_SESSION_PAYLOAD_BYTES, MembershipAddV1,
-    MembershipDeltaV1, MembershipRemoveV1, PushPolicy, RoomStatus, RuntimeStateProjection,
-    RuntimeStateProjectionEntry, RuntimeStateProjectionError, RuntimeStateSnapshotV1,
-    StagedWelcomeV1, UnreadPolicy, WelcomeState,
+    MAX_KEY_PACKAGES_PER_DEVICE, MembershipAddV1, MembershipDeltaV1, MembershipRemoveV1,
+    PushPolicy, RoomStatus, RuntimeStateProjection, RuntimeStateProjectionEntry,
+    RuntimeStateProjectionError, RuntimeStateSnapshotV1, StagedWelcomeV1, UnreadPolicy,
+    WelcomeState,
 };
 use finitechat_server::{HttpServerState, ServerHttpError, http_router};
 use finitechat_transport::engine::KeyPackage;
@@ -54,6 +51,8 @@ use finitechat_transport::transport::{
 };
 use finitechat_transport::{EpochId, GroupId, MemberId, MessageId};
 use futures_util::StreamExt;
+use nostr::event::FinalizeEvent;
+use nostr::{EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp as NostrTimestamp};
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -1418,285 +1417,172 @@ async fn sqlite_batch_key_package_claim_conflict_has_no_side_effects() {
     );
 }
 
-#[tokio::test]
-async fn sqlite_link_session_state_machine_survives_restart_over_http() {
-    let temp = TempDir::new().expect("tempdir");
-    let db_path = temp.path().join("delivery.sqlite3");
-    let link_session_id = "link-http-session".to_owned();
-    let app = persistent_app(&db_path);
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions",
-        &CreateLinkSessionRequest {
-            link_session_id: link_session_id.clone(),
-            pairing_public_key: "pairing-key-http".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let record: HttpLinkSessionRecord = read_json(response).await;
-    assert_eq!(record.state, HttpLinkSessionState::Created);
-    assert!(record.encrypted_payload.is_none());
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions",
-        &CreateLinkSessionRequest {
-            link_session_id: link_session_id.clone(),
-            pairing_public_key: "pairing-key-http".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let error: ErrorResponse = read_json(response).await;
-    assert_eq!(error.kind, "link_session_already_exists");
-
-    let payload = b"ciphertext:server-list-and-authorization".to_vec();
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/payload",
-        &UploadLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-            encrypted_payload: payload.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let record: HttpLinkSessionRecord = read_json(response).await;
-    assert_eq!(record.state, HttpLinkSessionState::PayloadUploaded);
-    assert_eq!(record.encrypted_payload, Some(payload.clone()));
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/payload",
-        &UploadLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-            encrypted_payload: payload.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/payload",
-        &UploadLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-            encrypted_payload: b"different".to_vec(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let error: ErrorResponse = read_json(response).await;
-    assert_eq!(error.kind, "link_session_conflict");
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/claim",
-        &ClaimLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let claim: ClaimLinkPayloadResponse = read_json(response).await;
-    assert_eq!(claim.encrypted_payload, payload);
-    assert!(!claim.claim_token.is_empty());
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/release",
-        &ReleaseLinkClaimRequest {
-            link_session_id: link_session_id.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let release: ReleaseLinkClaimResponse = read_json(response).await;
-    assert!(release.released);
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/claim",
-        &ClaimLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let retry_claim: ClaimLinkPayloadResponse = read_json(response).await;
-    assert_eq!(retry_claim.claim_token, claim.claim_token);
-
-    // Losing a successful claim response must not strand the single-use link.
-    // The exact retry survives a server restart and returns the same opaque
-    // payload and deterministic claim token.
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/claim",
-        &ClaimLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let replayed_claim: ClaimLinkPayloadResponse = read_json(response).await;
-    assert_eq!(replayed_claim, retry_claim);
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/ack",
-        &AckLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-            claim_token: "wrong-token".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ErrorResponse = read_json(response).await;
-    assert_eq!(error.kind, "bad_link_session_claim_token");
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/ack",
-        &AckLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-            claim_token: retry_claim.claim_token.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let ack: AckLinkPayloadResponse = read_json(response).await;
-    assert!(ack.acked);
-
-    // A supervisor can lose the first successful response after the server has
-    // durably committed delivery. Replaying the exact acknowledgement must be
-    // safe across a restart so it does not erase an already-stored Device key.
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/ack",
-        &AckLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-            claim_token: retry_claim.claim_token.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let replayed_ack: AckLinkPayloadResponse = read_json(response).await;
-    assert!(replayed_ack.acked);
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/payload",
-        &UploadLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-            encrypted_payload: b"late".to_vec(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ErrorResponse = read_json(response).await;
-    assert_eq!(error.kind, "link_session_closed");
-
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/get",
-        &GetLinkSessionRequest {
-            link_session_id: link_session_id.clone(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let record: Option<HttpLinkSessionRecord> = read_json(response).await;
-    let record = record.expect("stored link session");
-    assert_eq!(record.state, HttpLinkSessionState::Delivered);
-    assert_eq!(record.claim_token, Some(retry_claim.claim_token));
-
-    let response = post_json(
-        app.clone(),
-        "/link-sessions",
-        &CreateLinkSessionRequest {
-            link_session_id: "link-http-expired".to_owned(),
-            pairing_public_key: "pairing-expired".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let response = post_json(
-        app.clone(),
-        "/link-sessions/expire",
-        &ExpireLinkSessionRequest {
-            link_session_id: "link-http-expired".to_owned(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let app = persistent_app(&db_path);
-    let response = post_json(
-        app,
-        "/link-sessions/payload",
-        &UploadLinkPayloadRequest {
-            link_session_id: "link-http-expired".to_owned(),
-            encrypted_payload: b"late".to_vec(),
-        },
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ErrorResponse = read_json(response).await;
-    assert_eq!(error.kind, "link_session_closed");
+fn pairing_event(keys: &Keys, recipient: PublicKey, content: &str) -> Vec<u8> {
+    let event = EventBuilder::new(Kind::Custom(24_134), content)
+        .tags([Tag::public_key(recipient)])
+        .custom_created_at(NostrTimestamp::now())
+        .finalize(keys)
+        .expect("signed pairing event");
+    serde_json::to_vec(&event).expect("pairing event JSON")
 }
 
 #[tokio::test]
-async fn sqlite_link_session_payload_limit_rejects_without_persisting_payload() {
+async fn sqlite_pairing_events_are_bound_idempotent_and_survive_restart() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("delivery.sqlite3");
-    let link_session_id = "link-http-payload-limit".to_owned();
-    // Raise the harness body limit so this test reaches the adapter limit.
-    let body_limit = (MAX_LINK_SESSION_PAYLOAD_BYTES as usize + 1) * 4;
-    let app = persistent_app(&db_path).layer(DefaultBodyLimit::max(body_limit));
+    let pairing_session_id = "pair-http-session".to_owned();
+    let target = Keys::generate();
+    let source = Keys::generate();
+    let attacker = Keys::generate();
+    let offer = pairing_event(&target, source.public_key(), "offer-ciphertext");
+    let attacker_offer = pairing_event(&attacker, source.public_key(), "attacker-offer");
+    let confirmation = pairing_event(&source, target.public_key(), "confirm-ciphertext");
+    let payload = pairing_event(&source, target.public_key(), "payload-ciphertext");
+    let complete = pairing_event(&target, source.public_key(), "complete-ciphertext");
+    let app = persistent_app(&db_path);
 
     let response = post_json(
         app.clone(),
-        "/link-sessions",
-        &CreateLinkSessionRequest {
-            link_session_id: link_session_id.clone(),
-            pairing_public_key: "pairing-limit".to_owned(),
+        "/pairing-sessions",
+        &CreatePairingSessionRequest {
+            version: 1,
+            pairing_session_id: pairing_session_id.clone(),
+            target_device_id: "ios-test".to_owned(),
+            target_public_key: target.public_key().to_hex(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: HttpPairingSessionRecord = read_json(response).await;
+    assert_eq!(created.state, HttpPairingSessionState::Created);
+    assert!(created.events.is_empty());
+
+    let response = post_json(
+        app.clone(),
+        "/pairing-sessions/offer",
+        &PublishPairingOfferRequest {
+            pairing_session_id: pairing_session_id.clone(),
+            offer_event: attacker_offer,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = post_json(
+        app.clone(),
+        "/pairing-sessions/get",
+        &GetPairingSessionRequest {
+            pairing_session_id: pairing_session_id.clone(),
+        },
+    )
+    .await;
+    let unchanged: Option<HttpPairingSessionRecord> = read_json(response).await;
+    assert_eq!(
+        unchanged
+            .expect("attacker rejection preserves session")
+            .state,
+        HttpPairingSessionState::Created
+    );
+
+    let response = post_json(
+        app.clone(),
+        "/pairing-sessions/offer",
+        &PublishPairingOfferRequest {
+            pairing_session_id: pairing_session_id.clone(),
+            offer_event: offer.clone(),
         },
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
 
+    let app = persistent_app(&db_path);
     let response = post_json(
         app.clone(),
-        "/link-sessions/payload",
-        &UploadLinkPayloadRequest {
-            link_session_id: link_session_id.clone(),
-            encrypted_payload: vec![0; MAX_LINK_SESSION_PAYLOAD_BYTES as usize + 1],
+        "/pairing-sessions/offer",
+        &PublishPairingOfferRequest {
+            pairing_session_id: pairing_session_id.clone(),
+            offer_event: offer,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let offered: HttpPairingSessionRecord = read_json(response).await;
+    assert_eq!(offered.events.len(), 1);
+
+    let response = post_json(
+        app.clone(),
+        "/pairing-sessions/response",
+        &PublishPairingResponseRequest {
+            pairing_session_id: pairing_session_id.clone(),
+            source_confirmation_event: confirmation.clone(),
+            payload_event: payload.clone(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let responded: HttpPairingSessionRecord = read_json(response).await;
+    assert_eq!(responded.state, HttpPairingSessionState::ResponsePublished);
+    assert_eq!(responded.events.len(), 3);
+
+    let altered_payload = pairing_event(&source, target.public_key(), "different-payload");
+    let response = post_json(
+        app.clone(),
+        "/pairing-sessions/response",
+        &PublishPairingResponseRequest {
+            pairing_session_id: pairing_session_id.clone(),
+            source_confirmation_event: confirmation.clone(),
+            payload_event: altered_payload,
         },
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ErrorResponse = read_json(response).await;
-    assert_eq!(error.kind, "invalid_link_session_request");
-    assert!(error.error.contains("link_session.encrypted_payload"));
 
-    let app = persistent_app(&db_path).layer(DefaultBodyLimit::max(body_limit));
+    let app = persistent_app(&db_path);
     let response = post_json(
-        app,
-        "/link-sessions/get",
-        &GetLinkSessionRequest { link_session_id },
+        app.clone(),
+        "/pairing-sessions/response",
+        &PublishPairingResponseRequest {
+            pairing_session_id: pairing_session_id.clone(),
+            source_confirmation_event: confirmation,
+            payload_event: payload,
+        },
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let record: Option<HttpLinkSessionRecord> = read_json(response).await;
-    let record = record.expect("created link session survives failed upload");
-    assert_eq!(record.state, HttpLinkSessionState::Created);
-    assert!(record.encrypted_payload.is_none());
+
+    let response = post_json(
+        app.clone(),
+        "/pairing-sessions/complete",
+        &PublishPairingCompleteRequest {
+            pairing_session_id: pairing_session_id.clone(),
+            complete_event: complete.clone(),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let app = persistent_app(&db_path);
+    let response = post_json(
+        app.clone(),
+        "/pairing-sessions/complete",
+        &PublishPairingCompleteRequest {
+            pairing_session_id: pairing_session_id.clone(),
+            complete_event: complete,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let completed: HttpPairingSessionRecord = read_json(response).await;
+    assert_eq!(completed.state, HttpPairingSessionState::Completed);
+    assert_eq!(completed.events.len(), 4);
+
+    let response = post_json(
+        app,
+        "/pairing-sessions/get",
+        &GetPairingSessionRequest { pairing_session_id },
+    )
+    .await;
+    let stored: Option<HttpPairingSessionRecord> = read_json(response).await;
+    assert_eq!(stored.expect("persisted pairing"), completed);
 }
 
 #[tokio::test]

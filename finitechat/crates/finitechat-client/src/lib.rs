@@ -17,7 +17,6 @@ use finitechat_mls::{
     ExpectedDeviceCredential, FiniteDeviceCredentialV1, MlsCredentialError, NOSTR_PUBLIC_KEY_BYTES,
     NOSTR_SECRET_KEY_BYTES, NostrPublicKey, NostrSecretKey,
 };
-use finitechat_proto::message_id_for_bytes;
 use finitechat_proto::{
     AccountRoomRecord, AppendApplicationEventRequest, AppendEventRequest,
     ApplicationDeliveryPolicy, ClaimKeyPackageResult, CommitAccepted, CreateRoomRequest,
@@ -26,6 +25,11 @@ use finitechat_proto::{
     delivery_member_id_for_device, envelope, lease_token_for,
 };
 use finitechat_proto::{AppendEphemeralActivityRequest, EphemeralActivityAccepted};
+use finitechat_proto::{
+    DecryptedApplicationEventV1, DeviceLinkBootstrapEventV2, DeviceLinkBootstrapProfileV2,
+    DeviceLinkBootstrapRoomV2, DeviceLinkBootstrapSelectionV2, DeviceLinkBootstrapV2,
+    DurableAppEventKind, FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2, message_id_for_bytes,
+};
 use finitechat_proto::{
     DeviceRef, KeyPackageId, LogEntryKind, MAX_ACCOUNT_ID_BYTES,
     MAX_ACCOUNT_ROOM_DISCOVERY_RESULTS, MAX_DEVICE_ID_BYTES, MAX_ENVELOPE_PAYLOAD_BYTES,
@@ -53,6 +57,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error as StdError;
 use std::fmt;
@@ -72,7 +77,16 @@ const CLIENT_APP_OUTBOX_AAD_DOMAIN: &[u8] = b"finitechat.client-app-outbox.v1";
 const CLIENT_APP_ROOM_AAD_DOMAIN: &[u8] = b"finitechat.client-app-room.v1";
 const CLIENT_APP_STATE_AAD_DOMAIN: &[u8] = b"finitechat.client-app-state.v1";
 const CLIENT_APP_PROFILE_AAD_DOMAIN: &[u8] = b"finitechat.client-app-profile.v1";
-const CLIENT_STATE_SNAPSHOT_VERSION: u16 = 8;
+const CLIENT_DEVICE_LINK_BOOTSTRAP_MANIFEST_AAD_DOMAIN: &[u8] =
+    b"finitechat.client-device-link-bootstrap-manifest.v1";
+const CLIENT_DEVICE_LINK_BOOTSTRAP_CHUNK_AAD_DOMAIN: &[u8] =
+    b"finitechat.client-device-link-bootstrap-chunk.v1";
+const DEVICE_LINK_BOOTSTRAP_MANIFEST_DIGEST_DOMAIN: &[u8] =
+    b"finitechat.device-link-bootstrap-manifest.v2";
+const LEGACY_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2: &str =
+    "finitechat.device-link.bootstrap-request.v2";
+const LEGACY_CLIENT_STATE_SNAPSHOT_VERSION: u16 = 8;
+const CLIENT_STATE_SNAPSHOT_VERSION: u16 = 9;
 const CLIENT_STORE_KEY_BYTES: usize = 32;
 const CLIENT_STORE_NONCE_BYTES: usize = 12;
 const CLIENT_STORE_AEAD_TAG_BYTES: u32 = 16;
@@ -118,7 +132,18 @@ const MAX_APP_PROFILE_PICTURE_BYTES: u32 = 2 * 1024;
 const MAX_APP_PROFILE_METADATA_PLAINTEXT_BYTES: u32 = 8192;
 const MAX_APP_PROFILE_METADATA_CIPHERTEXT_BYTES: u32 =
     MAX_APP_PROFILE_METADATA_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
-const MAX_STORED_APP_MESSAGES: u32 = 5_000;
+const MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_PLAINTEXT_BYTES: u32 =
+    finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES;
+const MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_CIPHERTEXT_BYTES: u32 =
+    MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
+const MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_PLAINTEXT_BYTES: u32 =
+    finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES;
+const MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_CIPHERTEXT_BYTES: u32 =
+    MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_PLAINTEXT_BYTES + CLIENT_STORE_AEAD_TAG_BYTES;
+const MAX_PENDING_DEVICE_LINK_BOOTSTRAPS: u32 = 32;
+// Message retention is complete. This is the API's addressability bound, not
+// a product history window; callers must not silently prune durable history.
+const MAX_STORED_APP_MESSAGES: u32 = u32::MAX;
 const MAX_STORED_APP_OUTBOX_MESSAGES: u32 = 512;
 const MAX_STORED_APP_PROFILES: u32 = 4_096;
 const MAX_STORED_APP_REVOKED_DEVICES: u32 = 64;
@@ -132,6 +157,10 @@ const LINK_FANOUT_STATUS_DONE: u16 = 2;
 const LOG_ENTRY_KIND_APPLICATION: u16 = 0;
 const LOG_ENTRY_KIND_PROPOSAL: u16 = 1;
 const LOG_ENTRY_KIND_COMMIT: u16 = 2;
+const DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING: i64 = 0;
+const DEVICE_LINK_BOOTSTRAP_STATE_POISONED: i64 = 1;
+const DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED: i64 = 2;
+const DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED: i64 = 3;
 
 const _: () = {
     assert!(NOSTR_PUBLIC_KEY_BYTES == 32);
@@ -154,6 +183,15 @@ const _: () = {
     assert!(MAX_APP_EVENT_CIPHERTEXT_BYTES > MAX_ENVELOPE_PAYLOAD_BYTES);
     assert!(MAX_APP_ROOM_METADATA_CIPHERTEXT_BYTES > MAX_APP_ROOM_METADATA_PLAINTEXT_BYTES);
     assert!(MAX_APP_PROFILE_METADATA_CIPHERTEXT_BYTES > MAX_APP_PROFILE_METADATA_PLAINTEXT_BYTES);
+    assert!(
+        MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_CIPHERTEXT_BYTES
+            > MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_PLAINTEXT_BYTES
+    );
+    assert!(
+        MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_CIPHERTEXT_BYTES
+            > MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_PLAINTEXT_BYTES
+    );
+    assert!(MAX_PENDING_DEVICE_LINK_BOOTSTRAPS > 0);
     assert!(MAX_STORED_APP_MESSAGES > 0);
     assert!(MAX_STORED_APP_PROFILES > 0);
 };
@@ -228,6 +266,56 @@ pub struct LinkFanoutState {
     pub after_room_id: Option<RoomId>,
     pub discovery_complete: bool,
     pub rooms: Vec<LinkFanoutRoomState>,
+    pub bootstrap_export: LinkBootstrapExportState,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LinkBootstrapExportState {
+    #[default]
+    WaitingForFanout,
+    Exporting {
+        canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
+        rooms: Vec<LinkBootstrapRoomExport>,
+    },
+    Emitted {
+        manifests: Vec<LinkBootstrapManifestReceipt>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkBootstrapRoomExport {
+    pub room: DeviceLinkBootstrapRoomV2,
+    pub canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
+    pub profiles: Vec<DeviceLinkBootstrapProfileV2>,
+    pub through_seq: u64,
+    pub audit_after_seq: u64,
+    pub audit_complete: bool,
+    pub planning_after_seq: u64,
+    pub planning_after_message_id: String,
+    pub planning_complete: bool,
+    pub chunks: Vec<LinkBootstrapChunkPlan>,
+    pub total_history_events: u64,
+    pub history_sha256: Option<String>,
+    pub manifest_sha256: Option<String>,
+    pub next_chunk_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkBootstrapChunkPlan {
+    pub start_after_seq: u64,
+    pub start_after_message_id: String,
+    pub end_seq: u64,
+    pub end_message_id: String,
+    pub event_count: u32,
+    pub chunk_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkBootstrapManifestReceipt {
+    pub bootstrap_id: String,
+    pub room_id: RoomId,
+    pub manifest_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -514,11 +602,182 @@ struct StoredAppRoomMetadataV1 {
     local_read_seq: u64,
 }
 
+/// Durable proof that one exact V2 bootstrap manifest was verified and
+/// published for this Device.
+///
+/// The receipt is intentionally independent from the device-state snapshot.
+/// Callers can compare it with the source Device's expected receipt set after
+/// a restart without decoding or rewriting older hosted snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct StoredDeviceLinkBootstrapReceipt {
+    pub bootstrap_id: String,
+    pub room_id: RoomId,
+    pub source: DeviceRef,
+    pub target: DeviceRef,
+    pub chunk_count: u32,
+    pub total_history_events: u64,
+    pub history_sha256: String,
+    pub manifest_sha256: String,
+}
+
+impl StoredDeviceLinkBootstrapReceipt {
+    pub fn from_bootstrap(
+        source: &DeviceRef,
+        bootstrap: &DeviceLinkBootstrapV2,
+    ) -> Result<Self, ClientStoreError> {
+        let manifest = StoredDeviceLinkBootstrapManifestV2::from_bootstrap(source, bootstrap)?;
+        manifest.receipt()
+    }
+}
+
+/// One encrypted, durable V2 transfer reconstructed from its manifest and
+/// currently stored chunks. Incomplete transfers remain invisible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPendingDeviceLinkBootstrap {
+    pub receipt: StoredDeviceLinkBootstrapReceipt,
+    pub room: DeviceLinkBootstrapRoomV2,
+    pub canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
+    pub profiles: Vec<DeviceLinkBootstrapProfileV2>,
+    pub earliest_envelope_seq: u64,
+    pub chunks: BTreeMap<u32, Vec<DeviceLinkBootstrapEventV2>>,
+}
+
+impl StoredPendingDeviceLinkBootstrap {
+    pub fn is_complete(&self) -> bool {
+        self.chunks.len() == self.receipt.chunk_count as usize
+            && (0..self.receipt.chunk_count).all(|index| self.chunks.contains_key(&index))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceLinkBootstrapStageOutcome {
+    Pending {
+        received_chunks: u32,
+        expected_chunks: u32,
+    },
+    ExactDuplicate {
+        received_chunks: u32,
+        expected_chunks: u32,
+    },
+    Ready(StoredPendingDeviceLinkBootstrap),
+    AlreadyCommitted(StoredDeviceLinkBootstrapReceipt),
+    Poisoned,
+    CapacityExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceLinkBootstrapCommitOutcome {
+    Committed(StoredDeviceLinkBootstrapReceipt),
+    AlreadyCommitted(StoredDeviceLinkBootstrapReceipt),
+    Poisoned,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredDeviceLinkBootstrapManifestV2 {
+    version: u16,
+    bootstrap_id: String,
+    source: DeviceRef,
+    target: DeviceRef,
+    chunk_count: u32,
+    total_history_events: u64,
+    history_sha256: String,
+    room: DeviceLinkBootstrapRoomV2,
+    canonical_selection: Option<DeviceLinkBootstrapSelectionV2>,
+    profiles: Vec<DeviceLinkBootstrapProfileV2>,
+}
+
+impl StoredDeviceLinkBootstrapManifestV2 {
+    fn from_bootstrap(
+        source: &DeviceRef,
+        bootstrap: &DeviceLinkBootstrapV2,
+    ) -> Result<Self, ClientStoreError> {
+        validate_device_link_bootstrap_manifest_fields(source, bootstrap)?;
+        Ok(Self {
+            version: bootstrap.version,
+            bootstrap_id: bootstrap.bootstrap_id.clone(),
+            source: source.clone(),
+            target: bootstrap.target.clone(),
+            chunk_count: bootstrap.chunk_count,
+            total_history_events: bootstrap.total_history_events,
+            history_sha256: bootstrap.history_sha256.clone(),
+            room: bootstrap.room.clone(),
+            canonical_selection: bootstrap.canonical_selection.clone(),
+            profiles: bootstrap.profiles.clone(),
+        })
+    }
+
+    fn canonical_bytes(&self) -> Result<Vec<u8>, ClientStoreError> {
+        serde_json::to_vec(self).map_err(|_| ClientStoreError::EncodeDeviceLinkBootstrapManifest)
+    }
+
+    fn manifest_sha256(&self) -> Result<String, ClientStoreError> {
+        let mut digest = Sha256::new();
+        digest.update(DEVICE_LINK_BOOTSTRAP_MANIFEST_DIGEST_DOMAIN);
+        digest.update(self.canonical_bytes()?);
+        Ok(hex_lower(&digest.finalize()))
+    }
+
+    fn receipt(&self) -> Result<StoredDeviceLinkBootstrapReceipt, ClientStoreError> {
+        Ok(StoredDeviceLinkBootstrapReceipt {
+            bootstrap_id: self.bootstrap_id.clone(),
+            room_id: self.room.room_id.clone(),
+            source: self.source.clone(),
+            target: self.target.clone(),
+            chunk_count: self.chunk_count,
+            total_history_events: self.total_history_events,
+            history_sha256: self.history_sha256.clone(),
+            manifest_sha256: self.manifest_sha256()?,
+        })
+    }
+}
+
+/// Hash one chunk using the canonical event encoding shared by V2 source
+/// planning and target verification.
+pub fn device_link_bootstrap_chunk_sha256(history: &[DeviceLinkBootstrapEventV2]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for event in history {
+        update_device_link_bootstrap_event_digest(&mut digest, event);
+    }
+    digest.finalize().into()
+}
+
+/// V2 transfer digest: hash each canonical chunk independently, concatenate
+/// those raw 32-byte digests in chunk-index order, then hash that byte string.
+///
+/// An empty transfer still has exactly one empty chunk, so its value is
+/// `SHA256(SHA256(empty))`, not `SHA256(empty)`.
+pub fn device_link_bootstrap_history_sha256(chunks: &[Vec<DeviceLinkBootstrapEventV2>]) -> String {
+    let mut digest = Sha256::new();
+    for chunk in chunks {
+        digest.update(device_link_bootstrap_chunk_sha256(chunk));
+    }
+    hex_lower(&digest.finalize())
+}
+
+fn update_device_link_bootstrap_event_digest(
+    digest: &mut Sha256,
+    event: &DeviceLinkBootstrapEventV2,
+) {
+    digest.update(event.seq.to_be_bytes());
+    update_device_link_bootstrap_digest_field(digest, event.message_id.as_bytes());
+    update_device_link_bootstrap_digest_field(digest, event.sender.account_id.as_bytes());
+    update_device_link_bootstrap_digest_field(digest, event.sender.device_id.as_bytes());
+    update_device_link_bootstrap_digest_field(digest, &event.plaintext);
+    digest.update(event.timestamp_unix_seconds.to_be_bytes());
+}
+
+fn update_device_link_bootstrap_digest_field(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoredAppState {
     pub selected_room_id: Option<RoomId>,
     pub selected_topic_id: Option<String>,
     pub selected_chat_id: Option<String>,
+    pub paired_agent: Option<StoredPairedAgent>,
     pub revoked_devices: BTreeSet<DeviceRef>,
     pub chat_archives: Vec<StoredChatArchiveState>,
 }
@@ -551,6 +810,12 @@ impl StoredChatArchiveState {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPairedAgent {
+    pub agent_account_id: String,
+    pub canonical_room_id: RoomId,
+}
+
 impl StoredAppState {
     fn validate_limits(&self) -> Result<(), ClientError> {
         if let Some(room_id) = &self.selected_room_id {
@@ -563,6 +828,18 @@ impl StoredAppState {
         if let Some(chat_id) = &self.selected_chat_id {
             validate_bytes_non_empty("app_state.selected_chat_id", chat_id.len())?;
             validate_string_bytes("app_state.selected_chat_id", chat_id, MAX_OBJECT_ID_BYTES)?;
+        }
+        if let Some(paired_agent) = &self.paired_agent {
+            validate_bytes_non_empty(
+                "app_state.paired_agent.agent_account_id",
+                paired_agent.agent_account_id.len(),
+            )?;
+            validate_string_bytes(
+                "app_state.paired_agent.agent_account_id",
+                &paired_agent.agent_account_id,
+                MAX_OBJECT_ID_BYTES,
+            )?;
+            validate_room_id(&paired_agent.canonical_room_id)?;
         }
         validate_item_count(
             "app_state.revoked_devices",
@@ -592,6 +869,8 @@ struct StoredAppStateMetadataV1 {
     selected_topic_id: Option<String>,
     #[serde(default)]
     selected_chat_id: Option<String>,
+    #[serde(default)]
+    paired_agent: Option<StoredPairedAgent>,
     revoked_devices: BTreeSet<DeviceRef>,
     #[serde(default)]
     chat_archives: Vec<StoredChatArchiveState>,
@@ -1915,6 +2194,7 @@ impl FiniteChatDevice {
             after_room_id: None,
             discovery_complete: false,
             rooms: Vec::new(),
+            bootstrap_export: LinkBootstrapExportState::WaitingForFanout,
         };
         fanout.validate_limits()?;
         self.link_fanouts.insert(fanout_id, fanout);
@@ -2229,6 +2509,24 @@ impl FiniteChatDevice {
 
     pub fn link_fanout_room_count(&self, fanout_id: &str) -> Result<usize, ClientError> {
         Ok(self.link_fanout(fanout_id)?.rooms.len())
+    }
+
+    pub fn link_fanout_bootstrap_export(
+        &self,
+        fanout_id: &str,
+    ) -> Result<LinkBootstrapExportState, ClientError> {
+        Ok(self.link_fanout(fanout_id)?.bootstrap_export.clone())
+    }
+
+    pub fn set_link_fanout_bootstrap_export(
+        &mut self,
+        fanout_id: &str,
+        bootstrap_export: LinkBootstrapExportState,
+    ) -> Result<(), ClientError> {
+        validate_link_bootstrap_export(&bootstrap_export)?;
+        let fanout = self.link_fanout_mut(fanout_id)?;
+        fanout.bootstrap_export = bootstrap_export;
+        fanout.validate_limits()
     }
 
     fn link_fanout_target_device(&self, fanout_id: &str) -> Result<DeviceRef, ClientError> {
@@ -2875,8 +3173,37 @@ impl LinkFanoutState {
                 ));
             }
         }
+        validate_link_bootstrap_export(&self.bootstrap_export)?;
         Ok(())
     }
+}
+
+fn validate_link_bootstrap_export(export: &LinkBootstrapExportState) -> Result<(), ClientError> {
+    let encoded = serde_json::to_vec(export)
+        .map_err(|_| ClientError::InvalidClientState("device-link bootstrap export".to_owned()))?;
+    validate_bytes_len(
+        "link_fanout.bootstrap_export",
+        encoded.len(),
+        MAX_CLIENT_STATE_PLAINTEXT_BYTES,
+    )?;
+    match export {
+        LinkBootstrapExportState::WaitingForFanout => {}
+        LinkBootstrapExportState::Exporting { rooms, .. } => {
+            validate_item_count(
+                "link_fanout.bootstrap_rooms",
+                rooms.len(),
+                MAX_LINK_FANOUT_ROOMS,
+            )?;
+        }
+        LinkBootstrapExportState::Emitted { manifests } => {
+            validate_item_count(
+                "link_fanout.bootstrap_manifests",
+                manifests.len(),
+                MAX_LINK_FANOUT_ROOMS,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 impl LinkFanoutRoomState {
@@ -3075,8 +3402,21 @@ impl SqliteClientStore {
             save_device_state_tx(tx, &state, &encryption_key)?;
             save_app_messages_tx(tx, &encryption_key, &owner, messages)?;
             save_app_events_tx(tx, &encryption_key, &owner, events)?;
+            for event in events {
+                if let Some((source, bootstrap)) =
+                    device_link_bootstrap_from_stored_event(&owner, event)
+                {
+                    let _ = stage_device_link_bootstrap_chunk_tx(
+                        tx,
+                        &encryption_key,
+                        &owner,
+                        &source,
+                        event.seq,
+                        &bootstrap,
+                    )?;
+                }
+            }
             prune_app_messages_tx(tx, &owner, MAX_STORED_APP_MESSAGES)?;
-            prune_app_events_tx(tx, &owner, MAX_STORED_APP_MESSAGES)?;
             Ok(())
         })
     }
@@ -3196,7 +3536,7 @@ impl SqliteClientStore {
             save_app_messages_tx(tx, &encryption_key, owner, messages)?;
             save_app_events_tx(tx, &encryption_key, owner, events)?;
             prune_app_messages_tx(tx, owner, max_items)?;
-            prune_app_events_tx(tx, owner, max_items)
+            Ok(())
         })
     }
 
@@ -3300,6 +3640,346 @@ impl SqliteClientStore {
             save_app_events_tx(tx, &encryption_key, owner, events)?;
             prune_app_events_tx(tx, owner, max_events)
         })
+    }
+
+    /// Persist canonical decrypted application events without pruning history.
+    ///
+    /// The in-memory transcript remains independently bounded. Durable event
+    /// retention is intentionally complete because an existing account Device
+    /// is the only party able to rewrap pre-join MLS history for a newly linked
+    /// Device.
+    pub fn import_app_events_atomically(
+        &mut self,
+        owner: &DeviceRef,
+        events: &[StoredAppEvent],
+    ) -> Result<(), ClientStoreError> {
+        let encryption_key = self.options.encryption_key.clone();
+        self.with_transaction(|tx| import_app_events_tx(tx, &encryption_key, owner, events))
+    }
+
+    /// Durably stage one authenticated V2 bootstrap chunk.
+    ///
+    /// Runtime sync also invokes the same transaction helper while saving the
+    /// advanced device cursor. Calling this from the later projection pass is
+    /// therefore an exact, idempotent observation of already-durable state.
+    pub fn stage_device_link_bootstrap_chunk(
+        &mut self,
+        owner: &DeviceRef,
+        source: &DeviceRef,
+        envelope_seq: u64,
+        bootstrap: &DeviceLinkBootstrapV2,
+    ) -> Result<DeviceLinkBootstrapStageOutcome, ClientStoreError> {
+        validate_device_link_bootstrap_for_owner(owner, source, bootstrap)?;
+        let encryption_key = self.options.encryption_key.clone();
+        self.with_transaction(|tx| {
+            stage_device_link_bootstrap_chunk_tx(
+                tx,
+                &encryption_key,
+                owner,
+                source,
+                envelope_seq,
+                bootstrap,
+            )
+        })
+    }
+
+    /// Load every receiving transfer directly from encrypted staging.
+    ///
+    /// This is deliberately unrelated to the application-event cursor or its
+    /// retention window. A complete result can be finalized with the source
+    /// offline after any process restart.
+    pub fn load_pending_device_link_bootstraps(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<Vec<StoredPendingDeviceLinkBootstrap>, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        load_pending_device_link_bootstraps(&self.conn, &self.options.encryption_key, owner)
+    }
+
+    /// Atomically verify and publish one complete transfer.
+    ///
+    /// Imported history, authoritative room metadata, cached profiles, and
+    /// the completed receipt share one SQLite commit. No caller can observe a
+    /// receipt or authoritative room without the complete canonical history.
+    pub fn commit_device_link_bootstrap_atomically(
+        &mut self,
+        owner: &DeviceRef,
+        expected: &StoredDeviceLinkBootstrapReceipt,
+        room: &StoredAppRoom,
+        profiles: &[StoredAppProfile],
+    ) -> Result<DeviceLinkBootstrapCommitOutcome, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_device_link_bootstrap_receipt(expected)?;
+        room.validate_limits()?;
+        if room.room_id != expected.room_id {
+            return Err(ClientStoreError::DeviceLinkBootstrapRoomMismatch {
+                expected: expected.room_id.clone(),
+                actual: room.room_id.clone(),
+            });
+        }
+        let encryption_key = self.options.encryption_key.clone();
+        self.with_transaction(|tx| {
+            commit_device_link_bootstrap_tx(tx, &encryption_key, owner, expected, room, profiles)
+        })
+    }
+
+    pub fn poison_device_link_bootstrap(
+        &mut self,
+        owner: &DeviceRef,
+        expected: &StoredDeviceLinkBootstrapReceipt,
+    ) -> Result<(), ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_device_link_bootstrap_receipt(expected)?;
+        self.with_transaction(|tx| {
+            poison_device_link_bootstrap_tx(tx, owner, expected)?;
+            Ok(())
+        })
+    }
+
+    pub fn load_completed_device_link_bootstrap_receipts(
+        &self,
+        owner: &DeviceRef,
+    ) -> Result<Vec<StoredDeviceLinkBootstrapReceipt>, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        load_completed_device_link_bootstrap_receipts(
+            &self.conn,
+            &self.options.encryption_key,
+            owner,
+        )
+    }
+
+    pub fn load_completed_device_link_bootstrap_receipt(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+        bootstrap_id: &str,
+        source: &DeviceRef,
+    ) -> Result<Option<StoredDeviceLinkBootstrapReceipt>, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        validate_string_bytes(
+            "device_link_bootstrap.bootstrap_id",
+            bootstrap_id,
+            MAX_OBJECT_ID_BYTES,
+        )
+        .map_err(ClientError::from)?;
+        source.validate_limits().map_err(ClientError::from)?;
+        load_completed_device_link_bootstrap_receipt(
+            &self.conn,
+            &self.options.encryption_key,
+            owner,
+            room_id,
+            bootstrap_id,
+            source,
+        )
+    }
+
+    pub fn max_app_event_seq_for_room(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+    ) -> Result<Option<u64>, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        let stored = self.conn.query_row(
+            r#"
+            SELECT MAX(seq)
+            FROM client_app_events
+            WHERE account_id = ?1 AND device_id = ?2 AND room_id = ?3
+            "#,
+            params![&owner.account_id, &owner.device_id, room_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        stored.map(sqlite_app_event_seq_to_u64).transpose()
+    }
+
+    pub fn has_app_event(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+        message_id: &str,
+    ) -> Result<bool, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        validate_bytes_non_empty("app_event.message_id", message_id.len())
+            .map_err(ClientError::from)?;
+        validate_string_bytes("app_event.message_id", message_id, MAX_OBJECT_ID_BYTES)
+            .map_err(ClientError::from)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM client_app_events
+                  WHERE account_id = ?1
+                    AND device_id = ?2
+                    AND room_id = ?3
+                    AND message_id = ?4
+                )
+                "#,
+                params![&owner.account_id, &owner.device_id, room_id, message_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ClientStoreError::from)
+    }
+
+    pub fn has_app_event_identity(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+        seq: u64,
+        message_id: &str,
+        sender: &DeviceRef,
+        timestamp_unix_seconds: u64,
+    ) -> Result<bool, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        validate_bytes_non_empty("app_event.message_id", message_id.len())
+            .map_err(ClientError::from)?;
+        validate_string_bytes("app_event.message_id", message_id, MAX_OBJECT_ID_BYTES)
+            .map_err(ClientError::from)?;
+        sender.validate_limits().map_err(ClientError::from)?;
+        self.conn
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM client_app_events
+                  WHERE account_id = ?1
+                    AND device_id = ?2
+                    AND room_id = ?3
+                    AND seq = ?4
+                    AND message_id = ?5
+                    AND sender_account_id = ?6
+                    AND sender_device_id = ?7
+                    AND timestamp_unix_seconds = ?8
+                )
+                "#,
+                params![
+                    &owner.account_id,
+                    &owner.device_id,
+                    room_id,
+                    sqlite_app_event_seq_from_u64(seq)?,
+                    message_id,
+                    &sender.account_id,
+                    &sender.device_id,
+                    sqlite_timestamp_from_u64(timestamp_unix_seconds)?,
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ClientStoreError::from)
+    }
+
+    /// Load one deterministic page from the durable room history snapshot.
+    ///
+    /// `through_seq` freezes the upper boundary before bootstrap control events
+    /// are appended. `(after_seq, after_message_id)` is an exclusive cursor so
+    /// equal-sequence imported events cannot be skipped.
+    pub fn load_app_events_for_room_page(
+        &self,
+        owner: &DeviceRef,
+        room_id: &str,
+        through_seq: u64,
+        after_seq: u64,
+        after_message_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredAppEvent>, ClientStoreError> {
+        validate_app_message_owner(owner)?;
+        validate_room_id(room_id).map_err(ClientError::from)?;
+        validate_string_bytes(
+            "app_event_page.after_message_id",
+            after_message_id,
+            MAX_OBJECT_ID_BYTES,
+        )
+        .map_err(ClientError::from)?;
+        validate_app_event_limit(limit)?;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+              room_id,
+              seq,
+              message_id,
+              sender_account_id,
+              sender_device_id,
+              nonce,
+              ciphertext,
+              timestamp_unix_seconds
+            FROM client_app_events
+            WHERE account_id = ?1
+              AND device_id = ?2
+              AND room_id = ?3
+              AND seq <= ?4
+              AND (seq > ?5 OR (seq = ?5 AND message_id > ?6))
+            ORDER BY seq ASC, message_id ASC
+            LIMIT ?7
+            "#,
+        )?;
+        let rows = stmt.query_map(
+            params![
+                &owner.account_id,
+                &owner.device_id,
+                room_id,
+                sqlite_app_event_seq_from_u64(through_seq)?,
+                sqlite_app_event_seq_from_u64(after_seq)?,
+                after_message_id,
+                i64::from(limit),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, RoomId>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, MessageId>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (
+                stored_room_id,
+                stored_seq,
+                message_id,
+                sender_account_id,
+                sender_device_id,
+                nonce,
+                ciphertext,
+                stored_timestamp_unix_seconds,
+            ) = row?;
+            let seq = sqlite_app_event_seq_to_u64(stored_seq)?;
+            let timestamp_unix_seconds = sqlite_timestamp_to_u64(stored_timestamp_unix_seconds)?;
+            let sender = DeviceRef {
+                account_id: sender_account_id,
+                device_id: sender_device_id,
+            };
+            let plaintext = decrypt_app_event_plaintext(
+                &self.options.encryption_key,
+                AppMessageIdentity {
+                    owner,
+                    room_id: &stored_room_id,
+                    seq,
+                    message_id: &message_id,
+                    sender: &sender,
+                },
+                &nonce,
+                &ciphertext,
+            )?;
+            let event = StoredAppEvent {
+                room_id: stored_room_id,
+                seq,
+                message_id,
+                sender,
+                plaintext,
+                timestamp_unix_seconds,
+            };
+            event.validate_limits()?;
+            events.push(event);
+        }
+        debug_assert!(events.len() <= limit as usize);
+        Ok(events)
     }
 
     pub fn load_app_outbox(
@@ -3465,6 +4145,7 @@ impl SqliteClientStore {
             selected_room_id: metadata.selected_room_id,
             selected_topic_id: metadata.selected_topic_id,
             selected_chat_id: metadata.selected_chat_id,
+            paired_agent: metadata.paired_agent,
             revoked_devices: metadata.revoked_devices,
             chat_archives: metadata.chat_archives,
         };
@@ -5075,6 +5756,14 @@ fn complete_link_fanout_room_from_sync<D: RuntimeDelivery>(
                     });
                     report.record_completed_room()?;
                 }
+                if !app_messages.is_empty() || !app_events.is_empty() {
+                    store.save_app_messages_and_events(
+                        device.device_ref(),
+                        &app_messages,
+                        &app_events,
+                        MAX_STORED_APP_MESSAGES,
+                    )?;
+                }
                 return Ok(());
             }
             let before_seq = device.last_applied_seq(room_id)?;
@@ -5314,6 +6003,8 @@ pub enum ClientStoreError {
     StateSnapshotTrailingBytes,
     #[error("encrypted client state snapshot has invalid UTF-8")]
     StateSnapshotUtf8,
+    #[error("encrypted client state snapshot has invalid device-link bootstrap export")]
+    DecodeLinkBootstrapExport,
     #[error("encrypted client state snapshot enum {field} has unknown value {value}")]
     StateSnapshotEnum { field: &'static str, value: u64 },
     #[error("encrypted client state snapshot length overflow")]
@@ -5334,6 +6025,8 @@ pub enum ClientStoreError {
     NegativeStoredAppEventSeq { seq: i64 },
     #[error("stored app event count cannot be represented in sqlite")]
     StoredAppEventCountOverflow,
+    #[error("stored app event {room_id}/{message_id} conflicts with canonical local history")]
+    StoredAppEventConflict { room_id: String, message_id: String },
     #[error("stored app timestamp {timestamp} cannot be represented in sqlite")]
     StoredAppTimestampOutOfRange { timestamp: u64 },
     #[error("stored app timestamp is negative: {timestamp}")]
@@ -5388,6 +6081,38 @@ pub enum ClientStoreError {
     DecodeAppProfileMetadata,
     #[error("stored app profile count cannot be represented in sqlite")]
     StoredAppProfileCountOverflow,
+    #[error("failed to encode device-link bootstrap manifest")]
+    EncodeDeviceLinkBootstrapManifest,
+    #[error("failed to decode device-link bootstrap manifest")]
+    DecodeDeviceLinkBootstrapManifest,
+    #[error("failed to encrypt device-link bootstrap manifest")]
+    EncryptDeviceLinkBootstrapManifest,
+    #[error("failed to decrypt device-link bootstrap manifest")]
+    DecryptDeviceLinkBootstrapManifest,
+    #[error("device-link bootstrap manifest nonce has {actual_bytes} bytes")]
+    InvalidDeviceLinkBootstrapManifestNonceLength { actual_bytes: usize },
+    #[error("failed to encode device-link bootstrap chunk")]
+    EncodeDeviceLinkBootstrapChunk,
+    #[error("failed to decode device-link bootstrap chunk")]
+    DecodeDeviceLinkBootstrapChunk,
+    #[error("failed to encrypt device-link bootstrap chunk")]
+    EncryptDeviceLinkBootstrapChunk,
+    #[error("failed to decrypt device-link bootstrap chunk")]
+    DecryptDeviceLinkBootstrapChunk,
+    #[error("device-link bootstrap chunk nonce has {actual_bytes} bytes")]
+    InvalidDeviceLinkBootstrapChunkNonceLength { actual_bytes: usize },
+    #[error("device-link bootstrap state has unknown value {state}")]
+    InvalidDeviceLinkBootstrapState { state: i64 },
+    #[error("device-link bootstrap room mismatch: expected {expected}, actual {actual}")]
+    DeviceLinkBootstrapRoomMismatch { expected: String, actual: String },
+    #[error("device-link bootstrap receipt does not match its encrypted manifest")]
+    DeviceLinkBootstrapReceiptMismatch,
+    #[error("device-link bootstrap chunk index {index} cannot be represented in sqlite")]
+    DeviceLinkBootstrapChunkIndexOutOfRange { index: u32 },
+    #[error("device-link bootstrap chunk index is negative: {index}")]
+    NegativeDeviceLinkBootstrapChunkIndex { index: i64 },
+    #[error("device-link bootstrap chunk count cannot be represented in sqlite")]
+    DeviceLinkBootstrapChunkCountOverflow,
 }
 
 #[derive(Debug, Error)]
@@ -5400,6 +6125,8 @@ pub enum ClientError {
     Engine(#[from] EngineError),
     #[error("failed to derive envelope message id")]
     EnvelopeMessageId(#[source] serde_json::Error),
+    #[error("invalid persisted client state: {0}")]
+    InvalidClientState(String),
     #[error("stored outbox request room mismatch: expected {expected}, actual {actual}")]
     OutboxRoomMismatch { expected: String, actual: String },
     #[error("stored outbox request message id mismatch: expected {expected}, actual {actual}")]
@@ -6128,6 +6855,87 @@ fn create_current_client_store_schema(conn: &Connection) -> Result<(), ClientSto
 
         CREATE INDEX IF NOT EXISTS client_app_profiles_owner_idx
           ON client_app_profiles(account_id, device_id);
+
+        CREATE TABLE IF NOT EXISTS client_device_link_bootstrap_transfers (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          room_id TEXT NOT NULL,
+          bootstrap_id TEXT NOT NULL,
+          source_account_id TEXT NOT NULL,
+          source_device_id TEXT NOT NULL,
+          state INTEGER NOT NULL
+            CHECK (state IN (0, 1, 2, 3)),
+          earliest_envelope_seq INTEGER NOT NULL,
+          manifest_sha256 TEXT NOT NULL,
+          manifest_nonce BLOB NOT NULL,
+          manifest_ciphertext BLOB NOT NULL,
+          PRIMARY KEY (
+            account_id,
+            device_id,
+            room_id,
+            bootstrap_id,
+            source_account_id,
+            source_device_id
+          ),
+          FOREIGN KEY (account_id, device_id)
+            REFERENCES client_device_states(account_id, device_id)
+            ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS client_device_link_bootstrap_transfers_owner_state_idx
+          ON client_device_link_bootstrap_transfers(account_id, device_id, state);
+
+        CREATE TABLE IF NOT EXISTS client_device_link_bootstrap_chunks (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          room_id TEXT NOT NULL,
+          bootstrap_id TEXT NOT NULL,
+          source_account_id TEXT NOT NULL,
+          source_device_id TEXT NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          chunk_sha256 BLOB NOT NULL,
+          nonce BLOB,
+          ciphertext BLOB,
+          CHECK (
+            (nonce IS NULL AND ciphertext IS NULL)
+            OR (nonce IS NOT NULL AND ciphertext IS NOT NULL)
+          ),
+          PRIMARY KEY (
+            account_id,
+            device_id,
+            room_id,
+            bootstrap_id,
+            source_account_id,
+            source_device_id,
+            chunk_index
+          ),
+          FOREIGN KEY (
+            account_id,
+            device_id,
+            room_id,
+            bootstrap_id,
+            source_account_id,
+            source_device_id
+          ) REFERENCES client_device_link_bootstrap_transfers(
+            account_id,
+            device_id,
+            room_id,
+            bootstrap_id,
+            source_account_id,
+            source_device_id
+          ) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS client_device_link_bootstrap_chunks_transfer_idx
+          ON client_device_link_bootstrap_chunks(
+            account_id,
+            device_id,
+            room_id,
+            bootstrap_id,
+            source_account_id,
+            source_device_id,
+            chunk_index
+          );
         "#,
     )?;
     Ok(())
@@ -6465,6 +7273,1018 @@ fn sqlite_timestamp_to_u64(timestamp: i64) -> Result<u64, ClientStoreError> {
     u64::try_from(timestamp).map_err(|_| ClientStoreError::NegativeStoredAppTimestamp { timestamp })
 }
 
+fn sqlite_device_link_chunk_index_from_u32(index: u32) -> Result<i64, ClientStoreError> {
+    Ok(i64::from(index))
+}
+
+fn sqlite_device_link_chunk_index_to_u32(index: i64) -> Result<u32, ClientStoreError> {
+    u32::try_from(index)
+        .map_err(|_| ClientStoreError::NegativeDeviceLinkBootstrapChunkIndex { index })
+}
+
+#[derive(Clone, Copy)]
+struct DeviceLinkBootstrapIdentity<'a> {
+    owner: &'a DeviceRef,
+    room_id: &'a str,
+    bootstrap_id: &'a str,
+    source: &'a DeviceRef,
+}
+
+fn device_link_bootstrap_identity_from_receipt<'a>(
+    owner: &'a DeviceRef,
+    receipt: &'a StoredDeviceLinkBootstrapReceipt,
+) -> DeviceLinkBootstrapIdentity<'a> {
+    DeviceLinkBootstrapIdentity {
+        owner,
+        room_id: &receipt.room_id,
+        bootstrap_id: &receipt.bootstrap_id,
+        source: &receipt.source,
+    }
+}
+
+fn validate_device_link_bootstrap_identity(
+    identity: DeviceLinkBootstrapIdentity<'_>,
+) -> Result<(), ClientStoreError> {
+    validate_app_message_owner(identity.owner)?;
+    validate_room_id(identity.room_id).map_err(ClientError::from)?;
+    validate_bytes_non_empty(
+        "device_link_bootstrap.bootstrap_id",
+        identity.bootstrap_id.len(),
+    )
+    .map_err(ClientError::from)?;
+    validate_string_bytes(
+        "device_link_bootstrap.bootstrap_id",
+        identity.bootstrap_id,
+        MAX_OBJECT_ID_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    identity
+        .source
+        .validate_limits()
+        .map_err(ClientError::from)?;
+    Ok(())
+}
+
+fn validate_device_link_bootstrap_for_owner(
+    owner: &DeviceRef,
+    source: &DeviceRef,
+    bootstrap: &DeviceLinkBootstrapV2,
+) -> Result<(), ClientStoreError> {
+    validate_app_message_owner(owner)?;
+    source.validate_limits().map_err(ClientError::from)?;
+    bootstrap.validate_limits().map_err(ClientError::from)?;
+    if source.account_id != owner.account_id
+        || source.device_id == owner.device_id
+        || bootstrap.target != *owner
+    {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+    }
+    let encoded = serde_json::to_vec(bootstrap)
+        .map_err(|_| ClientStoreError::EncodeDeviceLinkBootstrapChunk)?;
+    validate_bytes_len(
+        "device_link_bootstrap.payload",
+        encoded.len(),
+        finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    Ok(())
+}
+
+fn validate_device_link_bootstrap_manifest_fields(
+    source: &DeviceRef,
+    bootstrap: &DeviceLinkBootstrapV2,
+) -> Result<(), ClientStoreError> {
+    source.validate_limits().map_err(ClientError::from)?;
+    bootstrap
+        .target
+        .validate_limits()
+        .map_err(ClientError::from)?;
+    validate_bytes_non_empty(
+        "device_link_bootstrap.bootstrap_id",
+        bootstrap.bootstrap_id.len(),
+    )
+    .map_err(ClientError::from)?;
+    validate_string_bytes(
+        "device_link_bootstrap.bootstrap_id",
+        &bootstrap.bootstrap_id,
+        MAX_OBJECT_ID_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    if bootstrap.version != finitechat_proto::DEVICE_LINK_BOOTSTRAP_VERSION_V2
+        || bootstrap.chunk_count == 0
+        || bootstrap.chunk_count > finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS
+        || bootstrap.total_history_events > finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS
+        || !is_lower_hex_sha256(&bootstrap.history_sha256)
+    {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+    }
+    if bootstrap.total_history_events == 0 {
+        if bootstrap.chunk_count != 1 {
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        }
+    } else if u64::from(bootstrap.chunk_count) > bootstrap.total_history_events
+        || bootstrap.total_history_events
+            > u64::from(bootstrap.chunk_count)
+                * u64::from(finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_EVENTS)
+    {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+    }
+    bootstrap
+        .room
+        .validate_limits()
+        .map_err(ClientError::from)?;
+    if let Some(selection) = &bootstrap.canonical_selection {
+        selection.validate_limits().map_err(ClientError::from)?;
+    }
+    validate_item_count(
+        "device_link_bootstrap.profiles",
+        bootstrap.profiles.len(),
+        finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_PROFILES,
+    )
+    .map_err(ClientError::from)?;
+    for profile in &bootstrap.profiles {
+        profile.validate_limits().map_err(ClientError::from)?;
+    }
+    Ok(())
+}
+
+fn validate_device_link_bootstrap_receipt(
+    receipt: &StoredDeviceLinkBootstrapReceipt,
+) -> Result<(), ClientStoreError> {
+    validate_room_id(&receipt.room_id).map_err(ClientError::from)?;
+    validate_bytes_non_empty(
+        "device_link_bootstrap.bootstrap_id",
+        receipt.bootstrap_id.len(),
+    )
+    .map_err(ClientError::from)?;
+    validate_string_bytes(
+        "device_link_bootstrap.bootstrap_id",
+        &receipt.bootstrap_id,
+        MAX_OBJECT_ID_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    receipt
+        .source
+        .validate_limits()
+        .map_err(ClientError::from)?;
+    receipt
+        .target
+        .validate_limits()
+        .map_err(ClientError::from)?;
+    if receipt.chunk_count == 0
+        || receipt.chunk_count > finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS
+        || receipt.total_history_events > finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_TOTAL_EVENTS
+        || !is_lower_hex_sha256(&receipt.history_sha256)
+        || !is_lower_hex_sha256(&receipt.manifest_sha256)
+    {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+    }
+    Ok(())
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn device_link_bootstrap_from_stored_event(
+    owner: &DeviceRef,
+    event: &StoredAppEvent,
+) -> Option<(DeviceRef, DeviceLinkBootstrapV2)> {
+    if event.sender.account_id != owner.account_id || event.sender.device_id == owner.device_id {
+        return None;
+    }
+    let app_event = serde_json::from_slice::<DecryptedApplicationEventV1>(&event.plaintext).ok()?;
+    app_event.validate_limits().ok()?;
+    match app_event.kind {
+        DurableAppEventKind::Namespaced { name, policy }
+            if name == FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2
+                && policy == ApplicationDeliveryPolicy::NON_NOTIFYING => {}
+        _ => return None,
+    }
+    if app_event.payload.len() > finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES as usize
+    {
+        return None;
+    }
+    let bootstrap = serde_json::from_slice::<DeviceLinkBootstrapV2>(&app_event.payload).ok()?;
+    validate_device_link_bootstrap_for_owner(owner, &event.sender, &bootstrap).ok()?;
+    (bootstrap.room.room_id == event.room_id).then(|| (event.sender.clone(), bootstrap))
+}
+
+#[derive(Debug)]
+struct StoredDeviceLinkBootstrapTransferRow {
+    state: i64,
+    earliest_envelope_seq: u64,
+    manifest_sha256: String,
+    manifest: StoredDeviceLinkBootstrapManifestV2,
+}
+
+fn load_device_link_bootstrap_transfer_row(
+    conn: &Connection,
+    encryption_key: &ClientStoreEncryptionKey,
+    identity: DeviceLinkBootstrapIdentity<'_>,
+) -> Result<Option<StoredDeviceLinkBootstrapTransferRow>, ClientStoreError> {
+    validate_device_link_bootstrap_identity(identity)?;
+    let row = conn
+        .query_row(
+            r#"
+            SELECT
+              state,
+              earliest_envelope_seq,
+              manifest_sha256,
+              manifest_nonce,
+              manifest_ciphertext
+            FROM client_device_link_bootstrap_transfers
+            WHERE account_id = ?1
+              AND device_id = ?2
+              AND room_id = ?3
+              AND bootstrap_id = ?4
+              AND source_account_id = ?5
+              AND source_device_id = ?6
+            "#,
+            params![
+                &identity.owner.account_id,
+                &identity.owner.device_id,
+                identity.room_id,
+                identity.bootstrap_id,
+                &identity.source.account_id,
+                &identity.source.device_id,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((state, earliest_envelope_seq, manifest_sha256, nonce, ciphertext)) = row else {
+        return Ok(None);
+    };
+    validate_device_link_bootstrap_state(state)?;
+    if !is_lower_hex_sha256(&manifest_sha256) {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+    }
+    let manifest = decrypt_device_link_bootstrap_manifest(
+        encryption_key,
+        identity,
+        &manifest_sha256,
+        &nonce,
+        &ciphertext,
+    )?;
+    if manifest.bootstrap_id != identity.bootstrap_id
+        || manifest.room.room_id != identity.room_id
+        || manifest.source != *identity.source
+        || manifest.manifest_sha256()? != manifest_sha256
+    {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+    }
+    Ok(Some(StoredDeviceLinkBootstrapTransferRow {
+        state,
+        earliest_envelope_seq: sqlite_app_event_seq_to_u64(earliest_envelope_seq)?,
+        manifest_sha256,
+        manifest,
+    }))
+}
+
+fn validate_device_link_bootstrap_state(state: i64) -> Result<(), ClientStoreError> {
+    match state {
+        DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING
+        | DEVICE_LINK_BOOTSTRAP_STATE_POISONED
+        | DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED
+        | DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED => Ok(()),
+        state => Err(ClientStoreError::InvalidDeviceLinkBootstrapState { state }),
+    }
+}
+
+fn poison_device_link_bootstrap_identity_tx(
+    tx: &Transaction<'_>,
+    identity: DeviceLinkBootstrapIdentity<'_>,
+) -> Result<(), ClientStoreError> {
+    tx.execute(
+        r#"
+        UPDATE client_device_link_bootstrap_transfers
+        SET state = CASE
+          WHEN state IN (?7, ?8) THEN ?8
+          ELSE ?9
+        END
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND room_id = ?3
+          AND bootstrap_id = ?4
+          AND source_account_id = ?5
+          AND source_device_id = ?6
+        "#,
+        params![
+            &identity.owner.account_id,
+            &identity.owner.device_id,
+            identity.room_id,
+            identity.bootstrap_id,
+            &identity.source.account_id,
+            &identity.source.device_id,
+            DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED,
+            DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED,
+            DEVICE_LINK_BOOTSTRAP_STATE_POISONED,
+        ],
+    )?;
+    Ok(())
+}
+
+fn poison_device_link_bootstrap_tx(
+    tx: &Transaction<'_>,
+    owner: &DeviceRef,
+    expected: &StoredDeviceLinkBootstrapReceipt,
+) -> Result<(), ClientStoreError> {
+    let identity = device_link_bootstrap_identity_from_receipt(owner, expected);
+    tx.execute(
+        r#"
+        UPDATE client_device_link_bootstrap_transfers
+        SET state = CASE
+          WHEN state IN (?8, ?9) THEN ?9
+          ELSE ?10
+        END
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND room_id = ?3
+          AND bootstrap_id = ?4
+          AND source_account_id = ?5
+          AND source_device_id = ?6
+          AND manifest_sha256 = ?7
+        "#,
+        params![
+            &identity.owner.account_id,
+            &identity.owner.device_id,
+            identity.room_id,
+            identity.bootstrap_id,
+            &identity.source.account_id,
+            &identity.source.device_id,
+            &expected.manifest_sha256,
+            DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED,
+            DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED,
+            DEVICE_LINK_BOOTSTRAP_STATE_POISONED,
+        ],
+    )?;
+    Ok(())
+}
+
+fn stage_device_link_bootstrap_chunk_tx(
+    tx: &Transaction<'_>,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    source: &DeviceRef,
+    envelope_seq: u64,
+    bootstrap: &DeviceLinkBootstrapV2,
+) -> Result<DeviceLinkBootstrapStageOutcome, ClientStoreError> {
+    validate_device_link_bootstrap_for_owner(owner, source, bootstrap)?;
+    let manifest = StoredDeviceLinkBootstrapManifestV2::from_bootstrap(source, bootstrap)?;
+    let receipt = manifest.receipt()?;
+    let identity = device_link_bootstrap_identity_from_receipt(owner, &receipt);
+    let envelope_seq = sqlite_app_event_seq_from_u64(envelope_seq)?;
+    let mut stored = load_device_link_bootstrap_transfer_row(tx, encryption_key, identity)?;
+
+    if stored.is_none() {
+        let active_count = tx.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM client_device_link_bootstrap_transfers
+            WHERE account_id = ?1
+              AND device_id = ?2
+              AND state IN (?3, ?4)
+            "#,
+            params![
+                &owner.account_id,
+                &owner.device_id,
+                DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING,
+                DEVICE_LINK_BOOTSTRAP_STATE_POISONED,
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if active_count >= i64::from(MAX_PENDING_DEVICE_LINK_BOOTSTRAPS) {
+            return Ok(DeviceLinkBootstrapStageOutcome::CapacityExceeded);
+        }
+        let sealed = encrypt_device_link_bootstrap_manifest(
+            encryption_key,
+            identity,
+            &receipt.manifest_sha256,
+            &manifest,
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO client_device_link_bootstrap_transfers (
+              account_id,
+              device_id,
+              room_id,
+              bootstrap_id,
+              source_account_id,
+              source_device_id,
+              state,
+              earliest_envelope_seq,
+              manifest_sha256,
+              manifest_nonce,
+              manifest_ciphertext
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            params![
+                &owner.account_id,
+                &owner.device_id,
+                &receipt.room_id,
+                &receipt.bootstrap_id,
+                &receipt.source.account_id,
+                &receipt.source.device_id,
+                DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING,
+                envelope_seq,
+                &receipt.manifest_sha256,
+                &sealed.nonce,
+                &sealed.ciphertext,
+            ],
+        )?;
+        stored = Some(StoredDeviceLinkBootstrapTransferRow {
+            state: DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING,
+            earliest_envelope_seq: sqlite_app_event_seq_to_u64(envelope_seq)?,
+            manifest_sha256: receipt.manifest_sha256.clone(),
+            manifest: manifest.clone(),
+        });
+    }
+
+    let stored = stored.expect("new or existing bootstrap transfer row");
+    if stored.manifest != manifest
+        || stored.manifest_sha256 != receipt.manifest_sha256
+        || stored.manifest.receipt()? != receipt
+    {
+        poison_device_link_bootstrap_identity_tx(tx, identity)?;
+        return Ok(DeviceLinkBootstrapStageOutcome::Poisoned);
+    }
+    match stored.state {
+        DEVICE_LINK_BOOTSTRAP_STATE_POISONED | DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED => {
+            return Ok(DeviceLinkBootstrapStageOutcome::Poisoned);
+        }
+        DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING | DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED => {}
+        state => return Err(ClientStoreError::InvalidDeviceLinkBootstrapState { state }),
+    }
+
+    let chunk_index = sqlite_device_link_chunk_index_from_u32(bootstrap.chunk_index)?;
+    let candidate_chunk_sha256 = device_link_bootstrap_chunk_sha256(&bootstrap.history);
+    let existing_chunk = tx
+        .query_row(
+            r#"
+            SELECT chunk_sha256, nonce, ciphertext
+            FROM client_device_link_bootstrap_chunks
+            WHERE account_id = ?1
+              AND device_id = ?2
+              AND room_id = ?3
+              AND bootstrap_id = ?4
+              AND source_account_id = ?5
+              AND source_device_id = ?6
+              AND chunk_index = ?7
+            "#,
+            params![
+                &owner.account_id,
+                &owner.device_id,
+                &receipt.room_id,
+                &receipt.bootstrap_id,
+                &receipt.source.account_id,
+                &receipt.source.device_id,
+                chunk_index,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let exact_duplicate = if let Some((stored_digest, nonce, ciphertext)) = existing_chunk {
+        let digest_matches = stored_digest.as_slice() == candidate_chunk_sha256;
+        let body_matches = match (nonce, ciphertext) {
+            (Some(nonce), Some(ciphertext)) => {
+                decrypt_device_link_bootstrap_chunk(
+                    encryption_key,
+                    identity,
+                    &receipt.manifest_sha256,
+                    bootstrap.chunk_index,
+                    &nonce,
+                    &ciphertext,
+                )? == bootstrap.history
+            }
+            (None, None) => digest_matches,
+            _ => false,
+        };
+        if !digest_matches || !body_matches {
+            poison_device_link_bootstrap_identity_tx(tx, identity)?;
+            return Ok(DeviceLinkBootstrapStageOutcome::Poisoned);
+        }
+        true
+    } else {
+        if stored.state == DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED {
+            poison_device_link_bootstrap_identity_tx(tx, identity)?;
+            return Ok(DeviceLinkBootstrapStageOutcome::Poisoned);
+        }
+        let sealed = encrypt_device_link_bootstrap_chunk(
+            encryption_key,
+            identity,
+            &receipt.manifest_sha256,
+            bootstrap.chunk_index,
+            &bootstrap.history,
+        )?;
+        tx.execute(
+            r#"
+            INSERT INTO client_device_link_bootstrap_chunks (
+              account_id,
+              device_id,
+              room_id,
+              bootstrap_id,
+              source_account_id,
+              source_device_id,
+              chunk_index,
+              chunk_sha256,
+              nonce,
+              ciphertext
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                &owner.account_id,
+                &owner.device_id,
+                &receipt.room_id,
+                &receipt.bootstrap_id,
+                &receipt.source.account_id,
+                &receipt.source.device_id,
+                chunk_index,
+                candidate_chunk_sha256.as_slice(),
+                &sealed.nonce,
+                &sealed.ciphertext,
+            ],
+        )?;
+        false
+    };
+
+    if stored.state == DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED {
+        return Ok(DeviceLinkBootstrapStageOutcome::AlreadyCommitted(receipt));
+    }
+    tx.execute(
+        r#"
+        UPDATE client_device_link_bootstrap_transfers
+        SET earliest_envelope_seq = MIN(earliest_envelope_seq, ?7)
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND room_id = ?3
+          AND bootstrap_id = ?4
+          AND source_account_id = ?5
+          AND source_device_id = ?6
+        "#,
+        params![
+            &owner.account_id,
+            &owner.device_id,
+            &receipt.room_id,
+            &receipt.bootstrap_id,
+            &receipt.source.account_id,
+            &receipt.source.device_id,
+            envelope_seq,
+        ],
+    )?;
+    let received_chunks = tx.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM client_device_link_bootstrap_chunks
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND room_id = ?3
+          AND bootstrap_id = ?4
+          AND source_account_id = ?5
+          AND source_device_id = ?6
+        "#,
+        params![
+            &owner.account_id,
+            &owner.device_id,
+            &receipt.room_id,
+            &receipt.bootstrap_id,
+            &receipt.source.account_id,
+            &receipt.source.device_id,
+        ],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let received_chunks = u32::try_from(received_chunks)
+        .map_err(|_| ClientStoreError::DeviceLinkBootstrapChunkCountOverflow)?;
+    if received_chunks == receipt.chunk_count {
+        let ready = load_pending_device_link_bootstrap(tx, encryption_key, owner, &receipt)?
+            .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch)?;
+        return Ok(DeviceLinkBootstrapStageOutcome::Ready(ready));
+    }
+    if received_chunks > receipt.chunk_count {
+        poison_device_link_bootstrap_identity_tx(tx, identity)?;
+        return Ok(DeviceLinkBootstrapStageOutcome::Poisoned);
+    }
+    if exact_duplicate {
+        Ok(DeviceLinkBootstrapStageOutcome::ExactDuplicate {
+            received_chunks,
+            expected_chunks: receipt.chunk_count,
+        })
+    } else {
+        Ok(DeviceLinkBootstrapStageOutcome::Pending {
+            received_chunks,
+            expected_chunks: receipt.chunk_count,
+        })
+    }
+}
+
+fn load_pending_device_link_bootstrap(
+    conn: &Connection,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    receipt: &StoredDeviceLinkBootstrapReceipt,
+) -> Result<Option<StoredPendingDeviceLinkBootstrap>, ClientStoreError> {
+    let identity = device_link_bootstrap_identity_from_receipt(owner, receipt);
+    let Some(row) = load_device_link_bootstrap_transfer_row(conn, encryption_key, identity)? else {
+        return Ok(None);
+    };
+    if row.state != DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING {
+        return Ok(None);
+    }
+    if row.manifest.receipt()? != *receipt {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+    }
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT chunk_index, chunk_sha256, nonce, ciphertext
+        FROM client_device_link_bootstrap_chunks
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND room_id = ?3
+          AND bootstrap_id = ?4
+          AND source_account_id = ?5
+          AND source_device_id = ?6
+        ORDER BY chunk_index ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            &owner.account_id,
+            &owner.device_id,
+            &receipt.room_id,
+            &receipt.bootstrap_id,
+            &receipt.source.account_id,
+            &receipt.source.device_id,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
+            ))
+        },
+    )?;
+    let mut chunks = BTreeMap::new();
+    for row in rows {
+        let (chunk_index, stored_digest, nonce, ciphertext) = row?;
+        let chunk_index = sqlite_device_link_chunk_index_to_u32(chunk_index)?;
+        let (Some(nonce), Some(ciphertext)) = (nonce, ciphertext) else {
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        };
+        let history = decrypt_device_link_bootstrap_chunk(
+            encryption_key,
+            identity,
+            &receipt.manifest_sha256,
+            chunk_index,
+            &nonce,
+            &ciphertext,
+        )?;
+        if stored_digest.as_slice() != device_link_bootstrap_chunk_sha256(&history) {
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        }
+        if chunks.insert(chunk_index, history).is_some() {
+            return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+        }
+    }
+    Ok(Some(StoredPendingDeviceLinkBootstrap {
+        receipt: receipt.clone(),
+        room: row.manifest.room,
+        canonical_selection: row.manifest.canonical_selection,
+        profiles: row.manifest.profiles,
+        earliest_envelope_seq: row.earliest_envelope_seq,
+        chunks,
+    }))
+}
+
+fn load_pending_device_link_bootstraps(
+    conn: &Connection,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+) -> Result<Vec<StoredPendingDeviceLinkBootstrap>, ClientStoreError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT room_id, bootstrap_id, source_account_id, source_device_id
+        FROM client_device_link_bootstrap_transfers
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND state = ?3
+        ORDER BY room_id, bootstrap_id, source_account_id, source_device_id
+        "#,
+    )?;
+    let keys = stmt
+        .query_map(
+            params![
+                &owner.account_id,
+                &owner.device_id,
+                DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    DeviceRef {
+                        account_id: row.get::<_, String>(2)?,
+                        device_id: row.get::<_, String>(3)?,
+                    },
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut pending = Vec::with_capacity(keys.len());
+    for (room_id, bootstrap_id, source) in keys {
+        let identity = DeviceLinkBootstrapIdentity {
+            owner,
+            room_id: &room_id,
+            bootstrap_id: &bootstrap_id,
+            source: &source,
+        };
+        let row = load_device_link_bootstrap_transfer_row(conn, encryption_key, identity)?
+            .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch)?;
+        let receipt = row.manifest.receipt()?;
+        pending.push(
+            load_pending_device_link_bootstrap(conn, encryption_key, owner, &receipt)?
+                .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch)?,
+        );
+    }
+    Ok(pending)
+}
+
+fn validated_device_link_bootstrap_events(
+    pending: &StoredPendingDeviceLinkBootstrap,
+) -> Option<Vec<StoredAppEvent>> {
+    if !pending.is_complete() {
+        return None;
+    }
+    let mut transfer_digest = Sha256::new();
+    let mut seen_message_ids = BTreeSet::new();
+    let mut previous_identity = None::<(u64, String)>;
+    let mut imported = Vec::new();
+    for chunk_index in 0..pending.receipt.chunk_count {
+        let chunk = pending.chunks.get(&chunk_index)?;
+        transfer_digest.update(device_link_bootstrap_chunk_sha256(chunk));
+        for history in chunk {
+            history.validate_limits().ok()?;
+            let identity = (history.seq, history.message_id.clone());
+            if history.seq >= pending.earliest_envelope_seq
+                || !seen_message_ids.insert(history.message_id.clone())
+                || previous_identity
+                    .as_ref()
+                    .is_some_and(|previous| previous >= &identity)
+            {
+                return None;
+            }
+            previous_identity = Some(identity);
+            let event =
+                serde_json::from_slice::<DecryptedApplicationEventV1>(&history.plaintext).ok()?;
+            event.validate_limits().ok()?;
+            if matches!(
+                event.kind,
+                DurableAppEventKind::Namespaced { ref name, .. }
+                    if name == FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2
+                        || name == LEGACY_DEVICE_LINK_BOOTSTRAP_REQUEST_EVENT_V2
+            ) {
+                return None;
+            }
+            let stored = StoredAppEvent {
+                room_id: pending.receipt.room_id.clone(),
+                seq: history.seq,
+                message_id: history.message_id.clone(),
+                sender: history.sender.clone(),
+                plaintext: history.plaintext.clone(),
+                timestamp_unix_seconds: history.timestamp_unix_seconds,
+            };
+            stored.validate_limits().ok()?;
+            imported.push(stored);
+        }
+    }
+    if imported.len() as u64 != pending.receipt.total_history_events
+        || hex_lower(&transfer_digest.finalize()) != pending.receipt.history_sha256
+    {
+        return None;
+    }
+    Some(imported)
+}
+
+fn commit_device_link_bootstrap_tx(
+    tx: &Transaction<'_>,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    expected: &StoredDeviceLinkBootstrapReceipt,
+    room: &StoredAppRoom,
+    profiles: &[StoredAppProfile],
+) -> Result<DeviceLinkBootstrapCommitOutcome, ClientStoreError> {
+    let identity = device_link_bootstrap_identity_from_receipt(owner, expected);
+    let Some(row) = load_device_link_bootstrap_transfer_row(tx, encryption_key, identity)? else {
+        return Ok(DeviceLinkBootstrapCommitOutcome::Incomplete);
+    };
+    let stored_receipt = row.manifest.receipt()?;
+    if stored_receipt != *expected || row.manifest_sha256 != expected.manifest_sha256 {
+        poison_device_link_bootstrap_identity_tx(tx, identity)?;
+        return Ok(DeviceLinkBootstrapCommitOutcome::Poisoned);
+    }
+    match row.state {
+        DEVICE_LINK_BOOTSTRAP_STATE_POISONED | DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED => {
+            return Ok(DeviceLinkBootstrapCommitOutcome::Poisoned);
+        }
+        DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED => {
+            return Ok(DeviceLinkBootstrapCommitOutcome::AlreadyCommitted(
+                stored_receipt,
+            ));
+        }
+        DEVICE_LINK_BOOTSTRAP_STATE_RECEIVING => {}
+        state => return Err(ClientStoreError::InvalidDeviceLinkBootstrapState { state }),
+    }
+    if expected.target != *owner
+        || expected.source.account_id != owner.account_id
+        || room.display_name != row.manifest.room.display_name
+        || room.picture != row.manifest.room.picture
+    {
+        poison_device_link_bootstrap_identity_tx(tx, identity)?;
+        return Ok(DeviceLinkBootstrapCommitOutcome::Poisoned);
+    }
+    let pending = load_pending_device_link_bootstrap(tx, encryption_key, owner, expected)?
+        .ok_or(ClientStoreError::DeviceLinkBootstrapReceiptMismatch)?;
+    if !pending.is_complete() {
+        return Ok(DeviceLinkBootstrapCommitOutcome::Incomplete);
+    }
+    let Some(imported) = validated_device_link_bootstrap_events(&pending) else {
+        poison_device_link_bootstrap_identity_tx(tx, identity)?;
+        return Ok(DeviceLinkBootstrapCommitOutcome::Poisoned);
+    };
+    if let Err(error) = validate_app_event_import_tx(tx, encryption_key, owner, &imported) {
+        if matches!(error, ClientStoreError::StoredAppEventConflict { .. }) {
+            poison_device_link_bootstrap_identity_tx(tx, identity)?;
+            return Ok(DeviceLinkBootstrapCommitOutcome::Poisoned);
+        }
+        return Err(error);
+    }
+
+    save_app_events_tx(tx, encryption_key, owner, &imported)?;
+    save_app_rooms_tx(tx, encryption_key, owner, std::slice::from_ref(room))?;
+    save_app_profiles_tx(tx, encryption_key, owner, profiles)?;
+    tx.execute(
+        r#"
+        DELETE FROM client_device_link_bootstrap_transfers
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND room_id = ?3
+          AND NOT (
+            bootstrap_id = ?4
+            AND source_account_id = ?5
+            AND source_device_id = ?6
+          )
+        "#,
+        params![
+            &owner.account_id,
+            &owner.device_id,
+            &expected.room_id,
+            &expected.bootstrap_id,
+            &expected.source.account_id,
+            &expected.source.device_id,
+        ],
+    )?;
+    tx.execute(
+        r#"
+        UPDATE client_device_link_bootstrap_transfers
+        SET state = ?7
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND room_id = ?3
+          AND bootstrap_id = ?4
+          AND source_account_id = ?5
+          AND source_device_id = ?6
+        "#,
+        params![
+            &owner.account_id,
+            &owner.device_id,
+            &expected.room_id,
+            &expected.bootstrap_id,
+            &expected.source.account_id,
+            &expected.source.device_id,
+            DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED,
+        ],
+    )?;
+    // Keep only the canonical per-chunk digests after publication. They are
+    // enough to distinguish an exact replay from a conflicting duplicate
+    // without retaining a second full copy of the imported room history.
+    tx.execute(
+        r#"
+        UPDATE client_device_link_bootstrap_chunks
+        SET nonce = NULL, ciphertext = NULL
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND room_id = ?3
+          AND bootstrap_id = ?4
+          AND source_account_id = ?5
+          AND source_device_id = ?6
+        "#,
+        params![
+            &owner.account_id,
+            &owner.device_id,
+            &expected.room_id,
+            &expected.bootstrap_id,
+            &expected.source.account_id,
+            &expected.source.device_id,
+        ],
+    )?;
+    Ok(DeviceLinkBootstrapCommitOutcome::Committed(stored_receipt))
+}
+
+fn load_completed_device_link_bootstrap_receipts(
+    conn: &Connection,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+) -> Result<Vec<StoredDeviceLinkBootstrapReceipt>, ClientStoreError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT room_id, bootstrap_id, source_account_id, source_device_id
+        FROM client_device_link_bootstrap_transfers
+        WHERE account_id = ?1
+          AND device_id = ?2
+          AND state IN (?3, ?4)
+        ORDER BY room_id, bootstrap_id, source_account_id, source_device_id
+        "#,
+    )?;
+    let keys = stmt
+        .query_map(
+            params![
+                &owner.account_id,
+                &owner.device_id,
+                DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED,
+                DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    DeviceRef {
+                        account_id: row.get::<_, String>(2)?,
+                        device_id: row.get::<_, String>(3)?,
+                    },
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut receipts = Vec::with_capacity(keys.len());
+    for (room_id, bootstrap_id, source) in keys {
+        if let Some(receipt) = load_completed_device_link_bootstrap_receipt(
+            conn,
+            encryption_key,
+            owner,
+            &room_id,
+            &bootstrap_id,
+            &source,
+        )? {
+            receipts.push(receipt);
+        }
+    }
+    receipts.sort();
+    Ok(receipts)
+}
+
+fn load_completed_device_link_bootstrap_receipt(
+    conn: &Connection,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    room_id: &str,
+    bootstrap_id: &str,
+    source: &DeviceRef,
+) -> Result<Option<StoredDeviceLinkBootstrapReceipt>, ClientStoreError> {
+    let identity = DeviceLinkBootstrapIdentity {
+        owner,
+        room_id,
+        bootstrap_id,
+        source,
+    };
+    let Some(row) = load_device_link_bootstrap_transfer_row(conn, encryption_key, identity)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        row.state,
+        DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED | DEVICE_LINK_BOOTSTRAP_STATE_COMMITTED_POISONED
+    ) {
+        return Ok(None);
+    }
+    Ok(Some(row.manifest.receipt()?))
+}
+
 fn save_app_messages_tx(
     tx: &Transaction<'_>,
     encryption_key: &ClientStoreEncryptionKey,
@@ -6559,6 +8379,113 @@ fn save_app_events_tx(
             &sealed.nonce,
             &sealed.ciphertext,
         ])?;
+    }
+    Ok(())
+}
+
+fn import_app_events_tx(
+    tx: &Transaction<'_>,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    events: &[StoredAppEvent],
+) -> Result<(), ClientStoreError> {
+    validate_app_event_import_tx(tx, encryption_key, owner, events)?;
+    save_app_events_tx(tx, encryption_key, owner, events)
+}
+
+fn validate_app_event_import_tx(
+    tx: &Transaction<'_>,
+    encryption_key: &ClientStoreEncryptionKey,
+    owner: &DeviceRef,
+    events: &[StoredAppEvent],
+) -> Result<(), ClientStoreError> {
+    validate_app_message_owner(owner)?;
+    let mut seen = BTreeSet::new();
+    for event in events {
+        event.validate_limits()?;
+        if !seen.insert((event.room_id.clone(), event.message_id.clone())) {
+            return Err(ClientStoreError::StoredAppEventConflict {
+                room_id: event.room_id.clone(),
+                message_id: event.message_id.clone(),
+            });
+        }
+        let existing = tx
+            .query_row(
+                r#"
+                SELECT
+                  seq,
+                  sender_account_id,
+                  sender_device_id,
+                  timestamp_unix_seconds,
+                  nonce,
+                  ciphertext
+                FROM client_app_events
+                WHERE account_id = ?1
+                  AND device_id = ?2
+                  AND room_id = ?3
+                  AND message_id = ?4
+                "#,
+                params![
+                    &owner.account_id,
+                    &owner.device_id,
+                    &event.room_id,
+                    &event.message_id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            stored_seq,
+            sender_account_id,
+            sender_device_id,
+            stored_timestamp,
+            nonce,
+            ciphertext,
+        )) = existing
+        else {
+            continue;
+        };
+        let seq = sqlite_app_event_seq_to_u64(stored_seq)?;
+        let timestamp_unix_seconds = sqlite_timestamp_to_u64(stored_timestamp)?;
+        let sender = DeviceRef {
+            account_id: sender_account_id,
+            device_id: sender_device_id,
+        };
+        let plaintext = decrypt_app_event_plaintext(
+            encryption_key,
+            AppMessageIdentity {
+                owner,
+                room_id: &event.room_id,
+                seq,
+                message_id: &event.message_id,
+                sender: &sender,
+            },
+            &nonce,
+            &ciphertext,
+        )?;
+        let canonical = StoredAppEvent {
+            room_id: event.room_id.clone(),
+            seq,
+            message_id: event.message_id.clone(),
+            sender,
+            plaintext,
+            timestamp_unix_seconds,
+        };
+        if canonical != *event {
+            return Err(ClientStoreError::StoredAppEventConflict {
+                room_id: event.room_id.clone(),
+                message_id: event.message_id.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -6927,6 +8854,12 @@ struct SealedAppProfile {
     ciphertext: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SealedDeviceLinkBootstrap {
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+}
+
 #[derive(Clone, Copy)]
 struct AppMessageIdentity<'a> {
     owner: &'a DeviceRef,
@@ -6966,7 +8899,11 @@ fn encrypt_device_state(
 ) -> Result<SealedClientState, ClientStoreError> {
     state.validate_limits()?;
     let plaintext = encode_device_state(state)?;
-    let aad = client_store_aad(&state.device_ref.account_id, &state.device_ref.device_id)?;
+    let aad = client_store_aad(
+        CLIENT_STATE_SNAPSHOT_VERSION,
+        &state.device_ref.account_id,
+        &state.device_ref.device_id,
+    )?;
     let provider = OpenMlsRustCrypto::default();
     let nonce: [u8; CLIENT_STORE_NONCE_BYTES] = provider
         .rand()
@@ -7199,6 +9136,7 @@ fn encrypt_app_state_metadata(
         selected_room_id: state.selected_room_id.clone(),
         selected_topic_id: state.selected_topic_id.clone(),
         selected_chat_id: state.selected_chat_id.clone(),
+        paired_agent: state.paired_agent.clone(),
         revoked_devices: state.revoked_devices.clone(),
         chat_archives: state.chat_archives.clone(),
     };
@@ -7288,6 +9226,100 @@ fn encrypt_app_profile_metadata(
     })
 }
 
+fn encrypt_device_link_bootstrap_manifest(
+    encryption_key: &ClientStoreEncryptionKey,
+    identity: DeviceLinkBootstrapIdentity<'_>,
+    manifest_sha256: &str,
+    manifest: &StoredDeviceLinkBootstrapManifestV2,
+) -> Result<SealedDeviceLinkBootstrap, ClientStoreError> {
+    let plaintext = manifest.canonical_bytes()?;
+    validate_bytes_len(
+        "device_link_bootstrap.manifest",
+        plaintext.len(),
+        MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_PLAINTEXT_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    let aad = device_link_bootstrap_aad(
+        CLIENT_DEVICE_LINK_BOOTSTRAP_MANIFEST_AAD_DOMAIN,
+        identity,
+        manifest_sha256,
+        None,
+    )?;
+    let provider = OpenMlsRustCrypto::default();
+    let nonce: [u8; CLIENT_STORE_NONCE_BYTES] = provider
+        .rand()
+        .random_array()
+        .map_err(|_| ClientStoreError::Randomness)?;
+    let ciphertext = provider
+        .crypto()
+        .aead_encrypt(
+            AeadType::Aes256Gcm,
+            encryption_key.as_bytes(),
+            &plaintext,
+            &nonce,
+            &aad,
+        )
+        .map_err(|_| ClientStoreError::EncryptDeviceLinkBootstrapManifest)?;
+    validate_bytes_len(
+        "device_link_bootstrap.manifest_ciphertext",
+        ciphertext.len(),
+        MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_CIPHERTEXT_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    Ok(SealedDeviceLinkBootstrap {
+        nonce: nonce.to_vec(),
+        ciphertext,
+    })
+}
+
+fn encrypt_device_link_bootstrap_chunk(
+    encryption_key: &ClientStoreEncryptionKey,
+    identity: DeviceLinkBootstrapIdentity<'_>,
+    manifest_sha256: &str,
+    chunk_index: u32,
+    history: &[DeviceLinkBootstrapEventV2],
+) -> Result<SealedDeviceLinkBootstrap, ClientStoreError> {
+    let plaintext = serde_json::to_vec(history)
+        .map_err(|_| ClientStoreError::EncodeDeviceLinkBootstrapChunk)?;
+    validate_bytes_len(
+        "device_link_bootstrap.chunk",
+        plaintext.len(),
+        MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_PLAINTEXT_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    let aad = device_link_bootstrap_aad(
+        CLIENT_DEVICE_LINK_BOOTSTRAP_CHUNK_AAD_DOMAIN,
+        identity,
+        manifest_sha256,
+        Some(chunk_index),
+    )?;
+    let provider = OpenMlsRustCrypto::default();
+    let nonce: [u8; CLIENT_STORE_NONCE_BYTES] = provider
+        .rand()
+        .random_array()
+        .map_err(|_| ClientStoreError::Randomness)?;
+    let ciphertext = provider
+        .crypto()
+        .aead_encrypt(
+            AeadType::Aes256Gcm,
+            encryption_key.as_bytes(),
+            &plaintext,
+            &nonce,
+            &aad,
+        )
+        .map_err(|_| ClientStoreError::EncryptDeviceLinkBootstrapChunk)?;
+    validate_bytes_len(
+        "device_link_bootstrap.chunk_ciphertext",
+        ciphertext.len(),
+        MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_CIPHERTEXT_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    Ok(SealedDeviceLinkBootstrap {
+        nonce: nonce.to_vec(),
+        ciphertext,
+    })
+}
+
 fn decrypt_device_state(
     encryption_key: &ClientStoreEncryptionKey,
     account_id: &str,
@@ -7308,18 +9340,25 @@ fn decrypt_device_state(
         MAX_CLIENT_STATE_CIPHERTEXT_BYTES,
     )
     .map_err(ClientError::from)?;
-    let aad = client_store_aad(account_id, device_id)?;
     let provider = OpenMlsRustCrypto::default();
-    let plaintext = provider
-        .crypto()
-        .aead_decrypt(
+    let mut plaintext = None;
+    for version in [
+        CLIENT_STATE_SNAPSHOT_VERSION,
+        LEGACY_CLIENT_STATE_SNAPSHOT_VERSION,
+    ] {
+        let aad = client_store_aad(version, account_id, device_id)?;
+        if let Ok(opened) = provider.crypto().aead_decrypt(
             AeadType::Aes256Gcm,
             encryption_key.as_bytes(),
             ciphertext,
             nonce,
             &aad,
-        )
-        .map_err(|_| ClientStoreError::DecryptState)?;
+        ) {
+            plaintext = Some(opened);
+            break;
+        }
+    }
+    let plaintext = plaintext.ok_or(ClientStoreError::DecryptState)?;
     decode_device_state(&plaintext)
 }
 
@@ -7637,7 +9676,123 @@ fn decrypt_app_profile_metadata(
     Ok(metadata)
 }
 
-fn client_store_aad(account_id: &str, device_id: &str) -> Result<Vec<u8>, ClientStoreError> {
+fn decrypt_device_link_bootstrap_manifest(
+    encryption_key: &ClientStoreEncryptionKey,
+    identity: DeviceLinkBootstrapIdentity<'_>,
+    manifest_sha256: &str,
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<StoredDeviceLinkBootstrapManifestV2, ClientStoreError> {
+    if nonce.len() != CLIENT_STORE_NONCE_BYTES {
+        return Err(
+            ClientStoreError::InvalidDeviceLinkBootstrapManifestNonceLength {
+                actual_bytes: nonce.len(),
+            },
+        );
+    }
+    validate_bytes_non_empty(
+        "device_link_bootstrap.manifest_ciphertext",
+        ciphertext.len(),
+    )
+    .map_err(ClientError::from)?;
+    validate_bytes_len(
+        "device_link_bootstrap.manifest_ciphertext",
+        ciphertext.len(),
+        MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_CIPHERTEXT_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    let aad = device_link_bootstrap_aad(
+        CLIENT_DEVICE_LINK_BOOTSTRAP_MANIFEST_AAD_DOMAIN,
+        identity,
+        manifest_sha256,
+        None,
+    )?;
+    let provider = OpenMlsRustCrypto::default();
+    let plaintext = provider
+        .crypto()
+        .aead_decrypt(
+            AeadType::Aes256Gcm,
+            encryption_key.as_bytes(),
+            ciphertext,
+            nonce,
+            &aad,
+        )
+        .map_err(|_| ClientStoreError::DecryptDeviceLinkBootstrapManifest)?;
+    validate_bytes_len(
+        "device_link_bootstrap.manifest",
+        plaintext.len(),
+        MAX_DEVICE_LINK_BOOTSTRAP_MANIFEST_PLAINTEXT_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    serde_json::from_slice(&plaintext)
+        .map_err(|_| ClientStoreError::DecodeDeviceLinkBootstrapManifest)
+}
+
+fn decrypt_device_link_bootstrap_chunk(
+    encryption_key: &ClientStoreEncryptionKey,
+    identity: DeviceLinkBootstrapIdentity<'_>,
+    manifest_sha256: &str,
+    chunk_index: u32,
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<DeviceLinkBootstrapEventV2>, ClientStoreError> {
+    if nonce.len() != CLIENT_STORE_NONCE_BYTES {
+        return Err(
+            ClientStoreError::InvalidDeviceLinkBootstrapChunkNonceLength {
+                actual_bytes: nonce.len(),
+            },
+        );
+    }
+    validate_bytes_non_empty("device_link_bootstrap.chunk_ciphertext", ciphertext.len())
+        .map_err(ClientError::from)?;
+    validate_bytes_len(
+        "device_link_bootstrap.chunk_ciphertext",
+        ciphertext.len(),
+        MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_CIPHERTEXT_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    let aad = device_link_bootstrap_aad(
+        CLIENT_DEVICE_LINK_BOOTSTRAP_CHUNK_AAD_DOMAIN,
+        identity,
+        manifest_sha256,
+        Some(chunk_index),
+    )?;
+    let provider = OpenMlsRustCrypto::default();
+    let plaintext = provider
+        .crypto()
+        .aead_decrypt(
+            AeadType::Aes256Gcm,
+            encryption_key.as_bytes(),
+            ciphertext,
+            nonce,
+            &aad,
+        )
+        .map_err(|_| ClientStoreError::DecryptDeviceLinkBootstrapChunk)?;
+    validate_bytes_len(
+        "device_link_bootstrap.chunk",
+        plaintext.len(),
+        MAX_DEVICE_LINK_BOOTSTRAP_CHUNK_PLAINTEXT_BYTES,
+    )
+    .map_err(ClientError::from)?;
+    let history = serde_json::from_slice::<Vec<DeviceLinkBootstrapEventV2>>(&plaintext)
+        .map_err(|_| ClientStoreError::DecodeDeviceLinkBootstrapChunk)?;
+    validate_item_count(
+        "device_link_bootstrap.history",
+        history.len(),
+        finitechat_proto::MAX_DEVICE_LINK_BOOTSTRAP_EVENTS,
+    )
+    .map_err(ClientError::from)?;
+    for event in &history {
+        event.validate_limits().map_err(ClientError::from)?;
+    }
+    Ok(history)
+}
+
+fn client_store_aad(
+    version: u16,
+    account_id: &str,
+    device_id: &str,
+) -> Result<Vec<u8>, ClientStoreError> {
     validate_string_bytes("account_id", account_id, MAX_ACCOUNT_ID_BYTES)
         .map_err(ClientError::from)?;
     validate_string_bytes("device_id", device_id, MAX_DEVICE_ID_BYTES)
@@ -7651,7 +9806,7 @@ fn client_store_aad(account_id: &str, device_id: &str) -> Result<Vec<u8>, Client
             + device_id.len(),
     );
     aad.extend_from_slice(CLIENT_STATE_SNAPSHOT_MAGIC);
-    aad.extend_from_slice(&CLIENT_STATE_SNAPSHOT_VERSION.to_be_bytes());
+    aad.extend_from_slice(&version.to_be_bytes());
     append_raw_len_prefixed(&mut aad, account_id.as_bytes())?;
     append_raw_len_prefixed(&mut aad, device_id.as_bytes())?;
     debug_assert!(aad.len() >= CLIENT_STATE_SNAPSHOT_MAGIC.len() + U16_BYTES);
@@ -7792,6 +9947,52 @@ fn app_profile_aad(identity: AppProfileIdentity<'_>) -> Result<Vec<u8>, ClientSt
     append_raw_len_prefixed(&mut aad, identity.owner.account_id.as_bytes())?;
     append_raw_len_prefixed(&mut aad, identity.owner.device_id.as_bytes())?;
     append_raw_len_prefixed(&mut aad, identity.profile_account_id.as_bytes())?;
+    Ok(aad)
+}
+
+fn device_link_bootstrap_aad(
+    domain: &[u8],
+    identity: DeviceLinkBootstrapIdentity<'_>,
+    manifest_sha256: &str,
+    chunk_index: Option<u32>,
+) -> Result<Vec<u8>, ClientStoreError> {
+    validate_device_link_bootstrap_identity(identity)?;
+    if !is_lower_hex_sha256(manifest_sha256) {
+        return Err(ClientStoreError::DeviceLinkBootstrapReceiptMismatch);
+    }
+    let mut aad = Vec::with_capacity(
+        domain.len()
+            + U32_BYTES
+            + identity.owner.account_id.len()
+            + U32_BYTES
+            + identity.owner.device_id.len()
+            + U32_BYTES
+            + identity.room_id.len()
+            + U32_BYTES
+            + identity.bootstrap_id.len()
+            + U32_BYTES
+            + identity.source.account_id.len()
+            + U32_BYTES
+            + identity.source.device_id.len()
+            + U32_BYTES
+            + manifest_sha256.len()
+            + U32_BYTES,
+    );
+    aad.extend_from_slice(domain);
+    append_raw_len_prefixed(&mut aad, identity.owner.account_id.as_bytes())?;
+    append_raw_len_prefixed(&mut aad, identity.owner.device_id.as_bytes())?;
+    append_raw_len_prefixed(&mut aad, identity.room_id.as_bytes())?;
+    append_raw_len_prefixed(&mut aad, identity.bootstrap_id.as_bytes())?;
+    append_raw_len_prefixed(&mut aad, identity.source.account_id.as_bytes())?;
+    append_raw_len_prefixed(&mut aad, identity.source.device_id.as_bytes())?;
+    append_raw_len_prefixed(&mut aad, manifest_sha256.as_bytes())?;
+    match chunk_index {
+        Some(index) => {
+            aad.push(1);
+            aad.extend_from_slice(&index.to_be_bytes());
+        }
+        None => aad.push(0),
+    }
     Ok(aad)
 }
 
@@ -7967,7 +10168,7 @@ fn decode_device_state(bytes: &[u8]) -> Result<FiniteChatDeviceState, ClientStor
     let mut cursor = ClientStateCursor::new(bytes);
     cursor.take_magic()?;
     let version = cursor.take_u16()?;
-    if version != CLIENT_STATE_SNAPSHOT_VERSION {
+    if version != CLIENT_STATE_SNAPSHOT_VERSION && version != LEGACY_CLIENT_STATE_SNAPSHOT_VERSION {
         return Err(ClientStoreError::StateSnapshotVersion(version));
     }
     let account_id = cursor.take_string("account_id", MAX_ACCOUNT_ID_BYTES)?;
@@ -8047,7 +10248,7 @@ fn decode_device_state(bytes: &[u8]) -> Result<FiniteChatDeviceState, ClientStor
     let link_fanout_count = cursor.take_count("client_state.link_fanouts", MAX_LINK_FANOUTS)?;
     let mut link_fanouts = Vec::with_capacity(link_fanout_count);
     for _ in 0..link_fanout_count {
-        link_fanouts.push(cursor.take_link_fanout_state()?);
+        link_fanouts.push(cursor.take_link_fanout_state(version)?);
     }
 
     let storage_count = cursor.take_count(
@@ -8206,6 +10407,14 @@ fn append_link_fanout_state(
     for room in &fanout.rooms {
         append_link_fanout_room_state(out, room)?;
     }
+    let bootstrap_export = serde_json::to_vec(&fanout.bootstrap_export)
+        .map_err(|_| ClientError::InvalidClientState("device-link bootstrap export".to_owned()))?;
+    append_bytes_field(
+        out,
+        "link_fanout.bootstrap_export",
+        &bootstrap_export,
+        MAX_CLIENT_STATE_PLAINTEXT_BYTES,
+    )?;
     Ok(())
 }
 
@@ -8524,6 +10733,9 @@ fn encoded_link_fanout_state_len(fanout: &LinkFanoutState) -> Result<usize, Clie
     for room in &fanout.rooms {
         len = checked_len_add(len, encoded_link_fanout_room_state_len(room)?)?;
     }
+    let bootstrap_export = serde_json::to_vec(&fanout.bootstrap_export)
+        .map_err(|_| ClientError::InvalidClientState("device-link bootstrap export".to_owned()))?;
+    len = checked_len_add(len, U32_BYTES + bootstrap_export.len())?;
     Ok(len)
 }
 
@@ -8775,21 +10987,40 @@ impl<'a> ClientStateCursor<'a> {
         Ok(request)
     }
 
-    fn take_link_fanout_state(&mut self) -> Result<LinkFanoutState, ClientStoreError> {
+    fn take_link_fanout_state(
+        &mut self,
+        snapshot_version: u16,
+    ) -> Result<LinkFanoutState, ClientStoreError> {
+        let fanout_id = self.take_string("link_fanout.fanout_id", MAX_OBJECT_ID_BYTES)?;
+        let target_device = self.take_device_ref("link_fanout.target_device")?;
+        let after_room_id =
+            self.take_optional_string("link_fanout.after_room_id", MAX_ROOM_ID_BYTES)?;
+        let discovery_complete = self.take_bool()?;
+        let rooms = {
+            let count = self.take_count("link_fanout.rooms", MAX_LINK_FANOUT_ROOMS)?;
+            let mut rooms = Vec::with_capacity(count);
+            for _ in 0..count {
+                rooms.push(self.take_link_fanout_room_state()?);
+            }
+            rooms
+        };
+        let bootstrap_export = if snapshot_version >= CLIENT_STATE_SNAPSHOT_VERSION {
+            let encoded = self.take_vec(
+                "link_fanout.bootstrap_export",
+                MAX_CLIENT_STATE_PLAINTEXT_BYTES,
+            )?;
+            serde_json::from_slice(&encoded)
+                .map_err(|_| ClientStoreError::DecodeLinkBootstrapExport)?
+        } else {
+            LinkBootstrapExportState::WaitingForFanout
+        };
         let fanout = LinkFanoutState {
-            fanout_id: self.take_string("link_fanout.fanout_id", MAX_OBJECT_ID_BYTES)?,
-            target_device: self.take_device_ref("link_fanout.target_device")?,
-            after_room_id: self
-                .take_optional_string("link_fanout.after_room_id", MAX_ROOM_ID_BYTES)?,
-            discovery_complete: self.take_bool()?,
-            rooms: {
-                let count = self.take_count("link_fanout.rooms", MAX_LINK_FANOUT_ROOMS)?;
-                let mut rooms = Vec::with_capacity(count);
-                for _ in 0..count {
-                    rooms.push(self.take_link_fanout_room_state()?);
-                }
-                rooms
-            },
+            fanout_id,
+            target_device,
+            after_room_id,
+            discovery_complete,
+            rooms,
+            bootstrap_export,
         };
         fanout.validate_limits()?;
         Ok(fanout)
@@ -9041,6 +11272,72 @@ mod tests {
             key_hex,
             "cb0a531322f96b78a76cec704b201c2ccc4695855f78022a024e50e8349bb656"
         );
+    }
+
+    #[test]
+    fn current_reader_opens_actual_predecessor_v8_encrypted_snapshot() {
+        // This SQLite file was emitted by the unmodified V8 writer at
+        // 5276a77d63a1b5069d21f3c2f5289947728f2784. Keep it static: encoding a
+        // "legacy" value with today's writer would not prove staggered-version
+        // compatibility.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        std::fs::write(
+            &db_path,
+            include_bytes!("../tests/fixtures/client-state-v8-predecessor.sqlite3"),
+        )
+        .unwrap();
+        let secret = NostrSecretKey::from_bytes([42; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "v8-predecessor-device";
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let store = SqliteClientStore::open(&db_path, options).unwrap();
+        let restored = store
+            .load_device(FiniteChatDeviceConfig {
+                account_secret_key: secret,
+                device_id: device_id.to_owned(),
+                now_unix_seconds: NOW,
+                credential_not_before_unix_seconds: NOW.saturating_sub(60),
+                credential_not_after_unix_seconds: NOW.saturating_add(600),
+            })
+            .unwrap();
+        let fanout = restored.link_fanout("v8-predecessor-fanout").unwrap();
+        assert_eq!(fanout.target_device.device_id, "v8-target-device");
+        assert_eq!(
+            fanout.bootstrap_export,
+            LinkBootstrapExportState::WaitingForFanout,
+            "V8 had no bootstrap-export field; V9 must supply the safe restart default"
+        );
+    }
+
+    #[test]
+    fn current_reader_opens_actual_candidate_v9_encrypted_snapshot() {
+        // This SQLite file was emitted by the V9 candidate before the
+        // expand/contract branches were restacked. Keep it static so the
+        // release reader must remain compatible with state already produced
+        // during candidate testing.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        std::fs::write(
+            &db_path,
+            include_bytes!("../tests/fixtures/client-state-v9-candidate.sqlite3"),
+        )
+        .unwrap();
+        let secret = NostrSecretKey::from_bytes([43; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "v9-candidate-device";
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let store = SqliteClientStore::open(&db_path, options).unwrap();
+        let restored = store
+            .load_device(FiniteChatDeviceConfig {
+                account_secret_key: secret,
+                device_id: device_id.to_owned(),
+                now_unix_seconds: NOW,
+                credential_not_before_unix_seconds: NOW.saturating_sub(60),
+                credential_not_after_unix_seconds: NOW.saturating_add(600),
+            })
+            .unwrap();
+        let fanout = restored.link_fanout("v9-candidate-fanout").unwrap();
+        assert_eq!(fanout.target_device.device_id, "v9-target-device");
+        fanout.validate_limits().unwrap();
     }
 
     #[test]
@@ -9434,6 +11731,450 @@ mod tests {
         assert_eq!(
             reopened.load_app_events(&owner, 10).unwrap(),
             vec![second, third]
+        );
+    }
+
+    #[test]
+    fn production_combined_save_retains_events_beyond_transcript_cache_limit() {
+        const FORMER_TRANSCRIPT_CACHE_LIMIT: u32 = 5_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([16; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "retention-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let mut store =
+            SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
+        store.save_device_state(&device).unwrap();
+        let events = (0..FORMER_TRANSCRIPT_CACHE_LIMIT + 1)
+            .map(|index| {
+                app_event(
+                    &owner,
+                    u64::from(index) + 1,
+                    &format!("event-{index:05}"),
+                    "retained",
+                )
+            })
+            .collect::<Vec<_>>();
+        store
+            .save_device_state_and_app_messages_and_events(&device, &[], &events)
+            .unwrap();
+
+        let first_page = store
+            .load_app_events_for_room_page(
+                &owner,
+                "room-store",
+                u64::from(FORMER_TRANSCRIPT_CACHE_LIMIT) + 1,
+                0,
+                "",
+                FORMER_TRANSCRIPT_CACHE_LIMIT,
+            )
+            .unwrap();
+        assert_eq!(first_page.len(), FORMER_TRANSCRIPT_CACHE_LIMIT as usize);
+        let last = first_page.last().unwrap();
+        let second_page = store
+            .load_app_events_for_room_page(
+                &owner,
+                "room-store",
+                u64::from(FORMER_TRANSCRIPT_CACHE_LIMIT) + 1,
+                last.seq,
+                &last.message_id,
+                1,
+            )
+            .unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].message_id, "event-05000");
+    }
+
+    #[test]
+    fn production_combined_save_retains_messages_beyond_former_cache_limit() {
+        const MESSAGE_COUNT: u32 = 5_201;
+
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([18; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "complete-history-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let mut store =
+            SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
+        let messages = (0..MESSAGE_COUNT)
+            .map(|index| {
+                app_message(
+                    &owner,
+                    u64::from(index) + 1,
+                    &format!("message-{index:05}"),
+                    "retained",
+                )
+            })
+            .collect::<Vec<_>>();
+
+        store
+            .save_device_state_and_app_messages_and_events(&device, &messages, &[])
+            .unwrap();
+
+        let loaded = store
+            .load_app_messages(&owner, MAX_STORED_APP_MESSAGES)
+            .unwrap();
+        assert_eq!(loaded.len(), MESSAGE_COUNT as usize);
+        assert_eq!(loaded.first().unwrap().message_id, "message-00000");
+        assert_eq!(loaded.last().unwrap().message_id, "message-05200");
+    }
+
+    #[test]
+    fn atomic_event_import_replays_exact_duplicates_and_rolls_back_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([17; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "import-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let mut store =
+            SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
+        store.save_device_state(&device).unwrap();
+        let canonical = app_event(&owner, 1, "event-1", "canonical");
+        store
+            .import_app_events_atomically(&owner, std::slice::from_ref(&canonical))
+            .unwrap();
+        store
+            .import_app_events_atomically(&owner, std::slice::from_ref(&canonical))
+            .unwrap();
+        assert!(
+            store
+                .has_app_event_identity(
+                    &owner,
+                    &canonical.room_id,
+                    canonical.seq,
+                    &canonical.message_id,
+                    &canonical.sender,
+                    canonical.timestamp_unix_seconds,
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_app_event_identity(
+                    &owner,
+                    &canonical.room_id,
+                    canonical.seq + 1,
+                    &canonical.message_id,
+                    &canonical.sender,
+                    canonical.timestamp_unix_seconds,
+                )
+                .unwrap(),
+            "message ID alone must not certify mismatched canonical history"
+        );
+
+        let new_event = app_event(&owner, 2, "event-2", "new");
+        let conflicting = StoredAppEvent {
+            plaintext: b"conflicting".to_vec(),
+            ..canonical.clone()
+        };
+        assert!(matches!(
+            store.import_app_events_atomically(&owner, &[new_event.clone(), conflicting]),
+            Err(ClientStoreError::StoredAppEventConflict { .. })
+        ));
+        assert!(
+            !store
+                .has_app_event(&owner, "room-store", "event-2")
+                .unwrap()
+        );
+        assert_eq!(store.load_app_events(&owner, 10).unwrap(), vec![canonical]);
+    }
+
+    #[test]
+    fn device_link_bootstrap_staging_survives_cursor_advance_and_publishes_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([19; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "linked-phone";
+        let config = FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        };
+        let mut device = FiniteChatDevice::new(config).unwrap();
+        device
+            .create_group_state("room-bootstrap", "mls-room-bootstrap")
+            .unwrap();
+        device.set_last_applied_seq("room-bootstrap", 50).unwrap();
+        let owner = device.device_ref().clone();
+        let source = DeviceRef {
+            account_id: owner.account_id.clone(),
+            device_id: "source-phone".to_owned(),
+        };
+        let chunks = test_device_link_bootstrap_chunks(&owner, &source);
+        let chunk_receipt =
+            StoredDeviceLinkBootstrapReceipt::from_bootstrap(&source, &chunks[0]).unwrap();
+        let mut manifest_only = chunks[0].clone();
+        manifest_only.history.clear();
+        assert_eq!(
+            StoredDeviceLinkBootstrapReceipt::from_bootstrap(&source, &manifest_only).unwrap(),
+            chunk_receipt,
+            "source planning and target chunks must derive the same exact manifest receipt"
+        );
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        let mut store = SqliteClientStore::open(&db_path, options.clone()).unwrap();
+        let first_control = test_device_link_bootstrap_control_event(&source, 50, &chunks[0]);
+
+        // This is the production crash boundary: cursor/device state, control
+        // event, and encrypted staging all enter one SQLite transaction.
+        store
+            .save_device_state_and_app_messages_and_events(
+                &device,
+                &[],
+                std::slice::from_ref(&first_control),
+            )
+            .unwrap();
+        assert!(store.load_app_rooms(&owner).unwrap().is_empty());
+        assert!(
+            !store
+                .has_app_event(&owner, "room-bootstrap", "history-1")
+                .unwrap()
+        );
+        assert!(matches!(
+            store
+                .stage_device_link_bootstrap_chunk(&owner, &source, 50, &chunks[0])
+                .unwrap(),
+            DeviceLinkBootstrapStageOutcome::ExactDuplicate {
+                received_chunks: 1,
+                expected_chunks: 2
+            }
+        ));
+        assert!(
+            !sqlite_table_has_column(
+                &store.conn,
+                "client_device_link_bootstrap_chunks",
+                "plaintext"
+            )
+            .unwrap()
+        );
+        drop(store);
+
+        let mut reopened = SqliteClientStore::open(&db_path, options).unwrap();
+        let restored = reopened
+            .load_device(FiniteChatDeviceConfig {
+                account_secret_key: secret,
+                device_id: device_id.to_owned(),
+                now_unix_seconds: NOW,
+                credential_not_before_unix_seconds: NOW.saturating_sub(60),
+                credential_not_after_unix_seconds: NOW.saturating_add(60),
+            })
+            .unwrap();
+        assert_eq!(restored.last_applied_seq("room-bootstrap").unwrap(), 50);
+        let pending = reopened
+            .load_pending_device_link_bootstraps(&owner)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].is_complete());
+
+        let ready = match reopened
+            .stage_device_link_bootstrap_chunk(&owner, &source, 51, &chunks[1])
+            .unwrap()
+        {
+            DeviceLinkBootstrapStageOutcome::Ready(ready) => ready,
+            outcome => panic!("second chunk should complete staging, got {outcome:?}"),
+        };
+        let receipt = ready.receipt.clone();
+        assert!(ready.is_complete());
+        assert!(reopened.load_app_rooms(&owner).unwrap().is_empty());
+        assert!(
+            !reopened
+                .has_app_event(&owner, "room-bootstrap", "history-1")
+                .unwrap()
+        );
+
+        let outcome = reopened
+            .commit_device_link_bootstrap_atomically(
+                &owner,
+                &receipt,
+                &app_room("room-bootstrap", "Bootstrap Room"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            DeviceLinkBootstrapCommitOutcome::Committed(receipt.clone())
+        );
+        assert_eq!(
+            reopened.load_app_rooms(&owner).unwrap(),
+            vec![app_room("room-bootstrap", "Bootstrap Room")]
+        );
+        assert!(
+            reopened
+                .has_app_event(&owner, "room-bootstrap", "history-1")
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .has_app_event(&owner, "room-bootstrap", "history-2")
+                .unwrap()
+        );
+        assert_eq!(
+            reopened
+                .load_completed_device_link_bootstrap_receipts(&owner)
+                .unwrap(),
+            vec![receipt.clone()]
+        );
+        assert_eq!(
+            reopened
+                .load_completed_device_link_bootstrap_receipt(
+                    &owner,
+                    "room-bootstrap",
+                    "bootstrap-test",
+                    &source,
+                )
+                .unwrap(),
+            Some(receipt.clone())
+        );
+        assert!(matches!(
+            reopened
+                .stage_device_link_bootstrap_chunk(&owner, &source, 52, &chunks[1])
+                .unwrap(),
+            DeviceLinkBootstrapStageOutcome::AlreadyCommitted(found) if found == receipt
+        ));
+    }
+
+    #[test]
+    fn conflicting_device_link_bootstrap_duplicate_poison_is_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([20; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "linked-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let source = DeviceRef {
+            account_id: owner.account_id.clone(),
+            device_id: "source-phone".to_owned(),
+        };
+        let chunks = test_device_link_bootstrap_chunks(&owner, &source);
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        let mut store = SqliteClientStore::open(&db_path, options.clone()).unwrap();
+        store.save_device_state(&device).unwrap();
+        assert!(matches!(
+            store
+                .stage_device_link_bootstrap_chunk(&owner, &source, 50, &chunks[0])
+                .unwrap(),
+            DeviceLinkBootstrapStageOutcome::Pending { .. }
+        ));
+
+        let mut conflicting = chunks[0].clone();
+        conflicting.history[0].plaintext.push(b'!');
+        assert!(matches!(
+            store
+                .stage_device_link_bootstrap_chunk(&owner, &source, 50, &conflicting)
+                .unwrap(),
+            DeviceLinkBootstrapStageOutcome::Poisoned
+        ));
+        drop(store);
+
+        let mut reopened = SqliteClientStore::open(&db_path, options).unwrap();
+        assert!(matches!(
+            reopened
+                .stage_device_link_bootstrap_chunk(&owner, &source, 50, &chunks[0])
+                .unwrap(),
+            DeviceLinkBootstrapStageOutcome::Poisoned
+        ));
+        assert!(
+            reopened
+                .load_pending_device_link_bootstraps(&owner)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .load_completed_device_link_bootstrap_receipts(&owner)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn invalid_device_link_bootstrap_digest_never_publishes_partial_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([21; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "linked-phone";
+        let device = FiniteChatDevice::new(FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        })
+        .unwrap();
+        let owner = device.device_ref().clone();
+        let source = DeviceRef {
+            account_id: owner.account_id.clone(),
+            device_id: "source-phone".to_owned(),
+        };
+        let mut chunk = test_device_link_bootstrap_chunks(&owner, &source)[0].clone();
+        chunk.chunk_count = 1;
+        chunk.total_history_events = 1;
+        chunk.history_sha256 = "0".repeat(64);
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let mut store =
+            SqliteClientStore::open(dir.path().join("client.sqlite3"), options).unwrap();
+        store.save_device_state(&device).unwrap();
+        let ready = match store
+            .stage_device_link_bootstrap_chunk(&owner, &source, 50, &chunk)
+            .unwrap()
+        {
+            DeviceLinkBootstrapStageOutcome::Ready(ready) => ready,
+            outcome => panic!("one chunk should be structurally ready, got {outcome:?}"),
+        };
+        assert_eq!(
+            store
+                .commit_device_link_bootstrap_atomically(
+                    &owner,
+                    &ready.receipt,
+                    &app_room("room-bootstrap", "Bootstrap Room"),
+                    &[],
+                )
+                .unwrap(),
+            DeviceLinkBootstrapCommitOutcome::Poisoned
+        );
+        assert!(store.load_app_rooms(&owner).unwrap().is_empty());
+        assert!(
+            !store
+                .has_app_event(&owner, "room-bootstrap", "history-1")
+                .unwrap()
+        );
+        assert!(
+            store
+                .load_completed_device_link_bootstrap_receipts(&owner)
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -9999,6 +12740,10 @@ mod tests {
             selected_room_id: Some("room-main".to_owned()),
             selected_topic_id: Some("home".to_owned()),
             selected_chat_id: Some("segment-main".to_owned()),
+            paired_agent: Some(StoredPairedAgent {
+                agent_account_id: "agent-account".to_owned(),
+                canonical_room_id: "room-agent".to_owned(),
+            }),
             revoked_devices: [DeviceRef {
                 account_id: owner.account_id.clone(),
                 device_id: "tablet".to_owned(),
@@ -10024,6 +12769,7 @@ mod tests {
             selected_room_id: None,
             selected_topic_id: None,
             selected_chat_id: None,
+            paired_agent: None,
             revoked_devices: BTreeSet::new(),
             chat_archives: Vec::new(),
         };
@@ -10055,6 +12801,10 @@ mod tests {
                 selected_room_id: Some("room-main".to_owned()),
                 selected_topic_id: Some("home".to_owned()),
                 selected_chat_id: Some("segment-main".to_owned()),
+                paired_agent: Some(StoredPairedAgent {
+                    agent_account_id: "agent-account".to_owned(),
+                    canonical_room_id: "room-agent".to_owned(),
+                }),
                 revoked_devices: [DeviceRef {
                     account_id: owner.account_id.clone(),
                     device_id: "tablet".to_owned(),
@@ -10103,6 +12853,71 @@ mod tests {
                 "{case} should fail closed, got {error}"
             );
         }
+    }
+
+    #[test]
+    fn sqlite_client_store_loads_metadata_written_before_paired_agent_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = NostrSecretKey::from_bytes([17; NOSTR_SECRET_KEY_BYTES]).unwrap();
+        let device_id = "hosted-web";
+        let config = FiniteChatDeviceConfig {
+            account_secret_key: secret.clone(),
+            device_id: device_id.to_owned(),
+            now_unix_seconds: NOW,
+            credential_not_before_unix_seconds: NOW.saturating_sub(60),
+            credential_not_after_unix_seconds: NOW.saturating_add(60),
+        };
+        let device = FiniteChatDevice::new(config).unwrap();
+        let owner = device.device_ref().clone();
+        let options = SqliteClientStoreOptions::from_nostr_secret(&secret, device_id).unwrap();
+        let db_path = dir.path().join("client.sqlite3");
+        let mut store = SqliteClientStore::open(&db_path, options.clone()).unwrap();
+        store.save_device_state(&device).unwrap();
+
+        // Keep this as literal predecessor output instead of serializing the
+        // current StoredAppStateMetadataV1 and deleting a field. The latter
+        // makes the fixture change with the candidate writer and recreates the
+        // all-new writer/all-new reader blind spot that broke production.
+        let metadata = serde_json::json!({
+            "selected_room_id": "room-main",
+            "selected_topic_id": "home",
+            "selected_chat_id": "segment-main",
+            "revoked_devices": [],
+            "chat_archives": []
+        });
+
+        let sealed = encrypt_app_state_metadata_json(&options.encryption_key, &owner, &metadata);
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO client_app_state (
+                  account_id,
+                  device_id,
+                  nonce,
+                  ciphertext
+                ) VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![
+                    &owner.account_id,
+                    &owner.device_id,
+                    &sealed.nonce,
+                    &sealed.ciphertext,
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.load_app_state(&owner).unwrap(),
+            StoredAppState {
+                selected_room_id: Some("room-main".to_owned()),
+                selected_topic_id: Some("home".to_owned()),
+                selected_chat_id: Some("segment-main".to_owned()),
+                paired_agent: None,
+                revoked_devices: BTreeSet::new(),
+                chat_archives: Vec::new(),
+            }
+        );
     }
 
     #[test]
@@ -10311,6 +13126,75 @@ mod tests {
             ),
             "unexpected error: {error}"
         );
+    }
+
+    fn test_device_link_bootstrap_chunks(
+        owner: &DeviceRef,
+        source: &DeviceRef,
+    ) -> Vec<DeviceLinkBootstrapV2> {
+        let history = [1_u64, 2]
+            .into_iter()
+            .map(|seq| DeviceLinkBootstrapEventV2 {
+                seq,
+                message_id: format!("history-{seq}"),
+                sender: source.clone(),
+                plaintext: serde_json::to_vec(&DecryptedApplicationEventV1 {
+                    kind: DurableAppEventKind::ChatMessage,
+                    conversation_id: Some("topic".to_owned()),
+                    segment_id: Some("chat".to_owned()),
+                    payload: format!("history {seq}").into_bytes(),
+                })
+                .unwrap(),
+                timestamp_unix_seconds: NOW + seq,
+            })
+            .collect::<Vec<_>>();
+        let chunk_history = vec![vec![history[0].clone()], vec![history[1].clone()]];
+        let history_sha256 = device_link_bootstrap_history_sha256(&chunk_history);
+        chunk_history
+            .into_iter()
+            .enumerate()
+            .map(|(chunk_index, history)| DeviceLinkBootstrapV2 {
+                version: finitechat_proto::DEVICE_LINK_BOOTSTRAP_VERSION_V2,
+                bootstrap_id: "bootstrap-test".to_owned(),
+                target: owner.clone(),
+                chunk_index: chunk_index as u32,
+                chunk_count: 2,
+                total_history_events: 2,
+                history_sha256: history_sha256.clone(),
+                room: DeviceLinkBootstrapRoomV2 {
+                    room_id: "room-bootstrap".to_owned(),
+                    display_name: "Bootstrap Room".to_owned(),
+                    picture: None,
+                },
+                canonical_selection: None,
+                profiles: Vec::new(),
+                history,
+            })
+            .collect()
+    }
+
+    fn test_device_link_bootstrap_control_event(
+        source: &DeviceRef,
+        seq: u64,
+        bootstrap: &DeviceLinkBootstrapV2,
+    ) -> StoredAppEvent {
+        StoredAppEvent {
+            room_id: bootstrap.room.room_id.clone(),
+            seq,
+            message_id: format!("control-{}", bootstrap.chunk_index),
+            sender: source.clone(),
+            plaintext: serde_json::to_vec(&DecryptedApplicationEventV1 {
+                kind: DurableAppEventKind::Namespaced {
+                    name: FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2.to_owned(),
+                    policy: ApplicationDeliveryPolicy::NON_NOTIFYING,
+                },
+                conversation_id: None,
+                segment_id: None,
+                payload: serde_json::to_vec(bootstrap).unwrap(),
+            })
+            .unwrap(),
+            timestamp_unix_seconds: NOW + seq,
+        }
     }
 
     fn app_message(

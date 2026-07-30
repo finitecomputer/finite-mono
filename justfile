@@ -21,9 +21,13 @@ check:
 fmt:
     cargo fmt --all
 
-# Runs all rust tests
+# Runs all Rust tests with isolated devfinity-managed test infrastructure
 test:
-    cargo test --workspace --locked
+    cargo run --quiet --locked -p devfinity -- run -- cargo test --workspace --locked
+
+# Runs the opt-in full-history Device convergence stress test.
+chat-history-stress:
+    cargo test --locked -p finitechat-core --lib tests::late_same_account_device_converges_topics_named_chats_and_archives_after_restart -- --ignored --exact --nocapture
 
 # Web-only contributor gate: dashboard unit tests, lint, and production build.
 web-check:
@@ -67,6 +71,11 @@ lat1-rollout-contract:
     bash -n scripts/deploy-lat1 scripts/rollout-lat1-runtime-artifact
     python3 -m unittest discover -s scripts/tests -p 'test_deploy_lat1_rollout.py'
 
+# Evaluated systemd ordering plus synthetic transient/persistent endpoint
+# behavior for the aggregate production healthcheck.
+lat1-healthcheck-contract:
+    python3 scripts/check_lat1_healthcheck_contract.py
+
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:
     python3 scripts/check_runtime_image_contract.py
@@ -88,7 +97,7 @@ lat1-secret-bootstrap-contract:
 # Focused protocol/process proof for the Hosted Web + Electron Device alpha.
 chat-device-parity:
     cargo test --locked -p finitechat-core --test electron_device_parity
-    cargo test --locked -p finitechat-hosted-device --test http device_link
+    cargo test --locked -p finitechat-hosted-device --test http
     cargo test --locked -p finitechat-daemon
     cd finitechat/apps/electron-chat && npm ci && npm run check
 
@@ -107,6 +116,11 @@ chat-electron-check:
 chat-electron-package:
     cargo build --locked --release -p finitechat-daemon
     cd finitechat/apps/electron-chat && npm ci && FINITECHAT_DAEMON_BINARY="{{justfile_directory()}}/target/release/finitechatd" npm run package:mac
+
+# Regenerate the native iOS bridge/project and prove the unsigned Release
+# configuration Xcode Cloud will archive.
+ios-cloud-preflight:
+    finitechat/scripts/ios-xcode-cloud-preflight.sh
 
 # Opt-in Stripe test-mode clock E2E. Credentials come from the caller's
 # environment and the harness never prints their values.

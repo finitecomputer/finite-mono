@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
+  ChevronDownIcon,
   HeartPulseIcon,
   MessageSquareIcon,
   RotateCcwIcon,
+  Settings2Icon,
   StopCircleIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -16,6 +18,10 @@ import {
 import { FormActionButton } from "@/components/form-action-button";
 import { AgentHeroCard } from "@/components/agent-hero-card";
 import { ConfirmSubmitButton } from "@/components/admin-ops-forms";
+import {
+  FinitePrivateUsagePanel,
+  FinitePrivateUsageUnavailablePanel,
+} from "@/components/finite-private-usage-panel";
 import { Button } from "@/components/ui/button";
 import {
   loadDashboardMachineAccess,
@@ -25,6 +31,8 @@ import {
   coreProjectSupportsHostedRecovery,
   coreProjectSupportsHostedRestart,
   coreProjectSupportsHostedStop,
+  loadCoreFinitePrivateUsageStatus,
+  type CoreFinitePrivateUsageResult,
   type CoreRuntimeStatus,
 } from "@/lib/core-client";
 import { runtimePrismState } from "@/lib/runtime-presentation";
@@ -43,9 +51,12 @@ export default async function MachineDetailPage({
 }) {
   const { machineId } = await params;
   const query = await searchParams;
-  const access = await loadDashboardMachineAccess(machineId, {
-    coreCacheMode: "swr",
-  });
+  const [access, finitePrivateUsage] = await Promise.all([
+    loadDashboardMachineAccess(machineId, {
+      coreCacheMode: "swr",
+    }),
+    loadCoreFinitePrivateUsageStatus(),
+  ]);
 
   if (!access) {
     redirect("/");
@@ -63,6 +74,7 @@ export default async function MachineDetailPage({
   return (
     <ImportedMachineOverview
       access={access}
+      finitePrivateUsage={finitePrivateUsage}
       removalResult={firstSearchParam(query.removal)}
     />
   );
@@ -70,9 +82,11 @@ export default async function MachineDetailPage({
 
 async function ImportedMachineOverview({
   access,
+  finitePrivateUsage,
   removalResult,
 }: {
   access: DashboardMachineAccess;
+  finitePrivateUsage: CoreFinitePrivateUsageResult;
   removalResult: string | null;
 }) {
   const activeRetirement =
@@ -91,12 +105,13 @@ async function ImportedMachineOverview({
   const prismState = activeRetirement ? "working" : runtimePrismState(runtimeStatus);
   const canRestartRuntime = coreProjectSupportsHostedRestart(access.coreProject);
   const canStopRuntime = coreProjectSupportsHostedStop(access.coreProject);
-  // Chat recovery remains operator maintenance. Retirement is owner-facing
-  // only when both product and persisted Runtime capability gates are open.
+  // Recovery and retirement remain operator maintenance. Their independent
+  // product and persisted Runtime capability gates still fail closed.
   const isAdminViewer = Boolean(access.viewer.isAdmin);
   const canRecoverRuntime =
     isAdminViewer && coreProjectSupportsHostedRecovery(access.coreProject);
-  const canRetireRuntime = access.canRetireRuntime && !activeRetirement;
+  const canRetireRuntime =
+    isAdminViewer && access.canRetireRuntime && !activeRetirement;
 
   return (
     <div className="space-y-6">
@@ -151,26 +166,68 @@ async function ImportedMachineOverview({
           </>
         }
       />
-      {canRecoverRuntime ? (
-        <section className="rounded-xl border bg-card p-5">
-          <h2 className="font-semibold">Chat recovery</h2>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Restarts and reconciles this agent&apos;s known-good chat services. This does
-            not restore a backup or delete chat data.
-          </p>
-          <form action={recoverCoreRuntimeAction} className="mt-4">
-            <input type="hidden" name="machineId" value={access.machineId} />
-            <input
-              type="hidden"
-              name="redirectPath"
-              value={`/dashboard/machines/${access.machineId}`}
-            />
-            <FormActionButton variant="outline" pendingLabel="Recovering chat...">
-              <HeartPulseIcon />
-              Recover chat
-            </FormActionButton>
-          </form>
-        </section>
+      {finitePrivateUsage.usage ? (
+        <FinitePrivateUsagePanel usage={finitePrivateUsage.usage} />
+      ) : null}
+      {!finitePrivateUsage.usage && finitePrivateUsage.error ? (
+        <FinitePrivateUsageUnavailablePanel error={finitePrivateUsage.error} />
+      ) : null}
+      {canRecoverRuntime || canRetireRuntime ? (
+        <details className="group">
+          <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+            <Settings2Icon className="size-4" />
+            Advanced
+            <ChevronDownIcon className="size-4 transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="mt-4 space-y-4">
+            {canRecoverRuntime ? (
+              <section className="rounded-xl border bg-card p-5">
+                <h2 className="font-semibold">Chat recovery</h2>
+                <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                  Restarts and reconciles this agent&apos;s known-good chat services. This
+                  does not restore a backup or delete chat data.
+                </p>
+                <form action={recoverCoreRuntimeAction} className="mt-4">
+                  <input type="hidden" name="machineId" value={access.machineId} />
+                  <input
+                    type="hidden"
+                    name="redirectPath"
+                    value={`/dashboard/machines/${access.machineId}`}
+                  />
+                  <FormActionButton variant="outline" pendingLabel="Recovering chat...">
+                    <HeartPulseIcon />
+                    Recover chat
+                  </FormActionButton>
+                </form>
+              </section>
+            ) : null}
+            {canRetireRuntime ? (
+              <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
+                <h2 className="font-semibold">Retire this agent</h2>
+                <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                  Retirement stops this agent, removes it from your dashboard, and releases
+                  its active slot after a verified support-held recovery snapshot is
+                  created. There is no self-service restore or undo. Your original agent
+                  data is retained.
+                </p>
+                <form
+                  action={`/dashboard/machines/${encodeURIComponent(access.machineId)}/remove`}
+                  method="post"
+                  className="mt-4"
+                >
+                  <ConfirmSubmitButton
+                    variant="destructive"
+                    pendingLabel="Starting retirement..."
+                    confirmMessage="Retire this agent? It will stop, leave your dashboard, and release its slot after a verified recovery snapshot is created. There is no self-service undo."
+                  >
+                    <Trash2Icon />
+                    Retire agent
+                  </ConfirmSubmitButton>
+                </form>
+              </section>
+            ) : null}
+          </div>
+        </details>
       ) : null}
       {activeRetirement ? (
         <section className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-5">
@@ -180,30 +237,6 @@ async function ImportedMachineOverview({
               ? "The last attempt was interrupted and is retrying the same retirement request. Your agent data remains retained until recovery verification succeeds, and the agent stays visible until retirement commits."
               : "The agent is stopping and creating a verified support-held recovery snapshot. It stays visible until that snapshot is proven and compute removal completes."}
           </p>
-        </section>
-      ) : null}
-      {canRetireRuntime ? (
-        <section className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
-          <h2 className="font-semibold">Retire this agent</h2>
-          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Retirement stops this agent, removes it from your dashboard, and releases its
-            active slot after a verified support-held recovery snapshot is created. There is
-            no self-service restore or undo. Your original agent data is retained.
-          </p>
-          <form
-            action={`/dashboard/machines/${encodeURIComponent(access.machineId)}/remove`}
-            method="post"
-            className="mt-4"
-          >
-            <ConfirmSubmitButton
-              variant="destructive"
-              pendingLabel="Starting retirement..."
-              confirmMessage="Retire this agent? It will stop, leave your dashboard, and release its slot after a verified recovery snapshot is created. There is no self-service undo."
-            >
-              <Trash2Icon />
-              Retire agent
-            </ConfirmSubmitButton>
-          </form>
         </section>
       ) : null}
     </div>

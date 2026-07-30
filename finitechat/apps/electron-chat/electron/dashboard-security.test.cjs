@@ -12,8 +12,10 @@ const {
   isGoogleWorkspaceStartUrl,
   normalizeDashboardBaseUrl,
   parseAccountBinding,
+  parseDeviceEnrollmentGrant,
   parseDeviceLinkPublicResponse,
   parseLocalDaemonIdentity,
+  retryableDashboardStatus,
   shouldExposeLocalChatBridge,
   trustedDashboardIpcFrame,
   trustedDashboardMicrophonePermission,
@@ -35,6 +37,36 @@ test("dashboard URL policy permits production HTTPS and loopback development onl
     "file:///tmp/dashboard",
   ]) {
     assert.throws(() => normalizeDashboardBaseUrl(value));
+  }
+});
+
+test("device enrollment accepts only the exact encrypted resume grant shape", () => {
+  const grant = {
+    pairing_session_id: "pairing-session",
+    target_device_id: "target-device",
+    enrollment_user_id: "user_123",
+    enrollment_capability_hex: "ab".repeat(32),
+  };
+  assert.deepEqual(parseDeviceEnrollmentGrant(grant), grant);
+  assert.throws(
+    () => parseDeviceEnrollmentGrant({ ...grant, unexpected: true }),
+    /enrollment is invalid/u
+  );
+  assert.throws(
+    () => parseDeviceEnrollmentGrant({
+      ...grant,
+      enrollment_capability_hex: "AB".repeat(32),
+    }),
+    /enrollment is invalid/u
+  );
+});
+
+test("only throttling and server failures retry durable dashboard enrollment", () => {
+  for (const status of [429, 500, 502, 503, 599]) {
+    assert.equal(retryableDashboardStatus(status), true, `${status} retries`);
+  }
+  for (const status of [0, 200, 400, 401, 403, 404, 409, 410, 600, "503"]) {
+    assert.equal(retryableDashboardStatus(status), false, `${status} is terminal`);
   }
 });
 
@@ -179,6 +211,7 @@ test("desktop chat bridge exposes an exact action allowlist", () => {
     "StartTopicChatIntent",
     "SetChatArchived",
     "SendChatMessage",
+    "SendChatMessageWithReferences",
     "RefreshDevices",
   ]) {
     const value = { [operation]: operation === "RefreshDevices" ? null : {} };
@@ -197,7 +230,7 @@ test("desktop chat bridge exposes an exact action allowlist", () => {
 
 test("device-link responses must match the exact public rendezvous", () => {
   const expected = {
-    link_session_id: "link-alpha",
+    pairing_session_id: "pairing-alpha",
     target_device_id: "electron-alpha",
   };
   assert.deepEqual(
@@ -208,6 +241,18 @@ test("device-link responses must match the exact public rendezvous", () => {
         expires_at_unix_seconds: 42,
         room_count: 2,
         active_room_count: 2,
+        bootstrap_manifests: [
+          {
+            bootstrap_id: "pairing-alpha",
+            room_id: "room-one",
+            manifest_sha256: "11".repeat(32),
+          },
+          {
+            bootstrap_id: "pairing-alpha",
+            room_id: "room-two",
+            manifest_sha256: "22".repeat(32),
+          },
+        ],
         account_secret_hex: "ignored-secret-field",
       },
       expected
@@ -218,6 +263,18 @@ test("device-link responses must match the exact public rendezvous", () => {
       expires_at_unix_seconds: 42,
       room_count: 2,
       active_room_count: 2,
+      bootstrap_manifests: [
+        {
+          bootstrap_id: "pairing-alpha",
+          room_id: "room-one",
+          manifest_sha256: "11".repeat(32),
+        },
+        {
+          bootstrap_id: "pairing-alpha",
+          room_id: "room-two",
+          manifest_sha256: "22".repeat(32),
+        },
+      ],
     }
   );
   assert.throws(() =>
@@ -229,6 +286,11 @@ test("device-link responses must match the exact public rendezvous", () => {
         expires_at_unix_seconds: 42,
         room_count: 1,
         active_room_count: 1,
+        bootstrap_manifests: [{
+          bootstrap_id: "pairing-alpha",
+          room_id: "room-one",
+          manifest_sha256: "11".repeat(32),
+        }],
       },
       expected
     )
@@ -243,11 +305,34 @@ test("device-link responses must match the exact public rendezvous", () => {
           expires_at_unix_seconds: 42,
           room_count: 1,
           active_room_count: 1,
+          bootstrap_manifests: [{
+            bootstrap_id: "pairing-alpha",
+            room_id: "room-one",
+            manifest_sha256: "11".repeat(32),
+          }],
         },
         { ...expected, target_device_id: invalidTarget }
       )
     );
   }
+  const duplicateManifest = {
+    bootstrap_id: "pairing-alpha",
+    room_id: "room-one",
+    manifest_sha256: "11".repeat(32),
+  };
+  assert.throws(() =>
+    parseDeviceLinkPublicResponse(
+      {
+        ...expected,
+        status: "ready",
+        expires_at_unix_seconds: 42,
+        room_count: 2,
+        active_room_count: 2,
+        bootstrap_manifests: [duplicateManifest, duplicateManifest],
+      },
+      expected
+    )
+  );
 });
 
 test("account and daemon identity projections are exact and fail closed on mismatch", () => {
@@ -290,16 +375,26 @@ test("account and daemon identity projections are exact and fail closed on misma
   assert.deepEqual(
     parseLocalDaemonIdentity(
       { identity: { account_id: accountId, device_id: "electron-alpha" }, secret: "ignored" },
-      accountId
+      accountId,
+      "electron-alpha"
     ),
     { account_id: accountId, device_id: "electron-alpha" }
   );
   assert.throws(
     () => parseLocalDaemonIdentity(
       { identity: { account_id: "b".repeat(64), device_id: "electron-alpha" } },
-      accountId
+      accountId,
+      "electron-alpha"
     ),
     /different Finite account/
+  );
+  assert.throws(
+    () => parseLocalDaemonIdentity(
+      { identity: { account_id: accountId, device_id: "electron-other" } },
+      accountId,
+      "electron-alpha"
+    ),
+    /different Finite Device identity/
   );
 });
 
@@ -354,6 +449,11 @@ test("daemon bootstrap stays internal and the remote shell does not claim invite
     "utf8"
   );
   assert.match(main, /dispatchDaemonAction: dispatchInternalDaemonAction/u);
+  assert.doesNotMatch(
+    main,
+    /currentDashboardAccountBinding\(\)/u,
+    "normal startup must not require WorkOS after the encrypted identity commit"
+  );
   assert.doesNotMatch(main, /setAsDefaultProtocolClient/u);
   assert.doesNotMatch(packager, /CFBundleURLTypes|CFBundleURLSchemes/u);
 });

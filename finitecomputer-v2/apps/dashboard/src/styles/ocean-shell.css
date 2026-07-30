@@ -379,7 +379,7 @@ body:has(.finite-chat) {
   min-width: 0;
   overflow: hidden;
   color: var(--text-primary);
-  font-family: var(--font-funnel-display), var(--font-funnel-sans), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-funnel-sans), ui-sans-serif, system-ui, sans-serif;
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0;

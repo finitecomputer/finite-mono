@@ -3,11 +3,10 @@ import test from "node:test";
 
 import {
   activeAtQuery,
+  chatReferencePayloads,
   inlineReferenceToken,
   insertAtReference,
-  parseChatReferences,
   retainInlineReferences,
-  serializeChatReferences,
   type ChatReference,
 } from "./chat-references";
 
@@ -35,7 +34,11 @@ test("selecting replaces the query with a minimal inline reference", () => {
       { start: 8, end: 13, query: "pric" },
       reference,
     ),
-    { text: "compare @pricing.md today", cursor: 19 }
+    {
+      text: "compare @pricing.md today",
+      cursor: 19,
+      reference: { ...reference, token: "@pricing.md" },
+    }
   );
   assert.equal(inlineReferenceToken(reference), "@pricing.md");
 });
@@ -55,28 +58,65 @@ test("selected inline references do not reopen search and disappear with their t
   assert.deepEqual(retainInlineReferences("Use strategy-review next", [reference]), []);
 });
 
-test("reference serialization stays readable to the agent and renders as typed data", () => {
-  const references: ChatReference[] = [
-    {
+test("typed reference payloads preserve multiline prose for 1, 3, and 12 references", () => {
+  const text = "first line\nsecond line\n\nfinal paragraph";
+  for (const count of [1, 3, 12]) {
+    const references = Array.from({ length: count }, (_, index): ChatReference => ({
       kind: "file",
-      id: "workspace:plans/pricing.md",
-      label: "pricing.md",
-      detail: "plans/pricing.md",
-      path: "plans/pricing.md",
-      fingerprint: "mtime-size:1:2",
-    },
-    {
-      kind: "skill",
-      id: "skill:strategy-review",
-      label: "strategy-review",
-      detail: "Review a product strategy.",
-    },
-  ];
-  const serialized = serializeChatReferences("Compare these.", references);
-  assert.match(serialized, /Open and use this Agent workspace Markdown file/u);
-  assert.match(serialized, /Load and follow this skill/u);
-  assert.deepEqual(parseChatReferences(serialized), {
-    text: "Compare these.",
-    references,
-  });
+      id: `workspace:plans/file-${index}.md`,
+      label: `file-${index}.md`,
+      detail: `plans/file-${index}.md`,
+      path: `plans/file-${index}.md`,
+      fingerprint: `sha256:${index}`,
+      token: `@file-${index}.md`,
+    }));
+    const encoded = JSON.stringify({
+      text,
+      references: chatReferencePayloads(references),
+    });
+    const decoded = JSON.parse(encoded) as {
+      text: string;
+      references: ChatReference[];
+    };
+    assert.equal(decoded.text, text);
+    assert.equal(decoded.references.length, count);
+    assert.doesNotMatch(decoded.text, /FINITE_CHAT_REFERENCES|File reference:/u);
+  }
+});
+
+test("colliding labels receive distinct identities and retain by visible token", () => {
+  const candidates = ["a", "b", "c"].map((directory): ChatReference => ({
+    kind: "file",
+    id: `workspace:${directory}/README.md`,
+    label: "README.md",
+    detail: `${directory}/README.md`,
+    path: `${directory}/README.md`,
+  }));
+  let text = "";
+  const selected: ChatReference[] = [];
+  for (const candidate of candidates) {
+    const queryText = `${text}${text ? " " : ""}@rea`;
+    const start = queryText.lastIndexOf("@");
+    const inserted = insertAtReference(
+      queryText,
+      { start, end: queryText.length, query: "rea" },
+      candidate,
+      selected,
+    );
+    text = inserted.text;
+    selected.push(inserted.reference);
+  }
+
+  assert.equal(text, "@README.md @README.md#2 @README.md#3");
+  assert.deepEqual(selected.map(inlineReferenceToken), [
+    "@README.md",
+    "@README.md#2",
+    "@README.md#3",
+  ]);
+  assert.deepEqual(
+    retainInlineReferences(text.replace("@README.md#2", ""), selected).map(
+      (reference) => reference.id
+    ),
+    ["workspace:a/README.md", "workspace:c/README.md"],
+  );
 });

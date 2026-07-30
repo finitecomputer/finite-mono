@@ -1,5 +1,6 @@
 /target/
 /ios/.build/
+/ios/.derived-data/
 /ios/Frameworks/
 /ios/Bindings/*.swift
 /ios/Bindings/*FFI.h

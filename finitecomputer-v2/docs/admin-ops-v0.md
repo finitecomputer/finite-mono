@@ -122,14 +122,14 @@ Admin Ops v0 is accepted when:
   untouched).
 - Core tests prove every mutating admin action records an audit event with
   the admin's email as actor.
-- The `FC_CORE_POSTGRES_TEST_URL`-gated harness covers the new store methods
-  (overview read, admin restart lease round trip, friend key
+- The devfinity-managed `just test` Postgres harness covers the new store
+  methods (overview read, admin restart lease round trip, friend key
   issue/rotate/revoke, window reset, audit persistence) against Postgres.
 - Dashboard tests cover the admin gate helper, heartbeat-age formatting, and
   the one-time key display logic as pure helpers.
 - Gates pass: `cargo fmt --check`, `cargo clippy --workspace --all-targets
-  -- -D warnings`, `cargo test --workspace`, and dashboard `npm ci`,
-  `npm run lint`, `npm test`, `npm run build`.
+  -- -D warnings`, `just test`, and dashboard `npm ci`, `npm run lint`,
+  `npm test`, `npm run build`.
 
 ## Open Decisions
 

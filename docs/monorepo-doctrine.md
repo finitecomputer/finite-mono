@@ -6,6 +6,29 @@ workspace AGENTS.md, WORKSPACE_INVENTORY.md, and finitecomputer-v2's
 README/AGENTS/service-dependencies docs. Those statements described the
 pre-mono world and are void.
 
+## Product safety maxims
+
+1. **Don't Break Chat!** Chat availability and durable history are Finite's
+   primary product promise. Any change touching persisted chat state,
+   protocols, Device identity, Agent Runtime state, or deployment topology
+   must trace the production through-line and prove the relevant
+   existing-state and mixed-version compatibility edges. A candidate tested
+   only with matching candidate components is not deployment evidence.
+2. **Don't break new-user onboarding.** Account enrollment, Agent admission,
+   launch, identity readiness, binding, and usable chat are separate causal
+   contracts inside one user promise. Runner drain, capacity, and host
+   placement are therefore product availability state, not merely operator
+   configuration.
+3. **Prefer causal simplicity over test volume.** Fewer authoritative
+   implementations, explicit writers and readers, production-faithful entry
+   points, and small through-line proofs are better than large suites around
+   shadow implementations. Say no to features whose compatibility, recovery,
+   and observability contracts cannot be made clear and affordable.
+
+The incidents motivating these maxims and the questions future work should ask
+are recorded in
+[`production-onboarding-chat-causality-2026-07-25.md`](postmortems/production-onboarding-chat-causality-2026-07-25.md).
+
 ## The doctrine
 
 1. **finite-mono is the single company repository.** All first-party code —

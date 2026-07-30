@@ -397,13 +397,11 @@ private final class ZoomableImageScrollView: UIView, UIScrollViewDelegate {
 
 private enum LocalVideoThumbnailLoader {
     nonisolated static func thumbnail(path: String, maxPixelSize: Int) async -> CGImage? {
-        await Task.detached(priority: .utility) {
-            let asset = AVURLAsset(url: URL(fileURLWithPath: path))
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
-            return try? generator.copyCGImage(at: .zero, actualTime: nil)
-        }.value
+        let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+        return try? await generator.image(at: .zero).image
     }
 }
 

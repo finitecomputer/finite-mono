@@ -112,7 +112,7 @@ move with the room; home-scoped routes are account-resident.
 | Scope | Routes |
 | --- | --- |
 | Room server | `/commits`, `/events`, `/activities`, `/sync/group`, `/sync/inbox` (server-local device inbox), `/welcomes/claim`, `/welcomes/ack`, `/application-effects/*`, `/rooms/admins`, `/rooms/leave`, `/rooms/report-invalid-commit` |
-| Home server | `/key-packages`, `/key-packages/availability`, `/key-packages/claim`, `/key-packages/claims`, `/key-packages/inventory`, `/key-packages/leases/expire`, `/push-tokens`, `/push-tokens/remove`, `/devices/revoke`, `/devices/liveness`, `/devices/liveness/get`, `/link-sessions/*`, `/account-rooms`, `/account-rooms/bootstrap`, `/account-rooms/list` |
+| Home server | `/key-packages`, `/key-packages/availability`, `/key-packages/claim`, `/key-packages/claims`, `/key-packages/inventory`, `/key-packages/leases/expire`, `/push-tokens`, `/push-tokens/remove`, `/devices/revoke`, `/devices/liveness`, `/devices/liveness/get`, `/pairing-sessions/*`, `/account-rooms`, `/account-rooms/bootstrap`, `/account-rooms/list` |
 | Both | `/health` |
 
 Note `/welcomes/claim` is device-addressed but server-local: in a sharded

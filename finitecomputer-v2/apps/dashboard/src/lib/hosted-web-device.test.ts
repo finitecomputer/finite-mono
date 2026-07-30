@@ -7,6 +7,7 @@ import {
   hostedDeviceAttachments,
   hostedDeviceBrainIdentityProvider,
   hostedDeviceConfig,
+  hostedDeviceDiagnosticPath,
   hostedDeviceHeaders,
   hostedDeviceProfileImage,
   hostedDeviceLinkStatus,
@@ -14,6 +15,7 @@ import {
   hostedDeviceRuntimeCommand,
   hostedDeviceSearch,
   hostedDeviceSitesIdentityProvider,
+  hostedDeviceState,
 } from "@/lib/hosted-web-device";
 
 const verifiedAccount = {
@@ -72,6 +74,64 @@ test("chat search uses the narrow WorkOS-bound device endpoint", async (context)
     query: "recovery",
     limit: 30,
   });
+});
+
+test("hosted-device diagnostic paths never expose resource identifiers", () => {
+  assert.equal(hostedDeviceDiagnosticPath("/v1/app/state"), "/v1/app/state");
+  assert.equal(
+    hostedDeviceDiagnosticPath(
+      "/v1/app/attachments/private-room/private-message/private-attachment"
+    ),
+    "/v1/app/attachments/:room/:message/:attachment"
+  );
+  assert.equal(
+    hostedDeviceDiagnosticPath("/v1/device-links/private-operation?secret=value"),
+    "/v1/device-links/:operation"
+  );
+  assert.equal(hostedDeviceDiagnosticPath("/v1/app/state/private-value"), "/unknown");
+  assert.equal(hostedDeviceDiagnosticPath("/private/account/path"), "/unknown");
+});
+
+test("hosted-device failures log only bounded request structure", async (context) => {
+  const originalFetch = global.fetch;
+  const originalConsoleError = console.error;
+  context.after(() => {
+    global.fetch = originalFetch;
+    console.error = originalConsoleError;
+  });
+  const logs: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    logs.push(args);
+  };
+  global.fetch = (async () =>
+    Response.json(
+      {
+        error:
+          "sensitive downstream detail with user_paul and internal-token",
+      },
+      { status: 502 }
+    )) as typeof fetch;
+
+  await assert.rejects(
+    hostedDeviceState(
+      { baseUrl: "https://device.internal", apiToken: "internal-token" },
+      verifiedAccount
+    ),
+    /sensitive downstream detail/u
+  );
+
+  assert.deepEqual(logs, [
+    [
+      "hosted-device request failed",
+      {
+        path: "/v1/app/state",
+        status: 502,
+        errorClass: "downstream_http",
+      },
+    ],
+  ]);
+  const serializedLogs = JSON.stringify(logs);
+  assert.doesNotMatch(serializedLogs, /user_paul|internal-token|sensitive downstream/u);
 });
 
 test("Brain identity operations use the narrow WorkOS-bound custody endpoint", async (context) => {
@@ -339,19 +399,44 @@ test("device linking stays server-side and projects only public progress", async
       body: String(init?.body),
     });
     return Response.json({
-      link_session_id: "link-alpha",
+      pairing_session_id: "pairing-alpha",
       target_device_id: "electron-alpha",
-      status: observed.length === 1 ? "awaiting_claim" : "ready",
+      status: observed.length === 1 ? "awaiting_offer" : "ready",
       expires_at_unix_seconds: 1_800_000_600,
       room_count: 2,
       active_room_count: observed.length === 1 ? 0 : 2,
+      bootstrap_manifests:
+        observed.length === 1
+          ? []
+          : [
+              {
+                bootstrap_id: "pairing-alpha",
+                room_id: "room-one",
+                manifest_sha256: "11".repeat(32),
+              },
+              {
+                bootstrap_id: "pairing-alpha",
+                room_id: "room-two",
+                manifest_sha256: "22".repeat(32),
+              },
+            ],
+      ...(observed.length === 1
+        ? {
+            source_descriptor: {
+              version: 1,
+              source_public_key: "a".repeat(64),
+              session_secret_hex: "b".repeat(64),
+              expires_at_unix_seconds: 1_800_000_120,
+            },
+          }
+        : {}),
       account_secret_hex: "must-never-cross-the-dashboard-boundary",
       encrypted_payload: [1, 2, 3],
     });
   }) as typeof fetch;
 
   const input = {
-    link_session_id: "link-alpha",
+    pairing_session_id: "pairing-alpha",
     target_device_id: "electron-alpha",
   };
   const approved = await hostedDeviceApproveLink(
@@ -367,10 +452,17 @@ test("device linking stays server-side and projects only public progress", async
 
   assert.deepEqual(approved, {
     ...input,
-    status: "awaiting_claim",
+    status: "awaiting_offer",
     expires_at_unix_seconds: 1_800_000_600,
     room_count: 2,
     active_room_count: 0,
+    bootstrap_manifests: [],
+    source_descriptor: {
+      version: 1,
+      source_public_key: "a".repeat(64),
+      session_secret_hex: "b".repeat(64),
+      expires_at_unix_seconds: 1_800_000_120,
+    },
   });
   assert.equal(ready.status, "ready");
   assert.deepEqual(
@@ -386,6 +478,29 @@ test("device linking stays server-side and projects only public progress", async
   }
   assert.equal("account_secret_hex" in approved, false);
   assert.equal("encrypted_payload" in approved, false);
+
+  const duplicateManifest = {
+    bootstrap_id: "pairing-alpha",
+    room_id: "room-one",
+    manifest_sha256: "11".repeat(32),
+  };
+  global.fetch = (async () =>
+    Response.json({
+      ...input,
+      status: "ready",
+      expires_at_unix_seconds: 1_800_000_600,
+      room_count: 2,
+      active_room_count: 2,
+      bootstrap_manifests: [duplicateManifest, duplicateManifest],
+    })) as typeof fetch;
+  await assert.rejects(
+    hostedDeviceLinkStatus(
+      { baseUrl: "https://device.internal", apiToken: "internal-token" },
+      verifiedAccount,
+      input
+    ),
+    /invalid response/u
+  );
 });
 
 test("Device reconciliation is project-bound and projects only public progress", async (context) => {

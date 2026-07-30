@@ -3,13 +3,17 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
-    # finite-lat-3 is the blank-slate NixOS 26.05 qualification host. Keep its
-    # platform pin independent until the lat1 closure upgrade is accepted.
+    # finite-lat-3 qualified this NixOS 26.05 platform pin. finite-lat-1 uses
+    # the same pin for its platform-only upgrade while retaining its existing
+    # disk layout and stateVersion.
     nixpkgs-lat3.url = "github:nixos/nixpkgs/nixos-26.05";
-    # Kata moves quickly and the 25.11 package is materially behind. Keep the
-    # host OS stable while pinning the microVM runtime toolchain independently.
+    # Kata moves quickly and the stable package was materially behind when this
+    # pin was established. Keep the host OS on a qualified release while
+    # pinning the microVM runtime toolchain independently.
     nixpkgs-kata.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     disko.url = "github:nix-community/disko";
     disko.inputs.nixpkgs.follows = "nixpkgs";
 
@@ -34,6 +38,7 @@
       nixpkgs-lat3,
       nixpkgs-kata,
       flake-utils,
+      rust-overlay,
       disko,
       nixos-anywhere,
       nixos-images,
@@ -86,31 +91,46 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+        };
+        rustToolchain = pkgs.rust-bin.stable."1.91.1".default.override {
+          extensions = [
+            "clippy"
+            "rust-analyzer"
+            "rust-src"
+            "rustfmt"
+          ];
+          targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            "aarch64-apple-ios"
+            "aarch64-apple-ios-sim"
+          ];
+        };
       in
       {
         devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            cargo
-            clippy
-            curl
-            git
-            just
-            nodejs_24
-            openssl
-            postgresql_16
-            pkg-config
-            process-compose
-            python3
-            rsync
-            rust-analyzer
-            rustPlatform.rustLibSrc
-            rustc
-            rustfmt
-            xxd
-          ];
+          packages =
+            with pkgs;
+            [
+              curl
+              git
+              jq
+              just
+              nodejs_24
+              openssl
+              postgresql_16
+              pkg-config
+              process-compose
+              protobuf
+              python3
+              rsync
+              xxd
+              rustToolchain
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.xcodegen ];
 
-          RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+          RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         };
 
         formatter = pkgs.nixfmt-rfc-style;
@@ -130,7 +150,7 @@
       #   nixos-rebuild switch --target-host root@finite-lat-1 \
       #     --flake github:finitecomputer/finite-mono/<tag-or-rev>#finite-lat-1
       # See infra/nixos/README.md and finite-fable/single-server-plan.md.
-      nixosConfigurations.finite-lat-1 = nixpkgs.lib.nixosSystem {
+      nixosConfigurations.finite-lat-1 = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
         specialArgs = runnerSpecialArgs;
         modules = [

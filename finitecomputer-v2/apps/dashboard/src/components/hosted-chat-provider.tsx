@@ -23,6 +23,7 @@ import {
   reconcileElectronChatState,
   type ElectronAttachmentAddress,
   type ElectronChatRuntime,
+  type ElectronDeviceLinkStatus,
   type ElectronLocalDevice,
 } from "@/lib/electron-chat-runtime";
 import type {
@@ -53,6 +54,11 @@ import {
   type HostedChatSelection,
   type HostedChatSelectionIntent,
 } from "@/lib/hosted-web-chat-selection";
+import {
+  pendingChatRefreshAdvancesTranscript,
+  preservePendingChatRefreshSelection,
+  type PendingChatRefreshTarget,
+} from "@/lib/hosted-web-chat-refresh";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
 const REVOKED_DESKTOP_MESSAGE =
@@ -74,6 +80,7 @@ type HostedChatContextValue = {
   ownerClaimed: boolean;
   bindingRecoveryRequired: boolean;
   localDeviceRecoveryRequired: boolean;
+  deviceLinkStatus: ElectronDeviceLinkStatus | null;
   selectionPending: boolean;
   load: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
   claimOwner: (showError?: boolean) => Promise<HostedChatRetryAttempt>;
@@ -92,6 +99,7 @@ type HostedChatContextValue = {
     query: string,
     signal?: AbortSignal
   ) => Promise<HostedChatReferenceSearchResult[]>;
+  refreshPendingChat: (target: PendingChatRefreshTarget) => Promise<boolean>;
   uploadAttachments: (formData: FormData) => Promise<HostedChatState>;
   attachmentUrl: (address: ElectronAttachmentAddress) => string;
 };
@@ -114,7 +122,10 @@ export function HostedChatProvider({
   const [ownerClaimed, setOwnerClaimed] = useState(false);
   const [bindingRecoveryRequired, setBindingRecoveryRequired] = useState(false);
   const [localDeviceRecoveryRequired, setLocalDeviceRecoveryRequired] = useState(false);
+  const [deviceLinkStatus, setDeviceLinkStatus] =
+    useState<ElectronDeviceLinkStatus | null>(runtime ? { status: "preparing" } : null);
   const [selectionPending, setSelectionPending] = useState(false);
+  const stateRef = useRef<HostedChatState | null>(null);
   const snapshotSourceRef = useRef(initialHostedChatSnapshotSource());
   const stateLoadRef = useRef<Promise<HostedChatRetryAttempt> | null>(null);
   const lastLoadErrorRef = useRef<string | null>(null);
@@ -142,12 +153,16 @@ export function HostedChatProvider({
       selectionIntentRef.current = null;
       setSelectionPending(false);
     }
-    setState((current) => ({
-      ...applied.state,
-      hosted_agent_binding: applied.state.hosted_agent_binding === undefined
-        ? current?.hosted_agent_binding ?? null
-        : applied.state.hosted_agent_binding,
-    }));
+    setState((current) => {
+      const merged = {
+        ...applied.state,
+        hosted_agent_binding: applied.state.hosted_agent_binding === undefined
+          ? current?.hosted_agent_binding ?? null
+          : applied.state.hosted_agent_binding,
+      };
+      stateRef.current = merged;
+      return merged;
+    });
   }, []);
 
   const mergeLocalState = useCallback((next: HostedChatState) => {
@@ -208,6 +223,7 @@ export function HostedChatProvider({
       try {
         let next: HostedChatState;
         if (runtime) {
+          setDeviceLinkStatus({ status: "preparing" });
           const deviceResult = await runtime.ensureLocalDevice();
           if (isElectronLocalDeviceRecoveryRequired(deviceResult)) {
             setLocalDeviceRecoveryRequired(true);
@@ -247,6 +263,7 @@ export function HostedChatProvider({
         setTransportError(null);
         setBindingRecoveryRequired(false);
         setLocalDeviceRecoveryRequired(false);
+        if (runtime) setDeviceLinkStatus({ status: "ready" });
         return "succeeded";
       } catch (caught) {
         if (runtime && signal?.aborted) return "stop";
@@ -440,7 +457,11 @@ export function HostedChatProvider({
       token = ++selectionIntentTokenRef.current;
       selectionIntentRef.current = { ...target, token };
       setSelectionPending(true);
-      setState((current) => (current ? { ...current, ...target } : current));
+      setState((current) => {
+        const selected = current ? { ...current, ...target } : current;
+        stateRef.current = selected;
+        return selected;
+      });
     }
     const releaseIntent = () => {
       if (token === null || selectionIntentRef.current?.token !== token) return;
@@ -448,7 +469,11 @@ export function HostedChatProvider({
       setSelectionPending(false);
       const serverSelection = serverSelectionRef.current;
       if (serverSelection) {
-        setState((current) => (current ? { ...current, ...serverSelection } : current));
+        setState((current) => {
+          const selected = current ? { ...current, ...serverSelection } : current;
+          stateRef.current = selected;
+          return selected;
+        });
       }
     };
 
@@ -495,6 +520,33 @@ export function HostedChatProvider({
     body: JSON.stringify({ room_id: roomId, topic_id: topicId, query }),
     signal,
   }), [apiBase]);
+
+  const refreshPendingChat = useCallback(async (target: PendingChatRefreshTarget) => {
+    if (runtime) return false;
+    const requestGeneration = snapshotSourceRef.current.generation;
+    const selectionToken = selectionIntentTokenRef.current;
+    try {
+      const next = await hostedChatRequest<HostedChatState>(`${apiBase}/state`);
+      const source = snapshotSourceRef.current;
+      const current = stateRef.current;
+      if (
+        !current
+        || selectionIntentTokenRef.current !== selectionToken
+        || source.generation !== requestGeneration
+        || next.rev < source.highestRev
+        || !pendingChatRefreshAdvancesTranscript(current, next, target)
+      ) {
+        return false;
+      }
+      snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
+      snapshotSequenceRef.current += 1;
+      setMergedState(preservePendingChatRefreshSelection(next, target));
+      setTransportError(null);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [apiBase, runtime, setMergedState]);
 
   const uploadAttachments = useCallback((formData: FormData) => runtime
     ? requestElectronMutationSnapshot(async (bridge) =>
@@ -565,9 +617,12 @@ export function HostedChatProvider({
         setTransportError(message || CHAT_UNAVAILABLE_MESSAGE);
       });
       const unsubscribeLinkStatus = runtime.onDeviceLinkStatus((status) => {
-        if (disposed || status.status !== "failed") return;
-        setStreamConnected(false);
-        setTransportError(status.message || CHAT_UNAVAILABLE_MESSAGE);
+        if (disposed) return;
+        setDeviceLinkStatus(status);
+        if (status.status === "failed") {
+          setStreamConnected(false);
+          setTransportError(status.message || CHAT_UNAVAILABLE_MESSAGE);
+        }
       });
       // Register generation last. Main replays generation before the first
       // state, allowing a restarted daemon to reset revision ordering.
@@ -661,6 +716,7 @@ export function HostedChatProvider({
       ownerClaimed,
       bindingRecoveryRequired,
       localDeviceRecoveryRequired,
+      deviceLinkStatus,
       selectionPending,
       load,
       claimOwner,
@@ -670,6 +726,7 @@ export function HostedChatProvider({
       dispatchQuiet,
       searchChats,
       searchReferences,
+      refreshPendingChat,
       uploadAttachments,
       attachmentUrl,
     }}>

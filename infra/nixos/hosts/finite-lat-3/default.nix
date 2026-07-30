@@ -7,6 +7,10 @@
 let
   ids = import ./storage-ids.nix;
   paulKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHqbHvWlrXRkTc0403ubkqNE/Ge4YbPvKwWuRBoLPVAW paul@paul.lol";
+  # Operator routes are deliberately absent from the public Identity vhost.
+  # Reach the loopback Authority through lat1's peer-scoped WireGuard proxy.
+  identityAuthority = "http://10.254.3.1:18790";
+  identityOperatorEnvironmentFile = "/etc/finite/identity-operator.env";
 in
 {
   imports = [
@@ -31,7 +35,25 @@ in
       assertion = config.fileSystems."/data".device == "/dev/md/data";
       message = "finite-lat-3 /data must be the named data MD array";
     }
+    {
+      assertion =
+        config.systemd.services.finite-saas-runner.environment.FINITE_IDENTITY_AUTHORITY
+        == identityAuthority;
+      message = "finite-lat-3 Runner must use the private production Identity Authority";
+    }
+    {
+      assertion = builtins.elem identityOperatorEnvironmentFile config.systemd.services.finite-saas-runner.serviceConfig.EnvironmentFile;
+      message = "finite-lat-3 Runner must load its Identity Authority operator credential";
+    }
   ];
+
+  # Managed Agent Email registration is part of successful creation. Keep the
+  # replaceable operator credential in its own root-only file and out of the
+  # general Runner environment template.
+  systemd.services.finite-saas-runner = {
+    environment.FINITE_IDENTITY_AUTHORITY = identityAuthority;
+    serviceConfig.EnvironmentFile = lib.mkAfter [ identityOperatorEnvironmentFile ];
+  };
 
   networking.useDHCP = false;
   networking.useNetworkd = true;

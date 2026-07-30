@@ -516,8 +516,6 @@ impl SubmitCommitRequest {
     }
 }
 
-pub type LinkSessionId = String;
-
 #[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum EngineError {
@@ -594,18 +592,6 @@ pub enum EngineError {
     ReporterNotInInterval(DeviceRef),
     #[error("conflicting idempotency key")]
     ConflictingIdempotencyKey,
-    #[error("link session already exists: {0}")]
-    LinkSessionAlreadyExists(LinkSessionId),
-    #[error("link session not found: {0}")]
-    LinkSessionNotFound(LinkSessionId),
-    #[error("link session has a conflicting payload")]
-    LinkSessionConflict,
-    #[error("link session is closed")]
-    LinkSessionClosed,
-    #[error("link session is not ready")]
-    LinkSessionNotReady,
-    #[error("bad link session claim token")]
-    BadLinkSessionClaimToken,
     #[error("runtime worker counter overflow")]
     RuntimeCounterOverflow,
     #[error("direct room cannot add third account: {0}")]

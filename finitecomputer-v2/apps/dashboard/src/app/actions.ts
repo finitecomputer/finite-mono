@@ -44,6 +44,7 @@ import {
   requestCoreRuntimeRestart,
   requestCoreRuntimeStop,
 } from "@/lib/core-client";
+import { formatUtcDateTime } from "@/lib/date-time";
 import {
   billingSubscriptionShouldUsePortal,
   requireStripeClient,
@@ -336,12 +337,12 @@ export async function claimFinitePrivateDailyResetAction(
     revalidatePath("/dashboard");
     if (!result.performed) {
       return {
-        message: `Today's free reset is already used. The next one is available at ${result.status.freeDailyResetAvailableAgainAt}.`,
+        message: `Today's free reset is already used. The next one is available at ${formatUtcDateTime(result.status.freeDailyResetAvailableAgainAt)}.`,
         tone: "success",
       };
     }
     return {
-      message: `Usage reset. This burst window now resets at ${result.status.burstResetAt}.`,
+      message: `Usage reset. This burst window now resets at ${formatUtcDateTime(result.status.burstResetAt)}.`,
       tone: "success",
     };
   } catch (error) {

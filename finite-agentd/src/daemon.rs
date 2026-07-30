@@ -134,14 +134,13 @@ impl DaemonConfig {
             .or_else(|_| std::env::var("FINITE_CONFIG_WORKSPACE"))
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/data/workspace"));
-        let managed_skill_roots = [
-            "FINITE_CONFIG_MANAGED_SKILLS_DIR",
-            "FINITE_CONFIG_SHARED_MANAGED_SKILLS_DIR",
-        ]
-        .into_iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .map(PathBuf::from)
-        .collect();
+        let managed_skill_roots = configured_managed_skill_roots(
+            &agent_home,
+            [
+                std::env::var("FINITE_CONFIG_MANAGED_SKILLS_DIR").ok(),
+                std::env::var("FINITE_CONFIG_SHARED_MANAGED_SKILLS_DIR").ok(),
+            ],
+        );
         let bridge_addr = std::env::var("FINITE_AGENTD_BRIDGE_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:37633".to_owned());
         if !bridge_addr.starts_with("127.0.0.1:") && !bridge_addr.starts_with("localhost:") {
@@ -211,6 +210,24 @@ impl DaemonConfig {
     pub fn status_path(&self) -> PathBuf {
         self.state_dir().join("status.json")
     }
+}
+
+fn configured_managed_skill_roots(
+    agent_home: &Path,
+    configured: impl IntoIterator<Item = Option<String>>,
+) -> Vec<PathBuf> {
+    let mut roots = vec![agent_home.join("managed-skills/finite/current")];
+    for value in configured.into_iter().flatten() {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(value);
+        if !roots.contains(&path) {
+            roots.push(path);
+        }
+    }
+    roots
 }
 
 fn startup_specialization_bundle_from_values(
@@ -656,16 +673,15 @@ impl CommandExecutor {
             })
             .await?;
         self.bridge.acknowledge(&delivery).await?;
-        if request.command != CONTEXT_SEARCH_COMMAND {
-            if let Err(error) = self
+        if request.command != CONTEXT_SEARCH_COMMAND
+            && let Err(error) = self
                 .publish_status(&delivery.room_id, delivery.conversation_id.clone())
                 .await
-            {
-                eprintln!(
-                    "finite-agentd: runtime status publish will wait for the next command: {}",
-                    error.public_message()
-                );
-            }
+        {
+            eprintln!(
+                "finite-agentd: runtime status publish will wait for the next command: {}",
+                error.public_message()
+            );
         }
         Ok(())
     }
@@ -1206,6 +1222,22 @@ mod tests {
     use finitechat_proto::{RuntimeCommandCancelV1, RuntimeCommandPayloadKindV1};
 
     use super::*;
+
+    #[test]
+    fn runtime_image_environment_includes_the_seeded_managed_skill_root() {
+        let dockerfile = include_str!(
+            "../../finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
+        );
+        assert!(dockerfile.contains("ENV FINITECHAT_HOME=/data/agent"));
+        assert!(dockerfile.contains(r#"CMD ["/runtime/bin/finite-agentd", "serve"]"#));
+        assert!(!dockerfile.contains("ENV FINITE_CONFIG_MANAGED_SKILLS_DIR="));
+
+        let roots = configured_managed_skill_roots(Path::new("/data/agent"), [None, None]);
+        assert_eq!(
+            roots,
+            [PathBuf::from("/data/agent/managed-skills/finite/current")]
+        );
+    }
 
     #[test]
     fn startup_specialization_bundle_requires_an_explicit_pair() {

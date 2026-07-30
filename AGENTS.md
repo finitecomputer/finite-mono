@@ -10,6 +10,17 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
 
 ## Ground rules
 
+- **Don't Break Chat!** Chat availability and durable history are the primary
+  product promise. Changes to persisted chat state, protocols, Device identity,
+  Agent Runtime state, or deployment topology must trace the production
+  through-line, name every writer and reader, and prove the relevant
+  existing-state and mixed-version edges. An all-candidate test is not
+  compatibility proof. Prefer fewer authoritative paths; reject features whose
+  compatibility and recovery contracts cannot be made clear and affordable.
+- **Don't break new-user onboarding.** Distinguish account enrollment, Agent
+  admission, launch, identity readiness, and chat readiness, then prove the
+  end-to-end promise. Runner drain and capacity are product availability state,
+  not merely operator configuration.
 - **This repo is public.** Never commit a secret value, token, or key — not
   in code, config, tests, or docs. Secrets are documented by NAME and
   location only (see `infra/README.md`). If one slips in: rotate first, then
@@ -39,7 +50,6 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   their internal layout; their crates are root workspace members and their
   old sub-workspace `Cargo.toml`/`Cargo.lock` files stay deleted. New crates
   get added to the root members list.
-- Update `docs/monorepo-migration-log.md` when recording migration facts.
 
 ## Development Environment
 

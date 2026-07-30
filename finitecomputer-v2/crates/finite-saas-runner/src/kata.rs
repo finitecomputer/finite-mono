@@ -2679,14 +2679,14 @@ impl RuntimeLauncher for KataLauncher {
             launcher.verify_relocation_state(&plan, lease, relocation.v1())?;
         }
         let host_port = launcher.run_fresh(&plan, lease, options)?;
-        if let Some(relocation) = lease.request.relocation.as_ref() {
-            let observed_npub = launcher.wait_for_agent_npub(&plan, host_port)?;
-            if observed_npub != relocation.v1().expected_agent_npub {
-                let _ = launcher.remove_compute(&plan.container_name);
-                return Err(RunnerError::RuntimeLaunch(
-                    "cold relocation target exposed a different Agent Principal".to_string(),
-                ));
-            }
+        let observed_npub = launcher.wait_for_agent_npub(&plan, host_port)?;
+        if let Some(relocation) = lease.request.relocation.as_ref()
+            && observed_npub != relocation.v1().expected_agent_npub
+        {
+            let _ = launcher.remove_compute(&plan.container_name);
+            return Err(RunnerError::RuntimeLaunch(
+                "cold relocation target exposed a different Agent Principal".to_string(),
+            ));
         }
         let runtime_bootstrap_token = random_runtime_bootstrap_token();
         let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
@@ -3894,10 +3894,10 @@ mod tests {
         AgentRuntime, HostOwnedRuntimeFacts, RuntimeControlRequest, RuntimeControlRequestStatus,
     };
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn private_host_address_controls_binding_and_advertised_urls() {
@@ -3949,87 +3949,85 @@ mod tests {
 
         fn start_with_recovery(npub: &str, recovery: Option<TestRecoveryBehavior>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
             let port = listener.local_addr().unwrap().port();
             let stop = Arc::new(AtomicBool::new(false));
             let stop_thread = stop.clone();
+            let ready = Arc::new(Barrier::new(2));
+            let ready_thread = ready.clone();
             let contact_requests = Arc::new(AtomicUsize::new(0));
             let contact_requests_thread = contact_requests.clone();
             let health_requests = Arc::new(AtomicUsize::new(0));
             let health_requests_thread = health_requests.clone();
             let npub = npub.to_string();
             let thread = std::thread::spawn(move || {
-                while !stop_thread.load(Ordering::Relaxed) {
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            let mut request = [0_u8; 2048];
-                            let count = stream.read(&mut request).unwrap_or_default();
-                            let request = String::from_utf8_lossy(&request[..count]);
-                            let body = if request.contains(" /contact ") {
-                                contact_requests_thread.fetch_add(1, Ordering::Relaxed);
-                                if recovery.as_ref().is_some_and(|recovery| recovery.oversized) {
+                ready_thread.wait();
+                while let Ok((mut stream, _)) = listener.accept() {
+                    // Drop connects once to wake the blocking accept.
+                    if stop_thread.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let mut request = [0_u8; 2048];
+                    let count = stream.read(&mut request).unwrap_or_default();
+                    let request = String::from_utf8_lossy(&request[..count]);
+                    let body = if request.contains(" /contact ") {
+                        contact_requests_thread.fetch_add(1, Ordering::Relaxed);
+                        if recovery.as_ref().is_some_and(|recovery| recovery.oversized) {
+                            format!(
+                                r#"{{"padding":"{}"}}"#,
+                                "x".repeat(MAX_KATA_HTTP_RESPONSE_BYTES as usize + 1)
+                            )
+                        } else {
+                            format!(r#"{{"agent_npub":"{npub}"}}"#)
+                        }
+                    } else {
+                        health_requests_thread.fetch_add(1, Ordering::Relaxed);
+                        match recovery.as_ref() {
+                            Some(recovery) => {
+                                if recovery.reveal_on_health {
+                                    recovery.visible.store(true, Ordering::Relaxed);
+                                }
+                                if recovery.oversized {
                                     format!(
                                         r#"{{"padding":"{}"}}"#,
                                         "x".repeat(MAX_KATA_HTTP_RESPONSE_BYTES as usize + 1)
                                     )
-                                } else {
-                                    format!(r#"{{"agent_npub":"{npub}"}}"#)
-                                }
-                            } else {
-                                health_requests_thread.fetch_add(1, Ordering::Relaxed);
-                                match recovery.as_ref() {
-                                    Some(recovery) => {
-                                        if recovery.reveal_on_health {
-                                            recovery.visible.store(true, Ordering::Relaxed);
-                                        }
-                                        if recovery.oversized {
-                                            format!(
-                                                r#"{{"padding":"{}"}}"#,
-                                                "x".repeat(
-                                                    MAX_KATA_HTTP_RESPONSE_BYTES as usize + 1
-                                                )
-                                            )
-                                        } else if recovery.visible.load(Ordering::Relaxed) {
-                                            if recovery.accepted {
-                                                format!(
-                                                    r#"{{"ready":true,"agent_npub":"{npub}","startup":{{"schema_version":1,"report_kind":"finite_agent_startup","boot_mode":"recover_known_good","status":"completed","phase":"complete","ok":true,"operation_id_hash":"{}","identity":{{"npub":"{npub}"}}}}}}"#,
-                                                    recovery.operation_hash
-                                                )
-                                            } else {
-                                                format!(
-                                                    r#"{{"ready":false,"agent_npub":"{npub}","startup":{{"schema_version":1,"report_kind":"finite_agent_startup","boot_mode":"recover_known_good","status":"refused","phase":"blocked","ok":false,"operation_id_hash":"{}","identity":{{"npub":"{npub}"}}}}}}"#,
-                                                    recovery.operation_hash
-                                                )
-                                            }
-                                        } else {
-                                            r#"{"ready":true}"#.to_string()
-                                        }
+                                } else if recovery.visible.load(Ordering::Relaxed) {
+                                    if recovery.accepted {
+                                        format!(
+                                            r#"{{"ready":true,"agent_npub":"{npub}","startup":{{"schema_version":1,"report_kind":"finite_agent_startup","boot_mode":"recover_known_good","status":"completed","phase":"complete","ok":true,"operation_id_hash":"{}","identity":{{"npub":"{npub}"}}}}}}"#,
+                                            recovery.operation_hash
+                                        )
+                                    } else {
+                                        format!(
+                                            r#"{{"ready":false,"agent_npub":"{npub}","startup":{{"schema_version":1,"report_kind":"finite_agent_startup","boot_mode":"recover_known_good","status":"refused","phase":"blocked","ok":false,"operation_id_hash":"{}","identity":{{"npub":"{npub}"}}}}}}"#,
+                                            recovery.operation_hash
+                                        )
                                     }
-                                    None => r#"{"ready":true}"#.to_string(),
+                                } else {
+                                    r#"{"ready":true}"#.to_string()
                                 }
-                            };
-                            let refused = recovery.as_ref().is_some_and(|recovery| {
-                                recovery.visible.load(Ordering::Relaxed) && !recovery.accepted
-                            });
-                            let status = if refused {
-                                "503 Service Unavailable"
-                            } else {
-                                "200 OK"
-                            };
-                            let response = format!(
-                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                body.len(),
-                                body
-                            );
-                            let _ = stream.write_all(response.as_bytes());
+                            }
+                            None => r#"{"ready":true}"#.to_string(),
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(_) => break,
-                    }
+                    };
+                    let refused = recovery.as_ref().is_some_and(|recovery| {
+                        recovery.visible.load(Ordering::Relaxed) && !recovery.accepted
+                    });
+                    let status = if refused {
+                        "503 Service Unavailable"
+                    } else {
+                        "200 OK"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
                 }
             });
+            ready.wait();
             Self {
                 port,
                 stop,
@@ -4043,6 +4041,7 @@ mod tests {
     impl Drop for TestHttpServer {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }

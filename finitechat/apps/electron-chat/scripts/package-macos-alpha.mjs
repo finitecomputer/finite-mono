@@ -18,6 +18,7 @@ const contents = path.join(outputApp, "Contents");
 const resources = path.join(contents, "Resources");
 const packagedApp = path.join(resources, "app");
 const packageJson = JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8"));
+const signingIdentity = process.env.FINITECHAT_CODESIGN_IDENTITY?.trim();
 
 requireDirectory(electronApp, "Electron runtime");
 requireExecutable(daemonBinary, "finitechatd release binary");
@@ -45,6 +46,10 @@ fs.cpSync(path.join(appRoot, "electron"), path.join(packagedApp, "electron"), {
     return !source.endsWith(".test.cjs");
   },
 });
+fs.copyFileSync(
+  path.join(repoRoot, "finitecomputer-v2", "apps", "dashboard", "public", "finite-logo.svg"),
+  path.join(packagedApp, "electron", "finite-logo.svg")
+);
 fs.writeFileSync(
   path.join(packagedApp, "package.json"),
   `${JSON.stringify(
@@ -53,6 +58,7 @@ fs.writeFileSync(
       version: packageJson.version,
       private: true,
       main: "electron/main.cjs",
+      finitechatAutoUpdate: Boolean(signingIdentity),
     },
     null,
     2
@@ -86,7 +92,6 @@ info = replacePlistString(
 );
 fs.writeFileSync(infoPath, info);
 
-const signingIdentity = process.env.FINITECHAT_CODESIGN_IDENTITY?.trim();
 const appEntitlements = path.join(appRoot, "build", "entitlements.mac.plist");
 if (signingIdentity) {
   await signReleaseBundle(outputApp, packagedDaemon, signingIdentity);

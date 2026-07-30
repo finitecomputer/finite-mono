@@ -18,22 +18,9 @@ jobs:
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      FC_CORE_POSTGRES_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
 
       - name: Install Rust
         # Pinned to 1.93: 1.88's clippy trips uninlined_format_args on v2
@@ -55,7 +42,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test workspace
-        run: cargo test --workspace --locked
+        run: nix develop --command just test
 
   dashboard:
     name: Dashboard
@@ -90,9 +77,8 @@ jobs:
 
   electron-alpha:
     name: Electron production-dashboard alpha
-    needs:
-      - rust
-      - dashboard
+    # This job builds and tests its own Rust daemon on macOS, so it consumes
+    # no artifacts from the Rust workspace or Dashboard jobs.
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -195,6 +181,8 @@ jobs:
         run: nix develop --command just runtime-image-contract
       - name: lat1 existing-Runtime rollout contract
         run: nix develop --command just lat1-rollout-contract
+      - name: lat1 healthcheck activation contract
+        run: nix develop --command just lat1-healthcheck-contract
       - name: Stripe Price contract
         run: nix develop --command just stripe-price-contract
       - name: Hosted Recovery Set contract

@@ -67,20 +67,26 @@ import type {
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import {
   activeAtQuery,
+  chatReferencePayloads,
+  hasInlineReferenceAt,
   inlineReferenceToken,
   insertAtReference,
-  parseChatReferences,
+  messageChatReferences,
   rankLocalReferences,
   retainInlineReferences,
   runtimeReference,
-  serializeChatReferences,
   uploadedFileReferences,
   type ActiveAtQuery,
   type ChatReference,
 } from "@/lib/chat-references";
+import { electronDeviceLinkPresentation } from "@/lib/electron-chat-runtime";
 import { HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 import type { CoreRuntimeStatus } from "@/lib/core-client";
 import { runtimeCanPresentActivity } from "@/lib/runtime-presentation";
+import {
+  PENDING_CHAT_REFRESH_DELAY_MS,
+  pendingChatRefreshIsDue,
+} from "@/lib/hosted-web-chat-refresh";
 import {
   AUDIO_RECORDING_BITS_PER_SECOND,
   audioRecordingErrorMessage,
@@ -95,10 +101,13 @@ import {
   activityLeaseIsFresh,
   beginPendingChatTurn,
   attachmentSendError,
+  chatContentIsRenderable,
+  isAskForInputToolMessage,
   liveActivityLabel as sharedLiveActivityLabel,
   messageContent,
   pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
+  pendingTurnRecoveryIsFresh,
   reconcilePendingChatTurns,
   transcriptItems,
   type ChatSelection,
@@ -143,6 +152,7 @@ export function HostedWebChat({
     claimError,
     bindingRecoveryRequired,
     localDeviceRecoveryRequired,
+    deviceLinkStatus,
     selectionPending,
     streamConnected,
     ownerClaimed,
@@ -153,9 +163,11 @@ export function HostedWebChat({
     dispatch,
     dispatchQuiet,
     searchReferences,
+    refreshPendingChat,
     uploadAttachments,
     attachmentUrl,
   } = useHostedChat();
+  const deviceLinkPresentation = electronDeviceLinkPresentation(deviceLinkStatus);
   const [actionError, setActionError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [draft, setDraft] = useState(initialDraft ?? "");
@@ -200,6 +212,12 @@ export function HostedWebChat({
   const audioRecordingFailedRef = useRef(false);
   const audioRecordingMountedRef = useRef(true);
   const markedReadSeqRef = useRef(new Map<string, number>());
+  const pendingRefreshProgressRef = useRef<{
+    key: string;
+    observedAtMs: number;
+    observedSeq: number;
+    refreshedAtMs: number | null;
+  } | null>(null);
   const mobilePreview = useMediaQuery("(max-width: 980px)");
   useEffect(() => {
     if (!state || streamConnected) {
@@ -303,7 +321,7 @@ export function HostedWebChat({
   const historicalReferenceFingerprints = useMemo(() => {
     const fingerprints = new Map<string, string>();
     for (const message of messages) {
-      for (const reference of parseChatReferences(messageContent(message)).references) {
+      for (const reference of messageChatReferences(message)) {
         if (reference.fingerprint) {
           fingerprints.set(referenceIdentity(reference), reference.fingerprint);
         }
@@ -347,6 +365,10 @@ export function HostedWebChat({
     (turn) =>
       pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
       && pendingTurnMatchesSelection(turn, selectedChatSelection)
+  );
+  const latestVisibleMessageSeq = Math.max(
+    0,
+    ...messages.map((message) => message.seq)
   );
 
   useEffect(() => {
@@ -458,8 +480,7 @@ export function HostedWebChat({
     if (!state) return;
     setPendingAgentTurns((turns) => {
       const fresh = turns.filter(
-        (turn) =>
-          pendingTurnLeaseIsFresh(turn, streamConnected, leaseNowMs)
+        (turn) => pendingTurnRecoveryIsFresh(turn, leaseNowMs)
       );
       const pending = reconcilePendingChatTurns(
         fresh,
@@ -468,7 +489,59 @@ export function HostedWebChat({
       );
       return pending.length === turns.length ? turns : pending;
     });
-  }, [leaseNowMs, state, streamConnected]);
+  }, [leaseNowMs, state]);
+
+  useEffect(() => {
+    const turn = pendingAgentTurns.find((candidate) =>
+      pendingTurnMatchesSelection(candidate, selectedChatSelection)
+    );
+    if (!turn || !selectedRoom || !selectedTopic || !selectedChat) {
+      pendingRefreshProgressRef.current = null;
+      return;
+    }
+    const key = [
+      turn.room_id,
+      turn.topic_id ?? "",
+      turn.chat_id ?? "",
+      turn.started_at_ms,
+    ].join(":");
+    const progress = pendingRefreshProgressRef.current;
+    if (
+      !progress
+      || progress.key !== key
+      || latestVisibleMessageSeq > progress.observedSeq
+    ) {
+      pendingRefreshProgressRef.current = {
+        key,
+        observedAtMs: leaseNowMs,
+        observedSeq: latestVisibleMessageSeq,
+        refreshedAtMs: null,
+      };
+      return;
+    }
+    if (!pendingChatRefreshIsDue(
+      leaseNowMs,
+      progress.observedAtMs,
+      progress.refreshedAtMs,
+      PENDING_CHAT_REFRESH_DELAY_MS
+    )) return;
+    progress.refreshedAtMs = leaseNowMs;
+    void refreshPendingChat({
+      room_id: selectedRoom.room_id,
+      topic_id: selectedTopic.topic_id,
+      chat_id: selectedChat.chat_id,
+      after_seq: latestVisibleMessageSeq,
+    });
+  }, [
+    leaseNowMs,
+    latestVisibleMessageSeq,
+    pendingAgentTurns,
+    refreshPendingChat,
+    selectedChat,
+    selectedChatSelection,
+    selectedRoom,
+    selectedTopic,
+  ]);
 
   useEffect(() => {
     if (!selectedRoom) return;
@@ -593,7 +666,7 @@ export function HostedWebChat({
 
   async function send(event: FormEvent) {
     event.preventDefault();
-    const text = serializeChatReferences(draft, references).trim();
+    const text = draft.trim();
     if (
       (!text && attachments.length === 0)
       || !selectedRoom
@@ -626,12 +699,21 @@ export function HostedWebChat({
         if (selectedTopic) formData.set("topic_id", selectedTopic.topic_id);
         if (selectedChat) formData.set("chat_id", selectedChat.chat_id);
         formData.set("caption", text);
+        if (references.length > 0) {
+          formData.set("references", JSON.stringify(chatReferencePayloads(references)));
+        }
         for (const attachment of attachments) formData.append("files", attachment.file);
         next = await uploadAttachments(formData);
         const uploadError = attachmentSendError(next);
         if (uploadError) throw new Error(uploadError);
       } else {
-        next = await dispatch(messageAction(selectedRoom.room_id, text, selectedTopic, selectedChat));
+        next = await dispatch(messageAction(
+          selectedRoom.room_id,
+          text,
+          selectedTopic,
+          selectedChat,
+          references,
+        ));
       }
       setDraft("");
       setReferences([]);
@@ -714,13 +796,13 @@ export function HostedWebChat({
         return;
       }
     }
-    const inserted = insertAtReference(draft, atQuery, reference);
+    const inserted = insertAtReference(draft, atQuery, reference, references);
     setDraft(inserted.text);
     if (!reference.attachment) {
       setReferences((current) => (
         current.some((entry) => entry.id === reference.id)
           ? current
-          : [...current, reference]
+          : [...current, inserted.reference]
       ));
     }
     setAtQuery(null);
@@ -942,9 +1024,21 @@ export function HostedWebChat({
     ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
     : null;
   const latestTranscriptItem = transcript[transcript.length - 1];
-  const activeWorkReceiptId = activityLabel && latestTranscriptItem?.type === "work"
+  const waitingWorkReceiptId = latestTranscriptItem?.type === "work"
+    && isAskForInputToolMessage(
+      latestTranscriptItem.entries[latestTranscriptItem.entries.length - 1]!.message
+    )
     ? latestTranscriptItem.id
     : null;
+  const activeWorkReceiptId = activityLabel
+    && !waitingWorkReceiptId
+    && latestTranscriptItem?.type === "work"
+    ? latestTranscriptItem.id
+    : null;
+  const hasRenderableChatContent = chatContentIsRenderable(
+    transcript.length,
+    activityLabel
+  );
 
   return (
     <div className="finite-chat finite-chat--embedded">
@@ -1011,17 +1105,22 @@ export function HostedWebChat({
                   setShowLatest(!shouldFollowScrollRef.current);
                 }}
               >
-                {!state && !transportError ? <ChatLoading label="Opening your chat…" /> : null}
+                {!state && !transportError ? (
+                  <ChatLoading
+                    label={deviceLinkPresentation.label}
+                    detail={deviceLinkPresentation.detail}
+                  />
+                ) : null}
                 {state && !selectedRoom ? (
                   <EmptyChat title="Connecting to your agent" body="Your chat is getting ready." />
                 ) : null}
-                {selectedRoom && selectionPending && messages.length === 0 ? (
+                {selectedRoom && selectionPending && !hasRenderableChatContent ? (
                   <ChatLoading label="Opening chat…" />
                 ) : null}
-                {selectedRoom && !selectionPending && messages.length === 0 ? (
+                {selectedRoom && !selectionPending && !hasRenderableChatContent ? (
                   <EmptyChat title="What should we work on?" body="Start here, or make a new chat inside this topic." />
                 ) : null}
-                {messages.length > 0 ? (
+                {hasRenderableChatContent ? (
                   <div className="finite-chat__messages">
                     {selectedRoom?.can_load_older && messages[0] ? (
                       <button
@@ -1053,10 +1152,13 @@ export function HostedWebChat({
                           key={item.id}
                           entries={item.entries}
                           active={item.id === activeWorkReceiptId}
+                          waitingForUser={item.id === waitingWorkReceiptId}
                         />
                       )
                     )}
-                    {activityLabel ? <LiveActivity label={activityLabel} /> : null}
+                    {activityLabel && !waitingWorkReceiptId
+                      ? <LiveActivity label={activityLabel} />
+                      : null}
                   </div>
                 ) : null}
               </div>
@@ -1404,12 +1506,14 @@ function LiveActivity({ label }: { label: string }) {
 function WorkReceipt({
   entries,
   active,
+  waitingForUser,
 }: {
   entries: Array<{
     kind: "commentary" | "tool";
     message: HostedChatMessage;
   }>;
   active: boolean;
+  waitingForUser: boolean;
 }) {
   const toolEntries = entries.filter((entry) => entry.kind === "tool");
   const actionCount = toolEntries.reduce(
@@ -1421,10 +1525,16 @@ function WorkReceipt({
   const update = summarizeWorkUpdate(
     latestCommentary ? messageContent(latestCommentary.message) : ""
   );
-  const running = active || toolEntries.some((entry) => entry.message.status === "running");
-  const label = `${running ? "Working" : "Work complete"} · ${actionCount} ${pluralize("action", actionCount)}`;
+  const running = !waitingForUser
+    && (active || toolEntries.some((entry) => entry.message.status === "running"));
+  const label = waitingForUser
+    ? "Waiting for you"
+    : `${running ? "Working" : "Work complete"} · ${actionCount} ${pluralize("action", actionCount)}`;
   return (
-    <details className={`finite-chat__work-receipt ${running ? "is-active" : ""}`}>
+    <details
+      className={`finite-chat__work-receipt ${running ? "is-active" : ""}`}
+      open={waitingForUser || undefined}
+    >
       <summary>
         {running ? <Loader2Icon className="size-4 finite-chat__spin" /> : <CheckIcon className="size-4" />}
         <span
@@ -1433,7 +1543,15 @@ function WorkReceipt({
           aria-atomic="true"
         >
           <strong>{label}</strong>
-          <small>{update || (running ? "Using tools and reviewing results" : "Details available")}</small>
+          <small>
+            {update || (
+              waitingForUser
+                ? "Your answer is needed to continue"
+                : running
+                  ? "Using tools and reviewing results"
+                  : "Details available"
+            )}
+          </small>
         </span>
         <ChevronRightIcon className="size-4" />
       </summary>
@@ -1475,15 +1593,15 @@ function MessageRow({
 }) {
   const content = messageContent(message);
   if (message.sender_account_id === ownAccountId || (!ownAccountId && message.is_mine)) {
-    const parsed = parseChatReferences(content);
+    const references = messageChatReferences(message);
     return (
       <article className="finite-chat__message finite-chat__message--user">
         <div>
           <MessageAttachments attachmentUrl={attachmentUrl} message={message} compact />
-          {parsed.text ? (
+          {content ? (
             <InlineReferencedText
-              references={parsed.references}
-              text={parsed.text}
+              references={references}
+              text={content}
             />
           ) : null}
           <time className="finite-chat__message-time">{deliveryText(message) || message.display_timestamp}</time>
@@ -1520,7 +1638,9 @@ function inlineReferencedContent(
       const results: Array<{ start: number; end: number; reference: ChatReference }> = [];
       let start = text.indexOf(token);
       while (start >= 0) {
-        results.push({ start, end: start + token.length, reference });
+        if (hasInlineReferenceAt(text, start, token)) {
+          results.push({ start, end: start + token.length, reference });
+        }
         start = text.indexOf(token, start + token.length);
       }
       return results;
@@ -1747,8 +1867,14 @@ function EmptyChat({ body, title }: { body: string; title: string }) {
   );
 }
 
-function ChatLoading({ label }: { label: string }) {
-  return <div className="finite-chat__notice"><Loader2Icon className="finite-chat__spin" /><span>{label}</span></div>;
+function ChatLoading({ detail, label }: { detail?: string | null; label: string }) {
+  return (
+    <div className="finite-chat__notice">
+      <Loader2Icon className="finite-chat__spin" />
+      {detail ? <strong>{label}</strong> : <span>{label}</span>}
+      {detail ? <span>{detail}</span> : null}
+    </div>
+  );
 }
 
 function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite, sites }: { activeSite: PreviewSite; className: string; machineId: string; onClose: () => void; onSelectSite: (id: string) => void; sites: PreviewSite[] }) {
@@ -1825,7 +1951,24 @@ function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite,
   );
 }
 
-function messageAction(roomId: string, text: string, topic: HostedChatTopic | null, chat: HostedChatSummary | null): HostedChatAction {
+function messageAction(
+  roomId: string,
+  text: string,
+  topic: HostedChatTopic | null,
+  chat: HostedChatSummary | null,
+  references: ChatReference[],
+): HostedChatAction {
+  if (topic && chat && references.length > 0) {
+    return {
+      SendChatMessageWithReferences: {
+        room_id: roomId,
+        topic_id: topic.topic_id,
+        chat_id: chat.chat_id,
+        text,
+        references: chatReferencePayloads(references),
+      },
+    };
+  }
   if (topic && chat) return { SendChatMessage: { room_id: roomId, topic_id: topic.topic_id, chat_id: chat.chat_id, text } };
   if (topic) return { SendTopicMessage: { room_id: roomId, topic_id: topic.topic_id, text } };
   return { SendMessage: { room_id: roomId, text } };

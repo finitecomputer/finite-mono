@@ -25,7 +25,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -56,6 +56,7 @@ PROCESSING_ACTIVITY_TTL_MILLIS = 15 * 1000
 ADMISSION_RECHECK_SECS = 0.05
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
+FINITECHAT_HOME_CHANNEL_ENV = "FINITECHAT_HOME_CHANNEL"
 FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
 REQUESTER_CONTEXT_DIR = "requester-context-v1"
 REQUESTER_CONTEXT_TTL_SECS = 15 * 60
@@ -453,6 +454,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._service_ready_file: Path | None = None
         self._finitechat_cmd = _resolve_finitechat_command(str(extra.get("finitechat_bin") or ""))
         self._finitechat_lock = asyncio.Lock()
+        self._home_channel_hydrated = False
         self._delivered_event_keys: set[str] = set()
         self._delivered_event_order: list[str] = []
         self._typing_paused: set[str] = set()
@@ -1001,6 +1003,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
         conversation_id = _string_or_none(raw_event.get("conversation_id"))
         segment_id = _string_or_none(raw_event.get("segment_id"))
+        await self._hydrate_hermes_home_channel_if_needed()
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = await self._set_processing_activity(room_id, activity_metadata)
         try:
@@ -1012,6 +1015,38 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
             raise
+
+    async def _hydrate_hermes_home_channel_if_needed(self) -> None:
+        if self._home_channel_hydrated:
+            return
+        if _string_or_none(os.getenv(FINITECHAT_HOME_CHANNEL_ENV)):
+            self._home_channel_hydrated = True
+            return
+        if getattr(self.config, "home_channel", None) is not None:
+            self._home_channel_hydrated = True
+            return
+
+        result = await self._finitechat_json("home-channel-show", {}, timeout=5)
+        if not result.ok:
+            return
+        metadata = result.data.get("home_channel")
+        if not isinstance(metadata, dict):
+            return
+        room_id = _string_or_none(metadata.get("room_id"))
+        if room_id is None:
+            return
+
+        try:
+            _save_hermes_home_channel_env(room_id)
+        except Exception as exc:
+            logger.debug("[finitechat] Could not hydrate Hermes home channel: %s", exc)
+            return
+        self.config.home_channel = HomeChannel(
+            platform=_finite_platform(),
+            chat_id=room_id,
+            name="Finite Chat",
+        )
+        self._home_channel_hydrated = True
 
     def _should_defer_admission(self, event: MessageEvent, session_key: str) -> bool:
         if event.message_type != MessageType.TEXT or event.internal:
@@ -1979,6 +2014,12 @@ def _finite_private_control_request(path: str, method: str) -> dict[str, Any] | 
     return payload if isinstance(payload, dict) else None
 
 
+def _save_hermes_home_channel_env(room_id: str) -> None:
+    from hermes_cli.config import save_env_value
+
+    save_env_value(FINITECHAT_HOME_CHANNEL_ENV, room_id)
+
+
 def _finite_platform() -> Platform:
     try:
         return Platform(FINITE_PLATFORM_NAME)
@@ -2007,6 +2048,7 @@ def register(ctx) -> None:
         ),
         allowed_users_env="FINITECHAT_ALLOWED_USERS",
         allow_all_env="FINITECHAT_ALLOW_ALL_USERS",
+        cron_deliver_env_var=FINITECHAT_HOME_CHANNEL_ENV,
         max_message_length=FiniteChatAdapter.MAX_MESSAGE_LENGTH,
         allow_update_command=True,
         platform_hint=(

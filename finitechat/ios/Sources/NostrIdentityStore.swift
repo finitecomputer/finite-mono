@@ -1,33 +1,93 @@
 import Foundation
 import Security
 
+struct AppDeviceEnrollment: Codable, Equatable, Sendable {
+    let pairingSessionID: String
+    let targetDeviceID: String
+    let accountID: String
+    let enrollmentUserID: String
+    let enrollmentCapabilityHex: String
+
+    init(grant: NativeDeviceEnrollmentGrant) {
+        pairingSessionID = grant.pairingSessionId
+        targetDeviceID = grant.targetDeviceId
+        accountID = grant.accountId
+        enrollmentUserID = grant.enrollmentUserId
+        enrollmentCapabilityHex = grant.enrollmentCapabilityHex
+    }
+
+    var nativeGrant: NativeDeviceEnrollmentGrant {
+        NativeDeviceEnrollmentGrant(
+            pairingSessionId: pairingSessionID,
+            targetDeviceId: targetDeviceID,
+            accountId: accountID,
+            enrollmentUserId: enrollmentUserID,
+            enrollmentCapabilityHex: enrollmentCapabilityHex
+        )
+    }
+}
+
 struct AppNostrIdentity: Codable, Equatable, Sendable {
     let accountSecretHex: String
     let accountID: String
     let npub: String
-    let nsec: String
+    let pendingEnrollment: AppDeviceEnrollment?
 
-    init(material: NostrIdentityMaterial) {
+    init(
+        material: NostrIdentityMaterial,
+        pendingEnrollment: AppDeviceEnrollment? = nil
+    ) {
         accountSecretHex = material.accountSecretHex
         accountID = material.accountId
         npub = material.npub
-        nsec = material.nsec
+        self.pendingEnrollment = pendingEnrollment
+    }
+
+    func enrollmentCompleted() -> AppNostrIdentity {
+        AppNostrIdentity(
+            accountSecretHex: accountSecretHex,
+            accountID: accountID,
+            npub: npub,
+            pendingEnrollment: nil
+        )
+    }
+
+    private init(
+        accountSecretHex: String,
+        accountID: String,
+        npub: String,
+        pendingEnrollment: AppDeviceEnrollment?
+    ) {
+        self.accountSecretHex = accountSecretHex
+        self.accountID = accountID
+        self.npub = npub
+        self.pendingEnrollment = pendingEnrollment
     }
 }
 
 protocol AppNostrIdentityStoring: AnyObject {
     func load() -> AppNostrIdentity?
-    func save(_ identity: AppNostrIdentity)
+    func save(_ identity: AppNostrIdentity) throws
     func clear()
 }
 
+enum AppNostrIdentityStoreError: Error {
+    case encode
+    case keychain(OSStatus)
+    case verification
+}
+
 final class KeychainNostrIdentityStore: AppNostrIdentityStoring {
+    static let productionService = "computer.finite.finitechat.workos-linked-account"
+    static let localDevelopmentService = "computer.finite.finitechat.local-device-link-account"
+    static let primaryAccount = "primary"
+
     private let service: String
     private let account: String
 
     init(
-        service: String = "computer.finite.finitechat.nostr-identity",
-        account: String = "primary"
+        service: String = productionService,
+        account: String = primaryAccount
     ) {
         self.service = service
         self.account = account
@@ -48,16 +108,27 @@ final class KeychainNostrIdentityStore: AppNostrIdentityStoring {
         return try? JSONDecoder().decode(AppNostrIdentity.self, from: data)
     }
 
-    func save(_ identity: AppNostrIdentity) {
-        guard let data = try? JSONEncoder().encode(identity) else { return }
+    func save(_ identity: AppNostrIdentity) throws {
+        guard let data = try? JSONEncoder().encode(identity) else {
+            throw AppNostrIdentityStoreError.encode
+        }
         var query = baseQuery()
         let update: [String: Any] = [kSecValueData as String: data]
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        if status == errSecSuccess { return }
-
-        query[kSecValueData as String] = data
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(query as CFDictionary, nil)
+        if status != errSecSuccess {
+            guard status == errSecItemNotFound else {
+                throw AppNostrIdentityStoreError.keychain(status)
+            }
+            query[kSecValueData as String] = data
+            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            let addStatus = SecItemAdd(query as CFDictionary, nil)
+            guard addStatus == errSecSuccess else {
+                throw AppNostrIdentityStoreError.keychain(addStatus)
+            }
+        }
+        guard load() == identity else {
+            throw AppNostrIdentityStoreError.verification
+        }
     }
 
     func clear() {
@@ -84,7 +155,7 @@ final class MemoryNostrIdentityStore: AppNostrIdentityStoring {
         identity
     }
 
-    func save(_ identity: AppNostrIdentity) {
+    func save(_ identity: AppNostrIdentity) throws {
         self.identity = identity
     }
 

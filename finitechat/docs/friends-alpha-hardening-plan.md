@@ -1,5 +1,9 @@
 # Friends Alpha Hardening Plan
 
+> Historical multi-user plan. The current iOS product scope is governed by
+> `docs/adr/0013-ios-single-agent-client.md`; its former People, profile, and
+> scan work is not an iOS backlog.
+
 ## Problem Statement
 
 Finite Chat should become usable day to day by Paul and a small group of
@@ -22,8 +26,6 @@ shared blob substrate, and survive normal restart and multi-device scenarios.
 - Multi-user rooms with one directly invited agent are tested end to end.
 - Hermes home channel is treated as a Hermes routing preference, not a Finite
   Chat membership concept.
-- People/profile/avatar loading is instant from cache and stale-while-
-  revalidate, following the Pika shape with Rust-owned state.
 - Wake-only APNs push works on a physical iPhone: locked phone receives a wake,
   syncs, and shows the message after opening.
 - Finite Blob has a provider-neutral API with scoped capabilities and a path to
@@ -214,44 +216,12 @@ Commit checkpoint:
 
 - Commit group-room support tests separately from home-channel API.
 
-## Phase 4 - Pika-Style People, Profiles, And Avatars
+## Phase 4 - Superseded iOS Breadth
 
-Goal: make the People tab and profile UI instant and reliable.
-
-Work:
-
-- Move follow/contact/profile state fully into Rust runtime projection.
-- Remove Swift-owned relay profile fetching from the product path.
-- Persist followed contacts and profile metadata locally.
-- Hydrate People UI from cache immediately on launch.
-- Refresh in the background, stale-while-revalidate.
-- Cache avatars with Pika-style dedicated profile image storage:
-  bounded download size, timeout, max concurrency, tmp cleanup, atomic writes,
-  resize to display-safe JPEG, and `file://...?v=<mtime>` projection.
-- Keep profile avatar cache separate from encrypted chat/blob storage policy.
-- Add basic in-app profile editing where product semantics are already clear.
-
-Acceptance:
-
-- Already-fetched contacts render instantly while offline.
-- Cached avatars render instantly when available.
-- Empty or failed refresh does not wipe good cached contacts.
-- Updated names/photos appear after refresh without UI cache staleness.
-- Swift renders projected rows and does not fetch Nostr relays directly.
-
-Evaluation:
-
-- Rust restart tests for profile/contact/avatar cache.
-- Negative tests for empty refresh, unavailable network, stale profile, corrupt
-  avatar tmp file, oversized image, download timeout, and URL change.
-- iOS UI test proving People tab loads cached rows before refresh completes.
-- Manual comparison against Pika cache behavior where useful.
-
-Commit checkpoint:
-
-- Commit Rust cache model first.
-- Commit Swift projection migration second.
-- Commit avatar materialization and UI tests third.
+The former People/profile/scan phase was deleted by ADR 0013. iOS renders
+Rust-projected sender metadata only where the retained transcript needs it; it
+does not own contact discovery, relay policy, profile editing, or direct-chat
+creation.
 
 ## Phase 5 - Wake-Only Push Notifications
 

@@ -124,6 +124,7 @@ jobs:
         run: |
           test -x "$ELECTRON_APP_PATH/Contents/Resources/finitechatd"
           test ! -e "$ELECTRON_APP_PATH/Contents/Resources/app/dist"
+          test "$(node -p "require('./$ELECTRON_APP_PATH/Contents/Resources/app/package.json').finitechatAutoUpdate")" = true
           ! otool -L "$ELECTRON_APP_PATH/Contents/Resources/finitechatd" | grep -F '/nix/store/'
           "$ELECTRON_APP_PATH/Contents/Resources/finitechatd" --help >/dev/null
           codesign --verify --deep --strict --verbose=2 "$ELECTRON_APP_PATH"
@@ -197,6 +198,8 @@ jobs:
       - electron
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -214,18 +217,48 @@ jobs:
               --title "$tag" --generate-notes --latest=false
           fi
 
+      - name: Generate macOS update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="$(node -p "require('./finitechat/apps/electron-chat/package.json').version")"
+          release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets,publishedAt)"
+          asset_url="$(jq -er '.assets[] | select(.name == "finitechat-electron-macos-aarch64.zip") | .url' <<<"$release_json")"
+          published_at="$(jq -er '.publishedAt' <<<"$release_json")"
+          node finitechat/apps/electron-chat/scripts/generate-macos-update-manifest.mjs \
+            --version "$version" \
+            --asset-url "$asset_url" \
+            --published-at "$published_at" \
+            --output release-assets/finitechat-electron-macos-aarch64-releases.json
+          jq -e --arg version "$version" '
+            .currentRelease == $version and
+            (.releases | length == 1) and
+            (.releases[0].version == $version) and
+            (.releases[0].updateTo.version == $version)
+          ' release-assets/finitechat-electron-macos-aarch64-releases.json >/dev/null
+          gh release upload "$tag" \
+            release-assets/finitechat-electron-macos-aarch64-releases.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
       - name: Refresh finitechat-latest rolling alias
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           alias=finitechat-latest
+          manifest=release-assets/finitechat-electron-macos-aarch64-releases.json
           notes="Rolling alias for the newest finitechat release (currently ${GITHUB_REF_NAME}, commit ${GITHUB_SHA}). Installers download from releases/download/$alias/."
           if gh release view "$alias" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+            mapfile -t payload_assets < <(find release-assets -maxdepth 1 -type f ! -path "$manifest" -print | sort)
+            gh release upload "$alias" "${payload_assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$alias" "$manifest" --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "$alias" --repo "$GITHUB_REPOSITORY" --notes "$notes"
             # best-effort: move the alias tag to this commit for provenance
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$alias" -f sha="$GITHUB_SHA" -F force=true >/dev/null || true
           else
-            gh release create "$alias" release-assets/* --repo "$GITHUB_REPOSITORY" \
+            mapfile -t payload_assets < <(find release-assets -maxdepth 1 -type f ! -path "$manifest" -print | sort)
+            gh release create "$alias" "${payload_assets[@]}" --repo "$GITHUB_REPOSITORY" \
               --title "finitechat (latest)" --notes "$notes" --latest=false
+            gh release upload "$alias" "$manifest" --repo "$GITHUB_REPOSITORY"
           fi

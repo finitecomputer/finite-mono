@@ -10,6 +10,7 @@ coverage/
 !.env.example
 secrets/
 .local-state/
+/.state/
 *.log
 *.sqlite
 *.sqlite3

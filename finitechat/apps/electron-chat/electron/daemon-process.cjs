@@ -5,7 +5,11 @@ const path = require("node:path");
 
 const READY_LINE_LIMIT_BYTES = 4 * 1024;
 const STARTUP_DOCUMENT_LIMIT_BYTES = 2 * 1024;
-const DEFAULT_READY_TIMEOUT_MS = 10_000;
+// Reopening a fully hydrated local identity can legitimately spend tens of
+// seconds rebuilding its first projection before the daemon binds HTTP.
+// Pairing imports complete history by design, so startup must tolerate that
+// bounded cold path instead of turning a successful link into a restart loop.
+const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 const DEVICE_LINK_LINE_LIMIT_BYTES = 4 * 1024;
 
@@ -23,6 +27,8 @@ const DEVICE_LINK_FAILURE_MESSAGES = Object.freeze({
   FINITECHAT_DEVICE_LINK_EXPIRED: "This device link expired. Start a new link to try again.",
   FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED:
     "The approved device-link payload did not match this link. Start a new link to try again.",
+  FINITECHAT_DEVICE_LINK_INCOMPATIBLE_PAYLOAD:
+    "Finite is being updated. This desktop can link after the update finishes.",
   FINITECHAT_DEVICE_LINK_RESULT_PIPE:
     "This desktop could not securely receive the linked account. Start a new link to try again.",
 });
@@ -34,6 +40,10 @@ const DEVICE_LINK_BOOTSTRAP_FAILURE_CODES = new Map([
   ["device-link server returned an invalid response", "FINITECHAT_DEVICE_LINK_INVALID_RESPONSE"],
   ["device-link request expired", "FINITECHAT_DEVICE_LINK_EXPIRED"],
   ["device-link payload failed authentication", "FINITECHAT_DEVICE_LINK_PAYLOAD_REJECTED"],
+  [
+    "device-link source is not compatible with this app version",
+    "FINITECHAT_DEVICE_LINK_INCOMPATIBLE_PAYLOAD",
+  ],
   ["device-link result pipe failed", "FINITECHAT_DEVICE_LINK_RESULT_PIPE"],
 ]);
 
@@ -109,6 +119,19 @@ function writeJsonObject(filePath, value, fileSystem = fs) {
       throw error;
     }
   }
+}
+
+function removeDeprecatedDeviceLinkSetting({
+  settingsFile,
+  fileSystem = fs,
+}) {
+  const settings = readJsonObject(settingsFile, fileSystem);
+  if (!Object.prototype.hasOwnProperty.call(settings, "pendingDeviceLink")) {
+    return false;
+  }
+  delete settings.pendingDeviceLink;
+  writeJsonObject(settingsFile, settings, fileSystem);
+  return true;
 }
 
 /**
@@ -249,7 +272,12 @@ function archiveRevokedDeviceProfile({
   fileSystem.mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
   fileSystem.mkdirSync(backupDirectory, { recursive: false, mode: 0o700 });
   try {
-    writeJsonObject(backupSettingsFile, settings, fileSystem);
+    const archivedSettings = { ...settings };
+    // Pre-release builds briefly persisted a bearer enrollment capability in
+    // this plaintext file. It has no recovery value and must not be copied
+    // into a retained profile archive.
+    delete archivedSettings.pendingDeviceLink;
+    writeJsonObject(backupSettingsFile, archivedSettings, fileSystem);
     if (pathExists(daemonDataDirectory, fileSystem)) {
       fileSystem.renameSync(daemonDataDirectory, backupDaemonDirectory);
       movedDaemon = true;
@@ -296,10 +324,62 @@ function archiveRevokedDeviceProfile({
   }
 }
 
-class AccountSecretStore {
-  constructor({ secretPath, safeStorage, fileSystem = fs }) {
-    this.secretPath = secretPath;
-    this.provisionalPath = `${secretPath}.linking`;
+function parseDeviceIdentityEnvelope(value) {
+  if (
+    !value
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !==
+      "account_secret,expected_account_id,expected_device_id,pending_enrollment,version"
+    || value.version !== 1
+    || typeof value.account_secret !== "string"
+    || !/^[0-9a-fA-F]{64}$/u.test(value.account_secret)
+    || typeof value.expected_account_id !== "string"
+    || !/^[0-9a-f]{64}$/u.test(value.expected_account_id)
+    || !validDeviceId(value.expected_device_id)
+  ) {
+    throw new Error("Finite Chat stored identity is invalid");
+  }
+  const enrollment = value.pending_enrollment;
+  if (
+    enrollment !== null
+    && (
+      !enrollment
+      || typeof enrollment !== "object"
+      || Array.isArray(enrollment)
+      || Object.keys(enrollment).sort().join(",") !==
+        "enrollment_capability_hex,enrollment_user_id,pairing_session_id,target_device_id"
+      || typeof enrollment.pairing_session_id !== "string"
+      || !enrollment.pairing_session_id
+      || Buffer.byteLength(enrollment.pairing_session_id) > 256
+      || enrollment.pairing_session_id.trim() !== enrollment.pairing_session_id
+      || /[\p{Cc}\p{Cf}]/u.test(enrollment.pairing_session_id)
+      || !validDeviceId(enrollment.target_device_id)
+      || enrollment.target_device_id !== value.expected_device_id
+      || typeof enrollment.enrollment_user_id !== "string"
+      || !enrollment.enrollment_user_id
+      || Buffer.byteLength(enrollment.enrollment_user_id) > 512
+      || enrollment.enrollment_user_id.trim() !== enrollment.enrollment_user_id
+      || /[\p{Cc}\p{Cf}]/u.test(enrollment.enrollment_user_id)
+      || typeof enrollment.enrollment_capability_hex !== "string"
+      || !/^[0-9a-f]{64}$/u.test(enrollment.enrollment_capability_hex)
+    )
+  ) {
+    throw new Error("Finite Chat stored identity is invalid");
+  }
+  return {
+    version: 1,
+    account_secret: value.account_secret,
+    expected_account_id: value.expected_account_id,
+    expected_device_id: value.expected_device_id,
+    pending_enrollment: enrollment === null ? null : { ...enrollment },
+  };
+}
+
+class DeviceIdentityStore {
+  constructor({ identityPath, safeStorage, fileSystem = fs }) {
+    this.identityPath = identityPath;
+    this.provisionalPath = `${identityPath}.linking`;
     this.safeStorage = safeStorage;
     this.fileSystem = fileSystem;
   }
@@ -312,36 +392,64 @@ class AccountSecretStore {
   }
 
   read() {
+    return this.#readPath(this.identityPath);
+  }
+
+  #readPath(filePath) {
     if (!this.isAvailable()) {
       return null;
     }
     let encrypted;
     try {
-      encrypted = this.fileSystem.readFileSync(this.secretPath);
+      encrypted = this.fileSystem.readFileSync(filePath);
     } catch (error) {
       if (error?.code === "ENOENT") {
         return null;
       }
       throw error;
     }
-    const secret = this.safeStorage.decryptString(encrypted).trim();
-    return secret || null;
+    let decoded;
+    try {
+      decoded = JSON.parse(this.safeStorage.decryptString(encrypted));
+    } catch {
+      throw new Error("Finite Chat stored identity is invalid");
+    }
+    return parseDeviceIdentityEnvelope(decoded);
   }
 
-  writeProvisional(secret) {
+  #encrypt(identity) {
     if (!this.isAvailable()) {
       throw new Error("Secure storage is unavailable on this desktop session");
     }
-    const trimmed = String(secret ?? "").trim();
-    if (!trimmed) {
-      throw new Error("Account secret is empty");
-    }
-    this.fileSystem.mkdirSync(path.dirname(this.secretPath), { recursive: true });
-    this.fileSystem.writeFileSync(this.provisionalPath, this.safeStorage.encryptString(trimmed), { mode: 0o600 });
+    const normalized = parseDeviceIdentityEnvelope(identity);
+    return this.safeStorage.encryptString(JSON.stringify(normalized));
+  }
+
+  writeProvisional(identity) {
+    const encrypted = this.#encrypt(identity);
+    this.fileSystem.mkdirSync(path.dirname(this.identityPath), { recursive: true, mode: 0o700 });
+    this.fileSystem.writeFileSync(this.provisionalPath, encrypted, { mode: 0o600 });
+    // Never acknowledge storage which cannot be read back and validated.
+    this.#readPath(this.provisionalPath);
   }
 
   promoteProvisional() {
-    this.fileSystem.renameSync(this.provisionalPath, this.secretPath);
+    this.#readPath(this.provisionalPath);
+    this.fileSystem.renameSync(this.provisionalPath, this.identityPath);
+  }
+
+  write(identity) {
+    const encrypted = this.#encrypt(identity);
+    this.fileSystem.mkdirSync(path.dirname(this.identityPath), { recursive: true, mode: 0o700 });
+    const temporaryPath = `${this.identityPath}.${process.pid}.tmp`;
+    try {
+      this.fileSystem.writeFileSync(temporaryPath, encrypted, { mode: 0o600 });
+      this.#readPath(temporaryPath);
+      this.fileSystem.renameSync(temporaryPath, this.identityPath);
+    } catch (error) {
+      this.fileSystem.rmSync(temporaryPath, { force: true });
+      throw error;
+    }
   }
 
   discardProvisional() {
@@ -350,7 +458,7 @@ class AccountSecretStore {
 
   clear() {
     this.discardProvisional();
-    this.fileSystem.rmSync(this.secretPath, { force: true });
+    this.fileSystem.rmSync(this.identityPath, { force: true });
   }
 }
 
@@ -475,16 +583,16 @@ function parseDeviceLinkReadyRecord(line) {
     typeof record !== "object" ||
     Array.isArray(record) ||
     Object.keys(record).length !== 3 ||
-    record.event !== "link_ready" ||
-    typeof record.link_session_id !== "string" ||
-    !record.link_session_id ||
+    record.event !== "pairing_ready" ||
+    typeof record.pairing_session_id !== "string" ||
+    !record.pairing_session_id ||
     typeof record.target_device_id !== "string" ||
     !validDeviceId(record.target_device_id)
   ) {
     throw new Error("Finite Chat device link emitted an invalid status record");
   }
   return {
-    link_session_id: record.link_session_id,
+    pairing_session_id: record.pairing_session_id,
     target_device_id: record.target_device_id,
   };
 }
@@ -507,12 +615,25 @@ function parseDeviceLinkSecretRecord(line) {
     !record ||
     typeof record !== "object" ||
     Array.isArray(record) ||
+    Object.keys(record).sort().join(",") !==
+      "account_secret,enrollment_capability_hex,enrollment_user_id" ||
     typeof record.account_secret !== "string" ||
-    !/^[0-9a-fA-F]{64}$/.test(record.account_secret)
+    !/^[0-9a-fA-F]{64}$/.test(record.account_secret) ||
+    typeof record.enrollment_user_id !== "string" ||
+    !record.enrollment_user_id ||
+    Buffer.byteLength(record.enrollment_user_id) > 512 ||
+    record.enrollment_user_id.trim() !== record.enrollment_user_id ||
+    /[\u0000-\u001f\u007f]/u.test(record.enrollment_user_id) ||
+    typeof record.enrollment_capability_hex !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(record.enrollment_capability_hex)
   ) {
     throw new Error("Finite Chat device link emitted an invalid private result");
   }
-  return record.account_secret;
+  return {
+    accountSecret: record.account_secret,
+    enrollmentUserId: record.enrollment_user_id,
+    enrollmentCapabilityHex: record.enrollment_capability_hex,
+  };
 }
 
 class BoundedLineReader {
@@ -561,8 +682,7 @@ class DeviceLinkSupervisor {
     serverUrl,
     deviceId,
     cwd,
-    storeAccountSecret,
-    promoteAccountSecret,
+    storeIdentityEnvelope,
     stopTimeoutMs = DEFAULT_STOP_TIMEOUT_MS,
   }) {
     this.spawnProcess = spawnProcess;
@@ -570,21 +690,21 @@ class DeviceLinkSupervisor {
     this.serverUrl = serverUrl;
     this.deviceId = deviceId;
     this.cwd = cwd;
-    this.storeAccountSecret = storeAccountSecret;
-    this.promoteAccountSecret = promoteAccountSecret;
+    this.storeIdentityEnvelope = storeIdentityEnvelope;
     this.stopTimeoutMs = stopTimeoutMs;
     this.child = null;
     this.ready = null;
     this.cancelled = false;
     this.settled = false;
     this.sawLinked = false;
-    this.secretStored = false;
-    this.secretPromoted = false;
+    this.identityStored = false;
+    this.enrollmentGrant = null;
     this.childFailure = null;
     this.privateResultPromise = null;
     this.promotionPromise = null;
     this.readers = [];
     this.readyPromise = null;
+    this.durable = null;
     this.completion = null;
   }
 
@@ -604,10 +724,12 @@ class DeviceLinkSupervisor {
         "3",
         "--confirm-fd",
         "4",
+        "--descriptor-fd",
+        "5",
       ],
       {
         cwd: this.cwd,
-        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe"],
         windowsHide: true,
       }
     );
@@ -617,6 +739,8 @@ class DeviceLinkSupervisor {
     let rejectReady;
     let resolveCompletion;
     let rejectCompletion;
+    let resolveDurable;
+    let rejectDurable;
     this.readyPromise = new Promise((resolve, reject) => {
       resolveReady = resolve;
       rejectReady = reject;
@@ -625,13 +749,20 @@ class DeviceLinkSupervisor {
       resolveCompletion = resolve;
       rejectCompletion = reject;
     });
+    this.durable = new Promise((resolve, reject) => {
+      resolveDurable = resolve;
+      rejectDurable = reject;
+    });
     // Main attaches a completion handler after awaiting readiness. Keep a fast
     // startup failure from becoming a process-level unhandled rejection.
     this.completion.catch(() => {});
+    this.durable.catch(() => {});
     this.resolveReady = resolveReady;
     this.rejectReady = rejectReady;
     this.resolveCompletion = resolveCompletion;
     this.rejectCompletion = rejectCompletion;
+    this.resolveDurable = resolveDurable;
+    this.rejectDurable = rejectDurable;
 
     const fail = (error) => this.#fail(error);
     this.readers.push(
@@ -684,16 +815,28 @@ class DeviceLinkSupervisor {
       this.#fail(new Error("Finite Chat device link emitted an invalid status record"));
       return;
     }
-    if (record?.event !== "linked" || !this.secretStored) {
+    if (record?.event !== "linked" || !this.identityStored) {
       this.#fail(new Error("Finite Chat device link emitted an invalid status transition"));
       return;
     }
     this.sawLinked = true;
-    this.promotionPromise = this.#promotePrivateResult();
+  }
+
+  acceptSourceDescriptor(descriptor) {
+    if (
+      !this.child
+      || !this.ready
+      || this.identityStored
+      || !descriptor
+      || typeof descriptor !== "object"
+    ) {
+      throw new Error("Finite Chat pairing descriptor arrived out of order");
+    }
+    this.child.stdio[5].end(`${JSON.stringify(descriptor)}\n`);
   }
 
   async #onPrivateLine(line) {
-    if (!this.ready || this.privateResultPromise || this.secretStored || this.settled || this.cancelled) {
+    if (!this.ready || this.privateResultPromise || this.identityStored || this.settled || this.cancelled) {
       this.#fail(new Error("Finite Chat device link emitted an invalid private transition"));
       return;
     }
@@ -702,11 +845,21 @@ class DeviceLinkSupervisor {
   }
 
   async #storePrivateResult(line) {
-    let accountSecret;
+    let privateResult;
     try {
-      accountSecret = parseDeviceLinkSecretRecord(line);
-      await this.storeAccountSecret(accountSecret);
-      this.secretStored = true;
+      privateResult = parseDeviceLinkSecretRecord(line);
+      this.enrollmentGrant = {
+        pairing_session_id: this.ready.pairing_session_id,
+        target_device_id: this.ready.target_device_id,
+        enrollment_user_id: privateResult.enrollmentUserId,
+        enrollment_capability_hex: privateResult.enrollmentCapabilityHex,
+      };
+      await this.storeIdentityEnvelope(
+        privateResult.accountSecret,
+        this.enrollmentGrant
+      );
+      this.identityStored = true;
+      this.resolveDurable(this.enrollmentGrant);
       if (this.cancelled || this.settled || !this.child) {
         return;
       }
@@ -714,16 +867,7 @@ class DeviceLinkSupervisor {
     } catch {
       this.#fail(new Error("Finite Chat could not securely store the linked account"));
     } finally {
-      accountSecret = null;
-    }
-  }
-
-  async #promotePrivateResult() {
-    try {
-      await this.promoteAccountSecret();
-      this.secretPromoted = true;
-    } catch {
-      this.#fail(new Error("Finite Chat could not commit the linked account"));
+      privateResult = null;
     }
   }
 
@@ -745,11 +889,19 @@ class DeviceLinkSupervisor {
       if (!this.ready) {
         this.rejectReady(error);
       }
+      if (!this.identityStored) {
+        this.rejectDurable(error);
+      }
       this.rejectCompletion(error);
       return;
     }
-    if (code === 0 && this.sawLinked && this.secretStored && this.secretPromoted) {
-      this.resolveCompletion();
+    if (
+      code === 0
+      && this.sawLinked
+      && this.identityStored
+      && this.enrollmentGrant
+    ) {
+      this.resolveCompletion(this.enrollmentGrant);
       return;
     }
     const error =
@@ -757,6 +909,9 @@ class DeviceLinkSupervisor {
       new Error(`Finite Chat device link stopped before completion (${code ?? signal ?? "unknown"})`);
     if (!this.ready) {
       this.rejectReady(error);
+    }
+    if (!this.identityStored) {
+      this.rejectDurable(error);
     }
     this.rejectCompletion(error);
   }
@@ -769,6 +924,9 @@ class DeviceLinkSupervisor {
     this.#closeReaders();
     if (!this.ready) {
       this.rejectReady(error);
+    }
+    if (!this.identityStored) {
+      this.rejectDurable(error);
     }
     this.rejectCompletion(error);
     const child = this.child;
@@ -1097,7 +1255,8 @@ class DaemonSupervisor {
 }
 
 module.exports = {
-  AccountSecretStore,
+  DEFAULT_READY_TIMEOUT_MS,
+  DeviceIdentityStore,
   DaemonUpdateRelay,
   DaemonSupervisor,
   DeviceLinkSupervisor,
@@ -1110,7 +1269,9 @@ module.exports = {
   parseReadyRecord,
   parseDeviceLinkReadyRecord,
   parseDeviceLinkSecretRecord,
+  parseDeviceIdentityEnvelope,
   parseDeviceLinkBootstrapError,
+  removeDeprecatedDeviceLinkSetting,
   resolveDaemonBinary,
   startDaemonRuntime,
   startupDocument,

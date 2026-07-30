@@ -96,7 +96,9 @@ tar = "0.4"
 uniffi = "0.31"
 ureq = { version = "2.10", features = ["json"] }
 walkdir = "2"
+workos = "=3.0.0"
 zip = { version = "4.6.1", default-features = false }
+zeroize = { version = "1.8", features = ["derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
