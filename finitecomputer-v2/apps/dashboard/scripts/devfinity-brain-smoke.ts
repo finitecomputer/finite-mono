@@ -90,21 +90,10 @@ async function main() {
     const directBrainTarget = (targetBrainId || action === "assert-org-first")
       ? `?brainId=${encodeURIComponent(targetBrainId || expectedText)}`
       : "";
-    await page.goto(
+    const brain = await loadBrainProductClient(
+      page,
       `${dashboardUrl}/machines/${encodeURIComponent(machineId)}/brain${directBrainTarget}`,
-      {
-        waitUntil: "domcontentloaded",
-        timeout: 60_000,
-      },
     );
-    const brainFrame = page.locator('iframe[title$=" Brain"]');
-    await brainFrame.waitFor({ state: "visible", timeout: 60_000 });
-    assert.match(
-      (await brainFrame.getAttribute("sandbox")) || "",
-      /(?:^|\s)allow-modals(?:\s|$)/u,
-      "Hosted Brain frame must permit its bounded Product Client dialogs",
-    );
-    const brain = page.frameLocator('iframe[title$=" Brain"]');
 
     if (action === "bootstrap") {
       await waitForBrainClient(brain, page);
@@ -381,6 +370,51 @@ async function waitForBrainClient(brain: FrameLocator, page: Page) {
     });
 }
 
+async function loadBrainProductClient(page: Page, url: string): Promise<FrameLocator> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const configLoaded = page
+      .waitForResponse(
+        (response) => {
+          try {
+            return new URL(response.url()).pathname === "/client/config.json"
+              && response.ok();
+          } catch {
+            return false;
+          }
+        },
+        { timeout: 20_000 },
+      )
+      .then(() => true, () => false);
+    try {
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 60_000,
+      });
+      const brainFrame = page.locator('iframe[title$=" Brain"]');
+      await brainFrame.waitFor({ state: "visible", timeout: 60_000 });
+      assert.match(
+        (await brainFrame.getAttribute("sandbox")) || "",
+        /(?:^|\s)allow-modals(?:\s|$)/u,
+        "Hosted Brain frame must permit its bounded Product Client dialogs",
+      );
+      const brain = page.frameLocator('iframe[title$=" Brain"]');
+      await waitForBrainClient(brain, page);
+      if (!(await configLoaded)) {
+        throw new Error("Product Client config request did not succeed");
+      }
+      return brain;
+    } catch (error) {
+      lastError = error;
+      await configLoaded;
+      if (attempt < 3) await page.goto("about:blank");
+    }
+  }
+  throw new Error(
+    `Brain Product Client config did not load after a dependency restart: ${String(lastError)}`,
+  );
+}
+
 async function createPersonalBrain(brain: FrameLocator, agentEmail: string) {
   await openManageBrains(brain);
   const create = brain.locator("#manageCreatePersonalBrainButton");
@@ -460,7 +494,13 @@ async function createOrganizationBrain(
     name,
     "Organization Brain name changed while configuring its Agent",
   );
-  await brain.locator("#manageCreateOrganizationBrainButton").click();
+  const create = brain.locator("#manageCreateOrganizationBrainButton");
+  await assertEventually(
+    async () => create.isEnabled(),
+    30_000,
+    async () => "Organization Brain Create action did not become ready",
+  );
+  await create.click();
   await assertEventually(
     async () => {
       const buttons = brain.locator("#manageBrainsList .brain-switch-button");
