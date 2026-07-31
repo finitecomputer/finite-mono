@@ -4,7 +4,7 @@ Companion to `docs/identity-rollout-reconciled-plan.md`. Things Paul needs to
 test, provide, or eyeball — locally or after deploy — in the order they'll
 come up. Check items off as they happen.
 
-## Needed from Paul before local validation
+## Needed from Paul before hosted Sites validation
 
 - [ ] `WORKOS_STAGING_API_KEY` and `WORKOS_STAGING_CLIENT_ID` values, placed in
       repo-root `.env.local` (never committed). See `docs/local-integration-harness.md`.
@@ -55,13 +55,20 @@ come up. Check items off as they happen.
 - [ ] Waffle Prime (older agent, previously repaired binding) can edit its
       sites through the new path.
 
-## Phase 3 — Chat repair, local then canary
+## Phase 3 — Chat repair, local PR evidence
 
-- [ ] Two concurrent chats with a delayed response: visible chat never jumps.
-- [ ] Manually collapse a running tool rollup: it stays collapsed across
+- [x] Two concurrent chats with a delayed response: visible chat never jumps
+      (PR #356; retain as regression coverage).
+- [x] Manually collapse a running tool rollup: it stays collapsed across
       snapshots, timers, and completion.
+- [ ] Record how pinned Hermes Telegram and Discord adapters consume
+      clarification plus adjacent working/typing/thinking/status callbacks.
 - [ ] Hermes clarification question: renders fully, answer resumes the exact
-      originating turn, survives an adapter restart.
-- [ ] Forced compaction: scoped "Summarizing earlier context…" appears in the
-      affected chat only, clears on resume.
-- [ ] Reload / restart mid-turn: no lost messages or pending turns.
+      originating turn, and cannot be answered from another active chat.
+- [ ] Clarification uses Hermes pending state and ordinary Chat messages; no
+      new core Chat protocol type or emoji/prose classifier.
+- [ ] Inspect whether pinned Hermes exposes semantic compaction start/finish
+      to adapters. If not, record it in the parking lot and move on.
+- [ ] Reload / adapter reconnect mid-turn: no lost messages or wrong-chat
+      admission.
+- [ ] Paul explicitly authorizes any merge, canary, or rollout separately.

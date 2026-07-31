@@ -1,19 +1,35 @@
 # Identity Rollout: Reconciled Plan
 
-Status: **AWAITING GO/NO-GO — NOT PRODUCTION MUTATION AUTHORITY**
+Status: **CHAT AMENDMENT AWAITING REVIEW — NOT PRODUCTION MUTATION AUTHORITY**
 
 Owner: Paul
 Driver: Kimi session (post-camp reconciliation)
 Opened: 2026-07-30
 
-This plan reconciles two prior planning documents with the post-camp grilling
-session and supersedes them where they conflict:
+This plan reconciles two prior planning documents from the
+`agent-camp-followup` worktree with the post-camp grilling session and
+supersedes them where they conflict:
 
-- `docs/chat-concurrency-presentation-repair-plan.md` (agent-camp-followup worktree)
-- `docs/identity-service-product-boundaries-plan.md` (agent-camp-followup worktree)
+- `chat-concurrency-presentation-repair-plan.md`
+- `identity-service-product-boundaries-plan.md`
 
 Scope discipline: everything below traces to a decision Paul explicitly made in
 the reconciliation Q&A. Deferred items are listed as deferred, not scheduled.
+
+## Current state after rollback (2026-07-31)
+
+- PRs #336, #337, and #172 are merged. PR #172 is not deployed by this run;
+  Brain navigation remains disabled.
+- PR #355 (tool disclosure ownership) and #356 (background updates do not
+  navigate) are merged and remain the accepted Chat baseline.
+- PR #357 was reverted by #361, #358 was closed, and Sites PRs #359/#360 were
+  reverted by #362. Current `origin/main` is the known-good base.
+- Chat clarification is the active implementation stream. Sites proceeds in a
+  separate stream using the unchanged Sites phases in this plan.
+- Reverted worktrees are evidence only. New work starts from current
+  `origin/main`; product code is not cherry-picked from them.
+- Preparing a PR does not authorize merging or deploying it. Both require a
+  separate explicit instruction from Paul.
 
 ## Locked decisions (Paul, 2026-07-30)
 
@@ -36,10 +52,10 @@ the reconciliation Q&A. Deferred items are listed as deferred, not scheduled.
    PERSISTENT — no single-use UX. Once shared, shared.
 8. Production quirks (below) must be documented durably enough to survive the
    whole journey.
-9. Accept typed protocol events (Clarification*, Compaction*) and test
-   locally. The rushed chat fixes and the unmerged sites clarify-admission
-   worktree are informational only — do NOT deploy them. Idiomatic fixes only:
-   logic out of the UI, env vars, and special domain knowledge.
+9. Clarification and compaction are Hermes lifecycle concepts, not Finite Chat
+   core protocol concepts. Consume real Hermes state at the adapter boundary;
+   do not add `Clarification*`/`Compaction*` Chat types or infer them from
+   emoji/prose. Reverted work is informational only.
 10. Worktrees for all work. We take over PR #172's finish line with full
     authority; comment reasoning on changes; stop and ask Paul to ask Austin
     if a change diverges from his identity DESIGN rather than hardening it.
@@ -51,8 +67,10 @@ the reconciliation Q&A. Deferred items are listed as deferred, not scheduled.
 
 ## Design principles
 
-1. **npub is the only durable authorization identity.** Mailbox addresses and
-   NIP-05 names are resolution and proof inputs, verified at each use.
+1. **Every authenticated action is signed by an npub; durable authorization is
+   product-owned.** Sites may durably authorize several npubs under one
+   verified mailbox principal. Chat addresses, and Brain encrypts to, exact
+   npubs. Mailbox addresses and NIP-05 names are proof/resolution inputs.
 2. **Mailbox proof is sufficient authority** to append a new npub to a Sites
    keyset (and eventually revoke). A registered npub then authenticates by
    signing. (Paul's rule; the self-authorization-via-connected-Gmail concern
@@ -149,17 +167,33 @@ dashboard + CLIs + agent image (skills).
 
 ### Phase 3 — Chat concurrency and presentation repair (parallel stream)
 
-Follow `chat-concurrency-presentation-repair-plan.md` phases 1–5 and its PR
-slicing, with these amendments:
+PRs #355 and #356 completed the navigation and disclosure slices. Do not
+redesign them; keep their tests as regression coverage.
 
-- Nothing merges until 172 is merged and nav-disabled is re-asserted.
-- The `rust-quality-audit` worktree clarify-admission code is INFORMATIONAL
-  ONLY (decision 9); Phase 4 first establishes whether ANY admission bypass
-  exists on main, then builds the typed lifecycle idiomatically.
-- Typed events are additive; old clients must ignore them safely (mixed-
-  version test required).
-- The event journal is dev/test diagnostics first; production use is bounded,
-  redacted, and explicitly enabled.
+**Clarification PR:**
+
+- First inspect pinned Hermes and its Telegram and Discord adapters to see how
+  they consume clarification, working, typing, thinking, and status callbacks.
+  Working/typing/thinking are context, not additional deliverables.
+- Reproduce open-ended and choice clarification through the real Hermes
+  pending-question mechanism, Finite durable inbox, and two concurrent Chats.
+- Hermes owns pending clarification state. The question and answer remain
+  ordinary Chat messages; the Finite adapter owns exact route correlation.
+- Ambiguous routes fail visibly and never fall back to Home or the active Chat.
+- Remove or bypass existing emoji/prose inference where it interferes; do not
+  replace it with another classifier or add a core Chat protocol type.
+- Test locally in a real browser, then open the PR. Do not merge it.
+
+**Compaction check, then parking-lot rule:**
+
+- Inspect the pinned Hermes adapter API for a clean semantic compaction
+  start/finish signal. Telegram and Discord must be reviewed, but they are not
+  assumed to implement a compaction UX.
+- If that signal is directly available, a separate bounded PR may project it
+  through existing generic, exact-route, expiring Chat activity.
+- If observing it requires marker/prose matching, a Hermes fork/upgrade, or a
+  new Finite Chat protocol concept, move compaction UI to the parking lot and
+  continue. Recheck when Hermes 0.19 or 0.20 is considered.
 
 ### Phase 4 — One deploy train
 
@@ -208,6 +242,8 @@ slicing, with these amendments:
 
 - Sites list UI; JIT open-in-new-tab polish beyond the durable-session
   primitive; Chat `@`-mention NIP-05 autocomplete.
+- Compaction UI when pinned Hermes lacks a clean semantic adapter hook; revisit
+  against Hermes 0.19/0.20 instead of adding local inference.
 - Full Identity Contract typed-resolution rewrite + shared client libraries;
   static-gate machinery; capability matrix.
 - Host-parity (lat1/lat3 anti-drift) infra project.
@@ -216,9 +252,11 @@ slicing, with these amendments:
 
 ## Escalation points — stop and ask Paul before
 
+- Merging or closing any implementation PR.
 - Any change to PR #172 that diverges from Austin's identity DESIGN (Paul
   relays to Austin).
 - Any production mutation, deploy, rollback, or canary.
+- Upgrading or forking Hermes as part of the Chat clarification work.
 - Introducing any new REQUIRED env var (design principle 3 violation).
 - Emailing users beyond the two approved flows (first-publication record,
   Request Access approval).
