@@ -175,6 +175,15 @@ pub struct SiteStatusUpdate {
     pub changed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSiteNotification {
+    pub idempotency_key: String,
+    pub site_id: String,
+    pub kind: String,
+    pub email: String,
+    pub site_name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectVisibilityUpdate {
     pub project_id: String,
@@ -2308,6 +2317,26 @@ impl Store {
         outputs: &[ProjectOutputApply],
         now: u64,
     ) -> Result<ProjectInitStoreOutcome, StoreError> {
+        self.init_project_with_owner(
+            owner_pubkey,
+            requesting_user_pubkey,
+            None,
+            slug,
+            outputs,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn init_project_with_owner(
+        &mut self,
+        owner_pubkey: &str,
+        requesting_user_pubkey: Option<&str>,
+        owner_email: Option<&str>,
+        slug: &str,
+        outputs: &[ProjectOutputApply],
+        now: u64,
+    ) -> Result<ProjectInitStoreOutcome, StoreError> {
         assert!(owner_pubkey.len() == 64);
         assert!(!slug.is_empty());
         let tx = self.conn.transaction()?;
@@ -2327,6 +2356,19 @@ impl Store {
             )?),
             None => None,
         };
+        let publisher_email_principal_id = owner_email
+            .map(|email| {
+                tx.query_row(
+                    "SELECT id FROM sites_email_principals WHERE email = ?1",
+                    params![email],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or(StoreError::CorruptState(
+                    "verified Sites owner mailbox principal missing",
+                ))
+            })
+            .transpose()?;
 
         let existing_project = tx
             .query_row(
@@ -2368,8 +2410,28 @@ impl Store {
                     return Err(StoreError::Conflict("project slug already exists"));
                 }
                 tx.execute(
-                    "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
-                    params![now, project.id],
+                    "UPDATE projects
+                     SET publisher_email_principal_id =
+                           COALESCE(publisher_email_principal_id, ?1),
+                         updated_at = ?2
+                     WHERE id = ?3
+                       AND (?1 IS NULL OR publisher_email_principal_id IS NULL
+                            OR publisher_email_principal_id = ?1)",
+                    params![publisher_email_principal_id, now, project.id],
+                )?;
+                if tx.changes() != 1 {
+                    return Err(StoreError::Conflict(
+                        "project mailbox owner cannot change during init",
+                    ));
+                }
+                tx.execute(
+                    "UPDATE sites
+                     SET publisher_email_principal_id =
+                           COALESCE(publisher_email_principal_id, ?1)
+                     WHERE id IN (
+                       SELECT site_id FROM project_outputs WHERE project_id = ?2
+                     )",
+                    params![publisher_email_principal_id, project.id],
                 )?;
                 (project, false)
             }
@@ -2378,9 +2440,16 @@ impl Store {
                 tx.execute(
                     "INSERT INTO projects
                         (id, slug, owner_principal_id, visibility,
+                         publisher_email_principal_id,
                          originating_publisher_principal_id, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, 'private', ?3, ?4, ?4)",
-                    params![project_id, slug, actor_principal_id, now],
+                     VALUES (?1, ?2, ?3, 'private', ?4, ?3, ?5, ?5)",
+                    params![
+                        project_id,
+                        slug,
+                        actor_principal_id,
+                        publisher_email_principal_id,
+                        now
+                    ],
                 )?;
                 (
                     ProjectRecord {
@@ -2555,6 +2624,13 @@ impl Store {
                         params![record.site_id, owner_pubkey, now],
                     )?;
                 }
+            }
+            if let Some(email) = owner_email {
+                tx.execute(
+                    "INSERT OR IGNORE INTO shares (site_id, email, created_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![record.site_id, email, now],
+                )?;
             }
             applied_outputs.push(AppliedProjectOutput { record, created });
         }
@@ -3406,6 +3482,24 @@ impl Store {
             params![publish_id],
             |row| row.get(0),
         )?;
+        if version_number == 1 {
+            let idempotency_key = format!("sites:first-publication:{site_id}");
+            let ready_at = start_command.is_none().then_some(now);
+            tx.execute(
+                "INSERT OR IGNORE INTO site_notification_outbox
+                    (idempotency_key, site_id, kind, email, site_name,
+                     ready_at, delivered_at, created_at)
+                 SELECT ?1, s.id, 'first_publication', sep.email, nc.name,
+                        ?2, NULL, ?3
+                 FROM sites s
+                 JOIN sites_email_principals sep
+                   ON sep.id = s.publisher_email_principal_id
+                 JOIN name_claims nc
+                   ON nc.site_id = s.id AND nc.status = 'active'
+                 WHERE s.id = ?4",
+                params![idempotency_key, ready_at, now, site_id],
+            )?;
+        }
         if start_command.is_some() {
             tx.execute(
                 "UPDATE sites SET kind = 'app' WHERE id = ?1",
@@ -3471,6 +3565,61 @@ impl Store {
             path_count: path_count as u32,
             total_bytes: total_bytes as u64,
         })
+    }
+
+    pub fn mark_first_publication_notification_ready(
+        &mut self,
+        site_id: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE site_notification_outbox
+             SET ready_at = COALESCE(ready_at, ?1)
+             WHERE site_id = ?2 AND kind = 'first_publication' AND delivered_at IS NULL",
+            params![now, site_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn pending_site_notifications(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<PendingSiteNotification>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT idempotency_key, site_id, kind, email, site_name
+             FROM site_notification_outbox
+             WHERE ready_at IS NOT NULL AND delivered_at IS NULL
+             ORDER BY created_at, idempotency_key
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], |row| {
+            Ok(PendingSiteNotification {
+                idempotency_key: row.get(0)?,
+                site_id: row.get(1)?,
+                kind: row.get(2)?,
+                email: row.get(3)?,
+                site_name: row.get(4)?,
+            })
+        })?;
+        let mut notifications = Vec::new();
+        for row in rows {
+            notifications.push(row?);
+        }
+        Ok(notifications)
+    }
+
+    pub fn mark_site_notification_delivered(
+        &mut self,
+        idempotency_key: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE site_notification_outbox
+             SET delivered_at = COALESCE(delivered_at, ?1)
+             WHERE idempotency_key = ?2 AND ready_at IS NOT NULL",
+            params![now, idempotency_key],
+        )?;
+        Ok(())
     }
 
     pub fn version_file(
@@ -3576,6 +3725,138 @@ impl Store {
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    pub fn is_email_authorized_publisher(
+        &self,
+        site_id: &str,
+        email: &str,
+    ) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1
+                 FROM sites s
+                 JOIN sites_email_principals sep
+                   ON sep.id = s.publisher_email_principal_id
+                 WHERE s.id = ?1 AND sep.email = ?2",
+                params![site_id, email],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    pub fn publisher_email_for_site(&self, site_id: &str) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT sep.email
+                 FROM sites s
+                 JOIN sites_email_principals sep
+                   ON sep.id = s.publisher_email_principal_id
+                 WHERE s.id = ?1",
+                params![site_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn create_site_access_request(
+        &mut self,
+        request_id: &str,
+        site_id: &str,
+        email: &str,
+        approval_token_hash: &str,
+        now: u64,
+        expires_at: u64,
+    ) -> Result<String, StoreError> {
+        assert!(approval_token_hash.len() == 64);
+        assert!(expires_at > now);
+        let changed = self.conn.execute(
+            "INSERT INTO site_access_requests
+                (id, site_id, email, approval_token_hash, status, requested_at, expires_at, approved_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, NULL)
+             ON CONFLICT(site_id, email) DO UPDATE SET
+               id = excluded.id,
+               approval_token_hash = excluded.approval_token_hash,
+               status = 'pending',
+               requested_at = excluded.requested_at,
+               expires_at = excluded.expires_at,
+               approved_at = NULL
+             WHERE (site_access_requests.status = 'pending'
+                    AND site_access_requests.expires_at < excluded.requested_at)
+                OR site_access_requests.status = 'approved'",
+            params![
+                request_id,
+                site_id,
+                email,
+                approval_token_hash,
+                now,
+                expires_at
+            ],
+        )?;
+        debug_assert!(changed <= 1);
+        self.conn
+            .query_row(
+                "SELECT id FROM site_access_requests WHERE site_id = ?1 AND email = ?2",
+                params![site_id, email],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn approve_site_access_request(
+        &mut self,
+        approval_token_hash: &str,
+        expected_site_id: &str,
+        now: u64,
+    ) -> Result<(String, String), StoreError> {
+        let tx = self.conn.transaction()?;
+        let request: Option<(String, String)> = tx
+            .query_row(
+                "SELECT site_id, email
+                 FROM site_access_requests
+                 WHERE approval_token_hash = ?1
+                   AND site_id = ?2
+                   AND status = 'pending'
+                   AND expires_at >= ?3",
+                params![approval_token_hash, expected_site_id, now],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (site_id, email) = request.ok_or(StoreError::NotFound("site access request"))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO shares (site_id, email, created_at) VALUES (?1, ?2, ?3)",
+            params![site_id, email, now],
+        )?;
+        tx.execute(
+            "UPDATE site_access_requests
+             SET status = 'approved', approved_at = ?1
+             WHERE approval_token_hash = ?2 AND status = 'pending'",
+            params![now, approval_token_hash],
+        )?;
+        tx.commit()?;
+        Ok((site_id, email))
+    }
+
+    pub fn pending_site_access_request(
+        &self,
+        approval_token_hash: &str,
+        now: u64,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT site_id, email
+                 FROM site_access_requests
+                 WHERE approval_token_hash = ?1
+                   AND status = 'pending'
+                   AND expires_at >= ?2",
+                params![approval_token_hash, now],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     pub fn add_native_share(
@@ -3741,6 +4022,30 @@ impl Store {
         pubkey: &str,
         now: u64,
     ) -> Result<SitesAuthorizedKeyRecord, StoreError> {
+        self.register_sites_authorized_key_with_proof(email, pubkey, "mailbox_challenge", now)
+    }
+
+    pub fn register_hosted_requester_key(
+        &mut self,
+        email: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<SitesAuthorizedKeyRecord, StoreError> {
+        self.register_sites_authorized_key_with_proof(
+            email,
+            pubkey,
+            "hosted_requester_assertion",
+            now,
+        )
+    }
+
+    fn register_sites_authorized_key_with_proof(
+        &mut self,
+        email: &str,
+        pubkey: &str,
+        proof_kind: &str,
+        now: u64,
+    ) -> Result<SitesAuthorizedKeyRecord, StoreError> {
         assert!(!email.is_empty());
         assert!(pubkey.len() == 64);
         let tx = self.conn.transaction()?;
@@ -3787,13 +4092,19 @@ impl Store {
             "INSERT INTO sites_authorized_keys
                 (id, email_principal_id, native_principal_id, proof_kind,
                  verified_at, revoked_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'mailbox_challenge', ?4, NULL, ?4, ?4)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?5, ?5)
              ON CONFLICT(email_principal_id, native_principal_id) DO UPDATE SET
-                proof_kind = 'mailbox_challenge',
+                proof_kind = excluded.proof_kind,
                 verified_at = excluded.verified_at,
                 revoked_at = NULL,
                 updated_at = excluded.updated_at",
-            params![key_id, email_principal_id, native_principal_id, now],
+            params![
+                key_id,
+                email_principal_id,
+                native_principal_id,
+                proof_kind,
+                now
+            ],
         )?;
         Self::clear_email_needs_proof_repairs(&tx, email)?;
         tx.commit()?;
@@ -3802,7 +4113,7 @@ impl Store {
             email_principal_id,
             native_principal_id,
             pubkey: pubkey.to_string(),
-            proof_kind: "mailbox_challenge".to_string(),
+            proof_kind: proof_kind.to_string(),
             verified_at: now,
             revoked_at: None,
         })
@@ -3919,6 +4230,78 @@ impl Store {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    pub fn active_sites_emails_for_key(&self, pubkey: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sep.email
+             FROM sites_authorized_keys sak
+             JOIN sites_email_principals sep ON sep.id = sak.email_principal_id
+             JOIN principals p ON p.id = sak.native_principal_id
+             WHERE p.pubkey = ?1 AND sak.revoked_at IS NULL
+             ORDER BY sep.email",
+        )?;
+        let rows = stmt.query_map(params![pubkey], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn create_hosted_requester_assertion(
+        &mut self,
+        assertion_hash: &str,
+        email: &str,
+        requester_pubkey: &str,
+        agent_pubkey: &str,
+        expires_at: u64,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "DELETE FROM hosted_requester_assertions WHERE expires_at < ?1",
+            params![now],
+        )?;
+        self.conn.execute(
+            "INSERT INTO hosted_requester_assertions
+                (id, assertion_hash, email, requester_pubkey, agent_pubkey,
+                 expires_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                ids::new_id(ids::HOSTED_REQUESTER_ASSERTION_ID_PREFIX),
+                assertion_hash,
+                email,
+                requester_pubkey,
+                agent_pubkey,
+                expires_at,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn hosted_requester_assertion_matches(
+        &self,
+        assertion_hash: &str,
+        email: &str,
+        requester_pubkey: &str,
+        agent_pubkey: &str,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        let matched: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM hosted_requester_assertions
+                 WHERE assertion_hash = ?1
+                   AND email = ?2
+                   AND requester_pubkey = ?3
+                   AND agent_pubkey = ?4
+                   AND expires_at >= ?5",
+                params![assertion_hash, email, requester_pubkey, agent_pubkey, now],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(matched.is_some())
     }
 
     pub fn reconcile_sites_identity(

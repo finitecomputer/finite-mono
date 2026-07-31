@@ -26,9 +26,11 @@ import {
   hostedDeviceUpdates,
   HostedDeviceRequestError,
   type HostedChatAction,
+  type HostedRequesterContext,
   type HostedChatState,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
+import { sitesUpstreamOrigin } from "@/lib/site-preview";
 
 const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
@@ -37,6 +39,7 @@ const AGENT_BINDING_AUTHORIZATION_REQUIRED =
 const AGENT_BINDING_RECOVERY_REQUIRED =
   `canonical Agent conversation requires recovery: ${AGENT_BINDING_AUTHORIZATION_REQUIRED}`;
 const MAX_DEVICE_ID_BYTES = 128;
+const HOSTED_REQUESTER_ASSERTION_TIMEOUT_MS = 5_000;
 
 export const MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES = 4 * 1024;
 
@@ -250,7 +253,71 @@ export async function dispatchHostedWebChatAction(machineId: string, payload: un
       ...target,
     });
   }
-  return hostedDeviceAction(context.config, context.account, action);
+  const requester = isTextSendAction(action)
+    ? await createHostedRequesterContext(context)
+    : undefined;
+  return hostedDeviceAction(context.config, context.account, action, requester);
+}
+
+function isTextSendAction(action: HostedChatAction) {
+  return (
+    "SendMessage" in action ||
+    "SendTopicMessage" in action ||
+    "SendChatMessage" in action
+  );
+}
+
+export async function createHostedRequesterContext(
+  context: Pick<
+    Awaited<ReturnType<typeof hostedWebChatContext>>,
+    "config" | "account"
+  >
+): Promise<HostedRequesterContext | undefined> {
+  const email = context.account.email;
+  const upstream = sitesUpstreamOrigin();
+  const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
+  if (!email || !context.account.emailVerified || !upstream || !serviceToken) {
+    return undefined;
+  }
+  try {
+    const state = await hostedDeviceState(context.config, context.account);
+    const agentNpub = state.hosted_agent_binding?.agent_npub;
+    if (!agentNpub) return undefined;
+    const response = await fetch(
+      `${upstream}/internal/v1/hosted-requester-assertions`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${serviceToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          email,
+          requester_npub: state.identity.account_id,
+          agent_npub: agentNpub,
+        }),
+        cache: "no-store",
+        signal: AbortSignal.timeout(HOSTED_REQUESTER_ASSERTION_TIMEOUT_MS),
+      }
+    );
+    if (!response.ok) return undefined;
+    const payload = (await response.json()) as {
+      email?: unknown;
+      assertion?: unknown;
+    };
+    if (
+      payload.email !== email ||
+      typeof payload.assertion !== "string" ||
+      !payload.assertion
+    ) {
+      return undefined;
+    }
+    return { email, sitesAssertion: payload.assertion };
+  } catch {
+    // Chat stays available if Sites is down. Project Init will return the
+    // structured requester_email_required response and the skill can ask.
+    return undefined;
+  }
 }
 
 export function isCanonicalNewChatTarget(

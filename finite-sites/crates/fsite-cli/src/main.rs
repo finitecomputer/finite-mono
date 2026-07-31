@@ -231,7 +231,7 @@ fn project_help() -> &'static str {
 }
 
 fn project_init_help() -> &'static str {
-    "usage: fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. During an authenticated Finite Chat turn, fsite automatically creates that human's explicit revocable Native Principal Share atomically with every declared output; never infer identity from message text. Standalone agents may use --requesting-user-npub explicitly, and recovery output preserves the exact explicit replay argument. If an explicit value disagrees with an active authenticated Finite Chat sender, init fails closed. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
+    "usage: fsite project init --config finite.toml [--owner-email MAILBOX] [--requesting-user-npub NPUB] [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. During an authenticated Finite Chat turn, fsite uses the verified requester mailbox automatically and creates that human's explicit revocable Native Principal Share atomically with every declared output; never infer identity from message text. Standalone agents may use --owner-email after registering their npub in that mailbox's Sites keyset and may use --requesting-user-npub explicitly. If no unambiguous verified owner mailbox is available, the server returns requester_email_required so the agent can ask the human. A [project]-only config creates a source-only repository with no served output yet. Declared outputs reserve their routing names; init does not deploy bytes. Replay is safe when existing outputs match, and adding missing outputs to the same Project is allowed. To publish an output, commit finite.toml plus the selected output path and push the Deploy Branch."
 }
 
 fn project_grant_help() -> &'static str {
@@ -680,6 +680,7 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
     let mut config_path: Option<PathBuf> = None;
     let mut dry_run = false;
     let mut requesting_user_npub: Option<String> = None;
+    let mut owner_email: Option<String> = None;
     let mut output_json = false;
     let mut index: usize = 0;
     // Bounded by argv length.
@@ -707,6 +708,19 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
                 }
                 index += 2;
             }
+            "--owner-email" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    CliError::Usage("--owner-email needs a mailbox address".to_string())
+                })?;
+                let mailbox = MailboxAddress::parse(value, "--owner-email")?;
+                reject_managed_agent_email(&mailbox)?;
+                if owner_email.replace(mailbox.into_string()).is_some() {
+                    return Err(CliError::Usage(
+                        "--owner-email may be supplied only once".to_string(),
+                    ));
+                }
+                index += 2;
+            }
             "--output" => {
                 let value = args
                     .get(index + 1)
@@ -726,20 +740,27 @@ fn project_init(args: &[String]) -> Result<(), CliError> {
     let config_path =
         config_path.ok_or_else(|| CliError::Usage(project_init_help().to_string()))?;
     let config = read_project_config_file(&config_path)?;
-    let requesting_user_npub = if requester_context::environment_can_infer() {
+    let resolved_requester = if requester_context::environment_can_infer() {
         let finite_paths = keys::identity_paths()?;
         let finite_root = finite_paths
             .root()
             .parent()
             .ok_or_else(|| CliError::Key("identity root has no parent directory".to_string()))?;
-        requester_context::resolve(requesting_user_npub, finite_root).map_err(CliError::Usage)?
+        requester_context::resolve_with_owner(requesting_user_npub, owner_email, finite_root)
+            .map_err(CliError::Usage)?
     } else {
-        requesting_user_npub
+        requester_context::ResolvedRequesterContext {
+            requesting_user_npub,
+            owner_email,
+            hosted_requester_assertion: None,
+        }
     };
     let request = ProjectInitRequest {
         config,
         dry_run,
-        requesting_user_npub,
+        requesting_user_npub: resolved_requester.requesting_user_npub,
+        owner_email: resolved_requester.owner_email,
+        hosted_requester_assertion: resolved_requester.hosted_requester_assertion,
     };
     request
         .config
@@ -832,6 +853,9 @@ fn project_init_recovery_error(
             "\n\nNo Project Init state changed. After service health has recovered, retry exactly once:\n  fsite project init --config {}{} --output json",
             config_path.display(), requesting_user_arg
         )),
+        Some("requester_email_required") => message.push_str(
+            "\n\nAsk the human which deliverable mailbox should own this Site, then run `fsite auth sites-key request MAILBOX` followed by `fsite auth sites-key add MAILBOX TOKEN`. Retry Project Init with `--owner-email MAILBOX`. Do not use a Managed Agent NIP-05 as the mailbox.",
+        ),
         _ => {}
     }
 

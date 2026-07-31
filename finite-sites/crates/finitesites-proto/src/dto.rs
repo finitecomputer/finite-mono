@@ -176,6 +176,30 @@ pub struct ProjectInitRequest {
     /// revocable Native Principal viewer Share on every Project Output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requesting_user_npub: Option<String>,
+    /// Mailbox that owns the Sites Project. The server accepts it only when
+    /// the signing npub is already in that mailbox's Sites keyset or a
+    /// short-lived Hosted Requester Assertion proves this exact chat request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_requester_assertion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostedRequesterAssertionRequest {
+    pub email: String,
+    pub requester_npub: String,
+    pub agent_npub: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostedRequesterAssertionResponse {
+    pub email: String,
+    pub requester_npub: String,
+    pub agent_npub: String,
+    pub assertion: String,
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +231,8 @@ pub struct ProjectInitResponse {
     pub outputs: Vec<ProjectOutputSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requesting_user_npub: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

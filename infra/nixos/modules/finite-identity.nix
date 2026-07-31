@@ -15,6 +15,7 @@ let
   serviceName = "finite-identity";
   loopbackAuthority = "http://127.0.0.1:8790";
   operatorEnvironmentFile = "/etc/finite/identity-operator.env";
+  sitesNotificationEnvironmentFile = "/etc/finite/identity-sites-notification.env";
 in
 {
   systemd.services.${serviceName} = {
@@ -46,6 +47,7 @@ in
       # read here by systemd without copying its value into the Nix store.
       EnvironmentFile = [
         operatorEnvironmentFile
+        sitesNotificationEnvironmentFile
         "/etc/finite-saas/sites.env"
       ];
 
@@ -136,6 +138,7 @@ in
     requires = [ "${serviceName}.service" ];
     after = [ "${serviceName}.service" ];
     environment.FINITE_IDENTITY_AUTHORITY = loopbackAuthority;
+    serviceConfig.EnvironmentFile = lib.mkAfter [ sitesNotificationEnvironmentFile ];
   };
 
   assertions = [
@@ -171,6 +174,12 @@ in
       assertion =
         !(builtins.elem operatorEnvironmentFile config.systemd.services.finite-saas-sites.serviceConfig.EnvironmentFile);
       message = "Sites must not receive the Identity Authority operator credential";
+    }
+    {
+      assertion =
+        builtins.elem sitesNotificationEnvironmentFile config.systemd.services.${serviceName}.serviceConfig.EnvironmentFile
+        && builtins.elem sitesNotificationEnvironmentFile config.systemd.services.finite-saas-sites.serviceConfig.EnvironmentFile;
+      message = "Identity and Sites must share only the narrow Sites notification credential";
     }
   ];
 }

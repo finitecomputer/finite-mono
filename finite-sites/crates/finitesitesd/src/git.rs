@@ -554,6 +554,9 @@ fn reconcile_ref_event(
                     // can retry; the Version row is already durable.
                     apps.deploy(deploy, &bundle_path, now)
                         .map_err(|error| format!("app deploy failed: {error}"))?;
+                    engine
+                        .mark_first_publication_notification_ready(&deploy.site_id, now)
+                        .map_err(|error| error.to_string())?;
                 }
                 last_deployed = Some((output_record.id.clone(), outcome.version_id));
             }

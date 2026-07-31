@@ -18,6 +18,8 @@ pub const HERMES_METADATA_CONVERSATION_ID: &str = "conversation_id";
 pub const HERMES_METADATA_ATTACHMENTS: &str = "attachments";
 pub const HERMES_METADATA_KIND: &str = "_finitechat_kind";
 pub const HERMES_METADATA_STATUS: &str = "_finitechat_status";
+pub const HERMES_METADATA_REQUESTER_EMAIL: &str = "_finite_requester_email";
+pub const HERMES_METADATA_SITES_REQUESTER_ASSERTION: &str = "_finite_sites_requester_assertion";
 pub const MAX_HERMES_POLL_EVENTS: u32 = 32;
 pub const MAX_HERMES_TEXT_BYTES: u32 = 64 * 1024;
 pub const MAX_HERMES_ATTACHMENTS: u32 = 16;
@@ -177,6 +179,10 @@ pub struct HermesPollEventV1 {
     pub attachments: Vec<HermesAttachmentV1>,
     pub reply_to_message_id: Option<MessageId>,
     pub reply_to_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sites_requester_assertion: Option<String>,
     pub auto_skill: Option<String>,
     pub channel_prompt: Option<String>,
     #[serde(default)]
@@ -404,6 +410,8 @@ impl HermesPollEventV1 {
             attachments: Vec::new(),
             reply_to_message_id: None,
             reply_to_text: None,
+            requester_email: None,
+            sites_requester_assertion: None,
             auto_skill: None,
             channel_prompt: None,
             internal: false,
@@ -449,6 +457,16 @@ impl HermesPollEventV1 {
             "hermes.poll_event.reply_to_text",
             self.reply_to_text.as_deref(),
             MAX_HERMES_REPLY_TEXT_BYTES,
+        )?;
+        validate_optional_string(
+            "hermes.poll_event.requester_email",
+            self.requester_email.as_deref(),
+            320,
+        )?;
+        validate_optional_string(
+            "hermes.poll_event.sites_requester_assertion",
+            self.sites_requester_assertion.as_deref(),
+            512,
         )?;
         validate_optional_string(
             "hermes.poll_event.auto_skill",
@@ -873,6 +891,7 @@ impl HermesMessagePayloadV1 {
         for attachment in &self.attachments {
             attachment.validate_limits()?;
         }
+        validate_requester_metadata(&self.metadata)?;
         Ok(())
     }
 
@@ -889,6 +908,16 @@ impl HermesMessagePayloadV1 {
     ) -> HermesPollEventV1 {
         let room_id = room_id.into();
         let sender_account_id = sender_account_id.into();
+        let requester_email = self
+            .metadata
+            .get(HERMES_METADATA_REQUESTER_EMAIL)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let sites_requester_assertion = self
+            .metadata
+            .get(HERMES_METADATA_SITES_REQUESTER_ASSERTION)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
         let message_type = self
             .attachments
             .first()
@@ -918,11 +947,41 @@ impl HermesMessagePayloadV1 {
             attachments: self.attachments,
             reply_to_message_id: self.reply_to_message_id,
             reply_to_text: None,
+            requester_email,
+            sites_requester_assertion,
             auto_skill: None,
             channel_prompt: None,
             internal: false,
         }
     }
+}
+
+fn validate_requester_metadata(
+    metadata: &BTreeMap<String, Value>,
+) -> Result<(), HermesBridgeError> {
+    for (key, field, max_bytes) in [
+        (
+            HERMES_METADATA_REQUESTER_EMAIL,
+            "hermes.payload.requester_email",
+            320,
+        ),
+        (
+            HERMES_METADATA_SITES_REQUESTER_ASSERTION,
+            "hermes.payload.sites_requester_assertion",
+            512,
+        ),
+    ] {
+        let Some(value) = metadata.get(key) else {
+            continue;
+        };
+        let value = value
+            .as_str()
+            .ok_or_else(|| HermesBridgeError::MetadataString {
+                field: key.to_owned(),
+            })?;
+        validate_string_bytes(field, value, max_bytes)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1142,6 +1201,38 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_requester_metadata_reaches_poll_event_additively() {
+        let mut payload = HermesMessagePayloadV1 {
+            payload_type: HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            conversation_id: Some("topic-build".to_owned()),
+            segment_id: Some("chat-1".to_owned()),
+            text: "publish it".to_owned(),
+            kind: HermesSendKindV1::Message,
+            status: HermesMessageStatusV1::Complete,
+            edit_of: None,
+            attachments: Vec::new(),
+            reply_to_message_id: None,
+            sender_name: None,
+            metadata: BTreeMap::new(),
+        };
+        payload.metadata.insert(
+            HERMES_METADATA_REQUESTER_EMAIL.to_owned(),
+            Value::String("paul@finite.vip".to_owned()),
+        );
+        payload.metadata.insert(
+            HERMES_METADATA_SITES_REQUESTER_ASSERTION.to_owned(),
+            Value::String("assertion-1".to_owned()),
+        );
+        payload.validate_limits().unwrap();
+        let event = payload.into_poll_event("room-agent-1", 1, "message-1", "aa", "hosted-web");
+        assert_eq!(event.requester_email.as_deref(), Some("paul@finite.vip"));
+        assert_eq!(
+            event.sites_requester_assertion.as_deref(),
+            Some("assertion-1")
+        );
+    }
+
+    #[test]
     fn bounded_invalid_attachment_matrix_is_rejected() {
         let mut missing_ref = sample_attachment();
         missing_ref.path = None;
@@ -1179,6 +1270,8 @@ mod tests {
             attachments: vec![sample_attachment()],
             reply_to_message_id: Some("message-6".to_string()),
             reply_to_text: Some("previous".to_string()),
+            requester_email: None,
+            sites_requester_assertion: None,
             auto_skill: Some("coding".to_string()),
             channel_prompt: Some("project context".to_string()),
             internal: false,

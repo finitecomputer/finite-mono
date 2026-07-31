@@ -59,6 +59,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const WORKOS_USER_HEADER: &str = "x-finite-workos-user-id";
+pub const REQUESTER_EMAIL_HEADER: &str = "x-finite-requester-email";
+pub const SITES_REQUESTER_ASSERTION_HEADER: &str = "x-finite-sites-requester-assertion";
 const CREATED_BY: &str = concat!("finitechat-hosted-device/", env!("CARGO_PKG_VERSION"));
 const DEFAULT_UPDATE_TIMEOUT_MILLIS: u64 = 30_000;
 const MAX_USER_ID_BYTES: usize = 512;
@@ -3470,10 +3472,16 @@ async fn dispatch_action(
     Json(action): Json<AppAction>,
 ) -> Result<Json<AppState>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
+    let requester_context = requester_context_from_headers(&headers)?;
     let runtime = state.runtime_for(&user_id)?;
-    let next = tokio::task::spawn_blocking(move || runtime.dispatch_and_wait(action))
-        .await
-        .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
+    let next = tokio::task::spawn_blocking(move || match requester_context {
+        Some((email, assertion)) => {
+            runtime.dispatch_and_wait_with_requester_context(action, email, assertion)
+        }
+        None => runtime.dispatch_and_wait(action),
+    })
+    .await
+    .map_err(|error| HostedDeviceError::Task(error.to_string()))??;
     Ok(Json(redacted_state(next)))
 }
 
@@ -4053,6 +4061,39 @@ fn authorized_user(
         return Err(HostedDeviceError::InvalidUser);
     }
     Ok(user_id.to_owned())
+}
+
+fn requester_context_from_headers(
+    headers: &HeaderMap,
+) -> Result<Option<(String, String)>, HostedDeviceError> {
+    let email = headers
+        .get(REQUESTER_EMAIL_HEADER)
+        .map(|value| value.to_str())
+        .transpose()
+        .map_err(|_| HostedDeviceError::InvalidUser)?;
+    let assertion = headers
+        .get(SITES_REQUESTER_ASSERTION_HEADER)
+        .map(|value| value.to_str())
+        .transpose()
+        .map_err(|_| HostedDeviceError::InvalidUser)?;
+    match (email, assertion) {
+        (None, None) => Ok(None),
+        (Some(email), Some(assertion)) => {
+            let email = email.trim();
+            let assertion = assertion.trim();
+            if email.is_empty()
+                || email.len() > 320
+                || assertion.is_empty()
+                || assertion.len() > 512
+                || email.chars().any(char::is_control)
+                || assertion.chars().any(char::is_control)
+            {
+                return Err(HostedDeviceError::InvalidUser);
+            }
+            Ok(Some((email.to_owned(), assertion.to_owned())))
+        }
+        _ => Err(HostedDeviceError::InvalidUser),
+    }
 }
 
 fn authorize_service(

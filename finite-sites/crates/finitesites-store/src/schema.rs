@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS sites_authorized_keys (
   native_principal_id TEXT NOT NULL REFERENCES principals(id),
   proof_kind TEXT NOT NULL CHECK (proof_kind IN (
     'mailbox_challenge',
+    'hosted_requester_assertion',
     'legacy_sites_email_key',
     'legacy_verified_principal_link',
     'verified_core_account_agent'
@@ -109,6 +110,16 @@ CREATE TABLE IF NOT EXISTS sites_legacy_email_resolutions (
   pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
   resolution_kind TEXT NOT NULL CHECK (resolution_kind = 'managed_agent_nip05'),
   resolved_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hosted_requester_assertions (
+  id TEXT PRIMARY KEY,
+  assertion_hash TEXT NOT NULL UNIQUE CHECK (length(assertion_hash) = 64),
+  email TEXT NOT NULL,
+  requester_pubkey TEXT NOT NULL CHECK (length(requester_pubkey) = 64),
+  agent_pubkey TEXT NOT NULL CHECK (length(agent_pubkey) = 64),
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sites (
@@ -371,6 +382,39 @@ CREATE INDEX IF NOT EXISTS login_tokens_expiry_used
 CREATE INDEX IF NOT EXISTS login_tokens_site_email_active
   ON login_tokens(site_id, email, created_at, token_hash)
   WHERE used_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS site_access_requests (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL REFERENCES sites(id),
+  email TEXT NOT NULL,
+  approval_token_hash TEXT NOT NULL UNIQUE CHECK (length(approval_token_hash) = 64),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'approved')),
+  requested_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  approved_at INTEGER,
+  UNIQUE (site_id, email),
+  CHECK (expires_at > requested_at),
+  CHECK ((status = 'approved') = (approved_at IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS site_access_requests_pending
+  ON site_access_requests(site_id, status, requested_at);
+
+CREATE TABLE IF NOT EXISTS site_notification_outbox (
+  idempotency_key TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL REFERENCES sites(id),
+  kind TEXT NOT NULL CHECK (kind IN ('first_publication')),
+  email TEXT NOT NULL,
+  site_name TEXT NOT NULL,
+  ready_at INTEGER,
+  delivered_at INTEGER,
+  created_at INTEGER NOT NULL,
+  UNIQUE (site_id, kind),
+  CHECK (delivered_at IS NULL OR ready_at IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS site_notification_outbox_pending
+  ON site_notification_outbox(ready_at, delivered_at, created_at);
 
 CREATE TABLE IF NOT EXISTS site_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

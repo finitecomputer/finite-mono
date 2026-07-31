@@ -17,8 +17,9 @@ use std::time::Duration;
 use finitesites_blob::BlobStore;
 use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::dto::{
-    AuthRegisterResponse, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest,
-    EmailRedeemResponse, GitAuthRequest, GitAuthResponse, NativeViewerSessionExchangeRequest,
+    ApiErrorBody, AuthRegisterResponse, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest,
+    EmailRedeemResponse, GitAuthRequest, GitAuthResponse, HostedRequesterAssertionRequest,
+    HostedRequesterAssertionResponse, NativeViewerSessionExchangeRequest,
     NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectOutputSharingResponse,
     ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse, ProjectStatusResponse,
@@ -159,6 +160,9 @@ impl TestServer {
             store
                 .allow_pubkey(allowed_pubkey, "e2e", now_unix())
                 .unwrap();
+            store
+                .register_sites_authorized_key("owner@example.com", allowed_pubkey, now_unix())
+                .unwrap();
         }
         let blobs = BlobStore::open(&data_dir.path().join("blobs")).unwrap();
         let outbox = data_dir.path().join("outbox");
@@ -190,6 +194,9 @@ impl TestServer {
             document_base_domain: document_base_domain(),
             api_url,
             git_base_url,
+            identity_sites_notification_token: identity_authority_url
+                .as_ref()
+                .map(|_| "11".repeat(32)),
             identity_authority_url,
             viewer_session_service_token: viewer_session_service_token.map(str::to_string),
             git_hook_helper_path: hook_helper_path(),
@@ -280,6 +287,25 @@ impl TestServer {
             .agent
             .post(&format!(
                 "{}/internal/v1/native-viewer-sessions",
+                self.api_url
+            ))
+            .set("Content-Type", "application/json");
+        if let Some(token) = token {
+            call = call.set("Authorization", &format!("Bearer {token}"));
+        }
+        call.send_bytes(&body)
+    }
+
+    fn hosted_requester_assertion(
+        &self,
+        token: Option<&str>,
+        request: &HostedRequesterAssertionRequest,
+    ) -> Result<ureq::Response, ureq::Error> {
+        let body = serde_json::to_vec(request).unwrap();
+        let mut call = self
+            .agent
+            .post(&format!(
+                "{}/internal/v1/hosted-requester-assertions",
                 self.api_url
             ))
             .set("Content-Type", "application/json");
@@ -655,6 +681,8 @@ fn project_init_request(dry_run: bool) -> ProjectInitRequest {
             outputs,
         },
         requesting_user_npub: None,
+        owner_email: None,
+        hosted_requester_assertion: None,
         dry_run,
     }
 }
@@ -668,6 +696,8 @@ fn bare_project_init_request(slug: &str, dry_run: bool) -> ProjectInitRequest {
             outputs: BTreeMap::new(),
         },
         requesting_user_npub: None,
+        owner_email: None,
+        hosted_requester_assertion: None,
         dry_run,
     }
 }
@@ -701,6 +731,8 @@ fn single_site_project_init_request(
             outputs,
         },
         requesting_user_npub: None,
+        owner_email: None,
+        hosted_requester_assertion: None,
         dry_run,
     }
 }
@@ -741,6 +773,8 @@ fn site_and_document_project_init_request(dry_run: bool) -> ProjectInitRequest {
             outputs,
         },
         requesting_user_npub: None,
+        owner_email: None,
+        hosted_requester_assertion: None,
         dry_run,
     }
 }
@@ -768,6 +802,8 @@ fn app_project_init_request(dry_run: bool) -> ProjectInitRequest {
             outputs,
         },
         requesting_user_npub: None,
+        owner_email: None,
+        hosted_requester_assertion: None,
         dry_run,
     }
 }
@@ -904,7 +940,7 @@ fn push_project_files(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn self_registration_bootstraps_project_creation() {
+async fn self_registration_requires_mailbox_before_project_creation() {
     let server = TestServer::start_without_publish_grant(true).await;
 
     let task = tokio::task::spawn_blocking(move || {
@@ -942,18 +978,19 @@ async fn self_registration_bootstraps_project_creation() {
         );
         assert!(!replay.registered);
 
-        let created: ProjectInitResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    "/api/v1/projects/init",
-                    Some(&apply_body),
-                )
-                .unwrap(),
-        );
-        assert!(created.created);
-        assert_eq!(created.slug, "finitechat-native");
+        let ureq::Error::Status(422, response) = server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/projects/init",
+                Some(&apply_body),
+            )
+            .unwrap_err()
+        else {
+            panic!("expected requester_email_required");
+        };
+        let body: ApiErrorBody = serde_json::from_reader(response.into_reader()).unwrap();
+        assert_eq!(body.error, "requester_email_required");
     });
     task.await.unwrap();
 }
@@ -1396,7 +1433,10 @@ async fn full_publish_share_and_view_flow() {
         );
         assert_eq!(shared.project_slug, "finitechat-native");
         assert_eq!(shared.output_id, "mockup");
-        assert_eq!(shared.shared_emails, vec!["friend@example.com"]);
+        assert_eq!(
+            shared.shared_emails,
+            vec!["friend@example.com", "owner@example.com"]
+        );
         let old_site_route = server
             .signed(
                 &user_secret(),
@@ -1414,7 +1454,64 @@ async fn full_publish_share_and_view_flow() {
             .send_form(&[("email", "stranger@example.com")])
             .unwrap();
         assert!(generic.into_string().unwrap().contains("Check your email"));
-        assert_eq!(std::fs::read_dir(&server.outbox).unwrap().count(), 0);
+        let stranger_link = outbox_link(&server.outbox);
+        let ureq::Error::Status(403, not_shared) =
+            server.agent.get(&stranger_link).call().unwrap_err()
+        else {
+            panic!("verified unshared mailbox should see the not-shared page");
+        };
+        let stranger_cookie = not_shared
+            .header("set-cookie")
+            .expect("verified mailbox receives a durable viewer cookie")
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert!(
+            not_shared
+                .into_string()
+                .unwrap()
+                .contains("You don&rsquo;t have access yet")
+        );
+        for entry in std::fs::read_dir(&server.outbox).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        let requested = server
+            .agent
+            .post(&format!("{site_base}/_finite/request-access"))
+            .set("Cookie", &stranger_cookie)
+            .send_bytes(&[])
+            .unwrap();
+        assert!(requested.into_string().unwrap().contains("Request sent"));
+        let approval_link = outbox_link(&server.outbox);
+        let confirmation = server.agent.get(&approval_link).call().unwrap();
+        assert!(
+            confirmation
+                .into_string()
+                .unwrap()
+                .contains("Share this site")
+        );
+        let approval_token = approval_link.split("token=").nth(1).unwrap();
+        let approved = server
+            .agent
+            .post(&format!("{site_base}/_finite/approve-access"))
+            .set("Content-Type", "application/x-www-form-urlencoded")
+            .send_string(&format!("token={approval_token}"))
+            .unwrap();
+        assert!(approved.into_string().unwrap().contains("Access approved"));
+        let stranger_page = server
+            .agent
+            .get(&format!("{site_base}/"))
+            .set("Cookie", &stranger_cookie)
+            .call()
+            .unwrap();
+        assert_eq!(
+            stranger_page.into_string().unwrap(),
+            "<h1>hello from finite</h1>"
+        );
+        for entry in std::fs::read_dir(&server.outbox).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
 
         server
             .agent
@@ -1608,17 +1705,25 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
             server.viewer_session(Some("wrong-token"), &request),
             Err(ureq::Error::Status(401, _))
         ));
-        assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request),
-            Err(ureq::Error::Status(403, _))
-        ));
+        let verified_but_unshared: VerifiedEmailViewerSessionResponse = json_body(
+            server
+                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
+                .unwrap(),
+        );
+        let Err(ureq::Error::Status(403, response)) =
+            server.agent.get(&verified_but_unshared.redeem_url).call()
+        else {
+            panic!("verified but unshared mailbox must reach the not-shared page");
+        };
+        assert!(response.into_string().unwrap().contains("Request access"));
 
         let mut unshared = request.clone();
         unshared.verified_email = "unshared@example.com".into();
-        assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &unshared),
-            Err(ureq::Error::Status(403, _))
-        ));
+        assert!(
+            server
+                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &unshared)
+                .is_ok()
+        );
         unshared.verified_email = format!("{}@example.com", "a".repeat(255));
         assert!(matches!(
             server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &unshared),
@@ -1663,8 +1768,13 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
 
         let mut still_unshared = request.clone();
         still_unshared.verified_email = "unshared@example.com".into();
+        let still_unshared_session: VerifiedEmailViewerSessionResponse = json_body(
+            server
+                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &still_unshared)
+                .unwrap(),
+        );
         assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &still_unshared),
+            server.agent.get(&still_unshared_session.redeem_url).call(),
             Err(ureq::Error::Status(403, _))
         ));
 
@@ -1868,8 +1978,13 @@ async fn verified_email_viewer_session_reuses_login_and_revokes_immediately() {
                 .call(),
             Err(ureq::Error::Status(401, _))
         ));
+        let revoked_session: VerifiedEmailViewerSessionResponse = json_body(
+            server
+                .viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request)
+                .unwrap(),
+        );
         assert!(matches!(
-            server.viewer_session(Some(VIEWER_SESSION_SERVICE_TOKEN), &request),
+            server.agent.get(&revoked_session.redeem_url).call(),
             Err(ureq::Error::Status(403, _))
         ));
     });
@@ -2126,6 +2241,77 @@ async fn native_requesting_user_sessions_open_private_output_without_magic_link(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn hosted_requester_assertion_binds_verified_mailbox_to_exact_agent_project_init() {
+    let owner_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let requester_npub = finitesites_proto::npub::encode_npub(&owner_pubkey).unwrap();
+    let agent_pubkey = finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap();
+    let agent_npub = finitesites_proto::npub::encode_npub(&agent_pubkey).unwrap();
+    let other_agent_pubkey = finitesites_proto::event::pubkey_for_secret(&viewer_secret()).unwrap();
+    let server = TestServer::start(&owner_pubkey).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let mut store = Store::open(&server.data_dir().join("registry.db")).unwrap();
+        store
+            .allow_pubkey(&agent_pubkey, "hosted agent", now_unix())
+            .unwrap();
+        store
+            .allow_pubkey(&other_agent_pubkey, "other hosted agent", now_unix())
+            .unwrap();
+        drop(store);
+
+        let assertion_request = HostedRequesterAssertionRequest {
+            email: "owner@example.com".to_owned(),
+            requester_npub: requester_npub.clone(),
+            agent_npub: agent_npub.clone(),
+        };
+        assert!(matches!(
+            server.hosted_requester_assertion(None, &assertion_request),
+            Err(ureq::Error::Status(401, _))
+        ));
+        let assertion: HostedRequesterAssertionResponse = json_body(
+            server
+                .hosted_requester_assertion(Some(VIEWER_SESSION_SERVICE_TOKEN), &assertion_request)
+                .unwrap(),
+        );
+        assert_eq!(assertion.email, "owner@example.com");
+        assert_eq!(assertion.requester_npub, requester_npub);
+        assert_eq!(assertion.agent_npub, agent_npub);
+
+        let mut init = project_init_request(false);
+        init.requesting_user_npub = Some(assertion.requester_npub);
+        init.owner_email = Some(assertion.email.clone());
+        init.hosted_requester_assertion = Some(assertion.assertion);
+        let body = serde_json::to_vec(&init).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/projects/init",
+                    Some(&body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(created.owner_email.as_deref(), Some("owner@example.com"));
+        assert!(created.outputs[0].requesting_user_shared);
+
+        let mut wrong_agent = init;
+        wrong_agent.config.project.slug = "wrong-agent".to_owned();
+        let wrong_body = serde_json::to_vec(&wrong_agent).unwrap();
+        assert!(matches!(
+            server.signed(
+                &viewer_secret(),
+                "POST",
+                "/api/v1/projects/init",
+                Some(&wrong_body)
+            ),
+            Err(ureq::Error::Status(403, _))
+        ));
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn share_send_invite_emails_viewer_magic_link_and_replays() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
@@ -2192,7 +2378,10 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
         );
         assert_eq!(shared.project_slug, "finitechat-native");
         assert_eq!(shared.output_id, "mockup");
-        assert_eq!(shared.shared_emails, vec!["friend@example.com"]);
+        assert_eq!(
+            shared.shared_emails,
+            vec!["friend@example.com", "owner@example.com"]
+        );
         assert_eq!(shared.invited_emails, vec!["friend@example.com"]);
 
         let bodies = outbox_bodies(&server.outbox);
@@ -2219,7 +2408,10 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
                 )
                 .unwrap(),
         );
-        assert_eq!(replay.shared_emails, vec!["friend@example.com"]);
+        assert_eq!(
+            replay.shared_emails,
+            vec!["friend@example.com", "owner@example.com"]
+        );
         assert_eq!(replay.invited_emails, vec!["friend@example.com"]);
         assert_eq!(outbox_bodies(&server.outbox).len(), 1);
     });

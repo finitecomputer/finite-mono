@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -25,7 +26,7 @@ use finitesites_engine::Engine;
 use crate::apps::Supervisor;
 use crate::identity::IdentityAuthority;
 use crate::limiter::{RateLimiter, WINDOW_SECONDS};
-use crate::mailer::Mailer;
+use crate::mailer::{IdentityNotifier, Mailer};
 use crate::{ServeOptions, api, git, sites};
 
 const SERVING_ENGINE_POOL_SIZE: usize = 8;
@@ -43,6 +44,7 @@ pub struct AppState {
     /// bytes across active versions.
     pub blobs: BlobStore,
     pub mailer: Box<dyn Mailer>,
+    pub identity_notifier: Option<IdentityNotifier>,
     /// Owns app isolation (the runner) plus the density policy: wake on
     /// request, stop when idle.
     pub apps: Supervisor,
@@ -301,6 +303,10 @@ pub async fn serve_on(
     options: ServeOptions,
 ) -> Result<(), String> {
     crate::validate_viewer_session_service_token(options.viewer_session_service_token.as_deref())?;
+    crate::validate_identity_sites_notification_token(
+        options.identity_authority_url.as_deref(),
+        options.identity_sites_notification_token.as_deref(),
+    )?;
     git::preflight_git_dependency().map_err(|error| {
         format!(
             "Git dependency preflight failed: {error}. Install Git and make it available on PATH"
@@ -314,6 +320,11 @@ pub async fn serve_on(
         serving_engines,
         blobs,
         mailer,
+        identity_notifier: options
+            .identity_authority_url
+            .as_deref()
+            .zip(options.identity_sites_notification_token.clone())
+            .map(|(url, token)| IdentityNotifier::new(url, token)),
         apps,
         login_limiter: RateLimiter::new(WINDOW_SECONDS),
         api_url: options.api_url.clone(),
@@ -331,7 +342,9 @@ pub async fn serve_on(
     });
     reconcile_apps(&state);
     reconcile_git_projects(&state);
+    deliver_pending_site_notifications(&state);
     spawn_idle_reaper(state.clone());
+    spawn_site_notification_reaper(state.clone());
     let app = build_app(state);
     eprintln!(
         "finitesitesd listening on {} (api: {}, git: {}, sites: *.{})",
@@ -367,7 +380,7 @@ fn reconcile_git_projects(state: &Arc<AppState>) {
 /// restart. Failures are logged, not fatal: one broken app must not stop
 /// the platform from serving.
 fn reconcile_apps(state: &Arc<AppState>) {
-    let engine = state.engine.lock().expect("engine mutex never poisoned");
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let deploys = match engine.app_deploys() {
         Ok(deploys) => deploys,
         Err(error) => {
@@ -380,11 +393,94 @@ fn reconcile_apps(state: &Arc<AppState>) {
         let bundle_path = engine.blob_file_path(&deploy.bundle_sha256);
         if let Err(error) = state.apps.deploy(deploy, &bundle_path, now_unix()) {
             eprintln!("app reconcile: {} failed: {error}", deploy.site_id);
+        } else if let Err(error) =
+            engine.mark_first_publication_notification_ready(&deploy.site_id, now_unix())
+        {
+            eprintln!(
+                "app reconcile: cannot ready first-publication notification for {}: {error}",
+                deploy.site_id
+            );
         }
     }
     if !deploys.is_empty() {
         eprintln!("app reconcile: {} app site(s) processed", deploys.len());
     }
+}
+
+fn deliver_pending_site_notifications(state: &Arc<AppState>) {
+    let Some(notifier) = state.identity_notifier.as_ref() else {
+        return;
+    };
+    let pending = {
+        let engine = state.engine.lock().expect("engine mutex never poisoned");
+        let pending = match engine.pending_site_notifications(32) {
+            Ok(pending) => pending,
+            Err(error) => {
+                eprintln!("site notification outbox read failed: {error}");
+                return;
+            }
+        };
+        pending
+            .into_iter()
+            .filter_map(|notification| {
+                let site = match engine.output_by_site_id(&notification.site_id) {
+                    Ok(Some(site)) => site,
+                    Ok(None) => return None,
+                    Err(error) => {
+                        eprintln!(
+                            "site notification {} lookup failed: {error}",
+                            notification.idempotency_key
+                        );
+                        return None;
+                    }
+                };
+                let url = engine.output_url_for_site(&site);
+                Some((notification, url))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (notification, site_url) in pending {
+        let result = match notification.kind.as_str() {
+            "first_publication" => notifier.send_first_publication(
+                &notification.idempotency_key,
+                &notification.email,
+                &notification.site_name,
+                &site_url,
+            ),
+            _ => continue,
+        };
+        if let Err(error) = result {
+            eprintln!(
+                "site notification {} delivery failed: {error}",
+                notification.idempotency_key
+            );
+            continue;
+        }
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        if let Err(error) =
+            engine.mark_site_notification_delivered(&notification.idempotency_key, now_unix())
+        {
+            eprintln!(
+                "site notification {} acknowledgement failed: {error}",
+                notification.idempotency_key
+            );
+        }
+    }
+}
+
+fn spawn_site_notification_reaper(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let state = Arc::clone(&state);
+            let _ = tokio::task::spawn_blocking(move || {
+                deliver_pending_site_notifications(&state);
+            })
+            .await;
+        }
+    });
 }
 
 /// Periodically stop apps that have been idle past the timeout. This is the

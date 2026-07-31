@@ -25,6 +25,7 @@ pub struct AuthorityConfig {
     pub finite_vip_domain: String,
     pub email_challenge_ttl_seconds: u64,
     pub operator_token: Option<String>,
+    pub sites_notification_token: Option<String>,
 }
 
 impl AuthorityConfig {
@@ -35,6 +36,13 @@ impl AuthorityConfig {
 
 pub trait Mailer: Send + Sync + 'static {
     fn send_email_challenge(&self, email: &str, token: &str) -> Result<(), String>;
+    fn send_transactional_email(
+        &self,
+        idempotency_key: &str,
+        email: &str,
+        subject: &str,
+        text: &str,
+    ) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +51,19 @@ pub struct DevMailer;
 impl Mailer for DevMailer {
     fn send_email_challenge(&self, email: &str, token: &str) -> Result<(), String> {
         eprintln!("finite-identityd dev email challenge for {email}: {token}");
+        Ok(())
+    }
+
+    fn send_transactional_email(
+        &self,
+        idempotency_key: &str,
+        email: &str,
+        subject: &str,
+        text: &str,
+    ) -> Result<(), String> {
+        eprintln!(
+            "finite-identityd dev transactional email {idempotency_key} to {email}: {subject}\n{text}"
+        );
         Ok(())
     }
 }
@@ -106,16 +127,29 @@ impl HttpMailer {
     }
 
     fn send_payload(&self, payload: serde_json::Value) -> Result<(), String> {
+        self.send_payload_with_idempotency(payload, None)
+    }
+
+    fn send_payload_with_idempotency(
+        &self,
+        payload: serde_json::Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<(), String> {
         let auth_value = match self.provider {
             MailProvider::Resend => format!("Bearer {}", self.api_key),
             MailProvider::Postmark => self.api_key.clone(),
         };
-        let result = self
+        let mut request = self
             .agent
             .post(self.provider.endpoint())
             .set(self.provider.auth_header(), &auth_value)
-            .set("Accept", "application/json")
-            .send_json(payload);
+            .set("Accept", "application/json");
+        if let Some(idempotency_key) = idempotency_key
+            && self.provider == MailProvider::Resend
+        {
+            request = request.set("Idempotency-Key", idempotency_key);
+        }
+        let result = request.send_json(payload);
         match result {
             Ok(_response) => Ok(()),
             Err(ureq::Error::Status(code, response)) => {
@@ -139,6 +173,44 @@ impl Mailer for HttpMailer {
             token,
         ))
     }
+
+    fn send_transactional_email(
+        &self,
+        idempotency_key: &str,
+        email: &str,
+        subject: &str,
+        text: &str,
+    ) -> Result<(), String> {
+        let payload = match self.provider {
+            MailProvider::Resend => serde_json::json!({
+                "from": self.from_address,
+                "to": [email],
+                "subject": subject,
+                "text": text,
+            }),
+            MailProvider::Postmark => serde_json::json!({
+                "From": self.from_address,
+                "To": email,
+                "Subject": subject,
+                "TextBody": text,
+                "MessageStream": "outbound",
+            }),
+        };
+        self.send_payload_with_idempotency(payload, Some(idempotency_key))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SitesNotificationRequest {
+    idempotency_key: String,
+    kind: String,
+    email: String,
+    site_name: String,
+    site_url: String,
+    #[serde(default)]
+    requester_email: Option<String>,
+    #[serde(default)]
+    approval_url: Option<String>,
 }
 
 fn email_challenge_subject() -> &'static str {
@@ -223,6 +295,7 @@ pub struct AuthorityState {
     mailer: Arc<dyn Mailer>,
     clock: Arc<dyn Clock>,
     config: AuthorityConfig,
+    notification_sends: Arc<Mutex<()>>,
 }
 
 impl AuthorityState {
@@ -237,6 +310,7 @@ impl AuthorityState {
             mailer,
             clock: Arc::new(clock),
             config,
+            notification_sends: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -493,7 +567,41 @@ impl IdentityStore {
               pubkey TEXT NOT NULL,
               created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS notification_deliveries (
+              idempotency_key TEXT PRIMARY KEY,
+              delivered_at INTEGER NOT NULL
+            );
             ",
+            )?;
+        Ok(())
+    }
+
+    fn notification_delivered(&self, idempotency_key: &str) -> Result<bool, StoreError> {
+        let delivered: Option<i64> = self
+            .conn
+            .lock()
+            .expect("store mutex never poisoned")
+            .query_row(
+                "SELECT delivered_at FROM notification_deliveries WHERE idempotency_key = ?1",
+                params![idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(delivered.is_some())
+    }
+
+    fn mark_notification_delivered(
+        &self,
+        idempotency_key: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .lock()
+            .expect("store mutex never poisoned")
+            .execute(
+                "INSERT OR IGNORE INTO notification_deliveries (idempotency_key, delivered_at)
+                 VALUES (?1, ?2)",
+                params![idempotency_key, now],
             )?;
         Ok(())
     }
@@ -942,6 +1050,10 @@ pub fn router(state: AuthorityState) -> Router {
             post(satisfies_grant),
         )
         .route("/api/v1/nip05-resolution", post(resolve_nip05))
+        .route(
+            "/internal/v1/sites-notifications",
+            post(send_sites_notification),
+        )
         .route("/api/v1/operator/inspect", post(operator_inspect))
         .route(
             "/api/v1/operator/agent-email-bindings",
@@ -964,6 +1076,109 @@ pub fn router(state: AuthorityState) -> Router {
             post(operator_disable_binding),
         )
         .with_state(state)
+}
+
+async fn send_sites_notification(
+    State(state): State<AuthorityState>,
+    headers: HeaderMap,
+    Json(request): Json<SitesNotificationRequest>,
+) -> impl IntoResponse {
+    if let Err(error) = require_sites_notification_token(&state, &headers) {
+        return api_error(error.status, error.code);
+    }
+    if request.idempotency_key.is_empty()
+        || request.idempotency_key.len() > 200
+        || request
+            .idempotency_key
+            .chars()
+            .any(|character| character.is_control())
+        || request.site_name.is_empty()
+        || request.site_name.len() > 253
+        || request.site_url.len() > 2048
+        || !(request.site_url.starts_with("https://") || request.site_url.starts_with("http://"))
+    {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_notification");
+    }
+    let Some(email) = normalize_invited_email(&request.email, &state.config.finite_vip_domain)
+    else {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_notification_email");
+    };
+    // Serialize the check-send-record boundary so concurrent retries cannot
+    // deliver the same logical notification twice. Provider idempotency still
+    // protects the narrower crash window between delivery and the durable mark.
+    let _send_guard = match state.notification_sends.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "notification_lock_poisoned",
+            );
+        }
+    };
+    match state.store.notification_delivered(&request.idempotency_key) {
+        Ok(true) => {
+            return Json(serde_json::json!({ "status": "already_delivered" })).into_response();
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+        }
+    }
+    let content = sites_notification_content(&request, &state.config.finite_vip_domain);
+    let Some((subject, text)) = content else {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_notification");
+    };
+    if state
+        .mailer
+        .send_transactional_email(&request.idempotency_key, &email, &subject, &text)
+        .is_err()
+    {
+        return api_error(StatusCode::BAD_GATEWAY, "mail_delivery_failed");
+    }
+    if let Err(error) = state
+        .store
+        .mark_notification_delivered(&request.idempotency_key, state.clock.now())
+    {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
+    }
+    Json(serde_json::json!({ "status": "delivered" })).into_response()
+}
+
+fn sites_notification_content(
+    request: &SitesNotificationRequest,
+    finite_vip_domain: &str,
+) -> Option<(String, String)> {
+    match request.kind.as_str() {
+        "first_publication"
+            if request.requester_email.is_none() && request.approval_url.is_none() =>
+        {
+            Some((
+                format!("{} is live", request.site_name),
+                format!(
+                    "Your Finite Site is published.\n\n{}\n\nThis email is your record of its first publication.\n",
+                    request.site_url
+                ),
+            ))
+        }
+        "site_access_request" => {
+            let requester = request.requester_email.as_deref()?;
+            let approval_url = request.approval_url.as_deref()?;
+            if normalize_invited_email(requester, finite_vip_domain).is_none()
+                || approval_url.len() > 2048
+                || !(approval_url.starts_with("https://") || approval_url.starts_with("http://"))
+            {
+                return None;
+            }
+            Some((
+                format!("Access requested for {}", request.site_name),
+                format!(
+                    "{requester} verified their email and requested access to {}.\n\nApprove access:\n\n{approval_url}\n\nSite:\n\n{}\n\nIgnore this email if you do not want to share the site.\n",
+                    request.site_name, request.site_url
+                ),
+            ))
+        }
+        _ => None,
+    }
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -1583,6 +1798,35 @@ fn require_operator(state: &AuthorityState, headers: &HeaderMap) -> Result<(), A
         return Err(ApiFailure::new(
             StatusCode::UNAUTHORIZED,
             "invalid_operator_token",
+        ));
+    }
+    Ok(())
+}
+
+fn require_sites_notification_token(
+    state: &AuthorityState,
+    headers: &HeaderMap,
+) -> Result<(), ApiFailure> {
+    let Some(expected) = state.config.sites_notification_token.as_deref() else {
+        return Err(ApiFailure::new(
+            StatusCode::UNAUTHORIZED,
+            "sites_notification_api_disabled",
+        ));
+    };
+    let Some(actual) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return Err(ApiFailure::new(
+            StatusCode::UNAUTHORIZED,
+            "missing_sites_notification_token",
+        ));
+    };
+    if actual != expected {
+        return Err(ApiFailure::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_sites_notification_token",
         ));
     }
     Ok(())

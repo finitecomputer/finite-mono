@@ -14,8 +14,17 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 const REQUESTER_CONTEXT_DIR: &str = "requester-context-v1";
+const REQUESTER_CONTEXT_V2_DIR: &str = "requester-context-v2";
 const REQUESTER_CONTEXT_VERSION: u32 = 1;
+const REQUESTER_CONTEXT_V2_VERSION: u32 = 2;
 const MAX_CONTEXT_BYTES: u64 = 4096;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ResolvedRequesterContext {
+    pub requesting_user_npub: Option<String>,
+    pub owner_email: Option<String>,
+    pub hosted_requester_assertion: Option<String>,
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SessionEnvironment {
@@ -58,44 +67,104 @@ struct RequesterContext {
     expires_at_unix: u64,
 }
 
-pub fn resolve(explicit: Option<String>, finite_root: &Path) -> Result<Option<String>, String> {
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequesterContextV2 {
+    version: u32,
+    session_key: String,
+    platform: String,
+    requesting_user_id: String,
+    owner_email: String,
+    hosted_requester_assertion: String,
+    expires_at_unix: u64,
+}
+
+pub fn resolve_with_owner(
+    explicit: Option<String>,
+    explicit_owner_email: Option<String>,
+    finite_root: &Path,
+) -> Result<ResolvedRequesterContext, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is before the Unix epoch".to_string())?
         .as_secs();
-    resolve_at(explicit, &SessionEnvironment::current(), finite_root, now)
+    resolve_with_owner_at(
+        explicit,
+        explicit_owner_email,
+        &SessionEnvironment::current(),
+        finite_root,
+        now,
+    )
 }
 
 pub fn environment_can_infer() -> bool {
     SessionEnvironment::current().can_infer()
 }
 
+#[cfg(test)]
 fn resolve_at(
     explicit: Option<String>,
     environment: &SessionEnvironment,
     finite_root: &Path,
     now: u64,
 ) -> Result<Option<String>, String> {
-    let inferred = active_requester(environment, finite_root, now);
+    Ok(resolve_with_owner_at(explicit, None, environment, finite_root, now)?.requesting_user_npub)
+}
+
+fn resolve_with_owner_at(
+    explicit: Option<String>,
+    explicit_owner_email: Option<String>,
+    environment: &SessionEnvironment,
+    finite_root: &Path,
+    now: u64,
+) -> Result<ResolvedRequesterContext, String> {
+    let inferred_context = active_requester_v2(environment, finite_root, now);
+    let inferred = inferred_context
+        .as_ref()
+        .map(|context| context.requesting_user_id.clone())
+        .or_else(|| active_requester(environment, finite_root, now));
     let Some(inferred) = inferred else {
         // Preserve the standalone contract. Agents outside a live authenticated
         // Finite Chat tool call may still provide the explicit requester.
-        return Ok(explicit);
+        return Ok(ResolvedRequesterContext {
+            requesting_user_npub: explicit,
+            owner_email: explicit_owner_email,
+            hosted_requester_assertion: None,
+        });
     };
-    let Some(explicit) = explicit else {
-        return Ok(Some(inferred));
-    };
-    let explicit_pubkey = npub::pubkey_from_hex_or_npub(&explicit)
-        .map_err(|error| format!("invalid --requesting-user-npub: {error}"))?;
-    let inferred_pubkey = npub::pubkey_from_hex_or_npub(&inferred)
-        .map_err(|error| format!("invalid authenticated requester context: {error}"))?;
-    if explicit_pubkey != inferred_pubkey {
-        return Err(
-            "--requesting-user-npub disagrees with the active authenticated Finite Chat sender"
-                .to_string(),
-        );
+    if let Some(explicit) = explicit {
+        let explicit_pubkey = npub::pubkey_from_hex_or_npub(&explicit)
+            .map_err(|error| format!("invalid --requesting-user-npub: {error}"))?;
+        let inferred_pubkey = npub::pubkey_from_hex_or_npub(&inferred)
+            .map_err(|error| format!("invalid authenticated requester context: {error}"))?;
+        if explicit_pubkey != inferred_pubkey {
+            return Err(
+                "--requesting-user-npub disagrees with the active authenticated Finite Chat sender"
+                    .to_string(),
+            );
+        }
     }
-    Ok(Some(inferred))
+    let (owner_email, hosted_requester_assertion) = match inferred_context {
+        Some(context) => {
+            if let Some(explicit_email) = explicit_owner_email
+                && !explicit_email.eq_ignore_ascii_case(&context.owner_email)
+            {
+                return Err(
+                    "--owner-email disagrees with the active verified Finite requester".to_string(),
+                );
+            }
+            (
+                Some(context.owner_email),
+                Some(context.hosted_requester_assertion),
+            )
+        }
+        None => (explicit_owner_email, None),
+    };
+    Ok(ResolvedRequesterContext {
+        requesting_user_npub: Some(inferred),
+        owner_email,
+        hosted_requester_assertion,
+    })
 }
 
 fn active_requester(
@@ -140,11 +209,58 @@ fn active_requester(
     Some(user_id.to_string())
 }
 
+fn active_requester_v2(
+    environment: &SessionEnvironment,
+    finite_root: &Path,
+    now: u64,
+) -> Option<RequesterContextV2> {
+    if !environment.can_infer() {
+        return None;
+    }
+    let session_key = environment.session_key.as_deref()?.trim();
+    let user_id = environment.user_id.as_deref()?.trim();
+    let path = requester_context_path_in(REQUESTER_CONTEXT_V2_DIR, finite_root, session_key);
+    let bytes = read_context_file(&path)?;
+    let context: RequesterContextV2 = serde_json::from_str(&bytes).ok()?;
+    if context.version != REQUESTER_CONTEXT_V2_VERSION
+        || context.platform != "finitechat"
+        || context.session_key != session_key
+        || context.requesting_user_id != user_id
+        || context.owner_email.trim().is_empty()
+        || context.owner_email.len() > 320
+        || context.hosted_requester_assertion.trim().is_empty()
+        || context.hosted_requester_assertion.len() > 512
+        || context.expires_at_unix <= now
+    {
+        if context.expires_at_unix <= now {
+            let _ = std::fs::remove_file(path);
+        }
+        return None;
+    }
+    Some(context)
+}
+
+fn read_context_file(path: &Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_CONTEXT_BYTES {
+        return None;
+    }
+    let mut bytes = String::new();
+    File::open(path)
+        .ok()?
+        .take(MAX_CONTEXT_BYTES + 1)
+        .read_to_string(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_CONTEXT_BYTES).then_some(bytes)
+}
+
 fn requester_context_path(finite_root: &Path, session_key: &str) -> PathBuf {
+    requester_context_path_in(REQUESTER_CONTEXT_DIR, finite_root, session_key)
+}
+
+fn requester_context_path_in(dir: &str, finite_root: &Path, session_key: &str) -> PathBuf {
     let digest = Sha256::digest(session_key.as_bytes());
-    finite_root
-        .join(REQUESTER_CONTEXT_DIR)
-        .join(format!("{digest:x}.json"))
+    finite_root.join(dir).join(format!("{digest:x}.json"))
 }
 
 #[cfg(test)]
@@ -177,6 +293,66 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+    }
+
+    fn write_context_v2(
+        finite_root: &Path,
+        session_key: &str,
+        user_id: &str,
+        owner_email: &str,
+        assertion: &str,
+        expires_at_unix: u64,
+    ) {
+        let path = requester_context_path_in(REQUESTER_CONTEXT_V2_DIR, finite_root, session_key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "version": 2,
+                "session_key": session_key,
+                "platform": "finitechat",
+                "requesting_user_id": user_id,
+                "owner_email": owner_email,
+                "hosted_requester_assertion": assertion,
+                "expires_at_unix": expires_at_unix,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v2_lease_carries_verified_owner_and_rejects_explicit_disagreement() {
+        let finite_root = tempfile::tempdir().unwrap();
+        write_context(finite_root.path(), "session-a", ALICE, 200);
+        write_context_v2(
+            finite_root.path(),
+            "session-a",
+            ALICE,
+            "paul@finite.vip",
+            "assertion-1",
+            200,
+        );
+        let environment = environment("finitechat", "session-a", ALICE);
+        let resolved =
+            resolve_with_owner_at(None, None, &environment, finite_root.path(), 100).unwrap();
+        assert_eq!(resolved.requesting_user_npub.as_deref(), Some(ALICE));
+        assert_eq!(resolved.owner_email.as_deref(), Some("paul@finite.vip"));
+        assert_eq!(
+            resolved.hosted_requester_assertion.as_deref(),
+            Some("assertion-1")
+        );
+        assert!(
+            resolve_with_owner_at(
+                None,
+                Some("other@example.com".to_owned()),
+                &environment,
+                finite_root.path(),
+                100,
+            )
+            .unwrap_err()
+            .contains("disagrees")
+        );
     }
 
     #[test]

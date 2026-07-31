@@ -2,6 +2,11 @@ import type { AccountAuthContext } from "@/lib/dashboard-auth";
 
 const HOSTED_DEVICE_TIMEOUT_MS = 15_000;
 
+export type HostedRequesterContext = {
+  email: string;
+  sitesAssertion: string;
+};
+
 export class HostedDeviceRequestError extends Error {
   constructor(
     message: string,
@@ -432,12 +437,24 @@ export async function hostedDeviceSitesIdentityProvider(
 export async function hostedDeviceAction(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
-  action: HostedChatAction
+  action: HostedChatAction,
+  requester?: HostedRequesterContext,
 ) {
-  return hostedDeviceJson<HostedChatState>(config, account, "/v1/app/actions", {
-    method: "POST",
-    body: JSON.stringify(action),
-  });
+  const headers = hostedDeviceHeaders(config, account, true);
+  if (requester) {
+    headers.set("x-finite-requester-email", requester.email);
+    headers.set("x-finite-sites-requester-assertion", requester.sitesAssertion);
+  }
+  return hostedDeviceJson<HostedChatState>(
+    config,
+    account,
+    "/v1/app/actions",
+    {
+      method: "POST",
+      body: JSON.stringify(action),
+      headers,
+    }
+  );
 }
 
 export async function hostedDeviceOpenAgentBinding(
@@ -659,10 +676,14 @@ async function hostedDeviceJson<T>(
   const diagnosticPath = hostedDeviceDiagnosticPath(path);
   let response: Response;
   try {
+    const headers =
+      init.headers instanceof Headers
+        ? init.headers
+        : hostedDeviceHeaders(config, account, typeof init.body === "string");
     response = await fetch(`${config.baseUrl}${path}`, {
       ...init,
       cache: "no-store",
-      headers: hostedDeviceHeaders(config, account, typeof init.body === "string"),
+      headers,
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {

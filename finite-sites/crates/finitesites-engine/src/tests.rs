@@ -4,7 +4,8 @@ use finitesites_blob::BlobStore;
 use std::collections::BTreeMap;
 
 use finitesites_proto::dto::{
-    ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest, SharingRequest,
+    HostedRequesterAssertionRequest, ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest,
+    SharingRequest,
 };
 use finitesites_proto::limits::{LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE};
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
@@ -86,6 +87,8 @@ fn project_request(slug: &str, site_name: &str, spa: bool, dry_run: bool) -> Pro
         },
         dry_run,
         requesting_user_npub: None,
+        owner_email: None,
+        hosted_requester_assertion: None,
     }
 }
 
@@ -113,6 +116,8 @@ fn app_project_request(slug: &str, site_name: &str, dry_run: bool) -> ProjectIni
         },
         dry_run,
         requesting_user_npub: None,
+        owner_email: None,
+        hosted_requester_assertion: None,
     }
 }
 
@@ -229,6 +234,54 @@ fn project_init_dry_run_create_and_replay() {
     assert!(!replay.created);
     assert!(!replay.outputs[0].created);
     assert_eq!(replay.project_id, created.project_id);
+}
+
+#[test]
+fn hosted_requester_assertion_binds_exact_human_and_agent_without_mutating_dry_run() {
+    let mut fx = fixture();
+    let assertion = fx
+        .engine
+        .create_hosted_requester_assertion(
+            &HostedRequesterAssertionRequest {
+                email: "paul@finite.vip".to_owned(),
+                requester_npub: OTHER_OWNER.to_owned(),
+                agent_npub: OWNER.to_owned(),
+            },
+            NOW,
+        )
+        .unwrap();
+    let mut request = project_request("hosted-owner", "hosted-owner", false, true);
+    request.requesting_user_npub = Some(OTHER_OWNER.to_owned());
+    request.owner_email = Some("paul@finite.vip".to_owned());
+    request.hosted_requester_assertion = Some(assertion.assertion);
+    assert_eq!(
+        fx.engine
+            .resolve_project_owner_email(OWNER, &request, NOW + 1)
+            .unwrap(),
+        "paul@finite.vip"
+    );
+    assert!(
+        !fx.engine
+            .store_mut()
+            .has_sites_authorized_key("paul@finite.vip", OWNER)
+            .unwrap()
+    );
+    request.dry_run = false;
+    fx.engine
+        .resolve_project_owner_email(OWNER, &request, NOW + 2)
+        .unwrap();
+    assert!(
+        fx.engine
+            .store_mut()
+            .has_sites_authorized_key("paul@finite.vip", OWNER)
+            .unwrap()
+    );
+    assert!(
+        fx.engine
+            .store_mut()
+            .has_sites_authorized_key("paul@finite.vip", OTHER_OWNER)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -1458,11 +1511,18 @@ fn shared_site_full_magic_link_flow() {
         fx.engine.view_access(&site, None, NOW).unwrap(),
         ViewAccess::NeedsLogin
     );
-    assert!(
+    let stranger_link = fx
+        .engine
+        .request_login("hello", "stranger@example.com", NOW)
+        .unwrap()
+        .expect("share status is disclosed only after mailbox verification");
+    let stranger_token = stranger_link.url.split("token=").nth(1).unwrap();
+    let (_, stranger_cookie) = fx.engine.redeem_login(stranger_token, NOW + 1).unwrap();
+    assert_eq!(
         fx.engine
-            .request_login("hello", "stranger@example.com", NOW)
-            .unwrap()
-            .is_none()
+            .view_access(&site, Some(&stranger_cookie), NOW + 2)
+            .unwrap(),
+        ViewAccess::NeedsLogin
     );
 
     let link = fx
@@ -1514,6 +1574,184 @@ fn shared_site_full_magic_link_flow() {
             .unwrap(),
         ViewAccess::NeedsLogin
     );
+}
+
+#[test]
+fn verified_unshared_mailbox_can_request_and_receive_explicit_access() {
+    let mut fx = fixture();
+    fx.engine
+        .store_mut()
+        .register_sites_authorized_key("owner@example.com", OWNER, NOW)
+        .unwrap();
+    let mut request = project_request("owner-project", "owner-site", false, false);
+    request.owner_email = Some("owner@example.com".to_owned());
+    let response = fx
+        .engine
+        .init_project(OWNER, &request, remote("owner-project"), NOW)
+        .unwrap();
+    let site_id = response.outputs[0].site_id.clone().unwrap();
+    fx.engine
+        .commit_project_output_version(
+            &site_id,
+            vec![output_file("/index.html", b"hello")],
+            false,
+            NOW + 1,
+        )
+        .unwrap();
+    let notifications = fx.engine.pending_site_notifications(10).unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].email, "owner@example.com");
+    fx.engine
+        .commit_project_output_version(
+            &site_id,
+            vec![output_file("/index.html", b"hello again")],
+            false,
+            NOW + 2,
+        )
+        .unwrap();
+    assert_eq!(fx.engine.pending_site_notifications(10).unwrap().len(), 1);
+    fx.engine
+        .set_sharing(
+            OWNER,
+            "owner-site",
+            &SharingRequest {
+                visibility: Some("shared".into()),
+                confirm_public: false,
+                add_emails: vec![],
+                remove_emails: vec![],
+                add_npubs: vec![],
+                remove_npubs: vec![],
+            },
+            NOW + 3,
+        )
+        .unwrap();
+    let site = fx.engine.resolve_site("owner-site").unwrap().unwrap();
+
+    let owner_link = fx
+        .engine
+        .request_login_for_site(&site, "owner@example.com", NOW + 4)
+        .unwrap()
+        .unwrap();
+    let owner_token = owner_link.url.split("token=").nth(1).unwrap();
+    let (_, owner_cookie) = fx.engine.redeem_login(owner_token, NOW + 5).unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&owner_cookie), NOW + 6)
+            .unwrap(),
+        ViewAccess::Allowed
+    );
+
+    let requester_link = fx
+        .engine
+        .request_login_for_site(&site, "friend@example.com", NOW + 4)
+        .unwrap()
+        .unwrap();
+    let requester_token = requester_link.url.split("token=").nth(1).unwrap();
+    let (_, requester_cookie) = fx.engine.redeem_login(requester_token, NOW + 5).unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&requester_cookie), NOW + 6)
+            .unwrap(),
+        ViewAccess::NeedsLogin
+    );
+    let access_request = fx
+        .engine
+        .request_site_access(&site, &requester_cookie, NOW + 7)
+        .unwrap();
+    assert_eq!(access_request.owner_email, "owner@example.com");
+    let retry = fx
+        .engine
+        .request_site_access(&site, &requester_cookie, NOW + 8)
+        .unwrap();
+    assert_eq!(retry.idempotency_key, access_request.idempotency_key);
+    assert_eq!(retry.approval_url, access_request.approval_url);
+    let approval_token = access_request.approval_url.split("token=").nth(1).unwrap();
+    assert!(matches!(
+        fx.engine.approve_site_access(
+            &site.id,
+            approval_token,
+            NOW + 8 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS
+        ),
+        Err(EngineError::Validation("unknown access request"))
+    ));
+    let replacement = fx
+        .engine
+        .request_site_access(
+            &site,
+            &requester_cookie,
+            NOW + 8 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS,
+        )
+        .unwrap();
+    let approval_token = replacement.approval_url.split("token=").nth(1).unwrap();
+    let other_response = fx
+        .engine
+        .init_project(
+            OWNER,
+            &project_request("other-project", "other-site", false, false),
+            remote("other-project"),
+            NOW + 9 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS,
+        )
+        .unwrap();
+    let other_site_id = other_response.outputs[0].site_id.as_deref().unwrap();
+    assert!(matches!(
+        fx.engine.approve_site_access(
+            other_site_id,
+            approval_token,
+            NOW + 9 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS,
+        ),
+        Err(EngineError::Validation("unknown access request"))
+    ));
+    assert_eq!(
+        fx.engine
+            .view_access(
+                &site,
+                Some(&requester_cookie),
+                NOW + 9 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS
+            )
+            .unwrap(),
+        ViewAccess::NeedsLogin
+    );
+    fx.engine
+        .approve_site_access(
+            &site.id,
+            approval_token,
+            NOW + 9 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS,
+        )
+        .unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(
+                &site,
+                Some(&requester_cookie),
+                NOW + 10 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS
+            )
+            .unwrap(),
+        ViewAccess::Allowed
+    );
+    fx.engine
+        .set_sharing(
+            OWNER,
+            "owner-site",
+            &SharingRequest {
+                remove_emails: vec!["friend@example.com".into()],
+                ..SharingRequest::default()
+            },
+            NOW + 11 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS,
+        )
+        .unwrap();
+    let after_revocation = fx
+        .engine
+        .request_site_access(
+            &site,
+            &requester_cookie,
+            NOW + 12 + crate::SITE_ACCESS_APPROVAL_TTL_SECONDS,
+        )
+        .unwrap();
+    assert_ne!(
+        after_revocation.idempotency_key,
+        replacement.idempotency_key
+    );
+    assert_ne!(after_revocation.approval_url, replacement.approval_url);
 }
 
 #[test]

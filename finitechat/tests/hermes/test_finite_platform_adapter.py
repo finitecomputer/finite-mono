@@ -301,6 +301,38 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 broker.after_tool_call(**hook)
                 self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
+    def test_terminal_hook_writes_additive_v2_verified_mailbox_lease(self):
+        with tempfile.TemporaryDirectory() as finite_home:
+            broker = self.module._RequesterContextBroker(Path(finite_home) / "requester-context-v1")
+            session_context = cast(Any, sys.modules["gateway.session_context"])
+            session_context.values = {
+                "HERMES_SESSION_PLATFORM": "local",
+                "HERMES_SESSION_KEY": "finitechat:room-a:thread-a",
+                "HERMES_SESSION_USER_ID": "a1" * 32,
+            }
+            user_token = self.module._AUTHENTICATED_FINITE_TURN_USER.set("a1" * 32)
+            context_token = self.module._AUTHENTICATED_FINITE_REQUESTER_CONTEXT.set(
+                ("paul@finite.vip", "assertion-1")
+            )
+            hook = {"tool_name": "terminal", "tool_call_id": "call-a"}
+            try:
+                broker.before_tool_call(**hook)
+                filename = self.module._requester_context_filename(
+                    "finitechat:room-a:thread-a"
+                )
+                v1 = json.loads((broker.root / filename).read_text(encoding="utf-8"))
+                v2 = json.loads((broker.root_v2 / filename).read_text(encoding="utf-8"))
+                self.assertEqual(v1["version"], 1)
+                self.assertNotIn("owner_email", v1)
+                self.assertEqual(v2["version"], 2)
+                self.assertEqual(v2["owner_email"], "paul@finite.vip")
+                self.assertEqual(v2["hosted_requester_assertion"], "assertion-1")
+            finally:
+                broker.after_tool_call(**hook)
+                self.module._AUTHENTICATED_FINITE_REQUESTER_CONTEXT.reset(context_token)
+                self.module._AUTHENTICATED_FINITE_TURN_USER.reset(user_token)
+            self.assertFalse((broker.root_v2 / filename).exists())
+
     def test_non_finite_invalid_and_non_terminal_hooks_never_lease(self):
         with tempfile.TemporaryDirectory() as finite_home:
             broker = self.module._RequesterContextBroker(Path(finite_home) / "contexts")

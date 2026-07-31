@@ -28,6 +28,9 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         flag_value(&args, "--finite-vip-domain").unwrap_or_else(|| "finite.vip".to_owned());
     let operator_token =
         configured_operator_token(&args, std::env::var("FINITE_IDENTITY_OPERATOR_TOKEN").ok());
+    let sites_notification_token = configured_sites_notification_token(
+        std::env::var("FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN").ok(),
+    );
     let address: SocketAddr = listen
         .parse()
         .map_err(|error| format!("invalid --listen address: {error}"))?;
@@ -43,6 +46,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
             finite_vip_domain,
             email_challenge_ttl_seconds: 15 * 60,
             operator_token,
+            sites_notification_token,
         },
     );
     let listener = tokio::net::TcpListener::bind(address)
@@ -51,6 +55,12 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     axum::serve(listener, router(state))
         .await
         .map_err(|error| format!("server error: {error}"))
+}
+
+fn configured_sites_notification_token(environment: Option<String>) -> Option<String> {
+    environment
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -97,7 +107,7 @@ fn configure_mailer(
 }
 
 fn usage() -> String {
-    "usage: finite-identityd serve --data DIR --external-base-url URL [--listen 127.0.0.1:8790] [--finite-vip-domain finite.vip] [--operator-token TOKEN] [--mailer dev --dev-print-email-tokens yes | --mailer resend|postmark --mail-from ADDR]".to_owned()
+    "usage: finite-identityd serve --data DIR --external-base-url URL [--listen 127.0.0.1:8790] [--finite-vip-domain finite.vip] [--operator-token TOKEN] [--mailer dev --dev-print-email-tokens yes | --mailer resend|postmark --mail-from ADDR] (FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN enables the narrow Sites notification endpoint)".to_owned()
 }
 
 #[cfg(test)]
