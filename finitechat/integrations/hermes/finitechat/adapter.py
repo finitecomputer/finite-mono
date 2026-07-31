@@ -66,9 +66,9 @@ REQUESTER_CONTEXT_V2_VERSION = 2
 _AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "finitechat_authenticated_turn_user", default=None
 )
-_AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[
-    tuple[str, str] | None
-] = contextvars.ContextVar("finitechat_authenticated_requester_context", default=None)
+_AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[tuple[str, str] | None] = (
+    contextvars.ContextVar("finitechat_authenticated_requester_context", default=None)
+)
 APPROVAL_CONTROL_TEXT = frozenset(
     {
         "approve",

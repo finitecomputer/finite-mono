@@ -317,9 +317,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             hook = {"tool_name": "terminal", "tool_call_id": "call-a"}
             try:
                 broker.before_tool_call(**hook)
-                filename = self.module._requester_context_filename(
-                    "finitechat:room-a:thread-a"
-                )
+                filename = self.module._requester_context_filename("finitechat:room-a:thread-a")
                 v1 = json.loads((broker.root / filename).read_text(encoding="utf-8"))
                 v2 = json.loads((broker.root_v2 / filename).read_text(encoding="utf-8"))
                 self.assertEqual(v1["version"], 1)
