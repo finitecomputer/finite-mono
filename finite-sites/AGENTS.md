@@ -44,8 +44,6 @@ fsite describe workflow project-config --output json
 fsite auth register --output json
 fsite project init --config finite.toml --dry-run --output json
 fsite project init --config finite.toml --output json
-fsite project grant PROJECT --npub AGENT_NPUB --output json
-fsite project grant PROJECT --nip05 AGENT_NIP05 --output json
 fsite project grant PROJECT --email editor@example.com --send-invite --output json
 fsite project share PROJECT OUTPUT --shared --add-email viewer@example.com --send-invite --output json
 fsite auth login editor@example.com
@@ -57,9 +55,7 @@ git clone https://git.finite.chat/PROJECT.git
 - A `[project]`-only `finite.toml` is a valid Bare Project Repository with no
   served output. Add missing outputs later by adding them to `finite.toml` and
   replaying `fsite project init --config finite.toml`.
-- Email is optional. Prefer native auth with `fsite auth register`; grant an
-  agent's own Principal with `fsite project grant PROJECT --npub AGENT_NPUB`.
-  Never link a human email merely to make an Agent Principal a collaborator. Use
+- Email is optional. Prefer native auth with `fsite auth register`; use
   `fsite auth redeem EMAIL TOKEN --link-native` when an invite token should
   link that email to the local npub **and both identify the same Principal**.
   Never use `--link-native` to give an agent access to a human's email-shaped

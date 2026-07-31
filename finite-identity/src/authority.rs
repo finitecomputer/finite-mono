@@ -274,21 +274,10 @@ impl IdentityStore {
         let parsed = parse_email(email).ok_or(StoreError::Validation("malformed email"))?;
         let mut conn = self.conn.lock().expect("store mutex never poisoned");
         let tx = conn.transaction()?;
-        Self::bind_vip_email_in_transaction(&tx, &parsed, pubkey, now)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn bind_vip_email_in_transaction(
-        tx: &rusqlite::Transaction<'_>,
-        parsed: &ParsedEmail,
-        pubkey: &str,
-        now: u64,
-    ) -> Result<(), StoreError> {
         let existing: Option<String> = tx
             .query_row(
                 "SELECT pubkey FROM vip_email_bindings WHERE email = ?1",
-                params![&parsed.email],
+                params![parsed.email],
                 |row| row.get(0),
             )
             .optional()?;
@@ -301,13 +290,7 @@ impl IdentityStore {
                 "INSERT INTO vip_email_bindings
                    (email, localpart, domain, pubkey, created_at, disabled_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
-                params![
-                    &parsed.email,
-                    &parsed.localpart,
-                    &parsed.domain,
-                    pubkey,
-                    now
-                ],
+                params![parsed.email, parsed.localpart, parsed.domain, pubkey, now],
             )?;
         }
         tx.execute(
@@ -323,14 +306,15 @@ impl IdentityStore {
                 pubkey = excluded.pubkey,
                 verified_at = excluded.verified_at,
                 revoked_at = NULL",
-            params![&parsed.email, pubkey, now],
+            params![parsed.email, pubkey, now],
         )?;
         tx.execute(
             "UPDATE email_only_principals
              SET revoked_at = COALESCE(revoked_at, ?2)
              WHERE email = ?1",
-            params![&parsed.email, now],
+            params![parsed.email, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -480,19 +464,6 @@ impl IdentityStore {
               used_at INTEGER,
               created_at INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS mailbox_proofs (
-              proof_hash TEXT PRIMARY KEY,
-              email TEXT NOT NULL,
-              pubkey TEXT NOT NULL,
-              expires_at INTEGER NOT NULL,
-              used_at INTEGER,
-              created_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS managed_agent_nip05_bindings (
-              name TEXT PRIMARY KEY,
-              pubkey TEXT NOT NULL,
-              created_at INTEGER NOT NULL
-            );
             ",
             )?;
         Ok(())
@@ -541,58 +512,6 @@ impl IdentityStore {
         Ok(email)
     }
 
-    fn create_mailbox_proof(
-        &self,
-        proof_hash: &str,
-        email: &str,
-        pubkey: &str,
-        expires_at: u64,
-        now: u64,
-    ) -> Result<(), StoreError> {
-        self.conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .execute(
-                "INSERT INTO mailbox_proofs
-                    (proof_hash, email, pubkey, expires_at, used_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
-                params![proof_hash, email, pubkey, expires_at, now],
-            )?;
-        Ok(())
-    }
-
-    fn consume_mailbox_proof(
-        &self,
-        proof_hash: &str,
-        pubkey: &str,
-        now: u64,
-    ) -> Result<String, StoreError> {
-        let mut conn = self.conn.lock().expect("store mutex never poisoned");
-        let tx = conn.transaction()?;
-        let row: Option<(String, String, u64, Option<u64>)> = tx
-            .query_row(
-                "SELECT email, pubkey, expires_at, used_at
-                 FROM mailbox_proofs WHERE proof_hash = ?1",
-                params![proof_hash],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        let (email, proof_pubkey, expires_at, used_at) =
-            row.ok_or(StoreError::Validation("unknown_or_expired_mailbox_proof"))?;
-        if proof_pubkey != pubkey {
-            return Err(StoreError::Validation("mailbox_proof_pubkey_mismatch"));
-        }
-        if used_at.is_some() || now > expires_at {
-            return Err(StoreError::Validation("unknown_or_expired_mailbox_proof"));
-        }
-        tx.execute(
-            "UPDATE mailbox_proofs SET used_at = ?1 WHERE proof_hash = ?2",
-            params![now, proof_hash],
-        )?;
-        tx.commit()?;
-        Ok(email)
-    }
-
     fn nip05_pubkey(&self, localpart: &str, domain: &str) -> Result<Option<String>, StoreError> {
         self.conn
             .lock()
@@ -619,57 +538,6 @@ impl IdentityStore {
             )
             .optional()
             .map_err(StoreError::from)
-    }
-
-    fn bind_managed_agent_nip05(
-        &self,
-        name: &str,
-        pubkey: &str,
-        now: u64,
-    ) -> Result<(), StoreError> {
-        if !hex::is_hex32(pubkey) {
-            return Err(StoreError::Validation("malformed pubkey"));
-        }
-        let parsed = parse_email(name).ok_or(StoreError::Validation("malformed email"))?;
-        let mut conn = self.conn.lock().expect("store mutex never poisoned");
-        let tx = conn.transaction()?;
-        Self::bind_vip_email_in_transaction(&tx, &parsed, pubkey, now)?;
-        let existing: Option<String> = tx
-            .query_row(
-                "SELECT pubkey FROM managed_agent_nip05_bindings WHERE name = ?1",
-                params![&parsed.email],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if existing
-            .as_deref()
-            .is_some_and(|existing| existing != pubkey)
-        {
-            return Err(StoreError::Conflict("managed_agent_nip05_already_bound"));
-        }
-        tx.execute(
-            "INSERT INTO managed_agent_nip05_bindings (name, pubkey, created_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(name) DO NOTHING",
-            params![&parsed.email, pubkey, now],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn is_managed_agent_nip05(&self, name: &str, pubkey: &str) -> Result<bool, StoreError> {
-        let found: Option<String> = self
-            .conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .query_row(
-                "SELECT pubkey FROM managed_agent_nip05_bindings
-                 WHERE name = ?1 AND pubkey = ?2",
-                params![name, pubkey],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
     }
 
     fn active_email_only_principal(&self, email: &str, pubkey: &str) -> Result<bool, StoreError> {
@@ -932,16 +800,10 @@ pub fn router(state: AuthorityState) -> Router {
             "/api/v1/email-only-principals/redeem",
             post(redeem_email_only_principal),
         )
-        .route("/api/v1/mailbox-proofs/redeem", post(redeem_mailbox_proof))
-        .route(
-            "/api/v1/mailbox-proofs/consume",
-            post(consume_mailbox_proof),
-        )
         .route(
             "/api/v1/principal-resolution/satisfies-grant",
             post(satisfies_grant),
         )
-        .route("/api/v1/nip05-resolution", post(resolve_nip05))
         .route("/api/v1/operator/inspect", post(operator_inspect))
         .route(
             "/api/v1/operator/agent-email-bindings",
@@ -1103,75 +965,6 @@ async fn redeem_email_only_principal(
     }
 }
 
-async fn redeem_mailbox_proof(
-    State(state): State<AuthorityState>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let actor = match authenticate(&state, &headers, "POST", &original_uri, Some(&body)) {
-        Ok(actor) => actor,
-        Err(error) => return api_error(error.status, error.code),
-    };
-    let request: MailboxProofRedeemRequest = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_json"),
-    };
-    let Some(email) = normalize_invited_email(&request.email, &state.config.finite_vip_domain)
-    else {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_invited_email");
-    };
-    let now = state.clock.now();
-    let token_email = match state
-        .store
-        .redeem_email_challenge(&token_hash(&request.token), now)
-    {
-        Ok(token_email) => token_email,
-        Err(error) => return api_error(StatusCode::BAD_REQUEST, store_error_code(&error)),
-    };
-    if token_email != email {
-        return api_error(StatusCode::BAD_REQUEST, "email_challenge_mismatch");
-    }
-    let proof = random_token();
-    let expires_at = now + 5 * 60;
-    if let Err(error) =
-        state
-            .store
-            .create_mailbox_proof(&token_hash(&proof), &email, &actor, expires_at, now)
-    {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-    }
-    Json(MailboxProofRedeemResponse {
-        proof,
-        email,
-        pubkey: actor,
-        expires_at,
-    })
-    .into_response()
-}
-
-async fn consume_mailbox_proof(
-    State(state): State<AuthorityState>,
-    Json(request): Json<MailboxProofConsumeRequest>,
-) -> impl IntoResponse {
-    if !hex::is_hex32(&request.pubkey) {
-        return api_error(StatusCode::BAD_REQUEST, "malformed_pubkey");
-    }
-    let now = state.clock.now();
-    match state
-        .store
-        .consume_mailbox_proof(&token_hash(&request.proof), &request.pubkey, now)
-    {
-        Ok(email) => Json(MailboxProofConsumeResponse {
-            email,
-            pubkey: request.pubkey,
-            verified: true,
-        })
-        .into_response(),
-        Err(error) => api_error(StatusCode::BAD_REQUEST, store_error_code(&error)),
-    }
-}
-
 async fn satisfies_grant(
     State(state): State<AuthorityState>,
     Json(request): Json<SatisfiesGrantRequest>,
@@ -1199,43 +992,6 @@ async fn satisfies_grant(
     Json(SatisfiesGrantResponse {
         satisfied,
         principal,
-    })
-    .into_response()
-}
-
-async fn resolve_nip05(
-    State(state): State<AuthorityState>,
-    Json(request): Json<Nip05ResolutionRequest>,
-) -> impl IntoResponse {
-    let Some(name) = normalize_finite_vip_email(&request.name, &state.config.finite_vip_domain)
-    else {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_finite_nip05_name");
-    };
-    let binding = match state.store.vip_binding_by_email(&name) {
-        Ok(Some(binding)) if !binding.disabled() => binding,
-        Ok(_) => return api_error(StatusCode::NOT_FOUND, "nip05_name_not_found"),
-        Err(error) => {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-        }
-    };
-    let managed_agent = match state.store.is_managed_agent_nip05(&name, &binding.pubkey) {
-        Ok(managed_agent) => managed_agent,
-        Err(error) => {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-        }
-    };
-    let Some(pubkey_bytes) = hex::decode32(&binding.pubkey) else {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_pubkey");
-    };
-    Json(Nip05ResolutionResponse {
-        name,
-        pubkey: binding.pubkey,
-        npub: npub::encode(&pubkey_bytes),
-        kind: if managed_agent {
-            "managed_agent"
-        } else {
-            "mailbox"
-        },
     })
     .into_response()
 }
@@ -1392,7 +1148,7 @@ async fn operator_bind_agent_email(
     }
     match state
         .store
-        .bind_managed_agent_nip05(&email, &pubkey, state.clock.now())
+        .bind_vip_email(&email, &pubkey, state.clock.now())
     {
         Ok(()) => Json(OperatorBindAgentEmailResponse {
             email: email.clone(),
@@ -1843,33 +1599,6 @@ struct EmailOnlyRedeemResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct MailboxProofRedeemRequest {
-    email: String,
-    token: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MailboxProofRedeemResponse {
-    proof: String,
-    email: String,
-    pubkey: String,
-    expires_at: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct MailboxProofConsumeRequest {
-    proof: String,
-    pubkey: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MailboxProofConsumeResponse {
-    email: String,
-    pubkey: String,
-    verified: bool,
-}
-
-#[derive(Debug, Deserialize)]
 struct SatisfiesGrantRequest {
     grant: String,
     actor_pubkey: String,
@@ -1879,19 +1608,6 @@ struct SatisfiesGrantRequest {
 struct SatisfiesGrantResponse {
     satisfied: bool,
     principal: Option<PrincipalResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Nip05ResolutionRequest {
-    name: String,
-}
-
-#[derive(Debug, Serialize)]
-struct Nip05ResolutionResponse {
-    name: String,
-    pubkey: String,
-    npub: String,
-    kind: &'static str,
 }
 
 #[derive(Debug, Serialize)]

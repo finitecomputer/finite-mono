@@ -76,53 +76,24 @@ human who owns its SaaS Project. `fsite` never copies the secret elsewhere.
 fsite auth status --output json
 ```
 
-### Mailboxes, NIP-05, And Identity Authority
+### Email And Identity Authority
 
-`fsite` uses `https://identity.finite.vip` as the production Identity Authority
-by default. `FINITE_IDENTITY_AUTHORITY` is only a self-hosting and local-test
-override. CLI behavior does not change merely because that variable is present.
+When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
+`fsite auth login`, `fsite auth link-email`, and `fsite auth redeem` use that
+authority for email proof and Nostr key ownership instead of Sites-local email
+keys.
 
-`--email` always means a deliverable Mailbox Address. `--nip05` always means a
-Finite Identity resolution name, and `--npub` always means a native key.
-Managed Agent NIP-05 names are not mailboxes: passing one to an email flag
-fails before any invitation or challenge is delivered and points to the
-corresponding NIP-05 flag.
-
-For `@finite.vip` Mailbox Addresses, redeeming after `fsite auth link-email
-MAILBOX` or redeeming with `--link-native` binds the mailbox to the current
-Local Identity Key in finite-identity. Do not run that flow from an agent
-merely to inherit the human's permissions; human-to-agent access requires an
+For `@finite.vip` addresses, redeeming after `fsite auth link-email EMAIL` or
+redeeming with `--link-native` binds the email to the current Local Identity
+Key in finite-identity. Do not run that flow from an agent merely to inherit
+the human's email permissions; human-to-agent email access requires an
 explicit, revocable Finite Sites Email Access Delegation. For non-`@finite.vip`
-Mailbox Addresses, redeeming preserves the email-only collaborator flow: the
-mailbox can satisfy its grant, but it does not become a native Finite identity.
+addresses, redeeming
+preserves the email-only collaborator flow: the email can satisfy an email
+grant, but it does not become a native Finite VIP identity.
 
-The Sites-only delegation flow is:
-
-```sh
-fsite auth sites-key request paul@example.com
-fsite auth sites-key add paul@example.com TOKEN_FROM_EMAIL --output json
-fsite auth sites-key revoke paul@example.com TOKEN_FROM_EMAIL npub1... --output json
-```
-
-Every add or revoke uses fresh mailbox proof. Multiple npubs can remain active
-for one mailbox; revoking one does not change Chat NIP-05 resolution, Brain
-encryption recipients, other keys, or the underlying mailbox grants.
-
-The additive operator reconciliation is:
-
-```sh
-FC_CORE_API_TOKEN=... \
-finitesitesd reconcile-identity --data DATA_DIR \
-  --identity-authority-url https://identity.finite.vip \
-  --core-api-url https://core.example
-```
-
-The Core URL and server-only `FC_CORE_API_TOKEN` are optional as a pair.
-Without them, reconciliation still preserves legacy access and converts
-Managed Agent NIP-05 grants to native grants. With them, a verified active Core
-account-to-Agent association may create the missing mailbox-to-npub Sites key.
-Automated evidence never reactivates a revoked key; only a new mailbox
-challenge can do that.
+Sites keeps its legacy `/api/v1/email-auth/*` endpoints for self-hosted and
+transition deployments that do not configure `FINITE_IDENTITY_AUTHORITY`.
 
 ### Migrating an existing key
 
@@ -351,15 +322,13 @@ git commit -m "Describe the edit"
 git push origin main
 ```
 
-Use `--email MAILBOX` with `fsite auth git` only when you are acting through a
-mailbox collaborator grant. A native collaborator can optionally prove the
-same key with `--nip05 NAME` or `--npub NPUB`:
+Use `--email EMAIL` with `fsite auth git` only when you are acting through an
+email collaborator grant:
 
 ```sh
 fsite auth login editor@example.com
 fsite auth redeem editor@example.com TOKEN_FROM_EMAIL
 fsite auth git PROJECT --email editor@example.com --store --output json
-fsite auth git PROJECT --nip05 my-agent@finite.vip --store --output json
 ```
 
 Do not print Git Credential passwords into transcripts. Prefer `--store`.
@@ -383,34 +352,24 @@ fsite auth redeem editor@example.com TOKEN_FROM_EMAIL --link-native --output jso
 ```
 
 Never run that command from an Agent Principal merely to inherit a human's
-email grants. Use `fsite auth sites-key request` followed by `sites-key add`
-instead. The resulting Authorized Sites Key grants no Chat or Brain authority.
+email grants. That case requires an explicit, revocable Finite Sites Email
+Access Delegation. It grants no Brain access, and until the installed Sites
+API/CLI exposes the delegation flow the agent must stop rather than impersonate
+the human through an email session.
 
 ## Share And Collaborate
 
 Project collaboration controls who can clone and push source:
 
 ```sh
-# Native agents and Finite users keep their own Principal.
-fsite project grant PROJECT --npub npub1... --output json
-fsite project revoke PROJECT --npub npub1... --output json
-fsite project grant PROJECT --nip05 my-agent@finite.vip --output json
-fsite project revoke PROJECT --nip05 my-agent@finite.vip --output json
-
-# External email collaborators use the invitation flow.
-fsite project grant PROJECT --email editor@example.com --send-invite --output json
-fsite project revoke PROJECT --email editor@example.com --output json
+fsite project grant PROJECT --email bot@example.com --send-invite --output json
+fsite project revoke PROJECT --email bot@example.com --output json
 ```
-
-Use exactly one of `--email`, `--nip05`, or `--npub`. Native collaborators
-authenticate with their own Local Identity Key and run `fsite auth git PROJECT
---store`; they do not link or impersonate the project owner's mailbox.
 
 Output visibility controls who can view the served website:
 
 ```sh
 fsite project share PROJECT site --shared --add-email viewer@example.com --send-invite --output json
-fsite project share PROJECT site --add-nip05 my-agent@finite.vip --output json
 fsite project share PROJECT site --add-npub npub1... --output json
 fsite project share PROJECT site --remove-npub npub1... --output json
 fsite project share PROJECT site --public --yes-public --output json

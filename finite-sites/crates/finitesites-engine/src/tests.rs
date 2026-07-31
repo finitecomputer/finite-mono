@@ -3,9 +3,7 @@ use sha2::{Digest, Sha256};
 use finitesites_blob::BlobStore;
 use std::collections::BTreeMap;
 
-use finitesites_proto::dto::{
-    ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest, SharingRequest,
-};
+use finitesites_proto::dto::{ProjectGrantRequest, ProjectInitRequest, SharingRequest};
 use finitesites_proto::limits::{LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE};
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::project_config::{
@@ -317,7 +315,6 @@ fn project_grant_rejects_bad_role_and_replays() {
         "finitechat-native",
         &ProjectGrantRequest {
             email: "skyler@example.com".to_string(),
-            npub: None,
             role: "owner".to_string(),
         },
         NOW + 1,
@@ -331,7 +328,6 @@ fn project_grant_rejects_bad_role_and_replays() {
             "finitechat-native",
             &ProjectGrantRequest {
                 email: "skyler@example.com".to_string(),
-                npub: None,
                 role: "editor".to_string(),
             },
             NOW + 2,
@@ -346,193 +342,12 @@ fn project_grant_rejects_bad_role_and_replays() {
             "finitechat-native",
             &ProjectGrantRequest {
                 email: "skyler@example.com".to_string(),
-                npub: None,
                 role: "editor".to_string(),
             },
             NOW + 3,
         )
         .unwrap();
     assert!(!replay.collaborator.created);
-}
-
-#[test]
-fn native_project_collaborator_can_publish_and_revocation_replays() {
-    let mut fx = fixture();
-    fx.engine
-        .init_project(
-            OWNER,
-            &project_request(
-                "finitechat-native",
-                "finitechat-native-mockup",
-                false,
-                false,
-            ),
-            remote("finitechat-native"),
-            NOW,
-        )
-        .unwrap();
-    let collaborator_npub = finitesites_proto::npub::encode_npub(OTHER_OWNER).unwrap();
-    let request = ProjectGrantRequest {
-        email: String::new(),
-        npub: Some(collaborator_npub.clone()),
-        role: "editor".to_string(),
-    };
-
-    let granted = fx
-        .engine
-        .grant_project(OWNER, "finitechat-native", &request, NOW + 1)
-        .unwrap();
-    assert!(granted.collaborator.created);
-    assert_eq!(granted.collaborator.email, "");
-    assert_eq!(granted.collaborator.npub, Some(collaborator_npub.clone()));
-
-    let replay = fx
-        .engine
-        .grant_project(OWNER, "finitechat-native", &request, NOW + 2)
-        .unwrap();
-    assert!(!replay.collaborator.created);
-
-    let status = fx
-        .engine
-        .project_status(
-            OTHER_OWNER,
-            "finitechat-native",
-            remote("finitechat-native"),
-        )
-        .unwrap();
-    assert_eq!(status.role, "editor");
-    assert!(
-        status
-            .collaborators
-            .iter()
-            .any(|collaborator| collaborator.npub.as_deref() == Some(&collaborator_npub))
-    );
-
-    let credential = fx
-        .engine
-        .mint_git_credential(
-            OTHER_OWNER,
-            "finitechat-native",
-            None,
-            remote("finitechat-native"),
-            NOW + 3,
-        )
-        .unwrap();
-    let removed = fx
-        .engine
-        .revoke_project(
-            OWNER,
-            "finitechat-native",
-            &ProjectRevokeRequest {
-                email: String::new(),
-                npub: Some(collaborator_npub.clone()),
-            },
-            NOW + 4,
-        )
-        .unwrap();
-    assert_eq!(removed.email, "");
-    assert_eq!(removed.npub, Some(collaborator_npub.clone()));
-    assert!(removed.removed);
-    assert_eq!(removed.revoked_git_credentials, 1);
-    assert!(matches!(
-        fx.engine.authenticate_git_credential(
-            &credential.username,
-            &credential.password,
-            "finitechat-native",
-            NOW + 5,
-        ),
-        Err(EngineError::NotAuthorized)
-    ));
-
-    let replay = fx
-        .engine
-        .revoke_project(
-            OWNER,
-            "finitechat-native",
-            &ProjectRevokeRequest {
-                email: String::new(),
-                npub: Some(collaborator_npub.clone()),
-            },
-            NOW + 6,
-        )
-        .unwrap();
-    assert!(!replay.removed);
-    assert_eq!(replay.revoked_git_credentials, 0);
-    assert!(matches!(
-        fx.engine.project_status(
-            OTHER_OWNER,
-            "finitechat-native",
-            remote("finitechat-native")
-        ),
-        Err(EngineError::ProjectNotFound)
-    ));
-}
-
-#[test]
-fn native_project_grant_requires_one_non_owner_identity() {
-    let mut fx = fixture();
-    fx.engine
-        .init_project(
-            OWNER,
-            &project_request(
-                "finitechat-native",
-                "finitechat-native-mockup",
-                false,
-                false,
-            ),
-            remote("finitechat-native"),
-            NOW,
-        )
-        .unwrap();
-    let other_npub = finitesites_proto::npub::encode_npub(OTHER_OWNER).unwrap();
-    let owner_npub = finitesites_proto::npub::encode_npub(OWNER).unwrap();
-
-    for request in [
-        ProjectGrantRequest {
-            email: String::new(),
-            npub: None,
-            role: "editor".to_string(),
-        },
-        ProjectGrantRequest {
-            email: "skyler@example.com".to_string(),
-            npub: Some(other_npub),
-            role: "editor".to_string(),
-        },
-        ProjectGrantRequest {
-            email: String::new(),
-            npub: Some("not-an-npub".to_string()),
-            role: "editor".to_string(),
-        },
-    ] {
-        assert!(matches!(
-            fx.engine
-                .grant_project(OWNER, "finitechat-native", &request, NOW + 1),
-            Err(EngineError::Validation(_) | EngineError::Proto(_))
-        ));
-    }
-
-    let owner_target = fx.engine.grant_project(
-        OWNER,
-        "finitechat-native",
-        &ProjectGrantRequest {
-            email: String::new(),
-            npub: Some(owner_npub),
-            role: "viewer".to_string(),
-        },
-        NOW + 2,
-    );
-    assert!(matches!(owner_target, Err(EngineError::Conflict(_))));
-    assert!(
-        fx.engine
-            .mint_git_credential(
-                OWNER,
-                "finitechat-native",
-                None,
-                remote("finitechat-native"),
-                NOW + 3,
-            )
-            .is_ok()
-    );
 }
 
 #[test]
@@ -557,7 +372,6 @@ fn registered_native_can_link_email_and_inherit_editor_grant() {
             "finitechat-native",
             &ProjectGrantRequest {
                 email: "skyler@example.com".to_string(),
-                npub: None,
                 role: "editor".to_string(),
             },
             NOW + 1,
@@ -591,97 +405,6 @@ fn registered_native_can_link_email_and_inherit_editor_grant() {
 }
 
 #[test]
-fn authorized_sites_key_can_manage_same_mailbox_owned_project_without_identity_link() {
-    let mut fx = fixture();
-    let published = publish_project_site(&mut fx.engine, "mailbox-owned", "mailbox-owned", false);
-    fx.engine
-        .store_mut()
-        .link_email_to_native_principal("paul@finite.vip", OWNER, NOW + 1)
-        .unwrap();
-    fx.engine.store_mut().reconcile_sites_identity().unwrap();
-    fx.engine
-        .register_sites_authorized_key(OTHER_OWNER, "paul@finite.vip", NOW + 2)
-        .unwrap();
-
-    let status = fx
-        .engine
-        .project_status(OTHER_OWNER, "mailbox-owned", remote("mailbox-owned"))
-        .unwrap();
-    assert_eq!(status.role, "owner");
-    let sharing = SharingRequest {
-        visibility: Some("shared".to_string()),
-        confirm_public: false,
-        add_emails: vec!["friend@example.com".to_string()],
-        remove_emails: Vec::new(),
-        add_npubs: Vec::new(),
-        remove_npubs: Vec::new(),
-    };
-    fx.engine
-        .set_project_output_sharing(OTHER_OWNER, "mailbox-owned", "site", &sharing, NOW + 3)
-        .unwrap();
-    let site = fx
-        .engine
-        .output_by_site_id(&published.site_id)
-        .unwrap()
-        .unwrap();
-    let viewer_cookie = fx
-        .engine
-        .native_viewer_session(&site, OTHER_OWNER, "mailbox-owner-proof", NOW + 3)
-        .unwrap();
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&viewer_cookie), NOW + 3)
-            .unwrap(),
-        ViewAccess::Allowed
-    );
-
-    fx.engine
-        .revoke_sites_authorized_key(
-            "paul@finite.vip",
-            &finitesites_proto::npub::encode_npub(OTHER_OWNER).unwrap(),
-            NOW + 4,
-        )
-        .unwrap();
-    assert!(matches!(
-        fx.engine
-            .project_status(OTHER_OWNER, "mailbox-owned", remote("mailbox-owned")),
-        Err(EngineError::ProjectNotFound)
-    ));
-    assert_eq!(
-        fx.engine
-            .view_access(&site, Some(&viewer_cookie), NOW + 4)
-            .unwrap(),
-        ViewAccess::NeedsLogin
-    );
-    assert!(
-        fx.engine
-            .project_status(OWNER, "mailbox-owned", remote("mailbox-owned"))
-            .is_ok()
-    );
-
-    fx.engine
-        .register_sites_authorized_key(OTHER_OWNER, "paul@finite.vip", NOW + 5)
-        .unwrap();
-    fx.engine
-        .revoke_sites_authorized_key(
-            "paul@finite.vip",
-            &finitesites_proto::npub::encode_npub(OWNER).unwrap(),
-            NOW + 6,
-        )
-        .unwrap();
-    assert!(matches!(
-        fx.engine
-            .project_status(OWNER, "mailbox-owned", remote("mailbox-owned")),
-        Err(EngineError::ProjectNotFound)
-    ));
-    assert!(
-        fx.engine
-            .project_status(OTHER_OWNER, "mailbox-owned", remote("mailbox-owned"))
-            .is_ok()
-    );
-}
-
-#[test]
 fn email_only_redeem_does_not_create_native_project_access() {
     let mut fx = fixture();
     fx.engine
@@ -703,7 +426,6 @@ fn email_only_redeem_does_not_create_native_project_access() {
             "finitechat-native",
             &ProjectGrantRequest {
                 email: "skyler@example.com".to_string(),
-                npub: None,
                 role: "editor".to_string(),
             },
             NOW + 1,
@@ -763,7 +485,6 @@ fn identity_verified_email_can_mint_git_credential_without_sites_email_key() {
             "finitechat-native",
             &ProjectGrantRequest {
                 email: "skyler@example.com".to_string(),
-                npub: None,
                 role: "editor".to_string(),
             },
             NOW + 1,
@@ -859,7 +580,6 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
             "finitechat-native",
             &ProjectGrantRequest {
                 email: "skyler@example.com".to_string(),
-                npub: None,
                 role: "editor".to_string(),
             },
             NOW + 2,
@@ -910,15 +630,7 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
 
     let removed = fx
         .engine
-        .revoke_project(
-            OWNER,
-            "finitechat-native",
-            &ProjectRevokeRequest {
-                email: "skyler@example.com".to_string(),
-                npub: None,
-            },
-            NOW + 6,
-        )
+        .revoke_project(OWNER, "finitechat-native", "skyler@example.com", NOW + 6)
         .unwrap();
     assert!(removed.removed);
     assert_eq!(removed.revoked_git_credentials, 1);
@@ -933,15 +645,7 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
 
     let replay = fx
         .engine
-        .revoke_project(
-            OWNER,
-            "finitechat-native",
-            &ProjectRevokeRequest {
-                email: "skyler@example.com".to_string(),
-                npub: None,
-            },
-            NOW + 8,
-        )
+        .revoke_project(OWNER, "finitechat-native", "skyler@example.com", NOW + 8)
         .unwrap();
     assert!(!replay.removed);
     assert_eq!(replay.revoked_git_credentials, 0);

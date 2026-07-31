@@ -17,9 +17,8 @@ use finitesites_blob::{BlobError, BlobStore};
 use finitesites_proto::dto::{
     AuthRegisterResponse, GitAuthResponse, ProjectCollaboratorSummary, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListItem,
-    ProjectListResponse, ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse,
-    ProjectStatusResponse, SharingRequest, SharingResponse, SiteSummary,
-    SitesAuthorizedKeyResponse,
+    ProjectListResponse, ProjectOutputSummary, ProjectRevokeResponse, ProjectStatusResponse,
+    SharingRequest, SharingResponse, SiteSummary,
 };
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_APP_BUNDLE_BYTES, MAX_EMAIL_KEYS_PER_EMAIL,
@@ -31,9 +30,9 @@ use finitesites_proto::project_config::ProjectOutputKind;
 use finitesites_proto::{ManifestFile, ProtoError, PublishManifest, hex, ids, names, npub};
 use finitesites_store::{
     GitRefEventRecord, ProjectAccessRecord, ProjectCollaboratorApply, ProjectCollaboratorRecord,
-    ProjectCollaboratorRole, ProjectCollaboratorTarget, ProjectInitStoreOutcome,
-    ProjectOutputApply, ProjectOutputRecord, ProjectRecord, ProjectVisibility, SiteKind,
-    SiteRecord, SiteStatus, Store, StoreError, Visibility,
+    ProjectCollaboratorRole, ProjectInitStoreOutcome, ProjectOutputApply, ProjectOutputRecord,
+    ProjectRecord, ProjectVisibility, SiteKind, SiteRecord, SiteStatus, Store, StoreError,
+    Visibility,
 };
 use sha2::{Digest, Sha256};
 
@@ -331,11 +330,11 @@ impl Engine {
         let existing_project = self.store.project_by_slug(&request.config.project.slug)?;
         let project_id = existing_project.as_ref().map(|project| project.id.clone());
         if let Some(project) = &existing_project {
-            let owner_principal_id = self
+            let owner_principal = self
                 .store
-                .project_owner_principal_for_actor(owner_pubkey, &project.id)?
+                .principal_by_pubkey(owner_pubkey)?
                 .ok_or(StoreError::CorruptState("project owner principal missing"))?;
-            if project.owner_principal_id != owner_principal_id {
+            if project.owner_principal_id != owner_principal.id {
                 return Err(EngineError::Conflict("project slug already exists"));
             }
         }
@@ -459,14 +458,14 @@ impl Engine {
             .store
             .project_by_slug(project_slug)?
             .ok_or(EngineError::ProjectNotFound)?;
-        let owner_principal_id = self
+        let owner_principal = self
             .store
-            .project_owner_principal_for_actor(owner_pubkey, &project.id)?
+            .principal_by_pubkey(owner_pubkey)?
             .ok_or(EngineError::NotAuthorized)?;
         let collaborator = collaborator_apply_input(request)?;
         let applied = self
             .store
-            .add_project_collaborator(&project.id, &owner_principal_id, &collaborator, now)
+            .add_project_collaborator(&project.id, &owner_principal.id, &collaborator, now)
             .map_err(|error| match error {
                 StoreError::Conflict("too many project collaborators") => {
                     EngineError::TooManyProjectCollaborators
@@ -474,14 +473,11 @@ impl Engine {
                 StoreError::Conflict("project owner principal mismatch") => {
                     EngineError::NotAuthorized
                 }
-                StoreError::Conflict("project owner cannot be a collaborator target") => {
-                    EngineError::Conflict("project owner already has project access")
-                }
                 other => EngineError::Store(other),
             })?;
         Ok(ProjectGrantResponse {
             project_slug: project.slug,
-            collaborator: project_collaborator_summary(&applied.record, applied.created)?,
+            collaborator: project_collaborator_summary(&applied.record, applied.created),
             invited_emails: Vec::new(),
         })
     }
@@ -490,31 +486,32 @@ impl Engine {
         &mut self,
         owner_pubkey: &str,
         project_slug: &str,
-        request: &ProjectRevokeRequest,
+        collaborator_email: &str,
         now: u64,
     ) -> Result<ProjectRevokeResponse, EngineError> {
         assert!(hex::is_hex32(owner_pubkey));
         finitesites_proto::project_config::validate_project_slug(project_slug)?;
-        let target = collaborator_target(&request.email, request.npub.as_deref())?;
+        let email = validate_email(collaborator_email)?;
         let project = self
             .store
             .project_by_slug(project_slug)?
             .ok_or(EngineError::ProjectNotFound)?;
-        let owner_principal_id = self
+        let owner_principal = self
             .store
-            .project_owner_principal_for_actor(owner_pubkey, &project.id)?
+            .principal_by_pubkey(owner_pubkey)?
             .ok_or(EngineError::NotAuthorized)?;
+        if project.owner_principal_id != owner_principal.id {
+            return Err(EngineError::NotAuthorized);
+        }
         let removed = self.store.remove_project_collaborator(
             &project.id,
-            &owner_principal_id,
-            &target,
+            &owner_principal.id,
+            &email,
             now,
         )?;
-        let (email, npub) = collaborator_target_output(&removed.target)?;
         Ok(ProjectRevokeResponse {
             project_slug: project.slug,
-            email,
-            npub,
+            email: removed.email,
             removed: removed.removed,
             revoked_git_credentials: removed.revoked_git_credentials,
         })
@@ -528,9 +525,13 @@ impl Engine {
     ) -> Result<ProjectStatusResponse, EngineError> {
         assert!(hex::is_hex32(actor_pubkey));
         finitesites_proto::project_config::validate_project_slug(project_slug)?;
+        let principal = self
+            .store
+            .principal_by_pubkey(actor_pubkey)?
+            .ok_or(EngineError::NotAuthorized)?;
         let access = self
             .store
-            .project_access_by_actor(actor_pubkey, project_slug)?
+            .project_access_by_slug(&principal.id, project_slug)?
             .ok_or(EngineError::ProjectNotFound)?;
         let outputs = self.project_output_summaries(&access.project.id)?;
         let collaborators = self.project_collaborator_summaries(&access.project.id)?;
@@ -551,7 +552,12 @@ impl Engine {
         git_remote_base_url: &str,
     ) -> Result<ProjectListResponse, EngineError> {
         assert!(hex::is_hex32(actor_pubkey));
-        let access_records = self.store.projects_for_actor(actor_pubkey)?;
+        let Some(principal) = self.store.principal_by_pubkey(actor_pubkey)? else {
+            return Ok(ProjectListResponse {
+                projects: Vec::new(),
+            });
+        };
+        let access_records = self.store.projects_for_principal(&principal.id)?;
         let mut projects = Vec::with_capacity(access_records.len());
         for access in &access_records {
             projects.push(self.project_list_item(access, git_remote_base_url)?);
@@ -605,7 +611,7 @@ impl Engine {
         let records = self.store.active_project_collaborators(project_id)?;
         let mut collaborators = Vec::with_capacity(records.len());
         for record in &records {
-            collaborators.push(project_collaborator_summary(record, false)?);
+            collaborators.push(project_collaborator_summary(record, false));
         }
         Ok(collaborators)
     }
@@ -660,7 +666,7 @@ impl Engine {
         let collaborator = match actor_email {
             Some(raw_email) => {
                 let email = validate_email(raw_email)?;
-                if !self.actor_has_sites_email_key(actor_pubkey, &email)? {
+                if !self.store.has_email_key(&email, actor_pubkey)? {
                     return Err(EngineError::NotAuthorized);
                 }
                 self.store
@@ -668,55 +674,16 @@ impl Engine {
                     .ok_or(EngineError::NotAuthorized)?
             }
             None => {
-                let access = self
+                let principal = self
                     .store
-                    .project_access_by_actor(actor_pubkey, project_slug)?
+                    .principal_by_pubkey(actor_pubkey)?
                     .ok_or(EngineError::NotAuthorized)?;
-                let principal_id = if access.role == ProjectCollaboratorRole::Owner {
-                    access.project.owner_principal_id
-                } else {
-                    self.store
-                        .principal_by_pubkey(actor_pubkey)?
-                        .ok_or(EngineError::NotAuthorized)?
-                        .id
-                };
                 self.store
-                    .active_project_collaborator_by_principal(&project.id, &principal_id)?
+                    .active_project_collaborator_by_principal(&project.id, &principal.id)?
                     .ok_or(EngineError::NotAuthorized)?
             }
         };
         self.mint_git_credential_for_collaborator(&project, &collaborator, git_remote_url, now)
-    }
-
-    pub fn actor_has_sites_email_key(
-        &self,
-        actor_pubkey: &str,
-        actor_email: &str,
-    ) -> Result<bool, EngineError> {
-        let email = validate_email(actor_email)?;
-        if self
-            .store
-            .has_sites_authorized_key_record(&email, actor_pubkey)?
-        {
-            return self
-                .store
-                .has_sites_authorized_key(&email, actor_pubkey)
-                .map_err(EngineError::from);
-        }
-        self.store
-            .has_email_key(&email, actor_pubkey)
-            .map_err(EngineError::from)
-    }
-
-    pub fn actor_has_sites_email_key_record(
-        &self,
-        actor_pubkey: &str,
-        actor_email: &str,
-    ) -> Result<bool, EngineError> {
-        let email = validate_email(actor_email)?;
-        Ok(self
-            .store
-            .has_sites_authorized_key_record(&email, actor_pubkey)?)
     }
 
     pub fn mint_git_credential_for_verified_email(
@@ -1127,10 +1094,14 @@ impl Engine {
         assert!(hex::is_hex32(actor_pubkey));
         finitesites_proto::project_config::validate_project_slug(project_slug)?;
         finitesites_proto::project_config::validate_output_id(output_id)?;
+        let principal = self
+            .store
+            .principal_by_pubkey(actor_pubkey)?
+            .ok_or(EngineError::NotAuthorized)?;
         let access = self
             .store
-            .project_access_by_actor(actor_pubkey, project_slug)?
-            .ok_or(EngineError::NotAuthorized)?;
+            .project_access_by_slug(&principal.id, project_slug)?
+            .ok_or(EngineError::ProjectNotFound)?;
         if access.role != ProjectCollaboratorRole::Owner {
             return Err(EngineError::NotAuthorized);
         }
@@ -1174,7 +1145,7 @@ impl Engine {
         request: &SharingRequest,
         now: u64,
     ) -> Result<SharingResponse, EngineError> {
-        if !self.store.actor_can_manage_site(actor_pubkey, &site.id)? {
+        if actor_pubkey != site.owner_pubkey {
             return Err(EngineError::NotAuthorized);
         }
         let adds = request.add_emails.len()
@@ -1316,45 +1287,6 @@ impl Engine {
         })
     }
 
-    pub fn register_sites_authorized_key(
-        &mut self,
-        actor_pubkey: &str,
-        verified_email: &str,
-        now: u64,
-    ) -> Result<SitesAuthorizedKeyResponse, EngineError> {
-        if !hex::is_hex32(actor_pubkey) {
-            return Err(EngineError::NotAuthorized);
-        }
-        let email = validate_email(verified_email)?;
-        let key = self
-            .store
-            .register_sites_authorized_key(&email, actor_pubkey, now)?;
-        Ok(SitesAuthorizedKeyResponse {
-            email,
-            npub: npub::encode_npub(actor_pubkey)?,
-            proof_kind: key.proof_kind,
-            active: true,
-        })
-    }
-
-    pub fn revoke_sites_authorized_key(
-        &mut self,
-        verified_email: &str,
-        target_npub: &str,
-        now: u64,
-    ) -> Result<SitesAuthorizedKeyResponse, EngineError> {
-        let email = validate_email(verified_email)?;
-        let target_pubkey = npub::pubkey_from_hex_or_npub(target_npub)?;
-        self.store
-            .revoke_sites_authorized_key(&email, &target_pubkey, now)?;
-        Ok(SitesAuthorizedKeyResponse {
-            email,
-            npub: npub::encode_npub(&target_pubkey)?,
-            proof_kind: "mailbox_challenge".to_string(),
-            active: false,
-        })
-    }
-
     // ---- listing / status ------------------------------------------------------
 
     pub fn list_sites(&self, owner_pubkey: &str) -> Result<Vec<SiteSummary>, EngineError> {
@@ -1449,11 +1381,7 @@ impl Engine {
                         }
                     }
                     ViewerCookieSubject::PrincipalId(principal_id) => {
-                        if self.store.is_principal_shared(&site.id, &principal_id)?
-                            || self
-                                .store
-                                .is_principal_authorized_publisher(&site.id, &principal_id)?
-                        {
+                        if self.store.is_principal_shared(&site.id, &principal_id)? {
                             Ok(ViewAccess::Allowed)
                         } else {
                             Ok(ViewAccess::NeedsLogin)
@@ -1736,11 +1664,7 @@ impl Engine {
             .store
             .principal_by_pubkey(signer_pubkey)?
             .ok_or(EngineError::NotAuthorized)?;
-        if !self.store.is_principal_shared(&site.id, &principal.id)?
-            && !self
-                .store
-                .is_principal_authorized_publisher(&site.id, &principal.id)?
-        {
+        if !self.store.is_principal_shared(&site.id, &principal.id)? {
             return Err(EngineError::NotAuthorized);
         }
         self.store
@@ -1930,7 +1854,7 @@ fn document_name_for_output(kind: &str, name: &str) -> Option<String> {
 fn collaborator_apply_input(
     request: &ProjectGrantRequest,
 ) -> Result<ProjectCollaboratorApply, EngineError> {
-    let target = collaborator_target(&request.email, request.npub.as_deref())?;
+    let email = validate_email(&request.email)?;
     let role = match ProjectCollaboratorRole::parse(&request.role) {
         Ok(ProjectCollaboratorRole::Owner) => {
             return Err(EngineError::Validation(
@@ -1945,56 +1869,19 @@ fn collaborator_apply_input(
         }
         Err(error) => return Err(EngineError::Store(error)),
     };
-    Ok(ProjectCollaboratorApply { target, role })
-}
-
-fn collaborator_target(
-    raw_email: &str,
-    raw_npub: Option<&str>,
-) -> Result<ProjectCollaboratorTarget, EngineError> {
-    let email = raw_email.trim();
-    let npub = raw_npub.unwrap_or_default().trim();
-    match (email.is_empty(), npub.is_empty()) {
-        (false, true) => Ok(ProjectCollaboratorTarget::Email(validate_email(email)?)),
-        (true, false) => Ok(ProjectCollaboratorTarget::NativePubkey(npub::decode_npub(
-            npub,
-        )?)),
-        (true, true) => Err(EngineError::Validation(
-            "project collaborator requires exactly one of email or npub",
-        )),
-        (false, false) => Err(EngineError::Validation(
-            "project collaborator email and npub are mutually exclusive",
-        )),
-    }
-}
-
-fn collaborator_target_output(
-    target: &ProjectCollaboratorTarget,
-) -> Result<(String, Option<String>), EngineError> {
-    match target {
-        ProjectCollaboratorTarget::Email(email) => Ok((email.clone(), None)),
-        ProjectCollaboratorTarget::NativePubkey(pubkey) => {
-            Ok((String::new(), Some(npub::encode_npub(pubkey)?)))
-        }
-    }
+    Ok(ProjectCollaboratorApply { email, role })
 }
 
 fn project_collaborator_summary(
     record: &ProjectCollaboratorRecord,
     created: bool,
-) -> Result<ProjectCollaboratorSummary, EngineError> {
-    let npub = record
-        .pubkey
-        .as_deref()
-        .map(npub::encode_npub)
-        .transpose()?;
-    Ok(ProjectCollaboratorSummary {
+) -> ProjectCollaboratorSummary {
+    ProjectCollaboratorSummary {
         principal_id: Some(record.principal_id.clone()),
         email: record.email.clone().unwrap_or_default(),
-        npub,
         role: record.role.as_str().to_string(),
         created,
-    })
+    }
 }
 
 #[cfg(test)]

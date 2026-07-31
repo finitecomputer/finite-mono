@@ -51,12 +51,9 @@ with exactly these meanings.
   Native Principal. It is created only by an explicit email verification flow,
   lets future email-based collaborator grants resolve to the native npub, and
   keeps email optional for npub-primary users.
-- **Sites Email Principal**: a durable Sites owner keyed by a verified,
-  deliverable mailbox. It is product authorization state, not an Identity
-  Principal Link.
-- **Authorized Sites Key**: a revocable native npub allowed to exercise one
-  Sites Email Principal's grants without making the key and mailbox the same
-  Principal. Older documents call this an Email Access Delegation.
+- **Email Access Delegation**: a revocable Finite Sites authorization allowing
+  one Agent Principal to exercise one verified email Principal's Sites grants
+  without making them the same Principal.
 - **Project Repository**: the editable git history for a project. It may begin
   with data, grow logic around that data, and later produce one or more Project
   Outputs. A Project Repository may exist before any public-facing UI exists.
@@ -227,9 +224,8 @@ with exactly these meanings.
 - **Agent Delegation**: a Principal-approved authorization that lets one Agent
   Principal Key act for that Principal on one Project Repository, with bounded
   capabilities.
-- An **Authorized Sites Key** is product-scoped across one Sites Email
-  Principal's grants; an **Agent Delegation** is bounded to one Project
-  Repository.
+- An **Email Access Delegation** is product-scoped across Finite Sites email
+  grants; an **Agent Delegation** is bounded to one Project Repository.
 - An agent using either delegation signs as its **Agent Principal Key**, and
   Sites audit records the delegation separately from actor identity.
 - **Git Remote**: the standard git clone/push endpoint for a Project
