@@ -4649,9 +4649,6 @@ impl AppRuntimeState {
             trimmed.to_owned(),
             "sent",
         )?;
-        self.app.selected_topic_id = conversation_id;
-        self.app.selected_chat_id = chat_id;
-        self.sync_selected_room_messages();
         Ok(())
     }
 
@@ -4866,24 +4863,21 @@ impl AppRuntimeState {
                 reason: format!("room '{room_id}' is not ready to send"),
             });
         }
-        let (selected_topic_id, selected_chat_id) =
-            match (input.conversation_id.clone(), input.chat_id.clone()) {
-                (Some(topic_id), Some(chat_id)) => {
-                    self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
-                    (Some(topic_id), Some(chat_id))
-                }
-                (None, None) => {
-                    let (topic_id, chat_id) = self.default_chat_route_for_room(&room_id)?;
-                    input.conversation_id = Some(topic_id.clone());
-                    input.chat_id = Some(chat_id.clone());
-                    (Some(topic_id), Some(chat_id))
-                }
-                _ => {
-                    return Err(FiniteChatCoreError::Client {
-                        reason: "attachment route must include both topic and chat ids".to_owned(),
-                    });
-                }
-            };
+        match (input.conversation_id.clone(), input.chat_id.clone()) {
+            (Some(topic_id), Some(chat_id)) => {
+                self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
+            }
+            (None, None) => {
+                let (topic_id, chat_id) = self.default_chat_route_for_room(&room_id)?;
+                input.conversation_id = Some(topic_id);
+                input.chat_id = Some(chat_id);
+            }
+            _ => {
+                return Err(FiniteChatCoreError::Client {
+                    reason: "attachment route must include both topic and chat ids".to_owned(),
+                });
+            }
+        }
         if input.attachments.is_empty() {
             return Err(FiniteChatCoreError::Client {
                 reason: "attachment message must include at least one attachment".to_owned(),
@@ -4902,9 +4896,6 @@ impl AppRuntimeState {
             Ok(projection) => {
                 self.apply_projection_events(projection.events)?;
                 self.append_messages(projection.result.messages);
-                self.app.selected_topic_id = selected_topic_id;
-                self.app.selected_chat_id = selected_chat_id;
-                self.sync_selected_room_messages();
                 self.app.status = "sent".to_owned();
             }
             Err(error) => {
@@ -13629,6 +13620,16 @@ mod tests {
                 .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
                 .is_some_and(|chat| chat.archived),
             "new messages must not implicitly restore an archived chat"
+        );
+        assert_eq!(
+            after_message.selected_topic_id.as_deref(),
+            Some(elsewhere_topic_id.as_str()),
+            "sending to a background chat must not change the active topic"
+        );
+        assert_eq!(
+            after_message.selected_chat_id.as_deref(),
+            Some(elsewhere_chat_id.as_str()),
+            "sending to a background chat must not change the active chat"
         );
 
         drop(alice);

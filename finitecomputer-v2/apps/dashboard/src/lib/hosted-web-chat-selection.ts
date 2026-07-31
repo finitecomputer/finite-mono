@@ -6,14 +6,11 @@ export type HostedChatSelection = {
   selected_chat_id: string | null;
 };
 
-/**
- * The user's most recent navigation click, pinned client-side. Selection-only
- * actions do not bump the daemon revision, so stream snapshots generated
- * before the click persists still carry the previous selection and legally
- * apply. Without the pin, every such snapshot yanks the highlight back to the
- * old chat until reconciliation flips it forward again.
- */
-export type HostedChatSelectionIntent = HostedChatSelection & { token: number };
+export type HostedChatSelectionProjection = {
+  state: HostedChatState;
+  selection: HostedChatSelection;
+  decision: "initial" | "preserved" | "fallback";
+};
 
 export function hostedChatSelectionFromState(state: HostedChatState): HostedChatSelection {
   return {
@@ -52,46 +49,97 @@ export function hostedChatSelectionIntentTarget(
   return null;
 }
 
-/** A snapshot confirms the intent once the server persisted the selection at
- * the intent's granularity: chat click → same chat; topic click → same topic
- * (the server may pick any chat inside it); room click → same room. */
-export function hostedChatSelectionIntentSatisfied(
-  intent: HostedChatSelectionIntent,
-  state: HostedChatState
-): boolean {
-  if (intent.selected_chat_id) {
-    return (state.selected_chat_id ?? null) === intent.selected_chat_id;
-  }
-  if (intent.selected_topic_id) {
-    return (
-      (state.selected_topic_id ?? null) === intent.selected_topic_id &&
-      (state.selected_room_id ?? null) === intent.selected_room_id
-    );
-  }
-  return (state.selected_room_id ?? null) === intent.selected_room_id;
-}
-
 /**
- * Apply a pending intent to an incoming snapshot. A satisfied snapshot is
- * returned untouched and reports confirmed so the caller drops the pin; an
- * unsatisfied one keeps its content but presents the intent's selection so
- * stale stream snapshots cannot fight the user's click.
+ * Project the browser-owned visible route onto a full daemon snapshot.
+ *
+ * Snapshot selection is used only for the initial route and for deterministic
+ * fallback after the visible route disappears. Transcript, activity, send,
+ * upload, and refresh snapshots therefore cannot navigate the browser.
  */
-export function applyHostedChatSelectionIntent(
-  intent: HostedChatSelectionIntent | null,
+export function projectHostedChatVisibleSelection(
+  visible: HostedChatSelection | null,
   next: HostedChatState
-): { state: HostedChatState; confirmed: boolean } {
-  if (!intent) return { state: next, confirmed: false };
-  if (hostedChatSelectionIntentSatisfied(intent, next)) {
-    return { state: next, confirmed: true };
-  }
+): HostedChatSelectionProjection {
+  const selection = visible && hostedChatSelectionExists(visible, next)
+    ? visible
+    : fallbackHostedChatSelection(next);
+  const decision = visible === null
+    ? "initial"
+    : selection === visible
+      ? "preserved"
+      : "fallback";
   return {
     state: {
       ...next,
-      selected_room_id: intent.selected_room_id,
-      selected_topic_id: intent.selected_topic_id,
-      selected_chat_id: intent.selected_chat_id,
+      ...selection,
     },
-    confirmed: false,
+    selection,
+    decision,
+  };
+}
+
+export function hostedChatSelectionExists(
+  selection: HostedChatSelection,
+  state: HostedChatState
+) {
+  const roomId = selection.selected_room_id;
+  if (!roomId) return state.rooms.length === 0;
+  if (!state.rooms.some((room) => room.room_id === roomId)) return false;
+
+  const topicId = selection.selected_topic_id;
+  if (!topicId) return true;
+  const topic = state.topics.find(
+    (candidate) =>
+      candidate.room_id === roomId
+      && candidate.topic_id === topicId
+  );
+  if (!topic) return false;
+
+  const chatId = selection.selected_chat_id;
+  if (!chatId) return true;
+  return topic.chats.some((chat) => chat.chat_id === chatId);
+}
+
+function fallbackHostedChatSelection(state: HostedChatState): HostedChatSelection {
+  const server = hostedChatSelectionFromState(state);
+  if (hostedChatSelectionExists(server, state)) return server;
+
+  const canonicalRoomId = state.hosted_agent_binding?.canonical_room_id;
+  const room = state.rooms.find((candidate) => candidate.room_id === canonicalRoomId)
+    ?? [...state.rooms].sort((left, right) =>
+      left.room_id.localeCompare(right.room_id)
+    )[0];
+  if (!room) {
+    return {
+      selected_room_id: null,
+      selected_topic_id: null,
+      selected_chat_id: null,
+    };
+  }
+
+  const topics = state.topics
+    .filter((topic) => topic.room_id === room.room_id && !topic.archived)
+    .sort((left, right) => {
+      if (left.topic_id === "home") return -1;
+      if (right.topic_id === "home") return 1;
+      return left.topic_id.localeCompare(right.topic_id);
+    });
+  const topic = topics[0];
+  if (!topic) {
+    return {
+      selected_room_id: room.room_id,
+      selected_topic_id: null,
+      selected_chat_id: null,
+    };
+  }
+
+  const chats = topic.chats.filter((chat) => !chat.archived);
+  const chat = chats.find((candidate) => candidate.chat_id === topic.active_chat_id)
+    ?? chats.find((candidate) => candidate.active)
+    ?? [...chats].sort((left, right) => left.chat_id.localeCompare(right.chat_id))[0];
+  return {
+    selected_room_id: room.room_id,
+    selected_topic_id: topic.topic_id,
+    selected_chat_id: chat?.chat_id ?? null,
   };
 }
