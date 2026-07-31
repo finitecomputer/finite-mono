@@ -61,56 +61,6 @@ CREATE TABLE IF NOT EXISTS agent_keys (
 CREATE INDEX IF NOT EXISTS agent_keys_active
   ON agent_keys(principal_id, pubkey) WHERE revoked_at IS NULL;
 
--- A mailbox-scoped Sites owner is deliberately product-owned. It is not a
--- Finite Identity Principal Link and does not change Chat or Brain identity.
-CREATE TABLE IF NOT EXISTS sites_email_principals (
-  id TEXT PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  verified_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sites_authorized_keys (
-  id TEXT PRIMARY KEY,
-  email_principal_id TEXT NOT NULL REFERENCES sites_email_principals(id),
-  native_principal_id TEXT NOT NULL REFERENCES principals(id),
-  proof_kind TEXT NOT NULL CHECK (proof_kind IN (
-    'mailbox_challenge',
-    'legacy_sites_email_key',
-    'legacy_verified_principal_link',
-    'verified_core_account_agent'
-  )),
-  verified_at INTEGER NOT NULL,
-  revoked_at INTEGER,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  UNIQUE (email_principal_id, native_principal_id),
-  CHECK (revoked_at IS NULL OR revoked_at >= verified_at)
-);
-
-CREATE INDEX IF NOT EXISTS sites_authorized_keys_active
-  ON sites_authorized_keys(email_principal_id, native_principal_id)
-  WHERE revoked_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS sites_identity_repairs (
-  id TEXT PRIMARY KEY,
-  repair_key TEXT NOT NULL UNIQUE,
-  source_kind TEXT NOT NULL,
-  source_ref TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('conflict', 'needs_proof')),
-  detail TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sites_legacy_email_resolutions (
-  email TEXT PRIMARY KEY,
-  pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
-  resolution_kind TEXT NOT NULL CHECK (resolution_kind = 'managed_agent_nip05'),
-  resolved_at INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS sites (
   id TEXT PRIMARY KEY,
   owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
@@ -119,8 +69,6 @@ CREATE TABLE IF NOT EXISTS sites (
   kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static', 'document', 'app')),
   app_port INTEGER UNIQUE CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999)),
   active_version_id TEXT REFERENCES versions(id),
-  publisher_email_principal_id TEXT REFERENCES sites_email_principals(id),
-  originating_publisher_principal_id TEXT REFERENCES principals(id),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -131,8 +79,6 @@ CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   slug TEXT NOT NULL UNIQUE,
   owner_principal_id TEXT NOT NULL REFERENCES principals(id),
-  publisher_email_principal_id TEXT REFERENCES sites_email_principals(id),
-  originating_publisher_principal_id TEXT REFERENCES principals(id),
   visibility TEXT NOT NULL CHECK (visibility IN ('private', 'public-read')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL

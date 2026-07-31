@@ -157,16 +157,6 @@ If a Finite VIP Email later binds to a Native Principal, the native binding
 becomes authoritative for Product Grant satisfaction and the previous
 email-only rows for that Finite VIP Email are revoked for authorization.
 
-### Redeem and consume a Mailbox Proof
-
-`POST /api/v1/mailbox-proofs/redeem` uses the same Email Challenge plus an
-exact NIP-98 signer, but creates no Principal Link or NIP-05 binding. It returns
-a short-lived opaque proof. A product server calls
-`POST /api/v1/mailbox-proofs/consume` with that proof and the same signer
-pubkey; successful consumption is single-use. Finite Sites uses this boundary
-to manage its product-owned, revocable Authorized Key set without changing
-Chat routing or Brain encryption identity.
-
 ### Principal Resolution
 
 ```http

@@ -7,7 +7,6 @@ use finitesites_proto::dto::{
     GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse, ProjectInitRequest,
     ProjectInitResponse, ProjectListResponse, ProjectOutputSharingResponse, ProjectRevokeRequest,
     ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
-    SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest,
 };
 use finitesites_proto::nip98;
 
@@ -53,14 +52,6 @@ pub struct Nip05Resolution {
     pub pubkey: String,
     pub npub: String,
     pub kind: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct MailboxProof {
-    pub proof: String,
-    pub email: String,
-    pub pubkey: String,
-    pub expires_at: u64,
 }
 
 impl IdentityAuthorityClient {
@@ -173,20 +164,6 @@ impl IdentityAuthorityClient {
             pubkey: pubkey.to_owned(),
             linked_to_native_principal: true,
         })
-    }
-
-    pub fn redeem_mailbox_proof(
-        &self,
-        key: &KeyFile,
-        email: &str,
-        token: &str,
-    ) -> Result<MailboxProof, CliError> {
-        let identity_key = identity_key(key)?;
-        let request = self
-            .client
-            .mailbox_proof_redeem(&identity_key, email, token, now_unix())
-            .map_err(|error| CliError::Key(error.to_string()))?;
-        self.send_signed_json(request)
     }
 
     fn send_signed_json<T: serde::de::DeserializeOwned>(
@@ -316,42 +293,6 @@ impl Client {
 
     pub fn register_auth(&self, key: &KeyFile) -> Result<AuthRegisterResponse, CliError> {
         self.request(key, "POST", "/api/v1/auth/register", Some(&[]))
-    }
-
-    pub fn register_sites_authorized_key(
-        &self,
-        key: &KeyFile,
-        mailbox_proof: &str,
-    ) -> Result<SitesAuthorizedKeyResponse, CliError> {
-        let body = serde_json::to_vec(&SitesAuthorizedKeyRegisterRequest {
-            mailbox_proof: mailbox_proof.to_string(),
-        })
-        .expect("request serializes");
-        self.request(
-            key,
-            "POST",
-            "/api/v1/sites-authorized-keys/register",
-            Some(&body),
-        )
-    }
-
-    pub fn revoke_sites_authorized_key(
-        &self,
-        key: &KeyFile,
-        mailbox_proof: &str,
-        target_npub: &str,
-    ) -> Result<SitesAuthorizedKeyResponse, CliError> {
-        let body = serde_json::to_vec(&SitesAuthorizedKeyRevokeRequest {
-            mailbox_proof: mailbox_proof.to_string(),
-            target_npub: target_npub.to_string(),
-        })
-        .expect("request serializes");
-        self.request(
-            key,
-            "POST",
-            "/api/v1/sites-authorized-keys/revoke",
-            Some(&body),
-        )
     }
 
     pub fn project_status(

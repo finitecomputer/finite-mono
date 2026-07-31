@@ -13,9 +13,6 @@ pub const PRINCIPAL_ID_PREFIX: &str = "prn";
 pub const PROJECT_ID_PREFIX: &str = "proj";
 pub const PROJECT_OUTPUT_ID_PREFIX: &str = "pout";
 pub const GIT_CREDENTIAL_ID_PREFIX: &str = "gcred";
-pub const SITES_EMAIL_PRINCIPAL_ID_PREFIX: &str = "sep";
-pub const SITES_AUTHORIZED_KEY_ID_PREFIX: &str = "sak";
-pub const SITES_IDENTITY_REPAIR_ID_PREFIX: &str = "sir";
 
 pub fn new_id(prefix: &str) -> String {
     assert!(!prefix.is_empty() && prefix.len() <= 8);

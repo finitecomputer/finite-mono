@@ -45,12 +45,6 @@ identity-conformance:
     cargo test --locked -p finite-saas-runner run_once_binds_canonical_agent_email_before_completion
     cargo test --locked -p finitechat-hosted-device --test http initial_hosted_chat_setup_registers_the_users_public_identity
     cargo test --locked -p finitechat-hosted-device --test http new_agent_binding_stays_unchanged_across_duplicate_selection_and_restart
-    cargo test --locked -p finitesites-store sites_email_principal_supports_multiple_revocable_authorized_keys
-    cargo test --locked -p finitesites-store sites_identity_reconciliation_is_additive_and_idempotent
-    cargo test --locked -p finitesites-store verified_core_agent_evidence_never_resurrects_a_revoked_key
-    cargo test --locked -p finitesites-engine authorized_sites_key_can_manage_same_mailbox_owned_project_without_identity_link
-    cargo test --locked -p finitesitesd managed_agent_account_uses_core_service_auth_and_exact_agent_email
-    cargo test --locked -p finitesitesd --test e2e mailbox_proof_registers_and_revokes_sites_key_without_changing_legacy_grant
     cargo test --locked -p finitesitesd --test e2e identity_authority_can_satisfy_email_git_auth_without_sites_email_key
     cargo test --locked -p finite-brain-server owner_creates_personal_brain_by_managed_agent_email_without_trusting_navigation_npub
     cargo test --locked -p devfinity generated_yaml_contains_core_services

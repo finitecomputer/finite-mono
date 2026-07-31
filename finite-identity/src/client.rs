@@ -94,22 +94,6 @@ impl IdentityClient {
         )
     }
 
-    pub fn mailbox_proof_redeem(
-        &self,
-        key: &LocalIdentityKey,
-        email: &str,
-        token: &str,
-        now: u64,
-    ) -> Result<SignedJsonRequest, ClientError> {
-        self.signed_json(
-            key,
-            "POST",
-            "/api/v1/mailbox-proofs/redeem",
-            serde_json::json!({ "email": email, "token": token }),
-            now,
-        )
-    }
-
     pub fn classify_authority_error(status: u16, code: &str) -> Option<AuthorityError> {
         if status < 400 {
             return None;

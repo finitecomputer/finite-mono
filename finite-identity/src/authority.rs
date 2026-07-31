@@ -480,14 +480,6 @@ impl IdentityStore {
               used_at INTEGER,
               created_at INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS mailbox_proofs (
-              proof_hash TEXT PRIMARY KEY,
-              email TEXT NOT NULL,
-              pubkey TEXT NOT NULL,
-              expires_at INTEGER NOT NULL,
-              used_at INTEGER,
-              created_at INTEGER NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS managed_agent_nip05_bindings (
               name TEXT PRIMARY KEY,
               pubkey TEXT NOT NULL,
@@ -536,58 +528,6 @@ impl IdentityStore {
         tx.execute(
             "UPDATE email_challenges SET used_at = ?1 WHERE token_hash = ?2",
             params![now, token_hash],
-        )?;
-        tx.commit()?;
-        Ok(email)
-    }
-
-    fn create_mailbox_proof(
-        &self,
-        proof_hash: &str,
-        email: &str,
-        pubkey: &str,
-        expires_at: u64,
-        now: u64,
-    ) -> Result<(), StoreError> {
-        self.conn
-            .lock()
-            .expect("store mutex never poisoned")
-            .execute(
-                "INSERT INTO mailbox_proofs
-                    (proof_hash, email, pubkey, expires_at, used_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
-                params![proof_hash, email, pubkey, expires_at, now],
-            )?;
-        Ok(())
-    }
-
-    fn consume_mailbox_proof(
-        &self,
-        proof_hash: &str,
-        pubkey: &str,
-        now: u64,
-    ) -> Result<String, StoreError> {
-        let mut conn = self.conn.lock().expect("store mutex never poisoned");
-        let tx = conn.transaction()?;
-        let row: Option<(String, String, u64, Option<u64>)> = tx
-            .query_row(
-                "SELECT email, pubkey, expires_at, used_at
-                 FROM mailbox_proofs WHERE proof_hash = ?1",
-                params![proof_hash],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        let (email, proof_pubkey, expires_at, used_at) =
-            row.ok_or(StoreError::Validation("unknown_or_expired_mailbox_proof"))?;
-        if proof_pubkey != pubkey {
-            return Err(StoreError::Validation("mailbox_proof_pubkey_mismatch"));
-        }
-        if used_at.is_some() || now > expires_at {
-            return Err(StoreError::Validation("unknown_or_expired_mailbox_proof"));
-        }
-        tx.execute(
-            "UPDATE mailbox_proofs SET used_at = ?1 WHERE proof_hash = ?2",
-            params![now, proof_hash],
         )?;
         tx.commit()?;
         Ok(email)
@@ -932,11 +872,6 @@ pub fn router(state: AuthorityState) -> Router {
             "/api/v1/email-only-principals/redeem",
             post(redeem_email_only_principal),
         )
-        .route("/api/v1/mailbox-proofs/redeem", post(redeem_mailbox_proof))
-        .route(
-            "/api/v1/mailbox-proofs/consume",
-            post(consume_mailbox_proof),
-        )
         .route(
             "/api/v1/principal-resolution/satisfies-grant",
             post(satisfies_grant),
@@ -1100,75 +1035,6 @@ async fn redeem_email_only_principal(
         })
         .into_response(),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error)),
-    }
-}
-
-async fn redeem_mailbox_proof(
-    State(state): State<AuthorityState>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let actor = match authenticate(&state, &headers, "POST", &original_uri, Some(&body)) {
-        Ok(actor) => actor,
-        Err(error) => return api_error(error.status, error.code),
-    };
-    let request: MailboxProofRedeemRequest = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_json"),
-    };
-    let Some(email) = normalize_invited_email(&request.email, &state.config.finite_vip_domain)
-    else {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_invited_email");
-    };
-    let now = state.clock.now();
-    let token_email = match state
-        .store
-        .redeem_email_challenge(&token_hash(&request.token), now)
-    {
-        Ok(token_email) => token_email,
-        Err(error) => return api_error(StatusCode::BAD_REQUEST, store_error_code(&error)),
-    };
-    if token_email != email {
-        return api_error(StatusCode::BAD_REQUEST, "email_challenge_mismatch");
-    }
-    let proof = random_token();
-    let expires_at = now + 5 * 60;
-    if let Err(error) =
-        state
-            .store
-            .create_mailbox_proof(&token_hash(&proof), &email, &actor, expires_at, now)
-    {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, store_error_code(&error));
-    }
-    Json(MailboxProofRedeemResponse {
-        proof,
-        email,
-        pubkey: actor,
-        expires_at,
-    })
-    .into_response()
-}
-
-async fn consume_mailbox_proof(
-    State(state): State<AuthorityState>,
-    Json(request): Json<MailboxProofConsumeRequest>,
-) -> impl IntoResponse {
-    if !hex::is_hex32(&request.pubkey) {
-        return api_error(StatusCode::BAD_REQUEST, "malformed_pubkey");
-    }
-    let now = state.clock.now();
-    match state
-        .store
-        .consume_mailbox_proof(&token_hash(&request.proof), &request.pubkey, now)
-    {
-        Ok(email) => Json(MailboxProofConsumeResponse {
-            email,
-            pubkey: request.pubkey,
-            verified: true,
-        })
-        .into_response(),
-        Err(error) => api_error(StatusCode::BAD_REQUEST, store_error_code(&error)),
     }
 }
 
@@ -1840,33 +1706,6 @@ struct EmailOnlyRedeemResponse {
     email: String,
     pubkey: String,
     principal: PrincipalResponse,
-}
-
-#[derive(Debug, Deserialize)]
-struct MailboxProofRedeemRequest {
-    email: String,
-    token: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MailboxProofRedeemResponse {
-    proof: String,
-    email: String,
-    pubkey: String,
-    expires_at: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct MailboxProofConsumeRequest {
-    proof: String,
-    pubkey: String,
-}
-
-#[derive(Debug, Serialize)]
-struct MailboxProofConsumeResponse {
-    email: String,
-    pubkey: String,
-    verified: bool,
 }
 
 #[derive(Debug, Deserialize)]

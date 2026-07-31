@@ -18,8 +18,7 @@ use finitesites_proto::dto::{
     NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
     ProjectOutputSharingResponse, ProjectRevokeRequest, ProjectRevokeResponse,
-    ProjectStatusResponse, SharingRequest, SitesAuthorizedKeyRegisterRequest,
-    SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest, VerifiedEmailViewerSessionRequest,
+    ProjectStatusResponse, SharingRequest, VerifiedEmailViewerSessionRequest,
     VerifiedEmailViewerSessionResponse,
 };
 use finitesites_proto::limits::{
@@ -39,14 +38,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/auth/register", post(register_auth))
         .route("/api/v1/email-auth/request", post(request_email_login))
         .route("/api/v1/email-auth/redeem", post(redeem_email_login))
-        .route(
-            "/api/v1/sites-authorized-keys/register",
-            post(register_sites_authorized_key),
-        )
-        .route(
-            "/api/v1/sites-authorized-keys/revoke",
-            post(revoke_sites_authorized_key),
-        )
         .route("/api/v1/projects", get(list_projects))
         .route("/api/v1/projects/init", post(init_project))
         .route("/api/v1/projects/{slug}", get(project_status))
@@ -602,62 +593,6 @@ async fn redeem_email_login(
     }))
 }
 
-async fn register_sites_authorized_key(
-    State(state): State<Arc<AppState>>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<SitesAuthorizedKeyResponse>, ApiError> {
-    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: SitesAuthorizedKeyRegisterRequest = parse_json_body(&body)?;
-    let identity = state.identity_authority.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "identity_authority_unavailable",
-            "Sites key registration requires the Identity Authority",
-        )
-    })?;
-    let email = identity
-        .consume_mailbox_proof(&request.mailbox_proof, &actor)
-        .map_err(|error| {
-            eprintln!("finitesitesd mailbox proof error: {error}");
-            ApiError::unauthorized("mailbox proof was invalid, expired, or already used")
-        })?;
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    engine
-        .register_sites_authorized_key(&actor, &email, now_unix())
-        .map(Json)
-        .map_err(ApiError::from)
-}
-
-async fn revoke_sites_authorized_key(
-    State(state): State<Arc<AppState>>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<SitesAuthorizedKeyResponse>, ApiError> {
-    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: SitesAuthorizedKeyRevokeRequest = parse_json_body(&body)?;
-    let identity = state.identity_authority.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "identity_authority_unavailable",
-            "Sites key revocation requires the Identity Authority",
-        )
-    })?;
-    let email = identity
-        .consume_mailbox_proof(&request.mailbox_proof, &actor)
-        .map_err(|error| {
-            eprintln!("finitesitesd mailbox proof error: {error}");
-            ApiError::unauthorized("mailbox proof was invalid, expired, or already used")
-        })?;
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    engine
-        .revoke_sites_authorized_key(&email, &request.target_npub, now_unix())
-        .map(Json)
-        .map_err(ApiError::from)
-}
-
 async fn init_project(
     State(state): State<Arc<AppState>>,
     original_uri: OriginalUri,
@@ -794,27 +729,10 @@ async fn auth_git(
     let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: GitAuthRequest = parse_json_body(&body)?;
     let git_remote_url = git_remote_url(&state, &slug);
-    let (locally_authorized, sites_key_record_exists) = match request.email.as_deref() {
-        Some(email) => {
-            let engine = state.engine.lock().expect("engine mutex never poisoned");
-            (
-                engine
-                    .actor_has_sites_email_key(&actor, email)
-                    .map_err(ApiError::from)?,
-                engine
-                    .actor_has_sites_email_key_record(&actor, email)
-                    .map_err(ApiError::from)?,
-            )
-        }
-        None => (false, false),
-    };
-    let identity_authorized = if let (Some(email), Some(identity_authority)) = (
-        request
-            .email
-            .as_deref()
-            .filter(|_| !locally_authorized && !sites_key_record_exists),
-        state.identity_authority.as_ref(),
-    ) {
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = if let (Some(email), Some(identity_authority)) =
+        (request.email.as_deref(), state.identity_authority.as_ref())
+    {
         let satisfied = identity_authority
             .satisfies_grant(email, &actor)
             .map_err(|error| {
@@ -826,16 +744,6 @@ async fn auth_git(
                 "identity authority did not resolve actor for email grant",
             ));
         }
-        true
-    } else {
-        false
-    };
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = if let Some(email) = request
-        .email
-        .as_deref()
-        .filter(|_| identity_authorized && !locally_authorized)
-    {
         engine
             .mint_git_credential_for_verified_email(
                 &actor,

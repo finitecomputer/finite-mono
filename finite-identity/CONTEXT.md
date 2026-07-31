@@ -157,10 +157,6 @@ _Avoid_: signup proof, verification proof, login proof
 A short-lived, single-use proof request sent to an email address. The challenge token is opaque random secret material, stored only as a hash by the Identity Authority.
 _Avoid_: magic token, signed token, email login
 
-**Mailbox Proof**:
-A short-lived, single-use receipt proving that one exact NIP-98 signing key just redeemed an Email Challenge. It creates no Principal Link; a product may consume it into product-owned authorization such as a Sites Authorized Key.
-_Avoid_: identity binding, login session, global email ownership
-
 **Mailer Adapter**:
 The deployment-specific implementation that delivers Email Challenges. Finite Identity owns the challenge flow, while a Mailer Adapter performs delivery through dev outbox, Resend, Postmark, or another provider.
 _Avoid_: email service, notification service
