@@ -164,6 +164,16 @@ export type OutboundDelivery = {
 export type ChatMessageKind = "message" | "status" | "tool" | "media" | string;
 export type ChatMessageStatus = "running" | "complete" | string;
 
+export type ChatClarification = {
+  state: "requested" | "answered";
+  request_id: string;
+  turn_id: string;
+  prompt: string;
+  choices: string[];
+  expires_at_unix_seconds: number;
+  answer_message_id?: string | null;
+};
+
 export type ChatMessage = {
   room_id: string;
   seq: number;
@@ -190,6 +200,7 @@ export type ChatMessage = {
   media: ChatMediaAttachment[];
   read_receipt?: ChatReadReceiptSummary | null;
   poll?: ChatPoll | null;
+  clarification?: ChatClarification | null;
   timestamp_unix_seconds: number;
   display_timestamp: string;
 };
@@ -263,6 +274,15 @@ export type AppAction =
   | { SendMessage: { room_id: string; text: string } }
   | { SendTopicMessage: { room_id: string; topic_id: string; text: string } }
   | { SendChatMessage: { room_id: string; topic_id: string; chat_id: string; text: string } }
+  | {
+      AnswerClarification: {
+        room_id: string;
+        topic_id: string;
+        chat_id: string;
+        request_id: string;
+        text: string;
+      };
+    }
   | { SendReply: { room_id: string; text: string; reply_to_message_id: string } }
   | {
       SendChatReply: {
