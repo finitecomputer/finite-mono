@@ -10532,11 +10532,16 @@ mod tests {
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request).unwrap();
             match response {
-                AuthorityTestResponse::Status => stream
-                    .write_all(
-                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 20\r\nConnection: close\r\n\r\nprivate upstream body",
+                AuthorityTestResponse::Status => {
+                    let body = b"private upstream body";
+                    write!(
+                        stream,
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
                     )
-                    .unwrap(),
+                    .unwrap();
+                    stream.write_all(body).unwrap();
+                }
                 AuthorityTestResponse::Malformed => stream
                     .write_all(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot-json",
@@ -10594,7 +10599,11 @@ mod tests {
             .await
             .unwrap_err();
             assert_eq!(error.status, StatusCode::BAD_GATEWAY);
-            assert!(error.message.ends_with(category), "{}", error.message);
+            assert!(
+                error.message.ends_with(category),
+                "expected {category}, got {}",
+                error.message
+            );
             assert!(!error.message.contains("authority-secret"));
             assert!(!error.message.contains("private upstream body"));
             assert!(!error.message.contains(&url));
