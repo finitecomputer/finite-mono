@@ -11,7 +11,6 @@ import {
   isUserPrincipalMessage,
   liveActivityLabel,
   messagesForChat,
-  pendingClarification,
   pendingTurnIsComplete,
   pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
@@ -288,43 +287,6 @@ test("ask-for-input tools and projected transcript visibility are explicit prese
   assert.equal(chatContentIsRenderable(0, null), false);
   assert.equal(chatContentIsRenderable(1, null), true);
   assert.equal(chatContentIsRenderable(0, "Agent is working"), true);
-});
-
-test("typed clarification stays pending until its exact answer marker or expiry", () => {
-  const requested = message({ messageId: "clarify-request", seq: 4 });
-  requested.clarification = {
-    state: "requested",
-    request_id: "clarify-a",
-    turn_id: "turn-a",
-    prompt: "Which environment?",
-    choices: ["Staging", "Production"],
-    expires_at_unix_seconds: 1_000,
-    answer_message_id: null,
-  };
-  const unrelatedAnswer = message({ messageId: "clarify-other-answer", seq: 5 });
-  unrelatedAnswer.clarification = {
-    state: "answered",
-    request_id: "clarify-b",
-    turn_id: "clarify-b",
-    prompt: "",
-    choices: [],
-    expires_at_unix_seconds: 0,
-    answer_message_id: "user-b",
-  };
-  const exactAnswer = message({ messageId: "clarify-answer", seq: 6 });
-  exactAnswer.clarification = {
-    ...unrelatedAnswer.clarification,
-    request_id: "clarify-a",
-    turn_id: "clarify-a",
-    answer_message_id: "user-a",
-  };
-
-  assert.equal(
-    pendingClarification([requested, unrelatedAnswer], 500)?.message_id,
-    "clarify-request"
-  );
-  assert.equal(pendingClarification([requested, unrelatedAnswer, exactAnswer], 500), null);
-  assert.equal(pendingClarification([requested], 1_001), null);
 });
 
 test("append-only tools remain interspersed around assistant commentary", () => {

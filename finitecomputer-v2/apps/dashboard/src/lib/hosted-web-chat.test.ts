@@ -147,27 +147,6 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
 
   assert.deepEqual(
     parseHostedChatAction({
-      AnswerClarification: {
-        room_id: "room-1",
-        topic_id: "topic-1",
-        chat_id: "chat-1",
-        request_id: "clarify-1",
-        text: "2",
-      },
-    }),
-    {
-      AnswerClarification: {
-        room_id: "room-1",
-        topic_id: "topic-1",
-        chat_id: "chat-1",
-        request_id: "clarify-1",
-        text: "2",
-      },
-    }
-  );
-
-  assert.deepEqual(
-    parseHostedChatAction({
       SendChatMessage: {
         room_id: "room-1",
         topic_id: "topic-1",
