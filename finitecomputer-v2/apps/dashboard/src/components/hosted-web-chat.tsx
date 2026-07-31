@@ -88,7 +88,6 @@ import {
   isAskForInputToolMessage,
   liveActivityLabel as sharedLiveActivityLabel,
   messageContent,
-  pendingClarification,
   pendingTurnLeaseIsFresh,
   pendingTurnMatchesSelection,
   pendingTurnRecoveryIsFresh,
@@ -269,10 +268,6 @@ export function HostedWebChat({
   const transcript = useMemo(
     () => transcriptItems(messages, state?.identity.account_id ?? null),
     [messages, state?.identity.account_id]
-  );
-  const clarificationRequest = useMemo(
-    () => pendingClarification(messages),
-    [messages]
   );
   const liveMembers = useMemo(
     () => {
@@ -538,21 +533,15 @@ export function HostedWebChat({
       || sending
       || audioRecordingState !== "idle"
     ) return;
-    if (clarificationRequest && attachments.length > 0) {
-      setActionError("Answer the pending question with text before sending attachments.");
-      return;
-    }
     setSending(true);
     setActionError(null);
     stopTyping(selectedRoom.room_id);
     const pendingTurnStartedAtMs = Date.now();
-    const pendingTurn = clarificationRequest
-      ? null
-      : beginPendingChatTurn(
-        selectedChatSelection,
-        messages,
-        pendingTurnStartedAtMs
-      );
+    const pendingTurn = beginPendingChatTurn(
+      selectedChatSelection,
+      messages,
+      pendingTurnStartedAtMs
+    );
     if (pendingTurn) {
       setLeaseNowMs(pendingTurnStartedAtMs);
       setPendingAgentTurns((turns) => [
@@ -573,15 +562,7 @@ export function HostedWebChat({
         const uploadError = attachmentSendError(next);
         if (uploadError) throw new Error(uploadError);
       } else {
-        next = await dispatch(
-          messageAction(
-            selectedRoom.room_id,
-            text,
-            selectedTopic,
-            selectedChat,
-            clarificationRequest?.clarification?.request_id ?? null
-          )
-        );
+        next = await dispatch(messageAction(selectedRoom.room_id, text, selectedTopic, selectedChat));
       }
       setDraft("");
       setAttachments((current) => {
@@ -846,28 +827,16 @@ export function HostedWebChat({
   const connected = ownerClaimed
     && selectedRoom?.state === "Connected"
     && Boolean(selectedTopic && selectedChat);
-  const activityLabel = clarificationRequest
-    ? "Waiting for you"
-    : runtimeCanPresentActivity(runtimeStatus)
-      ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
-      : null;
+  const activityLabel = runtimeCanPresentActivity(runtimeStatus)
+    ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
+    : null;
   const latestTranscriptItem = transcript[transcript.length - 1];
-  const clarificationSeq = clarificationRequest?.seq ?? null;
-  const typedWaitingRollup = clarificationSeq === null
-    ? null
-    : [...transcript].reverse().find(
-      (item) =>
-        item.type === "tools"
-        && item.messages.some((message) => message.seq < clarificationSeq)
-    );
-  const waitingToolRollupId = typedWaitingRollup?.type === "tools"
-    ? typedWaitingRollup.id
-    : latestTranscriptItem?.type === "tools"
-      && isAskForInputToolMessage(
-        latestTranscriptItem.messages[latestTranscriptItem.messages.length - 1]!
-      )
-      ? latestTranscriptItem.id
-      : null;
+  const waitingToolRollupId = latestTranscriptItem?.type === "tools"
+    && isAskForInputToolMessage(
+      latestTranscriptItem.messages[latestTranscriptItem.messages.length - 1]!
+    )
+    ? latestTranscriptItem.id
+    : null;
   const activeToolRollupId = activityLabel
     && !waitingToolRollupId
     && latestTranscriptItem?.type === "tools"
@@ -1527,24 +1496,7 @@ function BrowserPanel({ activeSite, className, machineId, onClose, onSelectSite,
   );
 }
 
-function messageAction(
-  roomId: string,
-  text: string,
-  topic: HostedChatTopic | null,
-  chat: HostedChatSummary | null,
-  clarificationRequestId: string | null = null
-): HostedChatAction {
-  if (topic && chat && clarificationRequestId) {
-    return {
-      AnswerClarification: {
-        room_id: roomId,
-        topic_id: topic.topic_id,
-        chat_id: chat.chat_id,
-        request_id: clarificationRequestId,
-        text,
-      },
-    };
-  }
+function messageAction(roomId: string, text: string, topic: HostedChatTopic | null, chat: HostedChatSummary | null): HostedChatAction {
   if (topic && chat) return { SendChatMessage: { room_id: roomId, topic_id: topic.topic_id, chat_id: chat.chat_id, text } };
   if (topic) return { SendTopicMessage: { room_id: roomId, topic_id: topic.topic_id, text } };
   return { SendMessage: { room_id: roomId, text } };

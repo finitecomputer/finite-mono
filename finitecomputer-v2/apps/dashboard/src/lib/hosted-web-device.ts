@@ -91,15 +91,6 @@ export type HostedChatMessage = {
   status: "running" | "complete" | string;
   final_delivery: boolean;
   edit_of_message_id?: string | null;
-  clarification?: {
-    state: "requested" | "answered";
-    request_id: string;
-    turn_id: string;
-    prompt: string;
-    choices: string[];
-    expires_at_unix_seconds: number;
-    answer_message_id?: string | null;
-  } | null;
   timestamp_unix_seconds: number;
   display_timestamp: string;
 };
@@ -234,15 +225,6 @@ export type HostedChatAction =
         room_id: string;
         topic_id: string;
         chat_id: string;
-        text: string;
-      };
-    }
-  | {
-      AnswerClarification: {
-        room_id: string;
-        topic_id: string;
-        chat_id: string;
-        request_id: string;
         text: string;
       };
     }

@@ -149,25 +149,6 @@ export function isAskForInputToolMessage(message: ChatMessage) {
     && ASK_FOR_INPUT_TOOL_RE.test(messageContent(message).trim());
 }
 
-export function pendingClarification(
-  messages: ChatMessage[],
-  nowUnixSeconds = Math.floor(Date.now() / 1000)
-) {
-  const pending = new Map<string, ChatMessage>();
-  for (const message of [...messages].sort((left, right) => left.seq - right.seq)) {
-    const clarification = message.clarification;
-    if (!clarification) continue;
-    if (clarification.state === "answered") {
-      pending.delete(clarification.request_id);
-      continue;
-    }
-    if (clarification.expires_at_unix_seconds > nowUnixSeconds) {
-      pending.set(clarification.request_id, message);
-    }
-  }
-  return [...pending.values()].at(-1) ?? null;
-}
-
 export function chatContentIsRenderable(
   transcriptItemCount: number,
   activityLabel: string | null

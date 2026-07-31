@@ -18,8 +18,6 @@ pub const HERMES_METADATA_CONVERSATION_ID: &str = "conversation_id";
 pub const HERMES_METADATA_ATTACHMENTS: &str = "attachments";
 pub const HERMES_METADATA_KIND: &str = "_finitechat_kind";
 pub const HERMES_METADATA_STATUS: &str = "_finitechat_status";
-pub const HERMES_METADATA_CLARIFICATION: &str = "finitechat_clarification";
-pub const HERMES_METADATA_CLARIFICATION_ANSWER: &str = "finitechat_clarification_answer";
 pub const MAX_HERMES_POLL_EVENTS: u32 = 32;
 pub const MAX_HERMES_TEXT_BYTES: u32 = 64 * 1024;
 pub const MAX_HERMES_ATTACHMENTS: u32 = 16;
@@ -177,8 +175,6 @@ pub struct HermesPollEventV1 {
     pub source: HermesSourceV1,
     #[serde(default)]
     pub attachments: Vec<HermesAttachmentV1>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub metadata: BTreeMap<String, Value>,
     pub reply_to_message_id: Option<MessageId>,
     pub reply_to_text: Option<String>,
     pub auto_skill: Option<String>,
@@ -406,7 +402,6 @@ impl HermesPollEventV1 {
                 is_bot: false,
             },
             attachments: Vec::new(),
-            metadata: BTreeMap::new(),
             reply_to_message_id: None,
             reply_to_text: None,
             auto_skill: None,
@@ -445,11 +440,6 @@ impl HermesPollEventV1 {
             });
         }
         validate_attachments(&self.attachments)?;
-        validate_json_value_bytes(
-            "hermes.poll_event.metadata",
-            &self.metadata,
-            MAX_HERMES_METADATA_BYTES,
-        )?;
         validate_optional_string(
             "hermes.poll_event.reply_to_message_id",
             self.reply_to_message_id.as_deref(),
@@ -926,7 +916,6 @@ impl HermesMessagePayloadV1 {
                 is_bot: false,
             },
             attachments: self.attachments,
-            metadata: self.metadata,
             reply_to_message_id: self.reply_to_message_id,
             reply_to_text: None,
             auto_skill: None,
@@ -1124,11 +1113,7 @@ mod tests {
 
     #[test]
     fn poll_event_round_trips_through_json() {
-        let mut event = sample_poll_event();
-        event.metadata.insert(
-            HERMES_METADATA_CLARIFICATION_ANSWER.to_owned(),
-            serde_json::json!({ "request_id": "clarify-a" }),
-        );
+        let event = sample_poll_event();
         let bytes = serde_json::to_vec(&event).expect("event serializes");
         assert!(bytes.len() < MAX_HERMES_METADATA_BYTES as usize);
 
@@ -1192,7 +1177,6 @@ mod tests {
             )
             .expect("source is valid"),
             attachments: vec![sample_attachment()],
-            metadata: BTreeMap::new(),
             reply_to_message_id: Some("message-6".to_string()),
             reply_to_text: Some("previous".to_string()),
             auto_skill: Some("coding".to_string()),
