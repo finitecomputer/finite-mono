@@ -10,9 +10,9 @@
 //!   fsite describe workflow publish-stateful-app --output json
 //!   fsite auth register --output json
 //!   fsite project init --config finite.toml --dry-run --output json
-//!   fsite project grant PROJECT --email EDITOR_EMAIL --send-invite --output json
+//!   fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) --output json
 //!   fsite project share PROJECT OUTPUT --public --yes-public --output json
-//!   fsite auth git PROJECT [--email EMAIL] [--store] [--output json]
+//!   fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]
 //!   fsite project status PROJECT --output json
 //!   fsite project list --output json
 //!   fsite view URL_OR_NAME --output json
@@ -20,6 +20,7 @@
 //! Server address comes from FINITE_SITES_API (default https://api.finite.chat).
 
 mod api;
+mod identity_target;
 mod keys;
 mod requester_context;
 
@@ -35,6 +36,7 @@ use finitesites_proto::dto::{
 };
 use finitesites_proto::npub;
 use finitesites_proto::project_config::parse_project_config_toml;
+use identity_target::{MailboxAddress, NativeNpub, Nip05Name};
 
 #[derive(Debug, Error)]
 pub enum CliError {
@@ -148,9 +150,9 @@ fn usage() -> String {
      Commands:\n  fsite whoami\n  \
      fsite describe [workflow NAME] [--output json]\n  \
      fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  \
-     fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  \
-     fsite project revoke PROJECT --email EMAIL [--output json]\n  \
-     fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
+     fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  \
+     fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  \
+     fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
      fsite project status PROJECT [--output json]\n  \
      fsite project list [--output json]\n  \
      fsite auth status [--output json]\n  \
@@ -159,7 +161,7 @@ fn usage() -> String {
      fsite auth link-email EMAIL [--output json]\n  \
      fsite auth login EMAIL\n  \
      fsite auth redeem EMAIL TOKEN [--link-native] [--output json]\n  \
-     fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n  \
+     fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]\n  \
      fsite view URL_OR_NAME [--output json]"
         .to_string()
 }
@@ -225,7 +227,7 @@ fn describe_help() -> &'static str {
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT --email EMAIL [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
+    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and any declared outputs; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for one Project Output."
 }
 
 fn project_init_help() -> &'static str {
@@ -233,15 +235,15 @@ fn project_init_help() -> &'static str {
 }
 
 fn project_grant_help() -> &'static str {
-    "usage: fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n\nGrant Project Repository edit access to an External Principal email. Use --send-invite to email agent-facing auth/git instructions."
+    "usage: fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n\nGrant Project Repository edit access to one typed target. --email is only for a deliverable Mailbox Address and may send an invite; --nip05 resolves a Finite NIP-05 Name to its native npub; --npub grants that native key directly."
 }
 
 fn project_revoke_help() -> &'static str {
-    "usage: fsite project revoke PROJECT --email EMAIL [--output json]\n\nRemove Project Repository edit access for an External Principal email and revoke active Git Credentials. Safe to replay: removed=false means the collaborator was already inactive or unknown."
+    "usage: fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n\nRemove Project Repository edit access for one typed target and revoke active Git Credentials. Safe to replay: removed=false means the collaborator was already inactive or unknown."
 }
 
 fn project_share_help() -> &'static str {
-    "usage: fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n\nManage revocable viewer Shares for one Project Output. Email viewers use magic links; Native Principal npubs use bounded Sites viewer sessions without email. This is separate from Project Repository edit access. Use OUTPUT from finite.toml or fsite project status. Public sharing requires --yes-public."
+    "usage: fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n\nManage revocable viewer Shares for one Project Output. Mailbox viewers use email proof; NIP-05 Names resolve to native npubs; npubs use bounded Sites viewer sessions without email. This is separate from Project Repository edit access. Use OUTPUT from finite.toml or fsite project status. Public sharing requires --yes-public."
 }
 
 fn project_status_help() -> &'static str {
@@ -253,7 +255,7 @@ fn project_list_help() -> &'static str {
 }
 
 fn auth_help() -> &'static str {
-    "usage:\n  fsite auth status [--output json]\n  fsite auth import [--file PATH] [--output json]\n  fsite auth register [--output json]\n  fsite auth link-email EMAIL [--output json]\n  fsite auth login EMAIL\n  fsite auth redeem EMAIL TOKEN [--link-native] [--output json]\n  fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n\nAuthenticate this machine for Finite Sites. Status shows the shared Finite identity (User Key) every Finite tool uses; import adopts an existing secret as that identity. Register creates a native Publishing Principal for the local User Key. Link-email pairs a verified email with that native Principal. Email login remains the External Principal fallback. Git auth mints a scoped HTTPS Git Credential for one Project Repository."
+    "usage:\n  fsite auth status [--output json]\n  fsite auth import [--file PATH] [--output json]\n  fsite auth register [--output json]\n  fsite auth link-email MAILBOX [--output json]\n  fsite auth login MAILBOX\n  fsite auth redeem MAILBOX TOKEN [--link-native] [--output json]\n  fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]\n\nAuthenticate this machine for Finite Sites. Status shows the shared Finite identity key every Finite tool in this Finite Home uses; import adopts an existing secret as that identity. Mailbox flags require a deliverable address. NIP-05 flags resolve through Finite Identity and always use the native key."
 }
 
 fn auth_register_help() -> &'static str {
@@ -261,19 +263,19 @@ fn auth_register_help() -> &'static str {
 }
 
 fn auth_link_email_help() -> &'static str {
-    "usage: fsite auth link-email EMAIL [--output json]\n\nSend a verification token so `fsite auth redeem EMAIL TOKEN` can link that email to the local native Principal. Run `fsite auth register` first when you want the email paired with this npub."
+    "usage: fsite auth link-email MAILBOX [--output json]\n\nSend a verification token so `fsite auth redeem MAILBOX TOKEN` can link that Mailbox Address to the local native Principal. A Managed Agent NIP-05 is not a mailbox and is rejected."
 }
 
 fn auth_git_help() -> &'static str {
-    "usage: fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n\nReturns git_remote_url, username, and password for standard git clone/push against one Project Repository. With --store, saves the scoped credential to Finite's file-backed git credential store ($FINITE_HOME/git-credentials, else ~/.finite/git-credentials) and configures git to use only that store for the Finite Git host; the OS keychain is never touched, so no interactive credential UI can appear. The password is omitted from output."
+    "usage: fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]\n\nReturns git_remote_url, username, and password for standard git clone/push against one Project Repository. Omit a target for this Finite Home's native key. --nip05 and --npub verify that same native key explicitly; --email selects a verified Mailbox Address and never accepts a Managed Agent NIP-05. With --store, saves the scoped credential to Finite's file-backed git credential store ($FINITE_HOME/git-credentials, else ~/.finite/git-credentials)."
 }
 
 fn auth_login_help() -> &'static str {
-    "usage: fsite auth login EMAIL\n\nRequest a one-time email verification token for an External Principal."
+    "usage: fsite auth login MAILBOX\n\nRequest a one-time verification token for a deliverable Mailbox Address."
 }
 
 fn auth_redeem_help() -> &'static str {
-    "usage: fsite auth redeem EMAIL TOKEN [--link-native] [--output json]\n\nVerify this machine for an email token. By default this verifies an Email Key for the External Principal fallback. Use --link-native after `fsite auth register` to link the email to the local native Principal instead."
+    "usage: fsite auth redeem MAILBOX TOKEN [--link-native] [--output json]\n\nRedeem a Mailbox Address challenge. By default this verifies a mailbox-scoped key; use --link-native only when the mailbox and local native Principal identify the same human."
 }
 
 fn view_help() -> &'static str {
@@ -346,18 +348,18 @@ fn describe_commands() -> serde_json::Value {
             },
             {
                 "name": "project grant",
-                "summary": "Grant Project Repository edit access to an External Principal email.",
-                "usage": "fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]"
+                "summary": "Grant Project Repository edit access to one email or native npub Principal.",
+                "usage": "fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]"
             },
             {
                 "name": "project revoke",
                 "summary": "Remove Project Repository edit access and revoke active Git Credentials for that Principal.",
-                "usage": "fsite project revoke PROJECT --email EMAIL [--output json]"
+                "usage": "fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]"
             },
             {
                 "name": "project share",
                 "summary": "Manage viewer access for one Project Output.",
-                "usage": "fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email EMAIL]... [--remove-email EMAIL]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]"
+                "usage": "fsite project share PROJECT OUTPUT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]"
             },
             {
                 "name": "project status",
@@ -402,7 +404,7 @@ fn describe_commands() -> serde_json::Value {
             {
                 "name": "auth git",
                 "summary": "Mint a scoped HTTPS Git Credential for a native Project Collaborator or verified External Principal.",
-                "usage": "fsite auth git PROJECT [--email EMAIL] [--store] [--output json]"
+                "usage": "fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]"
             },
             {
                 "name": "view",
@@ -608,9 +610,9 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
         "grant-collaborator" => serde_json::json!({
             "name": "grant-collaborator",
             "steps": [
-                "Use the Project owner identity, not the collaborator email key.",
-                "Run fsite project grant PROJECT --email COLLABORATOR_EMAIL --role editor --send-invite --output json.",
-                "Preferred native path: the collaborator runs fsite auth register --output json, then fsite auth redeem COLLABORATOR_EMAIL TOKEN_FROM_EMAIL --link-native --output json, then fsite auth git PROJECT --store --output json.",
+                "Use the Project owner identity, not the collaborator identity.",
+                "For an agent or native Finite user, run fsite project grant PROJECT --npub COLLABORATOR_NPUB --role editor --output json. The collaborator then runs fsite auth git PROJECT --store --output json with that same native identity.",
+                "For an External Principal, run fsite project grant PROJECT --email COLLABORATOR_EMAIL --role editor --send-invite --output json.",
                 "Email-only fallback: the collaborator runs fsite auth redeem COLLABORATOR_EMAIL TOKEN_FROM_EMAIL --output json, then fsite auth git PROJECT --email COLLABORATOR_EMAIL --store --output json."
             ]
         }),
@@ -632,8 +634,8 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
         "revoke-collaborator" => serde_json::json!({
             "name": "revoke-collaborator",
             "steps": [
-                "Use the Project owner identity, not the collaborator email key.",
-                "Run fsite project revoke PROJECT --email COLLABORATOR_EMAIL --output json.",
+                "Use the Project owner identity, not the collaborator identity.",
+                "Run fsite project revoke PROJECT --email COLLABORATOR_EMAIL --output json or fsite project revoke PROJECT --npub COLLABORATOR_NPUB --output json.",
                 "Check removed and revoked_git_credentials in the JSON response."
             ]
         }),
@@ -847,12 +849,46 @@ fn read_project_config_file(
         .map_err(|error| CliError::Usage(format!("{} is invalid: {error}", path.display())))
 }
 
+fn reject_managed_agent_email(email: &MailboxAddress) -> Result<(), CliError> {
+    match api::IdentityAuthorityClient::from_env().resolve_nip05(email.as_str()) {
+        Ok(Some(resolution)) if resolution.kind == "managed_agent" => {
+            Err(CliError::Usage(format!(
+                "`{}` is a Managed Agent NIP-05, not a deliverable mailbox. Use `--nip05 {}` for a native-key grant; no email was sent.",
+                email.as_str(),
+                resolution.name
+            )))
+        }
+        Ok(Some(resolution)) if resolution.kind == "mailbox" => Ok(()),
+        Ok(Some(resolution)) => Err(CliError::Api(format!(
+            "Finite Identity returned unknown NIP-05 kind `{}`",
+            resolution.kind
+        ))),
+        Ok(None) => Ok(()),
+        Err(CliError::ApiStatus { status: 400, .. }) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn resolve_nip05_npub(name: &Nip05Name) -> Result<NativeNpub, CliError> {
+    let resolution = api::IdentityAuthorityClient::from_env()
+        .resolve_nip05(name.as_str())?
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "NIP-05 name `{}` is not registered with Finite Identity",
+                name.as_str()
+            ))
+        })?;
+    NativeNpub::parse(&resolution.npub, "--nip05")
+}
+
 fn project_grant(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
         return print_help(project_grant_help());
     }
     let mut project: Option<String> = None;
-    let mut email: Option<String> = None;
+    let mut email: Option<MailboxAddress> = None;
+    let mut collaborator_nip05: Option<Nip05Name> = None;
+    let mut collaborator_npub: Option<NativeNpub> = None;
     let mut role = "editor".to_string();
     let mut send_invite = false;
     let mut output_json = false;
@@ -864,7 +900,21 @@ fn project_grant(args: &[String]) -> Result<(), CliError> {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
-                email = Some(value.clone());
+                email = Some(MailboxAddress::parse(value, "--email")?);
+                index += 2;
+            }
+            "--nip05" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--nip05 needs a value".to_string()))?;
+                collaborator_nip05 = Some(Nip05Name::parse(value, "--nip05")?);
+                index += 2;
+            }
+            "--npub" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--npub needs a value".to_string()))?;
+                collaborator_npub = Some(NativeNpub::parse(value, "--npub")?);
                 index += 2;
             }
             "--role" => {
@@ -903,13 +953,42 @@ fn project_grant(args: &[String]) -> Result<(), CliError> {
         }
     }
     let project = project.ok_or_else(|| CliError::Usage(project_grant_help().to_string()))?;
-    let email = email.ok_or_else(|| CliError::Usage(project_grant_help().to_string()))?;
+    if usize::from(email.is_some())
+        + usize::from(collaborator_nip05.is_some())
+        + usize::from(collaborator_npub.is_some())
+        != 1
+    {
+        return Err(CliError::Usage(
+            "project grant requires exactly one of --email, --nip05, or --npub".to_string(),
+        ));
+    }
+    if send_invite && email.is_none() {
+        return Err(CliError::Usage(
+            "--send-invite requires an email collaborator".to_string(),
+        ));
+    }
+    let (email, collaborator_npub) = match (email, collaborator_nip05, collaborator_npub) {
+        (Some(email), None, None) => {
+            reject_managed_agent_email(&email)?;
+            (email.into_string(), None)
+        }
+        (None, Some(nip05), None) => (
+            String::new(),
+            Some(resolve_nip05_npub(&nip05)?.into_string()),
+        ),
+        (None, None, Some(npub)) => (String::new(), Some(npub.into_string())),
+        _ => unreachable!("exactly one target checked above"),
+    };
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
     let response = client.grant_project(
         &identity,
         &project,
-        &ProjectGrantRequest { email, role },
+        &ProjectGrantRequest {
+            email,
+            npub: collaborator_npub,
+            role,
+        },
         send_invite,
     )?;
     if output_json {
@@ -919,7 +998,14 @@ fn project_grant(args: &[String]) -> Result<(), CliError> {
         );
     } else {
         println!("project: {}", response.project_slug);
-        println!("email:   {}", response.collaborator.email);
+        if response.collaborator.email.is_empty() {
+            println!(
+                "npub:    {}",
+                response.collaborator.npub.as_deref().unwrap_or("unknown")
+            );
+        } else {
+            println!("email:   {}", response.collaborator.email);
+        }
         println!("role:    {}", response.collaborator.role);
         println!("created: {}", response.collaborator.created);
         if !response.invited_emails.is_empty() {
@@ -934,7 +1020,9 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
         return print_help(project_revoke_help());
     }
     let mut project: Option<String> = None;
-    let mut email: Option<String> = None;
+    let mut email: Option<MailboxAddress> = None;
+    let mut collaborator_nip05: Option<Nip05Name> = None;
+    let mut collaborator_npub: Option<NativeNpub> = None;
     let mut output_json = false;
     let mut index: usize = 0;
     // Bounded by argv length.
@@ -944,7 +1032,21 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
-                email = Some(value.clone());
+                email = Some(MailboxAddress::parse(value, "--email")?);
+                index += 2;
+            }
+            "--nip05" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--nip05 needs a value".to_string()))?;
+                collaborator_nip05 = Some(Nip05Name::parse(value, "--nip05")?);
+                index += 2;
+            }
+            "--npub" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--npub needs a value".to_string()))?;
+                collaborator_npub = Some(NativeNpub::parse(value, "--npub")?);
                 index += 2;
             }
             "--output" => {
@@ -973,10 +1075,37 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
     }
 
     let project = project.ok_or_else(|| CliError::Usage(project_revoke_help().to_string()))?;
-    let email = email.ok_or_else(|| CliError::Usage(project_revoke_help().to_string()))?;
+    if usize::from(email.is_some())
+        + usize::from(collaborator_nip05.is_some())
+        + usize::from(collaborator_npub.is_some())
+        != 1
+    {
+        return Err(CliError::Usage(
+            "project revoke requires exactly one of --email, --nip05, or --npub".to_string(),
+        ));
+    }
+    let (email, collaborator_npub) = match (email, collaborator_nip05, collaborator_npub) {
+        (Some(email), None, None) => {
+            reject_managed_agent_email(&email)?;
+            (email.into_string(), None)
+        }
+        (None, Some(nip05), None) => (
+            String::new(),
+            Some(resolve_nip05_npub(&nip05)?.into_string()),
+        ),
+        (None, None, Some(npub)) => (String::new(), Some(npub.into_string())),
+        _ => unreachable!("exactly one target checked above"),
+    };
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
-    let response = client.revoke_project(&identity, &project, &ProjectRevokeRequest { email })?;
+    let response = client.revoke_project(
+        &identity,
+        &project,
+        &ProjectRevokeRequest {
+            email,
+            npub: collaborator_npub,
+        },
+    )?;
     if output_json {
         println!(
             "{}",
@@ -984,7 +1113,11 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
         );
     } else {
         println!("project: {}", response.project_slug);
-        println!("email:   {}", response.email);
+        if response.email.is_empty() {
+            println!("npub:    {}", response.npub.as_deref().unwrap_or("unknown"));
+        } else {
+            println!("email:   {}", response.email);
+        }
         println!("removed: {}", response.removed);
         println!(
             "revoked git credentials: {}",
@@ -1000,10 +1133,12 @@ struct ProjectShareOptions {
     output_id: String,
     visibility: Option<String>,
     confirm_public: bool,
-    add_emails: Vec<String>,
-    remove_emails: Vec<String>,
-    add_npubs: Vec<String>,
-    remove_npubs: Vec<String>,
+    add_emails: Vec<MailboxAddress>,
+    remove_emails: Vec<MailboxAddress>,
+    add_nip05s: Vec<Nip05Name>,
+    remove_nip05s: Vec<Nip05Name>,
+    add_npubs: Vec<NativeNpub>,
+    remove_npubs: Vec<NativeNpub>,
     send_invite: bool,
     output_json: bool,
 }
@@ -1013,6 +1148,38 @@ fn project_share(args: &[String]) -> Result<(), CliError> {
         return print_help(project_share_help());
     }
     let options = parse_project_share_args(args)?;
+    let add_emails = options
+        .add_emails
+        .into_iter()
+        .map(|email| {
+            reject_managed_agent_email(&email)?;
+            Ok(email.into_string())
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    let remove_emails = options
+        .remove_emails
+        .into_iter()
+        .map(|email| {
+            reject_managed_agent_email(&email)?;
+            Ok(email.into_string())
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    let mut add_npubs = options
+        .add_npubs
+        .into_iter()
+        .map(NativeNpub::into_string)
+        .collect::<Vec<_>>();
+    for nip05 in &options.add_nip05s {
+        add_npubs.push(resolve_nip05_npub(nip05)?.into_string());
+    }
+    let mut remove_npubs = options
+        .remove_npubs
+        .into_iter()
+        .map(NativeNpub::into_string)
+        .collect::<Vec<_>>();
+    for nip05 in &options.remove_nip05s {
+        remove_npubs.push(resolve_nip05_npub(nip05)?.into_string());
+    }
     let identity = keys::load_or_generate_user_key()?;
     let client = api::Client::from_env();
     let response = client.share_project_output(
@@ -1022,10 +1189,10 @@ fn project_share(args: &[String]) -> Result<(), CliError> {
         &SharingRequest {
             visibility: options.visibility,
             confirm_public: options.confirm_public,
-            add_emails: options.add_emails,
-            remove_emails: options.remove_emails,
-            add_npubs: options.add_npubs,
-            remove_npubs: options.remove_npubs,
+            add_emails,
+            remove_emails,
+            add_npubs,
+            remove_npubs,
         },
         options.send_invite,
     )?;
@@ -1058,6 +1225,8 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
     let mut confirm_public = false;
     let mut add_emails = Vec::new();
     let mut remove_emails = Vec::new();
+    let mut add_nip05s = Vec::new();
+    let mut remove_nip05s = Vec::new();
     let mut add_npubs = Vec::new();
     let mut remove_npubs = Vec::new();
     let mut send_invite = false;
@@ -1090,28 +1259,42 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--add-email needs an email".to_string()))?;
-                add_emails.push(value.clone());
+                add_emails.push(MailboxAddress::parse(value, "--add-email")?);
                 index += 2;
             }
             "--remove-email" => {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--remove-email needs an email".to_string()))?;
-                remove_emails.push(value.clone());
+                remove_emails.push(MailboxAddress::parse(value, "--remove-email")?);
+                index += 2;
+            }
+            "--add-nip05" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--add-nip05 needs a name".to_string()))?;
+                add_nip05s.push(Nip05Name::parse(value, "--add-nip05")?);
+                index += 2;
+            }
+            "--remove-nip05" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--remove-nip05 needs a name".to_string()))?;
+                remove_nip05s.push(Nip05Name::parse(value, "--remove-nip05")?);
                 index += 2;
             }
             "--add-npub" => {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--add-npub needs an npub".to_string()))?;
-                add_npubs.push(value.clone());
+                add_npubs.push(NativeNpub::parse(value, "--add-npub")?);
                 index += 2;
             }
             "--remove-npub" => {
                 let value = args
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--remove-npub needs an npub".to_string()))?;
-                remove_npubs.push(value.clone());
+                remove_npubs.push(NativeNpub::parse(value, "--remove-npub")?);
                 index += 2;
             }
             "--output" => {
@@ -1167,6 +1350,8 @@ fn parse_project_share_args(args: &[String]) -> Result<ProjectShareOptions, CliE
         confirm_public,
         add_emails,
         remove_emails,
+        add_nip05s,
+        remove_nip05s,
         add_npubs,
         remove_npubs,
         send_invite,
@@ -1406,13 +1591,13 @@ fn auth_link_email(args: &[String]) -> Result<(), CliError> {
         return print_help(auth_link_email_help());
     }
     let (email, output_json) = parse_email_and_output_json(args, auth_link_email_help())?;
+    let email = MailboxAddress::parse(&email, "--email")?;
+    reject_managed_agent_email(&email)?;
     let identity = keys::load_or_generate_user_key()?;
     let display =
         npub::encode_npub(&identity.pubkey).map_err(|error| CliError::Key(error.to_string()))?;
-    let response = match api::IdentityAuthorityClient::from_env() {
-        Some(identity_authority) => identity_authority.request_email_challenge(&email)?,
-        None => api::Client::from_env().request_email_login(&email)?,
-    };
+    let response =
+        api::IdentityAuthorityClient::from_env().request_email_challenge(email.as_str())?;
     keys::write_pending_email_link(&response.email, &identity.pubkey)?;
     if output_json {
         let value = serde_json::json!({
@@ -1442,16 +1627,60 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
         return print_help(auth_git_help());
     }
     let options = parse_auth_git_args(args)?;
-    let key = match (&options.email, api::IdentityAuthorityClient::from_env()) {
-        (Some(_), Some(_)) | (None, _) => keys::load_or_generate_user_key()?,
-        (Some(email), None) => keys::load_or_create_email_key(email)?,
+    let identity_authority = api::IdentityAuthorityClient::from_env();
+    let (key, request_email) = match (&options.email, &options.nip05, &options.npub) {
+        (None, None, None) => (keys::load_or_generate_user_key()?, None),
+        (Some(email), None, None) => {
+            reject_managed_agent_email(email)?;
+            let native = keys::load_or_generate_user_key()?;
+            let key = if identity_authority.satisfies_grant(email.as_str(), &native.pubkey)? {
+                native
+            } else {
+                keys::load_or_create_email_key(email.as_str())?
+            };
+            (key, Some(email.as_str().to_string()))
+        }
+        (None, Some(nip05), None) => {
+            let resolution = identity_authority
+                .resolve_nip05(nip05.as_str())?
+                .ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "NIP-05 name `{}` is not registered with Finite Identity",
+                        nip05.as_str()
+                    ))
+                })?;
+            let native = keys::load_or_generate_user_key()?;
+            let native_npub = key_npub(&native)?;
+            if native.pubkey != resolution.pubkey {
+                return Err(CliError::Usage(format!(
+                    "`{}` resolves to {}, but this Finite Home controls {}; use the matching Finite Home or grant its npub explicitly",
+                    nip05.as_str(),
+                    resolution.npub,
+                    native_npub
+                )));
+            }
+            (native, None)
+        }
+        (None, None, Some(expected)) => {
+            let native = keys::load_or_generate_user_key()?;
+            let native_npub = key_npub(&native)?;
+            if native_npub != expected.as_str() {
+                return Err(CliError::Usage(format!(
+                    "`--npub {}` does not match this Finite Home's {}; use the matching Finite Home",
+                    expected.as_str(),
+                    native_npub
+                )));
+            }
+            (native, None)
+        }
+        _ => unreachable!("auth git parser accepts at most one target"),
     };
     let client = api::Client::from_env();
     let response = client.auth_git(
         &key,
         &options.project,
         &GitAuthRequest {
-            email: options.email.clone(),
+            email: request_email,
         },
     )?;
     if options.store {
@@ -1460,10 +1689,16 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
     print_git_auth_response(&response, options.output_json, options.store)
 }
 
+fn key_npub(key: &keys::KeyFile) -> Result<String, CliError> {
+    npub::encode_npub(&key.pubkey).map_err(|error| CliError::Key(error.to_string()))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct AuthGitOptions {
     project: String,
-    email: Option<String>,
+    email: Option<MailboxAddress>,
+    nip05: Option<Nip05Name>,
+    npub: Option<NativeNpub>,
     output_json: bool,
     store: bool,
 }
@@ -1471,6 +1706,8 @@ struct AuthGitOptions {
 fn parse_auth_git_args(args: &[String]) -> Result<AuthGitOptions, CliError> {
     let mut positionals: Vec<&String> = Vec::new();
     let mut email: Option<String> = None;
+    let mut nip05: Option<String> = None;
+    let mut native_npub: Option<String> = None;
     let mut output_json = false;
     let mut store = false;
     let mut index: usize = 0;
@@ -1482,6 +1719,20 @@ fn parse_auth_git_args(args: &[String]) -> Result<AuthGitOptions, CliError> {
                     .get(index + 1)
                     .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
                 email = Some(value.clone());
+                index += 2;
+            }
+            "--nip05" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--nip05 needs a value".to_string()))?;
+                nip05 = Some(value.clone());
+                index += 2;
+            }
+            "--npub" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--npub needs a value".to_string()))?;
+                native_npub = Some(value.clone());
                 index += 2;
             }
             "--output" => {
@@ -1511,12 +1762,29 @@ fn parse_auth_git_args(args: &[String]) -> Result<AuthGitOptions, CliError> {
     }
     let [project] = positionals.as_slice() else {
         return Err(CliError::Usage(
-            "usage: fsite auth git PROJECT [--email EMAIL] [--store] [--output json]".to_string(),
+            "usage: fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] [--store] [--output json]".to_string(),
         ));
     };
+    if usize::from(email.is_some())
+        + usize::from(nip05.is_some())
+        + usize::from(native_npub.is_some())
+        > 1
+    {
+        return Err(CliError::Usage(
+            "fsite auth git accepts at most one of --email, --nip05, or --npub".to_string(),
+        ));
+    }
     Ok(AuthGitOptions {
         project: (*project).clone(),
-        email,
+        email: email
+            .map(|value| MailboxAddress::parse(&value, "--email"))
+            .transpose()?,
+        nip05: nip05
+            .map(|value| Nip05Name::parse(&value, "--nip05"))
+            .transpose()?,
+        npub: native_npub
+            .map(|value| NativeNpub::parse(&value, "--npub"))
+            .transpose()?,
         output_json,
         store,
     })
@@ -2003,10 +2271,10 @@ fn auth_login(args: &[String]) -> Result<(), CliError> {
     let [email] = args else {
         return Err(CliError::Usage(auth_login_help().to_string()));
     };
-    let response = match api::IdentityAuthorityClient::from_env() {
-        Some(identity_authority) => identity_authority.request_email_challenge(email)?,
-        None => api::Client::from_env().request_email_login(email)?,
-    };
+    let email = MailboxAddress::parse(email, "EMAIL")?;
+    reject_managed_agent_email(&email)?;
+    let response =
+        api::IdentityAuthorityClient::from_env().request_email_challenge(email.as_str())?;
     println!("sent email login for {}", response.email);
     println!("run the fsite auth redeem command from the email to verify this machine");
     Ok(())
@@ -2017,59 +2285,30 @@ fn auth_redeem(args: &[String]) -> Result<(), CliError> {
         return print_help(auth_redeem_help());
     }
     let (email, token, link_native, output_json) = parse_redeem_args(args)?;
+    let email = MailboxAddress::parse(&email, "EMAIL")?;
+    reject_managed_agent_email(&email)?;
+    let email = email.into_string();
     let pending_link_pubkey = keys::pending_email_link_pubkey(&email)?;
-    if let Some(identity_authority) = api::IdentityAuthorityClient::from_env() {
-        let key = keys::load_or_generate_user_key()?;
-        if let Some(pubkey) = &pending_link_pubkey
-            && key.pubkey != *pubkey
-        {
-            return Err(CliError::Key(
-                "pending email link belongs to a different local User Key; run `fsite auth link-email EMAIL` again from the machine that should own this email".to_string(),
-            ));
-        }
-        let response =
-            if (link_native || pending_link_pubkey.is_some()) && is_finite_vip_email(&email) {
-                identity_authority.redeem_vip_email(&key, &email, &token)?
-            } else {
-                identity_authority.redeem_email_only(&key, &email, &token)?
-            };
-        if pending_link_pubkey.is_some() {
-            keys::clear_pending_email_link(&email)?;
-        }
-        return print_email_redeem_response(&response, output_json);
-    }
-    let key = if link_native {
+    let key = if link_native || pending_link_pubkey.is_some() {
         keys::load_or_generate_user_key()?
     } else {
-        match &pending_link_pubkey {
-            Some(pubkey) => {
-                let identity = keys::load_or_generate_user_key()?;
-                if &identity.pubkey != pubkey {
-                    return Err(CliError::Key(
-                        "pending email link belongs to a different local User Key; run `fsite auth link-email EMAIL` again from the machine that should own this email".to_string(),
-                    ));
-                }
-                identity
-            }
-            None => keys::load_or_create_email_key(&email)?,
-        }
+        keys::load_or_create_email_key(&email)?
     };
-    if link_native
-        && let Some(pubkey) = &pending_link_pubkey
+    if let Some(pubkey) = &pending_link_pubkey
         && key.pubkey != *pubkey
     {
         return Err(CliError::Key(
             "pending email link belongs to a different local User Key; run `fsite auth link-email EMAIL` again from the machine that should own this email".to_string(),
         ));
     }
-    let client = api::Client::from_env();
-    let response = client.redeem_email_login(&key, &email, &token)?;
-    if (pending_link_pubkey.is_some() || link_native) && !response.linked_to_native_principal {
-        return Err(CliError::Api(
-            "email token was verified, but the server did not link it to the native Principal. Run `fsite auth register --output json`, then `fsite auth link-email EMAIL --output json` and redeem the new token.".to_string(),
-        ));
-    }
-    if response.linked_to_native_principal {
+    let identity_authority = api::IdentityAuthorityClient::from_env();
+    let response = if (link_native || pending_link_pubkey.is_some()) && is_finite_vip_email(&email)
+    {
+        identity_authority.redeem_vip_email(&key, &email, &token)?
+    } else {
+        identity_authority.redeem_email_only(&key, &email, &token)?
+    };
+    if pending_link_pubkey.is_some() {
         keys::clear_pending_email_link(&email)?;
     }
     print_email_redeem_response(&response, output_json)
@@ -2384,6 +2623,8 @@ mod tests {
 
     use super::*;
 
+    const TEST_NPUB: &str = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
+
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
     }
@@ -2555,20 +2796,59 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(parsed.visibility.as_deref(), Some("shared"));
-        assert_eq!(parsed.add_emails, vec!["viewer@example.com"]);
+        assert_eq!(parsed.add_emails[0].as_str(), "viewer@example.com");
         assert!(parsed.send_invite);
 
         let native = parse_project_share_args(&args(&[
             "demo",
             "site",
             "--add-npub",
-            "npub1viewer",
+            TEST_NPUB,
             "--remove-npub",
-            "npub1former",
+            TEST_NPUB,
         ]))
         .unwrap();
-        assert_eq!(native.add_npubs, vec!["npub1viewer"]);
-        assert_eq!(native.remove_npubs, vec!["npub1former"]);
+        assert_eq!(native.add_npubs[0].as_str(), TEST_NPUB);
+        assert_eq!(native.remove_npubs[0].as_str(), TEST_NPUB);
+    }
+
+    #[test]
+    fn collaborator_commands_require_one_identity_and_email_for_invites() {
+        assert!(project_grant_help().contains("--email MAILBOX | --nip05 NAME | --npub NPUB"));
+        assert!(project_revoke_help().contains("--email MAILBOX | --nip05 NAME | --npub NPUB"));
+        assert!(matches!(
+            project_grant(&args(&["demo"])),
+            Err(CliError::Usage(message)) if message.contains("exactly one")
+        ));
+        assert!(matches!(
+            project_grant(&args(&[
+                "demo",
+                "--email",
+                "editor@example.com",
+                "--npub",
+                TEST_NPUB,
+            ])),
+            Err(CliError::Usage(message)) if message.contains("exactly one")
+        ));
+        assert!(matches!(
+            project_grant(&args(&[
+                "demo",
+                "--npub",
+                TEST_NPUB,
+                "--send-invite",
+            ])),
+            Err(CliError::Usage(message)) if message.contains("requires an email")
+        ));
+        assert!(matches!(
+            project_revoke(&args(&[
+                "demo",
+                "--email",
+                "editor@example.com",
+                "--npub",
+                TEST_NPUB,
+            ])),
+            Err(CliError::Usage(message)) if message.contains("exactly one")
+        ));
     }
 
     #[test]
@@ -2629,6 +2909,8 @@ mod tests {
             AuthGitOptions {
                 project: "finite-curriculum".to_string(),
                 email: None,
+                nip05: None,
+                npub: None,
                 output_json: true,
                 store: true,
             }
@@ -2637,8 +2919,35 @@ mod tests {
         let external =
             parse_auth_git_args(&args(&["finite-curriculum", "--email", "paul@finite.vip"]))
                 .unwrap();
-        assert_eq!(external.email.as_deref(), Some("paul@finite.vip"));
+        assert_eq!(
+            external.email.as_ref().map(MailboxAddress::as_str),
+            Some("paul@finite.vip")
+        );
         assert!(!external.store);
+
+        let resolved =
+            parse_auth_git_args(&args(&["finite-curriculum", "--nip05", "agent@finite.vip"]))
+                .unwrap();
+        assert_eq!(
+            resolved.nip05.as_ref().map(Nip05Name::as_str),
+            Some("agent@finite.vip")
+        );
+        let explicit =
+            parse_auth_git_args(&args(&["finite-curriculum", "--npub", TEST_NPUB])).unwrap();
+        assert_eq!(
+            explicit.npub.as_ref().map(NativeNpub::as_str),
+            Some(TEST_NPUB)
+        );
+        assert!(matches!(
+            parse_auth_git_args(&args(&[
+                "finite-curriculum",
+                "--email",
+                "paul@finite.vip",
+                "--npub",
+                TEST_NPUB,
+            ])),
+            Err(CliError::Usage(message)) if message.contains("at most one")
+        ));
     }
 
     #[test]
