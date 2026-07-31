@@ -1368,7 +1368,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual([event.text for event in restarted.handled_messages], ["survive restart"])
         self.assertEqual([call[0] for call in restarted_calls], ["activity", "ack"])
 
-    def test_controls_bypass_busy_text_admission_gate(self):
+    def test_approval_and_stop_controls_bypass_busy_text_admission_gate(self):
         adapter = self.adapter()
         calls = []
         adapter._finitechat_json = self._record_json(calls)
@@ -1405,7 +1405,6 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             adapter._active_sessions[session_key] = asyncio.Event()
             adapter._session_tasks[session_key] = owner
 
-            await adapter._handle_finitechat_event(self._text_event(41, "msg-41", "2"))
             clarify_pending = False
             await adapter._handle_finitechat_event(self._text_event(42, "msg-42", "yes"))
             approval_pending = False
@@ -1414,7 +1413,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
             self.assertEqual(
                 [event.text for event in adapter.handled_messages],
-                ["2", "yes", "/stop"],
+                ["yes", "/stop"],
             )
             self.assertEqual(len(adapter._deferred_admissions), 1)
             self.assertNotIn("msg-44", [call[1].get("message_id") for call in calls])
@@ -1435,10 +1434,10 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
         self.assertEqual(
             [event.text for event in adapter.handled_messages],
-            ["2", "yes", "/stop", "ordinary"],
+            ["yes", "/stop", "ordinary"],
         )
         acked = [call[1]["message_id"] for call in calls if call[0] == "ack"]
-        self.assertEqual(acked, ["msg-41", "msg-42", "msg-43", "msg-44"])
+        self.assertEqual(acked, ["msg-42", "msg-43", "msg-44"])
 
     def _assert_deferred_text_keeps_arrival_classification(
         self,
@@ -1533,6 +1532,91 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual([event.text for event in adapter.handled_messages], ["other session"])
         self.assertEqual([call[0] for call in calls], ["activity", "ack"])
         self.assertEqual(adapter._deferred_admissions, {})
+
+    def test_typed_clarification_resumes_only_its_exact_chat_and_request(self):
+        adapter = self.adapter()
+        calls = []
+        responses = []
+        adapter._finitechat_json = self._record_json(calls)
+        tools_module = types.ModuleType("tools")
+        tools_module.__path__ = []
+        clarify_module = types.ModuleType("tools.clarify_gateway")
+        cast(Any, clarify_module).mark_awaiting_text = lambda _request_id: None
+        cast(Any, clarify_module).get_clarify_timeout = lambda: 600
+        cast(Any, clarify_module).resolve_gateway_clarify = lambda request_id, response: (
+            responses.append((request_id, response)) or True
+        )
+        cast(Any, tools_module).clarify_gateway = clarify_module
+
+        async def exercise():
+            prompt = await adapter.send_clarify(
+                chat_id="room-agent-1",
+                question="Which environment?",
+                choices=["Staging", "Production"],
+                clarify_id="clarify-a",
+                session_key="shared-hermes-session",
+                metadata={
+                    "conversation_id": "topic-build",
+                    "segment_id": "chat-a",
+                    "thread_id": "chat-a",
+                },
+            )
+            self.assertTrue(prompt.success)
+
+            wrong_chat = self._text_event(71, "msg-71", "2", segment_id="chat-b")
+            wrong_chat["metadata"] = {
+                "finitechat_clarification_answer": {"request_id": "clarify-a"}
+            }
+            await adapter._handle_finitechat_event(wrong_chat)
+
+            exact = self._text_event(72, "msg-72", "2", segment_id="chat-a")
+            exact["metadata"] = {"finitechat_clarification_answer": {"request_id": "clarify-a"}}
+            await adapter._handle_finitechat_event(exact)
+
+        with patch.dict(
+            sys.modules,
+            {
+                "tools": tools_module,
+                "tools.clarify_gateway": clarify_module,
+            },
+        ):
+            asyncio.run(exercise())
+
+        prompt_payload = calls[0][1]
+        self.assertEqual(prompt_payload["conversation_id"], "topic-build")
+        self.assertEqual(prompt_payload["segment_id"], "chat-a")
+        self.assertEqual(
+            prompt_payload["metadata"]["finitechat_clarification"]["request_id"],
+            "clarify-a",
+        )
+        self.assertEqual(responses, [("clarify-a", "Production")])
+        acked = [call[1]["message_id"] for call in calls if call[0] == "ack"]
+        self.assertEqual(acked, ["msg-72"])
+        self.assertEqual(adapter.handled_messages, [])
+        self.assertTrue(
+            any(
+                call[0] == "send"
+                and call[1]["conversation_id"] == "topic-build"
+                and call[1]["segment_id"] == "chat-b"
+                and "couldn't safely match" in call[1]["text"]
+                for call in calls
+            )
+        )
+
+    def test_restart_retains_unmatched_typed_answer_in_durable_inbox(self):
+        restarted = self.adapter()
+        calls = []
+        restarted._finitechat_json = self._record_json(calls)
+        answer = self._text_event(73, "msg-73", "the safe option", segment_id="chat-a")
+        answer["metadata"] = {
+            "finitechat_clarification_answer": {"request_id": "clarify-before-restart"}
+        }
+
+        asyncio.run(restarted._handle_finitechat_event(answer))
+
+        self.assertEqual(restarted.handled_messages, [])
+        self.assertEqual([call[0] for call in calls], ["send"])
+        self.assertNotIn("msg-73", [call[1].get("message_id") for call in calls])
 
     def test_failed_handoff_clears_processing_activity(self):
         adapter = self.adapter()

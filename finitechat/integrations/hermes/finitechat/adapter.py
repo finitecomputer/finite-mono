@@ -48,6 +48,7 @@ BRIDGE_STATUS_FILE = "hermes-bridge-status.json"
 SERVICE_START_TIMEOUT_SECS = 5.0
 MAX_DELIVERED_EVENT_KEYS = 256
 MAX_OUTBOUND_MESSAGE_ROUTES = 256
+MAX_PENDING_CLARIFICATIONS = 64
 STREAM_RECONNECT_BACKOFF_SECS = 2.0
 STREAM_RECONNECT_MAX_BACKOFF_SECS = 30.0
 SERVICE_TRANSPORT_RETRY_SECS = 0.1
@@ -63,6 +64,8 @@ FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
 REQUESTER_CONTEXT_DIR = "requester-context-v1"
 REQUESTER_CONTEXT_TTL_SECS = 15 * 60
 REQUESTER_CONTEXT_VERSION = 1
+CLARIFICATION_METADATA_KEY = "finitechat_clarification"
+CLARIFICATION_ANSWER_METADATA_KEY = "finitechat_clarification_answer"
 _AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "finitechat_authenticated_turn_user", default=None
 )
@@ -467,6 +470,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._outbound_message_order: list[str] = []
         self._inbound_chat_routes: dict[tuple[str, str], tuple[str | None, str | None]] = {}
         self._active_compactions: dict[tuple[str, str | None, str | None], str] = {}
+        self._pending_clarifications: dict[str, dict[str, Any]] = {}
+        self._pending_clarification_routes: dict[tuple[str, str, str], str] = {}
+        self._clarification_route_errors: set[str] = set()
         # The Rust inbox is the durable queue. Keep at most its first blocked
         # ordinary text event per Hermes session in memory while the current
         # owner task finishes. Later events remain only in the inbox and are
@@ -631,6 +637,85 @@ class FiniteChatAdapter(BasePlatformAdapter):
             message_id=message_id,
             raw_response=result.data,
         )
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: list | None,
+        clarify_id: str,
+        session_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        meta = self._message_metadata(metadata)
+        room_id = self._room_id(chat_id)
+        conversation_id, segment_id = self._route_from_metadata(room_id, meta)
+        if not conversation_id or not segment_id:
+            return SendResult(
+                success=False,
+                error="clarification requires an exact Finite topic and chat",
+                retryable=False,
+            )
+
+        choice_values = [str(choice) for choice in choices or []]
+        if choice_values:
+            lines = [f"❓ {question}", ""]
+            lines.extend(f"  {index}. {choice}" for index, choice in enumerate(choice_values, 1))
+            lines.extend(["", "Reply with the number, the option text, or your own answer."])
+            text = "\n".join(lines)
+            try:
+                from tools.clarify_gateway import mark_awaiting_text
+
+                mark_awaiting_text(clarify_id)
+            except Exception:
+                pass
+        else:
+            text = f"❓ {question}"
+
+        try:
+            from tools.clarify_gateway import get_clarify_timeout
+
+            timeout_seconds = max(1, int(get_clarify_timeout()))
+        except Exception:
+            timeout_seconds = 10 * 60
+        turn_id = hashlib.sha256(f"{session_key}:{clarify_id}".encode()).hexdigest()[:20]
+        expires_at = int(time.time()) + timeout_seconds
+        typed_request = {
+            "request_id": clarify_id,
+            "turn_id": turn_id,
+            "prompt": str(question),
+            "choices": choice_values,
+            "expires_at_unix_seconds": expires_at,
+        }
+        send_metadata = {
+            "conversation_id": conversation_id,
+            "segment_id": segment_id,
+            "thread_id": segment_id,
+            CLARIFICATION_METADATA_KEY: typed_request,
+            "_finitechat_kind": "message",
+            "_finitechat_status": "complete",
+        }
+        result = await self.send(chat_id=room_id, content=text, metadata=send_metadata)
+        if not result.success:
+            return result
+
+        route = (room_id, conversation_id, segment_id)
+        previous = self._pending_clarification_routes.get(route)
+        if previous:
+            self._pending_clarifications.pop(previous, None)
+        self._pending_clarification_routes[route] = clarify_id
+        self._pending_clarifications[clarify_id] = {
+            "room_id": room_id,
+            "conversation_id": conversation_id,
+            "segment_id": segment_id,
+            "session_key": session_key,
+            "choices": choice_values,
+            "expires_at_unix_seconds": expires_at,
+        }
+        while len(self._pending_clarifications) > MAX_PENDING_CLARIFICATIONS:
+            oldest_id = next(iter(self._pending_clarifications))
+            self._forget_pending_clarification(oldest_id)
+        return result
 
     async def edit_message(
         self,
@@ -1007,6 +1092,16 @@ class FiniteChatAdapter(BasePlatformAdapter):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
+        if await self._resolve_clarification_reply(
+            event,
+            room_id,
+            conversation_id,
+            segment_id,
+            seq,
+            message_id,
+            event_key or "",
+        ):
+            return
         if self._should_defer_admission(event, session_key):
             self._defer_admission(
                 session_key,
@@ -1093,20 +1188,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _is_immediate_text_control(event: MessageEvent, session_key: str) -> bool:
-        try:
-            from tools import clarify_gateway
-
-            if (
-                clarify_gateway.get_pending_for_session(
-                    session_key,
-                    include_choice_prompts=True,
-                )
-                is not None
-            ):
-                return True
-        except Exception:
-            pass
-
         if (event.text or "").strip().lower() not in APPROVAL_CONTROL_TEXT:
             return False
         try:
@@ -1115,6 +1196,137 @@ class FiniteChatAdapter(BasePlatformAdapter):
             return bool(has_blocking_approval(session_key))
         except Exception:
             return False
+
+    async def _resolve_clarification_reply(
+        self,
+        event: MessageEvent,
+        room_id: str,
+        conversation_id: str | None,
+        segment_id: str | None,
+        seq: Any,
+        message_id: str,
+        event_key: str,
+    ) -> bool:
+        if event.message_type != MessageType.TEXT or event.internal:
+            return False
+        if (event.text or "").lstrip().startswith("/"):
+            return False
+
+        raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
+        self._prune_pending_clarifications()
+        raw_metadata = raw_event.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        answer_metadata = metadata.get(CLARIFICATION_ANSWER_METADATA_KEY)
+        explicit_request_id = (
+            _string_or_none(answer_metadata.get("request_id"))
+            if isinstance(answer_metadata, dict)
+            else None
+        )
+        route = (
+            room_id,
+            conversation_id or "",
+            segment_id or "",
+        )
+        routed_request_id = self._pending_clarification_routes.get(route)
+        request_id = explicit_request_id or routed_request_id
+        if request_id is None:
+            return False
+
+        pending = self._pending_clarifications.get(request_id)
+        if (
+            pending is None
+            or (
+                pending["room_id"],
+                pending["conversation_id"],
+                pending["segment_id"],
+            )
+            != route
+            or (explicit_request_id is not None and explicit_request_id != routed_request_id)
+        ):
+            await self._report_unmatched_clarification_reply(
+                room_id, conversation_id, segment_id, message_id
+            )
+            # The durable Rust inbox retains this event because it is not ACKed.
+            return True
+
+        response = _clarification_response(event.text or "", pending.get("choices") or [])
+        try:
+            from tools.clarify_gateway import resolve_gateway_clarify
+
+            resolved = bool(resolve_gateway_clarify(request_id, response))
+        except Exception:
+            resolved = False
+        if not resolved:
+            await self._report_unmatched_clarification_reply(
+                room_id, conversation_id, segment_id, message_id
+            )
+            return True
+
+        answer_marker = {
+            "conversation_id": conversation_id,
+            "segment_id": segment_id,
+            "thread_id": segment_id,
+            CLARIFICATION_ANSWER_METADATA_KEY: {
+                "request_id": request_id,
+                "answer_message_id": message_id,
+            },
+            "_finitechat_kind": "status",
+            "_finitechat_status": "complete",
+        }
+        marker = await self.send(
+            chat_id=room_id,
+            content="Clarification answered",
+            metadata=answer_marker,
+        )
+        if not marker.success:
+            logger.warning(
+                "[finitechat] clarification %s resumed but answer marker failed: %s",
+                request_id,
+                marker.error,
+            )
+        self._forget_pending_clarification(request_id)
+        if event_key:
+            self._remember_delivered_event(event_key)
+        await self._ack_finitechat_event(room_id, seq, message_id)
+        return True
+
+    async def _report_unmatched_clarification_reply(
+        self,
+        room_id: str,
+        conversation_id: str | None,
+        segment_id: str | None,
+        message_id: str,
+    ) -> None:
+        if message_id in self._clarification_route_errors:
+            return
+        self._clarification_route_errors.add(message_id)
+        metadata = self._route_metadata(conversation_id, segment_id)
+        await self.send(
+            chat_id=room_id,
+            content=(
+                "I couldn't safely match that reply to the pending question. "
+                "Your answer is still saved here; please retry after the agent reconnects."
+            ),
+            metadata=metadata,
+        )
+
+    def _forget_pending_clarification(self, request_id: str) -> None:
+        pending = self._pending_clarifications.pop(request_id, None)
+        if pending is None:
+            return
+        route = (
+            str(pending["room_id"]),
+            str(pending["conversation_id"]),
+            str(pending["segment_id"]),
+        )
+        if self._pending_clarification_routes.get(route) == request_id:
+            self._pending_clarification_routes.pop(route, None)
+
+    def _prune_pending_clarifications(self) -> None:
+        now = int(time.time())
+        for request_id, pending in list(self._pending_clarifications.items()):
+            if int(pending.get("expires_at_unix_seconds") or 0) <= now:
+                self._forget_pending_clarification(request_id)
 
     def _session_is_active(self, session_key: str) -> bool:
         if session_key not in self._active_sessions:
@@ -1708,6 +1920,20 @@ class _FiniteChatResult:
         self.error = error
         self.retryable = retryable
         self.transport_error = transport_error
+
+
+def _clarification_response(text: str, choices: list[str]) -> str:
+    response = str(text).strip()
+    if not choices:
+        return response
+    if response.isdigit():
+        index = int(response) - 1
+        if 0 <= index < len(choices):
+            return choices[index]
+    for choice in choices:
+        if response.casefold() == choice.casefold():
+            return choice
+    return response
 
 
 def _resolve_finitechat_command(configured: str) -> list[str]:

@@ -122,6 +122,15 @@ type FakeHostedChatState = {
     status: "running" | "complete";
     final_delivery: boolean;
     edit_of_message_id: string | null;
+    clarification?: {
+      state: "requested" | "answered";
+      request_id: string;
+      turn_id: string;
+      prompt: string;
+      choices: string[];
+      expires_at_unix_seconds: number;
+      answer_message_id: string | null;
+    } | null;
     is_mine: boolean;
     media: Array<{
       attachment_id: string;
@@ -1407,6 +1416,61 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         true,
         "the user should be able to reopen a completed tool rollup"
       );
+      await browserQaRollup.locator("summary").click();
+
+      const clarificationRequest = {
+        ...hostedMessage(
+          "❓ Which environment?\n\n  1. Staging\n  2. Production\n\nReply with the number, the option text, or your own answer.",
+          false,
+          9
+        ),
+        clarification: {
+          state: "requested" as const,
+          request_id: "clarify-browser-a",
+          turn_id: "turn-browser-a",
+          prompt: "Which environment?",
+          choices: ["Staging", "Production"],
+          expires_at_unix_seconds: Math.floor(Date.now() / 1_000) + 600,
+          answer_message_id: null,
+        },
+      };
+      hostedDevice.state.app.messages.push(clarificationRequest);
+      hostedDevice.emit();
+      await page.getByText(/Which environment\?/u).first().waitFor({ state: "visible" });
+      await expectVisibleText(page, "Waiting for you");
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        false,
+        "typed clarification must not reopen a rollup the user closed"
+      );
+
+      await page.getByLabel("Message your agent").fill("2");
+      await page.getByRole("button", { name: "Send message" }).click();
+      await waitFor(
+        () =>
+          hostedDevice.state.actions.some(
+            (action) => actionName(action) === "AnswerClarification"
+          ),
+        15_000,
+        () => "the typed clarification answer action was not dispatched"
+      );
+      const clarificationAction = hostedDevice.state.actions.find(
+        (action) => actionName(action) === "AnswerClarification"
+      );
+      assert.deepEqual(clarificationAction, {
+        AnswerClarification: {
+          room_id: "room_browser_agent",
+          topic_id: "home",
+          chat_id: "chat_browser_agent",
+          request_id: "clarify-browser-a",
+          text: "2",
+        },
+      });
+      await page
+        .getByText("Waiting for you", { exact: true })
+        .waitFor({ state: "hidden", timeout: 15_000 });
+      await browserQaRollup.locator("summary").click();
+
       await page.getByLabel("Message your agent").fill("Working lease browser proof.");
       await page.getByRole("button", { name: "Send message" }).click();
       await page
@@ -1637,6 +1701,8 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         message_id: "message_remembered_only",
         chat_id: "chat_browser_remembered",
       });
+      const completedBeforeRememberedNavigation =
+        hostedDevice.state.completedSelectionMutations;
       await page
         .getByRole("button", { name: "Remembered work", exact: true })
         .click();
@@ -1648,7 +1714,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       // The pinned selection updates the pane before the daemon confirms, so
       // wait for the daemon-side selection rather than asserting it directly.
       await waitFor(
-        () => hostedDevice.state.app.selected_chat_id === "chat_browser_remembered",
+        () =>
+          hostedDevice.state.completedSelectionMutations
+            === completedBeforeRememberedNavigation + 1,
         5_000,
         () => "the daemon never persisted the Remembered work selection"
       );
@@ -1689,7 +1757,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       });
       hostedDevice.emit();
       // The stream snapshot still carries the previous selection while the
-      // OpenChat is held; its message is only visible if the pinned Browser QA
+      // OpenChat is held; its message is only visible if the browser-owned Browser QA
       // pane stayed put instead of fighting back to Remembered work.
       await expectVisibleText(page, "Concurrent stream update.");
       hostedDevice.releaseNavigationAction();
@@ -1707,6 +1775,53 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .waitFor({ state: "visible" });
       assert.equal(hostedDevice.state.app.selected_chat_id, "chat_browser_agent");
 
+      // Once OpenChat is fully confirmed, a later higher-revision stream can
+      // still carry another daemon selection (for example, a scoped send in a
+      // concurrently active Chat). It may merge that Chat's transcript, but
+      // it is not browser navigation intent and must not move the visible pane.
+      hostedDevice.state.app.selected_chat_id = "chat_browser_remembered";
+      hostedDevice.state.app.topics[0]!.active_chat_id = "chat_browser_remembered";
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Remembered background stream.", false, 15),
+        message_id: "message_remembered_background",
+        chat_id: "chat_browser_remembered",
+      });
+      hostedDevice.state.app.rev += 1;
+      hostedDevice.emit();
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        await page
+          .locator(".finite-chat__message")
+          .getByText("Remembered background stream.", { exact: true })
+          .isVisible(),
+        false,
+        "background transcript update changed the visible Chat"
+      );
+      const navigationJournal = await page.evaluate(() =>
+        (window as unknown as {
+          __finiteChatNavigationJournal?: Array<{
+            source: string;
+            decision: string;
+            snapshot_selection: { selected_chat_id: string | null };
+            visible_selection: { selected_chat_id: string | null };
+          }>;
+        }).__finiteChatNavigationJournal ?? []
+      );
+      assert(
+        navigationJournal.some((entry) =>
+          entry.source === "sse"
+          && entry.decision === "preserved"
+          && entry.snapshot_selection.selected_chat_id === "chat_browser_remembered"
+          && entry.visible_selection.selected_chat_id === "chat_browser_agent"
+        ),
+        "navigation journal did not explain why the background selection was ignored"
+      );
+
+      const completedBeforeBackgroundChatNavigation =
+        hostedDevice.state.completedSelectionMutations;
       await page
         .getByRole("button", { name: "Remembered work", exact: true })
         .click();
@@ -1714,10 +1829,13 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .locator(".finite-chat__topbar")
         .getByText("Remembered work", { exact: true })
         .waitFor({ state: "visible" });
-      // The pinned selection presents instantly; let the daemon confirm before
+      await expectVisibleText(page, "Remembered background stream.");
+      // The browser-owned selection presents instantly; let the daemon confirm before
       // reading mutation counters so the next section starts quiescent.
       await waitFor(
-        () => hostedDevice.state.app.selected_chat_id === "chat_browser_remembered",
+        () =>
+          hostedDevice.state.completedSelectionMutations
+            === completedBeforeBackgroundChatNavigation + 1,
         5_000,
         () => "the daemon never persisted the Remembered work selection"
       );
@@ -2644,6 +2762,28 @@ function applyHostedAction(
     const text = String(payload.text ?? "");
     assert(text);
     state.messages.push(hostedMessage(text, true, state.messages.length + 1));
+    state.rooms[0]!.last_message_preview = text;
+  } else if (operation === "AnswerClarification") {
+    const payload = action.AnswerClarification as Record<string, unknown> | undefined;
+    assert(payload);
+    const text = String(payload.text ?? "");
+    const requestId = String(payload.request_id ?? "");
+    assert(text && requestId);
+    const answer = hostedMessage(text, true, state.messages.length + 1);
+    state.messages.push(answer);
+    state.messages.push({
+      ...hostedMessage("Clarification answered", false, state.messages.length + 1),
+      kind: "status",
+      clarification: {
+        state: "answered",
+        request_id: requestId,
+        turn_id: requestId,
+        prompt: "",
+        choices: [],
+        expires_at_unix_seconds: 0,
+        answer_message_id: answer.message_id,
+      },
+    });
     state.rooms[0]!.last_message_preview = text;
   } else if (operation === "RenameChat") {
     const payload = action.RenameChat as Record<string, unknown> | undefined;

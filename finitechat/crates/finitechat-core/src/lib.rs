@@ -29,8 +29,8 @@ use finitechat_client::{
     run_room_sync_tick, run_runtime_sync_setup_tick,
 };
 use finitechat_hermes::{
-    HermesAttachmentKindV1, HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1,
-    HermesSendKindV1,
+    HERMES_METADATA_CLARIFICATION, HERMES_METADATA_CLARIFICATION_ANSWER, HermesAttachmentKindV1,
+    HermesAttachmentV1, HermesMessagePayloadV1, HermesMessageStatusV1, HermesSendKindV1,
 };
 use finitechat_http::{
     FINITECHAT_SERVER_CONTRACT_VERSION, GetEphemeralActivitiesRequest, HealthResponse,
@@ -352,6 +352,24 @@ pub enum ChatMessageStatus {
     Complete,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatClarificationState {
+    Requested,
+    Answered,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct ChatClarification {
+    pub state: ChatClarificationState,
+    pub request_id: String,
+    pub turn_id: String,
+    pub prompt: String,
+    pub choices: Vec<String>,
+    pub expires_at_unix_seconds: u64,
+    pub answer_message_id: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct ChatMessage {
     pub room_id: String,
@@ -398,6 +416,8 @@ pub struct ChatMessage {
     pub read_receipt: Option<ChatReadReceiptSummary>,
     #[serde(default)]
     pub poll: Option<ChatPoll>,
+    #[serde(default)]
+    pub clarification: Option<ChatClarification>,
     #[serde(default)]
     pub timestamp_unix_seconds: u64,
     #[serde(default)]
@@ -743,6 +763,13 @@ pub enum AppAction {
         room_id: String,
         topic_id: String,
         chat_id: String,
+        text: String,
+    },
+    AnswerClarification {
+        room_id: String,
+        topic_id: String,
+        chat_id: String,
+        request_id: String,
         text: String,
     },
     SendReply {
@@ -2468,6 +2495,13 @@ impl AppRuntimeState {
                 chat_id,
                 text,
             } => self.send_chat_message(room_id, topic_id, chat_id, text)?,
+            AppAction::AnswerClarification {
+                room_id,
+                topic_id,
+                chat_id,
+                request_id,
+                text,
+            } => self.answer_clarification(room_id, topic_id, chat_id, request_id, text)?,
             AppAction::SendReply {
                 room_id,
                 text,
@@ -4447,7 +4481,75 @@ impl AppRuntimeState {
             Some(chat_id),
             text,
             None,
+            BTreeMap::new(),
         )
+    }
+
+    fn answer_clarification(
+        &mut self,
+        room_id: String,
+        topic_id: String,
+        chat_id: String,
+        request_id: String,
+        text: String,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
+        let request_id = request_id.trim();
+        if request_id.is_empty()
+            || !self.pending_clarification_matches(&room_id, &topic_id, &chat_id, request_id)
+        {
+            return Err(FiniteChatCoreError::Client {
+                reason: "clarification is no longer pending in this chat".to_owned(),
+            });
+        }
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            HERMES_METADATA_CLARIFICATION_ANSWER.to_owned(),
+            serde_json::json!({ "request_id": request_id }),
+        );
+        self.send_message_with_conversation_and_chat(
+            room_id,
+            Some(topic_id),
+            Some(chat_id),
+            text,
+            None,
+            metadata,
+        )
+    }
+
+    fn pending_clarification_matches(
+        &self,
+        room_id: &str,
+        topic_id: &str,
+        chat_id: &str,
+        request_id: &str,
+    ) -> bool {
+        let mut requested_seq = None;
+        let mut answered_seq = None;
+        for message in self.chat_projection.messages.values().filter(|message| {
+            message.room_id == room_id
+                && message.conversation_id.as_deref() == Some(topic_id)
+                && message.chat_id.as_deref() == Some(chat_id)
+        }) {
+            let Some(clarification) = &message.clarification else {
+                continue;
+            };
+            if clarification.request_id != request_id {
+                continue;
+            }
+            match clarification.state {
+                ChatClarificationState::Requested => {
+                    requested_seq =
+                        Some(requested_seq.map_or(message.seq, |seq: u64| seq.max(message.seq)));
+                }
+                ChatClarificationState::Answered => {
+                    answered_seq =
+                        Some(answered_seq.map_or(message.seq, |seq: u64| seq.max(message.seq)));
+                }
+            }
+        }
+        requested_seq
+            .is_some_and(|requested| answered_seq.is_none_or(|answered| answered < requested))
     }
 
     fn send_reply(
@@ -4478,6 +4580,7 @@ impl AppRuntimeState {
             Some(chat_id),
             text,
             Some(target_id.to_owned()),
+            BTreeMap::new(),
         )
     }
 
@@ -4505,6 +4608,7 @@ impl AppRuntimeState {
             Some(chat_id),
             trimmed.to_owned(),
             reply_to_message_id,
+            BTreeMap::new(),
         )
     }
 
@@ -4515,6 +4619,7 @@ impl AppRuntimeState {
         chat_id: Option<String>,
         text: String,
         reply_to_message_id: Option<String>,
+        metadata: BTreeMap<String, serde_json::Value>,
     ) -> Result<(), FiniteChatCoreError> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -4526,11 +4631,12 @@ impl AppRuntimeState {
             });
         }
 
-        let chat_payload = encode_text_message_payload_scoped(
+        let chat_payload = encode_text_message_payload_scoped_with_metadata(
             trimmed,
             reply_to_message_id.as_deref(),
             conversation_id.as_deref(),
             chat_id.as_deref(),
+            metadata,
         )?;
         let app_event_plaintext = encode_application_event_with_segment(
             DurableAppEventKind::ChatMessage,
@@ -4544,9 +4650,6 @@ impl AppRuntimeState {
             trimmed.to_owned(),
             "sent",
         )?;
-        self.app.selected_topic_id = conversation_id;
-        self.app.selected_chat_id = chat_id;
-        self.sync_selected_room_messages();
         Ok(())
     }
 
@@ -4761,24 +4864,21 @@ impl AppRuntimeState {
                 reason: format!("room '{room_id}' is not ready to send"),
             });
         }
-        let (selected_topic_id, selected_chat_id) =
-            match (input.conversation_id.clone(), input.chat_id.clone()) {
-                (Some(topic_id), Some(chat_id)) => {
-                    self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
-                    (Some(topic_id), Some(chat_id))
-                }
-                (None, None) => {
-                    let (topic_id, chat_id) = self.default_chat_route_for_room(&room_id)?;
-                    input.conversation_id = Some(topic_id.clone());
-                    input.chat_id = Some(chat_id.clone());
-                    (Some(topic_id), Some(chat_id))
-                }
-                _ => {
-                    return Err(FiniteChatCoreError::Client {
-                        reason: "attachment route must include both topic and chat ids".to_owned(),
-                    });
-                }
-            };
+        match (input.conversation_id.clone(), input.chat_id.clone()) {
+            (Some(topic_id), Some(chat_id)) => {
+                self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
+            }
+            (None, None) => {
+                let (topic_id, chat_id) = self.default_chat_route_for_room(&room_id)?;
+                input.conversation_id = Some(topic_id);
+                input.chat_id = Some(chat_id);
+            }
+            _ => {
+                return Err(FiniteChatCoreError::Client {
+                    reason: "attachment route must include both topic and chat ids".to_owned(),
+                });
+            }
+        }
         if input.attachments.is_empty() {
             return Err(FiniteChatCoreError::Client {
                 reason: "attachment message must include at least one attachment".to_owned(),
@@ -4797,9 +4897,6 @@ impl AppRuntimeState {
             Ok(projection) => {
                 self.apply_projection_events(projection.events)?;
                 self.append_messages(projection.result.messages);
-                self.app.selected_topic_id = selected_topic_id;
-                self.app.selected_chat_id = selected_chat_id;
-                self.sync_selected_room_messages();
                 self.app.status = "sent".to_owned();
             }
             Err(error) => {
@@ -9009,6 +9106,7 @@ struct ChatProjectionPayload {
     sender_name: Option<String>,
     media: Vec<ChatMediaAttachment>,
     poll: Option<ChatPoll>,
+    clarification: Option<ChatClarification>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -9040,7 +9138,7 @@ fn project_chat_message(
     timestamp_unix_seconds: u64,
     owner: &DeviceRef,
 ) -> Option<ChatMessage> {
-    let projection = chat_projection_payload_from_application_plaintext(&plaintext)?;
+    let mut projection = chat_projection_payload_from_application_plaintext(&plaintext)?;
     // Product authorship is account-scoped: another Device enrolled under the
     // same Principal is still "you". Delivery state, however, belongs only to
     // the Device that actually authored this local outbound message.
@@ -9051,6 +9149,12 @@ fn project_chat_message(
         &projection.text,
         &projection.display_content,
     ));
+    if let Some(clarification) = projection.clarification.as_mut()
+        && clarification.state == ChatClarificationState::Answered
+        && clarification.answer_message_id.is_none()
+    {
+        clarification.answer_message_id = Some(message_id.clone());
+    }
     Some(ChatMessage {
         room_id,
         seq,
@@ -9080,6 +9184,7 @@ fn project_chat_message(
         media: projection.media,
         read_receipt: None,
         poll: projection.poll,
+        clarification: projection.clarification,
         timestamp_unix_seconds,
         display_timestamp: display_timestamp(timestamp_unix_seconds),
     })
@@ -9202,9 +9307,11 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
             sender_name: None,
             media: Vec::new(),
             poll: Some(chat_poll_from_payload(payload)),
+            clarification: None,
         };
     }
     if let Ok(Some(payload)) = HermesMessagePayloadV1::decode(payload_bytes) {
+        let clarification = chat_clarification_from_metadata(&payload.metadata);
         return ChatProjectionPayload {
             display_content: payload.text.clone(),
             text: payload.text,
@@ -9227,6 +9334,7 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
                 .map(|(index, attachment)| chat_media_attachment(index, attachment))
                 .collect(),
             poll: None,
+            clarification,
         };
     }
     let text = String::from_utf8_lossy(payload_bytes).into_owned();
@@ -9243,7 +9351,67 @@ fn chat_projection_payload(payload_bytes: &[u8]) -> ChatProjectionPayload {
         sender_name: None,
         media: Vec::new(),
         poll: None,
+        clarification: None,
     }
+}
+
+fn chat_clarification_from_metadata(
+    metadata: &BTreeMap<String, serde_json::Value>,
+) -> Option<ChatClarification> {
+    if let Some(value) = metadata.get(HERMES_METADATA_CLARIFICATION) {
+        #[derive(Deserialize)]
+        struct Requested {
+            request_id: String,
+            turn_id: String,
+            prompt: String,
+            #[serde(default)]
+            choices: Vec<String>,
+            expires_at_unix_seconds: u64,
+        }
+        let requested = serde_json::from_value::<Requested>(value.clone()).ok()?;
+        if requested.request_id.trim().is_empty()
+            || requested.turn_id.trim().is_empty()
+            || requested.prompt.trim().is_empty()
+        {
+            return None;
+        }
+        return Some(ChatClarification {
+            state: ChatClarificationState::Requested,
+            request_id: requested.request_id,
+            turn_id: requested.turn_id,
+            prompt: requested.prompt,
+            choices: requested.choices,
+            expires_at_unix_seconds: requested.expires_at_unix_seconds,
+            answer_message_id: None,
+        });
+    }
+    if let Some(value) = metadata.get(HERMES_METADATA_CLARIFICATION_ANSWER) {
+        #[derive(Deserialize)]
+        struct Answered {
+            request_id: String,
+            #[serde(default)]
+            answer_message_id: Option<String>,
+        }
+        let answered = serde_json::from_value::<Answered>(value.clone()).ok()?;
+        if answered.request_id.trim().is_empty()
+            || answered
+                .answer_message_id
+                .as_deref()
+                .is_some_and(|message_id| message_id.trim().is_empty())
+        {
+            return None;
+        }
+        return Some(ChatClarification {
+            state: ChatClarificationState::Answered,
+            request_id: answered.request_id.clone(),
+            turn_id: answered.request_id,
+            prompt: String::new(),
+            choices: Vec::new(),
+            expires_at_unix_seconds: 0,
+            answer_message_id: answered.answer_message_id,
+        });
+    }
+    None
 }
 
 fn chat_message_kind(kind: HermesSendKindV1) -> ChatMessageKind {
@@ -9551,11 +9719,28 @@ fn encode_text_message_payload(
     encode_text_message_payload_scoped(text, reply_to_message_id, None, None)
 }
 
+#[cfg(test)]
 fn encode_text_message_payload_scoped(
     text: &str,
     reply_to_message_id: Option<&str>,
     conversation_id: Option<&str>,
     chat_id: Option<&str>,
+) -> Result<Vec<u8>, FiniteChatCoreError> {
+    encode_text_message_payload_scoped_with_metadata(
+        text,
+        reply_to_message_id,
+        conversation_id,
+        chat_id,
+        BTreeMap::new(),
+    )
+}
+
+fn encode_text_message_payload_scoped_with_metadata(
+    text: &str,
+    reply_to_message_id: Option<&str>,
+    conversation_id: Option<&str>,
+    chat_id: Option<&str>,
+    metadata: BTreeMap<String, serde_json::Value>,
 ) -> Result<Vec<u8>, FiniteChatCoreError> {
     HermesMessagePayloadV1 {
         payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
@@ -9568,7 +9753,7 @@ fn encode_text_message_payload_scoped(
         attachments: Vec::new(),
         reply_to_message_id: reply_to_message_id.map(ToOwned::to_owned),
         sender_name: None,
-        metadata: BTreeMap::new(),
+        metadata,
     }
     .encode()
     .map_err(client_error)
@@ -12929,6 +13114,131 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_answers_only_the_exact_pending_clarification() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let app = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "alice-desktop".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let created = app
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Clarification Room".to_owned(),
+            })
+            .unwrap();
+        let room_id = created.selected_room_id.unwrap();
+        let home_chat_id = created.selected_chat_id.unwrap();
+        let second = app
+            .dispatch_and_wait(AppAction::StartTopicChat {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                reason: Some("exact clarification route test".to_owned()),
+            })
+            .unwrap();
+        let second_chat_id = second.selected_chat_id.unwrap();
+
+        let request_id = "clarify-exact-a";
+        let request_payload = HermesMessagePayloadV1 {
+            payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
+            text: "Which environment?".to_owned(),
+            kind: HermesSendKindV1::Message,
+            status: HermesMessageStatusV1::Complete,
+            edit_of: None,
+            conversation_id: Some(HOME_TOPIC_ID.to_owned()),
+            segment_id: Some(home_chat_id.clone()),
+            attachments: Vec::new(),
+            reply_to_message_id: None,
+            sender_name: Some("Agent".to_owned()),
+            metadata: BTreeMap::from([(
+                HERMES_METADATA_CLARIFICATION.to_owned(),
+                serde_json::json!({
+                    "request_id": request_id,
+                    "turn_id": "turn-exact-a",
+                    "prompt": "Which environment?",
+                    "choices": ["Staging", "Production"],
+                    "expires_at_unix_seconds": NOW + 600,
+                }),
+            )]),
+        }
+        .encode()
+        .unwrap();
+        let request_plaintext = encode_application_event_with_segment(
+            DurableAppEventKind::ChatMessage,
+            Some(HOME_TOPIC_ID.to_owned()),
+            Some(home_chat_id.clone()),
+            &request_payload,
+        )
+        .unwrap();
+        app.send_encoded_chat_message_and_wait(
+            room_id.clone(),
+            request_plaintext,
+            "Which environment?".to_owned(),
+        )
+        .unwrap();
+
+        let wrong_route = app
+            .dispatch_and_wait(AppAction::AnswerClarification {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: second_chat_id.clone(),
+                request_id: request_id.to_owned(),
+                text: "2".to_owned(),
+            })
+            .expect_err("a different chat must not consume the clarification");
+        assert!(
+            wrong_route
+                .to_string()
+                .contains("clarification is no longer pending in this chat")
+        );
+
+        let answered = app
+            .dispatch_and_wait(AppAction::AnswerClarification {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: home_chat_id.clone(),
+                request_id: request_id.to_owned(),
+                text: "2".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            answered.selected_chat_id.as_deref(),
+            Some(second_chat_id.as_str()),
+            "answering a clarification in a background chat must not navigate"
+        );
+        assert!(
+            answered.messages.iter().all(|message| message.text != "2"),
+            "the background answer must not leak into the visible transcript"
+        );
+        let reopened = app
+            .dispatch_and_wait(AppAction::OpenChat {
+                room_id,
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: home_chat_id,
+            })
+            .unwrap();
+        let answer = reopened
+            .messages
+            .iter()
+            .find(|message| message.text == "2")
+            .expect("the exact answer is durable in its explicitly opened chat");
+        let clarification = answer
+            .clarification
+            .as_ref()
+            .expect("the answer projects typed lifecycle metadata");
+        assert_eq!(clarification.state, ChatClarificationState::Answered);
+        assert_eq!(clarification.request_id, request_id);
+        assert_eq!(
+            clarification.answer_message_id.as_deref(),
+            Some(answer.message_id.as_str())
+        );
+    }
+
+    #[test]
     fn app_runtime_chat_rename_replays_and_syncs_to_another_device() {
         let dir = tempfile::tempdir().unwrap();
         let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
@@ -13329,6 +13639,16 @@ mod tests {
                 .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
                 .is_some_and(|chat| chat.archived),
             "new messages must not implicitly restore an archived chat"
+        );
+        assert_eq!(
+            after_message.selected_topic_id.as_deref(),
+            Some(elsewhere_topic_id.as_str()),
+            "sending to a background chat must not change the active topic"
+        );
+        assert_eq!(
+            after_message.selected_chat_id.as_deref(),
+            Some(elsewhere_chat_id.as_str()),
+            "sending to a background chat must not change the active chat"
         );
 
         drop(alice);
@@ -13920,6 +14240,36 @@ mod tests {
         assert!(final_message.final_delivery);
         assert!(!commentary.final_delivery);
         assert!(!tool.final_delivery);
+    }
+
+    #[test]
+    fn chat_projection_preserves_typed_clarification_lifecycle() {
+        let requested = chat_clarification_from_metadata(&BTreeMap::from([(
+            HERMES_METADATA_CLARIFICATION.to_owned(),
+            serde_json::json!({
+                "request_id": "clarify-a",
+                "turn_id": "turn-a",
+                "prompt": "Which environment?",
+                "choices": ["Staging", "Production"],
+                "expires_at_unix_seconds": 1_000,
+            }),
+        )]))
+        .expect("typed request projects");
+        assert_eq!(requested.state, ChatClarificationState::Requested);
+        assert_eq!(requested.request_id, "clarify-a");
+        assert_eq!(requested.prompt, "Which environment?");
+        assert_eq!(requested.choices, vec!["Staging", "Production"]);
+
+        let answered = chat_clarification_from_metadata(&BTreeMap::from([(
+            HERMES_METADATA_CLARIFICATION_ANSWER.to_owned(),
+            serde_json::json!({
+                "request_id": "clarify-a",
+                "answer_message_id": "user-answer-a",
+            }),
+        )]))
+        .expect("typed answer projects");
+        assert_eq!(answered.state, ChatClarificationState::Answered);
+        assert_eq!(answered.answer_message_id.as_deref(), Some("user-answer-a"));
     }
 
     #[test]
