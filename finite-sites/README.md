@@ -96,6 +96,34 @@ explicit, revocable Finite Sites Email Access Delegation. For non-`@finite.vip`
 Mailbox Addresses, redeeming preserves the email-only collaborator flow: the
 mailbox can satisfy its grant, but it does not become a native Finite identity.
 
+The Sites-only delegation flow is:
+
+```sh
+fsite auth sites-key request paul@example.com
+fsite auth sites-key add paul@example.com TOKEN_FROM_EMAIL --output json
+fsite auth sites-key revoke paul@example.com TOKEN_FROM_EMAIL npub1... --output json
+```
+
+Every add or revoke uses fresh mailbox proof. Multiple npubs can remain active
+for one mailbox; revoking one does not change Chat NIP-05 resolution, Brain
+encryption recipients, other keys, or the underlying mailbox grants.
+
+The additive operator reconciliation is:
+
+```sh
+FC_CORE_API_TOKEN=... \
+finitesitesd reconcile-identity --data DATA_DIR \
+  --identity-authority-url https://identity.finite.vip \
+  --core-api-url https://core.example
+```
+
+The Core URL and server-only `FC_CORE_API_TOKEN` are optional as a pair.
+Without them, reconciliation still preserves legacy access and converts
+Managed Agent NIP-05 grants to native grants. With them, a verified active Core
+account-to-Agent association may create the missing mailbox-to-npub Sites key.
+Automated evidence never reactivates a revoked key; only a new mailbox
+challenge can do that.
+
 ### Migrating an existing key
 
 Older `fsite` releases stored the key at `~/.config/finite-sites/identity.env`.
@@ -355,10 +383,8 @@ fsite auth redeem editor@example.com TOKEN_FROM_EMAIL --link-native --output jso
 ```
 
 Never run that command from an Agent Principal merely to inherit a human's
-email grants. That case requires an explicit, revocable Finite Sites Email
-Access Delegation. It grants no Brain access, and until the installed Sites
-API/CLI exposes the delegation flow the agent must stop rather than impersonate
-the human through an email session.
+email grants. Use `fsite auth sites-key request` followed by `sites-key add`
+instead. The resulting Authorized Sites Key grants no Chat or Brain authority.
 
 ## Share And Collaborate
 

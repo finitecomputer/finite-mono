@@ -430,6 +430,37 @@ pub struct ProjectInitStoreOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SitesEmailPrincipalRecord {
+    pub id: String,
+    pub email: String,
+    pub verified_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SitesAuthorizedKeyRecord {
+    pub id: String,
+    pub email_principal_id: String,
+    pub native_principal_id: String,
+    pub pubkey: String,
+    pub proof_kind: String,
+    pub verified_at: u64,
+    pub revoked_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SitesIdentityReconciliationReport {
+    pub migrated: u64,
+    pub unchanged: u64,
+    pub conflicts: u64,
+    pub needs_proof: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyEmailGrantCandidate {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitCredentialRecord {
     pub id: String,
     pub project_id: String,
@@ -566,6 +597,30 @@ impl Store {
             "kind",
             "kind TEXT NOT NULL DEFAULT 'site' CHECK (kind IN ('site', 'document'))",
         )?;
+        Self::ensure_column(
+            &conn,
+            "sites",
+            "publisher_email_principal_id",
+            "publisher_email_principal_id TEXT REFERENCES sites_email_principals(id)",
+        )?;
+        Self::ensure_column(
+            &conn,
+            "sites",
+            "originating_publisher_principal_id",
+            "originating_publisher_principal_id TEXT REFERENCES principals(id)",
+        )?;
+        Self::ensure_column(
+            &conn,
+            "projects",
+            "publisher_email_principal_id",
+            "publisher_email_principal_id TEXT REFERENCES sites_email_principals(id)",
+        )?;
+        Self::ensure_column(
+            &conn,
+            "projects",
+            "originating_publisher_principal_id",
+            "originating_publisher_principal_id TEXT REFERENCES principals(id)",
+        )?;
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS versions_git_ref_event
              ON versions(site_id, git_ref_event_id) WHERE git_ref_event_id IS NOT NULL",
@@ -579,6 +634,34 @@ impl Store {
         Self::migrate_versions_git_ref_event_index(&conn)?;
         Self::migrate_legacy_sites_shape(&conn)?;
         Self::migrate_legacy_allowed_pubkeys(&conn)?;
+        // Shape-rebuild migrations above intentionally preserve only columns
+        // known to their legacy source shape, so re-assert newer attribution
+        // columns after those table swaps.
+        Self::ensure_column(
+            &conn,
+            "sites",
+            "publisher_email_principal_id",
+            "publisher_email_principal_id TEXT REFERENCES sites_email_principals(id)",
+        )?;
+        Self::ensure_column(
+            &conn,
+            "sites",
+            "originating_publisher_principal_id",
+            "originating_publisher_principal_id TEXT REFERENCES principals(id)",
+        )?;
+        Self::ensure_column(
+            &conn,
+            "projects",
+            "publisher_email_principal_id",
+            "publisher_email_principal_id TEXT REFERENCES sites_email_principals(id)",
+        )?;
+        Self::ensure_column(
+            &conn,
+            "projects",
+            "originating_publisher_principal_id",
+            "originating_publisher_principal_id TEXT REFERENCES principals(id)",
+        )?;
+        Self::reconcile_sites_identity_evidence(&conn)?;
         Ok(Store { conn, path })
     }
 
@@ -627,6 +710,336 @@ impl Store {
             columns.push(row?);
         }
         Ok(columns)
+    }
+
+    fn reconcile_sites_identity_evidence(conn: &Connection) -> Result<(), StoreError> {
+        let repair_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| StoreError::CorruptState("system clock preceded Unix epoch"))?
+            .as_secs();
+        let mut stmt = conn.prepare(
+            "SELECT email, pubkey, verified_at
+             FROM email_keys
+             WHERE revoked_at IS NULL
+             ORDER BY email, pubkey",
+        )?;
+        let legacy_email_keys = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (email, pubkey, verified_at) in legacy_email_keys {
+            Self::upsert_sites_authorized_key_on_connection(
+                conn,
+                &email,
+                &pubkey,
+                "legacy_sites_email_key",
+                verified_at,
+            )?;
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT pel.email, p.pubkey, pel.verified_at
+             FROM principal_email_links pel
+             JOIN principals p ON p.id = pel.principal_id
+             WHERE pel.revoked_at IS NULL AND p.kind = 'native'
+             ORDER BY pel.email, p.pubkey",
+        )?;
+        let legacy_links = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (email, pubkey, verified_at) in legacy_links {
+            Self::upsert_sites_authorized_key_on_connection(
+                conn,
+                &email,
+                &pubkey,
+                "legacy_verified_principal_link",
+                verified_at,
+            )?;
+        }
+
+        conn.execute(
+            "UPDATE projects
+             SET originating_publisher_principal_id = owner_principal_id
+             WHERE originating_publisher_principal_id IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE sites
+             SET originating_publisher_principal_id = (
+                 SELECT id FROM principals
+                 WHERE kind = 'native' AND pubkey = sites.owner_pubkey
+             )
+             WHERE originating_publisher_principal_id IS NULL",
+            [],
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.owner_principal_id
+             FROM projects p
+             WHERE p.publisher_email_principal_id IS NULL",
+        )?;
+        let projects = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (project_id, owner_principal_id) in projects {
+            Self::reconcile_project_publisher_email(
+                conn,
+                &project_id,
+                &owner_principal_id,
+                repair_now,
+            )?;
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT p.id, p.email
+             FROM principals p
+             JOIN project_collaborators pc ON pc.principal_id = p.id
+             WHERE p.kind = 'external' AND pc.removed_at IS NULL
+             ORDER BY p.email",
+        )?;
+        let external_collaborators = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (principal_id, email) in external_collaborators {
+            let has_verified_principal: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM sites_email_principals WHERE email = ?1",
+                    params![email],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if has_verified_principal.is_none() {
+                let resolved_managed_agent: Option<i64> = conn
+                    .query_row(
+                        "SELECT 1 FROM sites_legacy_email_resolutions WHERE email = ?1",
+                        params![email],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if resolved_managed_agent.is_some() {
+                    continue;
+                }
+                Self::record_sites_identity_repair(
+                    conn,
+                    &format!("external-principal:{principal_id}"),
+                    "project_collaborator",
+                    &principal_id,
+                    "needs_proof",
+                    "email collaborator is preserved but has no durable mailbox proof for a Sites keyset",
+                    repair_now,
+                )?;
+            }
+        }
+        let mut stmt = conn.prepare("SELECT DISTINCT email FROM shares ORDER BY email")?;
+        let shared_emails = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for email in shared_emails {
+            let has_verified_principal: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM sites_email_principals WHERE email = ?1",
+                    params![email],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if has_verified_principal.is_none() {
+                let resolved_managed_agent: Option<i64> = conn
+                    .query_row(
+                        "SELECT 1 FROM sites_legacy_email_resolutions WHERE email = ?1",
+                        params![email],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if resolved_managed_agent.is_some() {
+                    continue;
+                }
+                Self::record_sites_identity_repair(
+                    conn,
+                    &format!("site-share:{email}"),
+                    "site_share",
+                    &email,
+                    "needs_proof",
+                    "email viewer share is preserved but has no durable mailbox proof for a Sites keyset",
+                    repair_now,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_project_publisher_email(
+        conn: &Connection,
+        project_id: &str,
+        owner_principal_id: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        let mut stmt = conn.prepare(
+            "SELECT sep.id
+             FROM principal_email_links pel
+             JOIN sites_email_principals sep ON sep.email = pel.email
+             WHERE pel.principal_id = ?1 AND pel.revoked_at IS NULL
+             ORDER BY sep.id",
+        )?;
+        let candidates = stmt
+            .query_map(params![owner_principal_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        match candidates.as_slice() {
+            [] => Ok(()),
+            [email_principal_id] => {
+                conn.execute(
+                    "UPDATE projects
+                     SET publisher_email_principal_id = ?1
+                     WHERE id = ?2 AND publisher_email_principal_id IS NULL",
+                    params![email_principal_id, project_id],
+                )?;
+                conn.execute(
+                    "UPDATE sites
+                     SET publisher_email_principal_id = ?1
+                     WHERE id IN (
+                         SELECT site_id FROM project_outputs WHERE project_id = ?2
+                     ) AND publisher_email_principal_id IS NULL",
+                    params![email_principal_id, project_id],
+                )?;
+                Ok(())
+            }
+            _ => Self::record_sites_identity_repair(
+                conn,
+                &format!("project-publisher:{project_id}"),
+                "project",
+                project_id,
+                "conflict",
+                "originating publisher has multiple verified mailbox links; publisher attribution was not guessed",
+                now,
+            ),
+        }
+    }
+
+    fn record_sites_identity_repair(
+        conn: &Connection,
+        repair_key: &str,
+        source_kind: &str,
+        source_ref: &str,
+        status: &str,
+        detail: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        conn.execute(
+            "INSERT INTO sites_identity_repairs
+                (id, repair_key, source_kind, source_ref, status, detail, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(repair_key) DO UPDATE SET
+                status = excluded.status,
+                detail = excluded.detail,
+                updated_at = excluded.updated_at",
+            params![
+                ids::new_id(ids::SITES_IDENTITY_REPAIR_ID_PREFIX),
+                repair_key,
+                source_kind,
+                source_ref,
+                status,
+                detail,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_sites_authorized_key_on_connection(
+        conn: &Connection,
+        email: &str,
+        pubkey: &str,
+        proof_kind: &str,
+        verified_at: u64,
+    ) -> Result<(), StoreError> {
+        let email_principal_id = match conn
+            .query_row(
+                "SELECT id FROM sites_email_principals WHERE email = ?1",
+                params![email],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            Some(id) => id,
+            None => {
+                let id = ids::new_id(ids::SITES_EMAIL_PRINCIPAL_ID_PREFIX);
+                conn.execute(
+                    "INSERT INTO sites_email_principals
+                        (id, email, verified_at, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?3, ?3)",
+                    params![id, email, verified_at],
+                )?;
+                id
+            }
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO principals
+                (id, kind, email, pubkey, created_at, updated_at)
+             VALUES (?1, 'native', NULL, ?2, ?3, ?3)",
+            params![ids::new_id(ids::PRINCIPAL_ID_PREFIX), pubkey, verified_at],
+        )?;
+        let native_principal_id = conn
+            .query_row(
+                "SELECT id FROM principals WHERE kind = 'native' AND pubkey = ?1",
+                params![pubkey],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(StoreError::CorruptState(
+                "Sites authorized key native principal missing",
+            ))?;
+        conn.execute(
+            "INSERT INTO sites_authorized_keys
+                (id, email_principal_id, native_principal_id, proof_kind,
+                 verified_at, revoked_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?5, ?5)
+             ON CONFLICT(email_principal_id, native_principal_id) DO NOTHING",
+            params![
+                ids::new_id(ids::SITES_AUTHORIZED_KEY_ID_PREFIX),
+                email_principal_id,
+                native_principal_id,
+                proof_kind,
+                verified_at
+            ],
+        )?;
+        Self::clear_email_needs_proof_repairs(conn, email)?;
+        Ok(())
+    }
+
+    fn clear_email_needs_proof_repairs(conn: &Connection, email: &str) -> Result<(), StoreError> {
+        conn.execute(
+            "DELETE FROM sites_identity_repairs
+             WHERE status = 'needs_proof'
+               AND (
+                 repair_key = 'site-share:' || ?1
+                 OR repair_key IN (
+                   SELECT 'external-principal:' || id
+                   FROM principals
+                   WHERE kind = 'external' AND email = ?1
+                 )
+               )",
+            params![email],
+        )?;
+        Ok(())
     }
 
     fn migrate_legacy_sites_shape(conn: &Connection) -> Result<(), StoreError> {
@@ -1424,6 +1837,166 @@ impl Store {
         }
     }
 
+    pub fn project_access_by_actor(
+        &self,
+        actor_pubkey: &str,
+        slug: &str,
+    ) -> Result<Option<ProjectAccessRecord>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "WITH actor_access(project_id, role, rank) AS (
+                   SELECT pc.project_id, pc.role,
+                          CASE pc.role WHEN 'owner' THEN 3 WHEN 'editor' THEN 2 ELSE 1 END
+                   FROM project_collaborators pc
+                   JOIN principals p ON p.id = pc.principal_id
+                   JOIN projects direct_project ON direct_project.id = pc.project_id
+                   WHERE p.kind = 'native' AND p.pubkey = ?1 AND pc.removed_at IS NULL
+                     AND (
+                       pc.role != 'owner'
+                       OR direct_project.publisher_email_principal_id IS NULL
+                       OR EXISTS (
+                         SELECT 1
+                         FROM sites_authorized_keys owner_key
+                         JOIN principals owner_key_principal
+                           ON owner_key_principal.id = owner_key.native_principal_id
+                         WHERE owner_key.email_principal_id =
+                                 direct_project.publisher_email_principal_id
+                           AND owner_key_principal.pubkey = ?1
+                           AND owner_key.revoked_at IS NULL
+                       )
+                     )
+                   UNION ALL
+                   SELECT pc.project_id, pc.role,
+                          CASE pc.role WHEN 'owner' THEN 3 WHEN 'editor' THEN 2 ELSE 1 END
+                   FROM project_collaborators pc
+                   JOIN principals external ON external.id = pc.principal_id
+                   JOIN sites_email_principals sep ON sep.email = external.email
+                   JOIN sites_authorized_keys sak ON sak.email_principal_id = sep.id
+                   JOIN principals key_principal ON key_principal.id = sak.native_principal_id
+                   WHERE external.kind = 'external'
+                     AND key_principal.pubkey = ?1
+                     AND sak.revoked_at IS NULL
+                     AND pc.removed_at IS NULL
+                   UNION ALL
+                   SELECT p.id, 'owner', 3
+                   FROM projects p
+                   JOIN sites_authorized_keys sak
+                     ON sak.email_principal_id = p.publisher_email_principal_id
+                   JOIN principals key_principal ON key_principal.id = sak.native_principal_id
+                   WHERE key_principal.pubkey = ?1 AND sak.revoked_at IS NULL
+                 ),
+                 best_access AS (
+                   SELECT project_id, MAX(rank) AS rank
+                   FROM actor_access
+                   GROUP BY project_id
+                 )
+                 SELECT p.id, p.slug, p.owner_principal_id, p.visibility,
+                        CASE best_access.rank
+                          WHEN 3 THEN 'owner'
+                          WHEN 2 THEN 'editor'
+                          ELSE 'viewer'
+                        END
+                 FROM projects p
+                 JOIN best_access ON best_access.project_id = p.id
+                 WHERE p.slug = ?2",
+                params![actor_pubkey, slug],
+                Self::row_to_project_access,
+            )
+            .optional()?;
+        match row {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn project_owner_principal_for_actor(
+        &self,
+        actor_pubkey: &str,
+        project_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT p.owner_principal_id
+                 FROM projects p
+                 WHERE p.id = ?2
+                   AND (
+                     (
+                       p.publisher_email_principal_id IS NULL
+                       AND p.owner_principal_id = (
+                       SELECT id FROM principals
+                       WHERE kind = 'native' AND pubkey = ?1
+                     )
+                     )
+                     OR EXISTS (
+                       SELECT 1
+                       FROM sites_authorized_keys sak
+                       JOIN principals key_principal
+                         ON key_principal.id = sak.native_principal_id
+                       WHERE sak.email_principal_id = p.publisher_email_principal_id
+                         AND key_principal.pubkey = ?1
+                         AND sak.revoked_at IS NULL
+                     )
+                   )",
+                params![actor_pubkey, project_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn actor_can_manage_site(
+        &self,
+        actor_pubkey: &str,
+        site_id: &str,
+    ) -> Result<bool, StoreError> {
+        let allowed: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1
+                 FROM sites s
+                 WHERE s.id = ?2
+                   AND (
+                     (s.publisher_email_principal_id IS NULL AND s.owner_pubkey = ?1)
+                     OR EXISTS (
+                       SELECT 1
+                       FROM sites_authorized_keys sak
+                       JOIN principals key_principal
+                         ON key_principal.id = sak.native_principal_id
+                       WHERE sak.email_principal_id = s.publisher_email_principal_id
+                         AND key_principal.pubkey = ?1
+                         AND sak.revoked_at IS NULL
+                     )
+                   )",
+                params![actor_pubkey, site_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(allowed.is_some())
+    }
+
+    pub fn is_principal_authorized_publisher(
+        &self,
+        site_id: &str,
+        principal_id: &str,
+    ) -> Result<bool, StoreError> {
+        let allowed: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1
+                 FROM sites s
+                 JOIN sites_authorized_keys sak
+                   ON sak.email_principal_id = s.publisher_email_principal_id
+                 WHERE s.id = ?1
+                   AND sak.native_principal_id = ?2
+                   AND sak.revoked_at IS NULL",
+                params![site_id, principal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(allowed.is_some())
+    }
+
     pub fn projects_for_principal(
         &self,
         principal_id: &str,
@@ -1439,6 +2012,75 @@ impl Store {
         let rows = stmt.query_map(params![principal_id], Self::row_to_project_access)?;
         let mut out = Vec::new();
         // Bounded by Project Output publishing limits and collaborator grants.
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    pub fn projects_for_actor(
+        &self,
+        actor_pubkey: &str,
+    ) -> Result<Vec<ProjectAccessRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "WITH actor_access(project_id, role, rank) AS (
+               SELECT pc.project_id, pc.role,
+                      CASE pc.role WHEN 'owner' THEN 3 WHEN 'editor' THEN 2 ELSE 1 END
+               FROM project_collaborators pc
+               JOIN principals p ON p.id = pc.principal_id
+               JOIN projects direct_project ON direct_project.id = pc.project_id
+               WHERE p.kind = 'native' AND p.pubkey = ?1 AND pc.removed_at IS NULL
+                 AND (
+                   pc.role != 'owner'
+                   OR direct_project.publisher_email_principal_id IS NULL
+                   OR EXISTS (
+                     SELECT 1
+                     FROM sites_authorized_keys owner_key
+                     JOIN principals owner_key_principal
+                       ON owner_key_principal.id = owner_key.native_principal_id
+                     WHERE owner_key.email_principal_id =
+                             direct_project.publisher_email_principal_id
+                       AND owner_key_principal.pubkey = ?1
+                       AND owner_key.revoked_at IS NULL
+                   )
+                 )
+               UNION ALL
+               SELECT pc.project_id, pc.role,
+                      CASE pc.role WHEN 'owner' THEN 3 WHEN 'editor' THEN 2 ELSE 1 END
+               FROM project_collaborators pc
+               JOIN principals external ON external.id = pc.principal_id
+               JOIN sites_email_principals sep ON sep.email = external.email
+               JOIN sites_authorized_keys sak ON sak.email_principal_id = sep.id
+               JOIN principals key_principal ON key_principal.id = sak.native_principal_id
+               WHERE external.kind = 'external'
+                 AND key_principal.pubkey = ?1
+                 AND sak.revoked_at IS NULL
+                 AND pc.removed_at IS NULL
+               UNION ALL
+               SELECT p.id, 'owner', 3
+               FROM projects p
+               JOIN sites_authorized_keys sak
+                 ON sak.email_principal_id = p.publisher_email_principal_id
+               JOIN principals key_principal ON key_principal.id = sak.native_principal_id
+               WHERE key_principal.pubkey = ?1 AND sak.revoked_at IS NULL
+             ),
+             best_access AS (
+               SELECT project_id, MAX(rank) AS rank
+               FROM actor_access
+               GROUP BY project_id
+             )
+             SELECT p.id, p.slug, p.owner_principal_id, p.visibility,
+                    CASE best_access.rank
+                      WHEN 3 THEN 'owner'
+                      WHEN 2 THEN 'editor'
+                      ELSE 'viewer'
+                    END
+             FROM projects p
+             JOIN best_access ON best_access.project_id = p.id
+             ORDER BY p.created_at, p.slug",
+        )?;
+        let rows = stmt.query_map(params![actor_pubkey], Self::row_to_project_access)?;
+        let mut out = Vec::new();
         for row in rows {
             out.push(row??);
         }
@@ -1654,7 +2296,7 @@ impl Store {
         assert!(!slug.is_empty());
         let tx = self.conn.transaction()?;
 
-        let owner_principal_id = ensure_native_principal(
+        let actor_principal_id = ensure_native_principal(
             &tx,
             owner_pubkey,
             ids::new_id(ids::PRINCIPAL_ID_PREFIX),
@@ -1681,7 +2323,32 @@ impl Store {
         let (project, project_created) = match existing_project {
             Some(result) => {
                 let project = result?;
-                if project.owner_principal_id != owner_principal_id {
+                let authorized: Option<i64> = tx
+                    .query_row(
+                        "SELECT 1
+                         FROM projects existing
+                         WHERE existing.id = ?1
+                           AND (
+                             (
+                               existing.publisher_email_principal_id IS NULL
+                               AND existing.owner_principal_id = ?2
+                             )
+                             OR EXISTS (
+                               SELECT 1
+                               FROM sites_authorized_keys sak
+                               JOIN principals key_principal
+                                 ON key_principal.id = sak.native_principal_id
+                               WHERE sak.email_principal_id =
+                                       existing.publisher_email_principal_id
+                                 AND key_principal.pubkey = ?3
+                                 AND sak.revoked_at IS NULL
+                             )
+                           )",
+                        params![project.id, actor_principal_id, owner_pubkey],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if authorized.is_none() {
                     return Err(StoreError::Conflict("project slug already exists"));
                 }
                 tx.execute(
@@ -1693,15 +2360,17 @@ impl Store {
             None => {
                 let project_id = ids::new_id(ids::PROJECT_ID_PREFIX);
                 tx.execute(
-                    "INSERT INTO projects (id, slug, owner_principal_id, visibility, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, 'private', ?4, ?4)",
-                    params![project_id, slug, owner_principal_id, now],
+                    "INSERT INTO projects
+                        (id, slug, owner_principal_id, visibility,
+                         originating_publisher_principal_id, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'private', ?3, ?4, ?4)",
+                    params![project_id, slug, actor_principal_id, now],
                 )?;
                 (
                     ProjectRecord {
                         id: project_id,
                         slug: slug.to_string(),
-                        owner_principal_id: owner_principal_id.clone(),
+                        owner_principal_id: actor_principal_id.clone(),
                         visibility: ProjectVisibility::Private,
                     },
                     true,
@@ -1716,7 +2385,7 @@ impl Store {
              ON CONFLICT(project_id, principal_id) DO UPDATE SET
                 role = 'owner',
                 removed_at = NULL",
-            params![project.id, owner_principal_id, now],
+            params![project.id, project.owner_principal_id, now],
         )?;
 
         let mut applied_outputs = Vec::with_capacity(outputs.len());
@@ -1773,9 +2442,23 @@ impl Store {
                     let project_output_id = ids::new_id(ids::PROJECT_OUTPUT_ID_PREFIX);
                     tx.execute(
                         "INSERT INTO sites
-                            (id, owner_pubkey, status, visibility, kind, active_version_id, created_at, updated_at)
-                         VALUES (?1, ?2, 'claimed_unpublished', 'private', ?3, NULL, ?4, ?4)",
-                        params![site_id, owner_pubkey, site_kind, now],
+                            (id, owner_pubkey, status, visibility, kind, active_version_id,
+                             publisher_email_principal_id,
+                             originating_publisher_principal_id,
+                             created_at, updated_at)
+                         VALUES (
+                           ?1, ?2, 'claimed_unpublished', 'private', ?3, NULL,
+                           (SELECT publisher_email_principal_id FROM projects WHERE id = ?4),
+                           ?5, ?6, ?6
+                         )",
+                        params![
+                            site_id,
+                            owner_pubkey,
+                            site_kind,
+                            project.id,
+                            actor_principal_id,
+                            now
+                        ],
                     )?;
                     tx.execute(
                         "INSERT INTO name_claims (id, site_id, kind, name, status, released_at, created_at)
@@ -2402,8 +3085,14 @@ impl Store {
         assert!(owner_pubkey.len() == 64);
         let tx = self.conn.transaction()?;
         let site_insert = tx.execute(
-            "INSERT INTO sites (id, owner_pubkey, status, visibility, active_version_id, created_at, updated_at)
-             VALUES (?1, ?2, 'claimed_unpublished', 'private', NULL, ?3, ?3)",
+            "INSERT INTO sites
+                (id, owner_pubkey, status, visibility, active_version_id,
+                 originating_publisher_principal_id, created_at, updated_at)
+             VALUES (
+               ?1, ?2, 'claimed_unpublished', 'private', NULL,
+               (SELECT id FROM principals WHERE kind = 'native' AND pubkey = ?2),
+               ?3, ?3
+             )",
             params![site_id, owner_pubkey, now],
         );
         if let Err(error) = site_insert {
@@ -3030,6 +3719,338 @@ impl Store {
         Ok(())
     }
 
+    pub fn register_sites_authorized_key(
+        &mut self,
+        email: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<SitesAuthorizedKeyRecord, StoreError> {
+        assert!(!email.is_empty());
+        assert!(pubkey.len() == 64);
+        let tx = self.conn.transaction()?;
+        let native_principal_id =
+            ensure_native_principal(&tx, pubkey, ids::new_id(ids::PRINCIPAL_ID_PREFIX), now)?;
+        let email_principal_id = match tx
+            .query_row(
+                "SELECT id FROM sites_email_principals WHERE email = ?1",
+                params![email],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE sites_email_principals
+                     SET verified_at = ?1, updated_at = ?1
+                     WHERE id = ?2",
+                    params![now, id],
+                )?;
+                id
+            }
+            None => {
+                let id = ids::new_id(ids::SITES_EMAIL_PRINCIPAL_ID_PREFIX);
+                tx.execute(
+                    "INSERT INTO sites_email_principals
+                        (id, email, verified_at, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?3, ?3)",
+                    params![id, email, now],
+                )?;
+                id
+            }
+        };
+        let key_id = tx
+            .query_row(
+                "SELECT id FROM sites_authorized_keys
+                 WHERE email_principal_id = ?1 AND native_principal_id = ?2",
+                params![email_principal_id, native_principal_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| ids::new_id(ids::SITES_AUTHORIZED_KEY_ID_PREFIX));
+        tx.execute(
+            "INSERT INTO sites_authorized_keys
+                (id, email_principal_id, native_principal_id, proof_kind,
+                 verified_at, revoked_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'mailbox_challenge', ?4, NULL, ?4, ?4)
+             ON CONFLICT(email_principal_id, native_principal_id) DO UPDATE SET
+                proof_kind = 'mailbox_challenge',
+                verified_at = excluded.verified_at,
+                revoked_at = NULL,
+                updated_at = excluded.updated_at",
+            params![key_id, email_principal_id, native_principal_id, now],
+        )?;
+        Self::clear_email_needs_proof_repairs(&tx, email)?;
+        tx.commit()?;
+        Ok(SitesAuthorizedKeyRecord {
+            id: key_id,
+            email_principal_id,
+            native_principal_id,
+            pubkey: pubkey.to_string(),
+            proof_kind: "mailbox_challenge".to_string(),
+            verified_at: now,
+            revoked_at: None,
+        })
+    }
+
+    /// Adds Core's verified account + Managed Agent association as
+    /// reconciliation evidence. Unlike a fresh mailbox challenge this is
+    /// intentionally insert-only: a durable revocation tombstone wins over
+    /// later automated repair runs.
+    pub fn reconcile_verified_core_agent_key(
+        &mut self,
+        email: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        assert!(!email.is_empty());
+        assert!(pubkey.len() == 64);
+        let existed = self.has_sites_authorized_key_record(email, pubkey)?;
+        Self::upsert_sites_authorized_key_on_connection(
+            &self.conn,
+            email,
+            pubkey,
+            "verified_core_account_agent",
+            now,
+        )?;
+        Ok(!existed)
+    }
+
+    pub fn revoke_sites_authorized_key(
+        &mut self,
+        email: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        assert!(!email.is_empty());
+        assert!(pubkey.len() == 64);
+        let updated = self.conn.execute(
+            "UPDATE sites_authorized_keys
+             SET revoked_at = ?1, updated_at = ?1
+             WHERE email_principal_id = (
+                 SELECT id FROM sites_email_principals WHERE email = ?2
+             )
+               AND native_principal_id = (
+                 SELECT id FROM principals WHERE kind = 'native' AND pubkey = ?3
+             )
+               AND revoked_at IS NULL",
+            params![now, email, pubkey],
+        )?;
+        Ok(updated == 1)
+    }
+
+    pub fn has_sites_authorized_key(&self, email: &str, pubkey: &str) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1
+                 FROM sites_authorized_keys sak
+                 JOIN sites_email_principals sep ON sep.id = sak.email_principal_id
+                 JOIN principals p ON p.id = sak.native_principal_id
+                 WHERE sep.email = ?1 AND p.pubkey = ?2 AND sak.revoked_at IS NULL",
+                params![email, pubkey],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    pub fn has_sites_authorized_key_record(
+        &self,
+        email: &str,
+        pubkey: &str,
+    ) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1
+                 FROM sites_authorized_keys sak
+                 JOIN sites_email_principals sep ON sep.id = sak.email_principal_id
+                 JOIN principals p ON p.id = sak.native_principal_id
+                 WHERE sep.email = ?1 AND p.pubkey = ?2",
+                params![email, pubkey],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    pub fn sites_authorized_keys(
+        &self,
+        email: &str,
+    ) -> Result<Vec<SitesAuthorizedKeyRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sak.id, sak.email_principal_id, sak.native_principal_id,
+                    p.pubkey, sak.proof_kind, sak.verified_at, sak.revoked_at
+             FROM sites_authorized_keys sak
+             JOIN sites_email_principals sep ON sep.id = sak.email_principal_id
+             JOIN principals p ON p.id = sak.native_principal_id
+             WHERE sep.email = ?1
+             ORDER BY sak.created_at, sak.id",
+        )?;
+        let rows = stmt.query_map(params![email], |row| {
+            Ok(SitesAuthorizedKeyRecord {
+                id: row.get(0)?,
+                email_principal_id: row.get(1)?,
+                native_principal_id: row.get(2)?,
+                pubkey: row.get(3)?,
+                proof_kind: row.get(4)?,
+                verified_at: row.get::<_, i64>(5)? as u64,
+                revoked_at: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn reconcile_sites_identity(
+        &mut self,
+    ) -> Result<SitesIdentityReconciliationReport, StoreError> {
+        let before: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM sites_authorized_keys", [], |row| {
+                    row.get(0)
+                })?;
+        Self::reconcile_sites_identity_evidence(&self.conn)?;
+        let after: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM sites_authorized_keys", [], |row| {
+                    row.get(0)
+                })?;
+        let conflicts: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sites_identity_repairs WHERE status = 'conflict'",
+            [],
+            |row| row.get(0),
+        )?;
+        let needs_proof: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sites_identity_repairs WHERE status = 'needs_proof'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(SitesIdentityReconciliationReport {
+            migrated: after.saturating_sub(before) as u64,
+            unchanged: before as u64,
+            conflicts: conflicts as u64,
+            needs_proof: needs_proof as u64,
+        })
+    }
+
+    pub fn legacy_email_grant_candidates(
+        &self,
+    ) -> Result<Vec<LegacyEmailGrantCandidate>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT email FROM shares
+             UNION
+             SELECT p.email
+             FROM principals p
+             JOIN project_collaborators pc ON pc.principal_id = p.id
+             WHERE p.kind = 'external' AND pc.removed_at IS NULL
+             ORDER BY email",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LegacyEmailGrantCandidate { email: row.get(0)? })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn add_native_grants_for_legacy_email(
+        &mut self,
+        email: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<u64, StoreError> {
+        assert!(!email.is_empty());
+        assert!(pubkey.len() == 64);
+        let tx = self.conn.transaction()?;
+        let native_principal_id =
+            ensure_native_principal(&tx, pubkey, ids::new_id(ids::PRINCIPAL_ID_PREFIX), now)?;
+        let native_shares = tx.execute(
+            "INSERT OR IGNORE INTO native_shares (site_id, principal_id, created_at)
+             SELECT site_id, ?1, ?2 FROM shares WHERE email = ?3",
+            params![native_principal_id, now, email],
+        )?;
+
+        let mut stmt = tx.prepare(
+            "SELECT pc.project_id, pc.role, pc.added_by_principal_id, pc.added_at
+             FROM project_collaborators pc
+             JOIN principals p ON p.id = pc.principal_id
+             WHERE p.kind = 'external' AND p.email = ?1 AND pc.removed_at IS NULL",
+        )?;
+        let collaborators = stmt
+            .query_map(params![email], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut collaborator_changes = 0_u64;
+        for (project_id, role, added_by, added_at) in collaborators {
+            let existing_role: Option<String> = tx
+                .query_row(
+                    "SELECT role FROM project_collaborators
+                     WHERE project_id = ?1 AND principal_id = ?2 AND removed_at IS NULL",
+                    params![project_id, native_principal_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let effective_role = match (existing_role.as_deref(), role.as_str()) {
+                (Some("owner"), _) | (_, "owner") => "owner",
+                (Some("editor"), _) | (_, "editor") => "editor",
+                (Some("viewer"), _) | (None, "viewer") => "viewer",
+                _ => return Err(StoreError::CorruptState("unknown collaborator role")),
+            };
+            tx.execute(
+                "INSERT INTO project_collaborators
+                    (project_id, principal_id, role, added_by_principal_id, added_at, removed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+                 ON CONFLICT(project_id, principal_id) DO UPDATE SET
+                    role = ?3,
+                    removed_at = NULL",
+                params![
+                    project_id,
+                    native_principal_id,
+                    effective_role,
+                    added_by,
+                    added_at
+                ],
+            )?;
+            if existing_role.as_deref() != Some(effective_role) {
+                collaborator_changes += 1;
+            }
+        }
+        tx.execute(
+            "INSERT INTO sites_legacy_email_resolutions
+                (email, pubkey, resolution_kind, resolved_at)
+             VALUES (?1, ?2, 'managed_agent_nip05', ?3)
+             ON CONFLICT(email) DO UPDATE SET
+                pubkey = excluded.pubkey,
+                resolution_kind = excluded.resolution_kind,
+                resolved_at = excluded.resolved_at",
+            params![email, pubkey, now],
+        )?;
+        tx.execute(
+            "DELETE FROM sites_identity_repairs
+             WHERE repair_key = 'site-share:' || ?1
+                OR repair_key IN (
+               SELECT 'external-principal:' || id
+               FROM principals WHERE kind = 'external' AND email = ?1
+             )",
+            params![email],
+        )?;
+        tx.commit()?;
+        Ok(native_shares as u64 + collaborator_changes)
+    }
+
     pub fn count_email_keys(&self, email: &str) -> Result<u32, StoreError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM email_keys WHERE email = ?1 AND revoked_at IS NULL",
@@ -3461,6 +4482,7 @@ mod tests {
 
     const OWNER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const OTHER_KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const THIRD_KEY: &str = "4444444444444444444444444444444444444444444444444444444444444444";
     const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const NOW: u64 = 1_750_000_000;
@@ -4356,6 +5378,328 @@ mod tests {
             store.redeem_email_login_token(&expired_hash, NOW + 11),
             Err(StoreError::Conflict("email login token expired"))
         ));
+    }
+
+    #[test]
+    fn sites_email_principal_supports_multiple_revocable_authorized_keys() {
+        let mut store = Store::open_in_memory().unwrap();
+        let project = store
+            .init_project(
+                OWNER,
+                "shared-owner",
+                &[project_output("shared-owner")],
+                NOW,
+            )
+            .unwrap()
+            .project;
+        store
+            .add_project_collaborator(
+                &project.id,
+                &project.owner_principal_id,
+                &ProjectCollaboratorApply {
+                    target: ProjectCollaboratorTarget::Email("paul@finite.vip".to_string()),
+                    role: ProjectCollaboratorRole::Editor,
+                },
+                NOW + 1,
+            )
+            .unwrap();
+
+        store
+            .register_sites_authorized_key("paul@finite.vip", OTHER_KEY, NOW + 2)
+            .unwrap();
+        store
+            .register_sites_authorized_key("paul@finite.vip", THIRD_KEY, NOW + 3)
+            .unwrap();
+        assert_eq!(
+            store
+                .sites_authorized_keys("paul@finite.vip")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .project_access_by_actor(OTHER_KEY, "shared-owner")
+                .unwrap()
+                .unwrap()
+                .role,
+            ProjectCollaboratorRole::Editor
+        );
+        assert_eq!(
+            store
+                .project_access_by_actor(THIRD_KEY, "shared-owner")
+                .unwrap()
+                .unwrap()
+                .role,
+            ProjectCollaboratorRole::Editor
+        );
+
+        assert!(
+            store
+                .revoke_sites_authorized_key("paul@finite.vip", OTHER_KEY, NOW + 4)
+                .unwrap()
+        );
+        assert!(
+            store
+                .project_access_by_actor(OTHER_KEY, "shared-owner")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .project_access_by_actor(THIRD_KEY, "shared-owner")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn sites_identity_reconciliation_is_additive_and_idempotent() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .add_email_key("paul@finite.vip", OTHER_KEY, NOW)
+            .unwrap();
+        let first = store.reconcile_sites_identity().unwrap();
+        assert_eq!(first.migrated, 1);
+        assert!(store.has_email_key("paul@finite.vip", OTHER_KEY).unwrap());
+        assert!(
+            store
+                .has_sites_authorized_key("paul@finite.vip", OTHER_KEY)
+                .unwrap()
+        );
+        let second = store.reconcile_sites_identity().unwrap();
+        assert_eq!(second.migrated, 0);
+        assert_eq!(second.unchanged, 1);
+        store
+            .revoke_sites_authorized_key("paul@finite.vip", OTHER_KEY, NOW + 1)
+            .unwrap();
+        store.reconcile_sites_identity().unwrap();
+        assert!(
+            !store
+                .has_sites_authorized_key("paul@finite.vip", OTHER_KEY)
+                .unwrap()
+        );
+        assert!(store.has_email_key("paul@finite.vip", OTHER_KEY).unwrap());
+    }
+
+    #[test]
+    fn verified_core_agent_evidence_never_resurrects_a_revoked_key() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(
+            store
+                .reconcile_verified_core_agent_key("paul@finite.vip", OTHER_KEY, NOW)
+                .unwrap()
+        );
+        assert!(
+            store
+                .has_sites_authorized_key("paul@finite.vip", OTHER_KEY)
+                .unwrap()
+        );
+        assert!(
+            store
+                .revoke_sites_authorized_key("paul@finite.vip", OTHER_KEY, NOW + 1)
+                .unwrap()
+        );
+
+        assert!(
+            !store
+                .reconcile_verified_core_agent_key("paul@finite.vip", OTHER_KEY, NOW + 2)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .has_sites_authorized_key("paul@finite.vip", OTHER_KEY)
+                .unwrap()
+        );
+        let keys = store.sites_authorized_keys("paul@finite.vip").unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].proof_kind, "verified_core_account_agent");
+        assert_eq!(keys[0].revoked_at, Some(NOW + 1));
+    }
+
+    #[test]
+    fn fresh_mailbox_evidence_clears_resolved_needs_proof_repairs() {
+        let mut store = store_with_site("repair-mailbox");
+        store
+            .add_share("site_1", "paul@finite.vip", NOW + 1)
+            .unwrap();
+        let unresolved = store.reconcile_sites_identity().unwrap();
+        assert_eq!(unresolved.needs_proof, 1);
+
+        store
+            .register_sites_authorized_key("paul@finite.vip", OTHER_KEY, NOW + 2)
+            .unwrap();
+        let resolved = store.reconcile_sites_identity().unwrap();
+        assert_eq!(resolved.needs_proof, 0);
+        assert!(
+            store
+                .has_sites_authorized_key("paul@finite.vip", OTHER_KEY)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn sites_identity_reconciliation_preserves_legacy_acl_and_credentials_exactly() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("registry.db");
+        let before = {
+            let mut store = Store::open(&database).unwrap();
+            let outcome = store
+                .init_project(
+                    OWNER,
+                    "legacy-project",
+                    &[project_output("legacy-site")],
+                    NOW,
+                )
+                .unwrap();
+            let collaborator = store
+                .add_project_collaborator(
+                    &outcome.project.id,
+                    &outcome.project.owner_principal_id,
+                    &ProjectCollaboratorApply {
+                        target: ProjectCollaboratorTarget::Email("paul@finite.vip".to_string()),
+                        role: ProjectCollaboratorRole::Editor,
+                    },
+                    NOW + 1,
+                )
+                .unwrap();
+            let site_id = outcome.outputs[0].record.site_id.clone();
+            store
+                .add_share(&site_id, "friend@example.com", NOW + 2)
+                .unwrap();
+            store
+                .create_git_credential(
+                    "gcred_legacy",
+                    &outcome.project.id,
+                    &collaborator.record.principal_id,
+                    &"a".repeat(64),
+                    None,
+                    NOW + 3,
+                )
+                .unwrap();
+            store
+                .add_email_key("paul@finite.vip", OTHER_KEY, NOW + 4)
+                .unwrap();
+            (
+                store.project_by_slug("legacy-project").unwrap().unwrap(),
+                store.site_by_name("legacy-site").unwrap().unwrap(),
+                store.shares(&site_id).unwrap(),
+                store.git_credential_by_id("gcred_legacy").unwrap().unwrap(),
+            )
+        };
+
+        let mut reopened = Store::open(&database).unwrap();
+        let project = reopened.project_by_slug("legacy-project").unwrap().unwrap();
+        let site = reopened.site_by_name("legacy-site").unwrap().unwrap();
+        assert_eq!(project, before.0);
+        assert_eq!(site.name, before.1.name);
+        assert_eq!(site.owner_pubkey, before.1.owner_pubkey);
+        assert_eq!(site.visibility, before.1.visibility);
+        assert_eq!(site.status, before.1.status);
+        assert_eq!(reopened.shares(&site.id).unwrap(), before.2);
+        assert_eq!(
+            reopened
+                .git_credential_by_id("gcred_legacy")
+                .unwrap()
+                .unwrap(),
+            before.3
+        );
+        assert!(
+            reopened
+                .has_sites_authorized_key("paul@finite.vip", OTHER_KEY)
+                .unwrap()
+        );
+        assert_eq!(reopened.reconcile_sites_identity().unwrap().migrated, 0);
+    }
+
+    #[test]
+    fn ambiguous_legacy_publisher_fails_closed_and_records_conflict() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .link_email_to_native_principal("paul@finite.vip", OWNER, NOW)
+            .unwrap();
+        store
+            .link_email_to_native_principal("paul+sites@finite.vip", OWNER, NOW + 1)
+            .unwrap();
+        store
+            .init_project(
+                OWNER,
+                "ambiguous-owner",
+                &[project_output("ambiguous-owner")],
+                NOW + 2,
+            )
+            .unwrap();
+        let report = store.reconcile_sites_identity().unwrap();
+        assert_eq!(report.conflicts, 1);
+        let publisher: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT publisher_email_principal_id FROM projects WHERE slug = 'ambiguous-owner'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(publisher.is_none());
+        assert!(
+            store
+                .project_access_by_actor(OWNER, "ambiguous-owner")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn managed_agent_email_conversion_adds_native_grants_and_keeps_legacy_rows() {
+        let mut store = Store::open_in_memory().unwrap();
+        let outcome = store
+            .init_project(
+                OWNER,
+                "legacy-managed",
+                &[project_output("legacy-managed")],
+                NOW,
+            )
+            .unwrap();
+        store
+            .add_project_collaborator(
+                &outcome.project.id,
+                &outcome.project.owner_principal_id,
+                &ProjectCollaboratorApply {
+                    target: ProjectCollaboratorTarget::Email("clanky-123@finite.vip".to_string()),
+                    role: ProjectCollaboratorRole::Editor,
+                },
+                NOW + 1,
+            )
+            .unwrap();
+        let site_id = &outcome.outputs[0].record.site_id;
+        store
+            .add_share(site_id, "clanky-123@finite.vip", NOW + 2)
+            .unwrap();
+        let changed = store
+            .add_native_grants_for_legacy_email("clanky-123@finite.vip", OTHER_KEY, NOW + 3)
+            .unwrap();
+        assert_eq!(changed, 2);
+        assert_eq!(
+            store.shares(site_id).unwrap(),
+            vec!["clanky-123@finite.vip"]
+        );
+        assert_eq!(
+            store.native_shares(site_id).unwrap(),
+            vec![OTHER_KEY.to_string()]
+        );
+        assert_eq!(
+            store
+                .project_access_by_actor(OTHER_KEY, "legacy-managed")
+                .unwrap()
+                .unwrap()
+                .role,
+            ProjectCollaboratorRole::Editor
+        );
+        assert_eq!(
+            store
+                .add_native_grants_for_legacy_email("clanky-123@finite.vip", OTHER_KEY, NOW + 4,)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
