@@ -3,11 +3,10 @@
 //! requests that carry one.
 
 use finitesites_proto::dto::{
-    ApiErrorBody, AuthRegisterResponse, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest,
-    EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest,
-    ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
-    ProjectOutputSharingResponse, ProjectRevokeRequest, ProjectRevokeResponse,
-    ProjectStatusResponse, SharingRequest,
+    ApiErrorBody, AuthRegisterResponse, EmailLoginResponse, EmailRedeemResponse, GitAuthRequest,
+    GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse, ProjectInitRequest,
+    ProjectInitResponse, ProjectListResponse, ProjectOutputSharingResponse, ProjectRevokeRequest,
+    ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
 };
 use finitesites_proto::nip98;
 
@@ -19,6 +18,7 @@ pub struct Client {
 }
 
 const DEFAULT_API_URL: &str = "https://api.finite.chat";
+const DEFAULT_IDENTITY_AUTHORITY_URL: &str = "https://identity.finite.vip";
 const IDENTITY_AUTHORITY_ENV: &str = "FINITE_IDENTITY_AUTHORITY";
 
 fn base_url_from_env_value(value: Option<String>) -> String {
@@ -26,6 +26,13 @@ fn base_url_from_env_value(value: Option<String>) -> String {
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
         .trim_end_matches('/')
         .to_string()
+}
+
+fn identity_base_url_from_env_value(value: Option<String>) -> String {
+    value
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_IDENTITY_AUTHORITY_URL.to_string())
 }
 
 fn now_unix() -> u64 {
@@ -39,16 +46,58 @@ pub struct IdentityAuthorityClient {
     client: finite_identity::client::IdentityClient,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Nip05Resolution {
+    pub name: String,
+    pub pubkey: String,
+    pub npub: String,
+    pub kind: String,
+}
+
 impl IdentityAuthorityClient {
-    pub fn from_env() -> Option<Self> {
-        let base_url = std::env::var(IDENTITY_AUTHORITY_ENV)
-            .ok()
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty())?;
-        Some(Self {
+    pub fn from_env() -> Self {
+        let base_url = identity_base_url_from_env_value(std::env::var(IDENTITY_AUTHORITY_ENV).ok());
+        Self {
             client: finite_identity::client::IdentityClient::new(&base_url),
             base_url,
-        })
+        }
+    }
+
+    pub fn resolve_nip05(&self, name: &str) -> Result<Option<Nip05Resolution>, CliError> {
+        let url = format!("{}/api/v1/nip05-resolution", self.base_url);
+        let response = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .send_json(serde_json::json!({ "name": name }));
+        match response {
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            response => {
+                identity_response_json(response, "POST", "/api/v1/nip05-resolution").map(Some)
+            }
+        }
+    }
+
+    pub fn satisfies_grant(&self, grant: &str, actor_pubkey: &str) -> Result<bool, CliError> {
+        let url = format!(
+            "{}/api/v1/principal-resolution/satisfies-grant",
+            self.base_url
+        );
+        let response = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .send_json(serde_json::json!({
+                "grant": grant,
+                "actor_pubkey": actor_pubkey,
+            }));
+        let value: serde_json::Value = identity_response_json(
+            response,
+            "POST",
+            "/api/v1/principal-resolution/satisfies-grant",
+        )?;
+        value
+            .get("satisfied")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                CliError::Api("identity authority response missing satisfied".to_string())
+            })
     }
 
     pub fn request_email_challenge(&self, email: &str) -> Result<EmailLoginResponse, CliError> {
@@ -331,48 +380,6 @@ impl Client {
             Some(&body),
         )
     }
-
-    pub fn request_email_login(&self, email: &str) -> Result<EmailLoginResponse, CliError> {
-        let body = serde_json::to_vec(&EmailLoginRequest {
-            email: email.to_string(),
-        })
-        .expect("request serializes");
-        let url = format!("{}/api/v1/email-auth/request", self.base_url);
-        let result = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .send_bytes(&body);
-        match result {
-            Ok(response) => response
-                .into_json::<EmailLoginResponse>()
-                .map_err(|error| CliError::Api(format!("invalid response from server: {error}"))),
-            Err(ureq::Error::Status(code, response)) => {
-                let message = response
-                    .into_json::<ApiErrorBody>()
-                    .map(|body| body.message)
-                    .unwrap_or_else(|_| "no error details".to_string());
-                Err(CliError::Api(format!(
-                    "POST /api/v1/email-auth/request: {code}: {message}"
-                )))
-            }
-            Err(transport) => Err(CliError::Http(format!(
-                "POST {url} failed: {transport} (is finitesitesd running?)"
-            ))),
-        }
-    }
-
-    pub fn redeem_email_login(
-        &self,
-        key: &KeyFile,
-        email: &str,
-        token: &str,
-    ) -> Result<EmailRedeemResponse, CliError> {
-        let body = serde_json::to_vec(&EmailRedeemRequest {
-            email: email.to_string(),
-            token: token.to_string(),
-        })
-        .expect("request serializes");
-        self.request(key, "POST", "/api/v1/email-auth/redeem", Some(&body))
-    }
 }
 
 fn invite_query(send_invites: bool) -> &'static str {
@@ -401,6 +408,14 @@ mod tests {
         assert_eq!(
             base_url_from_env_value(Some("http://127.0.0.1:8787/".to_string())),
             "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            identity_base_url_from_env_value(None),
+            "https://identity.finite.vip"
+        );
+        assert_eq!(
+            identity_base_url_from_env_value(Some(" http://127.0.0.1:8788/ ".to_string())),
+            "http://127.0.0.1:8788"
         );
     }
 }

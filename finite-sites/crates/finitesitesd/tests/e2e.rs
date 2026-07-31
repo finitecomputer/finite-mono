@@ -709,6 +709,7 @@ fn app_project_init_request(dry_run: bool) -> ProjectInitRequest {
 fn mint_skyler_git_credential(server: &TestServer) -> GitAuthResponse {
     let grant_body = serde_json::to_vec(&ProjectGrantRequest {
         email: "skyler@example.com".into(),
+        npub: None,
         role: "editor".into(),
     })
     .unwrap();
@@ -2303,6 +2304,7 @@ async fn project_init_and_git_auth_flow() {
 
         let grant_body = serde_json::to_vec(&ProjectGrantRequest {
             email: "skyler@example.com".into(),
+            npub: None,
             role: "editor".into(),
         })
         .unwrap();
@@ -2387,6 +2389,7 @@ async fn identity_authority_can_satisfy_email_git_auth_without_sites_email_key()
 
         let grant_body = serde_json::to_vec(&ProjectGrantRequest {
             email: "skyler@example.com".into(),
+            npub: None,
             role: "editor".into(),
         })
         .unwrap();
@@ -2447,6 +2450,7 @@ async fn project_grant_send_invite_emails_collaborator_and_replays() {
 
         let grant_body = serde_json::to_vec(&ProjectGrantRequest {
             email: "skyler@example.com".to_string(),
+            npub: None,
             role: "editor".to_string(),
         })
         .unwrap();
@@ -2507,6 +2511,7 @@ async fn project_collaborator_remove_revokes_git_credentials() {
         );
         let grant_body = serde_json::to_vec(&ProjectGrantRequest {
             email: "skyler@example.com".into(),
+            npub: None,
             role: "editor".into(),
         })
         .unwrap();
@@ -2542,6 +2547,7 @@ async fn project_collaborator_remove_revokes_git_credentials() {
 
         let remove_body = serde_json::to_vec(&ProjectRevokeRequest {
             email: "skyler@example.com".into(),
+            npub: None,
         })
         .unwrap();
         let stranger_remove = server
@@ -2600,6 +2606,170 @@ async fn project_collaborator_remove_revokes_git_credentials() {
                     "POST",
                     "/api/v1/projects/finitechat-native/revoke",
                     Some(&remove_body),
+                )
+                .unwrap(),
+        );
+        assert!(!replay.removed);
+        assert_eq!(replay.revoked_git_credentials, 0);
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_project_collaborator_grant_and_revoke_use_own_identity() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let stranger_pubkey = finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap();
+    let stranger_npub = finitesites_proto::npub::encode_npub(&stranger_pubkey).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        json_body::<ProjectInitResponse>(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        let grant_body = serde_json::to_vec(&ProjectGrantRequest {
+            email: String::new(),
+            npub: Some(stranger_npub.clone()),
+            role: "editor".into(),
+        })
+        .unwrap();
+
+        let invite_attempt = server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/grant?send_invites=true",
+                Some(&grant_body),
+            )
+            .unwrap_err();
+        assert!(matches!(invite_attempt, ureq::Error::Status(400, _)));
+        assert!(outbox_bodies(&server.outbox).is_empty());
+
+        let grant: ProjectGrantResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/grant",
+                    Some(&grant_body),
+                )
+                .unwrap(),
+        );
+        assert!(grant.collaborator.created);
+        assert_eq!(grant.collaborator.email, "");
+        assert_eq!(
+            grant.collaborator.npub.as_deref(),
+            Some(stranger_npub.as_str())
+        );
+        assert!(grant.invited_emails.is_empty());
+
+        let replay: ProjectGrantResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/grant",
+                    Some(&grant_body),
+                )
+                .unwrap(),
+        );
+        assert!(!replay.collaborator.created);
+
+        let status: ProjectStatusResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "GET",
+                    "/api/v1/projects/finitechat-native",
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(status.role, "editor");
+        assert!(
+            status
+                .collaborators
+                .iter()
+                .any(|collaborator| collaborator.npub.as_deref() == Some(stranger_npub.as_str()))
+        );
+
+        let auth_body = serde_json::to_vec(&GitAuthRequest { email: None }).unwrap();
+        let credential: GitAuthResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/git-auth",
+                    Some(&auth_body),
+                )
+                .unwrap(),
+        );
+        let remote = format!(
+            "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+            credential.username,
+            credential.password,
+            server.port()
+        );
+        let host_header = format!("Host: git.{BASE_DOMAIN}:{}", server.port());
+        let dir = tempfile::tempdir().unwrap();
+        run_git(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "ls-remote",
+                &remote,
+            ],
+            Some(dir.path()),
+        );
+
+        let revoke_body = serde_json::to_vec(&ProjectRevokeRequest {
+            email: String::new(),
+            npub: Some(stranger_npub.clone()),
+        })
+        .unwrap();
+        let removed: ProjectRevokeResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/revoke",
+                    Some(&revoke_body),
+                )
+                .unwrap(),
+        );
+        assert!(removed.removed);
+        assert_eq!(removed.email, "");
+        assert_eq!(removed.npub.as_deref(), Some(stranger_npub.as_str()));
+        assert_eq!(removed.revoked_git_credentials, 1);
+        run_git_expect_failure(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "ls-remote",
+                &remote,
+            ],
+            Some(dir.path()),
+        );
+
+        let auth_after_remove = server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/git-auth",
+                Some(&auth_body),
+            )
+            .unwrap_err();
+        assert!(matches!(auth_after_remove, ureq::Error::Status(403, _)));
+
+        let replay: ProjectRevokeResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/revoke",
+                    Some(&revoke_body),
                 )
                 .unwrap(),
         );

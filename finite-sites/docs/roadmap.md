@@ -89,11 +89,12 @@ implementation stay focused.
   the app happy path and the explicit `PORT`/`DATA_DIR` runtime contract.
 - `fsite describe workflow project-config --output json` documents the
   `finite.toml` schema and example configs.
-- `fsite auth git PROJECT [--email EMAIL] --store --output json` mints a scoped HTTPS
+- `fsite auth git PROJECT [--email MAILBOX | --nip05 NAME | --npub NPUB] --store --output json` mints a scoped HTTPS
   Git Credential.
-- `fsite project revoke PROJECT --email EMAIL --output json`
-  removes Project edit access and revokes active Git Credentials for that
-  Principal.
+- `fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) --output json`
+  grants Project access through one explicitly typed target.
+- `fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) --output json`
+  removes Project access and revokes active Git Credentials for that Principal.
 - `fsite project share PROJECT OUTPUT ... --output json` manages viewer
   access for one Project Output without falling back to site-first commands.
 - `git clone https://git.finite.chat/PROJECT.git` and `git push origin main`
