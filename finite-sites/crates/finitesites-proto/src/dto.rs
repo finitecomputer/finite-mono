@@ -30,6 +30,25 @@ pub struct EmailRedeemResponse {
     pub linked_to_native_principal: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SitesAuthorizedKeyRegisterRequest {
+    pub mailbox_proof: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SitesAuthorizedKeyRevokeRequest {
+    pub mailbox_proof: String,
+    pub target_npub: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SitesAuthorizedKeyResponse {
+    pub email: String,
+    pub npub: String,
+    pub proof_kind: String,
+    pub active: bool,
+}
+
 /// Server-to-server request for a viewer session derived from an already
 /// verified account email. This never creates or changes a Site share.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -77,4 +77,20 @@ fn managed_agent_nip05_in_email_flag_fails_before_sites_or_mail_delivery() {
     assert!(request.starts_with("POST /api/v1/nip05-resolution "));
     assert!(request.contains(managed));
     assert!(!finite_home.path().join("identity").exists());
+
+    let (identity_url, request) = one_response_server(managed, body);
+    let output = Command::new(env!("CARGO_BIN_EXE_fsite"))
+        .args(["auth", "sites-key", "request", managed])
+        .env("FINITE_HOME", finite_home.path())
+        .env("FINITE_IDENTITY_AUTHORITY", identity_url)
+        .env("FINITE_SITES_API", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Managed Agent NIP-05"));
+    assert!(stderr.contains("no email was sent"));
+    assert!(!stderr.contains("is finitesitesd running"));
+    let request = request.recv().unwrap();
+    assert!(request.starts_with("POST /api/v1/nip05-resolution "));
 }

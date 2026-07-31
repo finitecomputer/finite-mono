@@ -22,7 +22,9 @@ use finitesites_proto::dto::{
     NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectOutputSharingResponse,
     ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse, ProjectStatusResponse,
-    SharingRequest, VerifiedEmailViewerSessionRequest, VerifiedEmailViewerSessionResponse,
+    SharingRequest, SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse,
+    SitesAuthorizedKeyRevokeRequest, VerifiedEmailViewerSessionRequest,
+    VerifiedEmailViewerSessionResponse,
 };
 use finitesites_proto::nip98;
 use finitesites_proto::project_config::{
@@ -384,6 +386,70 @@ fn identity_authority_stub(satisfied: bool) -> (String, mpsc::Receiver<serde_jso
             response_body
         );
         stream.write_all(response.as_bytes()).unwrap();
+    });
+    (url, receiver)
+}
+
+fn mailbox_proof_stub(
+    email: &str,
+    request_count: usize,
+) -> (String, mpsc::Receiver<serde_json::Value>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (sender, receiver) = mpsc::channel();
+    let email = email.to_string();
+    std::thread::spawn(move || {
+        for _ in 0..request_count {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 512];
+            let body_start = loop {
+                let read = stream.read(&mut chunk).unwrap();
+                assert_ne!(read, 0, "identity authority client closed before headers");
+                buffer.extend_from_slice(&chunk[..read]);
+                if let Some(end) = buffer
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                {
+                    break end;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buffer[..body_start]).into_owned();
+            assert_eq!(
+                headers.lines().next().unwrap_or_default(),
+                "POST /api/v1/mailbox-proofs/consume HTTP/1.1"
+            );
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                })
+                .unwrap_or(0);
+            while buffer.len() < body_start + content_length {
+                let read = stream.read(&mut chunk).unwrap();
+                assert_ne!(read, 0, "identity authority client closed before body");
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&buffer[body_start..body_start + content_length]).unwrap();
+            sender.send(body.clone()).unwrap();
+            let response_body = serde_json::json!({
+                "email": email,
+                "pubkey": body["pubkey"],
+                "verified": true,
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
     });
     (url, receiver)
 }
@@ -2428,6 +2494,104 @@ async fn identity_authority_can_satisfy_email_git_auth_without_sites_email_key()
             .unwrap();
         assert_eq!(identity_request["grant"], "skyler@example.com");
         assert_eq!(identity_request["actor_pubkey"], stranger_pubkey);
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mailbox_proof_registers_and_revokes_sites_key_without_changing_legacy_grant() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let stranger_pubkey = finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap();
+    let stranger_npub = finitesites_proto::npub::encode_npub(&stranger_pubkey).unwrap();
+    let (identity_authority_url, proof_requests) = mailbox_proof_stub("paul@finite.vip", 2);
+    let server =
+        TestServer::start_with_identity_authority(&user_pubkey, identity_authority_url).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        assert!(created.created);
+        let grant_body = serde_json::to_vec(&ProjectGrantRequest {
+            email: "paul@finite.vip".into(),
+            npub: None,
+            role: "editor".into(),
+        })
+        .unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/grant",
+                Some(&grant_body),
+            )
+            .unwrap();
+
+        let register_body = serde_json::to_vec(&SitesAuthorizedKeyRegisterRequest {
+            mailbox_proof: "proof-for-stranger".into(),
+        })
+        .unwrap();
+        let registered: SitesAuthorizedKeyResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/sites-authorized-keys/register",
+                    Some(&register_body),
+                )
+                .unwrap(),
+        );
+        assert!(registered.active);
+        assert_eq!(registered.email, "paul@finite.vip");
+        assert_eq!(registered.npub, stranger_npub);
+
+        let auth_body = serde_json::to_vec(&GitAuthRequest {
+            email: Some("paul@finite.vip".into()),
+        })
+        .unwrap();
+        server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/git-auth",
+                Some(&auth_body),
+            )
+            .unwrap();
+
+        let revoke_body = serde_json::to_vec(&SitesAuthorizedKeyRevokeRequest {
+            mailbox_proof: "fresh-proof-for-owner".into(),
+            target_npub: stranger_npub,
+        })
+        .unwrap();
+        let revoked: SitesAuthorizedKeyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/sites-authorized-keys/revoke",
+                    Some(&revoke_body),
+                )
+                .unwrap(),
+        );
+        assert!(!revoked.active);
+
+        let error = server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/git-auth",
+                Some(&auth_body),
+            )
+            .unwrap_err();
+        assert!(matches!(error, ureq::Error::Status(403, _)));
+
+        let first = proof_requests.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = proof_requests.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(first["pubkey"], stranger_pubkey);
+        assert_eq!(second["pubkey"], user_pubkey);
     });
     task.await.unwrap();
 }
