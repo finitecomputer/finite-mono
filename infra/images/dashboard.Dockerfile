@@ -6,10 +6,11 @@
 FROM node:22-bookworm-slim AS deps
 
 WORKDIR /src/finitecomputer-v2/apps/dashboard
-COPY finitecomputer-v2/apps/dashboard/package.json finitecomputer-v2/apps/dashboard/package-lock.json ./
+RUN corepack enable
+COPY finitecomputer-v2/apps/dashboard/package.json finitecomputer-v2/apps/dashboard/pnpm-lock.yaml ./
 COPY finitechat/packages/finitechat-chat-ui/package.json /src/finitechat/packages/finitechat-chat-ui/package.json
 COPY finitechat/packages/finitechat-chat-ui/src /src/finitechat/packages/finitechat-chat-ui/src
-RUN npm ci
+RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
 
@@ -17,7 +18,7 @@ WORKDIR /src
 COPY finitecomputer-v2/apps/dashboard ./finitecomputer-v2/apps/dashboard
 COPY finitechat/packages/finitechat-chat-ui ./finitechat/packages/finitechat-chat-ui
 WORKDIR /src/finitecomputer-v2/apps/dashboard
-RUN npm run build
+RUN pnpm run build
 
 FROM node:22-bookworm-slim AS runner
 

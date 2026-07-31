@@ -119,6 +119,7 @@
               just
               nodejs_24
               openssl
+              pnpm
               postgresql_16
               pkg-config
               process-compose
