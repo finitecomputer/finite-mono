@@ -13182,7 +13182,7 @@ mod tests {
             .dispatch_and_wait(AppAction::AnswerClarification {
                 room_id: room_id.clone(),
                 topic_id: HOME_TOPIC_ID.to_owned(),
-                chat_id: second_chat_id,
+                chat_id: second_chat_id.clone(),
                 request_id: request_id.to_owned(),
                 text: "2".to_owned(),
             })
@@ -13195,18 +13195,34 @@ mod tests {
 
         let answered = app
             .dispatch_and_wait(AppAction::AnswerClarification {
-                room_id,
+                room_id: room_id.clone(),
                 topic_id: HOME_TOPIC_ID.to_owned(),
-                chat_id: home_chat_id,
+                chat_id: home_chat_id.clone(),
                 request_id: request_id.to_owned(),
                 text: "2".to_owned(),
             })
             .unwrap();
-        let answer = answered
+        assert_eq!(
+            answered.selected_chat_id.as_deref(),
+            Some(second_chat_id.as_str()),
+            "answering a clarification in a background chat must not navigate"
+        );
+        assert!(
+            answered.messages.iter().all(|message| message.text != "2"),
+            "the background answer must not leak into the visible transcript"
+        );
+        let reopened = app
+            .dispatch_and_wait(AppAction::OpenChat {
+                room_id,
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: home_chat_id,
+            })
+            .unwrap();
+        let answer = reopened
             .messages
             .iter()
             .find(|message| message.text == "2")
-            .expect("the exact answer is durable in the selected chat");
+            .expect("the exact answer is durable in its explicitly opened chat");
         let clarification = answer
             .clarification
             .as_ref()
