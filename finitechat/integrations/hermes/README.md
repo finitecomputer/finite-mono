@@ -120,6 +120,34 @@ only the ephemeral gate, so the inbox redelivers the message. Slash commands,
 pending approval responses, and pending clarification replies still reach the
 active turn immediately, and one busy session does not pause another.
 
+## Hermes 0.18.2 clarification and compaction boundary
+
+Pinned Hermes owns clarification state in `tools.clarify_gateway`. Its gateway
+registers the pending question under the exact session key, calls the platform
+adapter's `send_clarify`, and resolves typed answers through that same session.
+Telegram renders the full question and choices with inline buttons; Discord
+renders the full question in content plus an embed and uses buttons for choices.
+Both adapters resolve button choices through `resolve_gateway_clarify`; open
+answers and typed choice replies use Hermes's session-scoped text interceptor.
+Typing is paused while either adapter waits, and their normal whole-turn
+processing reactions remain separate from clarification state.
+
+Finite Chat uses that same pending state and ordinary Chat messages. Its
+adapter requires the originating Finite topic and chat to resolve before it
+delegates prompt formatting to Hermes, pins the send to that exact route, and
+explicitly bypasses emoji/prose kind inference. A missing or unknown route
+returns a visible adapter failure to Hermes instead of falling back to Home or
+whichever Chat is active. Finite does not persist a second clarification state
+or add clarification request/answer protocol types.
+
+Hermes 0.18.2 does not expose a semantic compaction start/finish pair to
+platform adapters. Compaction emits human-readable status strings, an internal
+post-compression `session:compress` hook, and the whole-turn
+`on_processing_complete` callback; none gives an adapter both semantic edges.
+Telegram and Discord have no separate compaction callback or UI contract.
+Consequently, compaction UI is parked until a later Hermes version provides a
+clean adapter hook; Finite must not infer it from status prose or markers.
+
 See [HARDENING.md](./HARDENING.md) for the adapter reliability plan and
 acceptance matrix.
 See
