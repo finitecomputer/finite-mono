@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 
 import {
   chromium,
@@ -13,6 +15,7 @@ async function main() {
   const action = process.argv[2];
   const dashboardUrl = requiredEnv("FC_DASHBOARD_URL").replace(/\/$/u, "");
   const machineId = requiredEnv("DEVFINITY_BRAIN_MACHINE_ID");
+  const runtimeContainerId = requiredEnv("DEVFINITY_BRAIN_CONTAINER_ID");
   const agentEmail = requiredEnv("DEVFINITY_BRAIN_AGENT_EMAIL").toLowerCase();
   const expectedText = process.env.DEVFINITY_BRAIN_EXPECTED_TEXT?.trim() || "";
   const targetBrainId = process.env.DEVFINITY_BRAIN_TARGET_ID?.trim() || "";
@@ -26,16 +29,24 @@ async function main() {
     "create-org-human",
     "create-folder",
     "assert-folder",
+    "assert-absent",
+    "live-agent-note",
+    "live-browser-folder",
+    "live-agent-asset",
+    "reconnect-catchup",
+    "live-browser-revocation",
+    "live-browser-conflict",
+    "live-notification-hints",
   ]);
   if (!actions.has(action)) {
     throw new Error(
-      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human|create-folder|assert-folder",
+      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human|create-folder|assert-folder|assert-absent|live-agent-note|live-browser-folder|live-agent-asset|reconnect-catchup|live-browser-revocation|live-browser-conflict|live-notification-hints",
     );
   }
   if (!agentEmail.includes("@")) {
     throw new Error("DEVFINITY_BRAIN_AGENT_EMAIL must be an email");
   }
-  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human", "create-folder", "assert-folder"].includes(action) && !expectedText) {
+  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human", "create-folder", "assert-folder", "assert-absent", "live-agent-note", "live-browser-folder", "live-agent-asset", "reconnect-catchup", "live-browser-revocation", "live-browser-conflict", "live-notification-hints"].includes(action) && !expectedText) {
     throw new Error(
       "DEVFINITY_BRAIN_EXPECTED_TEXT is required for assert-note",
     );
@@ -53,7 +64,7 @@ async function main() {
     const page = await context.newPage();
     let personalAgentConfirmation = "";
     page.on("dialog", async (dialog) => {
-      if (action === "create-folder" && dialog.type() === "prompt") {
+      if (["create-folder", "live-browser-folder"].includes(action) && dialog.type() === "prompt") {
         await dialog.accept(expectedText);
         return;
       }
@@ -121,7 +132,8 @@ async function main() {
       console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain agent-first Org Brain opens without a Personal Brain");
     } else if (action === "create-org-agent" || action === "create-org-human") {
-      await waitForBrainClient(brain, page);
+      if (targetBrainId) await waitForUnlockedBrain(brain, page);
+      else await waitForBrainClient(brain, page);
       await createOrganizationBrain(
         brain,
         expectedText,
@@ -133,7 +145,11 @@ async function main() {
     } else if (action === "create-folder") {
       await waitForUnlockedBrain(brain, page);
       await brain.locator("#obsidianNewFolderButton").click();
-      await assertOwnerSeesNote(brain, slugFromFolderName(expectedText));
+      await brain
+        .locator("#readerFolderList .obsidian-folder-button")
+        .filter({ hasText: slugFromFolderName(expectedText), visible: true })
+        .first()
+        .waitFor({ state: "visible", timeout: 30_000 });
       console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain browser-created Folder ok");
     } else if (action === "assert-folder") {
@@ -141,6 +157,121 @@ async function main() {
       await assertOwnerSeesNote(brain, expectedText);
       console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
       console.log("brain browser Folder readback ok");
+    } else if (action === "assert-absent") {
+      await waitForUnlockedBrain(brain, page);
+      await assertOwnerDoesNotSeeText(brain, expectedText);
+      console.log(`BRAIN_ID=${await selectedBrainId(brain)}`);
+      console.log("brain browser deletion convergence ok");
+    } else if (action === "live-agent-note") {
+      await waitForUnlockedBrain(brain, page);
+      await writeAgentNote(runtimeContainerId, await selectedBrainId(brain), expectedText);
+      await assertOwnerSeesNoteWithoutRefresh(brain, expectedText);
+      console.log("brain Agent-to-browser notification convergence ok");
+    } else if (action === "live-browser-folder") {
+      await waitForUnlockedBrain(brain, page);
+      await brain.locator("#obsidianNewFolderButton").click();
+      await waitForRuntimePath(
+        runtimeContainerId,
+        `/data/workspace/finitebrain/${await selectedBrainId(brain)}/${slugFromFolderName(expectedText)}`,
+      );
+      console.log("brain browser-to-Agent notification convergence ok");
+    } else if (action === "live-agent-asset") {
+      await waitForUnlockedBrain(brain, page);
+      await writeAgentAsset(runtimeContainerId, await selectedBrainId(brain), expectedText);
+      await assertAssetDownload(brain, page, expectedText);
+      console.log("brain Asset notification and exact download ok");
+    } else if (action === "reconnect-catchup") {
+      await waitForUnlockedBrain(brain, page);
+      await assertOwnerSeesNoteWithoutRefresh(brain, expectedText);
+      console.log("brain reconnect authoritative-sequence catch-up ok");
+    } else if (action === "live-browser-revocation") {
+      await waitForUnlockedBrain(brain, page);
+      await assertOwnerSeesNoteWithoutRefresh(brain, expectedText);
+      const brainId = await selectedBrainId(brain);
+      revokeBrowserActor(runtimeContainerId, brainId);
+      await assertEventually(
+        async () => {
+          await openManageBrains(brain);
+          const visibleIds = await brain
+            .locator("#manageBrainsList .brain-switch-button")
+            .evaluateAll((buttons) =>
+              buttons.map((button) => (button as HTMLElement).dataset.brainId || ""),
+            );
+          await closeManageBrainsIfOpen(brain);
+          return !visibleIds.includes(brainId);
+        },
+        30_000,
+        async () => "revoked Organization Brain remained visible in the browser",
+      );
+      assert.equal(
+        (await brain.locator("#readerPageContent").textContent())?.includes(expectedText),
+        false,
+        "revoked Brain plaintext remained in the active browser projection",
+      );
+      console.log("brain browser revocation cleared its active decrypted projection ok");
+    } else if (action === "live-browser-conflict") {
+      await waitForUnlockedBrain(brain, page);
+      await assertOwnerSeesNoteWithoutRefresh(brain, expectedText);
+      await brain.locator("#editorDrawer").evaluate((node) => {
+        (node as HTMLDetailsElement).open = true;
+      });
+      const localDraft = `${expectedText} browser draft`;
+      await brain.locator("#pageDraftInput").fill(`# Browser draft\n\n${localDraft}\n`);
+      const brainId = await selectedBrainId(brain);
+      writeAgentConflict(runtimeContainerId, brainId, expectedText);
+      const unrelated = brain
+        .locator("#readerFolderList .obsidian-page-button")
+        .filter({ hasText: `${expectedText} unrelated`, visible: true })
+        .first();
+      await unrelated.waitFor({ state: "visible", timeout: 60_000 });
+      assert.ok((await brain.locator("#pageDraftInput").inputValue()).includes(localDraft));
+      assert.ok(
+        dockerExec(runtimeContainerId, [
+          "grep",
+          "-F",
+          `${expectedText} remote`,
+          `/data/workspace/finitebrain/${brainId}/matrix-revocation/browser-revocation.md`,
+        ]).includes(`${expectedText} remote`),
+        "remote conflicting version was not recoverable from the authoritative Agent projection",
+      );
+      console.log("brain browser conflict preserved its draft while unrelated progress converged ok");
+    } else if (action === "live-notification-hints") {
+      await waitForUnlockedBrain(brain, page);
+      await assertOwnerSeesNoteWithoutRefresh(brain, expectedText);
+      const brainId = await selectedBrainId(brain);
+      let reconcileRequests = 0;
+      page.on("request", (request) => {
+        if (
+          new URL(request.url()).pathname.endsWith(
+            `/v1/brains/${encodeURIComponent(brainId)}/metadata`,
+          )
+        ) reconcileRequests += 1;
+      });
+      await brain.locator("body").evaluate(async (_body, activeBrainId) => {
+        const api = (window as typeof window & {
+          FiniteBrainProductClient: {
+            applyBrainUpdateNotification(value: unknown): Promise<void>;
+          };
+        }).FiniteBrainProductClient;
+        const duplicate = {
+          brainId: activeBrainId,
+          latestSequence: Number.MAX_SAFE_INTEGER,
+          reason: "content_updated",
+        };
+        await Promise.all([
+          api.applyBrainUpdateNotification(duplicate),
+          api.applyBrainUpdateNotification(duplicate),
+          api.applyBrainUpdateNotification({ ...duplicate }),
+        ]);
+      }, brainId);
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      assert.equal(
+        reconcileRequests,
+        1,
+        "same-Brain duplicate hint burst must coalesce into one reconciliation",
+      );
+      await assertOwnerSeesNoteWithoutRefresh(brain, expectedText);
+      console.log("brain duplicate notification tolerance and same-Brain coalescing ok");
     } else {
       await waitForUnlockedBrain(brain, page);
       await assertOwnerSeesNote(brain, expectedText);
@@ -149,6 +280,18 @@ async function main() {
 
     await context.close();
   } catch (error) {
+    try {
+      const supervisorLog = dockerExec(runtimeContainerId, [
+        "/bin/bash",
+        "-lc",
+        "test ! -f /tmp/fbrain-supervisor.log || tail -200 /tmp/fbrain-supervisor.log",
+      ]).trim();
+      if (supervisorLog) diagnostics.push(`fbrain supervisor:\n${supervisorLog}`);
+    } catch (diagnosticError) {
+      diagnostics.push(
+        `fbrain supervisor diagnostics unavailable: ${diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)}`,
+      );
+    }
     const detail = diagnostics.length ? `\n${diagnostics.join("\n")}` : "";
     throw new Error(
       `${error instanceof Error ? error.message : String(error)}${detail}`,
@@ -156,6 +299,73 @@ async function main() {
   } finally {
     await browser?.close().catch(() => {});
   }
+}
+
+function dockerExec(machineId: string, args: string[]): string {
+  return execFileSync("docker", ["exec", machineId, ...args], {
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+}
+
+function revokeBrowserActor(machineId: string, brainId: string) {
+  const script = [
+    "set -euo pipefail",
+    'agent="$(fbrain signer public-key)"',
+    'target="$(fbrain brain metadata "$MATRIX_BRAIN_ID" --json | python3 -c \'import json,sys; agent=sys.argv[1]; print(next(value for value in json.load(sys.stdin).get("admins", []) if value != agent))\' "$agent")"',
+    'fbrain admin role revoke admin --brain "$MATRIX_BRAIN_ID" --target "$target" --json >/dev/null',
+    'fbrain admin member remove --brain "$MATRIX_BRAIN_ID" --target "$target" --json >/dev/null',
+  ].join("\n");
+  dockerExec(machineId, [
+    "env",
+    `MATRIX_BRAIN_ID=${brainId}`,
+    "/bin/bash",
+    "-lc",
+    script,
+  ]);
+}
+
+function writeAgentConflict(machineId: string, brainId: string, marker: string) {
+  dockerExec(machineId, [
+    "env",
+    `MATRIX_BRAIN_ID=${brainId}`,
+    `MATRIX_CONFLICT_MARKER=${marker}`,
+    "/bin/bash",
+    "-lc",
+    [
+      "set -euo pipefail",
+      'root="/data/workspace/finitebrain/$MATRIX_BRAIN_ID/matrix-revocation"',
+      'printf "# %s remote\\n\\n%s\\n" "$MATRIX_CONFLICT_MARKER" "$MATRIX_CONFLICT_MARKER" >"$root/browser-revocation.md"',
+      'printf "# %s unrelated\\n\\nMust converge around the browser draft.\\n" "$MATRIX_CONFLICT_MARKER" >"$root/unrelated-progress.md"',
+    ].join("\n"),
+  ]);
+}
+
+async function writeAgentNote(machineId: string, brainId: string, marker: string) {
+  dockerExec(machineId, [
+    "env",
+    `MATRIX_MARKER=${marker}`,
+    "/bin/bash",
+    "-lc",
+    `printf '# %s\\n\\nNotification-driven Agent edit.\\n' "$MATRIX_MARKER" > /data/workspace/finitebrain/${brainId}/agent-notes/devfinity-agent-proof.md`,
+  ]);
+}
+
+async function writeAgentAsset(machineId: string, brainId: string, filename: string) {
+  const root = `/data/workspace/finitebrain/${brainId}/agent-notes`;
+  dockerExec(machineId, [
+    "/bin/bash",
+    "-lc",
+    `mkdir -p '${root}/raw/assets' '${root}/raw'; printf '\\000FiniteBrain\\377Asset\\n' > '${root}/raw/assets/${filename}'; printf '# Matrix Asset\\n\\nAsset: raw/assets/${filename}\\n' > '${root}/raw/matrix-asset.md'`,
+  ]);
+}
+
+async function waitForRuntimePath(machineId: string, path: string) {
+  dockerExec(machineId, [
+    "/bin/bash",
+    "-lc",
+    `for attempt in $(seq 1 300); do test -e '${path}' && exit 0; sleep 0.1; done; echo 'timed out waiting for ${path}' >&2; exit 1`,
+  ]);
 }
 
 void main();
@@ -176,6 +386,12 @@ async function createPersonalBrain(brain: FrameLocator, agentEmail: string) {
   const create = brain.locator("#manageCreatePersonalBrainButton");
   await create.waitFor({ state: "visible", timeout: 30_000 });
   await brain.locator("#managePersonalAgentEmailInput").fill(agentEmail);
+  await create.waitFor({ state: "visible", timeout: 30_000 });
+  await assertEventually(
+    async () => create.isEnabled(),
+    30_000,
+    async () => "Personal Brain Create action did not become ready after Agent resolution",
+  );
   await create.click();
 }
 
@@ -222,22 +438,56 @@ async function createOrganizationBrain(
   includeAgent: boolean,
 ) {
   await openManageBrains(brain);
+  const existingIds = new Set(
+    await brain
+      .locator("#manageBrainsList .brain-switch-button")
+      .evaluateAll((buttons) =>
+        buttons
+          .map((button) => (button as HTMLElement).dataset.brainId || "")
+          .filter(Boolean),
+      ),
+  );
   await brain.locator("#manageBrainCreateDetails").evaluate((element) => {
     (element as HTMLDetailsElement).open = true;
   });
-  await brain.locator("#manageOrganizationBrainNameInput").fill(name);
   const checkbox = brain.locator("#manageOrganizationAddAgentInput");
   if ((await checkbox.isChecked()) !== includeAgent) await checkbox.click();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const nameInput = brain.locator("#manageOrganizationBrainNameInput");
+  await nameInput.fill(name);
+  assert.equal(
+    await nameInput.inputValue(),
+    name,
+    "Organization Brain name changed while configuring its Agent",
+  );
   await brain.locator("#manageCreateOrganizationBrainButton").click();
+  await assertEventually(
+    async () => {
+      const buttons = brain.locator("#manageBrainsList .brain-switch-button");
+      if ((await buttons.count()) !== existingIds.size + 1) return false;
+      const selectedId = await brain
+        .locator("#manageBrainsList .brain-switch-button.selected")
+        .getAttribute("data-brain-id");
+      return Boolean(selectedId && !existingIds.has(selectedId));
+    },
+    30_000,
+    async () => "Organization Brain creation did not select one new stable Brain id",
+  );
 }
 
 async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
   await openManageBrains(brain);
-  const selected = await brain.locator("#manageBrainsCurrentDetail").textContent();
-  assert.match(selected || "", /Session unlocked/u);
+  assert.equal(
+    await brain.locator(".obsidian-shell").getAttribute("data-session-status"),
+    "unlocked",
+  );
   const selectedBrain = brain.locator("#manageBrainsList .brain-switch-button.selected");
   await selectedBrain.waitFor({ state: "visible", timeout: 30_000 });
-  assert.equal(await brain.locator("#manageBrainsList .brain-switch-button").count(), 1);
+  assert.equal(
+    await selectedBrain.getAttribute("data-brain-id"),
+    brainId,
+    "Direct target did not select the requested stable Brain id",
+  );
   assert.match(
     (await selectedBrain.getAttribute("aria-label")) || "",
     /organization.*admin|admin.*organization/iu,
@@ -253,9 +503,10 @@ async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
 async function waitForUnlockedBrain(brain: FrameLocator, page: Page) {
   const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 90_000);
   const status = brain.locator("#sessionAccountStatus");
+  const shell = brain.locator('.obsidian-shell[data-session-status="unlocked"]');
   await waitForBrainClient(brain, page);
   await assertEventually(
-    async () => (await status.textContent())?.trim() === "Session unlocked",
+    async () => shell.isVisible(),
     timeoutMs,
     async () =>
       `Brain did not unlock; current status: ${(await status.textContent())?.trim()}`,
@@ -296,16 +547,106 @@ async function assertOwnerSeesNote(brain: FrameLocator, expectedText: string) {
     async () => "Brain refresh did not become available",
   );
   await refresh.click();
-  await brain
-    .locator("body")
+  const visibleReaderMatch = brain
+    .locator("#readerPageContent")
     .getByText(expectedText, { exact: false })
-    .first()
+    .filter({ visible: true })
+    .first();
+  if (await visibleReaderMatch.waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false)) {
+    return;
+  }
+  const folders = brain.locator("#readerFolderList .obsidian-folder-button");
+  for (let index = 0; index < await folders.count(); index += 1) {
+    const folder = folders.nth(index);
+    if (!((await folder.getAttribute("class")) || "").includes("expanded")) {
+      await folder.click();
+    }
+  }
+  const page = brain
+    .locator("#readerFolderList .obsidian-page-button")
+    .filter({ hasText: expectedText, visible: true })
+    .first();
+  await page.waitFor({ state: "visible", timeout: timeoutMs });
+  await page.click();
+  await visibleReaderMatch
     .waitFor({ state: "visible", timeout: timeoutMs })
     .catch(async (error) => {
       throw new Error(
         `${String(error)}\nBrain content: ${(await brain.locator("body").innerText()).slice(0, 4000)}`,
       );
     });
+}
+
+async function assertOwnerSeesNoteWithoutRefresh(brain: FrameLocator, expectedText: string) {
+  const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 60_000);
+  const folders = brain.locator("#readerFolderList .obsidian-folder-button");
+  for (let index = 0; index < await folders.count(); index += 1) {
+    const folder = folders.nth(index);
+    if (!((await folder.getAttribute("class")) || "").includes("expanded")) {
+      await folder.click();
+    }
+  }
+  const page = brain
+    .locator("#readerFolderList .obsidian-page-button")
+    .filter({ hasText: expectedText, visible: true })
+    .first();
+  await page.waitFor({ state: "visible", timeout: timeoutMs });
+  await page.click();
+  await brain
+    .locator("#readerPageContent")
+    .getByText(expectedText, { exact: false })
+    .filter({ visible: true })
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs });
+}
+
+async function assertAssetDownload(
+  brain: FrameLocator,
+  page: Page,
+  filename: string,
+) {
+  const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 60_000);
+  const asset = brain
+    .locator("#readerFolderList .obsidian-page-button.asset")
+    .filter({ hasText: filename, visible: true })
+    .first();
+  await asset.waitFor({ state: "visible", timeout: timeoutMs });
+  await asset.click();
+  await brain.locator("#readerPageContent").getByText(filename, { exact: true }).waitFor({
+    state: "visible",
+    timeout: timeoutMs,
+  });
+  await brain.locator("#readerPageContent").getByText("application/octet-stream", { exact: true }).waitFor({
+    state: "visible",
+    timeout: timeoutMs,
+  });
+  const downloadPromise = page.waitForEvent("download", { timeout: timeoutMs });
+  await brain.locator("#readerPageContent .asset-download-button").click();
+  const download = await downloadPromise;
+  assert.equal(download.suggestedFilename(), filename);
+  const path = await download.path();
+  assert.ok(path, "Asset download did not produce a local path");
+  assert.deepEqual(
+    await readFile(path),
+    Buffer.from([0, ...Buffer.from("FiniteBrain"), 255, ...Buffer.from("Asset\n")]),
+  );
+}
+
+async function assertOwnerDoesNotSeeText(brain: FrameLocator, expectedText: string) {
+  const refresh = brain.locator("#refreshReaderButton");
+  await assertEventually(
+    async () => !(await refresh.isDisabled()),
+    30_000,
+    async () => "Brain refresh did not become available",
+  );
+  await refresh.click();
+  await assertEventually(
+    async () =>
+      (await brain.locator("body").getByText(expectedText, { exact: false }).count()) === 0,
+    Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 60_000),
+    async () =>
+      `Deleted Brain text remains visible: ${(await brain.locator("body").innerText()).slice(0, 4000)}`,
+  );
 }
 
 async function assertEventually(

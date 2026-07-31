@@ -55,12 +55,12 @@ const NATIVE_DEVICE_LINK_BEARER_PATHS = new Set([
 
 // Brain's product client is a WorkOS-authenticated browser surface, while
 // the opaque-frame identity provider uses its frame capability plus a fresh,
-// request-bound WorkOS session proof. /_admin uses Brain-owned route-level auth
+// request-bound WorkOS session proof. /v1 uses Brain-owned route-level auth
 // (normally a Nostr signature, with narrowly scoped invitation proofs where
 // specified). Let those APIs reach Brain without replacing their authority
 // with an AuthKit session. Runtime callbacks likewise enforce their own
 // protocol boundary.
-const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/_admin", "/api/finite"] as const;
+const WORKOS_PROXY_BYPASS_PATH_PREFIXES = ["/v1", "/_admin", "/api/finite"] as const;
 
 type EnvSource = Record<string, string | undefined>;
 

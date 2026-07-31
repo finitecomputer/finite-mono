@@ -29,6 +29,38 @@ const MAX_USER_ID_LEN: usize = 128;
 const MAX_DISPLAY_NAME_LEN: usize = 128;
 const MAX_SAFE_RELATIVE_PATH_LEN: usize = 1024;
 const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS: usize = 100;
+/// One centrally governed accepted-state envelope for all durable Brain mutations.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct BrainCapacityEnvelope {
+    pub folders: usize,
+    pub folder_depth: usize,
+    pub current_objects: usize,
+    pub sync_records: usize,
+    pub members: usize,
+    pub folder_access_entries: usize,
+    pub folder_key_grants: usize,
+    pub invitations: usize,
+    pub share_links: usize,
+    pub mounts: usize,
+    pub shared_connections: usize,
+    pub delegations: usize,
+}
+
+/// Accepted state guaranteed to remain removable by one atomic direct deletion.
+pub const BRAIN_CAPACITY_ENVELOPE: BrainCapacityEnvelope = BrainCapacityEnvelope {
+    folders: 1_000,
+    folder_depth: 32,
+    current_objects: 10_000,
+    sync_records: 100_000,
+    members: 1_000,
+    folder_access_entries: 10_000,
+    folder_key_grants: 10_000,
+    invitations: 1_000,
+    share_links: 1_000,
+    mounts: 1_000,
+    shared_connections: 1_000,
+    delegations: 10_000,
+};
 /// Maximum number of Folder rotations accepted in one Personal Agent request.
 pub const MAX_PERSONAL_AGENT_ROTATION_FOLDERS: usize = 100;
 /// Maximum Folder Key Grants accepted for one Folder rotation.
@@ -43,6 +75,13 @@ pub const MAX_PERSONAL_AGENT_ROTATION_RECORDS: usize = 10_000;
 pub const MAX_FOLDER_ACCESS_REMOVAL_GRANTS: usize = MAX_FOLDER_ROTATION_GRANTS;
 /// Maximum re-encrypted records accepted in one Folder access-removal request.
 pub const MAX_FOLDER_ACCESS_REMOVAL_RECORDS: usize = MAX_FOLDER_ROTATION_RECORDS;
+/// Maximum native plus mounted Folder rotations accepted in one Member removal.
+pub const MAX_MEMBER_REMOVAL_ROTATIONS: usize =
+    BRAIN_CAPACITY_ENVELOPE.folders + BRAIN_CAPACITY_ENVELOPE.shared_connections;
+/// Maximum total Folder Key Grants accepted in one Member removal.
+pub const MAX_MEMBER_REMOVAL_GRANTS: usize = BRAIN_CAPACITY_ENVELOPE.folder_key_grants;
+/// Maximum total re-encrypted records accepted in one Member removal.
+pub const MAX_MEMBER_REMOVAL_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_objects;
 
 /// Versioned official Product Client identity boundary.
 pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";
@@ -236,6 +275,49 @@ impl fmt::Display for FolderId {
     }
 }
 
+/// Derive one readable stable resource id from a human display name.
+pub fn derive_stable_resource_id(
+    field: &'static str,
+    display_name: &str,
+) -> Result<String, CoreError> {
+    let normalized = normalize_nfc(display_name);
+    let mut derived = String::with_capacity(normalized.len());
+    for character in normalized.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            derived.push(character.to_ascii_lowercase());
+        } else if !derived.is_empty() && !derived.ends_with('-') {
+            derived.push('-');
+        }
+    }
+    while derived.ends_with('-') {
+        derived.pop();
+    }
+    validate_stable_id(field, derived, 1, 128)
+}
+
+/// Derive one safe, human-readable top-level Folder path from a display name.
+///
+/// Path separators and punctuation become a single space. The original
+/// display name remains Folder metadata; this value is only its safe Working
+/// Tree projection.
+pub fn derive_safe_top_level_folder_path(display_name: &str) -> Result<String, CoreError> {
+    let normalized = normalize_nfc(display_name);
+    let mut derived = String::with_capacity(normalized.len());
+    let mut separator_pending = false;
+    for character in normalized.trim().chars() {
+        if character.is_alphanumeric() {
+            if separator_pending && !derived.is_empty() {
+                derived.push(' ');
+            }
+            derived.push(character);
+            separator_pending = false;
+        } else if !derived.is_empty() {
+            separator_pending = true;
+        }
+    }
+    SafeRelativePath::new("folder_path", derived).map(|path| path.as_str().to_owned())
+}
+
 /// Stable Folder Object id.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ObjectId(String);
@@ -409,6 +491,108 @@ pub enum FolderAccessMode {
     Restricted,
 }
 
+/// One Folder candidate or result in the server-visible Email Invite Bootstrap scope.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EmailInviteScopeFolder {
+    /// Folder id.
+    pub folder_id: FolderId,
+    /// Folder access mode at invite creation.
+    pub access: FolderAccessMode,
+    /// Exact Folder Key version authorized for bootstrap.
+    pub key_version: u32,
+}
+
+/// A typed failure while deriving the authorized Email Invite Bootstrap scope.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum EmailInviteScopeError {
+    /// A requested Folder is absent from the authoritative Brain inventory.
+    MissingFolder { folder_id: String },
+    /// A Brain Invitation selected a Folder whose access mode cannot be included.
+    UnsupportedBrainInvitationFolder {
+        folder_id: FolderId,
+        access: FolderAccessMode,
+    },
+    /// A Folder Invitation did not resolve to exactly one Folder.
+    FolderInvitationCardinality,
+}
+
+impl fmt::Display for EmailInviteScopeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingFolder { folder_id } => write!(f, "folder {folder_id} not found"),
+            Self::UnsupportedBrainInvitationFolder { folder_id, access } => write!(
+                f,
+                "folder {folder_id} with access mode {access:?} cannot be selected for an email Brain Invitation"
+            ),
+            Self::FolderInvitationCardinality => {
+                f.write_str("Folder Email Invite Bootstrap must target exactly one Folder")
+            }
+        }
+    }
+}
+
+impl Error for EmailInviteScopeError {}
+
+/// Derive the complete server-visible Folder scope for an Email Invite Bootstrap.
+///
+/// Brain Invitations include every all-members Folder plus explicitly selected
+/// restricted Folders. Folder Invitations include exactly the selected Folder,
+/// independent of its native access mode.
+pub fn derive_email_invite_scope(
+    folders: &[EmailInviteScopeFolder],
+    selected_folder_access: &[FolderId],
+    folder_only: bool,
+) -> Result<Vec<EmailInviteScopeFolder>, EmailInviteScopeError> {
+    let selected = selected_folder_access
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut seen_selected = BTreeSet::new();
+    let mut included = BTreeSet::new();
+    let mut scope = Vec::new();
+
+    for folder in folders {
+        let selected_folder = selected.contains(&folder.folder_id);
+        if selected_folder {
+            seen_selected.insert(folder.folder_id.clone());
+        }
+        let include = if folder_only {
+            selected_folder
+        } else {
+            match folder.access {
+                FolderAccessMode::AllMembers => true,
+                FolderAccessMode::Restricted => selected_folder,
+                FolderAccessMode::Owner | FolderAccessMode::AdminOnly => {
+                    if selected_folder {
+                        return Err(EmailInviteScopeError::UnsupportedBrainInvitationFolder {
+                            folder_id: folder.folder_id.clone(),
+                            access: folder.access,
+                        });
+                    }
+                    false
+                }
+            }
+        };
+        if include && included.insert(folder.folder_id.clone()) {
+            scope.push(folder.clone());
+        }
+    }
+
+    if seen_selected != selected {
+        let missing = selected
+            .difference(&seen_selected)
+            .next()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "unknown".to_owned());
+        return Err(EmailInviteScopeError::MissingFolder { folder_id: missing });
+    }
+    if folder_only && scope.len() != 1 {
+        return Err(EmailInviteScopeError::FolderInvitationCardinality);
+    }
+
+    Ok(scope)
+}
+
 /// Brain member metadata.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BrainMember {
@@ -435,8 +619,6 @@ pub struct Folder {
     pub path: SafeRelativePath,
     /// Current Folder Key version.
     pub current_key_version: u32,
-    /// Whether this Folder is a shared-folder source.
-    pub shared_folder_source: bool,
 }
 
 /// Folder Object metadata without encrypted bytes.
@@ -482,7 +664,7 @@ pub struct FolderKeyRecipientPolicy<'a> {
     pub admins: &'a [UserId],
     /// Organization Brain members.
     pub members: &'a [UserId],
-    /// Explicit restricted-Folder recipients.
+    /// Explicit Folder Guests, independent of the native access mode.
     pub explicit_access_user_ids: &'a BTreeSet<UserId>,
     /// Current Personal Agent, when the role is occupied.
     pub personal_agent_npub: Option<&'a UserId>,
@@ -523,9 +705,9 @@ pub fn required_folder_key_recipients(
         FolderAccessMode::Restricted => {
             recipients.extend(policy.owner_user_id.cloned());
             recipients.extend(policy.admins.iter().cloned());
-            recipients.extend(policy.explicit_access_user_ids.iter().cloned());
         }
     }
+    recipients.extend(policy.explicit_access_user_ids.iter().cloned());
 
     if recipients.is_empty() {
         return Err(CoreError::InvalidAccessPolicy {
@@ -547,6 +729,7 @@ pub struct FolderRotationFanout {
 pub enum FolderRotationOperation {
     PersonalAgent,
     FolderAccessRemoval,
+    MemberRemoval,
 }
 
 /// Validate key-rotation work before cryptography, record parsing, or durable mutation.
@@ -557,18 +740,22 @@ pub fn validate_folder_rotation_fanout(
     let operation_name = match operation {
         FolderRotationOperation::PersonalAgent => "Personal Agent rotation",
         FolderRotationOperation::FolderAccessRemoval => "Folder access removal",
+        FolderRotationOperation::MemberRemoval => "Member removal",
     };
     let max_rotations = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
         FolderRotationOperation::FolderAccessRemoval => 1,
+        FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_ROTATIONS,
     };
     let max_total_grants = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_GRANTS,
         FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
+        FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_GRANTS,
     };
     let max_total_records = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_RECORDS,
         FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
+        FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_RECORDS,
     };
 
     let mut rotation_count = 0usize;
@@ -1425,9 +1612,9 @@ pub enum AdminAccessAction {
     AddAdmin,
     /// Remove admin.
     RemoveAdmin,
-    /// Grant restricted folder access.
+    /// Grant explicit Folder access.
     GrantFolderAccess,
-    /// Remove restricted folder access.
+    /// Remove explicit Folder access.
     RemoveFolderAccess,
     /// Rotate a Folder Key.
     RotateFolderKey,
@@ -1654,7 +1841,7 @@ pub fn validate_brain_http_authorization_intent(
             "Brain HTTP authorization requires the official Brain origin",
         );
     }
-    if path != "/_admin" && !path.starts_with("/_admin/") {
+    if path != "/v1" && !path.starts_with("/v1/") {
         return brain_identity_provider_error(
             "Brain HTTP authorization requires a protected Brain route",
         );
@@ -2536,7 +2723,6 @@ fn root_folder(
         parent_folder_id: None,
         path: SafeRelativePath::new("folder_path", name)?,
         current_key_version: 1,
-        shared_folder_source: false,
     })
 }
 
@@ -2576,6 +2762,84 @@ mod tests {
     #[test]
     fn exposes_core_crate_name() {
         assert_eq!(crate_name(), "finite-brain-core");
+    }
+
+    #[test]
+    fn stable_resource_ids_are_readable_and_deterministic() {
+        assert_eq!(
+            derive_stable_resource_id("brain_id", "  Hermes Agent Knowledge  ").unwrap(),
+            "hermes-agent-knowledge"
+        );
+        assert_eq!(
+            derive_stable_resource_id("folder_id", "Research / Primary Sources").unwrap(),
+            "research-primary-sources"
+        );
+    }
+
+    #[test]
+    fn stable_resource_ids_reject_names_without_ascii_identifier_content() {
+        let error = derive_stable_resource_id("folder_id", "💭").unwrap_err();
+        assert!(error.to_string().contains("folder_id"));
+    }
+
+    #[test]
+    fn safe_top_level_folder_paths_remove_path_syntax() {
+        assert_eq!(
+            derive_safe_top_level_folder_path("Research / Primary Sources").unwrap(),
+            "Research Primary Sources"
+        );
+        assert_eq!(
+            derive_safe_top_level_folder_path("../Hermes \\\\ Notes").unwrap(),
+            "Hermes Notes"
+        );
+        assert!(derive_safe_top_level_folder_path(" / .. / ").is_err());
+    }
+
+    #[test]
+    fn email_invite_scope_policy_is_core_owned_and_typed() {
+        let all_members = EmailInviteScopeFolder {
+            folder_id: FolderId::new("all-members").unwrap(),
+            access: FolderAccessMode::AllMembers,
+            key_version: 2,
+        };
+        let restricted = EmailInviteScopeFolder {
+            folder_id: FolderId::new("restricted").unwrap(),
+            access: FolderAccessMode::Restricted,
+            key_version: 3,
+        };
+        let admin_only = EmailInviteScopeFolder {
+            folder_id: FolderId::new("admin-only").unwrap(),
+            access: FolderAccessMode::AdminOnly,
+            key_version: 4,
+        };
+        let folders = vec![all_members.clone(), restricted.clone(), admin_only.clone()];
+
+        assert_eq!(
+            derive_email_invite_scope(
+                &folders,
+                std::slice::from_ref(&restricted.folder_id),
+                false,
+            )
+            .unwrap(),
+            vec![all_members, restricted]
+        );
+        assert_eq!(
+            derive_email_invite_scope(&folders, std::slice::from_ref(&admin_only.folder_id), true,)
+                .unwrap(),
+            vec![admin_only.clone()]
+        );
+        assert!(matches!(
+            derive_email_invite_scope(&folders, std::slice::from_ref(&admin_only.folder_id), false,),
+            Err(EmailInviteScopeError::UnsupportedBrainInvitationFolder { .. })
+        ));
+        assert!(matches!(
+            derive_email_invite_scope(&folders, &[], true),
+            Err(EmailInviteScopeError::FolderInvitationCardinality)
+        ));
+        assert!(matches!(
+            derive_email_invite_scope(&folders, &[FolderId::new("missing-folder").unwrap()], false,),
+            Err(EmailInviteScopeError::MissingFolder { .. })
+        ));
     }
 
     #[test]
@@ -2668,7 +2932,7 @@ mod tests {
     }
 
     #[test]
-    fn organization_folder_key_recipients_preserve_access_modes() {
+    fn organization_folder_key_recipients_include_explicit_guests_for_every_access_mode() {
         let admin = UserId::new("npub-admin").unwrap();
         let member = UserId::new("npub-member").unwrap();
         let explicit = UserId::new("npub-explicit").unwrap();
@@ -2685,11 +2949,11 @@ mod tests {
 
         assert_eq!(
             required_folder_key_recipients(policy(FolderAccessMode::AdminOnly)).unwrap(),
-            BTreeSet::from([admin.clone()])
+            BTreeSet::from([admin.clone(), explicit.clone()])
         );
         assert_eq!(
             required_folder_key_recipients(policy(FolderAccessMode::AllMembers)).unwrap(),
-            BTreeSet::from([admin.clone(), member.clone()])
+            BTreeSet::from([admin.clone(), member.clone(), explicit.clone()])
         );
         assert_eq!(
             required_folder_key_recipients(policy(FolderAccessMode::Restricted)).unwrap(),
@@ -2839,7 +3103,6 @@ mod tests {
             parent_folder_id: None,
             path: SafeRelativePath::new("folder_path", "Root 2").unwrap(),
             current_key_version: 1,
-            shared_folder_source: false,
         };
         assert_eq!(
             draft.add_folder(duplicate).unwrap_err(),
@@ -2858,7 +3121,6 @@ mod tests {
                 parent_folder_id: None,
                 path: SafeRelativePath::new("folder_path", "root").unwrap(),
                 current_key_version: 1,
-                shared_folder_source: false,
             })
             .unwrap();
 
@@ -2902,7 +3164,6 @@ mod tests {
             parent_folder_id: Some(parent.id.clone()),
             path: SafeRelativePath::new("folder_path", "Parent/Child").unwrap(),
             current_key_version: 1,
-            shared_folder_source: false,
         };
         draft.add_folder(child.clone()).unwrap();
 
@@ -2929,7 +3190,6 @@ mod tests {
             parent_folder_id: Some(FolderId::new("missing").unwrap()),
             path: SafeRelativePath::new("folder_path", "Missing/Orphan").unwrap(),
             current_key_version: 1,
-            shared_folder_source: false,
         };
 
         assert_eq!(

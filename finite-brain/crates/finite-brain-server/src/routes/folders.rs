@@ -1,5 +1,30 @@
 use crate::*;
 
+pub(crate) async fn folder_access_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+) -> Result<Json<FolderMetadataResponse>, ApiError> {
+    let actor_npub = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    let brain_id = BrainId::new(brain_id)?;
+    let folder_id = FolderId::new(folder_id)?;
+    let stored = {
+        let store = state.store.lock().map_err(lock_error)?;
+        store.load_brain(&brain_id)?
+    };
+    ensure_metadata_visible(&stored, &actor_npub)?;
+    let response = metadata_response_for_actor(stored, Vec::new(), &actor_npub)
+        .folders
+        .into_iter()
+        .find(|folder| folder.id == folder_id.as_str())
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "Folder not found"))?;
+    Ok(Json(response))
+}
+use finite_brain_core::BRAIN_CAPACITY_ENVELOPE;
+use finite_brain_store::FolderDeletionExpectation;
+
 pub(crate) async fn delete_folder_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -11,6 +36,36 @@ pub(crate) async fn delete_folder_handler(
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: FolderDeleteRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let expectation = {
+        let folder_ids = &request.expected_folder_ids;
+        let object_count = request.expected_object_count;
+        if folder_ids.is_empty() || folder_ids.len() > BRAIN_CAPACITY_ENVELOPE.folders {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "expectedFolderIds is outside the accepted Folder envelope",
+            ));
+        }
+        let parsed = folder_ids
+            .iter()
+            .map(|folder_id| FolderId::new(folder_id.clone()))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if parsed.len() != folder_ids.len() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "expectedFolderIds contains duplicate Folder identities",
+            ));
+        }
+        if object_count > BRAIN_CAPACITY_ENVELOPE.current_objects {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "expectedObjectCount is outside the accepted object envelope",
+            ));
+        }
+        FolderDeletionExpectation {
+            folder_ids: parsed,
+            object_count,
+        }
+    };
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let submitted_event = Event::from_json(request.deletion_event.to_string()).map_err(|_| {
@@ -74,13 +129,26 @@ pub(crate) async fn delete_folder_handler(
             &payload_json,
             &deleted_at,
             APP_SPECIFIC_KIND,
+            Some(&expectation),
         )?
     };
+    if !outcome.duplicate {
+        state.publish_brain_update(
+            brain_id.as_str(),
+            outcome.sequence,
+            BrainUpdateReason::AccessUpdated,
+        );
+    }
     Ok(Json(FolderDeleteResponse {
         sequence: outcome.sequence,
         duplicate: outcome.duplicate,
         folder_count: outcome.folder_count,
         object_count: outcome.object_count,
+        deleted_folder_ids: outcome
+            .deleted_folder_ids
+            .into_iter()
+            .map(|folder_id| folder_id.to_string())
+            .collect(),
     }))
 }
 
@@ -104,9 +172,8 @@ pub(crate) async fn create_folder_handler(
         parent_folder_id: request.parent_folder_id.map(FolderId::new).transpose()?,
         path: SafeRelativePath::new("folder_path", request.path)?,
         current_key_version: 1,
-        shared_folder_source: request.shared_folder_source.unwrap_or(false),
     };
-    let access_user_ids = resolve_user_id_set(&state, request.access_user_ids)?;
+    let access_user_ids = resolve_user_id_set(&state, request.access_user_ids).await?;
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
         &brain_id,
@@ -125,17 +192,24 @@ pub(crate) async fn create_folder_handler(
         Some(event_json),
         &grant_created_at,
     )?;
+    let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
 
-    mutate_as_admin_with_grants(
-        state,
-        brain_id,
-        actor,
-        event,
-        payload,
-        grants.clone(),
-        |store, brain_id| store.create_folder(brain_id, &folder, &access_user_ids, &grants),
-    )
-    .map(Json)
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
+        store.create_folder_with_control_records(
+            brain_id,
+            &folder,
+            &access_user_ids,
+            &grants,
+            &control_records,
+        )
+    })?;
+    // A newly created all-members Folder changes every member's authoritative
+    // view. Broadcast the hint; stream-time authorization still filters it to
+    // actors who can currently see this Brain.
+    notification_state.publish_access_update(&notification_brain_id);
+    Ok(Json(response))
 }
 
 pub(crate) async fn finish_folder_setup_handler(
@@ -175,17 +249,20 @@ pub(crate) async fn finish_folder_setup_handler(
         Some(event_json),
         &grant_created_at,
     )?;
+    let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
 
-    mutate_as_admin_with_grants(
-        state,
-        brain_id,
-        actor,
-        event,
-        payload,
-        grants.clone(),
-        |store, brain_id| store.finish_folder_setup(brain_id, &folder_id, &grants),
-    )
-    .map(Json)
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
+        store.finish_folder_setup_with_control_records(
+            brain_id,
+            &folder_id,
+            &grants,
+            &control_records,
+        )
+    })?;
+    notification_state.publish_access_update(&notification_brain_id);
+    Ok(Json(response))
 }
 
 pub(crate) async fn grant_folder_access_handler(
@@ -193,7 +270,7 @@ pub(crate) async fn grant_folder_access_handler(
     headers: HeaderMap,
     method: Method,
     OriginalUri(uri): OriginalUri,
-    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+    AxumPath((brain_id, folder_id, target_npub)): AxumPath<(String, String, String)>,
     body: Bytes,
 ) -> Result<Json<GrantFolderAccessResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
@@ -201,7 +278,7 @@ pub(crate) async fn grant_folder_access_handler(
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
-    let target_identity = resolve_and_record_identity(&state, &request.target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     let current_key_version = {
         let store = state.store.lock().map_err(lock_error)?;
@@ -255,6 +332,7 @@ pub(crate) async fn grant_folder_access_handler(
             GrantFolderAccessResponseOutcome::AlreadyHasAccess
         }
     };
+    state.publish_access_update_for(&brain_id, target.as_str());
     Ok(Json(GrantFolderAccessResponse { metadata, outcome }))
 }
 
@@ -278,7 +356,7 @@ pub(crate) async fn remove_folder_access_handler(
     )?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
-    let target_identity = resolve_and_record_identity(&state, &target_npub)?;
+    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
     {
         let store = state.store.lock().map_err(lock_error)?;
@@ -330,25 +408,22 @@ pub(crate) async fn remove_folder_access_handler(
         )?;
         reencrypted_records.push(record);
     }
+    let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
 
-    mutate_as_admin_with_grants(
-        state,
-        brain_id,
-        actor,
-        event,
-        payload,
-        grants.clone(),
-        |store, brain_id| {
-            store.rotate_folder_key_for_access_removal(
-                brain_id,
-                &folder_id,
-                &target,
-                request.new_key_version,
-                &grants,
-                &reencrypted_records,
-                &updated_at,
-            )
-        },
-    )
-    .map(Json)
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
+        store.rotate_folder_key_for_access_removal_with_control_records(
+            brain_id,
+            &folder_id,
+            &target,
+            request.new_key_version,
+            &grants,
+            &reencrypted_records,
+            &updated_at,
+            &control_records,
+        )
+    })?;
+    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
+    Ok(Json(response))
 }

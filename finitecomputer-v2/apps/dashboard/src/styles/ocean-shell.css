@@ -871,11 +871,24 @@ button.ocean-pill-button {
   flex: 1;
 }
 
+.finite-brain-page__body {
+  display: flex;
+  overflow: hidden;
+}
+
 .finite-brain-page__frame {
   width: 100%;
   height: 100%;
+  min-width: 0;
   overflow: hidden;
   background: var(--bg-card);
+}
+
+.finite-brain-page__frame > iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
 }
 
 .finite-brain-page__body > .finite-product-surface__empty {

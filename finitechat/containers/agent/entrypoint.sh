@@ -11,6 +11,7 @@ truthy() {
 agent_home="${FINITECHAT_HOME:-/data/agent}"
 state_root="${FINITE_AGENT_STATE_ROOT:-/data}"
 workspace="${FINITECHAT_WORKSPACE:-/data/workspace}"
+export FBRAIN_WORKING_TREE_ROOT="${FBRAIN_WORKING_TREE_ROOT:-$workspace/finitebrain}"
 # The shared Finite identity (identity/identity.json) must live on the same
 # durable mount as the rest of the agent state so restore/backup and
 # restarts keep the account key.
@@ -213,6 +214,23 @@ fi
 
 "$@" &
 child_pid="$!"
+brain_sync_pid=""
+if truthy "${FINITE_BRAIN_SYNC_SUPERVISOR:-1}" && command -v fbrain >/dev/null 2>&1; then
+    mkdir -p "$FBRAIN_WORKING_TREE_ROOT"
+    (
+        backoff=1
+        while kill -0 "$child_pid" 2>/dev/null; do
+            fbrain daemon supervise >>"${FINITE_BRAIN_SYNC_LOG:-/tmp/fbrain-supervisor.log}" 2>&1 || true
+            echo "FINITE_BRAIN_SYNC_SUPERVISOR_RESTART backoff_secs=$backoff" >&2
+            sleep "$backoff"
+            if [[ "$backoff" -lt 30 ]]; then
+                backoff=$((backoff * 2))
+            fi
+        done
+    ) &
+    brain_sync_pid="$!"
+    echo "FINITE_BRAIN_SYNC_SUPERVISOR_START pid=$brain_sync_pid"
+fi
 backup_loop_pid=""
 child_status=0
 terminating=0
@@ -229,6 +247,9 @@ shutdown() {
         return
     fi
     terminating=1
+    if [[ -n "$brain_sync_pid" ]] && kill -0 "$brain_sync_pid" 2>/dev/null; then
+        kill -TERM "$brain_sync_pid" 2>/dev/null || true
+    fi
     if kill -0 "$child_pid" 2>/dev/null; then
         kill -TERM "$child_pid" 2>/dev/null || true
     fi
@@ -241,5 +262,11 @@ if [[ "$terminating" -eq 1 ]] && kill -0 "$child_pid" 2>/dev/null; then
     wait "$child_pid" || child_status="$?"
 fi
 stop_periodic_backup
+if [[ -n "$brain_sync_pid" ]]; then
+    if kill -0 "$brain_sync_pid" 2>/dev/null; then
+        kill -TERM "$brain_sync_pid" 2>/dev/null || true
+    fi
+    wait "$brain_sync_pid" 2>/dev/null || true
+fi
 backup_agent_state
 exit "$child_status"

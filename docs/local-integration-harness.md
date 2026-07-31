@@ -99,13 +99,23 @@ This does not pass or replace the canonical real-chat acceptance. It only
 skips the three inference reply assertions; the Hosted Web Device must still
 connect, and all Brain/Apple assertions still run.
 
-To run the destructive Greenfield Brain setup matrix, add
-`DEVFINITY_BRAIN_SETUP_MATRIX=1` to that command. The matrix resets only the
-local FiniteBrain database and the test agent's `fbrain` working state between
-cases. It proves agent-first and user-first Personal Brain setup, agent-first
-Org-Brain-first access, user-first Org Brain setup with the selected agent, and
-user-first human-only Org Brain setup. Do not use this option against shared or
-production state.
+The complete Greenfield Brain setup/deletion matrix is a separate disposable
+gate:
+
+```sh
+just brain-product-matrix
+```
+
+It launches the canonical image through the local Docker Runner against a fresh
+temporary devfinity state root and a deterministic OpenAI-compatible model
+stub. The model still drives real Hermes terminal tool calls, reads the
+installed managed FiniteBrain skill, invokes the built `fbrain`, signs real
+Brain HTTP, and crosses Hosted Device and Product Client boundaries. The gate
+proves negative, unclear, and affirmative Personal setup, agent-first and
+user-first Organization cases, durable content, duplicate protection, and
+restart behavior. It is required in pull-request CI on the isolated Docker
+runner. The ordinary persisted Apple SaaS smoke never runs this destructive
+scenario reset.
 
 Rerun the real launch/chat/restart acceptance test at any time with:
 
@@ -140,6 +150,32 @@ limit), requests `--fresh` explicitly, verifies
 the service spine, and tears it down. `--fresh` is rejected for the default SaaS
 profile so a routine start can never erase agent data.
 
+## Managed test commands
+
+`devfinity run -- <command> [args...]` is the general test-command wrapper. It
+creates an isolated temporary state directory and kernel-assigned port, starts
+only the Nix-provided Postgres 16 process, waits for it, exports its maintenance
+connection as `FC_CORE_POSTGRES_TEST_URL`, and then executes the exact argument
+vector without an implicit shell. The child exit status is preserved, and
+Postgres plus the temporary state are removed on success, failure, or
+interruption.
+
+The repository gate is:
+
+```sh
+just test
+```
+
+That recipe wraps `cargo test --workspace --locked`; CI invokes the same recipe.
+Calling the Core Postgres tests without this managed environment is an error,
+not a reason to skip them. Commands that intentionally need shell evaluation
+must opt into it explicitly:
+
+```sh
+cargo run --locked -p devfinity -- run -- \
+  bash -lc 'cargo test -p example && echo done'
+```
+
 ## Apple Container host networking
 
 Devfinity first checks for Apple's official `host.container.internal` bridge.
@@ -167,14 +203,15 @@ just dev up
 just dev up --headless
 just dev saas-smoke
 just dev smoke
+just brain-product-matrix
 just dev rust-smoke
 just dev status
 just dev cleanup
 ```
 
-Passing a command after `--` starts the selected stack headlessly, waits for its
-services, runs the command with non-secret generated environment variables, and
-tears down the supervised host processes afterward.
+Passing a command after `just dev up --` starts the selected product stack
+headlessly, waits for its services, runs the command with non-secret generated
+environment variables, and tears down the supervised host processes afterward.
 
 `cleanup` is best-effort recovery for process-compose and its host process
 trees. Detached Apple Agent Runtimes intentionally remain alive so local Chat

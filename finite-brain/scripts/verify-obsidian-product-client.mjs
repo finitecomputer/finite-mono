@@ -103,13 +103,12 @@ function requireFile(filePath, label) {
 
 function readFolders() {
   return sqliteRows(
-    `SELECT id || char(9) || path || char(9) || access || char(9) || current_key_version || char(9) || shared_folder_source || char(9) || setup_incomplete
+    `SELECT id || char(9) || path || char(9) || access || char(9) || current_key_version || char(9) || setup_incomplete
      FROM folders
      WHERE brain_id = ${sqlQuote(brainId)}
      ORDER BY path;`
   ).map((line) => {
-    const [id, folderPath, access, keyVersion, sharedFolderSource, setupIncomplete] =
-      line.split("\t");
+    const [id, folderPath, access, keyVersion, setupIncomplete] = line.split("\t");
     return {
       access,
       accessUserIds: [],
@@ -117,7 +116,6 @@ function readFolders() {
       id,
       path: folderPath,
       setupIncomplete: setupIncomplete === "1",
-      sharedFolderSource: sharedFolderSource === "1",
     };
   });
 }
@@ -212,7 +210,6 @@ function checkStaticShell() {
     "accessShareHint",
     "accessShareTargetInput",
     "accessShareExpiresAtInput",
-    "accessShareMountInput",
     "createShareLinkButton",
     "accessShareLinkInput",
     "acceptShareLinkButton",
@@ -233,8 +230,8 @@ function checkStaticShell() {
     "addBrainMemberButton",
     "addBrainAdminButton",
     "brainInvitationPanel",
-    "brainInviteTargetNpubInput",
-    "brainInviteFoldersInput",
+    "brainInviteRecipientEmailInput",
+    "brainInviteFoldersOptions",
     "brainInviteExpiresAtInput",
     "createBrainInvitationButton",
     "revokeBrainInvitationButton",
@@ -243,7 +240,6 @@ function checkStaticShell() {
     "copyBrainInviteUrlButton",
     "brainInviteCodeInput",
     "brainInviteEmailInput",
-    "brainInviteEmailProofCreatedAtInput",
     "brainInviteSecretInput",
     "brainInviteConnectSignerButton",
     "getBrainInvitationButton",
@@ -262,6 +258,7 @@ function checkStaticShell() {
   ]) {
     assertIncludes(html, marker, "Product Client HTML");
   }
+  assertNotIncludes(html, 'id="accessShareMountInput"', "Product Client HTML");
   const primaryNavigationMarkup = html.match(
     /<header class="brain-header">[\s\S]*?<nav class="sidebar-primary-nav" aria-label="Primary navigation">([\s\S]*?)<\/nav>/
   )?.[1];
@@ -462,12 +459,17 @@ function checkStaticShell() {
   assert.match(
     html,
     /id="copyBrainInviteUrlButton"[^>]*aria-label="Copy private invite link"/,
-    "Product Client HTML must name the private invite copy action"
+    "Product Client HTML must name the client-only invite copy action"
   );
   assert.match(
     html,
-    /id="brainInviteSecretInput"[\s\S]{0,180}type="password"/,
-    "Product Client HTML must keep manually entered Invite Secrets masked"
+    /id="brainInviteSecretInput"[^>]*type="hidden"/,
+    "Product Client HTML must keep Invite Secrets in private link state instead of a visible form field"
+  );
+  assertNotIncludes(
+    html,
+    "brainInviteEmailProofCreatedAtInput",
+    "Product Client HTML"
   );
   assert.match(
     js,

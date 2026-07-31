@@ -6,6 +6,7 @@ const BRAIN_INVITATION_SELECT: &str = r#"
            created_at, updated_at, accepted_at, target_kind, invited_email,
            invite_unwrap_npub, bootstrap_payload_hash, bootstrap_wrapped_event_json,
            bootstrap_authorization_event_json, claimed_by_npub, bootstrap_scope_json
+           , folder_only
     FROM brain_invitations
 "#;
 
@@ -24,15 +25,10 @@ impl BrainStore {
         expires_at: &str,
         created_at: &str,
     ) -> Result<StoredBrainInvitation, StoreError> {
-        let brain = self.load_core_brain(brain_id)?;
-        if brain.kind != BrainKind::Organization {
+        let stored = self.load_brain(brain_id)?;
+        if !has_brain_operational_authority(&stored, created_by_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "brain invitations require an organization brain".to_owned(),
-            });
-        }
-        if !brain.admins.contains(created_by_npub) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "brain invitations must be created by a brain admin".to_owned(),
+                reason: "brain invitations require brain operational authority".to_owned(),
             });
         }
         if self.member_exists(brain_id, user_id)? {
@@ -42,7 +38,7 @@ impl BrainStore {
         }
         validate_link_id("brain_invitation_id", id)?;
         validate_link_id("invite_code", invite_code)?;
-        validate_link_timestamp("expiresAt", expires_at)?;
+        validate_bounded_offer_expiry(expires_at, created_at)?;
         for folder_id in initial_folder_access {
             ensure_folder_exists(&self.conn, brain_id, folder_id)?;
         }
@@ -89,24 +85,21 @@ impl BrainStore {
         invite_code: &str,
         accept_path: &str,
         selected_restricted_folder_access: &[FolderId],
+        folder_only: bool,
         created_by_npub: &UserId,
         expires_at: &str,
         created_at: &str,
     ) -> Result<StoredBrainInvitation, StoreError> {
-        let brain = self.load_core_brain(brain_id)?;
-        if brain.kind != BrainKind::Organization {
+        let stored = self.load_brain(brain_id)?;
+        let brain = &stored.brain;
+        if !has_brain_operational_authority(&stored, created_by_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "email brain invitations require an organization brain".to_owned(),
-            });
-        }
-        if !brain.admins.contains(created_by_npub) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "email brain invitations must be created by a brain admin".to_owned(),
+                reason: "email brain invitations require brain operational authority".to_owned(),
             });
         }
         validate_link_id("brain_invitation_id", id)?;
         validate_link_id("invite_code", invite_code)?;
-        validate_link_timestamp("expiresAt", expires_at)?;
+        validate_bounded_offer_expiry(expires_at, created_at)?;
         let invited_email = canonical_invited_email(invited_email)?;
         validate_required_text("bootstrapPayloadHash", bootstrap_payload_hash)?;
         validate_required_text("bootstrapWrappedEventJson", bootstrap_wrapped_event_json)?;
@@ -114,7 +107,8 @@ impl BrainStore {
             "bootstrapAuthorizationEventJson",
             bootstrap_authorization_event_json,
         )?;
-        let bootstrap_scope = email_bootstrap_scope(&brain, selected_restricted_folder_access)?;
+        let bootstrap_scope =
+            email_bootstrap_scope(brain, selected_restricted_folder_access, folder_only)?;
         let initial_folder_access = bootstrap_scope
             .iter()
             .map(|scope| scope.folder_id.clone())
@@ -126,7 +120,8 @@ impl BrainStore {
             }
         })?;
 
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             r#"
             UPDATE brain_invitations
             SET status = 'revoked',
@@ -136,44 +131,53 @@ impl BrainStore {
               AND target_kind = 'email_bootstrap'
               AND invited_email = ?2
               AND status = 'pending'
+              AND folder_only = ?4
+              AND (folder_only = 0 OR initial_folder_access_json = ?5)
             "#,
-            params![brain_id.as_str(), invited_email, created_at],
+            params![
+                brain_id.as_str(),
+                invited_email,
+                created_at,
+                i64::from(folder_only),
+                initial_folder_access_json
+            ],
         )?;
 
-        self.conn
-            .execute(
-                r#"
+        tx.execute(
+            r#"
                 INSERT INTO brain_invitations (
                     id, brain_id, user_id, target_kind, invited_email, invite_unwrap_npub,
                     bootstrap_payload_hash, bootstrap_wrapped_event_json,
                     bootstrap_authorization_event_json, bootstrap_scope_json,
                     status, invite_code, accept_path, initial_folder_access_json,
-                    created_by_npub, expires_at, created_at, updated_at
+                    created_by_npub, expires_at, created_at, updated_at, folder_only
                 )
                 VALUES (
                     ?1, ?2, NULL, 'email_bootstrap', ?3, ?4,
                     ?5, ?6, ?7, ?8,
-                    'pending', ?9, ?10, ?11, ?12, ?13, ?14, ?14
+                    'pending', ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15
                 )
                 "#,
-                params![
-                    id,
-                    brain_id.as_str(),
-                    invited_email,
-                    invite_unwrap_npub.as_str(),
-                    bootstrap_payload_hash,
-                    bootstrap_wrapped_event_json,
-                    bootstrap_authorization_event_json,
-                    bootstrap_scope_json,
-                    invite_code,
-                    accept_path,
-                    initial_folder_access_json,
-                    created_by_npub.as_str(),
-                    expires_at,
-                    created_at
-                ],
-            )
-            .map_err(map_insert_error("brain_invitation_id", id))?;
+            params![
+                id,
+                brain_id.as_str(),
+                invited_email,
+                invite_unwrap_npub.as_str(),
+                bootstrap_payload_hash,
+                bootstrap_wrapped_event_json,
+                bootstrap_authorization_event_json,
+                bootstrap_scope_json,
+                invite_code,
+                accept_path,
+                initial_folder_access_json,
+                created_by_npub.as_str(),
+                expires_at,
+                created_at,
+                i64::from(folder_only)
+            ],
+        )
+        .map_err(map_insert_error("brain_invitation_id", id))?;
+        tx.commit()?;
 
         self.load_brain_invitation(id)
     }
@@ -280,14 +284,20 @@ impl BrainStore {
         actor_npub: &UserId,
         updated_at: &str,
     ) -> Result<StoredBrainInvitation, StoreError> {
-        let brain = self.load_core_brain(brain_id)?;
-        if !brain.admins.contains(actor_npub) {
+        let stored = self.load_brain(brain_id)?;
+        if !has_brain_operational_authority(&stored, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "brain invitation revocation requires a brain admin".to_owned(),
+                reason: "brain invitation revocation requires brain operational authority"
+                    .to_owned(),
             });
         }
         let invitation = self.load_brain_invitation(invitation_id)?;
         if invitation.brain_id != *brain_id {
+            return Err(StoreError::UnavailableLink {
+                kind: "brain invitation",
+            });
+        }
+        if invitation.status != LinkStatus::Pending {
             return Err(StoreError::UnavailableLink {
                 kind: "brain invitation",
             });
@@ -356,6 +366,15 @@ impl BrainStore {
         insert_member_if_missing(&tx, &invitation.brain_id, user_id)?;
         for folder_id in restricted_initial_folder_access {
             insert_folder_access_if_missing(&tx, &invitation.brain_id, &folder_id, user_id)?;
+            insert_folder_access_source(
+                &tx,
+                &invitation.brain_id,
+                &folder_id,
+                user_id,
+                "invitation",
+                &invitation.id,
+                now,
+            )?;
         }
         tx.execute(
             r#"
@@ -372,13 +391,49 @@ impl BrainStore {
         Ok(invitation)
     }
 
-    /// Claim a pending Email Invite Bootstrap into durable npub-bound access.
+    /// Test-only claim helper that synthesizes the signed-record metadata boundary.
+    #[cfg(test)]
     pub fn claim_email_brain_invitation_by_code(
         &mut self,
         invite_code: &str,
         invited_email: &str,
         claimant: &UserId,
         grants: &[FolderKeyGrantMetadata],
+        now: &str,
+    ) -> Result<StoredBrainInvitation, StoreError> {
+        let control_records = grants
+            .iter()
+            .map(|grant| {
+                SyncRecordInput::Control(ControlSyncRecord {
+                    record_event_id: format!("{}-test-claim-control", grant.id),
+                    record_type: SyncRecordType::FolderKeyGrant,
+                    folder_id: Some(grant.folder_id.clone()),
+                    actor_npub: grant.issuer_npub.clone(),
+                    client_created_at: grant.created_at.clone(),
+                    payload_json: "{}".to_owned(),
+                    record_event_kind: NIP59_GIFT_WRAP_KIND,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.claim_email_brain_invitation_by_code_with_control_records(
+            invite_code,
+            invited_email,
+            claimant,
+            grants,
+            &control_records,
+            now,
+        )
+    }
+
+    /// Claim a pending Email Invite Bootstrap and append every Folder Key
+    /// Grant control record in the same transaction.
+    pub fn claim_email_brain_invitation_by_code_with_control_records(
+        &mut self,
+        invite_code: &str,
+        invited_email: &str,
+        claimant: &UserId,
+        grants: &[FolderKeyGrantMetadata],
+        control_records: &[SyncRecordInput],
         now: &str,
     ) -> Result<StoredBrainInvitation, StoreError> {
         let mut invitation = self
@@ -433,21 +488,33 @@ impl BrainStore {
             });
         }
         validate_email_claim_grants(&stored.brain, &invitation.bootstrap_scope, claimant, grants)?;
-        let restricted_scope = invitation
+        validate_folder_key_grant_control_records(grants, control_records)?;
+        let invited_scope = invitation
             .bootstrap_scope
             .iter()
-            .filter(|scope| scope.access == FolderAccessMode::Restricted)
             .map(|scope| scope.folder_id.clone())
             .collect::<Vec<_>>();
 
         let tx = self.conn.transaction()?;
-        insert_member_if_missing(&tx, &invitation.brain_id, claimant)?;
-        for folder_id in restricted_scope {
+        if !invitation.folder_only {
+            insert_member_if_missing(&tx, &invitation.brain_id, claimant)?;
+        }
+        for folder_id in invited_scope {
             insert_folder_access_if_missing(&tx, &invitation.brain_id, &folder_id, claimant)?;
+            insert_folder_access_source(
+                &tx,
+                &invitation.brain_id,
+                &folder_id,
+                claimant,
+                "invitation",
+                &invitation.id,
+                now,
+            )?;
         }
         for grant in grants {
             insert_grant(&tx, &invitation.brain_id, grant)?;
         }
+        sync_records::append_sync_records(&tx, &invitation.brain_id, control_records)?;
         tx.execute(
             r#"
             UPDATE brain_invitations
@@ -483,13 +550,12 @@ impl BrainStore {
         expires_at: &str,
         accept_path: &str,
         grant: &FolderKeyGrantMetadata,
-        create_personal_mount: bool,
         created_at: &str,
     ) -> Result<StoredShareLink, StoreError> {
         let stored = self.load_brain(brain_id)?;
         if !has_brain_operational_authority(&stored, created_by_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "share links require brain operational authority".to_owned(),
+                reason: "Folder Invitations require Brain operational authority".to_owned(),
             });
         }
         let folder = stored
@@ -500,13 +566,13 @@ impl BrainStore {
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: folder_id.to_string(),
             })?;
-        if folder.access != FolderAccessMode::Restricted {
+        if stored.setup_incomplete_folder_ids.contains(folder_id) {
             return Err(StoreError::BrokenInvariant {
-                reason: "share links require a restricted folder".to_owned(),
+                reason: "Folder Invitation source setup must be complete".to_owned(),
             });
         }
         validate_link_id("share_link_id", id)?;
-        validate_link_timestamp("expiresAt", expires_at)?;
+        validate_bounded_offer_expiry(expires_at, created_at)?;
         validate_grant_metadata(grant)?;
         validate_grant_issuer(
             &stored.brain,
@@ -532,7 +598,7 @@ impl BrainStore {
                 .access_change_event_json
                 .clone()
                 .ok_or_else(|| StoreError::BrokenInvariant {
-                    reason: "share link requires an access-change event".to_owned(),
+                    reason: "Folder Invitation requires an access-change event".to_owned(),
                 })?;
 
         self.conn
@@ -544,7 +610,7 @@ impl BrainStore {
                     grant_key_version, grant_wrapped_event_json, access_change_event_json,
                     create_personal_mount
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13)
+                VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, 0)
                 "#,
                 params![
                     id,
@@ -558,8 +624,7 @@ impl BrainStore {
                     grant.id,
                     grant.key_version,
                     grant.wrapped_event_json,
-                    access_change_event_json,
-                    create_personal_mount
+                    access_change_event_json
                 ],
             )
             .map_err(map_insert_error("share_link_id", id))?;
@@ -575,7 +640,7 @@ impl BrainStore {
                 SELECT id, brain_id, folder_id, recipient_npub, created_by_npub, status,
                        accept_path, expires_at, created_at, updated_at, accepted_at,
                        grant_id, grant_key_version, grant_wrapped_event_json,
-                       access_change_event_json, create_personal_mount, personal_mount_id
+                       access_change_event_json
                 FROM share_links
                 WHERE id = ?1
                 "#,
@@ -583,7 +648,9 @@ impl BrainStore {
                 share_link_from_row,
             )
             .optional()?
-            .ok_or(StoreError::UnavailableLink { kind: "share link" })
+            .ok_or(StoreError::UnavailableLink {
+                kind: "Folder Invitation",
+            })
     }
 
     /// List Share Links for one Folder, newest first, bounded by MAX_LINK_LIST_ROWS.
@@ -598,7 +665,7 @@ impl BrainStore {
             SELECT id, brain_id, folder_id, recipient_npub, created_by_npub, status,
                    accept_path, expires_at, created_at, updated_at, accepted_at,
                    grant_id, grant_key_version, grant_wrapped_event_json,
-                   access_change_event_json, create_personal_mount, personal_mount_id
+                   access_change_event_json
             FROM share_links
             WHERE brain_id = ?1 AND folder_id = ?2
             ORDER BY created_at DESC, id
@@ -636,10 +703,16 @@ impl BrainStore {
         updated_at: &str,
     ) -> Result<StoredShareLink, StoreError> {
         let share_link = self.load_share_link(share_link_id)?;
+        if share_link.status != LinkStatus::Pending {
+            return Err(StoreError::UnavailableLink {
+                kind: "Folder Invitation",
+            });
+        }
         let stored = self.load_brain(&share_link.brain_id)?;
         if !has_brain_operational_authority(&stored, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "share link revocation requires brain operational authority".to_owned(),
+                reason: "Folder Invitation revocation requires Brain operational authority"
+                    .to_owned(),
             });
         }
         self.conn.execute(
@@ -649,16 +722,19 @@ impl BrainStore {
         self.load_share_link(share_link_id)
     }
 
-    /// Accept a pending Share Link, creating membership, restricted access, grant, and optional mount state.
+    /// Accept a pending legacy Share Link as Folder-limited Guest access.
     pub fn accept_share_link(
         &mut self,
         share_link_id: &str,
         recipient_npub: &UserId,
+        control_records: &[SyncRecordInput],
         now: &str,
     ) -> Result<StoredShareLink, StoreError> {
         let mut share_link = self.load_share_link(share_link_id)?;
         if share_link.recipient_npub != *recipient_npub {
-            return Err(StoreError::UnavailableLink { kind: "share link" });
+            return Err(StoreError::UnavailableLink {
+                kind: "Folder Invitation",
+            });
         }
         if share_link.status == LinkStatus::Accepted {
             share_link.duplicate_accept = true;
@@ -675,11 +751,6 @@ impl BrainStore {
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: share_link.folder_id.to_string(),
             })?;
-        if folder.access != FolderAccessMode::Restricted {
-            return Err(StoreError::BrokenInvariant {
-                reason: "share links require a restricted folder".to_owned(),
-            });
-        }
         validate_grant_metadata(&share_link.folder_key_grant)?;
         validate_grant_issuer(
             &stored.brain,
@@ -691,56 +762,41 @@ impl BrainStore {
         )?;
         if share_link.folder_key_grant.key_version != folder.current_key_version {
             return Err(StoreError::BrokenInvariant {
-                reason: "share link grant key version must match folder current key version"
+                reason: "Folder Invitation grant key version must match Folder current key version"
                     .to_owned(),
             });
         }
+        validate_folder_key_grant_control_records(
+            std::slice::from_ref(&share_link.folder_key_grant),
+            control_records,
+        )?;
 
         let tx = self.conn.transaction()?;
-        insert_member_if_missing(&tx, &share_link.brain_id, recipient_npub)?;
-        tx.execute(
-            "INSERT INTO folder_access (brain_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
-            params![
-                share_link.brain_id.as_str(),
-                share_link.folder_id.as_str(),
-                recipient_npub.as_str()
-            ],
+        insert_folder_access_if_missing(
+            &tx,
+            &share_link.brain_id,
+            &share_link.folder_id,
+            recipient_npub,
+        )?;
+        insert_folder_access_source(
+            &tx,
+            &share_link.brain_id,
+            &share_link.folder_id,
+            recipient_npub,
+            "invitation",
+            &share_link.id,
+            now,
         )?;
         insert_grant(&tx, &share_link.brain_id, &share_link.folder_key_grant)?;
+        sync_records::append_sync_records(&tx, &share_link.brain_id, control_records)?;
 
-        let personal_mount_id = if share_link.create_personal_mount {
-            let mount_id =
-                personal_mount_id(recipient_npub, &share_link.brain_id, &share_link.folder_id);
-            tx.execute(
-                r#"
-                INSERT INTO personal_folder_mounts (
-                    id, owner_npub, source_brain_id, source_folder_id, display_name,
-                    display_parent_folder_id, created_at, updated_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?6)
-                ON CONFLICT(owner_npub, source_brain_id, source_folder_id) DO UPDATE SET
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    mount_id,
-                    recipient_npub.as_str(),
-                    share_link.brain_id.as_str(),
-                    share_link.folder_id.as_str(),
-                    folder.name.as_str(),
-                    now
-                ],
-            )?;
-            Some(mount_id)
-        } else {
-            None
-        };
         tx.execute(
             r#"
             UPDATE share_links
-            SET status = 'accepted', updated_at = ?2, accepted_at = ?2, personal_mount_id = ?3
+            SET status = 'accepted', updated_at = ?2, accepted_at = ?2
             WHERE id = ?1 AND status = 'pending'
             "#,
-            params![share_link_id, now, personal_mount_id],
+            params![share_link_id, now],
         )?;
         tx.commit()?;
 

@@ -18,22 +18,9 @@ jobs:
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      FC_CORE_POSTGRES_TEST_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
 
       - name: Install Rust
         # Pinned to 1.93: 1.88's clippy trips uninlined_format_args on v2
@@ -55,7 +42,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test workspace
-        run: cargo test --workspace --locked
+        run: nix develop --command just test
 
   dashboard:
     name: Dashboard
@@ -242,3 +229,25 @@ jobs:
             echo "===== $f ====="
             tail -50 "$f" || true
           done
+
+  brain-product-matrix:
+    name: Brain full-product matrix
+    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Containerized failures preserve root-owned diagnostics. Use a fresh
+          # checkout per attempt so those artifacts cannot poison checkout.
+          path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
+        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+        run: nix develop --command just brain-product-matrix
+      - name: Upload boundary report and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brain-product-matrix
+          path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}/target/brain-product-matrix
+          if-no-files-found: error

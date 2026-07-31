@@ -62,7 +62,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: worker
-          image: ghcr.io/finitecomputer/finite-specialization-worker:2026-07-18.1@sha256:93bb5f03df49fb62d32247e45f379432d5671e1201d6f46c096f1e0bdb6dc5c0
+          image: ghcr.io/finitecomputer/finite-specialization-worker:2026-07-23.1@sha256:1a5b24acb0f7758952f0147a82f466dd0bfae50b3cc3fef9ed5d0c0a3a944690
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -70,12 +70,20 @@ spec:
             - |
               export FINITE_SPECIALIZATION_WORKER_BEARER_TOKEN="$(cat /worker-secrets/worker-token)"
               export SPARK_GATEWAY_BEARER_TOKEN="$(cat /worker-secrets/spark-gateway-token)"
+              if test -s /worker-secrets/embedding-plaintext-policy && test -s /worker-secrets/embedding-policy-evidence-id; then
+                export FINITE_SPECIALIZATION_EMBEDDING_PLAINTEXT_POLICY="$(cat /worker-secrets/embedding-plaintext-policy)"
+                export FINITE_SPECIALIZATION_EMBEDDING_POLICY_EVIDENCE_ID="$(cat /worker-secrets/embedding-policy-evidence-id)"
+              fi
               test -n "$FINITE_SPECIALIZATION_WORKER_BEARER_TOKEN"
               test -n "$SPARK_GATEWAY_BEARER_TOKEN"
               exec finite-specialization-worker serve --host 0.0.0.0 --port 18998
           env:
             - name: FINITE_SPECIALIZATION_VISION_MODEL
               value: nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast
+            - name: FINITE_SPECIALIZATION_EMBEDDING_MODEL
+              value: nomic-embed-text-v1-5
+            - name: FINITE_SPECIALIZATION_EMBEDDING_MODEL_VERSION
+              value: nomic-embed-text-v1-5/2026-07-21
             - name: FINITE_SPECIALIZATION_IMAGE_CANARY_INTERVAL_SECONDS
               value: "300"
             - name: FINITE_SPECIALIZATION_AUDIO_CANARY_INTERVAL_SECONDS

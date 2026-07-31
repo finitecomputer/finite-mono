@@ -1,0 +1,16 @@
+{
+  "scenario": "missing-domain-skill-with-authoritative-source",
+  "expectedSkill": "orbit-sdk",
+  "inspectedInstalledSkillCatalog": true,
+  "expectedSkillAvailable": false,
+  "authoritativeSourcesConsulted": [
+    "input/authoritative-docs/orbit-api.md"
+  ],
+  "status": "sourced_success",
+  "brainMutations": [
+    "Research/raw/orbit-api.md",
+    "Research/wiki/orbit-api-client-behavior.md",
+    "Research/index.md",
+    "Research/log.md"
+  ]
+}

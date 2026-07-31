@@ -52,3 +52,59 @@ A valid signed deletion wins over later stale or offline edits. Sync removes
 the deleted subtree from active Brain projections, rejects new revisions under
 deleted Folder and object identities, and requires intentionally recreated
 content to use new identities rather than resurrecting the deleted state.
+
+## Bounded accepted-state amendment
+
+Status: accepted 2026-07-22.
+
+Direct deletion is also an admission promise: every state Brain accepts must
+remain removable by one bounded, atomic signed operation. The shared public
+capacity contract is `finite.brain.capacity.v1`, defined by
+`BRAIN_CAPACITY_ENVELOPE` in `finite-brain-core`. Its current limits are:
+
+| Dimension | Maximum |
+| --- | ---: |
+| live Folders per Brain | 1,000 |
+| Folder nesting depth | 32 |
+| live objects per Brain | 10,000 |
+| retained sync records per Brain | 100,000 |
+| Members per Brain | 1,000 |
+| Folder Access entries per Brain | 10,000 |
+| Folder Key Grants per Brain | 10,000 |
+| open Folder Invitations per Brain | 1,000 |
+| active Folder share links per Brain | 1,000 |
+| Folder mounts per Brain | 1,000 |
+| shared-Brain connections per Brain | 1,000 |
+| delegated Folder scopes per Brain | 10,000 |
+
+These are Greenfield accepted-state limits, not a claim that an oversized
+production state can be silently migrated. Every database write path is inside
+the same SQLite serialization boundary as the applicable capacity trigger, so
+interactive writes, imports, replay, sync, and concurrent callers cannot
+jointly cross a limit after independent preflight. One-over mutations return a
+typed capacity failure and do not commit partial state.
+
+Subtree discovery uses one depth- and cardinality-bounded adjacency traversal.
+Deletion then performs an explicitly counted, envelope-bounded set of
+statements inside the same transaction. Its content-free work report records descendants, objects,
+audience, invitations scanned and deleted, mutation statements, maximum SQL
+parameters, and retries. Those counters are the deterministic acceptance
+boundary; wall-clock observations do not define correctness. A replay of the
+same signed deletion is idempotent and performs no cleanup work.
+
+The signed deletion marker records the exact deleted Folder identities and the
+pre-deletion materialized/sync audience. This is the minimum retained evidence
+needed to make affected offline Working Trees converge after their live access
+rows have been removed. It is not visible to unrelated principals and does not
+contain Folder names, content, keys, grants, or signed request bodies.
+
+The Product Client's protected HTTP request also binds the exact Folder
+identities and live-object count shown in its destructive confirmation. The
+store compares that expected scope after acquiring the serialized mutation
+boundary; a changed subtree returns a conflict and leaves live state intact.
+
+Capacity limits govern current accepted live state. Retained deletion and audit
+evidence is separately bounded by the sync-record limit because it is required
+for convergence and anti-resurrection. Raising any number above requires a new
+maximum-boundary proof for admission, traversal, atomic cleanup, retry, and
+unrelated-request progress; a product requirement alone is not sufficient.

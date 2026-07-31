@@ -7,11 +7,21 @@ use serde::Deserialize;
 
 use crate::{
     AccessExplanation, AgentState, AuthStatus, CliEnvironment, CliError, ConflictState,
-    DaemonRunState, DaemonStatus, StatusReport, SyncStatus, identity_paths, load_identity_optional,
-    option_value, timestamp, validate_private_working_tree,
-    validate_working_tree_managed_structure, write_json_file,
-    write_private_file_atomic_for_migration,
+    DaemonStatus, StatusReport, SyncStatus, identity_paths, load_identity_optional, option_value,
+    timestamp, validate_private_working_tree, validate_working_tree_managed_structure,
+    write_json_file, write_private_file_atomic_for_migration,
 };
+
+pub(crate) fn write_working_tree_state(
+    root: &Path,
+    tree: &BrainWorkingTreeStateManifest,
+) -> Result<(), CliError> {
+    let revocation_guards =
+        crate::search::revoke_search_admission_before_state_publish(root, tree)?;
+    write_json_file(&root.join(".finitebrain/working-tree-state.json"), tree)?;
+    drop(revocation_guards);
+    crate::search::finish_search_lifecycle_after_state_publish(root, tree)
+}
 
 /// Report the shared Finite identity without touching it: status never mints
 /// (finite-identity CLI-CONVENTIONS.md).
@@ -41,7 +51,7 @@ pub(crate) fn auth_status(env: &CliEnvironment) -> Result<AuthStatus, CliError> 
 
 pub(crate) fn daemon_status(env: &CliEnvironment) -> Result<DaemonStatus, CliError> {
     let state = load_current_agent_state(env)?;
-    Ok(daemon_status_from_state(&state))
+    Ok(daemon_status_from_state(&state, live_supervisor_state(env)))
 }
 
 pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliError> {
@@ -55,6 +65,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
             daemon: DaemonStatus {
                 state: "missing".to_owned(),
                 sync_mode: "automatic".to_owned(),
+                notification_status: None,
                 last_started_at: None,
                 last_tick_at: None,
                 last_error: None,
@@ -88,7 +99,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
                 .to_owned(),
         );
     }
-    if state.daemon.state != DaemonRunState::Running {
+    if !live_supervisor_state(env) {
         blocked.push("daemon not running".to_owned());
     }
     if !open_conflicts.is_empty() {
@@ -98,7 +109,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
         brain_id: Some(state.brain_id.clone()),
         working_tree_path: Some(root.display().to_string()),
         auth,
-        daemon: daemon_status_from_state(&state),
+        daemon: daemon_status_from_state(&state, live_supervisor_state(env)),
         sync: SyncStatus {
             mode: state.sync.mode,
             status: state.sync.status,
@@ -109,10 +120,30 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
     })
 }
 
-fn daemon_status_from_state(state: &AgentState) -> DaemonStatus {
+fn live_supervisor_state(env: &CliEnvironment) -> bool {
+    crate::supervisor_is_running(env)
+}
+
+fn daemon_status_from_state(state: &AgentState, running: bool) -> DaemonStatus {
+    let live_state = if state.sync.status == "paused-access-revoked" {
+        "paused"
+    } else if state.daemon.notification_status.as_deref() == Some("reconnecting")
+        || state.sync.status == "reconnecting"
+    {
+        "reconnecting"
+    } else if state.daemon.notification_status.as_deref() == Some("unsupported") {
+        "degraded"
+    } else if state.sync.status.starts_with("blocked") {
+        "blocked"
+    } else if running {
+        "running"
+    } else {
+        "stopped"
+    };
     DaemonStatus {
-        state: state.daemon.state.to_string(),
+        state: live_state.to_owned(),
         sync_mode: state.sync.mode.clone(),
+        notification_status: state.daemon.notification_status.clone(),
         last_started_at: state.daemon.last_started_at.clone(),
         last_tick_at: state.daemon.last_tick_at.clone(),
         last_error: state.daemon.last_error.clone(),
@@ -164,6 +195,44 @@ pub(crate) fn explain_access(
 
 pub(crate) fn current_tree_root(env: &CliEnvironment) -> Result<PathBuf, CliError> {
     find_agent_state(&env.cwd)?.ok_or(CliError::MissingWorkingTree)
+}
+
+pub(crate) fn current_folder_id(env: &CliEnvironment) -> Result<String, CliError> {
+    let root = current_tree_root(env)?;
+    let tree = read_working_tree_state(&root)?;
+    let relative = env.cwd.strip_prefix(&root).map_err(|_| {
+        CliError::InvalidInput(
+            "current directory is outside the discovered Brain Working Tree".to_owned(),
+        )
+    })?;
+    let mut matches = tree
+        .folder_roots
+        .iter()
+        .filter_map(|folder| {
+            let folder_path = Path::new(&folder.path);
+            relative
+                .starts_with(folder_path)
+                .then_some((folder_path.components().count(), folder))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+    let Some((deepest, folder)) = matches.first().copied() else {
+        return Err(CliError::InvalidInput(
+            "current directory is not inside a managed Folder; cd into a Folder or pass its id explicitly"
+                .to_owned(),
+        ));
+    };
+    if matches
+        .iter()
+        .skip(1)
+        .any(|(depth, candidate)| *depth == deepest && candidate.folder_id != folder.folder_id)
+    {
+        return Err(CliError::InvalidInput(
+            "current directory matches multiple managed Folders; pass the Folder id explicitly"
+                .to_owned(),
+        ));
+    }
+    Ok(folder.folder_id.clone())
 }
 
 pub(crate) fn load_current_agent_state(env: &CliEnvironment) -> Result<AgentState, CliError> {
@@ -292,7 +361,12 @@ pub(crate) fn command_brain_id(args: &[String], env: &CliEnvironment) -> Result<
     if let Some(brain_id) = option_value(args, "--brain") {
         return Ok(brain_id);
     }
-    current_brain_id(env)?.ok_or(CliError::MissingArgument("brain-id or --brain"))
+    current_brain_id(env)?.ok_or_else(|| {
+        CliError::InvalidInput(
+            "No active Brain Working Tree was found. Run `fbrain brain list`, open the intended Brain, then retry from inside that Working Tree; advanced automation may pass `--brain <brain-id>`."
+                .to_owned(),
+        )
+    })
 }
 
 pub(crate) fn current_brain_id(env: &CliEnvironment) -> Result<Option<String>, CliError> {

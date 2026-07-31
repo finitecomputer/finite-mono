@@ -50,7 +50,6 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   their internal layout; their crates are root workspace members and their
   old sub-workspace `Cargo.toml`/`Cargo.lock` files stay deleted. New crates
   get added to the root members list.
-- Update `docs/monorepo-migration-log.md` when recording migration facts.
 
 ## Development Environment
 
@@ -72,3 +71,11 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
 lint/test/build, the finitechat Hermes bridge suite, and skills/search static
 checks. Release and image workflows are described in `infra/images/README.md`
 and the workflow files themselves.
+
+## Agent skills
+
+- **Issue tracker:** GitHub. See `docs/agents/issue-tracker.md`.
+- **Triage labels:** Canonical Matt Pocock skill labels. See
+  `docs/agents/triage-labels.md`.
+- **Domain documentation:** Multi-context monorepo guidance. See
+  `docs/agents/domain.md`.

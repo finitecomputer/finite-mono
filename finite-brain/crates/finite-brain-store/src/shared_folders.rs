@@ -1,35 +1,40 @@
 use crate::*;
 
 impl BrainStore {
-    pub fn mark_shared_folder_source(
-        &mut self,
-        brain_id: &BrainId,
-        folder_id: &FolderId,
-    ) -> Result<(), StoreError> {
-        let stored = self.load_brain(brain_id)?;
-        let folder = stored
-            .brain
-            .folders
-            .iter()
-            .find(|folder| folder.id == *folder_id)
-            .ok_or_else(|| StoreError::MissingFolder {
-                folder_id: folder_id.to_string(),
-            })?;
-        if folder.access != FolderAccessMode::Restricted {
-            return Err(StoreError::BrokenInvariant {
-                reason: "shared folder sources must be restricted folders".to_owned(),
-            });
-        }
-        if stored.setup_incomplete_folder_ids.contains(folder_id) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "shared folder source setup must be complete".to_owned(),
-            });
-        }
-        self.conn.execute(
-            "UPDATE folders SET shared_folder_source = 1 WHERE brain_id = ?1 AND id = ?2",
-            params![brain_id.as_str(), folder_id.as_str()],
+    pub(crate) fn list_active_destination_mounts_for_participant(
+        &self,
+        destination_brain_id: &BrainId,
+        participant: &UserId,
+    ) -> Result<Vec<StoredSharedFolderConnection>, StoreError> {
+        let limit = BRAIN_CAPACITY_ENVELOPE.mounts + 1;
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT connections.id
+            FROM shared_folder_connections connections
+            JOIN shared_folder_connection_members participants
+              ON participants.connection_id = connections.id
+            WHERE connections.destination_brain_id = ?1
+              AND connections.status = 'active'
+              AND participants.member_npub = ?2
+            ORDER BY connections.created_at DESC, connections.id ASC
+            LIMIT ?3
+            "#,
         )?;
-        Ok(())
+        let ids = stmt
+            .query_map(
+                params![destination_brain_id.as_str(), participant.as_str(), limit],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.len() > BRAIN_CAPACITY_ENVELOPE.mounts {
+            return Err(StoreError::BrokenInvariant {
+                reason: "active destination Mount participation exceeds the capacity envelope"
+                    .to_owned(),
+            });
+        }
+        ids.into_iter()
+            .map(|id| self.load_shared_folder_connection(&id))
+            .collect()
     }
 
     /// Create a Shared Folder Invitation from a source Folder to a destination Organization admin.
@@ -44,6 +49,7 @@ impl BrainStore {
         created_by_npub: &UserId,
         accept_path: &str,
         grant: &FolderKeyGrantMetadata,
+        expires_at: &str,
         created_at: &str,
     ) -> Result<StoredSharedFolderInvitation, StoreError> {
         let source = self.load_brain(source_brain_id)?;
@@ -57,16 +63,7 @@ impl BrainStore {
             })?;
         if !has_brain_operational_authority(&source, created_by_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitations require source brain operational authority"
-                    .to_owned(),
-            });
-        }
-        if !source_folder.shared_folder_source
-            || source_folder.access != FolderAccessMode::Restricted
-        {
-            return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitations require a restricted shared folder source"
-                    .to_owned(),
+                reason: "Mount Offers require source Brain operational authority".to_owned(),
             });
         }
         if source
@@ -74,22 +71,17 @@ impl BrainStore {
             .contains(source_folder_id)
         {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder source setup must be complete".to_owned(),
+                reason: "Mount Offer source Folder setup must be complete".to_owned(),
             });
         }
         let destination = self.load_brain(destination_brain_id)?;
-        if destination.brain.kind != BrainKind::Organization {
+        if !has_brain_operational_authority(&destination, destination_admin_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder destination must be an organization brain".to_owned(),
-            });
-        }
-        if !destination.brain.admins.contains(destination_admin_npub) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitation target must be a destination brain admin"
-                    .to_owned(),
+                reason: "mount offer target must control the destination brain".to_owned(),
             });
         }
         validate_link_id("shared_folder_invitation_id", id)?;
+        validate_bounded_offer_expiry(expires_at, created_at)?;
         validate_grant_metadata(grant)?;
         validate_grant_issuer(
             &source.brain,
@@ -105,7 +97,7 @@ impl BrainStore {
             || grant.issuer_npub != *created_by_npub
         {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitation grant must match source folder, key version, issuer, and destination admin"
+                reason: "Mount Offer grant must match source Folder, key version, issuer, and destination controller"
                     .to_owned(),
             });
         }
@@ -114,7 +106,7 @@ impl BrainStore {
                 .access_change_event_json
                 .clone()
                 .ok_or_else(|| StoreError::BrokenInvariant {
-                    reason: "shared folder invitation requires an access-change event".to_owned(),
+                    reason: "Mount Offer requires an access-change event".to_owned(),
                 })?;
 
         self.conn
@@ -124,9 +116,9 @@ impl BrainStore {
                     id, source_brain_id, source_folder_id, destination_brain_id,
                     destination_admin_npub, created_by_npub, status, current_key_version,
                     accept_path, created_at, updated_at, grant_id, grant_wrapped_event_json,
-                    access_change_event_json
+                    access_change_event_json, expires_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?9, ?10, ?11, ?12)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?9, ?10, ?11, ?12, ?13)
                 "#,
                 params![
                     id,
@@ -140,7 +132,8 @@ impl BrainStore {
                     created_at,
                     grant.id,
                     grant.wrapped_event_json,
-                    access_change_event_json
+                    access_change_event_json,
+                    expires_at
                 ],
             )
             .map_err(map_insert_error("shared_folder_invitation_id", id))?;
@@ -159,7 +152,7 @@ impl BrainStore {
                 SELECT id, source_brain_id, source_folder_id, destination_brain_id,
                        destination_admin_npub, created_by_npub, status, current_key_version,
                        accept_path, created_at, updated_at, accepted_at, grant_id,
-                       grant_wrapped_event_json, access_change_event_json
+                       grant_wrapped_event_json, access_change_event_json, expires_at
                 FROM shared_folder_invitations
                 WHERE id = ?1
                 "#,
@@ -168,7 +161,7 @@ impl BrainStore {
             )
             .optional()?
             .ok_or(StoreError::UnavailableLink {
-                kind: "shared folder invitation",
+                kind: "Mount Offer",
             })
     }
 
@@ -189,7 +182,7 @@ impl BrainStore {
             SELECT id, source_brain_id, source_folder_id, destination_brain_id,
                    destination_admin_npub, created_by_npub, status, current_key_version,
                    accept_path, created_at, updated_at, accepted_at, grant_id,
-                   grant_wrapped_event_json, access_change_event_json
+                   grant_wrapped_event_json, access_change_event_json, expires_at
             FROM shared_folder_invitations
             WHERE {column} = ?1
             ORDER BY created_at DESC, id
@@ -253,10 +246,15 @@ impl BrainStore {
         updated_at: &str,
     ) -> Result<StoredSharedFolderInvitation, StoreError> {
         let invitation = self.load_shared_folder_invitation(invitation_id)?;
+        if invitation.status != LinkStatus::Pending {
+            return Err(StoreError::UnavailableLink {
+                kind: "Mount Offer",
+            });
+        }
         let source = self.load_brain(&invitation.source_brain_id)?;
         if !has_brain_operational_authority(&source, actor_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitation revocation requires source brain operational authority"
+                reason: "Mount Offer revocation requires source Brain operational authority"
                     .to_owned(),
             });
         }
@@ -268,27 +266,32 @@ impl BrainStore {
     }
 
     /// Accept a Shared Folder Invitation, creating/reusing connection and Organization Mount.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept_shared_folder_invitation(
         &mut self,
         invitation_id: &str,
         destination_admin_npub: &UserId,
         connection_id: &str,
         mount_id: &str,
+        supplemental_grants: &[FolderKeyGrantMetadata],
+        control_records: &[SyncRecordInput],
         now: &str,
     ) -> Result<StoredSharedFolderInvitation, StoreError> {
         let mut invitation = self.load_shared_folder_invitation(invitation_id)?;
         if invitation.destination_admin_npub != *destination_admin_npub {
             return Err(StoreError::UnavailableLink {
-                kind: "shared folder invitation",
+                kind: "Mount Offer",
             });
         }
         if invitation.status == LinkStatus::Accepted {
             invitation.duplicate_accept = true;
             return Ok(invitation);
         }
-        if invitation.status != LinkStatus::Pending {
+        if invitation.status != LinkStatus::Pending
+            || timestamp_expired(&invitation.expires_at, now)
+        {
             return Err(StoreError::UnavailableLink {
-                kind: "shared folder invitation",
+                kind: "Mount Offer",
             });
         }
 
@@ -301,14 +304,12 @@ impl BrainStore {
             .ok_or_else(|| StoreError::MissingFolder {
                 folder_id: invitation.source_folder_id.to_string(),
             })?;
-        if !source_folder.shared_folder_source
-            || source_folder.access != FolderAccessMode::Restricted
-            || source
-                .setup_incomplete_folder_ids
-                .contains(&invitation.source_folder_id)
+        if source
+            .setup_incomplete_folder_ids
+            .contains(&invitation.source_folder_id)
         {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitation source is not usable".to_owned(),
+                reason: "Mount Offer source Folder is not usable".to_owned(),
             });
         }
         validate_grant_metadata(&invitation.folder_key_grant)?;
@@ -322,10 +323,52 @@ impl BrainStore {
         )?;
         if invitation.folder_key_grant.key_version != source_folder.current_key_version {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder invitation grant key version must match source folder"
+                reason: "Mount Offer grant key version must match source Folder".to_owned(),
+            });
+        }
+        let destination = self.load_brain(&invitation.destination_brain_id)?;
+        if !has_brain_operational_authority(&destination, destination_admin_npub) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "mount acceptance requires destination brain control".to_owned(),
+            });
+        }
+        let mut participants = BTreeSet::from([destination_admin_npub.clone()]);
+        if destination.brain.kind == BrainKind::Personal {
+            if let Some(owner) = destination.brain.owner_user_id.as_ref() {
+                participants.insert(owner.clone());
+            }
+            if let Some(agent) = destination.personal_agent.as_ref() {
+                participants.insert(agent.agent_npub.clone());
+            }
+        }
+        let mut participant_grants = BTreeMap::from([(
+            invitation.folder_key_grant.recipient_npub.clone(),
+            invitation.folder_key_grant.clone(),
+        )]);
+        for grant in supplemental_grants {
+            validate_grant_metadata(grant)?;
+            if grant.folder_id != invitation.source_folder_id
+                || grant.key_version != source_folder.current_key_version
+                || grant.issuer_npub != *destination_admin_npub
+            {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "mount participant grant does not match the source Folder or accepting controller"
+                        .to_owned(),
+                });
+            }
+            participant_grants.insert(grant.recipient_npub.clone(), grant.clone());
+        }
+        if participant_grants.keys().cloned().collect::<BTreeSet<_>>() != participants {
+            return Err(StoreError::BrokenInvariant {
+                reason: "mount acceptance requires one current Folder Key Grant for every initial participant"
                     .to_owned(),
             });
         }
+        let all_grants = std::iter::once(&invitation.folder_key_grant)
+            .chain(supplemental_grants)
+            .cloned()
+            .collect::<Vec<_>>();
+        validate_folder_key_grant_control_records(&all_grants, control_records)?;
 
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -349,12 +392,12 @@ impl BrainStore {
         )?;
         tx.execute(
             r#"
-            INSERT INTO organization_folder_mounts (
-                id, organization_brain_id, source_brain_id, source_folder_id, connection_id,
+            INSERT INTO folder_mounts (
+                id, destination_brain_id, source_brain_id, source_folder_id, connection_id,
                 display_name, display_parent_folder_id, created_by_npub, created_at, updated_at
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?8)
-            ON CONFLICT(organization_brain_id, source_brain_id, source_folder_id)
+            ON CONFLICT(destination_brain_id, source_brain_id, source_folder_id)
             DO UPDATE SET connection_id = excluded.connection_id, updated_at = excluded.updated_at
             "#,
             params![
@@ -368,22 +411,37 @@ impl BrainStore {
                 now
             ],
         )?;
-        insert_member_if_missing(&tx, &invitation.source_brain_id, destination_admin_npub)?;
-        insert_folder_access_if_missing(
-            &tx,
-            &invitation.source_brain_id,
-            &invitation.source_folder_id,
-            destination_admin_npub,
-        )?;
-        insert_grant_or_ignore(
-            &tx,
-            &invitation.source_brain_id,
-            &invitation.folder_key_grant,
-        )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO shared_folder_connection_members (connection_id, member_npub, created_at) VALUES (?1, ?2, ?3)",
-            params![connection_id, destination_admin_npub.as_str(), now],
-        )?;
+        for participant in &participants {
+            insert_folder_access_if_missing(
+                &tx,
+                &invitation.source_brain_id,
+                &invitation.source_folder_id,
+                participant,
+            )?;
+            insert_folder_access_source(
+                &tx,
+                &invitation.source_brain_id,
+                &invitation.source_folder_id,
+                participant,
+                "mount",
+                connection_id,
+                now,
+            )?;
+            insert_grant_or_ignore(
+                &tx,
+                &invitation.source_brain_id,
+                participant_grants
+                    .get(participant)
+                    .expect("participant grants checked above"),
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO shared_folder_connection_members
+                 (connection_id, member_npub, created_at, manages_folder_access)
+                 VALUES (?1, ?2, ?3, 0)",
+                params![connection_id, participant.as_str(), now],
+            )?;
+        }
+        sync_records::append_sync_records(&tx, &invitation.source_brain_id, control_records)?;
         tx.execute(
             "UPDATE shared_folder_invitations SET status = 'accepted', updated_at = ?2, accepted_at = ?2 WHERE id = ?1 AND status = 'pending'",
             params![invitation_id, now],
@@ -399,6 +457,7 @@ impl BrainStore {
         connection_id: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
         let members = self.load_connection_members(connection_id)?;
+        let managed_access_npubs = self.load_connection_managed_access_members(connection_id)?;
         self.conn
             .query_row(
                 r#"
@@ -408,33 +467,35 @@ impl BrainStore {
                 WHERE id = ?1
                 "#,
                 params![connection_id],
-                |row| shared_folder_connection_from_row(row, members),
+                |row| {
+                    let mut connection = shared_folder_connection_from_row(row, members)?;
+                    connection.managed_access_npubs = managed_access_npubs;
+                    Ok(connection)
+                },
             )
             .optional()?
-            .ok_or(StoreError::UnavailableLink {
-                kind: "shared folder connection",
-            })
+            .ok_or(StoreError::UnavailableLink { kind: "Mount" })
     }
 
-    /// Load Organization Folder Mounts for one destination Brain.
-    pub fn load_organization_folder_mounts(
+    /// Load Folder Mounts for one destination Brain.
+    pub fn load_folder_mounts(
         &self,
-        organization_brain_id: &BrainId,
-    ) -> Result<Vec<StoredOrganizationFolderMount>, StoreError> {
-        self.require_brain_exists(organization_brain_id)?;
+        destination_brain_id: &BrainId,
+    ) -> Result<Vec<StoredFolderMount>, StoreError> {
+        self.require_brain_exists(destination_brain_id)?;
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, organization_brain_id, source_brain_id, source_folder_id,
+            SELECT id, destination_brain_id, source_brain_id, source_folder_id,
                    connection_id, display_name, display_parent_folder_id,
                    created_by_npub, created_at, updated_at
-            FROM organization_folder_mounts
-            WHERE organization_brain_id = ?1
+            FROM folder_mounts
+            WHERE destination_brain_id = ?1
             ORDER BY id
             "#,
         )?;
         let rows = stmt.query_map(
-            params![organization_brain_id.as_str()],
-            organization_mount_from_row,
+            params![destination_brain_id.as_str()],
+            folder_mount_from_row,
         )?;
         let mut mounts = Vec::new();
         for row in rows {
@@ -443,13 +504,76 @@ impl BrainStore {
         Ok(mounts)
     }
 
-    /// Project Organization Folder Mounts as client-visible source-backed Folders.
+    /// List historical Mount access whose original ownership requires repair.
+    pub fn load_legacy_folder_access_source_repairs(
+        &self,
+    ) -> Result<Vec<LegacyFolderAccessSourceRepair>, StoreError> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT connection_id, brain_id, folder_id, user_id, reason, created_at
+            FROM legacy_folder_access_source_repairs
+            WHERE status = 'repair'
+            ORDER BY connection_id, user_id
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(LegacyFolderAccessSourceRepair {
+                connection_id: row.get(0)?,
+                brain_id: BrainId::new(row.get::<_, String>(1)?)
+                    .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
+                folder_id: FolderId::new(row.get::<_, String>(2)?)
+                    .map_err(to_from_sql_error(2, rusqlite::types::Type::Text))?,
+                user_id: UserId::new(row.get::<_, String>(3)?)
+                    .map_err(to_from_sql_error(3, rusqlite::types::Type::Text))?,
+                reason: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        let mut repairs = Vec::new();
+        for row in rows {
+            repairs.push(row?);
+        }
+        Ok(repairs)
+    }
+
+    /// List historical Personal Mount rows that require explicit operator repair.
+    pub fn load_legacy_personal_mount_repairs(
+        &self,
+    ) -> Result<Vec<LegacyPersonalMountRepair>, StoreError> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT legacy_mount_id, destination_brain_id, reason, updated_at
+            FROM legacy_personal_mount_migrations
+            WHERE status = 'repair'
+            ORDER BY legacy_mount_id
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            let destination_brain_id = row.get::<_, Option<String>>(1)?;
+            Ok(LegacyPersonalMountRepair {
+                legacy_mount_id: row.get(0)?,
+                destination_brain_id: destination_brain_id
+                    .map(BrainId::new)
+                    .transpose()
+                    .map_err(to_from_sql_error(1, rusqlite::types::Type::Text))?,
+                reason: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })?;
+        let mut repairs = Vec::new();
+        for row in rows {
+            repairs.push(row?);
+        }
+        Ok(repairs)
+    }
+
+    /// Project Folder Mounts as client-visible source-backed Folders.
     pub fn mounted_folder_projection(
         &self,
-        organization_brain_id: &BrainId,
+        destination_brain_id: &BrainId,
         actor_npub: &UserId,
     ) -> Result<Vec<MountedFolderProjection>, StoreError> {
-        let mounts = self.load_organization_folder_mounts(organization_brain_id)?;
+        let mounts = self.load_folder_mounts(destination_brain_id)?;
         let mut projections = Vec::new();
         for mount in mounts {
             let connection = self.load_shared_folder_connection(&mount.connection_id)?;
@@ -466,7 +590,7 @@ impl BrainStore {
             };
             projections.push(MountedFolderProjection {
                 mount_id: mount.id,
-                organization_brain_id: mount.organization_brain_id,
+                destination_brain_id: mount.destination_brain_id,
                 source_brain_id: mount.source_brain_id,
                 source_folder_id: mount.source_folder_id,
                 connection_id: mount.connection_id,
@@ -478,13 +602,14 @@ impl BrainStore {
         Ok(projections)
     }
 
-    /// Add a destination Organization member to a Shared Folder Connection.
+    /// Add one destination-governed identity to a Shared Folder Connection.
     pub fn add_shared_folder_connection_member(
         &mut self,
         connection_id: &str,
         actor_npub: &UserId,
         target_npub: &UserId,
         grant: &FolderKeyGrantMetadata,
+        control_records: &[SyncRecordInput],
         created_at: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
         let connection = self.load_shared_folder_connection(connection_id)?;
@@ -506,18 +631,30 @@ impl BrainStore {
             actor_npub,
             target_npub,
         )?;
+        validate_folder_key_grant_control_records(std::slice::from_ref(grant), control_records)?;
 
         let tx = self.conn.transaction()?;
-        insert_member_if_missing(&tx, &connection.source_brain_id, target_npub)?;
         insert_folder_access_if_missing(
             &tx,
             &connection.source_brain_id,
             &connection.source_folder_id,
             target_npub,
         )?;
-        insert_grant(&tx, &connection.source_brain_id, grant)?;
+        insert_folder_access_source(
+            &tx,
+            &connection.source_brain_id,
+            &connection.source_folder_id,
+            target_npub,
+            "mount",
+            connection_id,
+            created_at,
+        )?;
+        insert_grant_or_ignore(&tx, &connection.source_brain_id, grant)?;
+        sync_records::append_sync_records(&tx, &connection.source_brain_id, control_records)?;
         tx.execute(
-            "INSERT OR IGNORE INTO shared_folder_connection_members (connection_id, member_npub, created_at) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO shared_folder_connection_members
+             (connection_id, member_npub, created_at, manages_folder_access)
+             VALUES (?1, ?2, ?3, 0)",
             params![connection_id, target_npub.as_str(), created_at],
         )?;
         tx.commit()?;
@@ -534,6 +671,7 @@ impl BrainStore {
         target_npub: &UserId,
         new_key_version: u32,
         grants: &[FolderKeyGrantMetadata],
+        control_records: &[SyncRecordInput],
         reencrypted_records: &[FolderObjectRevisionSyncRecord],
         updated_at: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
@@ -541,20 +679,41 @@ impl BrainStore {
         self.validate_destination_admin_for_connection(&connection, actor_npub)?;
         if target_npub == &connection.destination_admin_npub {
             return Err(StoreError::BrokenInvariant {
-                reason: "destination admin access must be kept while the connection is active"
-                    .to_owned(),
+                reason:
+                    "destination controller must remain a participant while the Mount is active"
+                        .to_owned(),
             });
         }
         if !connection.member_npubs.contains(target_npub) {
             return Err(StoreError::BrokenInvariant {
-                reason: "connection member does not exist".to_owned(),
+                reason: "Mount Participant does not exist".to_owned(),
             });
+        }
+        if !connection.managed_access_npubs.contains(target_npub) {
+            validate_folder_key_grant_control_records(grants, control_records)?;
+            let tx = self.conn.transaction()?;
+            delete_folder_access_source(
+                &tx,
+                &connection.source_brain_id,
+                &connection.source_folder_id,
+                target_npub,
+                "mount",
+                connection_id,
+            )?;
+            tx.execute(
+                "DELETE FROM shared_folder_connection_members
+                 WHERE connection_id = ?1 AND member_npub = ?2",
+                params![connection_id, target_npub.as_str()],
+            )?;
+            tx.commit()?;
+            return self.load_shared_folder_connection(connection_id);
         }
         let removed_user_ids = BTreeSet::from([target_npub.clone()]);
         let rotation = SharedFolderAccessRemoval {
             removed_user_ids: &removed_user_ids,
             new_key_version,
             grants,
+            control_records,
             reencrypted_records,
             updated_at,
         };
@@ -563,6 +722,14 @@ impl BrainStore {
             actor_npub,
             rotation,
             |tx| {
+                delete_folder_access_source(
+                    tx,
+                    &connection.source_brain_id,
+                    &connection.source_folder_id,
+                    target_npub,
+                    "mount",
+                    connection_id,
+                )?;
                 tx.execute(
                     "DELETE FROM shared_folder_connection_members WHERE connection_id = ?1 AND member_npub = ?2",
                     params![connection_id, target_npub.as_str()],
@@ -574,27 +741,44 @@ impl BrainStore {
     }
 
     /// Revoke a Shared Folder Connection and remove all participating destination access.
+    #[allow(clippy::too_many_arguments)]
     pub fn revoke_shared_folder_connection(
         &mut self,
         connection_id: &str,
         actor_npub: &UserId,
         new_key_version: u32,
         grants: &[FolderKeyGrantMetadata],
+        control_records: &[SyncRecordInput],
         reencrypted_records: &[FolderObjectRevisionSyncRecord],
         updated_at: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
         let connection = self.load_shared_folder_connection(connection_id)?;
         let source = self.load_brain(&connection.source_brain_id)?;
-        if !has_brain_operational_authority(&source, actor_npub) {
+        let destination = self.load_brain(&connection.destination_brain_id)?;
+        if !has_brain_operational_authority(&source, actor_npub)
+            && !has_brain_operational_authority(&destination, actor_npub)
+        {
             return Err(StoreError::BrokenInvariant {
-                reason: "shared folder connection revocation requires source brain operational authority"
-                    .to_owned(),
+                reason: "mount revocation requires source or destination brain control".to_owned(),
             });
         }
+        if connection.managed_access_npubs.is_empty() {
+            validate_folder_key_grant_control_records(grants, control_records)?;
+            let tx = self.conn.transaction()?;
+            delete_folder_access_sources_for_origin(&tx, "mount", connection_id)?;
+            tx.execute(
+                "UPDATE shared_folder_connections
+                 SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
+                params![connection_id, updated_at],
+            )?;
+            tx.commit()?;
+            return self.load_shared_folder_connection(connection_id);
+        }
         let rotation = SharedFolderAccessRemoval {
-            removed_user_ids: &connection.member_npubs,
+            removed_user_ids: &connection.managed_access_npubs,
             new_key_version,
             grants,
+            control_records,
             reencrypted_records,
             updated_at,
         };
@@ -603,6 +787,7 @@ impl BrainStore {
             actor_npub,
             rotation,
             |tx| {
+                delete_folder_access_sources_for_origin(tx, "mount", connection_id)?;
                 tx.execute(
                     "UPDATE shared_folder_connections SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
                     params![connection_id, updated_at],

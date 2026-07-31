@@ -752,6 +752,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await brainItem.waitFor({ state: "visible" });
       assert.equal(await brainItem.getAttribute("aria-disabled"), "true");
       assert.equal(await brainItem.getAttribute("href"), null);
+      assert.equal(await brainItem.getAttribute("title"), "Coming soon");
       const skillsLink = productNav.getByRole("link", { name: "Skills", exact: true });
       await skillsLink.waitFor({ state: "visible" });
       assert.equal(
@@ -1052,6 +1053,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       await completedBrainItem.waitFor({ state: "visible" });
       assert.equal(await completedBrainItem.getAttribute("aria-disabled"), "true");
       assert.equal(await completedBrainItem.getAttribute("href"), null);
+      assert.equal(await completedBrainItem.getAttribute("title"), "Coming soon");
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_completed-oslo-bot/brain`
       );
@@ -1335,13 +1337,44 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       hostedDevice.emit();
       await expectVisibleText(page, "Completed Oslo Bot is working");
 
-      hostedDevice.state.app.messages.push({
+      const browserQaTool: FakeHostedChatState["messages"][number] = {
         ...hostedMessage("💻 Running browser QA", false, 7),
         kind: "tool",
         status: "complete",
-      });
+      };
+      hostedDevice.state.app.messages.push(browserQaTool);
       hostedDevice.emit();
       await expectVisibleText(page, "Working · 1 step");
+      const browserQaRollup = page
+        .locator("details.finite-chat__tool-rollup")
+        .filter({ hasText: "Running browser QA" });
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        true,
+        "a newly observed active tool rollup should open once"
+      );
+      await browserQaRollup.locator("summary").click();
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        false,
+        "the user should be able to close an active tool rollup"
+      );
+
+      browserQaTool.text = "💻 Running browser QA · refreshed";
+      browserQaTool.display_content = "💻 Running browser QA · refreshed";
+      hostedDevice.emit();
+      await waitFor(
+        async () =>
+          (await browserQaRollup.locator("pre").textContent())
+          === "💻 Running browser QA · refreshed",
+        15_000,
+        () => "the streamed tool edit did not reach the closed rollup"
+      );
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        false,
+        "a message edit and stream rerender must preserve the user's closed state"
+      );
 
       hostedDevice.state.app.typing_members = [];
       hostedDevice.state.app.messages.push({
@@ -1350,16 +1383,32 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       });
       hostedDevice.emit();
       await expectVisibleText(page, "Worked through 1 step");
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        false,
+        "completion must not reopen a rollup the user closed"
+      );
       await page
         .getByText("Completed Oslo Bot is working", { exact: true })
         .waitFor({ state: "hidden", timeout: 15_000 });
 
+      await browserQaRollup.locator("summary").click();
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        true,
+        "the user should be able to reopen a completed tool rollup"
+      );
       await page.getByLabel("Message your agent").fill("Working lease browser proof.");
       await page.getByRole("button", { name: "Send message" }).click();
       await page
         .getByRole("article")
         .getByText("Working lease browser proof.", { exact: true })
         .waitFor({ state: "visible", timeout: 15_000 });
+      assert.equal(
+        await browserQaRollup.evaluate((element) => (element as HTMLDetailsElement).open),
+        true,
+        "unrelated chat activity must preserve the user's open state"
+      );
       hostedDevice.state.app.typing_members = [
         {
           room_id: "room_browser_agent",
@@ -1579,6 +1628,8 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         message_id: "message_remembered_only",
         chat_id: "chat_browser_remembered",
       });
+      const completedBeforeRememberedNavigation =
+        hostedDevice.state.completedSelectionMutations;
       await page
         .getByRole("button", { name: "Remembered work", exact: true })
         .click();
@@ -1590,7 +1641,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       // The pinned selection updates the pane before the daemon confirms, so
       // wait for the daemon-side selection rather than asserting it directly.
       await waitFor(
-        () => hostedDevice.state.app.selected_chat_id === "chat_browser_remembered",
+        () =>
+          hostedDevice.state.completedSelectionMutations
+            === completedBeforeRememberedNavigation + 1,
         5_000,
         () => "the daemon never persisted the Remembered work selection"
       );
@@ -1631,7 +1684,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
       });
       hostedDevice.emit();
       // The stream snapshot still carries the previous selection while the
-      // OpenChat is held; its message is only visible if the pinned Browser QA
+      // OpenChat is held; its message is only visible if the browser-owned Browser QA
       // pane stayed put instead of fighting back to Remembered work.
       await expectVisibleText(page, "Concurrent stream update.");
       hostedDevice.releaseNavigationAction();
@@ -1649,6 +1702,53 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .waitFor({ state: "visible" });
       assert.equal(hostedDevice.state.app.selected_chat_id, "chat_browser_agent");
 
+      // Once OpenChat is fully confirmed, a later higher-revision stream can
+      // still carry another daemon selection (for example, a scoped send in a
+      // concurrently active Chat). It may merge that Chat's transcript, but
+      // it is not browser navigation intent and must not move the visible pane.
+      hostedDevice.state.app.selected_chat_id = "chat_browser_remembered";
+      hostedDevice.state.app.topics[0]!.active_chat_id = "chat_browser_remembered";
+      hostedDevice.state.app.messages.push({
+        ...hostedMessage("Remembered background stream.", false, 15),
+        message_id: "message_remembered_background",
+        chat_id: "chat_browser_remembered",
+      });
+      hostedDevice.state.app.rev += 1;
+      hostedDevice.emit();
+      await page
+        .locator(".finite-chat__topbar")
+        .getByText("Browser QA", { exact: true })
+        .waitFor({ state: "visible" });
+      assert.equal(
+        await page
+          .locator(".finite-chat__message")
+          .getByText("Remembered background stream.", { exact: true })
+          .isVisible(),
+        false,
+        "background transcript update changed the visible Chat"
+      );
+      const navigationJournal = await page.evaluate(() =>
+        (window as unknown as {
+          __finiteChatNavigationJournal?: Array<{
+            source: string;
+            decision: string;
+            snapshot_selection: { selected_chat_id: string | null };
+            visible_selection: { selected_chat_id: string | null };
+          }>;
+        }).__finiteChatNavigationJournal ?? []
+      );
+      assert(
+        navigationJournal.some((entry) =>
+          entry.source === "sse"
+          && entry.decision === "preserved"
+          && entry.snapshot_selection.selected_chat_id === "chat_browser_remembered"
+          && entry.visible_selection.selected_chat_id === "chat_browser_agent"
+        ),
+        "navigation journal did not explain why the background selection was ignored"
+      );
+
+      const completedBeforeBackgroundChatNavigation =
+        hostedDevice.state.completedSelectionMutations;
       await page
         .getByRole("button", { name: "Remembered work", exact: true })
         .click();
@@ -1656,10 +1756,13 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .locator(".finite-chat__topbar")
         .getByText("Remembered work", { exact: true })
         .waitFor({ state: "visible" });
-      // The pinned selection presents instantly; let the daemon confirm before
+      await expectVisibleText(page, "Remembered background stream.");
+      // The browser-owned selection presents instantly; let the daemon confirm before
       // reading mutation counters so the next section starts quiescent.
       await waitFor(
-        () => hostedDevice.state.app.selected_chat_id === "chat_browser_remembered",
+        () =>
+          hostedDevice.state.completedSelectionMutations
+            === completedBeforeBackgroundChatNavigation + 1,
         5_000,
         () => "the daemon never persisted the Remembered work selection"
       );
@@ -1968,10 +2071,10 @@ async function startFakeBrain() {
     const requestUrl = new URL(request.url ?? "/", "http://brain.test");
     if (request.method === "GET" && requestUrl.pathname === "/client") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(`<!doctype html><html><head></head><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/_admin/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
+      response.end(`<!doctype html><html><head></head><body><main><h1>FiniteBrain browser proof</h1><p>First-party client origin reached.</p><p id="api-status">Connecting…</p></main><script>fetch('/v1/browser-proof').then((result) => result.json()).then((result) => { document.getElementById('api-status').textContent = result.message; });</script></body></html>`);
       return;
     }
-    if (request.method === "GET" && request.url === "/_admin/browser-proof") {
+    if (request.method === "GET" && request.url === "/v1/browser-proof") {
       writeJson(response, 200, { message: "Brain API ready" });
       return;
     }
@@ -3073,7 +3176,15 @@ async function waitForDashboard(port: number, output: () => string) {
 }
 
 async function expectVisibleText(page: Page, text: string) {
-  await page.getByText(text, { exact: true }).waitFor({ state: "visible", timeout: 15_000 });
+  // Next.js copies the page's h1 into its persistent, visually-hidden route
+  // announcer (#__next-route-announcer__) after client-side transitions, so an
+  // unscoped text match can resolve to two mounted elements and trip strict
+  // mode depending on announcer timing. The announcer is never page content;
+  // exclude it.
+  await page
+    .getByText(text, { exact: true })
+    .and(page.locator(":not(#__next-route-announcer__)"))
+    .waitFor({ state: "visible", timeout: 15_000 });
 }
 
 async function waitFor(

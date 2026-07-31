@@ -32,18 +32,21 @@ pub(crate) fn metadata_response_for_actor(
     mounted_folders: Vec<MountedFolderProjection>,
     actor_npub: &str,
 ) -> BrainMetadataResponse {
-    let is_limited_personal_member = stored.brain.kind == BrainKind::Personal
+    let organization_admin_readiness = (stored.brain.kind == BrainKind::Organization
         && stored
             .brain
-            .owner_user_id
-            .as_ref()
-            .is_none_or(|owner| owner.as_str() != actor_npub)
-        && stored
-            .personal_agent
-            .as_ref()
-            .is_none_or(|relationship| relationship.agent_npub.as_str() != actor_npub);
-    if !is_limited_personal_member {
-        return metadata_response_with_mounts(stored, mounted_folders);
+            .admins
+            .iter()
+            .any(|admin| admin.as_str() == actor_npub))
+    .then(|| organization_collaborator_readiness(&stored));
+    let is_guest = stored
+        .guest_user_ids()
+        .iter()
+        .any(|guest| guest.as_str() == actor_npub);
+    if !is_guest {
+        let mut response = metadata_response_with_mounts(stored, mounted_folders);
+        response.collaborator_readiness = organization_admin_readiness.unwrap_or_default();
+        return response;
     }
 
     let visible_folder_ids = stored
@@ -81,6 +84,7 @@ pub(crate) fn metadata_response_with_mounts(
     stored: StoredBrain,
     mounted_folders: Vec<MountedFolderProjection>,
 ) -> BrainMetadataResponse {
+    let guests = stored.guest_user_ids();
     let folder_access = stored.folder_access;
     let setup_incomplete = stored.setup_incomplete_folder_ids;
     BrainMetadataResponse {
@@ -103,6 +107,7 @@ pub(crate) fn metadata_response_with_mounts(
             .iter()
             .map(|member| member.user_id.to_string())
             .collect(),
+        guests: guests.into_iter().map(|guest| guest.to_string()).collect(),
         admins: stored
             .brain
             .admins
@@ -121,7 +126,6 @@ pub(crate) fn metadata_response_with_mounts(
                 access: folder.access,
                 parent_folder_id: folder.parent_folder_id.as_ref().map(ToString::to_string),
                 path: folder.path.to_string(),
-                shared_folder_source: folder.shared_folder_source,
                 access_user_ids: folder_access
                     .get(&folder.id)
                     .map(|users| users.iter().map(ToString::to_string).collect())
@@ -132,7 +136,94 @@ pub(crate) fn metadata_response_with_mounts(
             .collect(),
         mounted_folders: mounted_folder_responses(mounted_folders),
         grant_count: stored.grants.len(),
+        collaborator_readiness: Vec::new(),
     }
+}
+
+fn organization_collaborator_readiness(stored: &StoredBrain) -> Vec<CollaboratorReadinessResponse> {
+    let collaborators = stored
+        .brain
+        .members
+        .iter()
+        .map(|member| member.user_id.clone())
+        .chain(stored.brain.admins.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    // Durable mutations enforce the central member envelope. Keep this
+    // projection one constant-size summary per collaborator (never
+    // collaborator × Folder detail) so metadata response work and wire size
+    // remain bounded by that accepted-state limit.
+    debug_assert!(collaborators.len() <= finite_brain_core::BRAIN_CAPACITY_ENVELOPE.members);
+    let admin_npubs = stored
+        .brain
+        .admins
+        .iter()
+        .map(UserId::as_str)
+        .collect::<BTreeSet<_>>();
+    let all_member_folder_count = stored
+        .brain
+        .folders
+        .iter()
+        .filter(|folder| folder.access == FolderAccessMode::AllMembers)
+        .count();
+    let mut explicit_non_member_folder_count = BTreeMap::<&str, usize>::new();
+    for folder in stored
+        .brain
+        .folders
+        .iter()
+        .filter(|folder| folder.access != FolderAccessMode::AllMembers)
+    {
+        for user in stored.folder_access.get(&folder.id).into_iter().flatten() {
+            *explicit_non_member_folder_count
+                .entry(user.as_str())
+                .or_default() += 1;
+        }
+    }
+    let folder_by_id = stored
+        .brain
+        .folders
+        .iter()
+        .map(|folder| (folder.id.as_str(), folder))
+        .collect::<BTreeMap<_, _>>();
+    let ready_pairs = stored
+        .grants
+        .iter()
+        .filter_map(|grant| {
+            let folder = folder_by_id.get(grant.folder_id.as_str())?;
+            (grant.key_version == folder.current_key_version
+                && folder_visible(stored, &grant.folder_id, grant.recipient_npub.as_str()))
+            .then(|| (grant.recipient_npub.as_str(), grant.folder_id.as_str()))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut ready_count_by_npub = BTreeMap::<&str, usize>::new();
+    for (npub, _) in ready_pairs {
+        *ready_count_by_npub.entry(npub).or_default() += 1;
+    }
+    collaborators
+        .into_iter()
+        .map(|target| {
+            let is_admin = admin_npubs.contains(target.as_str());
+            let total_count = if is_admin {
+                stored.brain.folders.len()
+            } else {
+                all_member_folder_count
+                    + explicit_non_member_folder_count
+                        .get(target.as_str())
+                        .copied()
+                        .unwrap_or_default()
+            };
+            CollaboratorReadinessResponse {
+                target_npub: target.to_string(),
+                brain_role: if is_admin { "admin" } else { "member" }.to_owned(),
+                ready_count: ready_count_by_npub
+                    .get(target.as_str())
+                    .copied()
+                    .unwrap_or_default(),
+                total_count,
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn visible_brains_response(brains: Vec<VisibleBrain>) -> VisibleBrainsResponse {
@@ -148,6 +239,7 @@ pub(crate) fn visible_brains_response(brains: Vec<VisibleBrain>) -> VisibleBrain
                     VisibleBrainRole::PersonalAgent => "personal_agent",
                     VisibleBrainRole::Admin => "admin",
                     VisibleBrainRole::Member => "member",
+                    VisibleBrainRole::Guest => "guest",
                     VisibleBrainRole::Invited => "invited",
                 }
                 .to_owned(),
@@ -179,6 +271,7 @@ pub(crate) fn brain_invitation_response(
                 key_version: scope.key_version,
             })
             .collect(),
+        folder_only: invitation.folder_only,
         claimed_by_npub: invitation.claimed_by_npub.map(|npub| npub.to_string()),
         identities: Vec::new(),
         status: link_status_str(invitation.status).to_owned(),
@@ -200,8 +293,8 @@ pub(crate) fn brain_invitation_response(
     }
 }
 
-pub(crate) fn share_link_response(share_link: StoredShareLink) -> ShareLinkResponse {
-    ShareLinkResponse {
+pub(crate) fn share_link_response(share_link: StoredShareLink) -> FolderInvitationResponse {
+    FolderInvitationResponse {
         id: share_link.id,
         brain_id: share_link.brain_id.to_string(),
         folder_id: share_link.folder_id.to_string(),
@@ -215,21 +308,20 @@ pub(crate) fn share_link_response(share_link: StoredShareLink) -> ShareLinkRespo
         updated_at: share_link.updated_at,
         accepted_at: share_link.accepted_at,
         grant_id: share_link.folder_key_grant.id,
-        create_personal_mount: share_link.create_personal_mount,
-        personal_mount_id: share_link.personal_mount_id,
         duplicate_accept: share_link.duplicate_accept,
     }
 }
 
 pub(crate) fn shared_folder_invitation_response(
     invitation: StoredSharedFolderInvitation,
-) -> SharedFolderInvitationResponse {
-    SharedFolderInvitationResponse {
+) -> MountOfferResponse {
+    let grant = folder_key_grant_response(invitation.folder_key_grant.clone());
+    MountOfferResponse {
         id: invitation.id,
         source_brain_id: invitation.source_brain_id.to_string(),
         source_folder_id: invitation.source_folder_id.to_string(),
         destination_brain_id: invitation.destination_brain_id.to_string(),
-        destination_admin_npub: invitation.destination_admin_npub.to_string(),
+        destination_controller_npub: invitation.destination_admin_npub.to_string(),
         created_by_npub: invitation.created_by_npub.to_string(),
         identities: Vec::new(),
         status: link_status_str(invitation.status).to_owned(),
@@ -237,21 +329,25 @@ pub(crate) fn shared_folder_invitation_response(
         accept_path: invitation.accept_path,
         created_at: invitation.created_at,
         updated_at: invitation.updated_at,
+        expires_at: invitation.expires_at,
         accepted_at: invitation.accepted_at,
         grant_id: invitation.folder_key_grant.id,
+        grant,
         duplicate_accept: invitation.duplicate_accept,
+        mount_id: None,
+        initial_participant_npubs: Vec::new(),
     }
 }
 
 pub(crate) fn shared_folder_connection_response(
     connection: StoredSharedFolderConnection,
-) -> SharedFolderConnectionResponse {
-    SharedFolderConnectionResponse {
+) -> MountResponse {
+    MountResponse {
         id: connection.id,
         source_brain_id: connection.source_brain_id.to_string(),
         source_folder_id: connection.source_folder_id.to_string(),
         destination_brain_id: connection.destination_brain_id.to_string(),
-        destination_admin_npub: connection.destination_admin_npub.to_string(),
+        destination_controller_npub: connection.destination_admin_npub.to_string(),
         identities: Vec::new(),
         status: match connection.status {
             SharedFolderConnectionStatus::Active => "active",
@@ -260,8 +356,13 @@ pub(crate) fn shared_folder_connection_response(
         .to_owned(),
         created_at: connection.created_at,
         updated_at: connection.updated_at,
-        member_npubs: connection
+        participant_npubs: connection
             .member_npubs
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        managed_access_participant_npubs: connection
+            .managed_access_npubs
             .iter()
             .map(ToString::to_string)
             .collect(),
@@ -274,11 +375,9 @@ pub(crate) fn mounted_folder_responses(
     mounted_folders
         .into_iter()
         .map(|mount| MountedFolderResponse {
-            mount_id: mount.mount_id,
-            organization_brain_id: mount.organization_brain_id.to_string(),
+            mount_id: mount.connection_id,
             source_brain_id: mount.source_brain_id.to_string(),
             source_folder_id: mount.source_folder_id.to_string(),
-            connection_id: mount.connection_id,
             display_name: mount.display_name,
             display_parent_folder_id: mount.display_parent_folder_id.map(|id| id.to_string()),
             state: match mount.state {
@@ -310,7 +409,6 @@ pub(crate) fn encrypted_brain_export_response(
                 path: folder.path.to_string(),
                 access: folder.access,
                 current_key_version: folder.current_key_version,
-                shared_folder_source: folder.shared_folder_source,
                 accessible: folder.accessible,
             })
             .collect(),

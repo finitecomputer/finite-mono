@@ -11,7 +11,8 @@ Global flags:
 - `--json`: return machine-readable output where the command supports it.
 - `--server <url>`: command-specific server override. Server resolution is
   explicit `--server`, saved Brain Working Tree server, `FINITE_BRAIN_SERVER_URL`,
-  then legacy `FINITE_BRAIN_PUBLIC_BASE_URL`.
+  legacy `FINITE_BRAIN_PUBLIC_BASE_URL`, then the built-in hosted production
+  endpoint.
 
 Transport accepts `https://` endpoints and `http://` only for localhost,
 loopback IPs, or the exact host named by the local-harness-only
@@ -30,23 +31,31 @@ for the same request.
 ```sh
 fbrain [--config-dir <path>] doctor
 fbrain repair
-fbrain auth status|import [--file <path>]
+fbrain auth status|import [--file <path>]|login <email>|redeem <email> <token>
 fbrain signer status|public-key|sign|encrypt|decrypt
 fbrain daemon status|start|stop|logs|tick|watch
 fbrain sync status|now [--summary]
+fbrain open personal [path]
 fbrain open <brain-id> [path]
 fbrain status [--json]
 fbrain conflicts
 fbrain resolve <id>
+fbrain search <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]
+fbrain search-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]
 fbrain activity
 fbrain wiki check [--json]
-fbrain access explain|list|grant|revoke
+fbrain access explain|list
 fbrain brain list|create|bootstrap-personal|metadata|export
-fbrain folder create|list
-fbrain mount list
-fbrain permissions add-member|remove-member|add-admin|remove-admin|grant-folder
-fbrain invites create|show|accept|revoke
-fbrain share link|accept|revoke|source|folder-invite|folder-accept
+fbrain folder create|list|delete
+fbrain collaborator ensure-admin
+fbrain invite brain create|list|inspect|accept|revoke
+fbrain invite folder create|list|inspect|accept|claim|revoke
+fbrain mount offer create|list|inspect|revoke
+fbrain mount accept|list|inspect|revoke
+fbrain mount participant add|remove
+fbrain admin member add|remove
+fbrain admin role grant|revoke admin
+fbrain admin folder-access grant|revoke
 ```
 
 Use `brain bootstrap-personal` for first-time Personal Brain setup. It creates
@@ -69,6 +78,8 @@ status` only reports and never creates one.
 fbrain auth status --json
 fbrain auth import < secret.txt
 fbrain auth import --file <path>
+fbrain auth login <email> --json
+fbrain auth redeem <email> <token> --json
 fbrain signer public-key
 fbrain signer sign --kind text --content "hello"
 fbrain signer encrypt --to <npub> --text "..."
@@ -81,35 +92,51 @@ flag, and import refuses to overwrite an existing identity. The legacy
 `auth login --nsec`/`auth logout` verbs and the plaintext `auth.json` config
 file are removed.
 
+`auth login <email>` asks the trusted identity authority to send a one-time
+email challenge. `auth redeem <email> <token>` completes that challenge and
+binds the current identity to the verified email. Treat the one-time token as
+sensitive input: never repeat it in logs or reports. Only the old secret-bearing
+`auth login --nsec` shape is retired.
+
 Use `auth status --json` to confirm the acting npub, identity file, and config
 directory. Do not print or request secrets during normal agent work.
 
 ## Working Tree And Sync
 
 ```sh
-fbrain doctor --server "$SERVER"
-fbrain brain list --server "$SERVER" --json
-fbrain open <brain-id> <tree-path> --server "$SERVER"
-cd <tree-path>
+fbrain doctor
+fbrain brain list --json
+open_result="$(fbrain open personal --json)"
+brain_tree="$(printf '%s' "$open_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nextCommandWorkingDirectory"])')"
+cd "$brain_tree"
 fbrain status --json
 fbrain sync status --json
 fbrain sync now --summary
 fbrain sync now --json
 fbrain conflicts --json
 fbrain resolve <conflict-id>
+fbrain search "credential rotation" --json
+fbrain search-index status --json
 fbrain activity
 fbrain wiki check --json
 ```
 
+`open personal` resolves the unique Personal Brain from the signed authoritative
+Brain list. Zero or multiple matches stop with guidance instead of guessing.
 `open` creates `.finitebrain/` state, saves the server URL when provided, marks
-the daemon running, and attempts an initial sync. `sync now` fetches the encrypted
-export, opens available grants, pushes local markdown changes, bootstraps latest
-state, and materializes readable Folders back into the tree.
+the daemon running, and attempts an initial sync. `sync now` fetches the
+encrypted export, opens available grants, pushes local markdown changes,
+bootstraps latest state, and materializes readable Folders back into the tree.
 
 When the path is omitted, `open` uses `$FBRAIN_WORKING_TREE_ROOT/<brain-id>` if
 configured, otherwise `<current-directory>/<brain-id>`. The hosted runtime sets
 `FBRAIN_CONFIG_DIR=/data/agent/fbrain` and
 `FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain`.
+
+From inside a Brain Working Tree, commands infer the Brain from Agent State.
+From inside a managed Folder directory, Folder-scoped commands infer that
+Folder. If context is absent or ambiguous, pass the explicit Brain or Folder
+selector named by the error.
 
 Useful `sync now --json` fields include `status`, `latestSequence`,
 `recordCount`, `localChanges`, `remoteChanges`, and `conflicts`. Expected status
@@ -118,6 +145,34 @@ values include `caught-up`, `applied-remote-records`, `pushed-local-changes`, an
 
 Each `remoteChanges` entry produced from a signed sync record includes
 `actorNpub`; `--summary` renders it as `actor=<npub>`.
+
+## Search Evidence
+
+`fbrain search` returns ranked Markdown Sections from every currently readable
+Folder in one result list. Repeat `--folder` to deliberately narrow the scope;
+an unknown or unreadable Folder fails closed. When mounted Folders reuse an ID,
+use `<source-brain-id>:<folder-id>` to select one unambiguously. Results identify
+the Folder and source Brain, Page path and title, heading ancestry, excerpt,
+sync disposition, and the contributing `lexical`, `semantic`, or combined
+signals. The default is ten results and the maximum explicit limit is fifty.
+
+BM25 is always available. When the runtime supplies
+`FBRAIN_EMBEDDING_ENDPOINT` and `FBRAIN_EMBEDDING_BEARER_TOKEN` and a Folder has
+a current semantic generation, `search` embeds the query once and combines the
+lexical and semantic rankings. Missing, disabled, building, stale, corrupt,
+timed-out, or unavailable semantic state falls back to BM25 without failing the
+search or sync. `--lexical-only` bypasses the provider for diagnostics.
+
+Semantic indexing is selected by default for readable Folders. Inspect it with
+`search-index status`; `disable --folder` deletes that Folder's vectors but
+keeps BM25, while `enable --folder` durably schedules it for the foreground
+`daemon watch` worker to rebuild in the background. Status reports only
+lifecycle, model contract, and counts—not credentials or wiki text. Folder
+selectors use the same readable-Folder and mounted-source rules as `search`.
+
+The lexical index is private disposable state under `.finitebrain/`. It is
+maintained from live daemon saves, startup reconciliation, and sync, but it is
+not synced content, authoritative knowledge, a backup, or a Recovery Set.
 
 `wiki check` scans Markdown Pages in materialized readable Folders only. It
 resolves exact Page titles, unique filenames, and Folder-root-relative Page
@@ -160,6 +215,8 @@ supervisor for long-running work. The default strategy is file-aware:
 initial sync, sync when readable Brain Working Tree markdown changes are
 detected, and bounded periodic remote polling. Use `--remote-poll-ticks 0` to
 disable periodic remote polling and `--poll-only` for legacy every-tick syncing.
+When an embedding provider is configured, semantic generations refresh on a
+separate background worker; provider work never runs inside the sync path.
 
 `daemon status --json` exposes `lastTickAt`, `lastError`, `tickCount`,
 `failureCount`, `retryBackoffMillis`, `watchStrategy`, and
@@ -169,36 +226,37 @@ disable periodic remote polling and `--poll-only` for legacy every-tick syncing.
 
 ```sh
 fbrain access explain <folder-id>
-fbrain access list --brain <brain-id>
-fbrain access grant --brain <brain-id> --folder <folder-id> --target <npub>
-fbrain access revoke --brain <brain-id> --folder <folder-id> --target <npub>
-fbrain access revoke --brain <brain-id> --folder <folder-id> --target <npub> --rotation-body rotation.json
+fbrain access list
 ```
 
-`access grant` delegates to `permissions grant-folder` and requires the current
-agent to have the Folder Key opened for the Folder's current key version.
-`access revoke` refuses unsafe metadata-only removal unless `--rotation-body`
-contains `newKeyVersion`, `grants`, `reencryptedRecords`, and
-`accessChangeEvent`.
+`access` is read-only. Mutations live under the explicit `admin`, `invite`,
+`collaborator`, and `mount` workflows. The CLI prepares Folder Key rotation
+automatically; never author or pass a raw rotation payload.
 
 ```sh
-fbrain brain bootstrap-personal --server "$SERVER" --json
-fbrain brain create <brain-id> --kind organization --name "Org Brain"
-fbrain brain create <brain-id> --kind organization --name "Org Brain" --requesting-user-npub <npub|hex>
+fbrain brain bootstrap-personal --json
+fbrain brain create organization "Org Brain" --json
 fbrain brain metadata --brain <brain-id>
 fbrain brain export --brain <brain-id>
 
 fbrain folder list --brain <brain-id>
-fbrain folder create <folder-id> --brain <brain-id> --name Notes --path Notes
+fbrain folder create "Notes" --json
 fbrain folder create <folder-id> --brain <brain-id> --role folder --access restricted --member <npub>
+fbrain folder delete <folder-id> --brain <brain-id> --json
 fbrain mount list --brain <brain-id>
 ```
 
-`--requesting-user-npub` is Organization Brain-only. It atomically makes the
-distinct signing creator and authenticated requester initial members and
-admins. The new Brain starts empty, so it creates no Folder Key Grants until an
-admin creates a Folder. Pass only authenticated sender metadata; the option
-does not resolve email or NIP-05 input.
+`folder delete` permanently deletes the named Folder, all descendant Folders,
+and every durable object in that subtree. The CLI submits the current expected
+Folder IDs and object count so concurrent scope changes fail closed, then
+removes the returned `deletedFolderIds` from the local Working Tree projection.
+Read [destructive-operations.md](destructive-operations.md) before using it.
+
+In an authenticated Agent Runtime, `brain create organization` atomically makes
+the signing Agent and Runtime-authenticated requester initial admins. The
+requester identity flag has been removed; a missing or stale Runtime requester
+lease fails without creating a Brain. A direct human CLI invocation makes the
+signing human the sole initial admin. The new Brain starts empty.
 
 Folder roles are `personal_home`, `brain_ops`, `general`, and `folder` (hyphen
 aliases are accepted). Folder access modes are `owner`, `admin_only`,
@@ -207,32 +265,74 @@ brains, `folder create` defaults to restricted access; for personal brains it
 defaults to owner access.
 
 ```sh
-fbrain permissions add-member --brain <brain-id> --target <npub>
-fbrain permissions remove-member --brain <brain-id> --target <npub>
-fbrain permissions add-admin --brain <brain-id> --target <npub>
-fbrain permissions remove-admin --brain <brain-id> --target <npub>
-fbrain permissions grant-folder --brain <brain-id> --folder <folder-id> --target <npub>
+fbrain admin member add --target <npub>
+fbrain admin member remove --target <npub>
+fbrain admin role grant admin --target <npub>
+fbrain admin role revoke admin --target <npub>
+fbrain admin folder-access grant --target <npub>
+fbrain admin folder-access revoke --target <npub>
+
+# Normal, convergent Organization Brain collaboration from its Working Tree
+fbrain collaborator ensure-admin \
+  --target agent@example.finite.vip \
+  --json
 ```
+
+`collaborator ensure-admin` is the normal email-first Organization Brain
+sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The
+command resolves the Managed Agent Email natively and returns one typed receipt:
+
+- `complete` proves Admin Brain Role plus current Folder readiness across the
+  authoritative Folder snapshot.
+- `partial` preserves useful progress but names every known incomplete Folder.
+  Retry this exact idempotent command from a named current key holder when the
+  receipt supplies a holder email. Otherwise ask another current Folder reader
+  who can open the listed Folder to retry; never invent or expose a holder
+  identity, and do not report the collaboration as complete.
+- `indeterminate` means the mutation may have committed but its postcondition
+  was not proved. Retry the exact command and inspect its next receipt; do not
+  claim either success or a clean failure.
+
+Human reports should use the target email, safe Folder paths, counts, reason
+codes, and holder emails. Do not paste the raw receipt or expose Member Identity
+keys, wrapped events, auth material, Folder Keys, or grant plaintext.
+
+Low-level `admin` commands are advanced primitives. Member and role commands
+change Brain-wide relationships, while `folder-access` targets one Folder;
+they do not prove complete Organization Brain Collaboration and are not the
+normal sharing workflow.
 
 ## Invitations And Sharing
 
 ```sh
-fbrain invites create --brain <brain-id> --target <npub> --folder <folder-id>
-fbrain invites create --brain <brain-id> --target <npub> --expires 2099-01-01T00:00:00Z
-fbrain invites show --code <invite-code>
-fbrain invites accept --code <invite-code>
-fbrain invites accept --brain <brain-id> --id <invitation-id>
-fbrain invites revoke --brain <brain-id> --id <invitation-id>
+fbrain invite brain create --target <email|npub>
+fbrain invite brain create --target <email|npub> --expires-in 7d
+fbrain invite brain list
+fbrain invite brain inspect <invitation-id>
+fbrain invite brain accept <invitation-id>
+fbrain invite brain revoke <invitation-id>
 
-fbrain share link --brain <brain-id> --folder <folder-id> --target <npub>
-fbrain share link --brain <brain-id> --folder <folder-id> --target <npub> --personal-mount
-fbrain share accept --id <share-link-id>
-fbrain share revoke --id <share-link-id>
-fbrain share source --brain <brain-id> --folder <folder-id>
-fbrain share folder-invite --brain <brain-id> --folder <folder-id> --destination-brain <brain-id> --destination-admin <npub>
-fbrain share folder-accept --id <shared-folder-invitation-id>
+fbrain invite folder create --target <email|npub>
+fbrain invite folder list
+fbrain invite folder inspect <invitation-id>
+fbrain invite folder accept <invitation-id>
+fbrain invite folder claim <invite-code> --email <email> --invite-secret-file <path>
+fbrain invite folder revoke <invitation-id>
+
+fbrain mount offer create --destination-brain <brain-id> --destination-controller <email|npub>
+fbrain mount offer list
+fbrain mount offer inspect <offer-id>
+fbrain mount accept <offer-id>
+fbrain mount participant add <mount-id> <email|npub>
+fbrain mount participant remove <mount-id> <email|npub>
+fbrain mount revoke <mount-id>
 ```
 
-Share-link and shared-folder invitation creation need the source Folder Key
-opened locally so the CLI can wrap the grant for the recipient or destination
-admin.
+Invitations and Mount Offers default to seven days and accept `--expires-in`
+from `1h` through `30d`. Brain Invitations create Members. Folder Invitations
+create bounded Guest access. Mounts are source-backed and work between either
+Brain kind; the CLI opens and wraps required Folder grants in memory.
+Folder Invitations work for registered identities and unregistered email
+addresses. Unregistered recipients claim the bounded invitation after exact
+email verification using the delivered Invite Secret file. A Folder's native
+access mode remains unchanged; explicit Guest access is orthogonal to it.

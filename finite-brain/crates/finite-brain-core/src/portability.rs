@@ -324,6 +324,8 @@ pub struct WorkingTreeMaterializeInput {
     pub generated_at: String,
     /// Acting npub.
     pub generated_by_npub: UserId,
+    /// Acting Brain role (`owner`, `personal_agent`, `admin`, `member`, or `guest`).
+    pub acting_role: String,
     /// Source Brain metadata.
     pub brain: Brain,
     /// Decrypted pages visible to the actor.
@@ -572,7 +574,10 @@ mod working_tree;
 pub use agents::agent_discovery_paths;
 pub use okf::{export_okf_bundle, plan_okf_import};
 pub use search::build_local_search_index;
-pub use working_tree::{materialize_brain_working_tree, plan_working_tree_change_intents};
+pub use working_tree::{
+    FOLDER_CONVENTION_DIRECTORIES, folder_agent_instructions, folder_convention_marker,
+    materialize_brain_working_tree, plan_working_tree_change_intents,
+};
 
 fn safe_locked_reason(reason: &str) -> &'static str {
     match reason {
@@ -760,6 +765,7 @@ mod tests {
         let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: opened_pages.clone(),
             opened_assets,
@@ -784,6 +790,11 @@ mod tests {
                 .contains_key(".finitebrain/working-tree-state.json")
         );
         assert!(projection.files.contains_key("AGENTS.md"));
+        let root_instructions = projection.files.get("AGENTS.md").unwrap();
+        assert!(root_instructions.contains("FiniteBrain Organization Brain Working Tree"));
+        assert!(root_instructions.contains("Brain ID: `acme`"));
+        assert!(root_instructions.contains("Acting Member Identity: `npub-admin`"));
+        assert!(root_instructions.contains("Acting Brain role: `admin`"));
         assert!(projection.files.contains_key("_index.md"));
         assert!(projection.files.contains_key("_wiki/index.md"));
         assert!(projection.files.contains_key("Concepts/AGENTS.md"));
@@ -791,7 +802,9 @@ mod tests {
         assert!(projection.files.contains_key("Concepts/_wiki/index.md"));
         assert!(projection.files.contains_key("Concepts/raw/.keep"));
         assert!(projection.files.contains_key("Concepts/raw/assets/.keep"));
-        assert!(projection.files.contains_key("Concepts/compiled/.keep"));
+        assert!(projection.files.contains_key("Concepts/wiki/.keep"));
+        assert!(projection.files.contains_key("Concepts/inventory/.keep"));
+        assert!(projection.files.contains_key("Concepts/datasets/.keep"));
         assert!(projection.files.contains_key("Concepts/output/.keep"));
         assert!(
             projection
@@ -806,6 +819,20 @@ mod tests {
                 .get("Concepts/AGENTS.md")
                 .unwrap()
                 .contains("Source Note")
+        );
+        assert!(
+            projection
+                .files
+                .get("Concepts/AGENTS.md")
+                .unwrap()
+                .contains("wiki/")
+        );
+        assert!(
+            !projection
+                .files
+                .get("Concepts/AGENTS.md")
+                .unwrap()
+                .contains("compiled/")
         );
         assert_eq!(
             projection
@@ -879,6 +906,7 @@ mod tests {
         let error = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: Vec::new(),
             opened_assets: vec![opened_asset],
@@ -913,6 +941,7 @@ mod tests {
         let error = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: Vec::new(),
             opened_assets,
@@ -934,6 +963,7 @@ mod tests {
         let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: vec![
                 page(
@@ -981,6 +1011,7 @@ mod tests {
         let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
             brain: sample_brain(),
             opened_pages: vec![opened],
             opened_assets: Vec::new(),
@@ -1172,7 +1203,6 @@ mod tests {
                     parent_folder_id: None,
                     path: SafeRelativePath::new("folder_path", "Concepts").unwrap(),
                     current_key_version: 1,
-                    shared_folder_source: false,
                 },
                 Folder {
                     id: FolderId::new("board").unwrap(),
@@ -1182,7 +1212,6 @@ mod tests {
                     parent_folder_id: None,
                     path: SafeRelativePath::new("folder_path", "Board").unwrap(),
                     current_key_version: 1,
-                    shared_folder_source: false,
                 },
             ],
             members: Vec::new(),

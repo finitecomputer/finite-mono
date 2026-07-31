@@ -108,10 +108,539 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 13)? {
+            tx.execute_batch(SCHEMA_V13)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![13, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 14)? {
+            tx.execute_batch(&capacity_guard_schema())?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![14, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 15)? {
+            tx.execute_batch(SCHEMA_V15)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![15, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 16)? {
+            tx.execute_batch(SCHEMA_V16)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![16, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 17)? {
+            tx.execute_batch(SCHEMA_V17)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![17, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 18)? {
+            tx.execute_batch(SCHEMA_V18)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![18, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 19)? {
+            tx.execute_batch(SCHEMA_V19)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![19, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 20)? {
+            tx.execute_batch(SCHEMA_V20)?;
+            tx.execute_batch(&format!(
+                r#"
+                CREATE TRIGGER capacity_folder_mounts
+                BEFORE INSERT ON folder_mounts
+                WHEN (
+                    SELECT COUNT(*) FROM folder_mounts
+                    WHERE source_brain_id = NEW.source_brain_id
+                ) >= {}
+                BEGIN
+                    SELECT RAISE(ABORT, 'finite_capacity:folder_mounts:{}');
+                END;
+                "#,
+                BRAIN_CAPACITY_ENVELOPE.mounts, BRAIN_CAPACITY_ENVELOPE.mounts
+            ))?;
+            migrate_legacy_personal_mounts(&tx)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![20, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
 }
+
+const SCHEMA_V20: &str = r#"
+ALTER TABLE organization_folder_mounts RENAME TO folder_mounts;
+ALTER TABLE folder_mounts RENAME COLUMN organization_brain_id TO destination_brain_id;
+
+DROP TRIGGER IF EXISTS capacity_organization_mounts;
+DROP TRIGGER IF EXISTS capacity_personal_mounts;
+
+CREATE TABLE legacy_personal_mount_migrations (
+    legacy_mount_id TEXT PRIMARY KEY NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('migrated', 'repair')),
+    destination_brain_id TEXT,
+    connection_id TEXT,
+    reason TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (destination_brain_id) REFERENCES brains(id) ON DELETE SET NULL,
+    FOREIGN KEY (connection_id) REFERENCES shared_folder_connections(id) ON DELETE SET NULL
+);
+"#;
+
+#[derive(Debug)]
+struct LegacyPersonalMountRow {
+    id: String,
+    owner_npub: String,
+    source_brain_id: String,
+    source_folder_id: String,
+    display_name: String,
+    display_parent_folder_id: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+pub(crate) fn migrate_legacy_personal_mounts(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let rows = {
+        let mut statement = tx.prepare(
+            r#"
+            SELECT id, owner_npub, source_brain_id, source_folder_id, display_name,
+                   display_parent_folder_id, created_at, updated_at
+            FROM personal_folder_mounts
+            ORDER BY id
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(LegacyPersonalMountRow {
+                id: row.get(0)?,
+                owner_npub: row.get(1)?,
+                source_brain_id: row.get(2)?,
+                source_folder_id: row.get(3)?,
+                display_name: row.get(4)?,
+                display_parent_folder_id: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for row in rows {
+        let destination_brains = {
+            let mut statement = tx.prepare(
+                "SELECT id FROM brains
+                 WHERE kind = 'personal' AND owner_user_id = ?1
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map(params![row.owner_npub], |result| result.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        if destination_brains.len() != 1 {
+            let reason = if destination_brains.is_empty() {
+                "legacy Personal Mount owner has no Personal Brain"
+            } else {
+                "legacy Personal Mount owner resolves to multiple Personal Brains"
+            };
+            record_legacy_personal_mount_migration(
+                tx,
+                &row.id,
+                "repair",
+                None,
+                None,
+                Some(reason),
+                &row.updated_at,
+            )?;
+            continue;
+        }
+        let destination_brain_id = &destination_brains[0];
+        let source_exists = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM folders WHERE brain_id = ?1 AND id = ?2
+             )",
+            params![row.source_brain_id, row.source_folder_id],
+            |result| result.get::<_, bool>(0),
+        )?;
+        if !source_exists {
+            record_legacy_personal_mount_migration(
+                tx,
+                &row.id,
+                "repair",
+                Some(destination_brain_id),
+                None,
+                Some("legacy Personal Mount source Folder no longer exists"),
+                &row.updated_at,
+            )?;
+            continue;
+        }
+
+        let existing_connection = tx
+            .query_row(
+                "SELECT id FROM shared_folder_connections
+                 WHERE source_brain_id = ?1 AND source_folder_id = ?2
+                   AND destination_brain_id = ?3",
+                params![
+                    row.source_brain_id,
+                    row.source_folder_id,
+                    destination_brain_id
+                ],
+                |result| result.get::<_, String>(0),
+            )
+            .optional()?;
+        let connection_id =
+            existing_connection.unwrap_or_else(|| format!("legacy-personal-connection-{}", row.id));
+        let connection_id_collision = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM shared_folder_connections
+                WHERE id = ?1
+                  AND NOT (
+                    source_brain_id = ?2 AND source_folder_id = ?3
+                    AND destination_brain_id = ?4
+                  )
+             )",
+            params![
+                connection_id,
+                row.source_brain_id,
+                row.source_folder_id,
+                destination_brain_id
+            ],
+            |result| result.get::<_, bool>(0),
+        )?;
+        if connection_id_collision {
+            record_legacy_personal_mount_migration(
+                tx,
+                &row.id,
+                "repair",
+                Some(destination_brain_id),
+                None,
+                Some("legacy Personal Mount connection id collides with unrelated state"),
+                &row.updated_at,
+            )?;
+            continue;
+        }
+
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO shared_folder_connections (
+                id, source_brain_id, source_folder_id, destination_brain_id,
+                destination_admin_npub, status, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7)
+            "#,
+            params![
+                connection_id,
+                row.source_brain_id,
+                row.source_folder_id,
+                destination_brain_id,
+                row.owner_npub,
+                row.created_at,
+                row.updated_at
+            ],
+        )?;
+
+        let mount_id_collision = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM folder_mounts
+                WHERE id = ?1
+                  AND NOT (
+                    destination_brain_id = ?2 AND source_brain_id = ?3
+                    AND source_folder_id = ?4
+                  )
+             )",
+            params![
+                row.id,
+                destination_brain_id,
+                row.source_brain_id,
+                row.source_folder_id
+            ],
+            |result| result.get::<_, bool>(0),
+        )?;
+        if mount_id_collision {
+            return Err(StoreError::BrokenInvariant {
+                reason: format!(
+                    "legacy Personal Mount {} collides with an unrelated universal Mount",
+                    row.id
+                ),
+            });
+        }
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO folder_mounts (
+                id, destination_brain_id, source_brain_id, source_folder_id, connection_id,
+                display_name, display_parent_folder_id, created_by_npub, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                row.id,
+                destination_brain_id,
+                row.source_brain_id,
+                row.source_folder_id,
+                connection_id,
+                row.display_name,
+                row.display_parent_folder_id,
+                row.owner_npub,
+                row.created_at,
+                row.updated_at
+            ],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO folder_access (brain_id, folder_id, user_id)
+             VALUES (?1, ?2, ?3)",
+            params![row.source_brain_id, row.source_folder_id, row.owner_npub],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO folder_access_sources (
+                brain_id, folder_id, user_id, source_kind, source_id, created_at
+             ) VALUES (?1, ?2, ?3, 'mount', ?4, ?5)",
+            params![
+                row.source_brain_id,
+                row.source_folder_id,
+                row.owner_npub,
+                connection_id,
+                row.created_at
+            ],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO shared_folder_connection_members (
+                connection_id, member_npub, created_at, manages_folder_access
+             ) VALUES (?1, ?2, ?3, 0)",
+            params![connection_id, row.owner_npub, row.created_at],
+        )?;
+        record_legacy_personal_mount_migration(
+            tx,
+            &row.id,
+            "migrated",
+            Some(destination_brain_id),
+            Some(&connection_id),
+            None,
+            &row.updated_at,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_legacy_personal_mount_migration(
+    tx: &Transaction<'_>,
+    legacy_mount_id: &str,
+    status: &str,
+    destination_brain_id: Option<&str>,
+    connection_id: Option<&str>,
+    reason: Option<&str>,
+    updated_at: &str,
+) -> Result<(), StoreError> {
+    tx.execute(
+        r#"
+        INSERT INTO legacy_personal_mount_migrations (
+            legacy_mount_id, status, destination_brain_id, connection_id, reason, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(legacy_mount_id) DO UPDATE SET
+            status = excluded.status,
+            destination_brain_id = excluded.destination_brain_id,
+            connection_id = excluded.connection_id,
+            reason = excluded.reason,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            legacy_mount_id,
+            status,
+            destination_brain_id,
+            connection_id,
+            reason,
+            updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+const SCHEMA_V19: &str = r#"
+CREATE TABLE folder_access_sources (
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('direct', 'invitation', 'mount')),
+    source_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, folder_id, user_id, source_kind, source_id),
+    FOREIGN KEY (brain_id, folder_id, user_id)
+        REFERENCES folder_access(brain_id, folder_id, user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX folder_access_sources_by_source
+    ON folder_access_sources(source_kind, source_id);
+
+CREATE TABLE legacy_folder_access_source_repairs (
+    connection_id TEXT NOT NULL,
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('repair', 'resolved')),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (connection_id, user_id),
+    FOREIGN KEY (connection_id)
+        REFERENCES shared_folder_connections(id) ON DELETE CASCADE
+);
+
+INSERT OR IGNORE INTO folder_access_sources (
+    brain_id, folder_id, user_id, source_kind, source_id, created_at
+)
+SELECT connections.source_brain_id,
+       connections.source_folder_id,
+       members.member_npub,
+       'mount',
+       connections.id,
+       members.created_at
+FROM shared_folder_connection_members members
+JOIN shared_folder_connections connections ON connections.id = members.connection_id
+JOIN folder_access access
+  ON access.brain_id = connections.source_brain_id
+ AND access.folder_id = connections.source_folder_id
+ AND access.user_id = members.member_npub
+WHERE connections.status = 'active';
+
+-- `manages_folder_access = 0` is authoritative for rows created after V17:
+-- access predated that Mount. It is ambiguous for rows that V17 migrated,
+-- because the new column defaulted every historical row to zero. Preserve
+-- availability by retaining a direct source and surface the ambiguity for
+-- deliberate repair instead of guessing that the Mount owns the only access.
+INSERT OR IGNORE INTO folder_access_sources (
+    brain_id, folder_id, user_id, source_kind, source_id, created_at
+)
+SELECT connections.source_brain_id,
+       connections.source_folder_id,
+       members.member_npub,
+       'direct',
+       'legacy-manages-false:' || connections.id,
+       members.created_at
+FROM shared_folder_connection_members members
+JOIN shared_folder_connections connections ON connections.id = members.connection_id
+JOIN folder_access access
+  ON access.brain_id = connections.source_brain_id
+ AND access.folder_id = connections.source_folder_id
+ AND access.user_id = members.member_npub
+WHERE connections.status = 'active'
+  AND members.manages_folder_access = 0;
+
+INSERT OR IGNORE INTO legacy_folder_access_source_repairs (
+    connection_id, brain_id, folder_id, user_id, reason, status, created_at
+)
+SELECT connections.id,
+       connections.source_brain_id,
+       connections.source_folder_id,
+       members.member_npub,
+       'legacy manages_folder_access=false cannot distinguish preexisting direct access from a pre-V17 Mount-owned grant',
+       'repair',
+       members.created_at
+FROM shared_folder_connection_members members
+JOIN shared_folder_connections connections ON connections.id = members.connection_id
+JOIN folder_access access
+  ON access.brain_id = connections.source_brain_id
+ AND access.folder_id = connections.source_folder_id
+ AND access.user_id = members.member_npub
+WHERE connections.status = 'active'
+  AND members.manages_folder_access = 0;
+
+INSERT OR IGNORE INTO folder_access_sources (
+    brain_id, folder_id, user_id, source_kind, source_id, created_at
+)
+SELECT links.brain_id,
+       links.folder_id,
+       links.recipient_npub,
+       'invitation',
+       links.id,
+       links.accepted_at
+FROM share_links links
+JOIN folder_access access
+  ON access.brain_id = links.brain_id
+ AND access.folder_id = links.folder_id
+ AND access.user_id = links.recipient_npub
+WHERE links.status = 'accepted'
+  AND links.accepted_at IS NOT NULL;
+
+INSERT OR IGNORE INTO folder_access_sources (
+    brain_id, folder_id, user_id, source_kind, source_id, created_at
+)
+SELECT invitations.brain_id,
+       json_each.value,
+       COALESCE(invitations.claimed_by_npub, invitations.user_id),
+       'invitation',
+       invitations.id,
+       invitations.accepted_at
+FROM brain_invitations invitations, json_each(invitations.initial_folder_access_json)
+JOIN folder_access access
+  ON access.brain_id = invitations.brain_id
+ AND access.folder_id = json_each.value
+ AND access.user_id = COALESCE(invitations.claimed_by_npub, invitations.user_id)
+WHERE invitations.status = 'accepted'
+  AND invitations.accepted_at IS NOT NULL
+  AND COALESCE(invitations.claimed_by_npub, invitations.user_id) IS NOT NULL;
+
+INSERT OR IGNORE INTO folder_access_sources (
+    brain_id, folder_id, user_id, source_kind, source_id, created_at
+)
+SELECT access.brain_id,
+       access.folder_id,
+       access.user_id,
+       'direct',
+       'migration-v19',
+       '2026-07-26T00:00:00Z'
+FROM folder_access access
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM folder_access_sources sources
+    WHERE sources.brain_id = access.brain_id
+      AND sources.folder_id = access.folder_id
+      AND sources.user_id = access.user_id
+);
+"#;
+
+const SCHEMA_V18: &str = r#"
+ALTER TABLE brain_invitations
+ADD COLUMN folder_only INTEGER NOT NULL DEFAULT 0
+CHECK (folder_only IN (0, 1));
+
+DROP INDEX IF EXISTS brain_invitations_pending_email_target;
+
+CREATE UNIQUE INDEX brain_invitations_pending_email_brain_target
+    ON brain_invitations(brain_id, invited_email)
+    WHERE status = 'pending'
+      AND target_kind = 'email_bootstrap'
+      AND folder_only = 0;
+
+CREATE UNIQUE INDEX brain_invitations_pending_email_folder_target
+    ON brain_invitations(brain_id, invited_email, initial_folder_access_json)
+    WHERE status = 'pending'
+      AND target_kind = 'email_bootstrap'
+      AND folder_only = 1;
+"#;
+
+const SCHEMA_V17: &str = r#"
+ALTER TABLE shared_folder_connection_members
+ADD COLUMN manages_folder_access INTEGER NOT NULL DEFAULT 0
+CHECK (manages_folder_access IN (0, 1));
+"#;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE vaults (
@@ -616,6 +1145,259 @@ CREATE UNIQUE INDEX personal_brains_one_per_owner
     WHERE kind = 'personal';
 "#;
 
+const SCHEMA_V13: &str = r#"
+CREATE TABLE folder_deletion_audience (
+    brain_id TEXT NOT NULL,
+    deletion_event_id TEXT NOT NULL,
+    actor_npub TEXT NOT NULL,
+    PRIMARY KEY (brain_id, deletion_event_id, actor_npub),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+
+CREATE INDEX folder_deletion_audience_by_actor
+    ON folder_deletion_audience(brain_id, actor_npub, deletion_event_id);
+"#;
+
+const SCHEMA_V15: &str = r#"
+ALTER TABLE folder_access RENAME TO folder_access_legacy;
+
+CREATE TABLE folder_access (
+    brain_id TEXT NOT NULL,
+    folder_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    PRIMARY KEY (brain_id, folder_id, user_id),
+    FOREIGN KEY (brain_id, folder_id) REFERENCES folders(brain_id, id)
+        ON DELETE CASCADE
+);
+
+INSERT INTO folder_access (brain_id, folder_id, user_id)
+SELECT brain_id, folder_id, user_id FROM folder_access_legacy;
+
+DROP TABLE folder_access_legacy;
+
+DELETE FROM brain_members
+WHERE brain_id IN (SELECT id FROM brains WHERE kind = 'personal')
+  AND NOT EXISTS (
+      SELECT 1 FROM brains personal
+      WHERE personal.id = brain_members.brain_id
+        AND personal.owner_user_id = brain_members.user_id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM personal_agents agents
+      WHERE agents.brain_id = brain_members.brain_id
+        AND agents.agent_npub = brain_members.user_id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM brain_invitations invitations
+      WHERE invitations.brain_id = brain_members.brain_id
+        AND invitations.status = 'accepted'
+        AND COALESCE(invitations.claimed_by_npub, invitations.user_id) = brain_members.user_id
+  );
+
+DELETE FROM brain_members
+WHERE EXISTS (
+    SELECT 1
+    FROM shared_folder_connection_members participants
+    JOIN shared_folder_connections connections
+      ON connections.id = participants.connection_id
+    WHERE connections.source_brain_id = brain_members.brain_id
+      AND participants.member_npub = brain_members.user_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM brain_admins admins
+    WHERE admins.brain_id = brain_members.brain_id
+      AND admins.user_id = brain_members.user_id
+)
+AND NOT EXISTS (
+    SELECT 1 FROM brain_invitations invitations
+    WHERE invitations.brain_id = brain_members.brain_id
+      AND invitations.status = 'accepted'
+      AND COALESCE(invitations.claimed_by_npub, invitations.user_id) = brain_members.user_id
+);
+"#;
+
+const SCHEMA_V16: &str = r#"
+ALTER TABLE shared_folder_invitations ADD COLUMN expires_at TEXT;
+
+UPDATE shared_folder_invitations
+SET expires_at = strftime('%Y-%m-%dT%H:%M:%SZ', created_at, '+7 days')
+WHERE expires_at IS NULL;
+
+UPDATE folders SET shared_folder_source = 0;
+"#;
+
+fn capacity_guard_schema() -> String {
+    let limits = BRAIN_CAPACITY_ENVELOPE;
+    format!(
+        r#"
+CREATE TRIGGER capacity_brain_folders
+BEFORE INSERT ON folders
+WHEN (
+    (SELECT COUNT(*) FROM folders WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM deleted_folder_identities WHERE brain_id = NEW.brain_id)
+) >= {folders}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_folders:{folders}');
+END;
+
+CREATE TRIGGER capacity_folder_depth
+BEFORE INSERT ON folders
+WHEN NEW.parent_folder_id IS NOT NULL AND (
+    WITH RECURSIVE ancestors(id, depth) AS (
+        SELECT NEW.parent_folder_id, 1
+        UNION ALL
+        SELECT f.parent_folder_id, ancestors.depth + 1
+        FROM folders f
+        JOIN ancestors ON f.brain_id = NEW.brain_id AND f.id = ancestors.id
+        WHERE f.parent_folder_id IS NOT NULL AND ancestors.depth <= {folder_depth}
+    )
+    SELECT COALESCE(MAX(depth), 0) + 1 FROM ancestors
+) > {folder_depth}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_depth:{folder_depth}');
+END;
+
+CREATE TRIGGER capacity_brain_members
+BEFORE INSERT ON brain_members
+WHEN (SELECT COUNT(*) FROM brain_members WHERE brain_id = NEW.brain_id) >= {members}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_members:{members}');
+END;
+
+CREATE TRIGGER capacity_current_objects
+BEFORE INSERT ON current_encrypted_brain_objects
+WHEN NOT EXISTS (
+    SELECT 1 FROM current_encrypted_brain_objects
+    WHERE brain_id = NEW.brain_id AND folder_id = NEW.folder_id AND object_id = NEW.object_id
+) AND (
+    (SELECT COUNT(*) FROM current_encrypted_brain_objects WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM deleted_object_identities WHERE brain_id = NEW.brain_id)
+) >= {current_objects}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:current_objects:{current_objects}');
+END;
+
+CREATE TRIGGER capacity_sync_records
+BEFORE INSERT ON brain_record_index
+WHEN COALESCE(json_extract(NEW.payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone'
+AND (
+    SELECT COUNT(*) FROM brain_record_index
+    WHERE brain_id = NEW.brain_id
+      AND COALESCE(json_extract(payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone'
+) >= {ordinary_sync_records}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:sync_records:{ordinary_sync_records}');
+END;
+
+CREATE TRIGGER capacity_deletion_records
+BEFORE INSERT ON brain_record_index
+WHEN COALESCE(json_extract(NEW.payload_json, '$.recordType'), '') = 'folder_subtree_tombstone'
+AND (
+    SELECT COUNT(*) FROM brain_record_index
+    WHERE brain_id = NEW.brain_id
+      AND COALESCE(json_extract(payload_json, '$.recordType'), '') = 'folder_subtree_tombstone'
+) >= {folders}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_deletion_records:{folders}');
+END;
+
+CREATE TRIGGER capacity_folder_access
+BEFORE INSERT ON folder_access
+WHEN (SELECT COUNT(*) FROM folder_access WHERE brain_id = NEW.brain_id) >= {folder_access_entries}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_access_entries:{folder_access_entries}');
+END;
+
+CREATE TRIGGER capacity_folder_key_grants
+BEFORE INSERT ON folder_key_grants
+WHEN (SELECT COUNT(*) FROM folder_key_grants WHERE brain_id = NEW.brain_id) >= {folder_key_grants}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_key_grants:{folder_key_grants}');
+END;
+
+CREATE TRIGGER capacity_brain_invitations
+BEFORE INSERT ON brain_invitations
+WHEN NEW.status = 'pending' AND (
+    SELECT COUNT(*) FROM brain_invitations
+    WHERE brain_id = NEW.brain_id AND status = 'pending'
+) >= {invitations}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_invitations:{invitations}');
+END;
+
+CREATE TRIGGER capacity_share_links
+BEFORE INSERT ON share_links
+WHEN NEW.status = 'pending' AND (
+    SELECT COUNT(*) FROM share_links
+    WHERE brain_id = NEW.brain_id AND status = 'pending'
+) >= {share_links}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:share_links:{share_links}');
+END;
+
+CREATE TRIGGER capacity_personal_mounts
+BEFORE INSERT ON personal_folder_mounts
+WHEN (SELECT COUNT(*) FROM personal_folder_mounts WHERE source_brain_id = NEW.source_brain_id) >= {mounts}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:personal_mounts:{mounts}');
+END;
+
+CREATE TRIGGER capacity_shared_invitations
+BEFORE INSERT ON shared_folder_invitations
+WHEN NEW.status = 'pending' AND (
+    SELECT COUNT(*) FROM shared_folder_invitations
+    WHERE source_brain_id = NEW.source_brain_id AND status = 'pending'
+) >= {invitations}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:shared_folder_invitations:{invitations}');
+END;
+
+CREATE TRIGGER capacity_shared_connections
+BEFORE INSERT ON shared_folder_connections
+WHEN NEW.status = 'active' AND (
+    SELECT COUNT(*) FROM shared_folder_connections
+    WHERE source_brain_id = NEW.source_brain_id AND status = 'active'
+) >= {shared_connections}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:shared_connections:{shared_connections}');
+END;
+
+CREATE TRIGGER capacity_connection_delegations
+BEFORE INSERT ON shared_folder_connection_members
+WHEN (
+    SELECT COUNT(*)
+    FROM shared_folder_connection_members members
+    JOIN shared_folder_connections connections ON connections.id = members.connection_id
+    WHERE connections.source_brain_id = (
+        SELECT source_brain_id FROM shared_folder_connections WHERE id = NEW.connection_id
+    )
+) >= {delegations}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:shared_connection_delegations:{delegations}');
+END;
+
+CREATE TRIGGER capacity_organization_mounts
+BEFORE INSERT ON organization_folder_mounts
+WHEN (SELECT COUNT(*) FROM organization_folder_mounts WHERE source_brain_id = NEW.source_brain_id) >= {mounts}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:organization_mounts:{mounts}');
+END;
+"#,
+        folders = limits.folders,
+        folder_depth = limits.folder_depth,
+        current_objects = limits.current_objects,
+        ordinary_sync_records = limits.sync_records - limits.folders,
+        members = limits.members,
+        folder_access_entries = limits.folder_access_entries,
+        folder_key_grants = limits.folder_key_grants,
+        invitations = limits.invitations,
+        share_links = limits.share_links,
+        mounts = limits.mounts,
+        shared_connections = limits.shared_connections,
+        delegations = limits.delegations,
+    )
+}
+
 fn migration_applied(tx: &Transaction<'_>, version: i64) -> Result<bool, StoreError> {
     let applied = tx
         .query_row(
@@ -746,7 +1528,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 12);
+        assert_eq!(latest_version, 20);
 
         let old_table_count: i64 = store
             .conn
@@ -783,5 +1565,81 @@ mod tests {
             })
             .unwrap();
         assert_eq!(foreign_key_failures, 0);
+    }
+
+    #[test]
+    fn migration_15_preserves_folder_access_while_converting_limited_members_to_guests() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brains (id, kind, name, owner_user_id, created_at)
+                 VALUES ('personal', 'personal', 'Personal', 'npub-owner', ?1)",
+                params![MIGRATION_TIMESTAMP],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_members (brain_id, user_id)
+                 VALUES ('personal', 'npub-limited')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO folders (
+                    brain_id, id, name, role, access, parent_folder_id,
+                    parent_folder_key, path, current_key_version,
+                    shared_folder_source, setup_incomplete, created_at
+                 ) VALUES (
+                    'personal', 'notes', 'Notes', 'folder', 'restricted', NULL,
+                    '', 'Notes', 1, 0, 0, ?1
+                 )",
+                params![MIGRATION_TIMESTAMP],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO folder_access (brain_id, folder_id, user_id)
+                 VALUES ('personal', 'notes', 'npub-limited')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("DELETE FROM schema_migrations WHERE version = 15", [])
+            .unwrap();
+
+        store.apply_migrations().unwrap();
+
+        let membership: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM brain_members
+                    WHERE brain_id = 'personal' AND user_id = 'npub-limited'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let folder_access: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM folder_access
+                    WHERE brain_id = 'personal'
+                      AND folder_id = 'notes'
+                      AND user_id = 'npub-limited'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!membership);
+        assert!(folder_access);
     }
 }

@@ -41,7 +41,7 @@ Date: 2026-07-02
 
 Before this repo is treated as authoritative:
 
-- `cargo test --workspace` passes or has a documented, bounded failure list.
+- `just test` passes or has a documented, bounded failure list.
 - `cd apps/dashboard && npm test && npm run lint && npm run build` passes after
   legacy dashboard surfaces are cut.
 - v2 docs no longer refer to box1/TRF as the normal deploy target.

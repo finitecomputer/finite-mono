@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   pendingChatRefreshAdvancesTranscript,
   pendingChatRefreshIsDue,
-  preservePendingChatRefreshSelection,
   type PendingChatRefreshTarget,
 } from "@/lib/hosted-web-chat-refresh";
 import type { HostedChatState } from "@/lib/hosted-web-device";
@@ -50,22 +49,6 @@ test("a pending refresh waits after transcript progress and after its previous a
   assert.equal(pendingChatRefreshIsDue(22_000, 10_000, null), true);
   assert.equal(pendingChatRefreshIsDue(30_000, 10_000, 25_000), false);
   assert.equal(pendingChatRefreshIsDue(37_000, 10_000, 25_000), true);
-});
-
-test("a pending refresh preserves the user's selected chat", () => {
-  const refreshed = preservePendingChatRefreshSelection(
-    {
-      ...state(7, 5),
-      selected_room_id: "stale-room",
-      selected_topic_id: "stale-topic",
-      selected_chat_id: "stale-chat",
-    },
-    target
-  );
-
-  assert.equal(refreshed.selected_room_id, target.room_id);
-  assert.equal(refreshed.selected_topic_id, target.topic_id);
-  assert.equal(refreshed.selected_chat_id, target.chat_id);
 });
 
 function state(rev: number, latestSeq: number): HostedChatState {

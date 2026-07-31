@@ -2126,6 +2126,138 @@ button.settings-nav-item.active {
   min-height: 40px;
 }
 
+.settings-access-section .access-field,
+.settings-invitations-section .access-field {
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.settings-access-section .access-field input,
+.settings-access-section .access-inline-field input,
+.settings-invitations-section .access-field input,
+.settings-invitations-section .access-inline-field input {
+  min-height: 40px;
+}
+
+.settings-access-section .access-add-button,
+.settings-invitations-section .access-add-button {
+  min-height: 40px;
+}
+
+.settings-folder-choices {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.settings-folder-choices legend {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.settings-folder-choice-list {
+  display: grid;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--access-surface-soft);
+  box-shadow: var(--shadow-access-ring);
+}
+
+.settings-folder-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 9px 11px;
+  color: var(--access-text);
+  cursor: pointer;
+}
+
+.settings-folder-choice + .settings-folder-choice {
+  border-top: 1px solid var(--access-border);
+}
+
+.settings-folder-choice input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--access-accent);
+}
+
+.settings-folder-choice span {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-access-section .brain-access-action-grid,
+.settings-invitations-section .brain-access-action-grid {
+  gap: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--access-surface-soft);
+  box-shadow: var(--shadow-access-ring);
+}
+
+.settings-access-section .brain-access-option,
+.settings-invitations-section .brain-access-option {
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 14px;
+}
+
+.settings-access-section .brain-access-option.primary,
+.settings-invitations-section .brain-access-option.primary {
+  background: transparent;
+  box-shadow: none;
+}
+
+.settings-access-section .brain-access-option + .brain-access-option,
+.settings-invitations-section .brain-access-option + .brain-access-option {
+  border-top: 1px solid var(--access-border);
+}
+
+.settings-access-section .brain-access-option-heading h4,
+.settings-invitations-section .brain-access-option-heading h4 {
+  color: var(--access-text);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.settings-access-section #brainPeopleActionPanel .access-inline-field {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.settings-access-section #brainPeopleActionPanel .access-inline-label {
+  grid-column: 1 / -1;
+}
+
+.settings-access-section #brainPeopleActionPanel .access-add-button {
+  width: auto;
+  min-width: 112px;
+  white-space: nowrap;
+}
+
+.settings-invitations-section #brainInvitationPanel .access-button-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .settings-invitation-copy {
   margin: 0 0 12px;
   line-height: 1.45;
@@ -2211,46 +2343,99 @@ button.settings-nav-item.active {
   padding: 16px;
 }
 
-.settings-section .session-security-status {
+.settings-health-section {
+  gap: 16px;
+}
+
+.settings-health-overview {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--surface-soft);
+  box-shadow: var(--shadow-control);
+}
+
+.settings-health-row {
   display: grid;
-  gap: 14px;
-  border-bottom: 0;
-  padding: 16px;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+}
+
+.settings-health-row + .settings-health-row {
+  border-top: 1px solid var(--line);
+}
+
+.settings-health-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--surface-strong);
+  color: var(--muted);
+}
+
+.settings-health-icon .icon {
+  width: 17px;
+  height: 17px;
+}
+
+.settings-health-icon-privacy {
+  color: var(--status-ready);
 }
 
 .settings-section .session-security-copy {
   display: grid;
-  gap: 5px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .settings-section .session-security-copy strong {
+  color: var(--text);
   font-size: 14px;
 }
 
-.settings-section .session-security-copy span {
+.settings-section .session-security-copy > span:last-child {
   position: static;
   width: auto;
   height: auto;
   overflow: visible;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.4;
   clip: auto;
   white-space: normal;
 }
 
 .settings-section .session-security-copy strong::before {
-  width: 6px;
-  height: 6px;
-  margin-right: 7px;
+  display: none;
 }
 
-.settings-section .session-security-status button {
-  justify-self: start;
+.settings-row-label {
+  color: var(--soft);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.settings-section .settings-health-row button {
+  justify-self: end;
+  min-width: 116px;
   min-height: 40px;
-  min-width: 142px;
 }
 
-.settings-section .session-security-status button:disabled {
+.settings-health-row #resumeSessionButton {
+  border-color: transparent;
+  background: var(--action-primary-bg);
+  color: var(--action-primary-text);
+}
+
+.settings-section #resumeSessionButton:disabled {
   opacity: 1;
   border-color: transparent;
   background: var(--surface-strong);
@@ -2263,11 +2448,11 @@ button.settings-nav-item.active {
   align-items: flex-start;
   gap: 10px;
   min-width: 0;
-  border: 1px solid var(--status-warning-border);
-  border-radius: 10px;
-  background: var(--status-warning-bg);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--muted);
-  padding: 12px;
+  padding: 0 2px;
 }
 
 .settings-info-card p {
@@ -2277,7 +2462,7 @@ button.settings-nav-item.active {
 .settings-info-icon {
   display: inline-flex;
   flex: 0 0 auto;
-  color: var(--status-warning);
+  color: var(--soft);
 }
 
 .settings-info-icon .icon {
@@ -2286,25 +2471,18 @@ button.settings-nav-item.active {
 }
 
 .settings-recovery-note {
-  border-color: var(--line-strong);
-  background: var(--surface-soft);
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
 }
 
 .settings-recovery-note .settings-info-icon {
   color: var(--muted);
 }
 
-.settings-signer-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
 .settings-card-copy {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: 3px;
 }
 
 .settings-card-copy strong {
@@ -2425,14 +2603,14 @@ button.settings-nav-item.active {
   font-size: 11px;
 }
 
-.session-security-status button:not(:disabled):hover {
+#resumeSessionButton:not(:disabled):hover {
   border-color: transparent;
   background: var(--action-primary-bg-hover);
   box-shadow: var(--shadow-control-hover);
   color: var(--action-primary-text);
 }
 
-.session-security-status button:not(:disabled):active {
+#resumeSessionButton:not(:disabled):active {
   transform: scale(0.96);
 }
 
@@ -2560,17 +2738,6 @@ button.settings-nav-item.active {
 
 #accessSidebarPanel > * + * {
   margin-top: 8px;
-}
-
-/* Legacy access inspector (keeping for compatibility during transition) */
-.access-inspector {
-  display: grid;
-  gap: 10px;
-  margin: 0 10px;
-  border-radius: 10px;
-  background: var(--access-surface);
-  box-shadow: var(--shadow-access-ring);
-  padding: 10px;
 }
 
 /* Dashboard-aligned access and collaboration UI */
@@ -3213,8 +3380,7 @@ button.settings-nav-item.active {
   transform: scale(0.96);
 }
 
-.access-action-row,
-.access-badge-row {
+.access-action-row {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3324,32 +3490,6 @@ button.settings-nav-item.active {
   background: var(--access-input);
   box-shadow: inset 0 0 0 1px var(--access-border);
   font-size: 12px;
-}
-
-.access-checkbox {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
-  min-height: 40px;
-  color: var(--access-text);
-  font-size: 12px;
-}
-
-.access-checkbox input {
-  width: 15px;
-  height: 15px;
-  margin: 0;
-}
-
-.access-checkbox-hint {
-  margin: -6px 0 0 23px;
-  color: var(--access-muted);
-}
-
-.access-share-form.is-locked .access-checkbox {
-  color: var(--access-muted);
-  opacity: 0.72;
 }
 
 .access-section {
@@ -3494,40 +3634,6 @@ button.settings-nav-item.active {
 
 .access-result span {
   display: block;
-}
-
-.access-badge-row {
-  flex-wrap: wrap;
-  margin-top: 4px;
-}
-
-.access-badge {
-  display: inline-flex;
-  align-items: center;
-  min-height: 18px;
-  border: 1px solid var(--access-border-strong);
-  border-radius: 999px;
-  color: var(--access-muted);
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 1;
-  padding: 2px 6px;
-  text-transform: uppercase;
-}
-
-.access-badge.ready {
-  border-color: var(--access-success-border);
-  color: var(--access-success);
-}
-
-.access-badge.warn {
-  border-color: var(--access-warning-border);
-  color: var(--access-warning);
-}
-
-.access-badge.error {
-  border-color: var(--access-danger-border);
-  color: var(--access-danger);
 }
 
 .sidebar-section-title {
@@ -3711,11 +3817,6 @@ button.obsidian-page-button.active {
 .obsidian-folder-button.setup .obsidian-file-detail,
 .obsidian-folder-button.active .obsidian-file-detail {
   display: block;
-}
-
-.obsidian-file-tree .access-badge-row {
-  gap: 4px;
-  margin-top: 4px;
 }
 
 .obsidian-page-children {
@@ -3958,20 +4059,32 @@ button.command-palette-row.active {
 
 .page-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(244px, 292px);
+  grid-template-columns: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   padding: 0;
+}
+
+.page-workspace[data-backlinks-open="true"] {
+  grid-template-columns: minmax(0, 1fr) minmax(244px, 292px);
 }
 
 .page-surface {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-width: 0;
+  min-height: 0;
   height: 100%;
+  overflow: hidden;
 }
 
 .page-link-context {
   min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
   border-left: 1px solid var(--line);
   background: var(--surface-soft);
   color: var(--text);
@@ -4035,9 +4148,14 @@ button.command-palette-row.active {
 .page-link-list {
   display: grid;
   gap: 2px;
+  min-width: 0;
   margin: 0;
   padding: 0 7px 9px;
   list-style: none;
+}
+
+.page-link-list > li {
+  min-width: 0;
 }
 
 .page-link-list .empty-row {
@@ -4071,6 +4189,12 @@ button.command-palette-row.active {
 }
 
 .page-link-row-title,
+.page-link-row-meta,
+.page-link-row-snippet {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .page-link-row-meta,
 .page-link-row-snippet {
   display: block;
@@ -4142,6 +4266,39 @@ button.command-palette-row.active {
   min-width: 0;
 }
 
+.page-context-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  border-color: transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 6px 9px;
+  transition-property: background-color, color, transform;
+  transition-duration: 140ms;
+}
+
+.page-context-toggle .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.page-context-toggle:hover,
+.page-context-toggle[aria-expanded="true"] {
+  border-color: transparent;
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.page-context-toggle:active {
+  transform: scale(0.96);
+}
+
 .page-save-button {
   min-height: 28px;
   border-radius: var(--radius-control);
@@ -4164,6 +4321,7 @@ button.command-palette-row.active {
   height: 100%;
   margin: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 0;
   border-radius: 0;
   background: var(--bg);
@@ -4916,10 +5074,6 @@ button.command-palette-row.active {
   padding-bottom: 10px;
 }
 
-.brain-management-section .access-badge-row {
-  margin-bottom: 10px;
-}
-
 .brain-management-section .access-section-header {
   min-height: 34px;
 }
@@ -5141,14 +5295,48 @@ button.command-palette-row.active {
 
 #brainPeopleSection .access-person-info {
   align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 5px 8px;
 }
 
 #brainPeopleSection .access-person-name {
+  flex: 1 1 calc(100% - 24px);
   line-height: 1.25;
   overflow: visible;
   overflow-wrap: anywhere;
   text-overflow: clip;
   white-space: normal;
+}
+
+#brainPeopleSection .access-person-role,
+#brainPeopleSection .access-person-readiness {
+  flex: 0 1 auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: var(--access-surface-soft);
+  box-shadow: var(--shadow-access-ring);
+  color: var(--access-muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.35;
+  text-transform: none;
+  white-space: normal;
+}
+
+#brainPeopleSection .access-person-readiness.complete {
+  background: var(--access-success-bg);
+  color: var(--access-success);
+}
+
+#brainPeopleSection .access-person-readiness.partial,
+#brainPeopleSection .access-person-readiness.indeterminate {
+  background: var(--access-warning-bg);
+  color: var(--access-warning);
+}
+
+.brain-people-readiness-hint {
+  margin: 0 0 8px;
 }
 
 /* Link lifecycle status inside access lists */
@@ -5270,13 +5458,13 @@ button.command-palette-row.active {
     max-width: 110px;
   }
 
-  .page-workspace {
+  .page-workspace[data-backlinks-open="true"] {
     grid-template-columns: minmax(0, 1fr) minmax(224px, 252px);
   }
 }
 
 @media (min-width: 641px) and (max-width: 1040px) {
-  .page-workspace {
+  .page-workspace[data-backlinks-open="true"] {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) minmax(180px, 32vh);
   }
@@ -5338,14 +5526,30 @@ button.command-palette-row.active {
     padding: 18px 16px 20px;
   }
 
-  .settings-signer-card {
-    align-items: stretch;
-    flex-direction: column;
+  .settings-health-row {
+    grid-template-columns: 36px minmax(0, 1fr);
+    align-items: start;
+    padding: 14px;
   }
 
-  .settings-signer-card .settings-primary-action,
+  .settings-health-row button {
+    grid-column: 2;
+    justify-self: stretch;
+    width: 100%;
+  }
+
+  .settings-health-row .settings-primary-action,
   .settings-secondary-action {
     justify-content: center;
+    width: 100%;
+  }
+
+  .settings-access-section #brainPeopleActionPanel .access-inline-field,
+  .settings-invitations-section #brainInvitationPanel .access-button-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-access-section #brainPeopleActionPanel .access-add-button {
     width: 100%;
   }
 
@@ -5417,4 +5621,27 @@ button.command-palette-row.active {
     padding-left: 8px;
     padding-right: 8px;
   }
+}
+.asset-detail dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.5rem 1rem;
+}
+
+.asset-detail dt {
+  color: var(--text-muted);
+}
+
+.asset-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.asset-download-button {
+  margin-top: 1rem;
+}
+
+.obsidian-page-button.asset .obsidian-file-title::before {
+  content: "Asset · ";
+  color: var(--text-muted);
 }
