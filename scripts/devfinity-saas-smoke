@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/devfinity-brain-readiness.sh
+source "$repo_root/scripts/lib/devfinity-brain-readiness.sh"
 
 declare -a sensitive_files=()
 updates_pid=""
@@ -648,6 +650,7 @@ reset_brain_setup_matrix_state() {
   '
   restart_process finite-brain
   wait_http "FiniteBrain matrix reset" "${FINITE_BRAIN_URL:?}/health" 120
+  wait_for_brain_dependency_ready "FiniteBrain matrix reset" 120
 }
 
 assert_agent_brain_list() {
@@ -1824,6 +1827,12 @@ while true; do
   sleep 2
 done
 wait_http "Agent Runtime after restart" "$runtime_url/healthz" 180
+start_chat_updates
+if ! wait_for_connected_chat; then
+  print_brain_readiness_diagnostics \
+    "hosted-device recovery after Agent Runtime restart" "${brain_tree:-}"
+  exit 1
+fi
 agent_npub_after="$(runtime_agent_npub)"
 if [[ "$agent_npub_after" != "$agent_npub_before" ]]; then
   echo "Agent Principal changed across Apple Container restart" >&2
@@ -1837,13 +1846,11 @@ if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
     exit 1
   fi
   if [[ "${DEVFINITY_BRAIN_PRODUCT_MATRIX:-0}" == "1" ]]; then
+    wait_for_brain_dependency_ready "FiniteBrain after Agent Runtime restart" 180
+    wait_for_brain_runtime_ready_after_restart "$brain_tree" 180
     # The runtime entrypoint must have restored one live identity supervisor.
     # A second writer must be rejected by the durable single-writer lock.
     runtime_exec -w "$brain_tree" "$container_machine_id" /bin/bash -lc '
-      for attempt in $(seq 1 300); do
-        test "$(fbrain daemon status --json | python3 -c '\''import json,sys; print(json.load(sys.stdin)["state"])'\'')" = running && break
-        sleep 0.1
-      done
       test "$(fbrain daemon status --json | python3 -c '\''import json,sys; print(json.load(sys.stdin)["state"])'\'')" = running
       set +e
       timeout 5 fbrain daemon supervise >/tmp/fbrain-duplicate-supervisor.log 2>&1
@@ -1871,7 +1878,6 @@ if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
     revoke_requesting_user_site
   fi
 fi
-wait_for_connected_chat
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then
   send_and_require_reply "Reply briefly with: runtime restart healed"
 fi
