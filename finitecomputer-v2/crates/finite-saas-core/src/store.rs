@@ -10368,6 +10368,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_migration_replay_preserves_and_repairs_pending_explicit_placement() {
+        with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-07-31T12:00:00Z").await;
+            let created = store
+                .request_agent_creation_configured(
+                    RequestAgentCreationInput {
+                        verified_email: "migration-replay@finite.vip".to_string(),
+                        workos_user_id: "workos_migration_replay".to_string(),
+                        display_name: "Migration Replay".to_string(),
+                        launch_code,
+                        idempotency_key: "migration-replay-submit".to_string(),
+                        now: Some("2026-07-31T12:01:00Z".to_string()),
+                    },
+                    AgentCreationConfiguration {
+                        placement: Some(RuntimePlacement {
+                            runner_class: RunnerClass::AppleContainer,
+                            runtime_resource_class: crate::RuntimeResourceClass::Vcpu4Memory8Gib,
+                        }),
+                        requested_hosting_tier: Some(HostingTier::Standard),
+                        profile_picture_url: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(created.request.runner_class, RunnerClass::AppleContainer);
+            assert_eq!(
+                created.request.placement.unwrap().runner_class,
+                RunnerClass::AppleContainer
+            );
+
+            // Core replays the full concatenated schema on every startup. A
+            // modern pending request must retain its exact placement.
+            store.migrate().await.unwrap();
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let runner_class: String = raw
+                .query_one(
+                    "SELECT runner_class FROM agent_creation_requests WHERE id = $1",
+                    &[&created.request.id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(runner_class, "apple_container");
+
+            // Reproduce the durable shape left by the bad replay, then prove
+            // the guarded repair before exercising the real lease query.
+            raw.execute(
+                "UPDATE agent_creation_requests SET runner_class = 'kata' WHERE id = $1",
+                &[&created.request.id],
+            )
+            .await
+            .unwrap();
+            store.migrate().await.unwrap();
+            let repaired_runner_class: String = raw
+                .query_one(
+                    "SELECT runner_class FROM agent_creation_requests WHERE id = $1",
+                    &[&created.request.id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(repaired_runner_class, "apple_container");
+
+            let lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "devfinity-apple-runner".to_string(),
+                    lease_token: "migration-replay-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::AppleContainer],
+                        max_sandbox_count: Some(1),
+                        active_sandbox_count: Some(0),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    source_host_id: Some("devfinity-apple".to_string()),
+                    now: Some("2026-07-31T12:02:00Z".to_string()),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(lease.request.id, created.request.id);
+            assert_eq!(lease.request.runner_class, RunnerClass::AppleContainer);
+            assert_eq!(
+                lease.request.placement.unwrap().runner_class,
+                RunnerClass::AppleContainer
+            );
+
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn postgres_launch_code_redemption_serializes_with_revocation() {
         with_isolated_postgres(|store| async move {
             let issued = store
