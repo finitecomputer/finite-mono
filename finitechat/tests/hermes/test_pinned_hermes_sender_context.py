@@ -232,5 +232,261 @@ class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
         await adapter.cancel_background_tasks()
 
 
+class PinnedHermesClarificationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _adapter():
+        module = PINNED_ADAPTER_MODULE
+        return module.FiniteChatAdapter(
+            PlatformConfig(
+                enabled=True,
+                typing_indicator=False,
+                home_channel=HomeChannel(
+                    platform=module._finite_platform(),
+                    chat_id="room-agent-1",
+                    name="Finite Chat",
+                ),
+                extra={
+                    "home": "/tmp/finite-agent-home",
+                    "finitechat_bin": "/bin/echo",
+                },
+            )
+        )
+
+    @staticmethod
+    def _text_event(
+        *,
+        segment_id: str,
+        seq: int,
+        message_id: str,
+        text: str,
+    ):
+        return {
+            "room_id": "room-agent-1",
+            "seq": seq,
+            "message_id": message_id,
+            "conversation_id": "topic-build",
+            "segment_id": segment_id,
+            "text": text,
+            "message_type": "text",
+            "source": {
+                "platform": "finitechat",
+                "chat_id": "room-agent-1",
+                "chat_type": "dm",
+                "user_id": "alice",
+            },
+        }
+
+    async def test_real_018_choice_reply_resumes_only_the_originating_active_chat(self):
+        from tools import clarify_gateway
+
+        module = PINNED_ADAPTER_MODULE
+        adapter = self._adapter()
+        bridge_calls = []
+
+        async def fake_json(action, payload, *, timeout):
+            bridge_calls.append((action, payload, timeout))
+            return module._FiniteChatResult(
+                True,
+                {"message_id": f"bridge-{len(bridge_calls)}"},
+                None,
+                False,
+            )
+
+        async def resolve_pending(event):
+            session_key = build_session_key(event.source)
+            clarify_gateway.resolve_text_response_for_session(session_key, event.text)
+            return ""
+
+        adapter._finitechat_json = fake_json
+        adapter.set_message_handler(resolve_pending)
+        session_a = build_session_key(
+            adapter.build_source(
+                chat_id="room-agent-1",
+                chat_type="dm",
+                user_id="alice",
+                thread_id="chat-a",
+            )
+        )
+        session_b = build_session_key(
+            adapter.build_source(
+                chat_id="room-agent-1",
+                chat_type="dm",
+                user_id="alice",
+                thread_id="chat-b",
+            )
+        )
+        request_id = "pinned-choice"
+        clarify_gateway.register(
+            clarify_id=request_id,
+            session_key=session_a,
+            question="Which environment should receive this change?",
+            choices=["Staging", "Production"],
+        )
+        releases = {session_a: asyncio.Event(), session_b: asyncio.Event()}
+        owners = {key: asyncio.create_task(release.wait()) for key, release in releases.items()}
+        adapter._active_sessions.update({key: asyncio.Event() for key in releases})
+        adapter._session_tasks.update(owners)
+        try:
+            sent = await adapter.send_clarify(
+                chat_id="room-agent-1",
+                question="Which environment should receive this change?",
+                choices=["Staging", "Production"],
+                clarify_id=request_id,
+                session_key=session_a,
+                metadata={
+                    "conversation_id": "topic-build",
+                    "segment_id": "chat-a",
+                    "thread_id": "chat-a",
+                },
+            )
+            self.assertTrue(sent.success)
+            prompt = bridge_calls[0][1]
+            self.assertEqual(prompt["kind"], "message")
+            self.assertEqual(prompt["conversation_id"], "topic-build")
+            self.assertEqual(prompt["segment_id"], "chat-a")
+            self.assertIn("1. Staging", prompt["text"])
+            self.assertIn("2. Production", prompt["text"])
+
+            await adapter._handle_finitechat_event(
+                self._text_event(
+                    segment_id="chat-b",
+                    seq=81,
+                    message_id="answer-b",
+                    text="2",
+                )
+            )
+            self.assertNotIn(
+                "answer-b",
+                [
+                    payload.get("message_id")
+                    for action, payload, _ in bridge_calls
+                    if action == "ack"
+                ],
+            )
+            self.assertIsNotNone(
+                clarify_gateway.get_pending_for_session(
+                    session_a,
+                    include_choice_prompts=True,
+                )
+            )
+
+            await adapter._handle_finitechat_event(
+                self._text_event(
+                    segment_id="chat-a",
+                    seq=82,
+                    message_id="answer-a",
+                    text="2",
+                )
+            )
+            self.assertEqual(
+                clarify_gateway.wait_for_response(request_id, timeout=0.1),
+                "Production",
+            )
+            self.assertIn(
+                "answer-a",
+                [
+                    payload.get("message_id")
+                    for action, payload, _ in bridge_calls
+                    if action == "ack"
+                ],
+            )
+        finally:
+            await adapter._cancel_admission_tasks()
+            clarify_gateway.clear_session(session_a)
+            for release in releases.values():
+                release.set()
+            await asyncio.gather(*owners.values(), return_exceptions=True)
+
+    async def test_real_018_open_reply_survives_adapter_reconstruction(self):
+        from tools import clarify_gateway
+
+        module = PINNED_ADAPTER_MODULE
+        first = self._adapter()
+        first_calls = []
+
+        async def first_json(action, payload, *, timeout):
+            first_calls.append((action, payload, timeout))
+            return module._FiniteChatResult(True, {"message_id": "prompt-open"}, None, False)
+
+        first._finitechat_json = first_json
+        session_key = build_session_key(
+            first.build_source(
+                chat_id="room-agent-1",
+                chat_type="dm",
+                user_id="alice",
+                thread_id="chat-open",
+            )
+        )
+        request_id = "pinned-open"
+        clarify_gateway.register(
+            clarify_id=request_id,
+            session_key=session_key,
+            question="What should change?",
+            choices=None,
+        )
+        owner_release = asyncio.Event()
+        owner = asyncio.create_task(owner_release.wait())
+        try:
+            sent = await first.send_clarify(
+                chat_id="room-agent-1",
+                question="What should change?",
+                choices=None,
+                clarify_id=request_id,
+                session_key=session_key,
+                metadata={
+                    "conversation_id": "topic-build",
+                    "segment_id": "chat-open",
+                    "thread_id": "chat-open",
+                },
+            )
+            self.assertTrue(sent.success)
+            self.assertEqual(first_calls[0][1]["text"], "❓ What should change?")
+            self.assertEqual(first_calls[0][1]["kind"], "message")
+
+            restarted = self._adapter()
+            restarted_calls = []
+
+            async def restarted_json(action, payload, *, timeout):
+                restarted_calls.append((action, payload, timeout))
+                return module._FiniteChatResult(True, {"message_id": action}, None, False)
+
+            async def resolve_pending(event):
+                clarify_gateway.resolve_text_response_for_session(
+                    build_session_key(event.source),
+                    event.text,
+                )
+                return ""
+
+            restarted._finitechat_json = restarted_json
+            restarted.set_message_handler(resolve_pending)
+            restarted._active_sessions[session_key] = asyncio.Event()
+            restarted._session_tasks[session_key] = owner
+            await restarted._handle_finitechat_event(
+                self._text_event(
+                    segment_id="chat-open",
+                    seq=83,
+                    message_id="answer-open",
+                    text="Keep the existing colors.",
+                )
+            )
+
+            self.assertEqual(
+                clarify_gateway.wait_for_response(request_id, timeout=0.1),
+                "Keep the existing colors.",
+            )
+            self.assertIn(
+                "answer-open",
+                [
+                    payload.get("message_id")
+                    for action, payload, _ in restarted_calls
+                    if action == "ack"
+                ],
+            )
+        finally:
+            clarify_gateway.clear_session(session_key)
+            owner_release.set()
+            await owner
+
+
 if __name__ == "__main__":
     unittest.main()
