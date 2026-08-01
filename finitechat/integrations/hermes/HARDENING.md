@@ -318,9 +318,11 @@ materialization into Hermes media fields, room filtering, redelivery dedupe,
 ack retry without duplicate dispatch, transient poll recovery, service fallback,
 NDJSON inbound stream consumption/fallback, outbound edit thread-route
 preservation, transient service transport retry before CLI fallback, and
-thread-scoped working activity set/clear routing. They also cover group-room
-sender identity mapping and fail-closed handling for typed non-message stream
-records such as receipts.
+thread-scoped working activity set/clear routing. They also cover exact-route
+Hermes clarification delivery as ordinary messages, fail-closed clarification
+delivery when the topic/chat route is unavailable, group-room sender identity
+mapping, and fail-closed handling for typed non-message stream records such as
+receipts.
 
 Protocol-hardening regression added after the missed second-turn incident:
 `hermes_poll_recovers_messages_already_applied_by_runtime_sync` proves the

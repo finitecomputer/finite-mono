@@ -598,6 +598,48 @@ class FiniteChatAdapter(BasePlatformAdapter):
             raw_response=result.data,
         )
 
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: list | None,
+        clarify_id: str,
+        session_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Project Hermes clarification onto one exact ordinary Chat route."""
+        meta = self._message_metadata(metadata)
+        room_id = self._room_id(chat_id)
+        conversation_id, segment_id = self._route_from_metadata(room_id, meta)
+        if conversation_id is None or segment_id is None:
+            error = (
+                "Hermes clarification requires an exact Finite Chat topic and chat; "
+                "refusing Home or active-chat fallback"
+            )
+            logger.warning("[finitechat] %s (session=%s)", error, session_key)
+            return SendResult(success=False, error=error, retryable=False)
+
+        # Hermes owns the pending request and the prompt format. Finite only
+        # pins its delivery route and keeps the prompt on the ordinary message
+        # rail, bypassing the legacy emoji/prose presentation inference.
+        meta.update(
+            {
+                "conversation_id": conversation_id,
+                "segment_id": segment_id,
+                "thread_id": segment_id,
+                "_finitechat_kind": "message",
+                "_finitechat_status": "complete",
+            }
+        )
+        return await super().send_clarify(
+            chat_id=room_id,
+            question=question,
+            choices=choices,
+            clarify_id=clarify_id,
+            session_key=session_key,
+            metadata=meta,
+        )
+
     async def edit_message(
         self,
         chat_id: str,
