@@ -45,6 +45,7 @@ const DEFAULT_IDENTITY_AUTHORITY_URL: &str = "https://identity.finite.vip";
 const CORE_API_BASE_URL_ENV: &str = "FC_CORE_API_BASE_URL";
 const CORE_API_TOKEN_ENV: &str = "FC_CORE_API_TOKEN";
 const VIEWER_SESSION_SERVICE_TOKEN_ENV: &str = "FINITE_SITES_VIEWER_SESSION_TOKEN";
+const IDENTITY_SITES_NOTIFICATION_TOKEN_ENV: &str = "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN";
 
 pub struct ServeOptions {
     pub data_dir: PathBuf,
@@ -57,6 +58,7 @@ pub struct ServeOptions {
     /// Dedicated account-boundary credential for the internal viewer-session
     /// exchange. It comes from the environment, never argv.
     pub viewer_session_service_token: Option<String>,
+    pub identity_sites_notification_token: Option<String>,
     pub git_hook_helper_path: PathBuf,
     pub git_auto_reconcile: bool,
     pub site_url_scheme: String,
@@ -241,7 +243,15 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let identity_sites_notification_token = std::env::var(IDENTITY_SITES_NOTIFICATION_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     validate_viewer_session_service_token(viewer_session_service_token.as_deref())?;
+    validate_identity_sites_notification_token(
+        identity_authority_url.as_deref(),
+        identity_sites_notification_token.as_deref(),
+    )?;
     let git_hook_helper_path = match flag_value(&flags, "git-hook-helper") {
         Some(raw) => PathBuf::from(raw),
         None => std::env::current_exe()
@@ -294,6 +304,7 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         git_base_url,
         identity_authority_url,
         viewer_session_service_token,
+        identity_sites_notification_token,
         git_hook_helper_path,
         git_auto_reconcile,
         site_url_scheme,
@@ -316,6 +327,22 @@ pub(crate) fn validate_viewer_session_service_token(token: Option<&str>) -> Resu
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_identity_sites_notification_token(
+    identity_authority_url: Option<&str>,
+    token: Option<&str>,
+) -> Result<(), String> {
+    match (identity_authority_url, token) {
+        (None, None) => Ok(()),
+        (Some(_), Some(value)) if hex::is_hex32(value) => Ok(()),
+        (Some(_), None) => Err(format!(
+            "{IDENTITY_SITES_NOTIFICATION_TOKEN_ENV} is required when the Identity Authority is configured"
+        )),
+        (_, Some(_)) => Err(format!(
+            "{IDENTITY_SITES_NOTIFICATION_TOKEN_ENV} must be exactly 64 lowercase hex characters"
+        )),
+    }
 }
 
 fn parse_identity_authority_url(
@@ -938,5 +965,24 @@ mod tests {
                 assert!(!error.contains(invalid));
             }
         }
+    }
+
+    #[test]
+    fn identity_notification_credential_fails_fast_when_required() {
+        let token = "ab".repeat(32);
+        assert!(validate_identity_sites_notification_token(None, None).is_ok());
+        assert!(
+            validate_identity_sites_notification_token(Some("http://127.0.0.1:8790"), Some(&token))
+                .is_ok()
+        );
+        assert_eq!(
+            validate_identity_sites_notification_token(Some("http://127.0.0.1:8790"), None)
+                .unwrap_err(),
+            "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN is required when the Identity Authority is configured"
+        );
+        assert_eq!(
+            validate_identity_sites_notification_token(None, Some("short")).unwrap_err(),
+            "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN must be exactly 64 lowercase hex characters"
+        );
     }
 }

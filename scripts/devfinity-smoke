@@ -154,6 +154,64 @@ console.log(`dashboard->core ok: request ${request.id} created project ${request
 JS
 }
 
+check_identity_reconciliation_operator_boundary() {
+  local smoke_root
+  local source_db
+  local synthetic_db
+  local preview_json
+  local apply_json
+  local authorized_before
+  local authorized_after_preview
+  local authorized_after_apply
+  local smoke_email="reconcile-smoke@finite.invalid"
+  local smoke_pubkey="2222222222222222222222222222222222222222222222222222222222222222"
+
+  smoke_root="${DEVFINITY_STATE_DIR:?}/sites-reconciliation-smoke"
+  source_db="${DEVFINITY_STATE_DIR:?}/finitesites/registry.db"
+  synthetic_db="$smoke_root/registry.db"
+  preview_json="$smoke_root/preview.json"
+  apply_json="$smoke_root/apply.json"
+  track_sensitive_dir "$smoke_root"
+  mkdir -p "$smoke_root"
+
+  sqlite3 "$source_db" ".backup '$synthetic_db'"
+  sqlite3 "$synthetic_db" \
+    "INSERT INTO email_keys (email, pubkey, verified_at, revoked_at) VALUES ('$smoke_email', '$smoke_pubkey', 1, NULL);"
+  authorized_before="$(sqlite3 "$synthetic_db" \
+    "SELECT count(*) FROM sites_authorized_keys sak JOIN sites_email_principals sep ON sep.id = sak.email_principal_id JOIN principals p ON p.id = sak.native_principal_id WHERE sep.email = '$smoke_email' AND p.pubkey = '$smoke_pubkey' AND sak.revoked_at IS NULL;")"
+
+  target/debug/finitesitesd reconcile-identity --data "$smoke_root" >"$preview_json"
+  node - "$preview_json" <<'JS'
+const fs = require("node:fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.mode !== "preview" || report.applied !== false || report.migrated < 1) {
+  throw new Error(`unexpected reconciliation preview: ${JSON.stringify(report)}`);
+}
+JS
+  authorized_after_preview="$(sqlite3 "$synthetic_db" \
+    "SELECT count(*) FROM sites_authorized_keys sak JOIN sites_email_principals sep ON sep.id = sak.email_principal_id JOIN principals p ON p.id = sak.native_principal_id WHERE sep.email = '$smoke_email' AND p.pubkey = '$smoke_pubkey' AND sak.revoked_at IS NULL;")"
+  if [[ "$authorized_before" != "0" || "$authorized_after_preview" != "$authorized_before" ]]; then
+    echo "Sites reconciliation preview mutated its synthetic source database" >&2
+    return 1
+  fi
+
+  target/debug/finitesitesd reconcile-identity --data "$smoke_root" --apply yes >"$apply_json"
+  node - "$apply_json" <<'JS'
+const fs = require("node:fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (report.mode !== "apply" || report.applied !== true || report.migrated < 1) {
+  throw new Error(`unexpected reconciliation apply: ${JSON.stringify(report)}`);
+}
+JS
+  authorized_after_apply="$(sqlite3 "$synthetic_db" \
+    "SELECT count(*) FROM sites_authorized_keys sak JOIN sites_email_principals sep ON sep.id = sak.email_principal_id JOIN principals p ON p.id = sak.native_principal_id WHERE sep.email = '$smoke_email' AND p.pubkey = '$smoke_pubkey' AND sak.revoked_at IS NULL;")"
+  if [[ "$authorized_after_apply" != "1" ]]; then
+    echo "Sites reconciliation apply did not add exactly one synthetic mailbox key" >&2
+    return 1
+  fi
+  echo "Sites reconciliation preview/apply operator boundary ok"
+}
+
 check_native_requesting_user_site() {
   local run_id
   local slug
@@ -168,9 +226,16 @@ check_native_requesting_user_site() {
   local user_state_json
   local requesting_user_id
   local requesting_user_npub
+  local owner_email
+  local agent_identity_json
+  local agent_npub
+  local assertion_request_json
+  local assertion_response_json
+  local session_key
   local init_json
   local init_fields
   local output_id
+  local site_id
   local output_url
   local git_remote
   local proof_request_json
@@ -195,6 +260,9 @@ check_native_requesting_user_site() {
   hosted_config="$smoke_root/hosted-device.curl"
   sites_config="$smoke_root/sites-service.curl"
   user_state_json="$smoke_root/user-state.json"
+  agent_identity_json="$smoke_root/agent-identity.json"
+  assertion_request_json="$smoke_root/hosted-requester-assertion-request.json"
+  assertion_response_json="$smoke_root/hosted-requester-assertion-response.json"
   init_json="$smoke_root/init.json"
   proof_request_json="$smoke_root/proof-request.json"
   proof_json="$smoke_root/proof.json"
@@ -203,6 +271,8 @@ check_native_requesting_user_site() {
   redemption_headers="$smoke_root/redemption.headers"
   revoke_json="$smoke_root/revoke.json"
   track_sensitive_dir "$smoke_root"
+  owner_email="devfinity@finite.computer"
+  session_key="finitechat:devfinity-sites-smoke:$run_id"
   umask 077
   mkdir -p "$agent_home" "$agent_finite_home" "$project_dir/site"
 
@@ -250,6 +320,66 @@ JS
     FINITE_SITES_API="$sites_url" \
     GIT_CONFIG_GLOBAL="$agent_home/gitconfig" \
     "$fsite_bin" auth register --output json >/dev/null
+  env \
+    HOME="$agent_home" \
+    FINITE_HOME="$agent_finite_home" \
+    "$fsite_bin" auth status --output json >"$agent_identity_json"
+  agent_npub="$(node - "$agent_identity_json" <<'JS'
+const fs = require("node:fs");
+const identity = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (typeof identity.npub !== "string" || !identity.npub.startsWith("npub1")) {
+  throw new Error("fsite did not report its Agent npub");
+}
+process.stdout.write(identity.npub);
+JS
+)"
+  node - "$owner_email" "$requesting_user_id" "$agent_npub" >"$assertion_request_json" <<'JS'
+const [email, requesterNpub, agentNpub] = process.argv.slice(2);
+process.stdout.write(JSON.stringify({
+  email,
+  requester_npub: requesterNpub,
+  agent_npub: agentNpub,
+}));
+JS
+  curl -fsS --config "$sites_config" \
+    -H 'content-type: application/json' \
+    --data-binary "@$assertion_request_json" \
+    "$sites_url/internal/v1/hosted-requester-assertions" >"$assertion_response_json"
+  node - "$assertion_response_json" "$agent_finite_home" "$session_key" \
+    "$requesting_user_id" "$owner_email" <<'JS'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const [responsePath, finiteHome, sessionKey, requesterId, ownerEmail] =
+  process.argv.slice(2);
+const response = JSON.parse(fs.readFileSync(responsePath, "utf8"));
+if (
+  response.email !== ownerEmail ||
+  typeof response.requester_npub !== "string" ||
+  !response.requester_npub.startsWith("npub1") ||
+  typeof response.assertion !== "string" ||
+  response.assertion.length === 0 ||
+  !Number.isSafeInteger(response.expires_at)
+) {
+  throw new Error("Sites did not mint the exact hosted requester assertion");
+}
+const digest = crypto.createHash("sha256").update(sessionKey).digest("hex");
+const contextDir = path.join(finiteHome, "requester-context-v2");
+fs.mkdirSync(contextDir, { recursive: true, mode: 0o700 });
+fs.writeFileSync(
+  path.join(contextDir, `${digest}.json`),
+  JSON.stringify({
+    version: 2,
+    session_key: sessionKey,
+    platform: "finitechat",
+    requesting_user_id: requesterId,
+    owner_email: ownerEmail,
+    hosted_requester_assertion: response.assertion,
+    expires_at_unix: response.expires_at,
+  }),
+  { mode: 0o600 },
+);
+JS
   (
     cd "$project_dir"
     env \
@@ -257,9 +387,11 @@ JS
       FINITE_HOME="$agent_finite_home" \
       FINITE_SITES_API="$sites_url" \
       GIT_CONFIG_GLOBAL="$agent_home/gitconfig" \
+      HERMES_SESSION_PLATFORM=finitechat \
+      HERMES_SESSION_KEY="$session_key" \
+      HERMES_SESSION_USER_ID="$requesting_user_id" \
       "$fsite_bin" project init \
         --config finite.toml \
-        --requesting-user-npub "$requesting_user_id" \
         --dry-run \
         --output json >/dev/null
     env \
@@ -267,9 +399,11 @@ JS
       FINITE_HOME="$agent_finite_home" \
       FINITE_SITES_API="$sites_url" \
       GIT_CONFIG_GLOBAL="$agent_home/gitconfig" \
+      HERMES_SESSION_PLATFORM=finitechat \
+      HERMES_SESSION_KEY="$session_key" \
+      HERMES_SESSION_USER_ID="$requesting_user_id" \
       "$fsite_bin" project init \
         --config finite.toml \
-        --requesting-user-npub "$requesting_user_id" \
         --output json >"$init_json"
   )
   init_fields="$(node - "$init_json" "$slug" <<'JS'
@@ -279,6 +413,7 @@ const output = response.outputs?.[0];
 if (
   response.slug !== process.argv[3] ||
   !response.requesting_user_npub?.startsWith("npub1") ||
+  response.owner_email !== "devfinity@finite.computer" ||
   !output?.requesting_user_shared ||
   output.visibility !== "private"
 ) {
@@ -286,13 +421,18 @@ if (
 }
 process.stdout.write([
   output.output_id,
+  output.site_id,
   output.output_url,
   response.git_remote_url,
   response.requesting_user_npub,
 ].join("\t"));
 JS
 )"
-  IFS=$'\t' read -r output_id output_url git_remote requesting_user_npub <<<"$init_fields"
+  IFS=$'\t' read -r output_id site_id output_url git_remote requesting_user_npub <<<"$init_fields"
+  if [[ ! "$site_id" =~ ^site_[0-9a-f]{32}$ ]]; then
+    echo "Sites smoke Project Init returned an invalid Site id" >&2
+    return 1
+  fi
   echo "Sites smoke Project and requesting-user Share initialized"
 
   env \
@@ -327,6 +467,50 @@ JS
     fi
     sleep 1
   done
+
+  local notification_key="sites:first-publication:$site_id"
+  local notification_count
+  started="$(date +%s)"
+  while true; do
+    notification_count="$(sqlite3 "${DEVFINITY_STATE_DIR:?}/finite-identity/identity.db" \
+      "SELECT count(*) FROM notification_deliveries WHERE idempotency_key = '$notification_key';")"
+    if [[ "$notification_count" == "1" ]]; then
+      break
+    fi
+    if (( "$(date +%s)" - started >= 30 )); then
+      echo "Sites first-publication notification was not delivered through Identity within 30s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+
+  printf '<h1>%s</h1><p>Second publication</p>\n' "$marker" >"$project_dir/site/index.html"
+  (
+    cd "$project_dir"
+    export GIT_CONFIG_GLOBAL="$agent_home/gitconfig"
+    git add site/index.html
+    git commit -q -m "Publish second private requesting-user smoke version"
+    git push -q finite main
+  )
+  started="$(date +%s)"
+  while true; do
+    if [[ "$(sqlite3 "${DEVFINITY_STATE_DIR:?}/finitesites/registry.db" \
+      "SELECT coalesce(max(version_number), 0) FROM versions WHERE site_id = '$site_id';")" == "2" ]]; then
+      break
+    fi
+    if (( "$(date +%s)" - started >= 60 )); then
+      echo "Sites smoke second Output version did not publish within 60s" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  notification_count="$(sqlite3 "${DEVFINITY_STATE_DIR:?}/finite-identity/identity.db" \
+    "SELECT count(*) FROM notification_deliveries WHERE idempotency_key = '$notification_key';")"
+  if [[ "$notification_count" != "1" ]]; then
+    echo "Sites first-publication notification was not exactly-once after a second publish" >&2
+    return 1
+  fi
+  echo "Sites first-publication Identity notification delivered exactly once"
 
   node - "$output_url" >"$proof_request_json" <<'JS'
 const { randomUUID } = require("node:crypto");
@@ -392,7 +576,7 @@ JS
 )"
   echo "Sites smoke Viewer Session redeemed"
   body="$(curl -fsS --max-time 15 -H "Cookie: $viewer_cookie" "$output_url")"
-  if [[ "$body" != *"$marker"* ]]; then
+  if [[ "$body" != *"$marker"* || "$body" != *"Second publication"* ]]; then
     echo "Sites smoke Viewer Cookie did not open the private Output" >&2
     return 1
   fi
@@ -406,17 +590,18 @@ JS
       --remove-npub "$requesting_user_npub" \
       --output json >"$revoke_json"
   status="$(curl -sS --max-time 15 -o /dev/null -H "Cookie: $viewer_cookie" -w '%{http_code}' "$output_url")"
-  if [[ "$status" != "401" ]]; then
-    echo "Revoked Sites smoke Viewer Cookie returned HTTP $status instead of 401" >&2
+  if [[ "$status" != "200" ]]; then
+    echo "Mailbox-authorized Sites smoke Viewer Cookie returned HTTP $status instead of 200 after its redundant native Share was removed" >&2
     return 1
   fi
-  echo "agent -> requesting user native Sites view and revocation ok: $output_url"
+  echo "agent -> requester native Share and same-mailbox keyset access ok: $output_url"
 }
 
 need bash
 need cargo
 need curl
 need node
+need sqlite3
 
 if [[ "${DEVFINITY_PROFILE:-}" != "services-only" ]]; then
   echo "devfinity service smoke requires the explicit services-only profile" >&2
@@ -438,6 +623,7 @@ check_http "hosted-web-device" "$hosted_device_url/healthz" '"status":"ok"'
 check_http "finitesites" "$sites_url/api/v1/healthz" '"ok":true'
 check_http "finitebrain" "$brain_url/health" '"status":"ok"'
 check_http "dashboard" "$dashboard_url" '<html'
+check_identity_reconciliation_operator_boundary
 check_native_requesting_user_site
 check_dashboard_agent_creation
 cargo test -p finitechat-client --locked --lib \

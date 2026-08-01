@@ -880,6 +880,7 @@ pub struct FiniteChatRuntime {
 enum AppRuntimeCommand {
     Dispatch {
         action: AppAction,
+        requester_context: Option<VerifiedRequesterContext>,
         response: Option<mpsc::SyncSender<Result<AppState, FiniteChatCoreError>>>,
     },
     WaitPlan {
@@ -982,6 +983,12 @@ enum AppRuntimeCommand {
         selected_room_id: Option<String>,
         response: mpsc::SyncSender<Result<(), FiniteChatCoreError>>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedRequesterContext {
+    email: String,
+    sites_assertion: String,
 }
 
 struct AppRuntimeState {
@@ -1278,6 +1285,7 @@ impl FiniteChatRuntime {
         self.command_tx
             .send(AppRuntimeCommand::Dispatch {
                 action,
+                requester_context: None,
                 response: None,
             })
             .map_err(|_| FiniteChatCoreError::Client {
@@ -1290,6 +1298,7 @@ impl FiniteChatRuntime {
         self.command_tx
             .send(AppRuntimeCommand::Dispatch {
                 action,
+                requester_context: None,
                 response: Some(response_tx),
             })
             .map_err(|_| FiniteChatCoreError::Client {
@@ -1330,6 +1339,44 @@ impl FiniteChatRuntime {
                 listener.reconcile(AppUpdate::FullState(state.clone()));
             }
         }
+    }
+}
+
+impl FiniteChatRuntime {
+    /// Dispatch a Hosted Web action carrying server-verified requester
+    /// context. This intentionally stays outside the UniFFI surface.
+    pub fn dispatch_and_wait_with_requester_context(
+        &self,
+        action: AppAction,
+        email: String,
+        sites_assertion: String,
+    ) -> Result<AppState, FiniteChatCoreError> {
+        let email = normalize_bounded_non_empty_string("requester.email", &email, 320)?;
+        let sites_assertion =
+            normalize_bounded_non_empty_string("requester.sites_assertion", &sites_assertion, 512)?;
+        if email.chars().any(char::is_control) || sites_assertion.chars().any(char::is_control) {
+            return Err(FiniteChatCoreError::Client {
+                reason: "requester context contains control characters".to_owned(),
+            });
+        }
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::Dispatch {
+                action,
+                requester_context: Some(VerifiedRequesterContext {
+                    email,
+                    sites_assertion,
+                }),
+                response: Some(response_tx),
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before completing command".to_owned(),
+            })?
     }
 }
 
@@ -1854,13 +1901,17 @@ fn spawn_app_runtime_worker(
         publish_app_update(&state.app, &shared_state, &reconciler);
         while let Ok(command) = command_rx.recv() {
             match command {
-                AppRuntimeCommand::Dispatch { action, response } => {
+                AppRuntimeCommand::Dispatch {
+                    action,
+                    requester_context,
+                    response,
+                } => {
                     if state.prepare_dispatch(&action) {
                         let snapshot = state.app.clone();
                         publish_app_update(&snapshot, &shared_state, &reconciler);
                     }
                     let completed_action = action.clone();
-                    let result = match state.dispatch(action) {
+                    let result = match state.dispatch(action, requester_context.as_ref()) {
                         Ok(()) => {
                             let snapshot = state.app.clone();
                             publish_app_update(&snapshot, &shared_state, &reconciler);
@@ -2393,7 +2444,11 @@ impl AppRuntimeState {
         self.app.flow.notice_text = notice_text;
     }
 
-    fn dispatch(&mut self, action: AppAction) -> Result<(), FiniteChatCoreError> {
+    fn dispatch(
+        &mut self,
+        action: AppAction,
+        requester_context: Option<&VerifiedRequesterContext>,
+    ) -> Result<(), FiniteChatCoreError> {
         self.app.toast = None;
         self.core.refresh_device_clock()?;
         match action {
@@ -2455,30 +2510,39 @@ impl AppRuntimeState {
                 self.add_room_members(room_id, profiles)?
             }
             AppAction::ScanTarget { value } => self.scan_target(value)?,
-            AppAction::SendMessage { room_id, text } => self.send_message(room_id, text)?,
+            AppAction::SendMessage { room_id, text } => {
+                self.send_message(room_id, text, requester_context)?
+            }
             AppAction::SendTopicMessage {
                 room_id,
                 topic_id,
                 text,
-            } => self.send_topic_message(room_id, topic_id, text)?,
+            } => self.send_topic_message(room_id, topic_id, text, requester_context)?,
             AppAction::SendChatMessage {
                 room_id,
                 topic_id,
                 chat_id,
                 text,
-            } => self.send_chat_message(room_id, topic_id, chat_id, text)?,
+            } => self.send_chat_message(room_id, topic_id, chat_id, text, requester_context)?,
             AppAction::SendReply {
                 room_id,
                 text,
                 reply_to_message_id,
-            } => self.send_reply(room_id, text, reply_to_message_id)?,
+            } => self.send_reply(room_id, text, reply_to_message_id, requester_context)?,
             AppAction::SendChatReply {
                 room_id,
                 topic_id,
                 chat_id,
                 text,
                 reply_to_message_id,
-            } => self.send_chat_reply(room_id, topic_id, chat_id, text, reply_to_message_id)?,
+            } => self.send_chat_reply(
+                room_id,
+                topic_id,
+                chat_id,
+                text,
+                reply_to_message_id,
+                requester_context,
+            )?,
             AppAction::SendAttachment {
                 room_id,
                 filename,
@@ -3311,6 +3375,7 @@ impl AppRuntimeState {
             HOME_TOPIC_ID.to_owned(),
             chat_id,
             trimmed.to_owned(),
+            None,
         )?;
         self.app.status = "chat started".to_owned();
         Ok(())
@@ -4406,8 +4471,13 @@ impl AppRuntimeState {
         Ok(())
     }
 
-    fn send_message(&mut self, room_id: String, text: String) -> Result<(), FiniteChatCoreError> {
-        self.send_message_with_reply(room_id, text, None)
+    fn send_message(
+        &mut self,
+        room_id: String,
+        text: String,
+        requester_context: Option<&VerifiedRequesterContext>,
+    ) -> Result<(), FiniteChatCoreError> {
+        self.send_message_with_reply(room_id, text, None, requester_context)
     }
 
     fn send_topic_message(
@@ -4415,6 +4485,7 @@ impl AppRuntimeState {
         room_id: String,
         topic_id: String,
         text: String,
+        requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         self.validate_topic(&room_id, &topic_id)?;
         let chat_id = match self.default_chat_id_for_topic(&room_id, &topic_id) {
@@ -4429,7 +4500,7 @@ impl AppRuntimeState {
                     })?
             }
         };
-        self.send_chat_message(room_id, topic_id, chat_id, text)
+        self.send_chat_message(room_id, topic_id, chat_id, text, requester_context)
     }
 
     fn send_chat_message(
@@ -4438,6 +4509,7 @@ impl AppRuntimeState {
         topic_id: String,
         chat_id: String,
         text: String,
+        requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
         self.send_message_with_conversation_and_chat(
@@ -4446,6 +4518,7 @@ impl AppRuntimeState {
             Some(chat_id),
             text,
             None,
+            requester_context,
         )
     }
 
@@ -4454,10 +4527,11 @@ impl AppRuntimeState {
         room_id: String,
         text: String,
         reply_to_message_id: String,
+        requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         let target_id = reply_to_message_id.trim();
         self.validate_reply_target(&room_id, target_id)?;
-        self.send_message_with_reply(room_id, text, Some(target_id.to_owned()))
+        self.send_message_with_reply(room_id, text, Some(target_id.to_owned()), requester_context)
     }
 
     fn send_chat_reply(
@@ -4467,6 +4541,7 @@ impl AppRuntimeState {
         chat_id: String,
         text: String,
         reply_to_message_id: String,
+        requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         self.validate_chat_route(&room_id, &topic_id, &chat_id)?;
         let target_id = reply_to_message_id.trim();
@@ -4477,6 +4552,7 @@ impl AppRuntimeState {
             Some(chat_id),
             text,
             Some(target_id.to_owned()),
+            requester_context,
         )
     }
 
@@ -4485,6 +4561,7 @@ impl AppRuntimeState {
         room_id: String,
         text: String,
         reply_to_message_id: Option<String>,
+        requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -4504,6 +4581,7 @@ impl AppRuntimeState {
             Some(chat_id),
             trimmed.to_owned(),
             reply_to_message_id,
+            requester_context,
         )
     }
 
@@ -4514,6 +4592,7 @@ impl AppRuntimeState {
         chat_id: Option<String>,
         text: String,
         reply_to_message_id: Option<String>,
+        requester_context: Option<&VerifiedRequesterContext>,
     ) -> Result<(), FiniteChatCoreError> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -4530,6 +4609,7 @@ impl AppRuntimeState {
             reply_to_message_id.as_deref(),
             conversation_id.as_deref(),
             chat_id.as_deref(),
+            requester_context,
         )?;
         let app_event_plaintext = encode_application_event_with_segment(
             DurableAppEventKind::ChatMessage,
@@ -9538,7 +9618,7 @@ fn encode_text_message_payload(
     text: &str,
     reply_to_message_id: Option<&str>,
 ) -> Result<Vec<u8>, FiniteChatCoreError> {
-    encode_text_message_payload_scoped(text, reply_to_message_id, None, None)
+    encode_text_message_payload_scoped(text, reply_to_message_id, None, None, None)
 }
 
 fn encode_text_message_payload_scoped(
@@ -9546,7 +9626,19 @@ fn encode_text_message_payload_scoped(
     reply_to_message_id: Option<&str>,
     conversation_id: Option<&str>,
     chat_id: Option<&str>,
+    requester_context: Option<&VerifiedRequesterContext>,
 ) -> Result<Vec<u8>, FiniteChatCoreError> {
+    let mut metadata = BTreeMap::new();
+    if let Some(requester) = requester_context {
+        metadata.insert(
+            finitechat_hermes::HERMES_METADATA_REQUESTER_EMAIL.to_owned(),
+            serde_json::Value::String(requester.email.clone()),
+        );
+        metadata.insert(
+            finitechat_hermes::HERMES_METADATA_SITES_REQUESTER_ASSERTION.to_owned(),
+            serde_json::Value::String(requester.sites_assertion.clone()),
+        );
+    }
     HermesMessagePayloadV1 {
         payload_type: finitechat_hermes::HERMES_MESSAGE_PAYLOAD_TYPE_V1.to_owned(),
         conversation_id: conversation_id.map(ToOwned::to_owned),
@@ -9558,7 +9650,7 @@ fn encode_text_message_payload_scoped(
         attachments: Vec::new(),
         reply_to_message_id: reply_to_message_id.map(ToOwned::to_owned),
         sender_name: None,
-        metadata: BTreeMap::new(),
+        metadata,
     }
     .encode()
     .map_err(client_error)
@@ -11840,6 +11932,40 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn text_payload_carries_requester_context_only_when_hosted_dispatch_supplies_it() {
+        let plain = encode_text_message_payload_scoped("hello", None, None, None, None).unwrap();
+        let plain = HermesMessagePayloadV1::decode(&plain).unwrap().unwrap();
+        assert!(
+            !plain
+                .metadata
+                .contains_key(finitechat_hermes::HERMES_METADATA_REQUESTER_EMAIL)
+        );
+
+        let requester = VerifiedRequesterContext {
+            email: "paul@finite.vip".to_owned(),
+            sites_assertion: "assertion-1".to_owned(),
+        };
+        let hosted =
+            encode_text_message_payload_scoped("publish", None, None, None, Some(&requester))
+                .unwrap();
+        let hosted = HermesMessagePayloadV1::decode(&hosted).unwrap().unwrap();
+        assert_eq!(
+            hosted
+                .metadata
+                .get(finitechat_hermes::HERMES_METADATA_REQUESTER_EMAIL)
+                .and_then(serde_json::Value::as_str),
+            Some("paul@finite.vip")
+        );
+        assert_eq!(
+            hosted
+                .metadata
+                .get(finitechat_hermes::HERMES_METADATA_SITES_REQUESTER_ASSERTION)
+                .and_then(serde_json::Value::as_str),
+            Some("assertion-1")
+        );
+    }
 
     fn next_permutation(values: &mut [usize]) -> bool {
         let Some(pivot) = (1..values.len())
@@ -19397,7 +19523,11 @@ mod tests {
         })
         .unwrap();
         alice
-            .send_message(room_id, "send while peer reaction is queued".to_owned())
+            .send_message(
+                room_id,
+                "send while peer reaction is queued".to_owned(),
+                None,
+            )
             .unwrap();
         assert_reaction(&alice.app, &target_message_id, "🎯", 1, false);
     }

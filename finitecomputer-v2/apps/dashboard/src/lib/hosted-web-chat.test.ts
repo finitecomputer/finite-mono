@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   HostedWebChatError,
   MAX_HOSTED_DEVICE_RECONCILE_REQUEST_BYTES,
+  createHostedRequesterContext,
   hostedWebChatErrorMessage,
   isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
@@ -16,6 +17,59 @@ import {
   HostedDeviceRequestError,
   type HostedChatState,
 } from "@/lib/hosted-web-device";
+
+test("verified hosted requester assertion binds mailbox, human, and agent", async (context) => {
+  const originalFetch = global.fetch;
+  const originalUpstream = process.env.FC_SITES_UPSTREAM_URL;
+  const originalToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN;
+  context.after(() => {
+    global.fetch = originalFetch;
+    process.env.FC_SITES_UPSTREAM_URL = originalUpstream;
+    process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = originalToken;
+  });
+  process.env.FC_SITES_UPSTREAM_URL = "https://sites.internal";
+  process.env.FINITE_SITES_VIEWER_SESSION_TOKEN = "sites-token";
+  const requests: Array<{ url: string; body: unknown }> = [];
+  global.fetch = (async (input, init) => {
+    const url = String(input);
+    requests.push({
+      url,
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    if (url.endsWith("/v1/app/state")) {
+      return Response.json(targetState());
+    }
+    return Response.json({
+      email: "paul@finite.vip",
+      requester_npub: "npub1human",
+      agent_npub: "npub1agent",
+      assertion: "assertion-1",
+      expires_at: 123,
+    });
+  }) as typeof fetch;
+
+  const requester = await createHostedRequesterContext({
+    config: { baseUrl: "https://device.internal", apiToken: "device-token" },
+    account: {
+      email: "paul@finite.vip",
+      workosUserId: "user_paul",
+      emailVerified: true,
+      source: "workos",
+    },
+  });
+  assert.deepEqual(requester, {
+    email: "paul@finite.vip",
+    sitesAssertion: "assertion-1",
+  });
+  assert.deepEqual(requests[1], {
+    url: "https://sites.internal/internal/v1/hosted-requester-assertions",
+    body: {
+      email: "paul@finite.vip",
+      requester_npub: "human-1",
+      agent_npub: "npub1agent",
+    },
+  });
+});
 
 function targetState(): HostedChatState {
   return {

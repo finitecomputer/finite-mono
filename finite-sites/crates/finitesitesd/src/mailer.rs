@@ -30,6 +30,10 @@ pub trait Mailer: Send + Sync {
         &self,
         invite: &ProjectCollaboratorInvite<'_>,
     ) -> Result<(), MailerError>;
+    fn send_site_access_request(
+        &self,
+        request: &SiteAccessRequestEmail<'_>,
+    ) -> Result<(), MailerError>;
 }
 
 pub struct ViewerInvite<'a> {
@@ -47,6 +51,91 @@ pub struct ProjectCollaboratorInvite<'a> {
     pub git_remote_url: &'a str,
     pub email_login_token: &'a str,
     pub outputs: &'a [ProjectOutputSummary],
+}
+
+pub struct SiteAccessRequestEmail<'a> {
+    pub owner_email: &'a str,
+    pub requester_email: &'a str,
+    pub site_name: &'a str,
+    pub site_url: &'a str,
+    pub approval_url: &'a str,
+}
+
+pub struct IdentityNotifier {
+    base_url: String,
+    token: String,
+    agent: ureq::Agent,
+}
+
+impl IdentityNotifier {
+    pub fn new(base_url: &str, token: String) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            token,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(10))
+                .build(),
+        }
+    }
+
+    pub fn send_site_access_request(
+        &self,
+        idempotency_key: &str,
+        request: &SiteAccessRequestEmail<'_>,
+    ) -> Result<(), MailerError> {
+        self.send(serde_json::json!({
+            "idempotency_key": idempotency_key,
+            "kind": "site_access_request",
+            "email": request.owner_email,
+            "site_name": request.site_name,
+            "site_url": request.site_url,
+            "requester_email": request.requester_email,
+            "approval_url": request.approval_url,
+        }))
+    }
+
+    pub fn send_first_publication(
+        &self,
+        idempotency_key: &str,
+        email: &str,
+        site_name: &str,
+        site_url: &str,
+    ) -> Result<(), MailerError> {
+        self.send(serde_json::json!({
+            "idempotency_key": idempotency_key,
+            "kind": "first_publication",
+            "email": email,
+            "site_name": site_name,
+            "site_url": site_url,
+        }))
+    }
+
+    fn send(&self, payload: serde_json::Value) -> Result<(), MailerError> {
+        match self
+            .agent
+            .post(&format!(
+                "{}/internal/v1/sites-notifications",
+                self.base_url
+            ))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .set("Accept", "application/json")
+            .send_json(payload)
+        {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(code, response)) => {
+                let body = response
+                    .into_string()
+                    .unwrap_or_else(|_| "unreadable body".to_owned());
+                Err(MailerError::Send(format!(
+                    "identity notification returned {code}: {}",
+                    body.chars().take(500).collect::<String>()
+                )))
+            }
+            Err(error) => Err(MailerError::Send(format!(
+                "identity notification transport failed: {error}"
+            ))),
+        }
+    }
 }
 
 /// Message text is shared by every mailer so dev output matches what real
@@ -144,6 +233,23 @@ fn project_collaborator_invite_text(invite: &ProjectCollaboratorInvite<'_>) -> S
     text
 }
 
+fn site_access_request_subject(site_name: &str) -> String {
+    format!("Access requested for {site_name}")
+}
+
+fn site_access_request_text(request: &SiteAccessRequestEmail<'_>) -> String {
+    format!(
+        "{requester} verified their email and requested access to {site_name}.\n\n\
+         Approve access:\n\n{approval_url}\n\n\
+         Site:\n\n{site_url}\n\n\
+         Ignore this email if you do not want to share the site.\n",
+        requester = request.requester_email,
+        site_name = request.site_name,
+        approval_url = request.approval_url,
+        site_url = request.site_url,
+    )
+}
+
 fn output_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
@@ -228,6 +334,18 @@ impl Mailer for DevMailer {
             &project_collaborator_invite_subject(invite.project_slug),
             &project_collaborator_invite_text(invite),
             "project-invite",
+        )
+    }
+
+    fn send_site_access_request(
+        &self,
+        request: &SiteAccessRequestEmail<'_>,
+    ) -> Result<(), MailerError> {
+        self.write_text_email(
+            request.owner_email,
+            &site_access_request_subject(request.site_name),
+            &site_access_request_text(request),
+            "site-access-request",
         )
     }
 }
@@ -402,6 +520,20 @@ impl Mailer for HttpMailer {
             invite.email,
             &project_collaborator_invite_subject(invite.project_slug),
             &project_collaborator_invite_text(invite),
+        );
+        self.send_payload(payload)
+    }
+
+    fn send_site_access_request(
+        &self,
+        request: &SiteAccessRequestEmail<'_>,
+    ) -> Result<(), MailerError> {
+        let payload = build_text_payload(
+            self.provider,
+            &self.from_address,
+            request.owner_email,
+            &site_access_request_subject(request.site_name),
+            &site_access_request_text(request),
         );
         self.send_payload(payload)
     }

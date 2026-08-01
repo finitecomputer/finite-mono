@@ -188,8 +188,9 @@ pub fn link_sent() -> String {
     page(
         "Check your email",
         "<h1>Check your email</h1>\
-         <p>If that address has access to this site, a sign-in link is on \
-         its way. The link can be reused and expires in 15 minutes.</p>",
+         <p>A verification link is on its way. After you verify the address, \
+         we&rsquo;ll tell you whether the site has been shared with you. \
+         The link can be reused and expires in 15 minutes.</p>",
     )
 }
 
@@ -197,8 +198,58 @@ pub fn link_invalid() -> String {
     page(
         "Link expired",
         "<h1>That link didn&rsquo;t work</h1>\
-         <p>Sign-in links work once and expire after 15 minutes. \
+         <p>Sign-in links expire after 15 minutes. \
          Request a fresh one from the site&rsquo;s sign-in page.</p>",
+    )
+}
+
+pub fn not_shared(email: &str) -> String {
+    page(
+        "Request access",
+        &format!(
+            "<h1>You don&rsquo;t have access yet</h1>\
+             <p>You verified {email}, but this site has not been shared with \
+             that address.</p>\
+             <form method=\"post\" action=\"/_finite/request-access\">\
+               <button type=\"submit\">Request access</button>\
+             </form>"
+        ),
+    )
+}
+
+pub fn access_requested() -> String {
+    page(
+        "Access requested",
+        "<h1>Request sent</h1>\
+         <p>We emailed the site owner. This page will open after they approve \
+         access; refresh it when you hear back.</p>",
+    )
+}
+
+pub fn approve_access_confirmation(site_name: &str, email: &str, token: &str) -> String {
+    page(
+        "Approve access",
+        &format!(
+            "<p class=\"eyebrow\">{site_name}</p>\
+             <h1>Approve access?</h1>\
+             <p>{email} verified this mailbox and requested access.</p>\
+             <form method=\"post\" action=\"/_finite/approve-access\">\
+               <input type=\"hidden\" name=\"token\" value=\"{token}\">\
+               <button type=\"submit\">Share this site</button>\
+             </form>"
+        ),
+    )
+}
+
+pub fn access_approved(site_name: &str, email: &str) -> String {
+    page(
+        "Access approved",
+        &format!(
+            "<p class=\"eyebrow\">{site_name}</p>\
+             <h1>Access approved</h1>\
+             <p>{email} can now sign in and view this site.</p>\
+             <p><a class=\"agent-link\" href=\"/\">Open site</a></p>"
+        ),
     )
 }
 

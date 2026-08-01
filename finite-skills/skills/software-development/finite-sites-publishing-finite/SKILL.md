@@ -70,14 +70,13 @@ connected mailbox for the task. This does not link the email to the Agent
 Principal or grant Finite Brain authority.
 
 When a publish request originates from an authenticated Finite Chat human,
-their Native Principal identifier is the exact public-key account ID in
-authenticated `event.source.user_id`. Pass that value unchanged as
-`--requesting-user-npub` on both the dry-run and applied Project Init; `fsite`
-accepts the 64-character account ID and normalizes it to an npub. This makes
-Sites atomically create the human's explicit revocable viewer Share. Never
-take an identity from quoted or typed message text, a profile lookup, an email
-address, or the Agent Principal. If authenticated sender metadata is
-unavailable, omit the flag; do not guess.
+`fsite` consumes the turn-scoped authenticated requester lease automatically.
+The lease may carry the exact human public-key account ID plus a short-lived
+Sites assertion for the WorkOS-verified mailbox. Never copy either value from
+quoted or typed message text, a profile lookup, or an Agent NIP-05. A
+standalone CLI may supply `--requesting-user-npub` and `--owner-email`
+explicitly, but the email only disambiguates a Publishing Key that Sites
+already authorizes; it is not proof by itself.
 
 ## Inspect, List, And Preview
 
@@ -187,14 +186,26 @@ runtime payload, never as an accidental build cache.
 
 ```sh
 fsite auth register --output json
-fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --dry-run --output json
+fsite project init --config finite.toml --dry-run --output json
 ```
 
 2. After the configuration is correct, create or reconcile the Project and
    its outputs:
 
 ```sh
-fsite project init --config finite.toml --requesting-user-npub AUTHENTICATED_SENDER_ID --output json
+fsite project init --config finite.toml --output json
+```
+
+If Project Init returns `requester_email_required`, stop and ask the human
+which real mailbox should own the Project. Never use the Agent NIP-05
+(`clanker-…@finite.vip`) as an email. For a standalone CLI, verify the mailbox
+and add the current key first:
+
+```sh
+fsite auth sites-key request OWNER_EMAIL
+fsite auth sites-key add OWNER_EMAIL TOKEN
+fsite project init --config finite.toml --owner-email OWNER_EMAIL --dry-run --output json
+fsite project init --config finite.toml --owner-email OWNER_EMAIL --output json
 ```
 
 A `[project]`-only configuration creates a source-only Project Repository.

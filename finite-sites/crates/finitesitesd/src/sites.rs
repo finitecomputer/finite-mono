@@ -34,16 +34,159 @@ use crate::server::{AppState, now_unix, site_label};
 const VIEWER_COOKIE_NAME: &str = "finite_site_auth";
 const PARTITIONED_VIEWER_COOKIE_NAME: &str = "__Host-finite_site_auth_partitioned";
 
+enum RedeemedViewer {
+    Email {
+        site: SiteRecord,
+        cookie_value: String,
+        email: String,
+    },
+    Native {
+        site: SiteRecord,
+        cookie_value: String,
+    },
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/_finite/auth", get(redeem_link))
         .route("/_finite/auth/native-session", post(native_session))
         .route("/_finite/request-link", post(request_link))
+        .route("/_finite/request-access", post(request_access))
+        .route(
+            "/_finite/approve-access",
+            get(confirm_access).post(approve_access),
+        )
         .route("/_finite/logout", get(logout))
         // Any method: app sites proxy POST/PUT/etc.; static handling
         // rejects non-GET itself.
         .fallback(serve_path)
         .with_state(state)
+}
+
+async fn request_access(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let site = match resolve_request_site(&state, &headers).await {
+        Ok(Some(site)) => site,
+        Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
+        Err(error) => {
+            eprintln!("finitesitesd request-access error: {error}");
+            return internal_page();
+        }
+    };
+    let Some(cookie_value) = viewer_cookie_value(&headers) else {
+        return html_response(StatusCode::UNAUTHORIZED, pages::login(&site.name));
+    };
+    let request = {
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine.request_site_access(&site, &cookie_value, now_unix())
+    };
+    match request {
+        Ok(request) => {
+            let email = crate::mailer::SiteAccessRequestEmail {
+                owner_email: &request.owner_email,
+                requester_email: &request.requester_email,
+                site_name: &request.site_name,
+                site_url: &request.site_url,
+                approval_url: &request.approval_url,
+            };
+            let delivery = match state.identity_notifier.as_ref() {
+                Some(notifier) => {
+                    notifier.send_site_access_request(&request.idempotency_key, &email)
+                }
+                None => state.mailer.send_site_access_request(&email),
+            };
+            if let Err(error) = delivery {
+                eprintln!("finitesitesd access-request mail error: {error}");
+                return internal_page();
+            }
+            html_response(StatusCode::OK, pages::access_requested())
+        }
+        Err(EngineError::Conflict("site access request already pending")) => {
+            html_response(StatusCode::OK, pages::access_requested())
+        }
+        Err(EngineError::Conflict("email already has site access")) => {
+            let mut response = Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header(LOCATION, "/")
+                .body(Body::empty())
+                .expect("static response builds");
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response
+        }
+        Err(EngineError::NotAuthorized) => {
+            html_response(StatusCode::UNAUTHORIZED, pages::login(&site.name))
+        }
+        Err(error) => {
+            eprintln!("finitesitesd request-access error: {error}");
+            internal_page()
+        }
+    }
+}
+
+async fn approve_access(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(params): Form<HashMap<String, String>>,
+) -> Response {
+    let site = match resolve_request_site(&state, &headers).await {
+        Ok(Some(site)) => site,
+        Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
+        Err(error) => {
+            eprintln!("finitesitesd approve-access error: {error}");
+            return internal_page();
+        }
+    };
+    let Some(token) = params.get("token") else {
+        return bad_request_page();
+    };
+    let approved = {
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine.approve_site_access(&site.id, token, now_unix())
+    };
+    match approved {
+        Ok((approved_site, email)) if approved_site.id == site.id => {
+            html_response(StatusCode::OK, pages::access_approved(&site.name, &email))
+        }
+        Ok(_) | Err(EngineError::Validation(_)) => bad_request_page(),
+        Err(error) => {
+            eprintln!("finitesitesd approve-access error: {error}");
+            internal_page()
+        }
+    }
+}
+
+async fn confirm_access(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let site = match resolve_request_site(&state, &headers).await {
+        Ok(Some(site)) => site,
+        Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
+        Err(error) => {
+            eprintln!("finitesitesd confirm-access error: {error}");
+            return internal_page();
+        }
+    };
+    let Some(token) = params.get("token") else {
+        return bad_request_page();
+    };
+    let pending = {
+        let engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine.pending_site_access_approval(token, now_unix())
+    };
+    match pending {
+        Ok((pending_site, email)) if pending_site.id == site.id => html_response(
+            StatusCode::OK,
+            pages::approve_access_confirmation(&site.name, &email, token),
+        ),
+        Ok(_) | Err(EngineError::Validation(_)) => bad_request_page(),
+        Err(error) => {
+            eprintln!("finitesitesd confirm-access error: {error}");
+            internal_page()
+        }
+    }
 }
 
 // ---- request context ---------------------------------------------------------
@@ -587,22 +730,58 @@ async fn redeem_link(
     let redeemed = {
         let mut engine = state.engine.lock().expect("engine mutex never poisoned");
         match (email_token, native_token) {
-            (Some(token), None) => engine.redeem_login(token, now_unix()),
-            (None, Some(token)) => engine.redeem_native_viewer_link(token, now_unix()),
+            (Some(token), None) => engine.redeem_login_with_email(token, now_unix()).map(
+                |(site, cookie_value, email)| RedeemedViewer::Email {
+                    site,
+                    cookie_value,
+                    email,
+                },
+            ),
+            (None, Some(token)) => engine
+                .redeem_native_viewer_link(token, now_unix())
+                .map(|(site, cookie_value)| RedeemedViewer::Native { site, cookie_value }),
             _ => unreachable!("token shape validated above"),
         }
     };
     match redeemed {
-        Ok((token_site, cookie_value)) => {
+        Ok(redeemed) => {
+            let (token_site, cookie_value, verified_email) = match redeemed {
+                RedeemedViewer::Email {
+                    site,
+                    cookie_value,
+                    email,
+                } => (site, cookie_value, Some(email)),
+                RedeemedViewer::Native { site, cookie_value } => (site, cookie_value, None),
+            };
             // A link minted for one site must not set a cookie on another.
             if token_site.id != site.id {
                 return html_response(StatusCode::BAD_REQUEST, pages::link_invalid());
             }
-            let mut response = Response::builder()
-                .status(StatusCode::SEE_OTHER)
-                .header(LOCATION, return_to)
-                .body(Body::empty())
-                .expect("static response builds");
+            let email_has_access = match verified_email.as_deref() {
+                Some(email) => {
+                    let engine = state.engine.lock().expect("engine mutex never poisoned");
+                    match engine.email_can_view_site(&site, email) {
+                        Ok(allowed) => allowed,
+                        Err(error) => {
+                            eprintln!("finitesitesd email access error: {error}");
+                            return internal_page();
+                        }
+                    }
+                }
+                None => true,
+            };
+            let mut response = if email_has_access {
+                Response::builder()
+                    .status(StatusCode::SEE_OTHER)
+                    .header(LOCATION, return_to)
+                    .body(Body::empty())
+                    .expect("static response builds")
+            } else {
+                html_response(
+                    StatusCode::FORBIDDEN,
+                    pages::not_shared(verified_email.as_deref().expect("email redemption")),
+                )
+            };
             for cookie in viewer_cookie_headers(
                 &cookie_value,
                 VIEWER_COOKIE_TTL_SECONDS,

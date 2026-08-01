@@ -59,10 +59,15 @@ FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITECHAT_HOME_CHANNEL_ENV = "FINITECHAT_HOME_CHANNEL"
 FINITE_ACCOUNT_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
 REQUESTER_CONTEXT_DIR = "requester-context-v1"
+REQUESTER_CONTEXT_V2_DIR = "requester-context-v2"
 REQUESTER_CONTEXT_TTL_SECS = 15 * 60
 REQUESTER_CONTEXT_VERSION = 1
+REQUESTER_CONTEXT_V2_VERSION = 2
 _AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "finitechat_authenticated_turn_user", default=None
+)
+_AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[tuple[str, str] | None] = (
+    contextvars.ContextVar("finitechat_authenticated_requester_context", default=None)
 )
 APPROVAL_CONTROL_TEXT = frozenset(
     {
@@ -222,6 +227,7 @@ class _RequesterContextBroker:
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or _requester_context_root()
+        self.root_v2 = self.root.parent / REQUESTER_CONTEXT_V2_DIR
         self._lock = threading.Lock()
         self._leases: dict[str, dict[str, tuple[int, int]]] = {}
         self._clear_on_start()
@@ -273,9 +279,12 @@ class _RequesterContextBroker:
         try:
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             self.root.chmod(0o700)
-            for path in self.root.iterdir():
-                if path.is_file() or path.is_symlink():
-                    path.unlink(missing_ok=True)
+            for root in (self.root, self.root_v2):
+                root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                root.chmod(0o700)
+                for path in root.iterdir():
+                    if path.is_file() or path.is_symlink():
+                        path.unlink(missing_ok=True)
         except OSError as exc:
             logger.warning("[finitechat] could not reset requester context leases: %s", exc)
 
@@ -289,7 +298,7 @@ class _RequesterContextBroker:
             self._leases.pop(session_key, None)
             self._remove(session_key)
         try:
-            for path in self.root.glob("*.json"):
+            for path in (*self.root.glob("*.json"), *self.root_v2.glob("*.json")):
                 try:
                     payload = json.loads(path.read_text(encoding="utf-8"))
                     expires_at = int(payload.get("expires_at_unix") or 0)
@@ -319,12 +328,53 @@ class _RequesterContextBroker:
                 handle.flush()
                 os.fsync(handle.fileno())
             temp_path.replace(final_path)
+            requester_context = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.get()
+            if requester_context is not None:
+                email, sites_assertion = requester_context
+                self._write_v2(
+                    session_key=session_key,
+                    user_id=user_id,
+                    email=email,
+                    sites_assertion=sites_assertion,
+                    expires_at_unix=expires_at_unix,
+                )
         except OSError as exc:
             logger.warning("[finitechat] could not write requester context lease: %s", exc)
 
+    def _write_v2(
+        self,
+        *,
+        session_key: str,
+        user_id: str,
+        email: str,
+        sites_assertion: str,
+        expires_at_unix: int,
+    ) -> None:
+        self.root_v2.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.root_v2.chmod(0o700)
+        final_path = self.root_v2 / _requester_context_filename(session_key)
+        temp_path = self.root_v2 / f".{final_path.name}.{os.getpid()}.tmp"
+        payload = {
+            "version": REQUESTER_CONTEXT_V2_VERSION,
+            "session_key": session_key,
+            "platform": FINITE_PLATFORM_NAME,
+            "requesting_user_id": user_id,
+            "owner_email": email,
+            "hosted_requester_assertion": sites_assertion,
+            "expires_at_unix": expires_at_unix,
+        }
+        with temp_path.open("w", encoding="utf-8") as handle:
+            os.chmod(temp_path, 0o600)
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(final_path)
+
     def _remove(self, session_key: str) -> None:
-        with contextlib.suppress(OSError):
-            (self.root / _requester_context_filename(session_key)).unlink(missing_ok=True)
+        for root in (self.root, self.root_v2):
+            with contextlib.suppress(OSError):
+                (root / _requester_context_filename(session_key)).unlink(missing_ok=True)
 
 
 def _requester_context_root() -> Path:
@@ -384,6 +434,27 @@ def _authenticated_requester_for_event(event: MessageEvent) -> str | None:
     ):
         return None
     return authenticated_user_id
+
+
+def _authenticated_requester_context_for_event(
+    event: MessageEvent,
+) -> tuple[str, str] | None:
+    if _authenticated_requester_for_event(event) is None:
+        return None
+    raw_message = getattr(event, "raw_message", None)
+    if not isinstance(raw_message, dict):
+        return None
+    email = str(raw_message.get("requester_email") or "").strip()
+    assertion = str(raw_message.get("sites_requester_assertion") or "").strip()
+    if (
+        not email
+        or len(email.encode("utf-8")) > 320
+        or not assertion
+        or len(assertion.encode("utf-8")) > 512
+        or any(character.isspace() for character in assertion)
+    ):
+        return None
+    return email, assertion
 
 
 def check_requirements() -> bool:
@@ -485,9 +556,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         """
         requester = _authenticated_requester_for_event(event)
         token = _AUTHENTICATED_FINITE_TURN_USER.set(requester)
+        requester_context = _authenticated_requester_context_for_event(event)
+        context_token = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.set(requester_context)
         try:
             await super()._process_message_background(event, session_key)
         finally:
+            _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.reset(context_token)
             _AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
     async def connect(self, is_reconnect: bool = False, **_: Any) -> bool:

@@ -16,6 +16,8 @@ pub const GIT_CREDENTIAL_ID_PREFIX: &str = "gcred";
 pub const SITES_EMAIL_PRINCIPAL_ID_PREFIX: &str = "sep";
 pub const SITES_AUTHORIZED_KEY_ID_PREFIX: &str = "sak";
 pub const SITES_IDENTITY_REPAIR_ID_PREFIX: &str = "sir";
+pub const HOSTED_REQUESTER_ASSERTION_ID_PREFIX: &str = "hra";
+pub const SITE_ACCESS_REQUEST_ID_PREFIX: &str = "sar";
 
 pub fn new_id(prefix: &str) -> String {
     assert!(!prefix.is_empty() && prefix.len() <= 8);

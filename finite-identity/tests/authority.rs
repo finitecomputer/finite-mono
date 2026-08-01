@@ -41,6 +41,20 @@ impl RecordingMailer {
             .find_map(|(delivered_email, token)| (delivered_email == email).then(|| token.clone()))
             .expect("token delivered")
     }
+
+    fn delivery_count(&self) -> usize {
+        self.deliveries.lock().unwrap().len()
+    }
+
+    fn last_delivery_for(&self, email: &str) -> String {
+        self.deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|(delivered_email, body)| (delivered_email == email).then(|| body.clone()))
+            .expect("mail delivered")
+    }
 }
 
 impl Mailer for RecordingMailer {
@@ -49,6 +63,20 @@ impl Mailer for RecordingMailer {
             .lock()
             .unwrap()
             .push((email.to_owned(), token.to_owned()));
+        Ok(())
+    }
+
+    fn send_transactional_email(
+        &self,
+        _idempotency_key: &str,
+        email: &str,
+        _subject: &str,
+        text: &str,
+    ) -> Result<(), String> {
+        self.deliveries
+            .lock()
+            .unwrap()
+            .push((email.to_owned(), text.to_owned()));
         Ok(())
     }
 }
@@ -71,6 +99,7 @@ fn fixture() -> (
             finite_vip_domain: "finite.vip".to_owned(),
             email_challenge_ttl_seconds: 600,
             operator_token: Some(OPERATOR_TOKEN.to_owned()),
+            sites_notification_token: Some("sites-notification-test-token".to_owned()),
         },
     );
     (router(state), store, mailer, clock)
@@ -95,6 +124,53 @@ async fn health_reports_identity_authority_ready() {
         serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
         serde_json::json!({ "service": "finite-identity", "status": "ok" })
     );
+}
+
+#[tokio::test]
+async fn sites_notifications_require_the_narrow_token_and_deduplicate_delivery() {
+    let (app, _, mailer, _) = fixture();
+    let body = serde_json::json!({
+        "idempotency_key": "sites:first-publication:site-1",
+        "kind": "first_publication",
+        "email": "alice@example.com",
+        "site_name": "Alice's notes",
+        "site_url": "https://alice-notes.finite.site/"
+    });
+
+    let (status, error) = json_request(
+        app.clone(),
+        "POST",
+        "/internal/v1/sites-notifications",
+        body.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error["error"], "missing_sites_notification_token");
+
+    let auth = Some("Bearer sites-notification-test-token".to_owned());
+    let (status, delivered) = json_request(
+        app.clone(),
+        "POST",
+        "/internal/v1/sites-notifications",
+        body.clone(),
+        auth.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(delivered["status"], "delivered");
+    assert_eq!(mailer.delivery_count(), 1);
+    assert!(
+        mailer
+            .last_delivery_for("alice@example.com")
+            .contains("first publication")
+    );
+
+    let (status, replay) =
+        json_request(app, "POST", "/internal/v1/sites-notifications", body, auth).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["status"], "already_delivered");
+    assert_eq!(mailer.delivery_count(), 1);
 }
 
 async fn json_request(

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   hostedDeviceAuthorizeAgentBinding,
+  hostedDeviceAction,
   hostedDeviceApproveLink,
   hostedDeviceAttachments,
   hostedDeviceBrainIdentityProvider,
@@ -46,6 +47,44 @@ test("hostedDeviceHeaders binds the internal call to the verified WorkOS user", 
   );
   assert.equal(headers.get("authorization"), "Bearer secret");
   assert.equal(headers.get("x-finite-workos-user-id"), "user_paul");
+});
+
+test("hosted text dispatch carries the Sites assertion only in trusted headers", async (context) => {
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+  let observedHeaders = new Headers();
+  global.fetch = (async (_input, init) => {
+    observedHeaders = new Headers(init?.headers);
+    return Response.json({
+      rev: 1,
+      identity: { account_id: "human", device_id: "hosted" },
+      rooms: [],
+      topics: [],
+      status: "ready",
+      messages: [],
+      profiles: [],
+      devices: [],
+      typing_members: [],
+      flow: {
+        notice_busy: false,
+        scan_in_flight: false,
+        scan_result: "",
+      },
+    });
+  }) as typeof fetch;
+  await hostedDeviceAction(
+    { baseUrl: "https://device.internal", apiToken: "internal-token" },
+    verifiedAccount,
+    { SendMessage: { room_id: "room-a", text: "publish" } },
+    { email: "paul@finite.vip", sitesAssertion: "assertion-1" },
+  );
+  assert.equal(observedHeaders.get("x-finite-requester-email"), "paul@finite.vip");
+  assert.equal(
+    observedHeaders.get("x-finite-sites-requester-assertion"),
+    "assertion-1",
+  );
 });
 
 test("hosted-device diagnostic paths never expose resource identifiers", () => {

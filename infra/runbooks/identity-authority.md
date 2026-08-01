@@ -17,6 +17,7 @@ audit metadata only. It never stores a user or Agent's secret Nostr key.
 | Data directory | `/var/lib/finite-identity` (`StateDirectory`, mode `0700`) |
 | SQLite database | `/var/lib/finite-identity/identity.db` |
 | Operator credential | `/etc/finite/identity-operator.env`, `root:root`, mode `0600` |
+| Sites notification credential | `/etc/finite/identity-sites-notification.env`, `root:root`, mode `0600` |
 | Mail provider credential | `RESEND_API_KEY` in `/etc/finite-saas/sites.env` |
 | Mail sender | `Finite Identity <identity@finite.chat>` |
 | Trusted same-host product URL | `http://127.0.0.1:8790` |
@@ -26,6 +27,12 @@ The operator environment contains exactly
 trusted Runner processes. It must never enter `FC_RUNNER_RUNTIME_ENV_JSON`,
 the Runtime secret environment, an Agent Runtime, a command argument, logs, or
 this repository.
+
+The Sites notification environment contains exactly
+`FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN`. Only Identity and Sites read it.
+It authorizes the narrow first-publication and site-access-request mail route;
+it is not valid for operator actions and must not be supplied to a browser,
+dashboard process, Hosted Device, Runner, or Agent Runtime.
 
 ## Public and private routes
 
@@ -59,13 +66,16 @@ From an exact reviewed checkout:
 
 ```sh
 scripts/install-identity-authority-credentials root@64.34.82.77
+scripts/install-identity-sites-notification-credential root@64.34.82.77
 ```
 
-The installer validates the existing Resend environment, creates a random
-32-byte operator token on lat1 if absent, and never displays the value. An
-existing valid file is preserved. The token is replaceable configuration, not
-identity data: after a host loss, generate a new value and install the same
-new value for the Authority and trusted products before starting either.
+The installers validate their existing files, create independent random
+32-byte credentials on lat1 if absent, and never display either value.
+Existing valid files are preserved. The operator token is replaceable
+configuration, not identity data: after a host loss, generate a new value and
+install the same new value for the Authority and trusted products before
+starting either. The Sites notification credential must exist before switching
+to a closure whose Identity and Sites units require it.
 
 After the DNS record and credential exist, deploy only an exact reviewed commit
 on `origin/main` through `scripts/deploy-lat1 REV`.

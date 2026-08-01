@@ -328,6 +328,7 @@ pub struct Stack {
     core_token: String,
     hosted_web_device_token: String,
     sites_viewer_session_token: String,
+    identity_sites_notification_token: String,
     profile: StackProfile,
     fresh_services_state: bool,
     inference_mode: InferenceMode,
@@ -394,6 +395,8 @@ impl Stack {
             hosted_web_device_token: "devfinity-hosted-web-device-token".to_string(),
             sites_viewer_session_token:
                 "dededededededededededededededededededededededededededededededede".to_string(),
+            identity_sites_notification_token:
+                "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd".to_string(),
             profile: StackProfile::AppleSaas,
             fresh_services_state: false,
             inference_mode,
@@ -594,8 +597,9 @@ impl Stack {
         write_mode_600(
             &self.identity_authority_secret_file(),
             format!(
-                "export FINITE_IDENTITY_OPERATOR_TOKEN={}\n",
-                shell_quote(&identity_operator_token)
+                "export FINITE_IDENTITY_OPERATOR_TOKEN={}\nexport FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN={}\n",
+                shell_quote(&identity_operator_token),
+                shell_quote(&self.identity_sites_notification_token)
             )
             .as_bytes(),
         )?;
@@ -1477,6 +1481,10 @@ wait "$postgres_pid"
                 (
                     "FINITE_SITES_VIEWER_SESSION_TOKEN",
                     self.sites_viewer_session_token.clone(),
+                ),
+                (
+                    "FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN",
+                    self.identity_sites_notification_token.clone(),
                 ),
                 ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
             ],

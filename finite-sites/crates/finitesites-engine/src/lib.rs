@@ -15,7 +15,8 @@ use thiserror::Error;
 
 use finitesites_blob::{BlobError, BlobStore};
 use finitesites_proto::dto::{
-    AuthRegisterResponse, GitAuthResponse, ProjectCollaboratorSummary, ProjectGrantRequest,
+    AuthRegisterResponse, GitAuthResponse, HostedRequesterAssertionRequest,
+    HostedRequesterAssertionResponse, ProjectCollaboratorSummary, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListItem,
     ProjectListResponse, ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse,
     ProjectStatusResponse, SharingRequest, SharingResponse, SiteSummary,
@@ -30,11 +31,12 @@ use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::project_config::ProjectOutputKind;
 use finitesites_proto::{ManifestFile, ProtoError, PublishManifest, hex, ids, names, npub};
 use finitesites_store::{
-    GitRefEventRecord, ProjectAccessRecord, ProjectCollaboratorApply, ProjectCollaboratorRecord,
-    ProjectCollaboratorRole, ProjectCollaboratorTarget, ProjectInitStoreOutcome,
-    ProjectOutputApply, ProjectOutputRecord, ProjectRecord, ProjectVisibility, SiteKind,
-    SiteRecord, SiteStatus, Store, StoreError, Visibility,
+    GitRefEventRecord, PendingSiteNotification, ProjectAccessRecord, ProjectCollaboratorApply,
+    ProjectCollaboratorRecord, ProjectCollaboratorRole, ProjectCollaboratorTarget,
+    ProjectInitStoreOutcome, ProjectOutputApply, ProjectOutputRecord, ProjectRecord,
+    ProjectVisibility, SiteKind, SiteRecord, SiteStatus, Store, StoreError, Visibility,
 };
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Error)]
@@ -51,6 +53,8 @@ pub enum EngineError {
     OutputNotFound,
     #[error("signer is not authorized for this site")]
     NotAuthorized,
+    #[error("the requesting user's verified email is required")]
+    RequesterEmailRequired,
     #[error("too many sites for this owner")]
     TooManySites,
     #[error("too many viewer shares for this site")]
@@ -145,6 +149,19 @@ pub struct EmailRedeemOutcome {
     pub email: String,
     pub linked_to_native_principal: bool,
 }
+
+#[derive(Debug, Clone)]
+pub struct SiteAccessRequest {
+    pub site_id: String,
+    pub idempotency_key: String,
+    pub requester_email: String,
+    pub owner_email: String,
+    pub site_name: String,
+    pub site_url: String,
+    pub approval_url: String,
+}
+
+const SITE_ACCESS_APPROVAL_TTL_SECONDS: u64 = 24 * 60 * 60;
 
 /// Everything the app supervisor needs to deploy one finalized version.
 #[derive(Debug, Clone)]
@@ -282,20 +299,27 @@ impl Engine {
             .as_deref()
             .map(npub::encode_npub)
             .transpose()?;
+        let owner_email = request
+            .owner_email
+            .as_deref()
+            .map(validate_email)
+            .transpose()?;
         if request.dry_run {
             return self.dry_run_project_init(
                 owner_pubkey,
                 request,
                 &outputs,
                 requesting_user_npub,
+                owner_email,
                 git_remote_url,
                 finite_toml,
             );
         }
 
-        let outcome = match self.store.init_project_with_requesting_user(
+        let outcome = match self.store.init_project_with_owner(
             owner_pubkey,
             requesting_user_pubkey.as_deref(),
+            owner_email.as_deref(),
             &request.config.project.slug,
             &outputs,
             now,
@@ -312,6 +336,7 @@ impl Engine {
         self.project_init_response_from_store(
             request.dry_run,
             requesting_user_npub,
+            owner_email,
             git_remote_url,
             finite_toml,
             outcome,
@@ -325,6 +350,7 @@ impl Engine {
         request: &ProjectInitRequest,
         outputs: &[ProjectOutputApply],
         requesting_user_npub: Option<String>,
+        owner_email: Option<String>,
         git_remote_url: String,
         finite_toml: String,
     ) -> Result<ProjectInitResponse, EngineError> {
@@ -414,6 +440,7 @@ impl Engine {
             finite_toml,
             outputs: output_summaries,
             requesting_user_npub,
+            owner_email,
         })
     }
 
@@ -421,6 +448,7 @@ impl Engine {
         &self,
         dry_run: bool,
         requesting_user_npub: Option<String>,
+        owner_email: Option<String>,
         git_remote_url: String,
         finite_toml: String,
         outcome: ProjectInitStoreOutcome,
@@ -443,6 +471,7 @@ impl Engine {
             finite_toml,
             outputs,
             requesting_user_npub,
+            owner_email,
         })
     }
 
@@ -1337,6 +1366,98 @@ impl Engine {
         })
     }
 
+    pub fn create_hosted_requester_assertion(
+        &mut self,
+        request: &HostedRequesterAssertionRequest,
+        now: u64,
+    ) -> Result<HostedRequesterAssertionResponse, EngineError> {
+        let email = validate_email(&request.email)?;
+        let requester_pubkey = npub::pubkey_from_hex_or_npub(&request.requester_npub)?;
+        let agent_pubkey = npub::pubkey_from_hex_or_npub(&request.agent_npub)?;
+        let requester_npub = npub::encode_npub(&requester_pubkey)?;
+        let agent_npub = npub::encode_npub(&agent_pubkey)?;
+        let assertion = hex::encode(&ids::random_32());
+        let assertion_hash = hex::encode(&Sha256::digest(assertion.as_bytes()));
+        let expires_at = now + 10 * 60;
+        self.store.create_hosted_requester_assertion(
+            &assertion_hash,
+            &email,
+            &requester_pubkey,
+            &agent_pubkey,
+            expires_at,
+            now,
+        )?;
+        Ok(HostedRequesterAssertionResponse {
+            email,
+            requester_npub,
+            agent_npub,
+            assertion,
+            expires_at,
+        })
+    }
+
+    pub fn resolve_project_owner_email(
+        &mut self,
+        actor_pubkey: &str,
+        request: &ProjectInitRequest,
+        now: u64,
+    ) -> Result<String, EngineError> {
+        if !self.store.has_publish_access(actor_pubkey, now)? {
+            return Err(EngineError::NotAllowlisted);
+        }
+        let explicit_email = request
+            .owner_email
+            .as_deref()
+            .map(validate_email)
+            .transpose()?;
+        let active_emails = self.store.active_sites_emails_for_key(actor_pubkey)?;
+        if let [email] = active_emails.as_slice() {
+            if explicit_email
+                .as_ref()
+                .is_none_or(|explicit| explicit == email)
+            {
+                return Ok(email.clone());
+            }
+            return Err(EngineError::NotAuthorized);
+        }
+        if let Some(assertion) = request.hosted_requester_assertion.as_deref() {
+            let email = explicit_email.ok_or(EngineError::RequesterEmailRequired)?;
+            let requester_pubkey = request
+                .requesting_user_npub
+                .as_deref()
+                .ok_or(EngineError::RequesterEmailRequired)
+                .and_then(|value| {
+                    npub::pubkey_from_hex_or_npub(value).map_err(EngineError::from)
+                })?;
+            let assertion_hash = hex::encode(&Sha256::digest(assertion.as_bytes()));
+            if !self.store.hosted_requester_assertion_matches(
+                &assertion_hash,
+                &email,
+                &requester_pubkey,
+                actor_pubkey,
+                now,
+            )? {
+                return Err(EngineError::NotAuthorized);
+            }
+            // Hosted assertions are reusable across the normal dry-run/apply pair, but
+            // dry-run itself must remain read-only.
+            if !request.dry_run {
+                self.store
+                    .register_hosted_requester_key(&email, &requester_pubkey, now)?;
+                self.store
+                    .register_hosted_requester_key(&email, actor_pubkey, now)?;
+            }
+            return Ok(email);
+        }
+        if let Some(email) = explicit_email {
+            if self.store.has_sites_authorized_key(&email, actor_pubkey)? {
+                return Ok(email);
+            }
+            return Err(EngineError::NotAuthorized);
+        }
+        Err(EngineError::RequesterEmailRequired)
+    }
+
     pub fn revoke_sites_authorized_key(
         &mut self,
         verified_email: &str,
@@ -1442,7 +1563,7 @@ impl Engine {
                 };
                 match cookie.subject {
                     ViewerCookieSubject::ExternalEmail(email) => {
-                        if self.store.is_email_shared(&site.id, &email)? {
+                        if self.email_can_view_site(site, &email)? {
                             Ok(ViewAccess::Allowed)
                         } else {
                             Ok(ViewAccess::NeedsLogin)
@@ -1462,6 +1583,12 @@ impl Engine {
                 }
             }
         }
+    }
+
+    pub fn email_can_view_site(&self, site: &SiteRecord, email: &str) -> Result<bool, EngineError> {
+        let email = validate_email(email)?;
+        Ok(self.store.is_email_shared(&site.id, &email)?
+            || self.store.is_email_authorized_publisher(&site.id, &email)?)
     }
 
     /// Look up the blob for a request path in the site's active version.
@@ -1644,6 +1771,33 @@ impl Engine {
         Ok(out)
     }
 
+    pub fn mark_first_publication_notification_ready(
+        &mut self,
+        site_id: &str,
+        now: u64,
+    ) -> Result<(), EngineError> {
+        self.store
+            .mark_first_publication_notification_ready(site_id, now)?;
+        Ok(())
+    }
+
+    pub fn pending_site_notifications(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<PendingSiteNotification>, EngineError> {
+        Ok(self.store.pending_site_notifications(limit)?)
+    }
+
+    pub fn mark_site_notification_delivered(
+        &mut self,
+        idempotency_key: &str,
+        now: u64,
+    ) -> Result<(), EngineError> {
+        self.store
+            .mark_site_notification_delivered(idempotency_key, now)?;
+        Ok(())
+    }
+
     /// Deploy info for one app site by id, for waking it on a request.
     pub fn app_deploy_for(&self, site_id: &str) -> Result<Option<AppDeploy>, EngineError> {
         let Some(site) = self.store.site_by_id(site_id)? else {
@@ -1795,9 +1949,7 @@ impl Engine {
 
     // ---- magic-link login --------------------------------------------------------
 
-    /// Issue a login token if (and only if) the email is shared on the site.
-    /// Returns `None` otherwise so callers can answer generically and not
-    /// leak which emails have access.
+    /// Issue a mailbox-verification token without revealing share status.
     pub fn request_login(
         &mut self,
         name: &str,
@@ -1820,10 +1972,7 @@ impl Engine {
             Ok(normalized) => normalized,
             Err(_) => return Ok(None),
         };
-        if site.visibility != Visibility::Shared {
-            return Ok(None);
-        }
-        if !self.store.is_email_shared(&site.id, &normalized)? {
+        if !matches!(site.visibility, Visibility::Shared | Visibility::Private) {
             return Ok(None);
         }
 
@@ -1854,6 +2003,15 @@ impl Engine {
         token: &str,
         now: u64,
     ) -> Result<(SiteRecord, String), EngineError> {
+        self.redeem_login_with_email(token, now)
+            .map(|(site, cookie, _email)| (site, cookie))
+    }
+
+    pub fn redeem_login_with_email(
+        &mut self,
+        token: &str,
+        now: u64,
+    ) -> Result<(SiteRecord, String, String), EngineError> {
         if !hex::is_hex32(token) {
             return Err(EngineError::Validation("malformed token"));
         }
@@ -1876,11 +2034,113 @@ impl Engine {
             ))?;
         let cookie = ViewerCookie {
             site_id,
-            subject: ViewerCookieSubject::ExternalEmail(email),
+            subject: ViewerCookieSubject::ExternalEmail(email.clone()),
             expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
         }
         .sign(&self.cookie_secret);
-        Ok((site, cookie))
+        Ok((site, cookie, email))
+    }
+
+    pub fn request_site_access(
+        &mut self,
+        site: &SiteRecord,
+        cookie_value: &str,
+        now: u64,
+    ) -> Result<SiteAccessRequest, EngineError> {
+        let cookie = ViewerCookie::verify(&self.cookie_secret, cookie_value, &site.id, now)
+            .ok_or(EngineError::NotAuthorized)?;
+        let ViewerCookieSubject::ExternalEmail(requester_email) = cookie.subject else {
+            return Err(EngineError::NotAuthorized);
+        };
+        if self.email_can_view_site(site, &requester_email)? {
+            return Err(EngineError::Conflict("email already has site access"));
+        }
+        let owner_email =
+            self.store
+                .publisher_email_for_site(&site.id)?
+                .ok_or(EngineError::Conflict(
+                    "site has no publisher mailbox for access requests",
+                ))?;
+        let request_id = ids::new_id(ids::SITE_ACCESS_REQUEST_ID_PREFIX);
+        let approval_token = self.site_access_approval_token(&request_id);
+        let approval_token_hash = hex::encode(&Sha256::digest(approval_token.as_bytes()));
+        let active_request_id = self.store.create_site_access_request(
+            &request_id,
+            &site.id,
+            &requester_email,
+            &approval_token_hash,
+            now,
+            now + SITE_ACCESS_APPROVAL_TTL_SECONDS,
+        )?;
+        let approval_token = self.site_access_approval_token(&active_request_id);
+        let site_url = self
+            .config
+            .output_url(site.kind.as_output_kind(), &site.name);
+        Ok(SiteAccessRequest {
+            site_id: site.id.clone(),
+            idempotency_key: format!("sites:access-request:{active_request_id}"),
+            requester_email,
+            owner_email,
+            site_name: site.name.clone(),
+            approval_url: format!("{site_url}_finite/approve-access?token={approval_token}"),
+            site_url,
+        })
+    }
+
+    fn site_access_approval_token(&self, request_id: &str) -> String {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.cookie_secret).expect("hmac accepts 32-byte keys");
+        mac.update(b"finite-sites-access-request-v1\n");
+        mac.update(request_id.as_bytes());
+        hex::encode(&mac.finalize().into_bytes())
+    }
+
+    pub fn approve_site_access(
+        &mut self,
+        expected_site_id: &str,
+        token: &str,
+        now: u64,
+    ) -> Result<(SiteRecord, String), EngineError> {
+        if !hex::is_hex32(token) {
+            return Err(EngineError::Validation("malformed token"));
+        }
+        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
+        let (site_id, email) = self
+            .store
+            .approve_site_access_request(&token_hash, expected_site_id, now)
+            .map_err(|error| match error {
+                StoreError::NotFound(_) => EngineError::Validation("unknown access request"),
+                other => other.into(),
+            })?;
+        let site = self
+            .store
+            .site_by_id(&site_id)?
+            .ok_or(StoreError::CorruptState(
+                "access request references missing site",
+            ))?;
+        Ok((site, email))
+    }
+
+    pub fn pending_site_access_approval(
+        &self,
+        token: &str,
+        now: u64,
+    ) -> Result<(SiteRecord, String), EngineError> {
+        if !hex::is_hex32(token) {
+            return Err(EngineError::Validation("malformed token"));
+        }
+        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
+        let (site_id, email) = self
+            .store
+            .pending_site_access_request(&token_hash, now)?
+            .ok_or(EngineError::Validation("unknown access request"))?;
+        let site = self
+            .store
+            .site_by_id(&site_id)?
+            .ok_or(StoreError::CorruptState(
+                "access request references missing site",
+            ))?;
+        Ok((site, email))
     }
 }
 

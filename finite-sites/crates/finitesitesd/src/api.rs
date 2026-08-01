@@ -14,7 +14,8 @@ use finitesites_engine::EngineError;
 use finitesites_engine::validate_email;
 use finitesites_proto::dto::{
     ApiErrorBody, AuthRegisterResponse, ERROR_GIT_REPOSITORY_SETUP_FAILED, ERROR_GIT_UNAVAILABLE,
-    GitAuthRequest, GitAuthResponse, NativeViewerSessionExchangeRequest,
+    GitAuthRequest, GitAuthResponse, HostedRequesterAssertionRequest,
+    HostedRequesterAssertionResponse, NativeViewerSessionExchangeRequest,
     NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
     ProjectOutputSharingResponse, ProjectRevokeRequest, ProjectRevokeResponse,
@@ -68,6 +69,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(create_native_viewer_session).layer(DefaultBodyLimit::max(
                 MAX_VIEWER_SESSION_BODY_BYTES as usize,
             )),
+        )
+        .route(
+            "/internal/v1/hosted-requester-assertions",
+            post(create_hosted_requester_assertion),
         )
         .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES as usize))
         .fallback(api_not_found)
@@ -136,6 +141,11 @@ impl From<EngineError> for ApiError {
             EngineError::NotAuthorized => {
                 ApiError::new(StatusCode::FORBIDDEN, "not_authorized", message)
             }
+            EngineError::RequesterEmailRequired => ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "requester_email_required",
+                message,
+            ),
             EngineError::NameTaken => ApiError::new(StatusCode::CONFLICT, "name_taken", message),
             EngineError::SiteNotFound
             | EngineError::ProjectNotFound
@@ -336,6 +346,24 @@ async fn create_native_viewer_session(
         [(header::CACHE_CONTROL, "no-store")],
         Json(NativeViewerSessionExchangeResponse { redeem_url }),
     ))
+}
+
+async fn create_hosted_requester_assertion(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<HostedRequesterAssertionResponse>, ApiError> {
+    let expected_token = state
+        .viewer_session_service_token
+        .as_deref()
+        .ok_or_else(|| ApiError::unavailable("hosted requester assertions are not configured"))?;
+    authenticate_viewer_session_service(&headers, expected_token)?;
+    let request: HostedRequesterAssertionRequest = parse_json_body(&body)?;
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    engine
+        .create_hosted_requester_assertion(&request, now_unix())
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 fn authenticate_viewer_session_service(
@@ -665,7 +693,7 @@ async fn init_project(
     body: Bytes,
 ) -> Result<Json<ProjectInitResponse>, ApiError> {
     let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: ProjectInitRequest = parse_json_body(&body)?;
+    let mut request: ProjectInitRequest = parse_json_body(&body)?;
     if let Err(error) = crate::git::preflight_git_dependency() {
         eprintln!("finitesitesd Git dependency unavailable before project init: {error}");
         return Err(ApiError::new(
@@ -674,6 +702,13 @@ async fn init_project(
             "Git publishing is temporarily unavailable; no Project Init state changed. Wait for service health to recover, then retry this request once.",
         ));
     }
+    let resolved_owner_email = {
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine
+            .resolve_project_owner_email(&owner, &request, now_unix())
+            .map_err(ApiError::from)?
+    };
+    request.owner_email = Some(resolved_owner_email);
     let git_remote_url = git_remote_url(&state, &request.config.project.slug);
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let response = engine
