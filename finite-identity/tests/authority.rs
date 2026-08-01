@@ -242,6 +242,67 @@ async fn operator_can_idempotently_bind_managed_agent_email_to_agent_principal()
 }
 
 #[tokio::test]
+async fn nip05_resolution_distinguishes_mailboxes_from_managed_agent_names() {
+    let (app, store, _mailer, _clock) = fixture();
+    store
+        .bind_vip_email(ALICE_EMAIL, ALICE_PUBKEY, NOW)
+        .expect("persist mailbox-backed name");
+    let agent_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());
+    let operator_headers = [("x-finite-operator-token", OPERATOR_TOKEN)];
+    let (status, _) = json_request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/operator/agent-email-bindings",
+        serde_json::json!({
+            "email": "cheater@finite.vip",
+            "agent_npub": agent_npub,
+        }),
+        &operator_headers,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, mailbox) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/nip05-resolution",
+        serde_json::json!({ "name": ALICE_EMAIL }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mailbox["name"], ALICE_EMAIL);
+    assert_eq!(mailbox["pubkey"], ALICE_PUBKEY);
+    assert_eq!(mailbox["npub"], agent_npub);
+    assert_eq!(mailbox["kind"], "mailbox");
+
+    let (status, managed) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/nip05-resolution",
+        serde_json::json!({ "name": "cheater@finite.vip" }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(managed["name"], "cheater@finite.vip");
+    assert_eq!(managed["pubkey"], ALICE_PUBKEY);
+    assert_eq!(managed["npub"], agent_npub);
+    assert_eq!(managed["kind"], "managed_agent");
+
+    let (status, missing) = json_request(
+        app,
+        "POST",
+        "/api/v1/nip05-resolution",
+        serde_json::json!({ "name": "missing@finite.vip" }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["error"], "nip05_name_not_found");
+}
+
+#[tokio::test]
 async fn brain_resolves_account_bound_agent_and_user_principals_without_private_keys() {
     let (app, _store, _mailer, _clock) = fixture();
     let agent_npub = npub::encode(&hex::decode32(ALICE_PUBKEY).unwrap());

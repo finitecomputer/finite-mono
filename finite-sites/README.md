@@ -76,24 +76,25 @@ human who owns its SaaS Project. `fsite` never copies the secret elsewhere.
 fsite auth status --output json
 ```
 
-### Email And Identity Authority
+### Mailboxes, NIP-05, And Identity Authority
 
-When `FINITE_IDENTITY_AUTHORITY` points at a finite-identity deployment,
-`fsite auth login`, `fsite auth link-email`, and `fsite auth redeem` use that
-authority for email proof and Nostr key ownership instead of Sites-local email
-keys.
+`fsite` uses `https://identity.finite.vip` as the production Identity Authority
+by default. `FINITE_IDENTITY_AUTHORITY` is only a self-hosting and local-test
+override. CLI behavior does not change merely because that variable is present.
 
-For `@finite.vip` addresses, redeeming after `fsite auth link-email EMAIL` or
-redeeming with `--link-native` binds the email to the current Local Identity
-Key in finite-identity. Do not run that flow from an agent merely to inherit
-the human's email permissions; human-to-agent email access requires an
+`--email` always means a deliverable Mailbox Address. `--nip05` always means a
+Finite Identity resolution name, and `--npub` always means a native key.
+Managed Agent NIP-05 names are not mailboxes: passing one to an email flag
+fails before any invitation or challenge is delivered and points to the
+corresponding NIP-05 flag.
+
+For `@finite.vip` Mailbox Addresses, redeeming after `fsite auth link-email
+MAILBOX` or redeeming with `--link-native` binds the mailbox to the current
+Local Identity Key in finite-identity. Do not run that flow from an agent
+merely to inherit the human's permissions; human-to-agent access requires an
 explicit, revocable Finite Sites Email Access Delegation. For non-`@finite.vip`
-addresses, redeeming
-preserves the email-only collaborator flow: the email can satisfy an email
-grant, but it does not become a native Finite VIP identity.
-
-Sites keeps its legacy `/api/v1/email-auth/*` endpoints for self-hosted and
-transition deployments that do not configure `FINITE_IDENTITY_AUTHORITY`.
+Mailbox Addresses, redeeming preserves the email-only collaborator flow: the
+mailbox can satisfy its grant, but it does not become a native Finite identity.
 
 ### Migrating an existing key
 
@@ -322,13 +323,15 @@ git commit -m "Describe the edit"
 git push origin main
 ```
 
-Use `--email EMAIL` with `fsite auth git` only when you are acting through an
-email collaborator grant:
+Use `--email MAILBOX` with `fsite auth git` only when you are acting through a
+mailbox collaborator grant. A native collaborator can optionally prove the
+same key with `--nip05 NAME` or `--npub NPUB`:
 
 ```sh
 fsite auth login editor@example.com
 fsite auth redeem editor@example.com TOKEN_FROM_EMAIL
 fsite auth git PROJECT --email editor@example.com --store --output json
+fsite auth git PROJECT --nip05 my-agent@finite.vip --store --output json
 ```
 
 Do not print Git Credential passwords into transcripts. Prefer `--store`.
@@ -362,14 +365,26 @@ the human through an email session.
 Project collaboration controls who can clone and push source:
 
 ```sh
-fsite project grant PROJECT --email bot@example.com --send-invite --output json
-fsite project revoke PROJECT --email bot@example.com --output json
+# Native agents and Finite users keep their own Principal.
+fsite project grant PROJECT --npub npub1... --output json
+fsite project revoke PROJECT --npub npub1... --output json
+fsite project grant PROJECT --nip05 my-agent@finite.vip --output json
+fsite project revoke PROJECT --nip05 my-agent@finite.vip --output json
+
+# External email collaborators use the invitation flow.
+fsite project grant PROJECT --email editor@example.com --send-invite --output json
+fsite project revoke PROJECT --email editor@example.com --output json
 ```
+
+Use exactly one of `--email`, `--nip05`, or `--npub`. Native collaborators
+authenticate with their own Local Identity Key and run `fsite auth git PROJECT
+--store`; they do not link or impersonate the project owner's mailbox.
 
 Output visibility controls who can view the served website:
 
 ```sh
 fsite project share PROJECT site --shared --add-email viewer@example.com --send-invite --output json
+fsite project share PROJECT site --add-nip05 my-agent@finite.vip --output json
 fsite project share PROJECT site --add-npub npub1... --output json
 fsite project share PROJECT site --remove-npub npub1... --output json
 fsite project share PROJECT site --public --yes-public --output json

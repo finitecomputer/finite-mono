@@ -393,8 +393,14 @@ pub struct ProjectOutputApply {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectCollaboratorApply {
-    pub email: String,
+    pub target: ProjectCollaboratorTarget,
     pub role: ProjectCollaboratorRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectCollaboratorTarget {
+    Email(String),
+    NativePubkey(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,7 +417,7 @@ pub struct AppliedProjectCollaborator {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedProjectCollaborator {
-    pub email: String,
+    pub target: ProjectCollaboratorTarget,
     pub removed: bool,
     pub revoked_git_credentials: u64,
 }
@@ -1871,7 +1877,10 @@ impl Store {
     ) -> Result<AppliedProjectCollaborator, StoreError> {
         assert!(!project_id.is_empty());
         assert!(!owner_principal_id.is_empty());
-        assert!(!collaborator.email.is_empty());
+        match &collaborator.target {
+            ProjectCollaboratorTarget::Email(email) => assert!(!email.is_empty()),
+            ProjectCollaboratorTarget::NativePubkey(pubkey) => assert!(pubkey.len() == 64),
+        }
 
         let tx = self.conn.transaction()?;
         let owner_matches: Option<i64> = tx
@@ -1891,12 +1900,22 @@ impl Store {
             params![project_id],
             |row| row.get(0),
         )?;
-        let principal_id = ensure_principal_for_email_collaborator(
-            &tx,
-            &collaborator.email,
-            ids::new_id(ids::PRINCIPAL_ID_PREFIX),
-            now,
-        )?;
+        let principal_id = match &collaborator.target {
+            ProjectCollaboratorTarget::Email(email) => ensure_principal_for_email_collaborator(
+                &tx,
+                email,
+                ids::new_id(ids::PRINCIPAL_ID_PREFIX),
+                now,
+            )?,
+            ProjectCollaboratorTarget::NativePubkey(pubkey) => {
+                ensure_native_principal(&tx, pubkey, ids::new_id(ids::PRINCIPAL_ID_PREFIX), now)?
+            }
+        };
+        if principal_id == owner_principal_id {
+            return Err(StoreError::Conflict(
+                "project owner cannot be a collaborator target",
+            ));
+        }
         let existed: Option<i64> = tx
             .query_row(
                 "SELECT 1 FROM project_collaborators
@@ -1927,13 +1946,17 @@ impl Store {
             ],
         )?;
         tx.commit()?;
+        let (email, pubkey) = match &collaborator.target {
+            ProjectCollaboratorTarget::Email(email) => (Some(email.clone()), None),
+            ProjectCollaboratorTarget::NativePubkey(pubkey) => (None, Some(pubkey.clone())),
+        };
         Ok(AppliedProjectCollaborator {
             record: ProjectCollaboratorRecord {
                 project_id: project_id.to_string(),
                 principal_id,
                 role: collaborator.role,
-                email: Some(collaborator.email.clone()),
-                pubkey: None,
+                email,
+                pubkey,
             },
             created: existed.is_none(),
         })
@@ -1943,12 +1966,15 @@ impl Store {
         &mut self,
         project_id: &str,
         owner_principal_id: &str,
-        email: &str,
+        target: &ProjectCollaboratorTarget,
         now: u64,
     ) -> Result<RemovedProjectCollaborator, StoreError> {
         assert!(!project_id.is_empty());
         assert!(!owner_principal_id.is_empty());
-        assert!(!email.is_empty());
+        match target {
+            ProjectCollaboratorTarget::Email(email) => assert!(!email.is_empty()),
+            ProjectCollaboratorTarget::NativePubkey(pubkey) => assert!(pubkey.len() == 64),
+        }
 
         let tx = self.conn.transaction()?;
         let owner_matches: Option<i64> = tx
@@ -1963,11 +1989,22 @@ impl Store {
             return Err(StoreError::Conflict("project owner principal mismatch"));
         }
 
-        let principal_ids = principal_ids_for_email(&tx, email)?;
+        let principal_ids = match target {
+            ProjectCollaboratorTarget::Email(email) => principal_ids_for_email(&tx, email)?,
+            ProjectCollaboratorTarget::NativePubkey(pubkey) => tx
+                .query_row(
+                    "SELECT id FROM principals WHERE pubkey = ?1",
+                    params![pubkey],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .into_iter()
+                .collect(),
+        };
         if principal_ids.is_empty() {
             tx.commit()?;
             return Ok(RemovedProjectCollaborator {
-                email: email.to_string(),
+                target: target.clone(),
                 removed: false,
                 revoked_git_credentials: 0,
             });
@@ -1975,7 +2012,8 @@ impl Store {
 
         let mut removed_rows: usize = 0;
         let mut revoked_rows: usize = 0;
-        // Bounded by one external Principal plus at most one active email link.
+        // Email targets resolve to at most one External Principal plus one
+        // active Email Link. Native targets resolve to one Principal.
         for principal_id in principal_ids {
             let active_role: Option<String> = tx
                 .query_row(
@@ -2010,7 +2048,7 @@ impl Store {
         }
         tx.commit()?;
         Ok(RemovedProjectCollaborator {
-            email: email.to_string(),
+            target: target.clone(),
             removed: removed_rows > 0,
             revoked_git_credentials: revoked_rows as u64,
         })
@@ -3705,7 +3743,7 @@ mod tests {
             .unwrap();
         let owner_principal = store.principal_by_pubkey(OWNER).unwrap().unwrap();
         let input = ProjectCollaboratorApply {
-            email: "skyler@example.com".to_string(),
+            target: ProjectCollaboratorTarget::Email("skyler@example.com".to_string()),
             role: ProjectCollaboratorRole::Editor,
         };
 
@@ -3745,7 +3783,7 @@ mod tests {
                 &applied.project.id,
                 &owner_principal.id,
                 &ProjectCollaboratorApply {
-                    email: "skyler@example.com".to_string(),
+                    target: ProjectCollaboratorTarget::Email("skyler@example.com".to_string()),
                     role: ProjectCollaboratorRole::Editor,
                 },
                 NOW + 1,
@@ -3780,7 +3818,7 @@ mod tests {
             .remove_project_collaborator(
                 &applied.project.id,
                 &owner_principal.id,
-                "skyler@example.com",
+                &ProjectCollaboratorTarget::Email("skyler@example.com".to_string()),
                 NOW + 3,
             )
             .unwrap();
@@ -3813,7 +3851,7 @@ mod tests {
             .remove_project_collaborator(
                 &applied.project.id,
                 &owner_principal.id,
-                "skyler@example.com",
+                &ProjectCollaboratorTarget::Email("skyler@example.com".to_string()),
                 NOW + 4,
             )
             .unwrap();
@@ -3824,7 +3862,7 @@ mod tests {
             .remove_project_collaborator(
                 &applied.project.id,
                 &owner_principal.id,
-                "unknown@example.com",
+                &ProjectCollaboratorTarget::Email("unknown@example.com".to_string()),
                 NOW + 5,
             )
             .unwrap();
@@ -3849,7 +3887,7 @@ mod tests {
                 &applied.project.id,
                 &owner_principal.id,
                 &ProjectCollaboratorApply {
-                    email: "skyler@example.com".to_string(),
+                    target: ProjectCollaboratorTarget::Email("skyler@example.com".to_string()),
                     role: ProjectCollaboratorRole::Editor,
                 },
                 NOW + 1,

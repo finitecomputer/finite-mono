@@ -4,17 +4,25 @@ Finite Identity owns the shared identity language for Finite tools and products.
 
 ## Language
 
-**Finite VIP Email**:
-A Finite-controlled email address on `finite.vip` that is also the canonical user-facing identity string. Its full form is `localpart@finite.vip`.
+**Mailbox Address**:
+A deliverable address whose control can be proved with an Email Challenge. A
+Mailbox Address may also be spelled like a NIP-05 Name, but the two types are
+never interchangeable at a CLI or delivery boundary.
+_Avoid_: email-shaped identifier, login email, Nostr email
+
+**Finite VIP Mailbox Address**:
+A Mailbox Address on the Finite-controlled `finite.vip` domain. Its full form
+is `localpart@finite.vip`.
 _Avoid_: finite-vip email, account email, VIP address
 
 **Finite VIP Domain**:
-The `finite.vip` domain that hosts Finite VIP Emails and their matching NIP-05 names.
+The `finite.vip` domain that hosts Finite VIP Mailbox Addresses and NIP-05 Names.
 _Avoid_: finite-vip, VIP host
 
 **NIP-05 Name**:
-The public Nostr name for a Finite identity. In v1 it is always identical to the user's Finite VIP Email, such as `localpart@finite.vip`.
-_Avoid_: handle, username, nostr email
+The public resolution name for a Nostr key. Its `localpart@domain` spelling
+does not prove that mail can be delivered to it.
+_Avoid_: mailbox, login email, Nostr email
 
 **Third-Party NIP-05 Name**:
 A NIP-05 identifier on a domain not owned by Finite. Third-Party NIP-05 Names are future work and are not trusted as product grantees in v1.
@@ -29,7 +37,7 @@ The explicit process for restoring control of a Native Principal or moving its p
 _Avoid_: reset, relink, silent reassignment
 
 **Disabled Binding**:
-A Finite VIP Email or NIP-05 Name binding that the Identity Authority keeps for audit history but no longer serves or resolves. Disabling a binding is an operator safety action, not Identity Recovery or reassignment.
+A Finite VIP Mailbox Address or NIP-05 Name binding that the Identity Authority keeps for audit history but no longer serves or resolves. Disabling a binding is an operator safety action, not Identity Recovery or reassignment.
 _Avoid_: deleted binding, reset binding, transferred binding
 
 **Principal**:
@@ -53,12 +61,13 @@ operations across Finite products. It is never the user's User Nostr Identity
 and never uses the user's hosted product adapter to act as that user.
 _Avoid_: user key, shared signer, Account Auth
 
-**Managed Agent Email**:
-The canonical Finite VIP Email assigned to one hosted agent and immutably bound
-to that agent's Agent Principal Key by the trusted provisioning path. Products
+**Managed Agent NIP-05**:
+The canonical NIP-05 Name assigned to one hosted agent and immutably bound to
+that agent's Agent Principal Key by the trusted provisioning path. It is not a
+Mailbox Address and must never be passed to an email-delivery flag. Products
 show this readable name to people and resolve it through Finite Identity; the
 underlying `npub` remains the authorization subject and an advanced diagnostic.
-_Avoid_: agent account, shared user email, display-only alias
+_Avoid_: agent email, agent account, shared user email
 
 **Finite Home**:
 The filesystem root that scopes one Local Identity Key and the Finite tool state belonging to that identity owner.
@@ -69,7 +78,7 @@ A Principal backed by verified control of an email address before the person has
 _Avoid_: guest user, invited user, external account
 
 **Invited Email**:
-Any email address that a Finite product can grant access to before the recipient has a Native Principal. An Invited Email can become an Email-Only Principal, but only an address on the Finite VIP Domain can become a Finite VIP Email and NIP-05 Name in v1.
+Legacy name for a Mailbox Address that a Finite product can grant access to before the recipient has a Native Principal. An Invited Email can become an Email-Only Principal, but only a Finite VIP Mailbox Address can also receive a human NIP-05 binding in v1.
 _Avoid_: external email, collaborator email
 
 **Principal Link**:
@@ -88,8 +97,26 @@ _Avoid_: user lookup, account lookup, auth mapping
 A product-owned permission record that names a Principal or Invited Email exactly as the product user granted it. Finite Identity does not own Product Grants; it only resolves whether a caller satisfies them.
 _Avoid_: identity grant, membership row, access mapping
 
+**Sites Email Principal**:
+A Sites-owned durable access subject established by verified control of one
+Mailbox Address. It can own an Authorized Sites Key set without becoming the
+authorization model for Chat or the encryption subject for Brain.
+_Avoid_: Sites account, global email identity
+
+**Authorized Sites Key**:
+A revocable human or agent `npub` authorized by a Sites Email Principal.
+Possession is proved by signature; membership is added or revoked only through
+the Sites mailbox-authority flow.
+_Avoid_: linked identity, email key, shared signer
+
+**Originating Publisher**:
+The native `npub` that performed a Sites publish operation. It is durable audit
+provenance even when access was exercised through a Sites Email Principal's
+Authorized Sites Key set.
+_Avoid_: owner email, publishing account
+
 **Identity Authority**:
-The deployed Finite Identity service and its identity-owned storage. It is the source of truth for Principal Resolution, Finite VIP Email bindings, and NIP-05 Names.
+The deployed Finite Identity service and its identity-owned storage. It is the source of truth for Principal Resolution, Finite VIP Mailbox bindings, and NIP-05 Names.
 _Avoid_: auth server, account service
 
 **Identity Contract**:
@@ -123,7 +150,7 @@ The human- or agent-owned Nostr keypair generated, imported, and stored under on
 _Avoid_: server key, account key, hosted key
 
 **Binding Proof**:
-The combined proof required to bind a Finite VIP Email to a Native Principal in v1: a valid email challenge token for the Finite VIP Email and a NIP-98-authenticated request signed by the target Local Identity Key.
+The combined proof required to bind a Finite VIP Mailbox Address to a Native Principal in v1: a valid Email Challenge token for that mailbox and a NIP-98-authenticated request signed by the target Local Identity Key.
 _Avoid_: signup proof, verification proof, login proof
 
 **Email Challenge**:
@@ -139,11 +166,11 @@ _Avoid_: email service, notification service
 - One **Finite Home** contains exactly one **Local Identity Key**.
 - Each hosted agent has its own **Finite Home** and **Local Identity Key**;
   `finitechat`, `fsite`, and `fbrain` inside that agent use the same key.
-- Each newly provisioned hosted agent has one **Managed Agent Email**. The
+- Each newly provisioned hosted agent has one **Managed Agent NIP-05**. The
   trusted runner registers the runtime's public Agent Principal Key; it never
   receives authority to issue product grants.
 - Core remains the source of truth for which WorkOS account owns a hosted
-  agent. Finite Identity binds that agent's Managed Agent Email to its Agent
+  agent. Finite Identity binds that agent's Managed Agent NIP-05 to its Agent
   Principal Key, while each product owns any access role granted because of the
   account-agent association.
 - A human's Finite Chat identity lives separately from every agent **Finite

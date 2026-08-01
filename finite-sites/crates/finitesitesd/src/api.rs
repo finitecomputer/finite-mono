@@ -680,6 +680,11 @@ async fn grant_project(
 ) -> Result<Json<ProjectGrantResponse>, ApiError> {
     let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: ProjectGrantRequest = parse_json_body(&body)?;
+    if query.send_invites && request.email.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "native npub collaborators do not use email invites",
+        ));
+    }
     let mut response = {
         let mut engine = state.engine.lock().expect("engine mutex never poisoned");
         engine
@@ -706,7 +711,7 @@ async fn revoke_project(
     let request: ProjectRevokeRequest = parse_json_body(&body)?;
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let response = engine
-        .revoke_project(&owner, &slug, &request.email, now_unix())
+        .revoke_project(&owner, &slug, &request, now_unix())
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)

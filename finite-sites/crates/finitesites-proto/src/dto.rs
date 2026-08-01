@@ -161,9 +161,13 @@ pub struct ProjectInitRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectGrantRequest {
-    /// Milestone 1 supports External Principals by verified email. Native
-    /// npub shares use the same role shape once Agent Delegations land.
+    /// External Principal target. Exactly one of email or npub is required.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub email: String,
+    /// Native Principal target. The owner grants this Principal its own
+    /// project role; the agent never acts as the owner's email identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npub: Option<String>,
     #[serde(default = "default_project_role")]
     pub role: String,
 }
@@ -223,6 +227,8 @@ pub struct ProjectOutputSummary {
 pub struct ProjectCollaboratorSummary {
     pub principal_id: Option<String>,
     pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npub: Option<String>,
     pub role: String,
     pub created: bool,
 }
@@ -237,13 +243,18 @@ pub struct ProjectGrantResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRevokeRequest {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRevokeResponse {
     pub project_slug: String,
     pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npub: Option<String>,
     pub removed: bool,
     pub revoked_git_credentials: u64,
 }
