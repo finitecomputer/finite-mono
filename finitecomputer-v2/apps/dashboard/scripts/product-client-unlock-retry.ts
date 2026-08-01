@@ -1,16 +1,16 @@
-type ProductClientBoundaryRetryOptions = {
+type ProductClientBoundaryRetryOptions<T> = {
   attempts?: number;
   timeoutMs: number;
-  attempt: (timeoutMs: number) => Promise<void>;
+  attempt: (timeoutMs: number) => Promise<T>;
   reload: () => Promise<void>;
 };
 
-export async function retryProductClientBoundary({
+export async function retryProductClientBoundary<T>({
   attempts = 3,
   timeoutMs,
   attempt,
   reload,
-}: ProductClientBoundaryRetryOptions): Promise<void> {
+}: ProductClientBoundaryRetryOptions<T>): Promise<T> {
   if (!Number.isInteger(attempts) || attempts < 1) {
     throw new Error("Product Client retry attempts must be a positive integer");
   }
@@ -22,8 +22,7 @@ export async function retryProductClientBoundary({
   let lastError: unknown = null;
   for (let attemptNumber = 1; attemptNumber <= attempts; attemptNumber += 1) {
     try {
-      await attempt(attemptTimeoutMs);
-      return;
+      return await attempt(attemptTimeoutMs);
     } catch (error) {
       lastError = error;
     }
@@ -34,7 +33,7 @@ export async function retryProductClientBoundary({
 }
 
 type ProductClientUnlockRetryOptions = Omit<
-  ProductClientBoundaryRetryOptions,
+  ProductClientBoundaryRetryOptions<void>,
   "attempt"
 > & {
   waitForUnlock: (timeoutMs: number) => Promise<void>;

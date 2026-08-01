@@ -479,23 +479,19 @@ async function createOrganizationBrain(
 ) {
   const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 90_000);
   const url = page.url();
-  let existingIds: Set<string> | null = null;
-  await retryProductClientBoundary({
+  const priorBrainIds = await retryProductClientBoundary({
     timeoutMs,
-    attempt: async (attemptTimeoutMs) => {
-      existingIds = await prepareOrganizationBrain(
+    attempt: async (attemptTimeoutMs) =>
+      prepareOrganizationBrain(
         brain,
         name,
         includeAgent,
         attemptTimeoutMs,
-      );
-    },
+      ),
     reload: async () => {
       await loadBrainProductClient(page, url);
     },
   });
-  const priorBrainIds = existingIds;
-  assert.ok(priorBrainIds, "Organization Brain form did not become ready");
   await brain.locator("#manageCreateOrganizationBrainButton").click();
   await assertEventually(
     async () => {
