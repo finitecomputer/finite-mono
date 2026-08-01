@@ -37,6 +37,9 @@ come up. Check items off as they happen.
       sends no mail; `fsite auth status` shows the agent's NIP-05.
 - [ ] (b) Two test npubs registered under one mailbox; both edit the same
       site; revoking one leaves the other working.
+- [ ] (b) `finitesitesd reconcile-identity` previews from a consistent copy
+      without changing the source registry; `--apply yes` is the only path
+      that performs the one-off durable reconciliation.
 - [ ] (c) Agent creates a private site in a hosted chat turn; Paul sees it in
       the dashboard WITHOUT any manual share step.
 - [ ] (c) Private-site email-auth page: unshared email gets truthful "not
@@ -44,6 +47,19 @@ come up. Check items off as they happen.
 - [ ] (c) Request Access approval email arrives via the unified mailer;
       approval grants persistent access — no single-use link UX.
 - [ ] (c) First-publication notification arrives exactly once per site.
+
+### Phase 2(b) environment-repair decision
+
+Use the existing provider-neutral Runtime Spec environment reconciliation; do
+not add a production-only repair script. Core already persists the desired
+`FINITE_BRAIN_SERVER_URL` and `FINITE_BRAIN_PUBLIC_BASE_URL`, and Kata upgrade
+merges those explicitly desired keys while retaining unrelated Runtime
+contract values and secrets. The 21 stale lat1 Kata agents therefore repair as
+part of the reviewed, digest-pinned runtime upgrade cohort, with the normal
+prepare/hash/execute and rollback boundary. Phala consumes the same desired
+environment on creation, but Phala upgrade remains deliberately disabled until
+its complete-environment replacement/rollback canary passes; this train does
+not bypass that gate.
 
 ## Phase 2 — deployed canary (Paul's own account first)
 

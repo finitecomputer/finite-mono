@@ -78,7 +78,7 @@ nostr = { version = "0.45.0-alpha.2", features = ["nip44", "nip59", "nip98", "os
 pulldown-cmark = "0.13"
 qrcode = { version = "0.14", default-features = false }
 reqwest = { version = "=0.12.27", default-features = false, features = ["blocking", "http2", "json", "rustls-tls-webpki-roots"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["backup", "bundled"] }
 secp256k1 = { version = "0.29.1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

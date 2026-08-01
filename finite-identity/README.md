@@ -112,6 +112,8 @@ The service exposes:
 | `POST /api/v1/email-challenges` | Issue an Email Challenge for a Finite VIP Email or Invited Email |
 | `POST /api/v1/vip-email-bindings/redeem` | Bind a Finite VIP Email to the NIP-98 signer |
 | `POST /api/v1/email-only-principals/redeem` | Verify an Invited Email as an Email-Only Principal |
+| `POST /api/v1/mailbox-proofs/redeem` | Bind one fresh Email Challenge to the exact NIP-98 signer without creating a Principal Link |
+| `POST /api/v1/mailbox-proofs/consume` | Let a product consume that short-lived proof once |
 | `POST /api/v1/principal-resolution/satisfies-grant` | Resolve whether a pubkey satisfies a Product Grant |
 | `POST /api/v1/operator/inspect` | Inspect public identity state with an operator token |
 | `POST /api/v1/operator/disable-binding` | Disable a binding without reassignment or recovery |
