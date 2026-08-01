@@ -10,6 +10,7 @@ import {
 } from "playwright";
 
 import { chromiumLaunchOptions } from "./playwright-browser";
+import { retryProductClientUnlock } from "./product-client-unlock-retry";
 
 async function main() {
   const action = process.argv[2];
@@ -544,13 +545,22 @@ async function waitForUnlockedBrain(brain: FrameLocator, page: Page) {
   const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 90_000);
   const status = brain.locator("#sessionAccountStatus");
   const shell = brain.locator('.obsidian-shell[data-session-status="unlocked"]');
-  await waitForBrainClient(brain, page);
-  await assertEventually(
-    async () => shell.isVisible(),
+  const url = page.url();
+  await retryProductClientUnlock({
     timeoutMs,
-    async () =>
-      `Brain did not unlock; current status: ${(await status.textContent())?.trim()}`,
-  );
+    waitForUnlock: async (attemptTimeoutMs) => {
+      await waitForBrainClient(brain, page);
+      await assertEventually(
+        async () => shell.isVisible(),
+        attemptTimeoutMs,
+        async () =>
+          `Brain did not unlock; current status: ${(await status.textContent())?.trim()}`,
+      );
+    },
+    reload: async () => {
+      await loadBrainProductClient(page, url);
+    },
+  });
 }
 
 async function assertPersonalAgent(
