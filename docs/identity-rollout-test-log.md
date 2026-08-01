@@ -77,14 +77,17 @@ not bypass that gate.
       (PR #356; retain as regression coverage).
 - [x] Manually collapse a running tool rollup: it stays collapsed across
       snapshots, timers, and completion.
-- [ ] Record how pinned Hermes Telegram and Discord adapters consume
-      clarification plus adjacent working/typing/thinking/status callbacks.
-- [ ] Hermes clarification question: renders fully, answer resumes the exact
+- [x] Record how pinned Hermes Telegram and Discord adapters consume
+      clarification plus adjacent working/typing/thinking/status callbacks
+      (`finitechat/integrations/hermes/README.md`).
+- [x] Hermes clarification question: renders fully, answer resumes the exact
       originating turn, and cannot be answered from another active chat.
-- [ ] Clarification uses Hermes pending state and ordinary Chat messages; no
-      new core Chat protocol type or emoji/prose classifier.
-- [ ] Inspect whether pinned Hermes exposes semantic compaction start/finish
-      to adapters. If not, record it in the parking lot and move on.
-- [ ] Reload / adapter reconnect mid-turn: no lost messages or wrong-chat
-      admission.
+- [x] Clarification uses Hermes pending state and ordinary Chat messages; no
+      new core Chat protocol type or emoji/prose classifier (pinned-Hermes
+      regression coverage).
+- [x] Inspect whether pinned Hermes exposes semantic compaction start/finish
+      to adapters. It does not; the parked boundary is recorded in
+      `finitechat/integrations/hermes/README.md`.
+- [x] Reload / adapter reconnect mid-turn: no lost clarification reply or
+      wrong-chat admission (pinned-Hermes regression coverage).
 - [ ] Paul explicitly authorizes any merge, canary, or rollout separately.

@@ -27,6 +27,10 @@ REQUIRED_REGRESSIONS: dict[str, list[str]] = {
         "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_controls_bypass_busy_text_admission_gate",
         "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_active_session_does_not_block_another_session",
     ],
+    "Hermes clarification routing": [
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_clarification_uses_hermes_prompt_on_exact_ordinary_message_route",
+        "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_clarification_without_exact_route_fails_without_home_fallback",
+    ],
     "transient poll recovery": [
         "tests.hermes.test_finite_platform_adapter.FinitePlatformAdapterTests.test_poll_loop_continues_after_transient_poll_error",
     ],

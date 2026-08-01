@@ -113,6 +113,28 @@ class BasePlatformAdapter:
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         self.handled_messages.append(event)
 
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: list | None,
+        clarify_id: str,
+        session_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        del session_key
+        if choices:
+            from tools.clarify_gateway import mark_awaiting_text
+
+            mark_awaiting_text(clarify_id)
+            lines = [f"❓ {question}", ""]
+            lines.extend(f"  {index}. {choice}" for index, choice in enumerate(choices, 1))
+            lines.extend(["", "Reply with the number, the option text, or your own answer."])
+            content = "\n".join(lines)
+        else:
+            content = f"❓ {question}"
+        return await cast(Any, self).send(chat_id=chat_id, content=content, metadata=metadata)
+
     def _heal_stale_session_lock(self, session_key: str) -> bool:
         task = self._session_tasks.get(session_key)
         if task is None or not task.done():
@@ -439,6 +461,65 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
     def test_adapter_disables_edit_streaming_for_ios_rendering_compatibility(self):
         self.assertFalse(self.module.FiniteChatAdapter.SUPPORTS_MESSAGE_EDITING)
+
+    def test_clarification_uses_hermes_prompt_on_exact_ordinary_message_route(self):
+        adapter = self.adapter()
+        calls = []
+        marked = []
+        adapter._finitechat_json = self._record_json(calls)
+        clarify_module = types.ModuleType("tools.clarify_gateway")
+        cast(Any, clarify_module).mark_awaiting_text = marked.append
+
+        async def exercise():
+            adapter._remember_inbound_chat_route(
+                "room-agent-1",
+                "chat-build-1",
+                "topic-build",
+                "chat-build-1",
+            )
+            return await adapter.send_clarify(
+                chat_id="room-agent-1",
+                question="Asking which environment should receive the change?",
+                choices=["Staging", "Production"],
+                clarify_id="clarify-choice",
+                session_key="agent:main:finitechat:dm:room-agent-1:chat-build-1",
+                metadata={"thread_id": "chat-build-1"},
+            )
+
+        with patch.dict(sys.modules, {"tools.clarify_gateway": clarify_module}):
+            result = asyncio.run(exercise())
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(calls), 1)
+        action, payload, _ = calls[0]
+        self.assertEqual(action, "send")
+        self.assertEqual(payload["conversation_id"], "topic-build")
+        self.assertEqual(payload["segment_id"], "chat-build-1")
+        self.assertEqual(payload["kind"], "message")
+        self.assertEqual(payload["status"], "complete")
+        self.assertIn("1. Staging", payload["text"])
+        self.assertIn("2. Production", payload["text"])
+        self.assertEqual(marked, ["clarify-choice"])
+
+    def test_clarification_without_exact_route_fails_without_home_fallback(self):
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+
+        result = asyncio.run(
+            adapter.send_clarify(
+                chat_id="room-agent-1",
+                question="What should change?",
+                choices=None,
+                clarify_id="clarify-open",
+                session_key="agent:main:finitechat:dm:room-agent-1:unknown-chat",
+                metadata={"thread_id": "unknown-chat"},
+            )
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("refusing Home or active-chat fallback", result.error or "")
+        self.assertEqual(calls, [])
 
     def test_first_inbound_hydrates_authoritative_home_before_handling(self):
         module = cast(Any, self.module)
