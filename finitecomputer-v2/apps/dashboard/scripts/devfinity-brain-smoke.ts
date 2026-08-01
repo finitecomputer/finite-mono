@@ -10,7 +10,10 @@ import {
 } from "playwright";
 
 import { chromiumLaunchOptions } from "./playwright-browser";
-import { retryProductClientUnlock } from "./product-client-unlock-retry";
+import {
+  retryProductClientBoundary,
+  retryProductClientUnlock,
+} from "./product-client-unlock-retry";
 
 async function main() {
   const action = process.argv[2];
@@ -126,6 +129,7 @@ async function main() {
       else await waitForBrainClient(brain, page);
       await createOrganizationBrain(
         brain,
+        page,
         expectedText,
         action === "create-org-agent",
       );
@@ -469,9 +473,46 @@ async function selectedBrainId(brain: FrameLocator) {
 
 async function createOrganizationBrain(
   brain: FrameLocator,
+  page: Page,
   name: string,
   includeAgent: boolean,
 ) {
+  const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 90_000);
+  const url = page.url();
+  const priorBrainIds = await retryProductClientBoundary({
+    timeoutMs,
+    attempt: async (attemptTimeoutMs) =>
+      prepareOrganizationBrain(
+        brain,
+        name,
+        includeAgent,
+        attemptTimeoutMs,
+      ),
+    reload: async () => {
+      await loadBrainProductClient(page, url);
+    },
+  });
+  await brain.locator("#manageCreateOrganizationBrainButton").click();
+  await assertEventually(
+    async () => {
+      const buttons = brain.locator("#manageBrainsList .brain-switch-button");
+      if ((await buttons.count()) !== priorBrainIds.size + 1) return false;
+      const selectedId = await brain
+        .locator("#manageBrainsList .brain-switch-button.selected")
+        .getAttribute("data-brain-id");
+      return Boolean(selectedId && !priorBrainIds.has(selectedId));
+    },
+    30_000,
+    async () => "Organization Brain creation did not select one new stable Brain id",
+  );
+}
+
+async function prepareOrganizationBrain(
+  brain: FrameLocator,
+  name: string,
+  includeAgent: boolean,
+  timeoutMs: number,
+): Promise<Set<string>> {
   await openManageBrains(brain);
   const existingIds = new Set(
     await brain
@@ -498,22 +539,10 @@ async function createOrganizationBrain(
   const create = brain.locator("#manageCreateOrganizationBrainButton");
   await assertEventually(
     async () => create.isEnabled(),
-    30_000,
+    timeoutMs,
     async () => "Organization Brain Create action did not become ready",
   );
-  await create.click();
-  await assertEventually(
-    async () => {
-      const buttons = brain.locator("#manageBrainsList .brain-switch-button");
-      if ((await buttons.count()) !== existingIds.size + 1) return false;
-      const selectedId = await brain
-        .locator("#manageBrainsList .brain-switch-button.selected")
-        .getAttribute("data-brain-id");
-      return Boolean(selectedId && !existingIds.has(selectedId));
-    },
-    30_000,
-    async () => "Organization Brain creation did not select one new stable Brain id",
-  );
+  return existingIds;
 }
 
 async function assertOrgFirstBrain(brain: FrameLocator, brainId: string) {
