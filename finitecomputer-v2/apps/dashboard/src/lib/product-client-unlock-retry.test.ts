@@ -1,7 +1,31 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { retryProductClientUnlock } from "../../scripts/product-client-unlock-retry";
+import {
+  retryProductClientBoundary,
+  retryProductClientUnlock,
+} from "../../scripts/product-client-unlock-retry";
+
+describe("Product Client boundary retry", () => {
+  it("reloads only before a bounded preparation succeeds", async () => {
+    let attempts = 0;
+    let reloads = 0;
+
+    await retryProductClientBoundary({
+      timeoutMs: 90_000,
+      attempt: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("action remained disabled");
+      },
+      reload: async () => {
+        reloads += 1;
+      },
+    });
+
+    assert.equal(attempts, 2);
+    assert.equal(reloads, 1);
+  });
+});
 
 describe("Product Client unlock retry", () => {
   it("reloads when a rendered Product Client stalls before unlock", async () => {

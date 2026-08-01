@@ -1,34 +1,51 @@
-type ProductClientUnlockRetryOptions = {
+type ProductClientBoundaryRetryOptions = {
   attempts?: number;
   timeoutMs: number;
-  waitForUnlock: (timeoutMs: number) => Promise<void>;
+  attempt: (timeoutMs: number) => Promise<void>;
   reload: () => Promise<void>;
 };
 
-export async function retryProductClientUnlock({
+export async function retryProductClientBoundary({
   attempts = 3,
   timeoutMs,
-  waitForUnlock,
+  attempt,
   reload,
-}: ProductClientUnlockRetryOptions): Promise<void> {
+}: ProductClientBoundaryRetryOptions): Promise<void> {
   if (!Number.isInteger(attempts) || attempts < 1) {
-    throw new Error("Product Client unlock attempts must be a positive integer");
+    throw new Error("Product Client retry attempts must be a positive integer");
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
-    throw new Error("Product Client unlock timeout must be positive");
+    throw new Error("Product Client retry timeout must be positive");
   }
 
   const attemptTimeoutMs = Math.max(1, Math.ceil(timeoutMs / attempts));
   let lastError: unknown = null;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+  for (let attemptNumber = 1; attemptNumber <= attempts; attemptNumber += 1) {
     try {
-      await waitForUnlock(attemptTimeoutMs);
+      await attempt(attemptTimeoutMs);
       return;
     } catch (error) {
       lastError = error;
     }
-    if (attempt < attempts) await reload();
+    if (attemptNumber < attempts) await reload();
   }
 
   throw lastError;
+}
+
+type ProductClientUnlockRetryOptions = Omit<
+  ProductClientBoundaryRetryOptions,
+  "attempt"
+> & {
+  waitForUnlock: (timeoutMs: number) => Promise<void>;
+};
+
+export async function retryProductClientUnlock({
+  waitForUnlock,
+  ...options
+}: ProductClientUnlockRetryOptions): Promise<void> {
+  await retryProductClientBoundary({
+    ...options,
+    attempt: waitForUnlock,
+  });
 }
