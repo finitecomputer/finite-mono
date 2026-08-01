@@ -217,12 +217,17 @@ UPDATE projects
   SET hosting_tier = 'standard'
   WHERE hosting_tier IS NULL;
 
--- An unlaunched legacy row cannot prove provider placement. The retired SQL
--- default made many such rows say Phala without a provider resource ever
--- existing, so deterministically route them to the Standard/Kata policy.
+-- An unlaunched legacy row without explicit placement cannot prove provider
+-- placement. The retired SQL default made many such rows say Phala without a
+-- provider resource ever existing, so deterministically route only those
+-- legacy rows to the Standard/Kata policy. This migration is replayed on every
+-- Core startup, after current writers may have inserted explicitly placed
+-- requests, so the placement-null guard is part of its idempotency contract.
 UPDATE agent_creation_requests
   SET runner_class = 'kata'
-  WHERE agent_runtime_id IS NULL;
+  WHERE agent_runtime_id IS NULL
+    AND placement_runner_class IS NULL
+    AND runtime_resource_class IS NULL;
 
 -- Preserve proven existing placement from the running request. Kata and the
 -- experimental Phala path have known retained resource shapes. Other legacy
@@ -237,6 +242,18 @@ UPDATE agent_creation_requests
   WHERE placement_runner_class IS NULL
     AND runtime_resource_class IS NULL
     AND runner_class IN ('kata', 'phala');
+
+-- Repair pending requests corrupted by an earlier replay of the legacy
+-- backfill above. Current writers bind runner_class to the exact placement,
+-- and the lease path rejects disagreement, so an existing explicit placement
+-- is the deterministic repair authority. Rows without explicit placement
+-- continue to fail closed through the legacy compatibility path.
+UPDATE agent_creation_requests
+  SET runner_class = placement_runner_class
+  WHERE agent_runtime_id IS NULL
+    AND placement_runner_class IS NOT NULL
+    AND runtime_resource_class IS NOT NULL
+    AND runner_class IS DISTINCT FROM placement_runner_class;
 
 UPDATE projects AS project
   SET placement_runner_class = request.placement_runner_class,
