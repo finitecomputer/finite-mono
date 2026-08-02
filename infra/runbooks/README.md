@@ -70,12 +70,13 @@ Two rules apply to **every** release and promotion, no exceptions:
 - Nothing is built on a prod box. Images are CI-built, digest-pinned, from
   `infra/images/` (`infra/README.md` deploy principles).
 - Rust service packages use content-scoped sources in
-  `infra/nixos/packages.nix`: the root `Cargo.toml` and `Cargo.lock`, all
-  workspace member manifests Cargo must inspect, and only the selected binary's
-  transitive local crate directories plus explicitly embedded assets. When a
-  package gains a path dependency or an `include_str!`/`include_bytes!` input
-  outside those crate directories, add that path to its `sourcePaths` in the
-  same change. Do not fall back to the full flake source. The `Nix service
+  `infra/nixos/packages.nix`: the root `Cargo.lock`, a generated root workspace
+  manifest listing only the package's selected workspace members, and only the
+  binary's transitive local crate directories plus explicitly embedded assets.
+  When a package gains a path dependency or an
+  `include_str!`/`include_bytes!` input outside those crate directories, add
+  that path to its `sourcePaths` in the same change. Do not add unrelated
+  workspace members or fall back to the full flake source. The `Nix service
   packages` CI lane builds every scoped package and must pass before rollout.
   For a supposedly component-only change, compare the clean base and candidate
   outputs with `nix path-info .#packages.x86_64-linux.<package>`; an unrelated

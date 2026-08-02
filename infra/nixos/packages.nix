@@ -1,7 +1,7 @@
 # Nix builds of the workspace server binaries + CLIs, shared by flake.nix.
-# Each package receives root Cargo metadata plus only its transitive local crate
-# closure. Keep these path lists aligned with Cargo path dependencies; the Nix
-# package-build CI lane catches omissions. The root Cargo.lock has git deps
+# Each package receives a generated workspace manifest plus only its transitive
+# local crate closure. Keep these path lists aligned with Cargo path dependencies;
+# the Nix package-build CI lane catches omissions. The root Cargo.lock has git deps
 # (hypernote-mdx, pinned finitechat crates), hence allowBuiltinFetchGit.
 # doCheck = false: tests run in CI via cargo; nix builds stay fast/reliable.
 {
@@ -13,20 +13,30 @@ let
 
   workspaceManifest = builtins.fromTOML (builtins.readFile (sourceRoot + "/Cargo.toml"));
   workspaceMembers = workspaceManifest.workspace.members;
-  workspaceMetadata = lib.fileset.unions (
-    [
-      (sourceRoot + "/Cargo.toml")
-      (sourceRoot + "/Cargo.lock")
-    ]
-    ++ map (member: sourceRoot + "/${member}/Cargo.toml") workspaceMembers
-  );
 
   scopedSource =
-    paths:
-    lib.fileset.toSource {
-      root = sourceRoot;
-      fileset = lib.fileset.unions ([ workspaceMetadata ] ++ map (path: sourceRoot + "/${path}") paths);
-    };
+    name: paths:
+    let
+      members = builtins.filter (member: builtins.elem member paths) workspaceMembers;
+      manifest = (pkgs.formats.toml { }).generate "Cargo.toml" (
+        workspaceManifest
+        // {
+          workspace = workspaceManifest.workspace // {
+            inherit members;
+          };
+        }
+      );
+      files = lib.fileset.toSource {
+        root = sourceRoot;
+        fileset = lib.fileset.unions (
+          [ (sourceRoot + "/Cargo.lock") ] ++ map (path: sourceRoot + "/${path}") paths
+        );
+      };
+    in
+    pkgs.runCommand "${name}-source" { } ''
+      cp -R ${files} "$out"
+      cp ${manifest} "$out/Cargo.toml"
+    '';
 
   crateVersion =
     dir: (builtins.fromTOML (builtins.readFile (sourceRoot + "/${dir}/Cargo.toml"))).package.version;
@@ -42,7 +52,7 @@ let
       extraAttrs ? { },
     }:
     let
-      src = scopedSource sourcePaths;
+      src = scopedSource pname sourcePaths;
       sourceFingerprint = "nix-${builtins.substring 0 32 (builtins.baseNameOf (toString src))}";
       fingerprintAttrs = lib.optionalAttrs exposeSourceFingerprint {
         FINITECHAT_BUILD_FINGERPRINT = sourceFingerprint;
@@ -55,7 +65,7 @@ let
         inherit pname src;
         version = crateVersion dir;
         cargoLock = {
-          lockFile = src + "/Cargo.lock";
+          lockFile = sourceRoot + "/Cargo.lock";
           allowBuiltinFetchGit = true;
         };
         cargoBuildFlags = [
