@@ -25,17 +25,25 @@ surface. Twenty-one of 22 active lat1 Agents reached the target Runtime. The
 remaining Agent is healthy on the prior known-good Runtime because its old Kata
 VM cannot complete the supported shutdown operation. Six inactive Runtime
 links were intentionally untouched. On lat3, the new-Agent canary and existing
-Brain canary reached the
-target, but the broad existing-Agent cohort that had not been named before the
-lat1 outage was never planned or executed. The retained evidence does not prove
-the artifact version of every other running lat3 Agent. Phala Runtime upgrades
-were not attempted.
+Brain canary reached the target, but the broad existing-Agent cohort that had
+not been named before the lat1 outage was never planned or executed. The
+retained evidence does not prove the artifact version of every other running
+lat3 Agent. Phala Runtime upgrades were not attempted.
+
+The rollout also ended with lat3 still drained and its Runner timer stopped.
+That was not discovered until 16:48 on August 2, so the product could not claim
+new-Agent requests after the maintenance window. At 16:50, an operator restored
+`FC_RUNNER_DRAIN=false`, started the timer, and ran a successful cycle. One
+queued creation was claimed immediately, increasing lat3 from 21 to 22 running
+sandboxes under its limit of 32. Leaving new-user admission disabled was a
+user-impacting closeout failure even though existing Agents remained healthy.
 
 The user-facing outcome is encouraging. On August 2, the product owner
-confirmed that Sites publishing and sharing work well in real use. Chat has not reproduced the
-incoming-update focus race; the sidebar still reorders as messages arrive,
-which is visually jarring but not a rollback blocker. Brain navigation remains
-disabled. Brain validation is still in progress, with promising results so far.
+confirmed that Sites publishing and sharing work well in real use. Chat has not
+reproduced the incoming-update focus race; the sidebar still reorders as
+messages arrive, which is visually jarring but not a rollback blocker. Brain
+navigation remains disabled. Brain validation is still in progress, with
+promising results so far.
 
 The operational outcome is more mixed. CI and release preparation consumed
 hours because the Brain matrix exposed several independent races, the lat2
@@ -48,26 +56,26 @@ archive, and broad app-plane restart.
 
 The most serious event was finite-lat-1 becoming completely unreachable during
 the eighth broad Agent upgrade. Latitude showed the server as `OFF`; the host
-did not return until an operator powered it on about two hours later. The previous boot
-journal ended abruptly, with no orderly shutdown, kernel panic, OOM, thermal,
-machine-check, watchdog, filesystem, or storage error. A provider/BMC or power
-event and a firmware/hardware protection event under transient load remain
-plausible. The rollout is temporally correlated but not proven causal. Latitude
-or BMC power-event telemetry is required to resolve this.
+did not return until an operator powered it on about two hours later. The
+previous boot journal ended abruptly, with no orderly shutdown, kernel panic,
+OOM, thermal, machine-check, watchdog, filesystem, or storage error. A
+provider/BMC or power event and a firmware/hardware protection event under
+transient load remain plausible. The rollout is temporally correlated but not
+proven causal. Latitude or BMC power-event telemetry is required to resolve
+this.
 
 The cold boot exposed two difficult Agent lifecycle failures:
 
 - The interrupted-upgrade Agent stopped between candidate creation and handle
-  swap. It
-  briefly had two VMs mounting the same durable data and advertising the same
-  npub. The control plane failed closed, but recovery required removing the
-  exact candidate, terminating an orphaned shim/VM, and isolating stale
+  swap. It briefly had two VMs mounting the same durable data and advertising
+  the same npub. The control plane failed closed, but recovery required removing
+  the exact candidate, terminating an orphaned shim/VM, and isolating stale
   containerd Runtime state before the normal upgrade could succeed.
 - The lifecycle-exception Agent repeatedly failed while stopping its old VM
-  with `ttrpc: closed`.
-  Recovery crossed stale CNI namespace, wrapped QEMU, restart-manager, and Kata
-  sandbox-state boundaries. The Agent was restored on its original image and
-  data, but a final normal upgrade still failed at old-container shutdown.
+  with `ttrpc: closed`. Recovery crossed stale CNI namespace, wrapped QEMU,
+  restart-manager, and Kata sandbox-state boundaries. The Agent was restored on
+  its original image and data, but a final normal upgrade still failed at
+  old-container shutdown.
 
 No Agent `/data` or identity material was hand-edited, and all 22 active lat1
 Agents finished online with their expected Agent Principals. That is not enough
@@ -90,6 +98,7 @@ opening a VM host and repairing CNI, QEMU, containerd, or Kata records by hand.
 | One classified deploy train | Completed for control plane, CLIs, Sites reconciliation, Runtime promotion, and Kata rollout | The actual Nix blast radius was wider than product classifications implied |
 | New-Agent and existing-Agent canaries | A new lat3 Agent, a legacy-identity lat1 Agent, and an existing Brain lat3 Agent passed before the broad cohort | The new canary proved Chat, ownership, key readiness, and disabled Brain nav, but not every Sites and Brain checklist item |
 | Fleet Runtime/environment reconciliation | 21 of 22 active lat1 Agents reached the target; desired Brain environment repaired for those upgraded Agents. The new and existing lat3 canaries reached the target | One lat1 Agent remains on the prior artifact. Six inactive lat1 links remain intentionally untouched. The remaining lat3 cohort was not frozen or rolled after the outage, so fleet-wide target convergence is not proven. No Phala upgrades |
+| Restore normal new-user admission | Restored on August 2 after the omission was discovered; the first successful cycle claimed one queued creation | Admission was unavailable from the end of the rollout until 16:50 on August 2. Closeout lacked a mandatory timer/drain/claim-loop assertion |
 | Recovery boundary | Coordinated v3 snapshots and offsite Borg archives passed; PostgreSQL crash recovery and integrity checks passed | This was not an empty-target restore of every Agent `/data` Recovery Set and must not be described as one |
 
 ## User and fleet impact
@@ -112,6 +121,10 @@ opening a VM host and repairing CNI, QEMU, containerd, or Kata records by hand.
 - The broad lat3 cohort did not run. The new-Agent and existing Brain canaries
   passed, but no retained plan establishes target convergence for every other
   running lat3 Agent.
+- Lat3 remained drained with its Runner timer inactive after the rollout.
+  Existing Agents stayed online, but new-Agent requests could not be claimed
+  until admission was restored on August 2. One queued creation was claimed by
+  the first successful cycle.
 - The interrupted eighth operation briefly created a two-writer risk. It was
   detected before normal progression and reduced back to one writer before the
   rollout continued. No resulting data damage was observed.
@@ -231,6 +244,18 @@ opening a VM host and repairing CNI, QEMU, containerd, or Kata records by hand.
   one prior-known-good; no helpers, active control requests, or failed units.
   The broad lat3 cohort remained unexecuted.
 
+### Post-rollout admission discovery, August 2
+
+- **16:48** — A live status check found lat3's Runner timer inactive and
+  `FC_RUNNER_DRAIN=true`. The last timer trigger had been at 18:58 on August 1.
+  Existing sandboxes were healthy, but the host was not accepting new-Agent
+  requests.
+- **16:50** — An operator changed only the drain flag to `false`, started the
+  recurring timer, and invoked one bounded Runner cycle. The service completed
+  successfully, Core private health remained HTTP 200, no units failed, and a
+  queued creation was claimed. Lat3 moved from 21 to 22 running sandboxes under
+  its configured limit of 32.
+
 ## What went right
 
 ### Product and identity design
@@ -342,6 +367,21 @@ marker when it was interrupted. Durable entry events were sufficient to
 reconstruct the truth, but a summary that can say “success” without all planned
 postflights is unsafe. Interruption, lost SSH, or driver termination must emit
 an incomplete/failure terminal state.
+
+### Closeout left new-Agent admission disabled
+
+Lat3 was intentionally drained and its timer stopped while the rollout staged
+and tested canaries. Those controls were never returned to normal at the end of
+the session. Existing Agent health made the platform look recovered, but the
+creation plane was unavailable: queued new users had no active Runner eligible
+to claim them.
+
+The postflight emphasized services, queues, existing-Agent contact, and the
+lat1 artifact cohort. It did not require the product invariant that lat3 be
+enabled, undrained, below capacity, connected to Core, and completing claim
+cycles. The omission persisted until a direct live check on August 2. Restoring
+the timer and drain flag immediately claimed one queued creation, confirming
+real suppressed demand rather than a merely theoretical configuration defect.
 
 ### Provider lifecycle state was not self-healing
 
@@ -514,6 +554,9 @@ scoped build inputs so a small change has a small activation boundary.
 5. **Operational truth is spread across scripts and implementation details.**
    Missing canonical status/wait commands encouraged guessed probes and manual
    coordination.
+6. **Rollout closeout omitted the admission invariant.** Existing-Agent health
+   and empty control queues were checked, but no gate required the designated
+   creation Runner to be active, undrained, and completing successful cycles.
 
 ### Contributing conditions
 
@@ -527,6 +570,8 @@ scoped build inputs so a small change has a small activation boundary.
   replacement transients than a dedicated compute host would provide.
 - The rollout wrapper had good entry-level events but incorrect interrupted-run
   summary semantics.
+- The same maintenance controls used to prevent premature canary claims had no
+  paired, mandatory restoration step.
 - HTTP application health was treated as an important postcondition, but it did
   not imply that the provider control channel was healthy enough for upgrade.
 
@@ -563,6 +608,10 @@ or any further production mutation.
    thermal, firmware, and hardware telemetry for future outages.
 5. Add an explicit host capacity/load gate for Runtime replacement, including
    non-Agent workloads, while preserving serial execution.
+6. Add a terminal product-availability gate: the designated creation Runner is
+   timer-active, `FC_RUNNER_DRAIN=false`, below its sandbox cap, connected to
+   Core, and has completed one successful post-maintenance cycle. Record any
+   queued creation count before and after restoration.
 
 ### P1 — reduce ceremony without weakening safety
 
@@ -599,8 +648,11 @@ or any further production mutation.
 - Agent Runtime target: `finite-agent-runtime-2026-08-01.1`, immutable digest
   `sha256:8b56ed2125eb03cdbe9c05f7686906ab2db6304a791c5321d6e9ca183c4fcf8f`.
 - Lat1 active fleet: 22 online; 21 target, one prior known-good.
-- Lat3: new-Agent and existing Brain canaries on target; broad existing-Agent
-  rollout not executed and other artifact versions not reconciled by this run.
+- Lat3: new-Agent admission restored at 16:50 on August 2; timer active, drain
+  false, successful claim cycle, Core healthy, 22 of 32 sandboxes running, and
+  zero failed units. New-Agent and existing Brain canaries are on target; the
+  broad existing-Agent rollout was not executed and other artifact versions
+  were not reconciled by this run.
 - Inactive lat1 links: six untouched.
 - Phala: no Agent Runtime upgrades; upgrade remains disabled.
 - Sites: reconciliation complete and idempotent; product acceptance reports
