@@ -99,8 +99,7 @@ def health_failures(
         )
     if expected_source and health.get("source_commit") != expected_source:
         failures.append(
-            f"source_commit is {health.get('source_commit')!r}, "
-            f"expected {expected_source!r}"
+            f"source_commit is {health.get('source_commit')!r}, expected {expected_source!r}"
         )
     if health.get("source_dirty") is True and not allow_dirty:
         failures.append("source_dirty is true")
