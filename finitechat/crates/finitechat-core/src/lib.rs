@@ -11820,13 +11820,17 @@ fn server_build_label(health: &HealthResponse) -> String {
         .server_version
         .as_deref()
         .unwrap_or("unknown-version");
-    let commit = health.source_commit.as_deref().unwrap_or("unknown-commit");
+    let source = health
+        .source_fingerprint
+        .as_deref()
+        .or(health.source_commit.as_deref())
+        .unwrap_or("unknown-source");
     let dirty = match health.source_dirty {
         Some(true) => " dirty",
         Some(false) => "",
         None => " unknown-dirty",
     };
-    format!("{version}@{commit}{dirty}")
+    format!("{version}@{source}{dirty}")
 }
 
 fn current_unix_seconds() -> u64 {
@@ -12228,6 +12232,7 @@ mod tests {
             status: "ok".to_owned(),
             server_contract_version: None,
             server_version: Some("0.1.0".to_owned()),
+            source_fingerprint: None,
             source_commit: Some("00aa753093c9".to_owned()),
             source_branch: Some("HEAD".to_owned()),
             source_dirty: Some(false),
@@ -12247,6 +12252,7 @@ mod tests {
             status: "ok".to_owned(),
             server_contract_version: Some(FINITECHAT_SERVER_CONTRACT_VERSION),
             server_version: Some("0.1.0".to_owned()),
+            source_fingerprint: Some("nix-chat-source".to_owned()),
             source_commit: Some("9dd1e11ce6b".to_owned()),
             source_branch: Some("main".to_owned()),
             source_dirty: Some(false),
@@ -12262,6 +12268,7 @@ mod tests {
             status: "ok".to_owned(),
             server_contract_version: Some(FINITECHAT_SERVER_CONTRACT_VERSION + 1),
             server_version: Some("0.1.0".to_owned()),
+            source_fingerprint: Some("nix-future-source".to_owned()),
             source_commit: Some("future".to_owned()),
             source_branch: Some("main".to_owned()),
             source_dirty: Some(false),

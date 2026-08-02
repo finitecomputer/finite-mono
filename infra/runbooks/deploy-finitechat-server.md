@@ -24,15 +24,16 @@ directly. The flake builds `finitechat-server` from that pinned rev.
 ## The contract gate (applies to EVERY server deploy)
 
 Per `finitechat/docs/server-deployment-gate.md`: production `GET /health`
-must report `server_contract_version`, `server_version`, `source_commit`
-matching the expected finite-chat commit, and `source_dirty: false`.
+must report `server_contract_version`, `server_version`, the Nix-derived
+`source_fingerprint` matching the selected Chat package, and
+`source_dirty: false`.
 
 ### PRECONDITIONS
 
 - The server commit to deploy is on mono `main`; local
   `cargo test -p finitechat-server` suites pass.
 - You know the expected post-deploy `/health` payload (contract version,
-  12-char source commit).
+  automatically derived Chat source fingerprint).
 - You can SSH from the Mac to `ubuntu@finite-lat-2` with agent forwarding for
   root access from lat2 to `64.34.82.77`. Do not build on the Mac, clawland,
   or lat1.
@@ -139,20 +140,24 @@ matching the expected finite-chat commit, and `source_dirty: false`.
    profile first preserves boot/generation rollback, while transient-unit
    activation survives SSH loss and cannot build on lat1.
 
-3. After the deploy, run the gate from a mono checkout at the release
-   commit:
+3. After the deploy, run the gate from a mono checkout at the release commit
+   on lat2. This evaluation reads package metadata and does not rebuild the
+   closure:
 
    ```sh
    set -euo pipefail
-   export FINITECHAT_RELEASE_COMMIT="$(git rev-parse --short=12 HEAD)"
+   export FINITECHAT_SOURCE_FINGERPRINT="$(
+     nix eval --option builders '' --raw \
+       .#packages.x86_64-linux.finitechat-server.sourceFingerprint
+   )"
    finitechat/scripts/server-contract-gate.py \
      --server https://chat.finite.computer \
-     --expected-source "$FINITECHAT_RELEASE_COMMIT"
+     --expected-fingerprint "$FINITECHAT_SOURCE_FINGERPRINT"
    ```
 
 ### VERIFY
 
-1. Gate passes (exact `source_commit`, `source_dirty: false`).
+1. Gate passes (exact `source_fingerprint`, `source_dirty: false`).
 2. Post-deploy smoke from the gate doc:
 
    ```sh
@@ -193,7 +198,7 @@ unrecoverable. Concretely, any migration follows this exact order:
    and copy the database ONLY after step 1.
 3. Start the NEW server; verify via direct IP
    (`curl --resolve chat.finite.computer:443:<new-ip> https://chat.finite.computer/health`)
-   — contract version + source_commit + `source_dirty:false`.
+   — contract version + source fingerprint + `source_dirty:false`.
 4. Only then flip DNS. During the TTL window, clients cached on the old IP
    get connection refused — a clean outage, by design.
 5. Rollback inverts the same discipline: stop+disable the NEW server BEFORE

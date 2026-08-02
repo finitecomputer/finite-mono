@@ -36,8 +36,13 @@ async fn health_reports_ok() {
         Some(FINITECHAT_SERVER_CONTRACT_VERSION)
     );
     assert_eq!(body.server_version.as_deref(), Some("0.1.0"));
-    assert_non_empty(body.source_commit.as_deref());
-    assert_non_empty(body.source_branch.as_deref());
+    assert!(body.source_fingerprint.is_some() || body.source_commit.is_some());
+    if body.source_fingerprint.is_some() {
+        assert_non_empty(body.source_fingerprint.as_deref());
+    } else {
+        assert_non_empty(body.source_commit.as_deref());
+        assert_non_empty(body.source_branch.as_deref());
+    }
     assert!(body.source_dirty.is_some());
 }
 

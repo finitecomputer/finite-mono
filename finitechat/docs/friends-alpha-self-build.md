@@ -47,9 +47,10 @@ cargo run -q -p finitechat-rmp -- doctor
 cargo run -q -p finitechat-cli -- http --server https://chat.finite.computer health
 ```
 
-The deployed server response must include `status: "ok"`, `server_version`,
-`source_commit`, and `source_dirty: false`. For this Friends Alpha branch, the
-server behavior gate is recorded in `docs/friends-alpha-integration-runbook.md`.
+The deployed Nix server response must include `status: "ok"`, `server_version`,
+`source_fingerprint`, and `source_dirty: false`. Legacy non-Nix builds may
+still report `source_commit`. For this Friends Alpha branch, the server
+behavior gate is recorded in `docs/friends-alpha-integration-runbook.md`.
 
 ## Build From Xcode
 

@@ -46,7 +46,8 @@ provenance is structurally absent, not just unrecorded.
    matches the tag before declaring success — today that is
    `finitesitesd --version` (0.2.16 at capture) plus
    `curl https://api.finite.chat/api/v1/healthz`; the finitechat-style
-   contract gate (a health endpoint reporting `source_commit`) is the bar
+   contract gate (a health endpoint reporting an automatically derived
+   artifact fingerprint) is the bar
    once finitesitesd exposes it.
 4. Rollback = `sudo install` the `.prev` binary back and restart, same as
    today.

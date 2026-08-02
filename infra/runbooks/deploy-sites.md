@@ -182,7 +182,7 @@ by copying a release tarball onto the box.
    that already received the old four-hour header can retain that old entry
    until it expires (an edge purge cannot clear a browser cache), so allow that
    one-time rollout window or hard-reload the validation browser once.
-5. TODO: once finitesitesd exposes a `source_commit` health payload
+5. TODO: once finitesitesd exposes an automatically derived source fingerprint
    (finitechat-style contract gate), gate on it here.
 
 ### ROLLBACK

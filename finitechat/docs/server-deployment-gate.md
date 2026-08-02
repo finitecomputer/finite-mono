@@ -9,7 +9,7 @@ Finite Chat owns:
 - the server build provenance exposed by `GET /health`;
 - the compatibility decision for a finite-chat app/server pair;
 - the release-blocking verification that production is running the expected
-  server commit.
+  server artifact.
 
 `../finitecomputer-v2` owns the hosted SaaS deploy mechanics: current lat1
 systemd/k3s/Traefik rollout, future image/release artifacts, stack deploy
@@ -23,31 +23,38 @@ stop and loop Paul into the v2 deploy lane before distributing the app.
 Before any phone or TestFlight build is handed to testers:
 
 ```sh
-export FINITECHAT_RELEASE_COMMIT="$(git rev-parse --short=12 HEAD)"
-scripts/server-contract-gate.py \
+export FINITECHAT_SOURCE_FINGERPRINT="$(
+  nix eval --raw .#packages.x86_64-linux.finitechat-server.sourceFingerprint
+)"
+finitechat/scripts/server-contract-gate.py \
   --server https://chat.finite.computer \
-  --expected-source "$FINITECHAT_RELEASE_COMMIT"
+  --expected-fingerprint "$FINITECHAT_SOURCE_FINGERPRINT"
 ```
+
+Run this from the root of the exact clean monorepo revision whose NixOS closure
+was deployed. Nix derives the fingerprint from Chat's scoped package inputs;
+there is no revision value to copy into a source file or release manifest.
 
 The deployed health response must include:
 
 ```json
 {
   "status": "ok",
-  "server_contract_version": 3,
+  "server_contract_version": 6,
   "server_version": "0.1.0",
-  "source_commit": "<finite-chat commit>",
+  "source_fingerprint": "nix-<scoped-source-hash>",
   "source_dirty": false
 }
 ```
 
 The release is blocked when any of these are true:
 
-- `/health` omits `source_commit` or `server_version`;
+- `/health` omits `source_fingerprint` or `server_version`;
 - `/health` omits `server_contract_version`;
 - `server_contract_version` is not the exact contract version expected by the
   app, CLI, Hermes bridge, and runtime image being shipped;
-- `source_commit` is not the finite-chat commit expected by the app build;
+- `source_fingerprint` is not the fingerprint of the selected Nix Chat
+  package;
 - `source_dirty` is `true`;
 - a server-side route or DTO changed but production still reports an older
   compatible-looking build;
@@ -56,7 +63,8 @@ The release is blocked when any of these are true:
 
 This deploy gate is intentionally stricter than normal client/server
 interoperability. The gate proves production is running the exact finitechat
-server build selected for a release. Runtime clients should treat
+server build selected for a release. The NixOS rollout record separately
+preserves the overall monorepo Git revision. Runtime clients should treat
 `server_contract_version` as a minimum server-visible transport/admission
 contract: a newer server may be accepted when it still preserves the older
 delivery behavior. Encrypted app-message protocol compatibility belongs to the
@@ -67,12 +75,12 @@ clients in the room, not to the server health check.
 When production needs a server update, loop Paul into `../finitecomputer-v2`
 with:
 
-- finite-chat branch and full commit SHA to deploy;
+- full monorepo commit SHA to deploy;
 - whether the deployment needs only `finitechat-server` or also a companion
   worker such as `push-drain`;
 - the finite-chat checks already run locally;
 - any server data/backfill/rollback notes;
-- the expected post-deploy `/health` payload.
+- the Nix-derived expected Chat fingerprint and post-deploy `/health` payload.
 
 The current v2 deployment lane is documented in
 `../finitecomputer-v2/docs/finite-stack-deployment.md` and currently uses:
@@ -84,8 +92,8 @@ The current v2 deployment lane is documented in
 ```
 
 Treat the exact deploy command as owned by v2. The required finite-chat
-acceptance criterion is that production `/health` reports the expected
-finite-chat commit and the app-facing smoke tests pass against
+acceptance criterion is that production `/health` reports the expected Chat
+source fingerprint and the app-facing smoke tests pass against
 `https://chat.finite.computer`.
 
 ## Post-Deploy Smoke
@@ -94,9 +102,11 @@ After Paul deploys the server, run:
 
 ```sh
 cargo run -q -p finitechat-cli -- http --server https://chat.finite.computer health
-scripts/server-contract-gate.py \
+finitechat/scripts/server-contract-gate.py \
   --server https://chat.finite.computer \
-  --expected-source "$(git rev-parse --short=12 HEAD)"
+  --expected-fingerprint "$(
+    nix eval --raw .#packages.x86_64-linux.finitechat-server.sourceFingerprint
+  )"
 cargo test -p finitechat-server --test http_routes
 cargo test -p finitechat-server --test http_persistence
 ```

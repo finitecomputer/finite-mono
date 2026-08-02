@@ -150,7 +150,8 @@ lat1's `FC_FINITE_PRIVATE_USAGE_API_TOKEN` — do NOT rotate at cutover).
    `fsite/v*`, `fbrain/v*`, `runtime-image/*`, `core/v*`).
 4. **Deploy scripts / runbooks live here**, are idempotent, take an explicit
    ref/digest, and verify what they deployed (health endpoint reporting
-   `source_commit`, like the finitechat server contract gate).
+   an automatically derived artifact fingerprint, like the finitechat server
+   contract gate).
 5. **Backups are only real once restored.** Before first-slice user data, every
    stateful service must have a service-consistent backup, an off-host copy, a
    restore runbook, and an empty-target restore drill. The current deployment

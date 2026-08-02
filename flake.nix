@@ -47,7 +47,7 @@
     let
       finitePackagesLinux = import ./infra/nixos/packages.nix {
         pkgs = import nixpkgs { system = "x86_64-linux"; };
-        src = self;
+        sourceRoot = ./.;
       };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
       runnerSpecialArgs = {
