@@ -203,8 +203,14 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Other containerized self-hosted jobs can preserve root-owned
+          # diagnostics. A fresh path keeps their artifacts from poisoning
+          # this clean package-build checkout.
+          path: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
       - name: Build every scoped Rust package
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           nix build --no-link --print-build-logs --option builders '' \
             .#packages.x86_64-linux.finite-saas-core \
@@ -220,6 +226,7 @@ jobs:
             .#packages.x86_64-linux.fbrain \
             .#packages.x86_64-linux.finitechat
       - name: Verify Chat reports its scoped source fingerprint
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           chat_out="$(
