@@ -35,6 +35,7 @@ let
     in
     pkgs.runCommand "${name}-source" { } ''
       cp -R ${files} "$out"
+      chmod u+w "$out"
       cp ${manifest} "$out/Cargo.toml"
     '';
 
