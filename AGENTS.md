@@ -46,6 +46,8 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   mutation requires explicit user authorization. A selected row, sort order,
   identifier order, or other navigation state never confers authority to choose
   or rewrite durable user state; ambiguous state fails closed without mutation.
+- Never open a snapshot SQLite file directly; inspect it only through
+  `scripts/snapshot-sqlite` or from a scratch copy.
 - One root Cargo workspace, one root `Cargo.lock`. Imported components keep
   their internal layout; their crates are root workspace members and their
   old sub-workspace `Cargo.toml`/`Cargo.lock` files stay deleted. New crates

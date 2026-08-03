@@ -97,6 +97,30 @@ restore proof. Once a non-disruptive cadence exists, the accepted plan retains
 48 hours of fine-grained points, then 7 daily, 4 weekly, and 6 monthly points;
 no current 15-minute archive series is claimed.
 
+## Read-only sealing rollout
+
+Merging this change does not alter finite-lat-1. After deploying its exact
+committed revision through the normal authorized lat1 flow, an operator must
+create and archive the first sealed recovery point. The normal deploy takes its
+pre-deploy snapshot with the previous system generation, so run these steps as
+root after the new generation has switched, during a window authorized for the
+snapshot's brief service write fence:
+
+```sh
+systemctl start finite-hosted-web-chat-snapshot.service
+latest=$(readlink -e /data/recovery-snapshots/hosted-web-chat/latest)
+test -z "$(find "$latest" ! -type l -perm /0222 -print -quit)"
+systemctl start finite-hosted-web-chat-snapshot-health.service
+systemctl start borgbackup-job-finite-hosted-web-chat-offsite.service
+systemctl start finite-hosted-web-chat-offsite-health.service
+scripts/snapshot-sqlite integrity-check "$latest/finite-sites/registry.db"
+```
+
+Record the deployed revision, resolved snapshot timestamp, snapshot-health
+result, Borg archive result, and helper result. Do not unseal an older snapshot
+as part of rollout; the mode-bit rollback below is only for a demonstrated
+sealing incompatibility.
+
 ## Snapshot checks
 
 On the source host:
@@ -113,7 +137,11 @@ test "$age" -le 900         # separate admission/RPO gate; expected to fail toda
 (cd "$latest" && sha256sum --check manifest.sha256)
 test "$(cat "$latest/format")" = finite.hosted-web-chat-recovery-snapshot.v3
 test -f "$latest/recovery-set.tsv"
+scripts/snapshot-sqlite integrity-check "$latest/finite-sites/registry.db"
 ```
+
+Never pass a database below `$latest` to plain `sqlite3`; the helper copies
+the database and any WAL/SHM sidecars to private scratch space first.
 
 The snapshot unit briefly fences every writer in the Recovery Set, copies
 identity and encrypted binding files, uses SQLite's backup API for every
@@ -189,6 +217,17 @@ archive: never overwrite a previous target during this drill. To exercise the
 activation boundary, run once with `FINITE_RESTORE_FAIL_AFTER_STAGE=1`; the
 tool must remove its staging path, leave the target empty/unchanged, and permit
 an exact retry after the failure injection is removed.
+
+If read-only sealing itself prevents snapshot health, archival, or rotation,
+unseal only the resolved latest snapshot as the mode-bit rollback:
+
+```sh
+sudo chmod -R u+w -- "$(readlink -e /data/recovery-snapshots/hosted-web-chat/latest)"
+```
+
+Do not use that rollback to inspect SQLite in place; preserve the snapshot and
+use `scripts/snapshot-sqlite`. A subsequent successful snapshot run must
+replace this temporary unsealed recovery point with a newly sealed one.
 
 Schedule the first drill immediately after the first verified archive and
 repeat it before Phase 11 authorizes additional paid/Launch Code creation and
