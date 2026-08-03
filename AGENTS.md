@@ -49,6 +49,8 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
 - **`scripts/finite-status` is the only platform/fleet status command.** Run it
   before and after every rollout; add any missing incident probe to that
   read-only command instead of preserving an ad-hoc operator query.
+- Never open a snapshot SQLite file directly; inspect it only through
+  `scripts/snapshot-sqlite` or from a scratch copy.
 - One root Cargo workspace, one root `Cargo.lock`. Imported components keep
   their internal layout; their crates are root workspace members and their
   old sub-workspace `Cargo.toml`/`Cargo.lock` files stay deleted. New crates

@@ -103,6 +103,7 @@ stripe-price-contract:
 
 # Synthetic empty-target proof for the complete hosted Recovery Set contract.
 hosted-recovery-contract:
+    python3 -m unittest discover -s scripts/tests -p 'test_snapshot_sqlite.py'
     infra/scripts/test-hosted-web-chat-restore
 
 # Values-free file/mode/name contract for rebuilding lat1 secret inputs.

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+snapshot_sqlite="$repo_root/scripts/snapshot-sqlite"
+[ -x "$snapshot_sqlite" ] || {
+  echo "restore refused: snapshot SQLite helper is missing or not executable" >&2
+  exit 69
+}
+
 usage() {
   echo "usage: FINITE_RESTORE_ISOLATED=1 $0 SNAPSHOT_DIR EMPTY_TARGET_DIR" >&2
   exit 64
@@ -164,11 +171,11 @@ find "$source_dir/hosted-device" -type f -name client.sqlite3 -print0 \
         echo "restore refused: Hosted Device account identity keypair is inconsistent" >&2
         exit 67
       }
-      [ "$(sqlite3 "$database" 'PRAGMA integrity_check;')" = ok ] || {
+      [ "$("$snapshot_sqlite" integrity-check "$database")" = ok ] || {
         echo "restore refused: Hosted Device SQLite integrity failed" >&2
         exit 67
       }
-      if ! database_account=$(sqlite3 "$database" \
+      if ! database_account=$("$snapshot_sqlite" query "$database" \
         'SELECT DISTINCT account_id FROM client_device_states ORDER BY account_id;'); then
         echo "restore refused: Hosted Device client database has no readable account binding" >&2
         exit 67
@@ -178,20 +185,20 @@ find "$source_dir/hosted-device" -type f -name client.sqlite3 -print0 \
         exit 67
       }
     done
-[ "$(sqlite3 "$source_dir/finite-chat/server.sqlite3" 'PRAGMA integrity_check;')" = ok ] || {
+[ "$("$snapshot_sqlite" integrity-check "$source_dir/finite-chat/server.sqlite3")" = ok ] || {
   echo "restore refused: Finite Chat SQLite integrity failed" >&2
   exit 67
 }
 pg_restore --list "$source_dir/saas-core/finite_core.dump" >/dev/null
-[ "$(sqlite3 "$source_dir/finite-brain/finite-brain.sqlite3" 'PRAGMA integrity_check;')" = ok ] || {
+[ "$("$snapshot_sqlite" integrity-check "$source_dir/finite-brain/finite-brain.sqlite3")" = ok ] || {
   echo "restore refused: Finite Brain SQLite integrity failed" >&2
   exit 67
 }
-[ "$(sqlite3 "$source_dir/finite-identity/identity.db" 'PRAGMA integrity_check;')" = ok ] || {
+[ "$("$snapshot_sqlite" integrity-check "$source_dir/finite-identity/identity.db")" = ok ] || {
   echo "restore refused: Finite Identity SQLite integrity failed" >&2
   exit 67
 }
-[ "$(sqlite3 "$source_dir/finite-sites/registry.db" 'PRAGMA integrity_check;')" = ok ] || {
+[ "$("$snapshot_sqlite" integrity-check "$source_dir/finite-sites/registry.db")" = ok ] || {
   echo "restore refused: Finite Sites SQLite integrity failed" >&2
   exit 67
 }

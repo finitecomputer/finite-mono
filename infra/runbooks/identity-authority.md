@@ -153,13 +153,14 @@ off-host Borg job. The snapshot fails closed if the Authority database is
 missing. Never back up the live SQLite file by plain copy while the service is
 running.
 
-Restore to a scratch directory first:
+Inspect the snapshot before restoration only through the snapshot helper:
 
 ```sh
-sqlite3 /path/to/snapshot/finite-identity/identity.db 'PRAGMA integrity_check;'
+scripts/snapshot-sqlite integrity-check /path/to/snapshot/finite-identity/identity.db
 ```
 
-Expected output is exactly `ok`. For an authorized production restore:
+It copies the database and any WAL/SHM sidecars to a private scratch directory;
+expected output is exactly `ok`. For an authorized production restore:
 
 1. Stop both Runner workers and their timer, then stop
    `finite-identity.service`.

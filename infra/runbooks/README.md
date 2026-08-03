@@ -93,6 +93,9 @@ Two rules apply to **every** release and promotion, no exceptions:
 
 - Nothing is built on a prod box. Images are CI-built, digest-pinned, from
   `infra/images/` (`infra/README.md` deploy principles).
+- Never open a snapshot SQLite file directly. Use
+  `scripts/snapshot-sqlite`, which inspects a private scratch copy and leaves
+  the sealed snapshot untouched.
 - Rust service packages use content-scoped sources in
   `infra/nixos/packages.nix`: the root `Cargo.lock`, a generated root workspace
   manifest listing only the package's selected workspace members, and only the
