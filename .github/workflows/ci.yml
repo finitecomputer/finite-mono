@@ -430,3 +430,81 @@ jobs:
           name: brain-product-matrix
           path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}/target/brain-product-matrix
           if-no-files-found: error
+
+  ci-gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs:
+      - changes
+      - rust
+      - dashboard
+      - electron-alpha
+      - hermes-bridge
+      - nix-checks
+      - nix-service-packages
+      - devfinity-smoke
+      - brain-product-matrix
+    runs-on: ubuntu-latest
+    env:
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      RUN_RUST: ${{ needs.changes.outputs.run_rust }}
+      RESULT_RUST: ${{ needs.rust.result }}
+      RUN_DASHBOARD: ${{ needs.changes.outputs.run_dashboard }}
+      RESULT_DASHBOARD: ${{ needs.dashboard.result }}
+      RUN_ELECTRON_ALPHA: ${{ needs.changes.outputs.run_electron_alpha }}
+      RESULT_ELECTRON_ALPHA: ${{ needs['electron-alpha'].result }}
+      RUN_HERMES_BRIDGE: ${{ needs.changes.outputs.run_hermes_bridge }}
+      RESULT_HERMES_BRIDGE: ${{ needs['hermes-bridge'].result }}
+      RUN_NIX_CHECKS: ${{ needs.changes.outputs.run_nix_checks }}
+      RESULT_NIX_CHECKS: ${{ needs['nix-checks'].result }}
+      RUN_NIX_SERVICE_PACKAGES: ${{ needs.changes.outputs.run_nix_service_packages }}
+      RESULT_NIX_SERVICE_PACKAGES: ${{ needs['nix-service-packages'].result }}
+      RUN_DEVFINITY_SMOKE: ${{ needs.changes.outputs.run_devfinity_smoke }}
+      RESULT_DEVFINITY_SMOKE: ${{ needs['devfinity-smoke'].result }}
+      RUN_BRAIN_PRODUCT_MATRIX: ${{ needs.changes.outputs.run_brain_product_matrix }}
+      RESULT_BRAIN_PRODUCT_MATRIX: ${{ needs['brain-product-matrix'].result }}
+    steps:
+      - name: Require selected harnesses
+        run: |
+          set -euo pipefail
+
+          if [[ "$CHANGES_RESULT" != success ]]; then
+            echo "Change detection finished with: $CHANGES_RESULT" >&2
+            exit 1
+          fi
+
+          failed=false
+
+          check_selected() {
+            local name=$1
+            local selected=$2
+            local result=$3
+
+            case "$selected" in
+              true)
+                if [[ "$result" != success ]]; then
+                  echo "$name was selected but finished with: $result" >&2
+                  failed=true
+                fi
+                ;;
+              false)
+                ;;
+              *)
+                echo "$name has an invalid selection value: $selected" >&2
+                failed=true
+                ;;
+            esac
+          }
+
+          check_selected "Rust workspace" "$RUN_RUST" "$RESULT_RUST"
+          check_selected "Dashboard" "$RUN_DASHBOARD" "$RESULT_DASHBOARD"
+          check_selected "Electron alpha" "$RUN_ELECTRON_ALPHA" "$RESULT_ELECTRON_ALPHA"
+          check_selected "Hermes bridge" "$RUN_HERMES_BRIDGE" "$RESULT_HERMES_BRIDGE"
+          check_selected "Nix checks" "$RUN_NIX_CHECKS" "$RESULT_NIX_CHECKS"
+          check_selected "Nix service packages" "$RUN_NIX_SERVICE_PACKAGES" "$RESULT_NIX_SERVICE_PACKAGES"
+          check_selected "devfinity smoke" "$RUN_DEVFINITY_SMOKE" "$RESULT_DEVFINITY_SMOKE"
+          check_selected "Brain product matrix" "$RUN_BRAIN_PRODUCT_MATRIX" "$RESULT_BRAIN_PRODUCT_MATRIX"
+
+          if [[ "$failed" == true ]]; then
+            exit 1
+          fi

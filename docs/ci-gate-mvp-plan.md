@@ -93,18 +93,18 @@ an unowned path selected all eight. An invalid Git range failed detection.
 
 ### 4. Add the authoritative gate
 
-- [ ] Add a final job with ID `ci-gate` and display name `CI gate`.
-- [ ] Give it `needs` entries for `changes` and all eight conditional jobs.
-- [ ] Use `if: ${{ always() }}` so it evaluates after upstream failures,
+- [x] Add a final job with ID `ci-gate` and display name `CI gate`.
+- [x] Give it `needs` entries for `changes` and all eight conditional jobs.
+- [x] Use `if: ${{ always() }}` so it evaluates after upstream failures,
   cancellations, and skips.
-- [ ] Keep the gate lightweight: an Ubuntu runner, no checkout, no Nix, and no
+- [x] Keep the gate lightweight: an Ubuntu runner, no checkout, no Nix, and no
   dependency installation.
-- [ ] Require `changes` to have result `success`.
-- [ ] Fail the gate when `changes` fails; a diff error must not create a
+- [x] Require `changes` to have result `success`.
+- [x] Fail the gate when `changes` fails; a diff error must not create a
   partial green run.
-- [ ] Require every selected job to have result `success`.
-- [ ] Allow unselected jobs to be skipped.
-- [ ] Fail when a selected job fails, is cancelled, or is skipped.
+- [x] Require every selected job to have result `success`.
+- [x] Allow unselected jobs to be skipped.
+- [x] Fail when a selected job fails, is cancelled, or is skipped.
 
 ### 5. Validate the hard cut
 
