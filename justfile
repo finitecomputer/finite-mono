@@ -29,9 +29,10 @@ test:
 chat-history-stress:
     cargo test --locked -p finitechat-core --lib tests::late_same_account_device_converges_topics_named_chats_and_archives_after_restart -- --ignored --exact --nocapture
 
-# Web-only contributor gate: dashboard unit tests, lint, and production build.
+# Web-only contributor gate: dashboard unit tests, lint, project-wide typecheck,
+# and production build.
 web-check:
-    cd finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run build
+    cd finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run typecheck && pnpm run build
 
 # Static contract: first-party Brain surfaces use only the Greenfield Brain vocabulary.
 brain-language-check:
@@ -104,6 +105,12 @@ lat1-secret-bootstrap-contract:
     python3 -m json.tool infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json >/dev/null
     python3 -m unittest scripts.tests.test_check_lat1_secret_bootstrap
 
+# Synthetic deletion, watermark, active-job, and stale-lease safety contract
+# for finite-lat-2's operator-installed runner guardrails.
+lat2-runner-guardrails-contract:
+    bash -n infra/hosts/lat2/configure-runner-linger infra/hosts/lat2/restart-idle-runner infra/hosts/lat2/runner-maintenance
+    python3 -m unittest scripts.tests.test_lat2_runner_guardrails
+
 # Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
 brain-product-matrix:
     bash scripts/tests/test_devfinity_brain_readiness.sh
@@ -127,7 +134,7 @@ chat-electron-check:
     cargo test --locked -p finitechat-core --test electron_device_parity
     cargo test --locked -p finitechat-hosted-device
     cd finitechat/apps/electron-chat && pnpm install --frozen-lockfile && pnpm run check
-    cd finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run build
+    cd finitecomputer-v2/apps/dashboard && pnpm install --frozen-lockfile && pnpm test && pnpm run lint && pnpm run typecheck && pnpm run build
 
 # Build the macOS Electron app. It is ad-hoc signed by default; release callers
 # supply FINITECHAT_CODESIGN_IDENTITY (and optionally a temporary keychain) for

@@ -57,7 +57,6 @@ function state(rev: number, latestSeq: number): HostedChatState {
     identity: {
       account_id: "user",
       device_id: "web",
-      account_secret_hex: "",
     },
     rooms: [],
     selected_room_id: target.room_id,
@@ -90,8 +89,6 @@ function state(rev: number, latestSeq: number): HostedChatState {
           },
         ]
       : [],
-    media_gallery: null,
-    room_details: null,
     profiles: [],
     devices: [],
     typing_members: [],

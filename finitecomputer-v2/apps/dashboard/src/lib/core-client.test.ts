@@ -197,7 +197,7 @@ test("route helpers prefer stable ids and isolate N-1 legacy alias reads", () =>
       id: "runtime_first",
       source_machine_id: "legacy-first",
     },
-  } as CoreVisibleProject;
+  } as unknown as CoreVisibleProject;
   const second = {
     project: {
       id: "project_second",
@@ -206,7 +206,7 @@ test("route helpers prefer stable ids and isolate N-1 legacy alias reads", () =>
     runtime: {
       id: "runtime_second",
     },
-  } as CoreVisibleProject;
+  } as unknown as CoreVisibleProject;
 
   assert.deepEqual(coreProductProjects([first, second]), [first, second]);
   assert.equal(
@@ -225,7 +225,7 @@ test("route helpers prefer stable ids and isolate N-1 legacy alias reads", () =>
   const imported = {
     project: { id: "project_imported", import_candidate_id: "import_1" },
     runtime: { id: "runtime_imported", source_machine_id: "legacy-import" },
-  } as CoreVisibleProject;
+  } as unknown as CoreVisibleProject;
   assert.deepEqual(coreProductProjects([imported, first]), [first]);
   assert.equal(
     coreProductProjectForLegacyMachineId([imported, first], "legacy-import"),

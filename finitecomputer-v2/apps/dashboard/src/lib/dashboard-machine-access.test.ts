@@ -14,7 +14,7 @@ test("dashboard overview links use stable runtime ids, never provider machine al
       id: "runtime-1",
       source_machine_id: "legacy-provider-machine",
     },
-  } as CoreVisibleProject;
+  } as unknown as CoreVisibleProject;
 
   assert.equal(coreProjectOverviewHref(project), "/dashboard/machines/runtime-1");
   assert.equal(coreProjectOverviewHref({ ...project, runtime: null }), null);
@@ -24,11 +24,11 @@ test("machine recovery route identity comes from one Core snapshot", () => {
   const current = {
     project: { id: "project-current" },
     runtime: { id: "runtime-current", source_machine_id: "legacy-current" },
-  } as CoreVisibleProject;
+  } as unknown as CoreVisibleProject;
   const changed = {
     project: { id: "project-changed" },
     runtime: { id: "runtime-changed", source_machine_id: "legacy-changed" },
-  } as CoreVisibleProject;
+  } as unknown as CoreVisibleProject;
   const me = {
     projects: [current, changed],
   } as Parameters<typeof dashboardMachineProjectFromSnapshot>[0];

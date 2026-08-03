@@ -29,10 +29,10 @@ test("machine switcher uses red for offline and green only for online", async ()
   const styles = await readFile(shellStylesUrl, "utf8");
   assert.match(
     styles,
-    /\.ocean-machine-switcher__dot\.is-offline\s*\{[^}]*background:\s*var\(--danger-text\)/su
+    /\.ocean-machine-switcher__dot\.is-offline\s*\{[^}]*background:\s*var\(--danger-text\)/u
   );
   assert.match(
     styles,
-    /\.ocean-machine-switcher__dot\.is-online\s*\{[^}]*background:\s*var\(--success\)/su
+    /\.ocean-machine-switcher__dot\.is-online\s*\{[^}]*background:\s*var\(--success\)/u
   );
 });

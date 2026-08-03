@@ -16,6 +16,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit --pretty false",
     "test": "node --import tsx --test src/**/*.test.ts",
     "test:browser": "node --import tsx --test --test-concurrency=1 browser/**/*.browser.ts",
     "design": "node --import tsx scripts/web-design-fixture.ts serve",

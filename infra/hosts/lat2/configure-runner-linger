@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly runner_user="ubuntu"
+action="${1:-verify}"
+
+runner_worker_active() {
+  pgrep -x Runner.Worker >/dev/null 2>&1 ||
+    pgrep -f '[/]bin/Runner.Worker' >/dev/null 2>&1
+}
+
+verify() {
+  local linger
+  linger="$(loginctl show-user "$runner_user" --property=Linger --value)"
+  if [[ "$linger" != "yes" ]] || [[ ! -e "/var/lib/systemd/linger/${runner_user}" ]]; then
+    printf 'runner login isolation is not active for %s (Linger=%s)\n' "$runner_user" "$linger" >&2
+    return 1
+  fi
+  printf 'runner login isolation verified for %s (Linger=yes)\n' "$runner_user"
+}
+
+case "$action" in
+  enable)
+    sudo loginctl enable-linger "$runner_user"
+    verify
+    ;;
+  verify)
+    verify
+    ;;
+  disable)
+    if runner_worker_active; then
+      printf 'refusing to disable linger while a runner worker is active\n' >&2
+      exit 1
+    fi
+    sudo loginctl disable-linger "$runner_user"
+    if [[ -e "/var/lib/systemd/linger/${runner_user}" ]]; then
+      printf 'linger marker still exists for %s\n' "$runner_user" >&2
+      exit 1
+    fi
+    printf 'runner login isolation disabled for %s\n' "$runner_user"
+    ;;
+  *)
+    printf 'usage: %s {enable|verify|disable}\n' "$0" >&2
+    exit 64
+    ;;
+esac

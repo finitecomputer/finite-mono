@@ -228,7 +228,7 @@ test("stripeDashboardReturnUrl rejects localhost in production", () => {
   process.env.NEXT_PUBLIC_APP_URL = "http://localhost:3000";
   delete process.env.FC_DASHBOARD_PUBLIC_URL;
   delete process.env.FC_DASHBOARD_BASE_URL;
-  process.env.NODE_ENV = "production";
+  Reflect.set(process.env, "NODE_ENV", "production");
 
   try {
     assert.throws(
@@ -252,9 +252,9 @@ test("stripeDashboardReturnUrl rejects localhost in production", () => {
       process.env.FC_DASHBOARD_BASE_URL = previousDashboardBaseUrl;
     }
     if (previousNodeEnv === undefined) {
-      delete process.env.NODE_ENV;
+      Reflect.deleteProperty(process.env, "NODE_ENV");
     } else {
-      process.env.NODE_ENV = previousNodeEnv;
+      Reflect.set(process.env, "NODE_ENV", previousNodeEnv);
     }
   }
 });
