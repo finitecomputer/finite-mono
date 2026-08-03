@@ -187,10 +187,24 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 21)? {
+            tx.execute_batch(SCHEMA_V21)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![21, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
 }
+
+const SCHEMA_V21: &str = r#"
+-- V6 created this index before V10 renamed vault_invitations to
+-- brain_invitations. SQLite preserved the old index name through the rename.
+DROP INDEX IF EXISTS vault_invitations_pending_email_target;
+"#;
 
 const SCHEMA_V20: &str = r#"
 ALTER TABLE organization_folder_mounts RENAME TO folder_mounts;
@@ -1415,6 +1429,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn migration_removes_legacy_pending_email_invitation_index() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        store
+            .conn
+            .execute_batch(
+                r#"
+                DELETE FROM schema_migrations WHERE version = 21;
+                DROP INDEX IF EXISTS vault_invitations_pending_email_target;
+                CREATE UNIQUE INDEX vault_invitations_pending_email_target
+                    ON brain_invitations(brain_id, invited_email)
+                    WHERE status = 'pending' AND target_kind = 'email_bootstrap';
+                "#,
+            )
+            .unwrap();
+
+        store.apply_migrations().unwrap();
+
+        let stale_index_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = 'vault_invitations_pending_email_target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_index_count, 0);
+    }
+
+    #[test]
     fn migrates_deployed_v9_schema_and_preserves_brain_data() {
         let conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -1528,7 +1571,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 20);
+        assert_eq!(latest_version, 21);
 
         let old_table_count: i64 = store
             .conn
