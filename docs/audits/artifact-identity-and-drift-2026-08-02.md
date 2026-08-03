@@ -105,7 +105,8 @@ The current Nix source-scoping change should include only:
 - the updated Chat deployment check; and
 - build and blast-radius evidence.
 
-Separate follow-up work should:
+Separate follow-up work is tracked in
+[issue #379](https://github.com/finitecomputer/finite-mono/issues/379) and should:
 
 1. derive or validate released-version lists from GitHub releases;
 2. derive the dashboard's factual version/digest record from its authoritative

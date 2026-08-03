@@ -34,6 +34,8 @@ finitechat/scripts/server-contract-gate.py \
 Run this from the root of the exact clean monorepo revision whose NixOS closure
 was deployed. Nix derives the fingerprint from Chat's scoped package inputs;
 there is no revision value to copy into a source file or release manifest.
+The fingerprint covers the complete Nix artifact input, so an intentional
+Nixpkgs or toolchain update may rotate it even when Chat source is unchanged.
 
 The deployed health response must include:
 
@@ -69,6 +71,10 @@ preserves the overall monorepo Git revision. Runtime clients should treat
 contract: a newer server may be accepted when it still preserves the older
 delivery behavior. Encrypted app-message protocol compatibility belongs to the
 clients in the room, not to the server health check.
+
+Older clients that only display `source_commit` will show `unknown-commit`
+against a fingerprint-only Nix server. That is cosmetic; protocol compatibility
+continues to come from `server_contract_version`.
 
 ## Handoff To finitecomputer-v2
 

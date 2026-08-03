@@ -3,6 +3,8 @@
 # local crate closure. Keep these path lists aligned with Cargo path dependencies;
 # the Nix package-build CI lane catches omissions. The root Cargo.lock has git deps
 # (hypernote-mdx, pinned finitechat crates), hence allowBuiltinFetchGit.
+# A missing path dependency usually surfaces there as Cargo's "failed to load
+# manifest" or "no targets specified" error; update that package's sourcePaths.
 # doCheck = false: tests run in CI via cargo; nix builds stay fast/reliable.
 {
   pkgs,
@@ -57,6 +59,8 @@ let
       sourceFingerprint = "nix-${builtins.substring 0 32 (builtins.baseNameOf (toString src))}";
       fingerprintAttrs = lib.optionalAttrs exposeSourceFingerprint {
         FINITECHAT_BUILD_FINGERPRINT = sourceFingerprint;
+        # Nix builds an immutable scoped snapshot. This describes that build
+        # input; it does not inspect the caller's Git working-tree status.
         FINITECHAT_BUILD_DIRTY = "false";
         passthru.sourceFingerprint = sourceFingerprint;
       };
