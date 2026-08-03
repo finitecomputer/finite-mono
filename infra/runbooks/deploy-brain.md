@@ -163,6 +163,14 @@ for `https://brain.finite.computer`. Then run `fbrain doctor` and a write/read
 proof from an authorized Nostr identity against
 `https://brain.finite.computer`.
 
+For an invite-delivery change, use a disposable Brain and an operator-owned
+inbox. Create one email-targeted Brain Invitation and one email-targeted Folder
+Invitation. Both responses and Product Client receipts must report email
+delivery as `sent`; both emails must contain the invite code and public
+instructions but no URL fragment or Invite Secret. Copy the private invite link
+from the unlocked Product Client as the required separate client-only channel,
+then revoke both disposable invitations after verification.
+
 ## Rollback
 
 1. Switch lat1 to the previous NixOS generation and record the resulting

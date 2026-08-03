@@ -11018,6 +11018,35 @@ const FiniteBrainProductClient = (() => {
     return `${base}/client#${fragment.join("&")}`;
   }
 
+  function emailInvitationDeliveryPresentation(invitation = {}) {
+    if (invitation.targetKind !== "email_bootstrap") return null;
+    if (invitation.deliveryStatus === "sent") {
+      return {
+        tone: "ready",
+        title: "Invitation created; email sent",
+        detail:
+          "The invitation notice was emailed. Send the private invite link separately; its Invite Secret stays client-only.",
+        statusLabel: "sent",
+      };
+    }
+    if (invitation.deliveryStatus === "not_configured") {
+      return {
+        tone: "warn",
+        title: "Invitation created; email not sent",
+        detail:
+          "Email delivery is not configured. Copy and send the private invite link manually.",
+        statusLabel: "not configured",
+      };
+    }
+    return {
+      tone: "warn",
+      title: "Invitation created; check email delivery",
+      detail:
+        "Brain did not confirm email delivery. Copy and send the private invite link manually.",
+      statusLabel: "unconfirmed",
+    };
+  }
+
   function emailInviteClaimProofPayload(input) {
     return JSON.stringify({
       version: "finite-email-invite-bootstrap-claim-proof-v1",
@@ -11927,14 +11956,14 @@ const FiniteBrainProductClient = (() => {
       requireCurrentSessionEpoch(sessionEpoch);
       state.lastShareLinkId = invitation.id;
       $("accessShareLinkInput").value = privateInviteUrl || invitation.id;
+      const delivery = emailInvitationDeliveryPresentation(invitation);
       setAccessResult(
-        "ready",
-        "Folder Invitation created",
-        privateInviteUrl
-          ? `Copy the private link for ${targetInput}. Its Invite Secret stays in the URL fragment.`
-          : `The private Folder Invitation is ready for ${identityDisplay(recipientNpub)}.`,
+        delivery?.tone || "ready",
+        delivery?.title || "Folder Invitation created",
+        delivery?.detail || `The private Folder Invitation is ready for ${identityDisplay(recipientNpub)}.`,
         {
           Expires: invitation.expiresAt,
+          ...(delivery ? { "Email delivery": delivery.statusLabel } : {}),
           ...(privateInviteUrl ? { "Private link": privateInviteUrl } : {}),
         }
       );
@@ -12080,10 +12109,13 @@ const FiniteBrainProductClient = (() => {
       const invitationAccessDetail = invitation.targetKind === "email_bootstrap"
         ? "They can claim the selected Folder access after verifying the invited email."
         : "They can join with this one-time invite; an admin may still need to finish their Folder access.";
-      setAccessResult("ready", "Invitation created", `${targetLabel} can join ${invitation.brainId}. ${invitationAccessDetail}`, {
+      const delivery = emailInvitationDeliveryPresentation(invitation);
+      const deliveryDetail = delivery ? `${delivery.detail} ${invitationAccessDetail}` : invitationAccessDetail;
+      setAccessResult(delivery?.tone || "ready", delivery?.title || "Invitation created", `${targetLabel} can join ${invitation.brainId}. ${deliveryDetail}`, {
         "Invite Code": invitation.inviteCode,
         Expires: invitation.expiresAt,
         Recipient: invitation.invitedEmail || targetLabel,
+        ...(delivery ? { "Email delivery": delivery.statusLabel } : {}),
       });
       log("Created Brain invitation.", {
         invitationId: invitation.id,
@@ -13048,6 +13080,7 @@ const FiniteBrainProductClient = (() => {
     emailInviteBootstrapPath,
     emailInviteClaimPath,
     emailInviteClientUrl,
+    emailInvitationDeliveryPresentation,
     emailInviteInstructionsPath,
     emailInviteScope,
     emailFolderInviteScope,
