@@ -52,11 +52,11 @@ the app to a tester, run the release gate in
 cargo run -q -p finitechat-cli -- http --server https://chat.finite.computer health
 ```
 
-The production response must include `server_version`, `source_commit`, and
-`source_dirty: false`. The `source_commit` must be the finite-chat commit that
+The production response must include `server_version`, `source_fingerprint`,
+and `source_dirty: false`. The fingerprint must match the Nix Chat package that
 the app build expects. If those fields are missing, production is an old server
-build and Friends Alpha is blocked until `../finitecomputer-v2` deploys a
-compatible commit.
+build and Friends Alpha is blocked until the hosted stack deploys a compatible
+package.
 
 If the app change requires server-side work, do not continue with native app
 proof until Paul has the finite-chat commit, the server/worker list to deploy,

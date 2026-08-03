@@ -2944,6 +2944,7 @@ async fn health() -> Json<HealthResponse> {
         status: "ok".to_owned(),
         server_contract_version: Some(FINITECHAT_SERVER_CONTRACT_VERSION),
         server_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        source_fingerprint: non_empty_build_value(option_env!("FINITECHAT_BUILD_FINGERPRINT")),
         source_commit: non_empty_build_value(option_env!("FINITECHAT_BUILD_COMMIT")),
         source_branch: non_empty_build_value(option_env!("FINITECHAT_BUILD_BRANCH")),
         source_dirty: option_env!("FINITECHAT_BUILD_DIRTY").map(|value| value == "true"),

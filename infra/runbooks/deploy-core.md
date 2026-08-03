@@ -221,10 +221,10 @@ Fleet scope requires both `--roll-all` and an explicit
 3. Units are up: `ssh root@64.34.82.77 'systemctl status finite-saas-core
    finite-saas-dashboard'` (`podman-finite-saas-dashboard.service` for the
    container unit name if querying journald).
-4. Core still exposes no `source_commit` health payload. The authoritative
-   identity check is therefore the exact comparison of `/run/current-system`
-   to the prebuilt `SYSTEM` path in step 2; a generation number alone is not
-   sufficient.
+4. Core still exposes no build fingerprint in its health payload. The
+   authoritative identity check is therefore the exact comparison of
+   `/run/current-system` to the prebuilt `SYSTEM` path in step 2; a generation
+   number alone is not sufficient.
 
 ### ROLLBACK
 

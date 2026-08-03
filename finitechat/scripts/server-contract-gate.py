@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Verify a Finite Chat server matches this checkout's protocol contract."""
+"""Verify a Finite Chat server matches the selected build contract."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import re
-import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -25,10 +24,16 @@ class GateFailure(RuntimeError):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", default=DEFAULT_SERVER_URL)
-    parser.add_argument(
+    identity = parser.add_mutually_exclusive_group()
+    identity.add_argument(
+        "--expected-fingerprint",
+        default="",
+        help="Expected Nix-scoped source_fingerprint for production builds.",
+    )
+    identity.add_argument(
         "--expected-source",
         default="",
-        help="Expected source_commit. Defaults to this checkout's short HEAD.",
+        help="Expected legacy source_commit for non-Nix builds.",
     )
     parser.add_argument(
         "--expected-contract",
@@ -52,17 +57,6 @@ def checkout_contract_version() -> int:
     return int(match.group(1))
 
 
-def checkout_short_head() -> str:
-    proc = subprocess.run(
-        ["git", "rev-parse", "--short=12", "HEAD"],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return proc.stdout.strip()
-
-
 def read_health(server_url: str) -> dict[str, Any]:
     url = f"{server_url.rstrip('/')}/health"
     try:
@@ -82,12 +76,14 @@ def read_health(server_url: str) -> dict[str, Any]:
     return value
 
 
-def main() -> int:
-    args = parse_args()
-    expected_contract = args.expected_contract or checkout_contract_version()
-    expected_source = args.expected_source or checkout_short_head()
-    health = read_health(args.server)
-
+def health_failures(
+    health: dict[str, Any],
+    *,
+    expected_contract: int,
+    expected_fingerprint: str = "",
+    expected_source: str = "",
+    allow_dirty: bool = False,
+) -> list[str]:
     failures: list[str] = []
     if health.get("status") != "ok":
         failures.append(f"status is {health.get('status')!r}, expected 'ok'")
@@ -96,20 +92,46 @@ def main() -> int:
             "server_contract_version is "
             f"{health.get('server_contract_version')!r}, expected {expected_contract}"
         )
-    if health.get("source_commit") != expected_source:
+    if expected_fingerprint and health.get("source_fingerprint") != expected_fingerprint:
+        failures.append(
+            "source_fingerprint is "
+            f"{health.get('source_fingerprint')!r}, expected {expected_fingerprint!r}"
+        )
+    if expected_source and health.get("source_commit") != expected_source:
         failures.append(
             f"source_commit is {health.get('source_commit')!r}, expected {expected_source!r}"
         )
-    if health.get("source_dirty") is True and not args.allow_dirty:
+    if health.get("source_dirty") is True and not allow_dirty:
         failures.append("source_dirty is true")
-    if "source_dirty" not in health and not args.allow_dirty:
+    if "source_dirty" not in health and not allow_dirty:
         failures.append("source_dirty is missing")
+    return failures
+
+
+def main() -> int:
+    args = parse_args()
+    expected_contract = args.expected_contract or checkout_contract_version()
+    if not args.expected_fingerprint and not args.expected_source:
+        raise GateFailure(
+            "pass --expected-fingerprint for a Nix deployment or "
+            "--expected-source for a legacy build"
+        )
+    health = read_health(args.server)
+
+    failures = health_failures(
+        health,
+        expected_contract=expected_contract,
+        expected_fingerprint=args.expected_fingerprint,
+        expected_source=args.expected_source,
+        allow_dirty=args.allow_dirty,
+    )
 
     report = {
         "status": "passed" if not failures else "failed",
         "server": args.server,
         "expected_contract": expected_contract,
-        "expected_source": expected_source,
+        "expected_fingerprint": args.expected_fingerprint or None,
+        "expected_source": args.expected_source or None,
         "health": health,
         "failures": failures,
     }

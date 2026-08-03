@@ -108,7 +108,7 @@ Also verify:
 - The deployed server passes `docs/server-deployment-gate.md`; do not upload or
   distribute a build that depends on server changes until
   `https://chat.finite.computer/health` reports the expected finite-chat
-  `source_commit` and `source_dirty: false`.
+  `source_fingerprint` and `source_dirty: false`.
 - `MARKETING_VERSION` in `finitechat/ios/project.yml` matches the App Store
   version. Xcode Cloud owns the distributed build number.
 - App icon assets are present in

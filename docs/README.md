@@ -57,6 +57,9 @@ commands against the owning source folder before relying on them.
   pre-pairing Hosted Chat incompatibility, and a causal-review framework for
   state lineage, mixed versions, production reachability, and fewer better
   tests.
+- [Artifact identity and manual drift audit](audits/artifact-identity-and-drift-2026-08-02.md):
+  automatic package fingerprints, confirmed compatibility-record drift, and
+  the boundary between intentional pins and redundant release bookkeeping.
 
 ## Imported Orientation Docs
 

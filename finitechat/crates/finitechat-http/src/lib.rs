@@ -23,6 +23,8 @@ pub struct HealthResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_branch: Option<String>,

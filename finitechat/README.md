@@ -432,10 +432,12 @@ cargo run -q -p finitechat-cli -- http --server https://chat.finite.computer hea
 ```
 
 Expected production output includes `status: "ok"`, `server_version`,
-`server_contract_version`, `source_commit`, and `source_dirty: false`. If
-`server_contract_version` or `source_commit` is missing, the production server
-is an old build and the app release is blocked until `../finitecomputer-v2`
-deploys a compatible finite-chat commit. See
+`server_contract_version`, `source_fingerprint`, and `source_dirty: false`.
+The fingerprint is derived automatically from the Nix package's scoped Chat
+inputs; the NixOS rollout record separately identifies the monorepo commit. If
+`server_contract_version` or `source_fingerprint` is missing, the production
+server is an old build and the app release is blocked until the hosted stack
+deploys a compatible finite-chat package. See
 `docs/server-deployment-gate.md` for the required handoff and verification
 steps.
 

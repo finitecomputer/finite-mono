@@ -197,6 +197,68 @@ jobs:
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 
+  nix-service-packages:
+    name: Nix service packages
+    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Other containerized self-hosted jobs can preserve root-owned
+          # diagnostics. A fresh path keeps their artifacts from poisoning
+          # this clean package-build checkout.
+          path: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Build every scoped Rust package
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          nix build --no-link --print-build-logs --option builders '' \
+            .#packages.x86_64-linux.finite-saas-core \
+            .#packages.x86_64-linux.finite-saas-runner \
+            .#packages.x86_64-linux.finitechat-server \
+            .#packages.x86_64-linux.finitechat-hosted-device \
+            .#packages.x86_64-linux.finite-agentd \
+            .#packages.x86_64-linux.finite-specialization-worker \
+            .#packages.x86_64-linux.finitesitesd \
+            .#packages.x86_64-linux.finite-brain \
+            .#packages.x86_64-linux.finite-identity \
+            .#packages.x86_64-linux.fsite \
+            .#packages.x86_64-linux.fbrain \
+            .#packages.x86_64-linux.finitechat
+      - name: Verify Chat reports its scoped source fingerprint
+        working-directory: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          chat_out="$(
+            nix build --no-link --print-out-paths --option builders '' \
+              .#packages.x86_64-linux.finitechat-server
+          )"
+          expected="$(
+            nix eval --raw \
+              .#packages.x86_64-linux.finitechat-server.sourceFingerprint
+          )"
+          port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          health_json="$(mktemp)"
+          "$chat_out/bin/finitechat-server" serve "127.0.0.1:$port" &
+          server_pid="$!"
+          trap 'kill "$server_pid" 2>/dev/null || true; rm -f "$health_json"' EXIT
+          for _ in $(seq 1 20); do
+            if curl --fail --silent "http://127.0.0.1:$port/health" >"$health_json"; then
+              break
+            fi
+            sleep 1
+          done
+          python3 - "$health_json" "$expected" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              health = json.load(stream)
+          assert health["source_fingerprint"] == sys.argv[2], health
+          assert health["source_dirty"] is False, health
+          assert "source_commit" not in health, health
+          PY
+
   devfinity-smoke:
     name: devfinity services-only smoke
     runs-on: ubuntu-latest
