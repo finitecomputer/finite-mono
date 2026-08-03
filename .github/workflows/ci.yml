@@ -315,6 +315,21 @@ jobs:
       - name: Real Hermes, managed skill, Runtime, fbrain, signed Brain, Hosted Device, and Product Client
         working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
         run: nix develop --command just brain-product-matrix
+      - name: Remove canceled matrix runtime
+        if: always()
+        working-directory: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          state_prefix="$PWD/.local-state/brain-product-matrix-"
+          docker ps -aq \
+            --filter label=computer.finite.v2.runtime=true \
+            --filter label=computer.finite.v2.source_host_id=devfinity-docker |
+          while read -r container; do
+            while read -r source; do
+              case "$source" in
+                "$state_prefix"*) docker rm -f "$container"; break ;;
+              esac
+            done < <(docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$container")
+          done
       - name: Upload boundary report and failure logs
         if: always()
         uses: actions/upload-artifact@v4
