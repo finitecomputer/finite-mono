@@ -15,6 +15,98 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect required CI harnesses
+    runs-on: ubuntu-latest
+    outputs:
+      run_rust: ${{ steps.detect.outputs.run_rust }}
+      run_dashboard: ${{ steps.detect.outputs.run_dashboard }}
+      run_electron_alpha: ${{ steps.detect.outputs.run_electron_alpha }}
+      run_hermes_bridge: ${{ steps.detect.outputs.run_hermes_bridge }}
+      run_nix_checks: ${{ steps.detect.outputs.run_nix_checks }}
+      run_nix_service_packages: ${{ steps.detect.outputs.run_nix_service_packages }}
+      run_devfinity_smoke: ${{ steps.detect.outputs.run_devfinity_smoke }}
+      run_brain_product_matrix: ${{ steps.detect.outputs.run_brain_product_matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Detect required harnesses
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              diff_range="$PR_BASE_SHA...$PR_HEAD_SHA"
+              ;;
+            push)
+              diff_range="$PUSH_BEFORE_SHA..$PUSH_HEAD_SHA"
+              ;;
+            *)
+              echo "Unsupported event: $GITHUB_EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          changed_files="$RUNNER_TEMP/ci-changed-files"
+          # Surface both sides of a rename so the old path still selects its harness.
+          git diff --name-only --no-renames "$diff_range" -- > "$changed_files"
+
+          run_rust=false
+          run_dashboard=false
+          run_electron_alpha=false
+          run_hermes_bridge=false
+          run_nix_checks=false
+          run_nix_service_packages=false
+          run_devfinity_smoke=false
+          run_brain_product_matrix=false
+
+          select_all() {
+            run_rust=true
+            run_dashboard=true
+            run_electron_alpha=true
+            run_hermes_bridge=true
+            run_nix_checks=true
+            run_nix_service_packages=true
+            run_devfinity_smoke=true
+            run_brain_product_matrix=true
+          }
+
+          while IFS= read -r path; do
+            case "$path" in
+              docs/*|README.md|CONTRIBUTING.md|AGENTS.md|CONTEXT-MAP.md)
+                ;;
+              finitecomputer-v2/apps/dashboard/*|finitechat/packages/finitechat-chat-ui/*)
+                run_dashboard=true
+                run_nix_checks=true
+                run_devfinity_smoke=true
+                ;;
+              *)
+                select_all
+                break
+                ;;
+            esac
+          done < "$changed_files"
+
+          {
+            echo "run_rust=$run_rust"
+            echo "run_dashboard=$run_dashboard"
+            echo "run_electron_alpha=$run_electron_alpha"
+            echo "run_hermes_bridge=$run_hermes_bridge"
+            echo "run_nix_checks=$run_nix_checks"
+            echo "run_nix_service_packages=$run_nix_service_packages"
+            echo "run_devfinity_smoke=$run_devfinity_smoke"
+            echo "run_brain_product_matrix=$run_brain_product_matrix"
+          } >> "$GITHUB_OUTPUT"
+
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest
