@@ -242,7 +242,7 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | `/etc/finite/brain-authority.env` | `FC_CORE_API_TOKEN` | provision Brain's trusted service credential for the narrow Core account/Agent resolution routes; never expose it to the Product Client |
 | `/etc/finite/sites-viewer-session.env` | `FINITE_SITES_VIEWER_SESSION_TOKEN` | generate exactly 32 random bytes as 64 lowercase hex characters (`openssl rand -hex 32`) for the Sites verified-email viewer-session boundary; systemd/Podman read this root:root 0600 file before dropping service privileges; Sites and the dashboard receive the same server-only value; store it in the team password manager |
 | `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
-| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and the initial canary also lets `finite-identityd` read the existing send-only Resend credential without copying its value |
+| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` (+ optional `FINITE_IDENTITY_AUTHORITY`) | migrated from lat2 `/etc/finite-saas/sites.env`; systemd reads the root:root 0600 file before dropping privileges, and Sites, Identity, and Brain reuse the existing send-only Resend credential without copying its value |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | copied from lat2 at cutover (Cloudflare Origin CA pair; host-agnostic, covers the zone) |
 | `/etc/finite/searxng.env` | `SEARXNG_SECRET` (+ optional `SEARXNG_BASE_URL`, `SEARXNG_LIMITER`) | lat2 `finite-search/searxng/.env` |
 | `/etc/finite/firecrawl.env` | `BULL_AUTH_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MAX_CPU`, `MAX_RAM` | lat2 `finite-search/firecrawl-upstream/.env` |
@@ -266,9 +266,10 @@ fingerprints, or password-derived hashes to the public contract.
 The complete custody and operator-copy gate is
 [`../runbooks/lat1-catastrophic-recovery-copy.md`](../runbooks/lat1-catastrophic-recovery-copy.md).
 
-Finite Brain reads only `/etc/finite/identity-operator.env` and
-`/etc/finite/brain-authority.env`; the Product Client and Agent Runtime never
-receive either credential.
+Finite Brain reads `/etc/finite/identity-operator.env`,
+`/etc/finite/brain-authority.env`, and the send-only Resend credential from
+`/etc/finite-saas/sites.env`; the Product Client and Agent Runtime never
+receive any of those credentials.
 
 ## Google Workspace OAuth production setup
 

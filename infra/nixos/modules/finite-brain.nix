@@ -2,7 +2,10 @@
 # origin and behind the finite.computer dashboard's embedded client proxy. It
 # binds loopback only. WorkOS protects the embedded Product Client; Brain owns
 # route-level auth through signed Nostr request proofs.
-{ finitePackages, ... }:
+{ config, finitePackages, ... }:
+let
+  mailEnvironmentFile = "/etc/finite-saas/sites.env";
+in
 {
   systemd.services.finite-brain-app = {
     description = "FiniteBrain Rust application server";
@@ -26,6 +29,8 @@
       FINITE_BRAIN_SERVER_URL = "https://brain.finite.computer";
       FINITE_IDENTITY_AUTHORITY = "http://127.0.0.1:8790";
       FC_CORE_API_BASE_URL = "http://127.0.0.1:4200";
+      FINITE_BRAIN_INVITE_MAILER = "resend";
+      FINITE_BRAIN_INVITE_MAIL_FROM = "Finite Brain <brain@finite.chat>";
     };
 
     serviceConfig = {
@@ -33,6 +38,9 @@
       EnvironmentFile = [
         "/etc/finite/identity-operator.env"
         "/etc/finite/brain-authority.env"
+        # Existing send-only Resend credential shared with Sites and Identity.
+        # Brain still owns its invitation content and access policy.
+        mailEnvironmentFile
       ];
       DynamicUser = true;
       # SQLite restored from smoke at cutover; real path under DynamicUser:
@@ -47,4 +55,16 @@
       ReadWritePaths = [ "/var/lib/finitebrain" ];
     };
   };
+
+  assertions = [
+    {
+      assertion =
+        config.systemd.services.finite-brain-app.environment.FINITE_BRAIN_INVITE_MAILER == "resend"
+        &&
+          config.systemd.services.finite-brain-app.environment.FINITE_BRAIN_INVITE_MAIL_FROM
+          == "Finite Brain <brain@finite.chat>"
+        && builtins.elem mailEnvironmentFile config.systemd.services.finite-brain-app.serviceConfig.EnvironmentFile;
+      message = "production Finite Brain must use the shared Resend delivery credential";
+    }
+  ];
 }

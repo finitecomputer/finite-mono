@@ -933,8 +933,12 @@ const createBrainInvitationFromPanelSource = source.slice(
   source.indexOf("async function createBrainInvitationFromPanel()"),
   source.indexOf("async function inspectBrainInvitationFromPanel()")
 );
+const createShareLinkFromPanelSource = source.slice(
+  source.indexOf("async function createShareLinkFromPanel()"),
+  source.indexOf("async function acceptShareLinkFromPanel()")
+);
 const successfulBrainInvitationResultSource = createBrainInvitationFromPanelSource.slice(
-  createBrainInvitationFromPanelSource.indexOf('setAccessResult("ready", "Invitation created"'),
+  createBrainInvitationFromPanelSource.indexOf("const delivery = emailInvitationDeliveryPresentation(invitation)"),
   createBrainInvitationFromPanelSource.indexOf('log("Created Brain invitation."')
 );
 const inspectBrainInvitationFromPanelSource = source.slice(
@@ -1000,6 +1004,16 @@ assert.match(
   /catch \(error\) \{\s*markAccessFailureHandled\(error\);\s*if \(state\.sessionEpoch === sessionEpoch\)/s,
   "Invitation failures must be suppressed before a post-lock rethrow reaches global feedback"
 );
+for (const invitationCreationSource of [
+  createBrainInvitationFromPanelSource,
+  createShareLinkFromPanelSource,
+]) {
+  assert.match(
+    invitationCreationSource,
+    /emailInvitationDeliveryPresentation\(invitation\)/,
+    "Email-targeted Brain and Folder invitations must present the server delivery result"
+  );
+}
 for (const invitationAcceptanceSource of [
   acceptBrainInvitationFromPanelSource,
   claimEmailBrainInvitationFromPanelSource,
@@ -4896,6 +4910,34 @@ function brainNotificationBehaviorTestSeams(options = {}) {
       inviteSecret: "secret-value",
     }),
     "https://finite.test/app/client#inviteCode=invite%2Fcode&inviteEmail=friend%40example.com&inviteSecret=secret-value"
+  );
+  const sentEmailInvitation = client.emailInvitationDeliveryPresentation({
+    targetKind: "email_bootstrap",
+    invitedEmail: "friend@example.com",
+    deliveryStatus: "sent",
+  });
+  assert.equal(sentEmailInvitation.tone, "ready");
+  assert.match(sentEmailInvitation.title, /email sent/i);
+  assert.match(sentEmailInvitation.detail, /private invite link separately/i);
+  assert.equal(sentEmailInvitation.statusLabel, "sent");
+
+  const manualEmailInvitation = client.emailInvitationDeliveryPresentation({
+    targetKind: "email_bootstrap",
+    invitedEmail: "friend@example.com",
+    deliveryStatus: "not_configured",
+  });
+  assert.equal(manualEmailInvitation.tone, "warn");
+  assert.match(manualEmailInvitation.title, /email not sent/i);
+  assert.match(manualEmailInvitation.detail, /copy and send the private invite link/i);
+  assert.equal(manualEmailInvitation.statusLabel, "not configured");
+
+  assert.equal(
+    client.emailInvitationDeliveryPresentation({
+      targetKind: "npub",
+      deliveryStatus: null,
+    }),
+    null,
+    "Native invitations do not imply email delivery"
   );
   assert.equal(client.brainInvitationIdentifierHint("invite-0fe6eda60e1bf6e662acb8e2b5c425d9"), null);
   assert.match(
