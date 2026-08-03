@@ -72,19 +72,24 @@ The MVP does not:
 
 ### 2. Check the three MVP cases
 
-- [ ] Prove a docs-only change selects no existing test/build jobs.
-- [ ] Prove dashboard-only, shared chat-UI, and allowed documentation changes
+- [x] Prove a docs-only change selects no existing test/build jobs.
+- [x] Prove dashboard-only, shared chat-UI, and allowed documentation changes
   select exactly `dashboard`, `nix-checks`, and `devfinity-smoke`.
-- [ ] Prove any other path, including one mixed with dashboard or docs paths,
+- [x] Prove any other path, including one mixed with dashboard or docs paths,
   selects all eight existing jobs.
+
+Validated against historical repository changes under both `push` and
+`pull_request` diff ranges: docs-only selected zero jobs; dashboard, shared
+chat UI, and docs-plus-dashboard selected three; Rust and dashboard mixed with
+an unowned path selected all eight. An invalid Git range failed detection.
 
 ### 3. Make the existing jobs conditional
 
-- [ ] Add `needs: changes` to each of the eight existing jobs.
-- [ ] Add a job-level condition matching that job's `run_*` output.
-- [ ] Preserve every existing command, environment, runner label, timeout, and
+- [x] Add `needs: changes` to each of the eight existing jobs.
+- [x] Add a job-level condition matching that job's `run_*` output.
+- [x] Preserve every existing command, environment, runner label, timeout, and
   artifact behavior in the MVP.
-- [ ] Keep the workflow-level pull-request and push triggers unfiltered.
+- [x] Keep the workflow-level pull-request and push triggers unfiltered.
 
 ### 4. Add the authoritative gate
 

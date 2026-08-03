@@ -109,6 +109,8 @@ jobs:
 
   rust:
     name: Rust workspace
+    needs: changes
+    if: needs.changes.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -138,6 +140,8 @@ jobs:
 
   dashboard:
     name: Dashboard
+    needs: changes
+    if: needs.changes.outputs.run_dashboard == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -179,6 +183,8 @@ jobs:
 
   electron-alpha:
     name: Electron production-dashboard alpha
+    needs: changes
+    if: needs.changes.outputs.run_electron_alpha == 'true'
     # This job builds and tests its own Rust daemon on macOS, so it consumes
     # no artifacts from the Rust workspace or Dashboard jobs.
     runs-on: macos-14
@@ -221,6 +227,8 @@ jobs:
 
   hermes-bridge:
     name: finitechat Hermes bridge
+    needs: changes
+    if: needs.changes.outputs.run_hermes_bridge == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -269,6 +277,8 @@ jobs:
 
   nix-checks:
     name: Skills + search static checks (nix shell)
+    needs: changes
+    if: needs.changes.outputs.run_nix_checks == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -300,6 +310,8 @@ jobs:
 
   nix-service-packages:
     name: Nix service packages
+    needs: changes
+    if: needs.changes.outputs.run_nix_service_packages == 'true'
     runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
     timeout-minutes: 90
     steps:
@@ -362,6 +374,8 @@ jobs:
 
   devfinity-smoke:
     name: devfinity services-only smoke
+    needs: changes
+    if: needs.changes.outputs.run_devfinity_smoke == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -395,6 +409,8 @@ jobs:
 
   brain-product-matrix:
     name: Brain full-product matrix
+    needs: changes
+    if: needs.changes.outputs.run_brain_product_matrix == 'true'
     runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
     timeout-minutes: 90
     steps:
