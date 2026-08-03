@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -72,7 +72,15 @@ fn spawn_daemon(root: &TempDir, bind: &str) -> Child {
         "account_secret": ACCOUNT_SECRET,
     });
     let mut stdin = child.stdin.take().unwrap();
-    writeln!(stdin, "{startup}").unwrap();
+    // A daemon that rejects its arguments (e.g. a non-loopback bind) exits
+    // before reading the startup record. That early exit is the behavior
+    // under test, so a broken pipe on this write is an acceptable outcome,
+    // not a test failure. Any other I/O error still fails.
+    match writeln!(stdin, "{startup}") {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => {}
+        Err(error) => panic!("failed to write startup record to daemon: {error}"),
+    }
     drop(stdin);
     child
 }
