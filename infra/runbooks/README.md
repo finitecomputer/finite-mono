@@ -67,6 +67,30 @@ Two rules apply to **every** release and promotion, no exceptions:
 
 ## Standing rules
 
+- **One status command:** run `scripts/finite-status` before and after every
+  rollout. Use `scripts/finite-status --json` for retained evidence or
+  automation. It is read-only and exits `0` when all four sections are green,
+  `1` when any section is red, and `2` when a result could not be determined
+  and nothing is already red. Fleet convergence is explicitly Core-recorded
+  state plus heartbeat age, not proof of live provider compute. Inactive
+  `project_runtime_links` are shown but excluded from drift.
+
+  The command observes the last `finite-healthcheck` systemd invocation for
+  service/HTTP health, verifies the sealed recovery manifest only by SHA-256,
+  uses the Borg job result and its canonical success stamp, and summarizes the
+  latest local `.local-state/runtime-rollouts` event stream. It never opens a
+  snapshot SQLite database as a database and never runs a mutating provider,
+  Core, systemd, or Borg operation. If an incident tempts you to type an ad-hoc
+  probe, that probe becomes a PR to `finite-status` and its contract test.
+
+  Until the reviewed revision is installed on lat1 through the normal NixOS
+  deployment, run it from a read-only checkout on the host or collect its
+  output after an operator installs the two `scripts/finite-status` and
+  `scripts/finite_status.py` files together. Once installed, remote observation
+  is simply `ssh -T root@64.34.82.77 finite-status --json`. Adding a systemd
+  timer/page-on-red policy and applying the revision to production are explicit
+  operator steps, outside the implementation PR.
+
 - Nothing is built on a prod box. Images are CI-built, digest-pinned, from
   `infra/images/` (`infra/README.md` deploy principles).
 - Rust service packages use content-scoped sources in
