@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyHostedChatSelectionIntent,
   hostedChatSelectionFromState,
-  hostedChatSelectionExists,
+  hostedChatSelectionIntentSatisfied,
   hostedChatSelectionIntentTarget,
-  projectHostedChatVisibleSelection,
+  type HostedChatSelectionIntent,
 } from "@/lib/hosted-web-chat-selection";
-import type { HostedChatState } from "@/lib/hosted-web-device";
+import type { HostedChatMessage, HostedChatState } from "@/lib/hosted-web-device";
 
 function snapshot(selection: {
   room?: string | null;
@@ -17,83 +18,9 @@ function snapshot(selection: {
   return {
     rev: 10,
     identity: { account_id: "acct", device_id: "hosted-web" },
-    rooms: [
-      {
-        room_id: "r1",
-        display_name: "Room",
-        state: "Connected",
-        status: "",
-        user_status_text: "",
-        last_message_preview: "",
-        unread_count: 0,
-        can_load_older: false,
-        is_agent_chat: true,
-      },
-    ],
+    rooms: [],
     selected_room_id: selection.room ?? null,
-    topics: [
-      {
-        room_id: "r1",
-        topic_id: "t1",
-        title: "One",
-        last_message_preview: "",
-        unread_count: 0,
-        message_count: 0,
-        created_seq: 1,
-        updated_seq: 1,
-        archived: false,
-        active_chat_id: "c1",
-        chats: [
-          {
-            chat_id: "c1",
-            title: "One",
-            last_message_preview: "",
-            unread_count: 0,
-            message_count: 0,
-            started_seq: 1,
-            updated_seq: 1,
-            active: true,
-            archived: false,
-          },
-          {
-            chat_id: "c2",
-            title: "Two",
-            last_message_preview: "",
-            unread_count: 0,
-            message_count: 0,
-            started_seq: 2,
-            updated_seq: 2,
-            active: false,
-            archived: false,
-          },
-        ],
-      },
-      {
-        room_id: "r1",
-        topic_id: "t2",
-        title: "Two",
-        last_message_preview: "",
-        unread_count: 0,
-        message_count: 0,
-        created_seq: 2,
-        updated_seq: 2,
-        archived: false,
-        active_chat_id: "c7",
-        chats: [
-          {
-            chat_id: "c7",
-            title: "Seven",
-            last_message_preview: "",
-            unread_count: 0,
-            message_count: 0,
-            started_seq: 3,
-            updated_seq: 3,
-            active: true,
-            archived: false,
-          },
-        ],
-      },
-    ],
+    topics: [],
     selected_topic_id: selection.topic ?? null,
     selected_chat_id: selection.chat ?? null,
     status: "ready",
@@ -137,53 +64,62 @@ test("navigation actions map to their target selection", () => {
   );
 });
 
-test("a later stream snapshot cannot move a settled browser selection", () => {
-  const visible = {
+test("a stale stream snapshot cannot move the selection away from a pending chat click", () => {
+  const intent: HostedChatSelectionIntent = {
+    token: 1,
     selected_room_id: "r1",
     selected_topic_id: "t1",
     selected_chat_id: "c2",
   };
-  const streaming = snapshot({ room: "r1", topic: "t1", chat: "c1" });
+  const stale = snapshot({ room: "r1", topic: "t1", chat: "c1" });
 
-  const projected = projectHostedChatVisibleSelection(visible, streaming);
-  assert.equal(projected.decision, "preserved");
-  assert.equal(projected.state.selected_chat_id, "c2");
-  assert.equal(projected.state.selected_topic_id, "t1");
-  assert.equal(projected.state.rev, streaming.rev, "content is untouched");
+  const applied = applyHostedChatSelectionIntent(intent, stale);
+  assert.equal(applied.confirmed, false);
+  assert.equal(applied.state.selected_chat_id, "c2");
+  assert.equal(applied.state.selected_topic_id, "t1");
+  assert.equal(applied.state.rev, stale.rev, "content is untouched");
 });
 
-test("the first snapshot initializes visible navigation from daemon persistence", () => {
-  const initial = snapshot({ room: "r1", topic: "t1", chat: "c2" });
-
-  const projected = projectHostedChatVisibleSelection(null, initial);
-  assert.equal(projected.decision, "initial");
-  assert.equal(projected.selection.selected_chat_id, "c2");
-});
-
-test("a removed visible chat causes one deterministic server-selection fallback", () => {
-  const next = snapshot({ room: "r1", topic: "t1", chat: "c1" });
-  next.topics[0]!.chats = next.topics[0]!.chats.filter(
-    (chat) => chat.chat_id !== "c2"
-  );
-
-  const projected = projectHostedChatVisibleSelection(
-    {
-      selected_room_id: "r1",
-      selected_topic_id: "t1",
-      selected_chat_id: "c2",
-    },
-    next
-  );
-  assert.equal(projected.decision, "fallback");
-  assert.deepEqual(projected.selection, {
+test("a snapshot carrying the clicked chat confirms and clears the pin untouched", () => {
+  const intent: HostedChatSelectionIntent = {
+    token: 1,
     selected_room_id: "r1",
     selected_topic_id: "t1",
-    selected_chat_id: "c1",
-  });
+    selected_chat_id: "c2",
+  };
+  const confirming = snapshot({ room: "r1", topic: "t1", chat: "c2" });
+
+  const applied = applyHostedChatSelectionIntent(intent, confirming);
+  assert.equal(applied.confirmed, true);
+  assert.equal(applied.state, confirming);
+});
+
+test("a topic click is confirmed by topic match even when the server picks a chat", () => {
+  const intent: HostedChatSelectionIntent = {
+    token: 2,
+    selected_room_id: "r1",
+    selected_topic_id: "t2",
+    selected_chat_id: null,
+  };
   assert.equal(
-    projectHostedChatVisibleSelection(projected.selection, next).decision,
-    "preserved"
+    hostedChatSelectionIntentSatisfied(intent, snapshot({ room: "r1", topic: "t2", chat: "c7" })),
+    true
   );
+  assert.equal(
+    hostedChatSelectionIntentSatisfied(intent, snapshot({ room: "r1", topic: "t1", chat: "c7" })),
+    false
+  );
+});
+
+test("settled snapshots keep selection and the windowed transcript on the same chat", () => {
+  const next = snapshot({ room: "r1", topic: "t1", chat: "c1" });
+  next.messages = [message("c1")];
+
+  const applied = applyHostedChatSelectionIntent(null, next);
+
+  assert.equal(applied.confirmed, false);
+  assert.equal(applied.state, next);
+  assert.equal(applied.state.selected_chat_id, applied.state.messages[0]?.chat_id);
 });
 
 test("server selection is recoverable from the snapshot for refusal fallback", () => {
@@ -194,27 +130,24 @@ test("server selection is recoverable from the snapshot for refusal fallback", (
   });
 });
 
-test("partial room and topic intents remain valid while their response is pending", () => {
-  assert.equal(
-    hostedChatSelectionExists(
-      {
-        selected_room_id: "r1",
-        selected_topic_id: null,
-        selected_chat_id: null,
-      },
-      snapshot({ room: "r1", topic: "t1", chat: "c1" })
-    ),
-    true
-  );
-  assert.equal(
-    hostedChatSelectionExists(
-      {
-        selected_room_id: "r1",
-        selected_topic_id: "t2",
-        selected_chat_id: null,
-      },
-      snapshot({ room: "r1", topic: "t1", chat: "c1" })
-    ),
-    true
-  );
-});
+function message(chatId: string): HostedChatMessage {
+  return {
+    room_id: "r1",
+    conversation_id: "t1",
+    chat_id: chatId,
+    seq: 1,
+    message_id: `message-${chatId}`,
+    sender_account_id: "acct",
+    sender_device_id: "hosted-web",
+    sender_display_name: "User",
+    text: "message",
+    display_content: "message",
+    kind: "message",
+    status: "complete",
+    final_delivery: false,
+    is_mine: true,
+    media: [],
+    timestamp_unix_seconds: 1,
+    display_timestamp: "now",
+  };
+}

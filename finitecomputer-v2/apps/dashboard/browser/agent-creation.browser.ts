@@ -1702,12 +1702,9 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .waitFor({ state: "visible" });
       assert.equal(hostedDevice.state.app.selected_chat_id, "chat_browser_agent");
 
-      // Once OpenChat is fully confirmed, a later higher-revision stream can
-      // still carry another daemon selection (for example, a scoped send in a
-      // concurrently active Chat). It may merge that Chat's transcript, but
-      // it is not browser navigation intent and must not move the visible pane.
-      hostedDevice.state.app.selected_chat_id = "chat_browser_remembered";
-      hostedDevice.state.app.topics[0]!.active_chat_id = "chat_browser_remembered";
+      // A scoped send in another Chat updates its metadata without changing
+      // the daemon selection. Core owns that invariant; full state snapshots
+      // can therefore keep selection and the selected transcript window aligned.
       hostedDevice.state.app.messages.push({
         ...hostedMessage("Remembered background stream.", false, 15),
         message_id: "message_remembered_background",
@@ -1726,25 +1723,6 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           .isVisible(),
         false,
         "background transcript update changed the visible Chat"
-      );
-      const navigationJournal = await page.evaluate(() =>
-        (window as unknown as {
-          __finiteChatNavigationJournal?: Array<{
-            source: string;
-            decision: string;
-            snapshot_selection: { selected_chat_id: string | null };
-            visible_selection: { selected_chat_id: string | null };
-          }>;
-        }).__finiteChatNavigationJournal ?? []
-      );
-      assert(
-        navigationJournal.some((entry) =>
-          entry.source === "sse"
-          && entry.decision === "preserved"
-          && entry.snapshot_selection.selected_chat_id === "chat_browser_remembered"
-          && entry.visible_selection.selected_chat_id === "chat_browser_agent"
-        ),
-        "navigation journal did not explain why the background selection was ignored"
       );
 
       const completedBeforeBackgroundChatNavigation =
