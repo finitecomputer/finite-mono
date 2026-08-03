@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 integrity-check SNAPSHOT_DB" >&2
+  echo "       $0 query SNAPSHOT_DB SQL" >&2
+  exit 64
+}
+
+[ "$#" -ge 1 ] || usage
+mode=$1
+case "$mode" in
+  integrity-check)
+    [ "$#" -eq 2 ] || usage
+    ;;
+  query)
+    [ "$#" -eq 3 ] && [ -n "$3" ] || usage
+    ;;
+  *) usage ;;
+esac
+
+database_arg=$2
+[ -f "$database_arg" ] && [ ! -L "$database_arg" ] || {
+  echo "snapshot-sqlite refused: database must be a regular, non-symlink file" >&2
+  exit 65
+}
+database=$(realpath -- "$database_arg") || {
+  echo "snapshot-sqlite refused: database cannot be resolved" >&2
+  exit 65
+}
+
+snapshot_dir=$(dirname "$database")
+while [ "$snapshot_dir" != / ]; do
+  if [ -f "$snapshot_dir/manifest.sha256" ] \
+    && [ ! -L "$snapshot_dir/manifest.sha256" ]; then
+    break
+  fi
+  snapshot_dir=$(dirname "$snapshot_dir")
+done
+[ "$snapshot_dir" != / ] || {
+  echo "snapshot-sqlite refused: database is not inside a manifested snapshot directory" >&2
+  exit 65
+}
+
+manifest_contains() {
+  local relative=$1
+  LC_ALL=C awk -v expected="$relative" '
+    length($0) >= 67 && substr($0, 65, 2) == "  " && substr($0, 67) == expected {
+      found = 1
+    }
+    END { exit !found }
+  ' "$snapshot_dir/manifest.sha256"
+}
+
+database_relative=${database#"$snapshot_dir"/}
+manifest_contains "$database_relative" || {
+  echo "snapshot-sqlite refused: database is not recorded in the snapshot manifest" >&2
+  exit 65
+}
+
+umask 077
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/finite-snapshot-sqlite.XXXXXX")
+cleanup() {
+  rm -rf -- "$scratch"
+}
+trap cleanup EXIT
+
+scratch_database="$scratch/$(basename "$database")"
+for source in "$database" "$database-wal" "$database-shm"; do
+  [ -e "$source" ] || continue
+  [ -f "$source" ] && [ ! -L "$source" ] || {
+    echo "snapshot-sqlite refused: database sidecars must be regular, non-symlink files" >&2
+    exit 65
+  }
+  source_relative=${source#"$snapshot_dir"/}
+  manifest_contains "$source_relative" || {
+    echo "snapshot-sqlite refused: database sidecar is not recorded in the snapshot manifest" >&2
+    exit 65
+  }
+  cp -p -- "$source" "$scratch/$(basename "$source")"
+done
+for copy in "$scratch_database" "$scratch_database-wal" "$scratch_database-shm"; do
+  [ ! -e "$copy" ] || chmod u+w -- "$copy"
+done
+
+sqlite=(sqlite3 -safe -readonly -batch -init /dev/null)
+case "$mode" in
+  integrity-check)
+    HOME="$scratch" "${sqlite[@]}" "$scratch_database" 'PRAGMA integrity_check;'
+    ;;
+  query)
+    HOME="$scratch" "${sqlite[@]}" -cmd 'PRAGMA query_only=ON;' "$scratch_database" "$3"
+    ;;
+esac

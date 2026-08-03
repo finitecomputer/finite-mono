@@ -64,9 +64,16 @@ in
         kata_timer_was_active=0
         phala_was_active=0
 
+        remove_tree() {
+          local tree=$1
+          if [ -e "$tree" ]; then
+            chmod -R u+w -- "$tree"
+            rm -rf -- "$tree"
+          fi
+        }
         cleanup() {
           cleanup_status=0
-          rm -rf "$staging" || cleanup_status=1
+          remove_tree "$staging" || cleanup_status=1
           if [ "$chat_was_active" = 1 ]; then systemctl start finitechat-server.service || cleanup_status=1; fi
           if [ "$identity_was_active" = 1 ]; then systemctl start finite-identity.service || cleanup_status=1; fi
           if [ "$sites_was_active" = 1 ]; then systemctl start finite-saas-sites.service || cleanup_status=1; fi
@@ -167,10 +174,14 @@ in
           find format recovery-set.tsv finite-sites-symlinks.bin hosted-device finite-chat saas-core finite-brain finite-identity finite-sites -type f -print0 \
             | LC_ALL=C sort -z \
             | xargs -0 sha256sum > manifest.sha256
+          sha256sum --check manifest.sha256
         )
+        chmod -R a-w -- "$staging"
         mv "$staging" "$final"
         ln -sfn "$stamp" "$root/latest"
-        find "$root" -mindepth 1 -maxdepth 1 -type d -name '20*T*Z' -mtime +2 -exec rm -rf -- {} +
+        while IFS= read -r -d "" expired; do
+          remove_tree "$expired"
+        done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -name '20*T*Z' -mtime +2 -print0)
         trap - EXIT
         cleanup
       '';
