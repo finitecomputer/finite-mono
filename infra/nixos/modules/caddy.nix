@@ -44,19 +44,15 @@ in
       reverse_proxy 127.0.0.1:3015
     '';
 
-    # Canonical Finite Identity signing/API origin. Only the browser-facing
-    # challenge, redeem, health, and NIP-05 routes are public. Operator and
-    # Principal Resolution endpoints remain loopback-only until their HTTP
-    # contracts authenticate product callers.
+    # Canonical Finite Identity signing/API origin. The edge is dumb on
+    # purpose: it proxies the service's public listener verbatim and keeps no
+    # route list. Finite Identity owns its public surface in code
+    # (`public_router` in finite-identity/src/authority.rs, bound on
+    # 127.0.0.1:8791); operator, /internal/*, and server-to-server routes
+    # exist only on the loopback full router (127.0.0.1:8790). The NIP-05
+    # CORS header is set by the service, not here.
     virtualHosts."identity.finite.vip".extraConfig = ''
-      @identityPublic path /health /.well-known/nostr.json /api/v1/email-challenges /api/v1/vip-email-bindings/redeem /api/v1/email-only-principals/redeem
-      handle @identityPublic {
-        header /.well-known/nostr.json Access-Control-Allow-Origin "*"
-        reverse_proxy 127.0.0.1:8790
-      }
-      handle {
-        respond 404
-      }
+      reverse_proxy 127.0.0.1:8791
     '';
 
     # Public URL unchanged; backend port moved 8787 -> 8788 on this box

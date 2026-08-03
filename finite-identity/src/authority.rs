@@ -1027,7 +1027,12 @@ pub enum StoreError {
     Conflict(&'static str),
 }
 
-pub fn router(state: AuthorityState) -> Router {
+/// Routes every public caller may reach. Each either returns public data or
+/// authenticates its caller (Email Challenge token or NIP-98 signature).
+/// `satisfies-grant` is mounted separately by the two routers because the
+/// public listener must authenticate it while trusted loopback services keep
+/// the tokenless contract.
+fn public_routes() -> Router<AuthorityState> {
     Router::new()
         .route("/health", get(health))
         .route("/.well-known/nostr.json", get(nip05))
@@ -1041,6 +1046,25 @@ pub fn router(state: AuthorityState) -> Router {
             post(redeem_email_only_principal),
         )
         .route("/api/v1/mailbox-proofs/redeem", post(redeem_mailbox_proof))
+        .route("/api/v1/nip05-resolution", post(resolve_nip05))
+}
+
+/// The service-owned public route surface. The edge proxies this router
+/// verbatim and keeps no route list of its own; adding a route here is the
+/// only way to expose one publicly.
+pub fn public_router(state: AuthorityState) -> Router {
+    public_routes()
+        .route(
+            "/api/v1/principal-resolution/satisfies-grant",
+            post(satisfies_grant_authenticated),
+        )
+        .with_state(state)
+}
+
+/// The full loopback router: the public surface plus the server-to-server,
+/// operator, and internal routes trusted services reach by network position.
+pub fn router(state: AuthorityState) -> Router {
+    public_routes()
         .route(
             "/api/v1/mailbox-proofs/consume",
             post(consume_mailbox_proof),
@@ -1049,7 +1073,6 @@ pub fn router(state: AuthorityState) -> Router {
             "/api/v1/principal-resolution/satisfies-grant",
             post(satisfies_grant),
         )
-        .route("/api/v1/nip05-resolution", post(resolve_nip05))
         .route(
             "/internal/v1/sites-notifications",
             post(send_sites_notification),
@@ -1192,20 +1215,21 @@ async fn nip05(
     State(state): State<AuthorityState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let Some(name) = query.get("name") else {
-        return Json(serde_json::json!({ "names": {} }));
+    // NIP-05 clients fetch cross-origin. The service owns this header so the
+    // edge can stay a plain reverse proxy with no per-route behavior.
+    let body = match query.get("name") {
+        Some(name) if valid_nip05_localpart(name) => {
+            match state
+                .store
+                .nip05_pubkey(name, &state.config.finite_vip_domain.to_ascii_lowercase())
+            {
+                Ok(Some(pubkey)) => serde_json::json!({ "names": { name: pubkey } }),
+                _ => serde_json::json!({ "names": {} }),
+            }
+        }
+        _ => serde_json::json!({ "names": {} }),
     };
-    if !valid_nip05_localpart(name) {
-        return Json(serde_json::json!({ "names": {} }));
-    }
-    match state
-        .store
-        .nip05_pubkey(name, &state.config.finite_vip_domain.to_ascii_lowercase())
-    {
-        Ok(Some(pubkey)) => Json(serde_json::json!({ "names": { name: pubkey } })),
-        Ok(None) => Json(serde_json::json!({ "names": {} })),
-        Err(_) => Json(serde_json::json!({ "names": {} })),
-    }
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
 async fn request_email_challenge(
@@ -1391,10 +1415,40 @@ async fn satisfies_grant(
     State(state): State<AuthorityState>,
     Json(request): Json<SatisfiesGrantRequest>,
 ) -> impl IntoResponse {
+    satisfies_grant_response(&state, &request)
+}
+
+/// The public `satisfies-grant` contract: same resolution as the loopback
+/// route, but the caller must sign the request (NIP-98) with the key it asks
+/// about so the endpoint cannot be used as an unauthenticated grant oracle.
+async fn satisfies_grant_authenticated(
+    State(state): State<AuthorityState>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let actor = match authenticate(&state, &headers, "POST", &original_uri, Some(&body)) {
+        Ok(actor) => actor,
+        Err(error) => return api_error(error.status, error.code),
+    };
+    let request: SatisfiesGrantRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_json"),
+    };
+    if actor != request.actor_pubkey {
+        return api_error(StatusCode::FORBIDDEN, "actor_pubkey_mismatch");
+    }
+    satisfies_grant_response(&state, &request)
+}
+
+fn satisfies_grant_response(
+    state: &AuthorityState,
+    request: &SatisfiesGrantRequest,
+) -> axum::response::Response {
     if !hex::is_hex32(&request.actor_pubkey) {
         return api_error(StatusCode::BAD_REQUEST, "invalid_actor_pubkey");
     }
-    let resolved = resolve_grant(&state, &request.grant, &request.actor_pubkey)
+    let resolved = resolve_grant(state, &request.grant, &request.actor_pubkey)
         .ok()
         .flatten();
     let satisfied = resolved.is_some();

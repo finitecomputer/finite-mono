@@ -191,12 +191,13 @@ Third-party email-shaped identifiers are treated as Invited Emails only.
 Finite Identity does not perform or trust Third-Party NIP-05 resolution in v1.
 
 This endpoint is a pure resolution query: `actor_pubkey` is a claimed input and
-the endpoint does not prove control of that key. Before calling it, the product
-must authenticate the actor with NIP-98 or obtain the pubkey from another
-trusted, server-validated assertion. The Identity Authority must be reachable
-only by trusted product services until the contract itself authenticates
-callers. A successful resolution answer never substitutes for actor
-authentication.
+the answer never substitutes for actor authentication. On the public listener
+(`public_router`, proxied by the edge) the route requires a NIP-98 signature
+from `actor_pubkey` itself, so product callers prove control of the key they
+ask about and the endpoint cannot be used as an unauthenticated grant oracle.
+Trusted product services on loopback (the full router on 127.0.0.1:8790) keep
+the tokenless contract and must authenticate the actor some other way before
+relying on the answer.
 
 Products may keep short-lived Resolution Caches for latency, but the cache is
 never the source of truth. Missing, expired, or uncertain answers must fail

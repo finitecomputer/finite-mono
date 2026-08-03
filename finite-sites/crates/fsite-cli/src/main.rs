@@ -1777,11 +1777,12 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
         (Some(email), None, None) => {
             reject_managed_agent_email(email)?;
             let native = keys::load_or_generate_user_key()?;
-            let key = if identity_authority.satisfies_grant(email.as_str(), &native.pubkey)? {
-                native
-            } else {
-                keys::load_or_create_email_key(email.as_str())?
-            };
+            let key =
+                if identity_authority.satisfies_grant(&native, email.as_str(), &native.pubkey)? {
+                    native
+                } else {
+                    keys::load_or_create_email_key(email.as_str())?
+                };
             (key, Some(email.as_str().to_string()))
         }
         (None, Some(nip05), None) => {
