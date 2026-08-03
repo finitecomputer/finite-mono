@@ -35,6 +35,141 @@ is real capacity, not aspiration.
 > three legacy-repo runners stay until their repos are archived, then get
 > removed per the steps below.
 
+## Operator/CI isolation: keep the runner UID lingering
+
+The runners currently share the `ubuntu` UID with operator SSH sessions. The
+smallest durable isolation for this topology is to enable systemd-logind
+lingering for `ubuntu`: the account no longer becomes fully logged out when an
+operator's last SSH session ends, so logind does not apply `RemoveIPC` to the
+UID and cannot remove a CI PostgreSQL process's shared-memory objects. This
+does not restart, re-register, or change credentials for any runner.
+
+Install and enable the checked-in guard (as `ubuntu` from a trusted
+finite-mono checkout):
+
+```sh
+sudo install -o root -g root -m 0755 \
+  infra/hosts/lat2/configure-runner-linger \
+  /usr/local/sbin/finite-lat2-configure-runner-linger
+/usr/local/sbin/finite-lat2-configure-runner-linger enable
+```
+
+Verify the durable marker and logind state:
+
+```sh
+/usr/local/sbin/finite-lat2-configure-runner-linger verify
+loginctl show-user ubuntu --property=Linger --value  # exactly: yes
+sudo test -e /var/lib/systemd/linger/ubuntu
+```
+
+For an end-to-end application check, dispatch a controlled CI job that has
+started PostgreSQL, end a separate operator SSH session, and confirm that the
+same job remains ready and completes. No runner service change is part of
+this procedure.
+
+## Disk guardrail and root-owned scratch reclamation
+
+`runner-maintenance` plus
+`systemd/finite-lat2-runner-maintenance.{service,timer}` provide the lat2 disk
+policy. The oneshot runs as root, which lets it remove root-owned container
+diagnostics without broad ownership repair. It first and last checks `/` and
+logs every decision to the unit journal.
+
+The destructive policy deliberately fails closed:
+
+- If any `/bin/Runner.Worker` process exists, all scratch and Docker cleanup is
+  skipped. Disk watermarks are still checked and can fail the unit.
+- Only `brain-matrix-*` and `nix-packages-*` directories below a runner
+  `_work` tree are candidates. A checkout is removed only when nothing in its
+  tree has changed for 24 hours, well beyond either lane's 90-minute timeout.
+- Docker removes only stopped containers older than 24 hours, images unused
+  by any container and older than 7 days, and build cache unused for 24 hours
+  while retaining 32 GB. Running containers are never eligible.
+- `/` warns in the journal at **80%**. At **90%** it logs `CRITICAL` and the
+  service exits 2, even if an idle cleanup recovers space, so the incident is
+  not hidden. Cleanup/tool failures exit 1.
+
+Lat2 has no aggregate host-health service to extend. The non-zero oneshot
+result and its journal are therefore the checked health signal; host
+monitoring must treat a failed `finite-lat2-runner-maintenance.service` or a
+`CRITICAL` entry as actionable.
+
+Review candidate state, install, run once, and only then enable the timer:
+
+```sh
+sudo find /srv/github-runner -xdev -type d \
+  \( -name 'brain-matrix-*' -o -name 'nix-packages-*' \) \
+  -path '*/_work/*' -print
+sudo install -o root -g root -m 0755 \
+  infra/hosts/lat2/runner-maintenance \
+  /usr/local/sbin/finite-lat2-runner-maintenance
+sudo install -o root -g root -m 0644 \
+  infra/hosts/lat2/systemd/finite-lat2-runner-maintenance.service \
+  infra/hosts/lat2/systemd/finite-lat2-runner-maintenance.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start finite-lat2-runner-maintenance.service
+sudo systemctl status finite-lat2-runner-maintenance.service
+sudo journalctl -u finite-lat2-runner-maintenance.service --since today
+sudo systemctl enable --now finite-lat2-runner-maintenance.timer
+systemctl list-timers finite-lat2-runner-maintenance.timer
+```
+
+New containerized self-hosted lanes must use a per-attempt checkout path such
+as `<lane>-${{ github.run_id }}-${{ github.run_attempt }}` and set each command's
+working directory to it. Never rely on a prior lane being able to clean or
+re-own its checkout; add a new explicit aged-name rule here when introducing a
+new checkout family.
+
+## Bounded stale-listener restart
+
+Install the guarded helper. Run it as the GitHub-authenticated operator (not
+through `sudo`; it elevates only the bounded systemd restart):
+
+```sh
+sudo install -o root -g root -m 0755 \
+  infra/hosts/lat2/restart-idle-runner \
+  /usr/local/sbin/finite-lat2-restart-idle-runner
+gh auth status
+```
+
+Before use, confirm in the Actions UI that no queued job is about to select
+`finite-lat-2` and leave the queue empty during the command. For the mono
+runner:
+
+```sh
+/usr/local/sbin/finite-lat2-restart-idle-runner \
+  finitecomputer/finite-mono \
+  finite-lat-2-mono \
+  actions.runner.finitecomputer-finite-mono.finite-lat-2-mono.service
+```
+
+The helper queries queued/in-progress/requested/waiting/pending workflow runs
+twice, aborts if any active job names this runner, aborts if any local
+`Runner.Worker` exists, and requires the unit to be active. A GitHub `busy`
+flag with neither an assigned job nor a Worker is treated as the stale lease.
+Only then does it run a 30-second-bounded listener restart and verify the unit
+is active. If the API result would be incomplete (more than 100 active runs or
+jobs), it fails closed. Afterward, verify the runner returns to Idle in GitHub
+Settings → Actions → Runners.
+
+## Rollback
+
+Do this only with no lat2 jobs assigned or running:
+
+```sh
+sudo systemctl disable --now finite-lat2-runner-maintenance.timer
+sudo systemctl reset-failed finite-lat2-runner-maintenance.service
+/usr/local/sbin/finite-lat2-configure-runner-linger disable
+```
+
+Disabling linger restores the prior login/IPC behavior: the last `ubuntu`
+logout can again trigger logind's `RemoveIPC`. The helper refuses that rollback
+while a `Runner.Worker` exists. The installed maintenance files may be left
+disabled for diagnosis or removed from `/etc/systemd/system` and
+`/usr/local/sbin`, followed by `sudo systemctl daemon-reload`. No runner
+registration, credential, or service-unit rollback is required.
+
 ## Cutover checklist — re-register against finitecomputer/finite-mono
 
 Runners are repo-scoped. For mono CI to build images on this box, each

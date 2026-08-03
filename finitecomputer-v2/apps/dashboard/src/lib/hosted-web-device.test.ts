@@ -267,9 +267,9 @@ test("hostedDeviceAttachments preserves the browser multipart boundary", async (
   context.after(() => {
     globalThis.fetch = originalFetch;
   });
-  let capturedHeaders: Headers | null = null;
+  const captured: { headers: Headers | null } = { headers: null };
   globalThis.fetch = async (_input, init) => {
-    capturedHeaders = new Headers(init?.headers);
+    captured.headers = new Headers(init?.headers);
     return Response.json({ rev: 1 });
   };
 
@@ -283,8 +283,8 @@ test("hostedDeviceAttachments preserves the browser multipart boundary", async (
     formData
   );
 
-  assert.equal(capturedHeaders?.get("content-type"), null);
-  assert.equal(capturedHeaders?.get("x-finite-workos-user-id"), "user_paul");
+  assert.equal(captured.headers?.get("content-type"), null);
+  assert.equal(captured.headers?.get("x-finite-workos-user-id"), "user_paul");
 });
 
 test("hostedDeviceHeaders rejects unverified or header-only identities", () => {

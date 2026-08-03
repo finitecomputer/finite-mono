@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly conservative disk maintenance for finite-lat-2 CI runners
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=10min
+AccuracySec=1min
+Unit=finite-lat2-runner-maintenance.service
+
+[Install]
+WantedBy=timers.target

@@ -32,6 +32,7 @@ sites/search/tunnel migration).
 | `finite-core-tunnel.service` **(DISABLED — Core is native on lat1 now)** | **Previously undocumented.** Persistent SSH `-L 127.0.0.1:14200 → 10.43.237.180:4200` (finite-saas-core ClusterIP inside lat1's k3s) via `ubuntu@64.34.82.77`, key `/home/ubuntu/.ssh/finite-lat2-core-tunnel`. Enabled, running. | `systemd/finite-core-tunnel.service` |
 | `finite-saas-runner.service` + `.timer` | **Previously undocumented, DORMANT.** "Finite agent creation runner": oneshot every 20s from the build-on-box checkout `/opt/finite/finitecomputer`. Timer is disabled and absent from `list-timers`. Stale `After=k3s.service` (no k3s here); depends on the core tunnel via drop-in. | `systemd/finite-saas-runner.service`, `.timer`, `systemd/finite-saas-runner-10-core-tunnel.conf` |
 | GitHub Actions runners **(lat2's LIVE role)** | `finite-lat-2-mono` (registered against finite-mono) **plus** the 3 legacy-repo runners (v2.335.1, `User=ubuntu`, under `/srv/github-runner/`, registered to finitechat / finitecomputer / finitecomputer-v2) — kept until those repos are archived, then removed. | `runners.md` |
+| `finite-lat2-runner-maintenance.service` + `.timer` **(PROPOSED — operator install required)** | Hourly idle-only cleanup of explicitly named aged CI checkouts, stopped Docker objects, unused image/build cache, plus 80%/90% root-disk watermarks. | `runner-maintenance`, `systemd/finite-lat2-runner-maintenance.service`, `.timer`, `runners.md` |
 
 ## Ports
 
@@ -69,7 +70,8 @@ sites/search/tunnel migration).
   `finite-sites/deploy/finite-lat-2/`). Files headed "Captured from host"
   or "PROPOSED" are new to any repo.
 - `caddy/Caddyfile` — deployed at `/etc/caddy/Caddyfile`.
-- `runners.md` — the three Actions runners + finite-mono cutover checklist.
+- `runners.md` — runner topology, login isolation, disk guardrails, stale-lease
+  restart, and the finite-mono cutover checklist.
 - `backups.md` — backup reality and the proposed timer.
 - `search.md` — how finite-search runs; points at `finite-search/compose/`.
 - `deploy.md` — current (deprecated) manual sites deploy and the target flow.

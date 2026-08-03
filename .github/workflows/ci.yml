@@ -71,6 +71,11 @@ jobs:
       - name: Lint dashboard
         run: pnpm run lint
 
+      - name: Typecheck dashboard and TSX tooling
+        # `next build` checks only the application graph. This project-wide
+        # tsc invocation also covers scripts/ and browser/ files run by tsx.
+        run: pnpm run typecheck
+
       - name: Test dashboard
         run: pnpm test
 
@@ -194,6 +199,8 @@ jobs:
         run: nix develop --command just hosted-recovery-contract
       - name: lat1 secret bootstrap contract
         run: nix develop --command just lat1-secret-bootstrap-contract
+      - name: lat2 runner guardrails contract
+        run: nix develop --command just lat2-runner-guardrails-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 

@@ -48,11 +48,12 @@ test("Launch Code form refuses indefinite or oversized issuance", () => {
 });
 
 test("one-time download text includes only plaintext codes, not database ids", () => {
+  const issuedCodes = [
+    { id: "launch_code_1", code: "finite_first" },
+    { id: "launch_code_2", code: "finite_second" },
+  ];
   assert.equal(
-    launchCodeDownloadText([
-      { id: "launch_code_1", code: "finite_first" },
-      { id: "launch_code_2", code: "finite_second" },
-    ]),
+    launchCodeDownloadText(issuedCodes),
     "finite_first\nfinite_second\n"
   );
   assert.equal(launchCodeDownloadFilename("July Training / 12"), "july-training-12-codes.txt");

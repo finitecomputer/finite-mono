@@ -126,7 +126,7 @@ test("Brain client capabilities are signed, account-and-origin-bound, and expiri
     "user_paul",
     "https://finite.computer",
     1_000,
-    "nonce-1",
+    "00000000-0000-4000-8000-000000000001",
   );
   assert.deepEqual(verifyBrainClientCapability(token, "hosted-secret", 1_001), {
     workosUserId: "user_paul",
@@ -145,7 +145,7 @@ test("a Brain client capability remains usable only while its dashboard account 
       "user_paul",
       "https://finite.computer",
       1_000,
-      "nonce-1",
+      "00000000-0000-4000-8000-000000000001",
     ),
     "hosted-secret",
     1_001,
@@ -181,7 +181,7 @@ test("Brain session proofs are short-lived and bound to one exact provider reque
     "user_paul",
     requestHash,
     1_000,
-    "proof-nonce",
+    "00000000-0000-4000-8000-000000000002",
   );
   assert.deepEqual(verifyBrainSessionProof(proof, "hosted-secret", requestHash, 1_001), {
     workosUserId: "user_paul",
