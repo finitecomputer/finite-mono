@@ -4,8 +4,6 @@ import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 
-// Intentional CI proof; reverted after the Dashboard typecheck fails.
-const SEEDED_TYPECHECK_ERROR: string = null;
 const MACHINE_ID = "web-design-fixture";
 const RUNTIME_ID = "runtime_web_design";
 const CORE_TOKEN = "web-design-core-token";
