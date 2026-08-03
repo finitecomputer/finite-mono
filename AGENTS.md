@@ -46,6 +46,9 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   mutation requires explicit user authorization. A selected row, sort order,
   identifier order, or other navigation state never confers authority to choose
   or rewrite durable user state; ambiguous state fails closed without mutation.
+- **`scripts/finite-status` is the only platform/fleet status command.** Run it
+  before and after every rollout; add any missing incident probe to that
+  read-only command instead of preserving an ad-hoc operator query.
 - Never open a snapshot SQLite file directly; inspect it only through
   `scripts/snapshot-sqlite` or from a scratch copy.
 - One root Cargo workspace, one root `Cargo.lock`. Imported components keep

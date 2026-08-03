@@ -87,6 +87,11 @@ lat1-rollout-contract:
 lat1-healthcheck-contract:
     python3 scripts/check_lat1_healthcheck_contract.py
 
+# Canonical read-only platform status: Nix-name contract plus Aug-1 fleet math.
+finite-status-contract:
+    python3 scripts/check_finite_status_contract.py
+    python3 -m unittest discover -s scripts/tests -p 'test_finite_status.py'
+
 # Static contract: Docker, Kata, and Phala share one Runtime image/build lane.
 runtime-image-contract:
     python3 scripts/check_runtime_image_contract.py
