@@ -123,10 +123,11 @@ ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer
 ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer
 ENV FINITE_REQUIRE_BUNDLED_SKILLS=1
 ENV FINITE_DEFAULT_INFERENCE_PROFILE=finite-private
-# The limiter domain keeps the historical kimi-k2-6 name but serves glm-5-2.
+# The limiter domain is historical; it now serves DeepSeek V4 Flash 0731.
 ENV FINITE_PRIVATE_BASE_URL=https://kimi-k2-6.finite.containers.tinfoil.dev/v1
 ENV FINITE_PRIVATE_CONTROL_URL=https://finite.computer/api/core/v1/finite-private
-ENV FINITE_PRIVATE_MODEL=glm-5-2
+ENV FINITE_PRIVATE_MODEL=deepseek-v4-flash-0731
+ENV FINITE_PRIVATE_CONTEXT_LENGTH=393216
 ENV FINITECHAT_HERMES_INBOUND_STREAM=1
 ENV FINITE_AGENTD_REQUIRED=1
 
