@@ -104,19 +104,26 @@ Postmark is also supported with `--mailer postmark` and
 `POSTMARK_SERVER_TOKEN`. Challenge creation, hashing, expiry, redemption, and
 replay rejection remain inside Finite Identity; only delivery changes.
 
+The daemon binds two listeners: `--listen` (default 127.0.0.1:8790) serves the
+full router for trusted loopback services, and `--public-listen` (default
+127.0.0.1:8791) serves only `public_router` — the service-owned public surface
+the Caddy edge proxies verbatim. The edge keeps no route list.
+
 The service exposes:
 
-| Route | Purpose |
-| --- | --- |
-| `GET /.well-known/nostr.json?name=<localpart>` | Serve Finite VIP NIP-05 `names` JSON |
-| `POST /api/v1/email-challenges` | Issue an Email Challenge for a Finite VIP Email or Invited Email |
-| `POST /api/v1/vip-email-bindings/redeem` | Bind a Finite VIP Email to the NIP-98 signer |
-| `POST /api/v1/email-only-principals/redeem` | Verify an Invited Email as an Email-Only Principal |
-| `POST /api/v1/mailbox-proofs/redeem` | Bind one fresh Email Challenge to the exact NIP-98 signer without creating a Principal Link |
-| `POST /api/v1/mailbox-proofs/consume` | Let a product consume that short-lived proof once |
-| `POST /api/v1/principal-resolution/satisfies-grant` | Resolve whether a pubkey satisfies a Product Grant |
-| `POST /api/v1/operator/inspect` | Inspect public identity state with an operator token |
-| `POST /api/v1/operator/disable-binding` | Disable a binding without reassignment or recovery |
+| Route | Purpose | Surface |
+| --- | --- | --- |
+| `GET /health` | Liveness | public |
+| `GET /.well-known/nostr.json?name=<localpart>` | Serve Finite VIP NIP-05 `names` JSON (with `Access-Control-Allow-Origin: *`) | public |
+| `POST /api/v1/email-challenges` | Issue an Email Challenge for a Finite VIP Email or Invited Email | public |
+| `POST /api/v1/vip-email-bindings/redeem` | Bind a Finite VIP Email to the NIP-98 signer | public |
+| `POST /api/v1/email-only-principals/redeem` | Verify an Invited Email as an Email-Only Principal | public |
+| `POST /api/v1/mailbox-proofs/redeem` | Bind one fresh Email Challenge to the exact NIP-98 signer without creating a Principal Link | public |
+| `POST /api/v1/nip05-resolution` | Resolve and classify a Finite NIP-05 Name | public |
+| `POST /api/v1/principal-resolution/satisfies-grant` | Resolve whether a pubkey satisfies a Product Grant | public (NIP-98 signer must be `actor_pubkey`); tokenless on loopback for trusted services |
+| `POST /api/v1/mailbox-proofs/consume` | Let a product consume that short-lived proof once | loopback only |
+| `POST /api/v1/operator/inspect` | Inspect public identity state with an operator token | loopback only |
+| `POST /api/v1/operator/disable-binding` | Disable a binding without reassignment or recovery | loopback only |
 
 ### Importing an existing secret
 

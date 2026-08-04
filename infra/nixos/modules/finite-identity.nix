@@ -4,6 +4,13 @@
 #
 # The public signing origin is identity.finite.vip. Trusted services on this
 # host use loopback so managed-agent creation does not depend on public DNS.
+#
+# The daemon binds two loopback listeners. 8790 serves the full router
+# (operator, /internal/*, and server-to-server routes such as
+# mailbox-proofs/consume) and stays reachable only from this host. 8791 serves
+# only the service-owned public surface (`public_router` in
+# finite-identity/src/authority.rs); the Caddy edge proxies 8791 verbatim and
+# keeps no route list of its own.
 {
   config,
   finitePackages,
@@ -14,6 +21,7 @@
 let
   serviceName = "finite-identity";
   loopbackAuthority = "http://127.0.0.1:8790";
+  loopbackPublic = "http://127.0.0.1:8791";
   operatorEnvironmentFile = "/etc/finite/identity-operator.env";
   sitesNotificationEnvironmentFile = "/etc/finite/identity-sites-notification.env";
 in
@@ -30,6 +38,7 @@ in
         ${finitePackages.finite-identity}/bin/finite-identityd serve \
           --data /var/lib/finite-identity \
           --listen 127.0.0.1:8790 \
+          --public-listen 127.0.0.1:8791 \
           --external-base-url https://identity.finite.vip \
           --finite-vip-domain finite.vip \
           --mailer resend \
@@ -40,6 +49,10 @@ in
           --fail --silent --show-error \
           --retry 10 --retry-connrefused --retry-delay 1 \
           ${loopbackAuthority}/health
+        ${pkgs.curl}/bin/curl \
+          --fail --silent --show-error \
+          --retry 10 --retry-connrefused --retry-delay 1 \
+          ${loopbackPublic}/health
       '';
 
       # The operator token is shared only with trusted provisioning services.
