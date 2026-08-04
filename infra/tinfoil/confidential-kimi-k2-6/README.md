@@ -17,7 +17,9 @@ commit `b9988c3`, for the model-side changes:
 - Tinfoil's GLM sparse-MLA DCP/FP8 and reasoning-boundary patches;
 - the confidential-compute all-reduce safeguards from upstream v0.0.19;
 - `--enable-prompt-tokens-details`; and
-- `--max-num-seqs 32` for bounded concurrency/backpressure.
+- `--max-num-seqs 16` for bounded concurrency/backpressure. The initial
+  vLLM 0.26 production canary at 32 caused the GLM worker to restart, so 32 is
+  not an accepted serving ceiling for this image.
 
 Finite-specific topology is intentionally preserved:
 
