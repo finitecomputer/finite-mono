@@ -179,7 +179,21 @@ then rechecks each exact Runtime immediately before enqueueing and verifies the
 target artifact, image, schema, writable `/data` bind, topology, and unchanged
 Agent Principal afterward. It stops before the next Runtime on plan drift,
 stopped or ambiguous compute, operation failure, timeout, wrong artifact, or a
-failed postcondition. The retained `events.jsonl` records success or failure.
+failed postcondition. Every run mints a run id and stamps it on each retained
+`events.jsonl` record, and the run's `final` marker is derived from the ledger:
+`success` only when every planned Runtime passed postflight, `failure` naming
+the failed Runtime, `interrupted` naming the resume point, or `noop` when the
+approved plan had zero planned Runtimes. SIGINT/SIGTERM/SIGHUP record
+`interrupted`; a run that died before any trap fires has a start with no final
+and is reported by `--summarize` as `unknown/incomplete`, never success.
+Re-executing the approved hash after an interruption is safe: the recomputed
+plan may differ only by entries Core already records on the target artifact,
+and each entry is reconciled before acting — already on target is verified and
+skipped, an identical in-flight upgrade request is awaited (Core never
+enqueues a duplicate), and anything else executes normally. The same wrapper
+covers lat3 with `--host lat3` (default `lat1`); the plan is provably
+single-host and mixed-host plans are refused. Core CLI calls always run on
+lat1; only provider facts and Runner addressing follow `--host`.
 For `--roll-all`, a canonical container that is already stopped is retained in
 the hashed plan as `provider_not_running` and is never contacted, started, or
 enqueued; healthy eligible Runtimes may continue. An explicitly selected

@@ -173,6 +173,47 @@ class FiniteStatusTests(unittest.TestCase):
         self.assertEqual(rollout["completed_entries"], 1)
         self.assertEqual(rollout["terminal_state"], "interrupted-or-incomplete")
 
+    def test_recorded_interrupted_final_is_red_and_named(self) -> None:
+        raw = {
+            "exists": True,
+            "plan_hash": "b" * 64,
+            "plan": {"planned": [{}, {}]},
+            "events": [
+                {"event": "start", "phase": "execute", "run_id": "run-1"},
+                {
+                    "event": "entry_postflight",
+                    "phase": "execute",
+                    "status": "succeeded",
+                    "agent_runtime_id": "runtime-a",
+                    "run_id": "run-1",
+                },
+                {
+                    "event": "final",
+                    "phase": "execute",
+                    "status": "interrupted",
+                    "run_id": "run-1",
+                    "resume_point": "project-b/runtime-b",
+                },
+            ],
+        }
+        rollout = finite_status.build_rollout(raw)
+        self.assertEqual(rollout["status"], "red")
+        self.assertEqual(rollout["terminal_state"], "interrupted")
+
+    def test_noop_final_is_never_reported_as_success(self) -> None:
+        raw = {
+            "exists": True,
+            "plan_hash": "c" * 64,
+            "plan": {"planned": []},
+            "events": [
+                {"event": "start", "phase": "execute", "run_id": "run-1"},
+                {"event": "final", "phase": "execute", "status": "noop", "run_id": "run-1"},
+            ],
+        }
+        rollout = finite_status.build_rollout(raw)
+        self.assertEqual(rollout["status"], "green")
+        self.assertEqual(rollout["terminal_state"], "noop")
+
 
 if __name__ == "__main__":
     unittest.main()

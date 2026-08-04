@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # Prepare and execute a reviewed, exact rollout of one promoted Runtime Artifact
-# to existing lat1 agents. Core remains the lifecycle authority; this wrapper
-# only freezes its exact plan and provider facts between two operator commands.
+# to existing agents on one source host. Core remains the lifecycle authority;
+# this wrapper only freezes its exact plan and provider facts between two
+# operator commands.
 set -euo pipefail
 
 LAT1="${LAT1:-root@64.34.82.77}"
+LAT3="${LAT3:-root@207.188.7.157}"
+ROLLOUT_HOST=lat1
 SOURCE_HOST_ID=finite-lat-1
+RUNNER_DEST="$LAT1"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROLLOUT_STATE_ROOT="${ROLLOUT_STATE_ROOT:-$REPO_ROOT/.local-state/runtime-rollouts}"
 
 usage() {
   cat >&2 <<'EOF'
-usage: scripts/rollout-lat1-runtime-artifact [--validate-only] \
-  (--prepare | --execute-plan-hash 64_LOWERCASE_HEX) \
+usage: scripts/rollout-lat1-runtime-artifact [--validate-only] [--host lat1|lat3] \
+  (--prepare | --execute-plan-hash 64_LOWERCASE_HEX | --summarize) \
   --roll-runtime-artifact ID \
   --roll-admin-email EMAIL \
   --roll-admin-workos-user-id ID \
@@ -33,6 +37,7 @@ validate_id() {
 
 validate_local_inputs() {
   [[ $LAT1 =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "LAT1 destination"; return; }
+  [[ $RUNNER_DEST =~ ^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,254}$ ]] || { invalid_value "rollout host destination"; return; }
   validate_id "runtime artifact id" "$ROLLOUT_ARTIFACT_ID" || return
   [[ $ROLLOUT_ADMIN_EMAIL =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { invalid_value "admin email"; return; }
   validate_id "admin WorkOS user id" "$ROLLOUT_ADMIN_WORKOS_USER_ID" || return
@@ -57,6 +62,7 @@ parse_args() {
   ROLLOUT_CANARY_PROJECT_ID=""
   ROLLOUT_WAIT_TIMEOUT_SECONDS=1200
   ROLLOUT_PROJECT_IDS=()
+  ROLLOUT_HOST=lat1
 
   while (($#)); do
     case "$1" in
@@ -64,8 +70,19 @@ parse_args() {
         VALIDATE_ONLY=true
         shift
         ;;
+      --host)
+        [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
+        case "$2" in
+          lat1|lat3) ROLLOUT_HOST="$2" ;;
+          *)
+            echo "unknown runtime rollout host: $2" >&2
+            return 64
+            ;;
+        esac
+        shift 2
+        ;;
       --prepare)
-        [[ -z $ROLLOUT_MODE ]] || { echo "choose exactly one of --prepare or --execute-plan-hash" >&2; return 64; }
+        [[ -z $ROLLOUT_MODE ]] || { echo "choose exactly one of --prepare, --execute-plan-hash, or --summarize" >&2; return 64; }
         ROLLOUT_MODE=prepare
         shift
         ;;
@@ -74,6 +91,11 @@ parse_args() {
         ROLLOUT_MODE=execute
         EXECUTE_PLAN_HASH="$2"
         shift 2
+        ;;
+      --summarize)
+        [[ -z $ROLLOUT_MODE ]] || { echo "choose exactly one of --prepare, --execute-plan-hash, or --summarize" >&2; return 64; }
+        ROLLOUT_MODE=summarize
+        shift
         ;;
       --roll-runtime-artifact)
         [[ $# -ge 2 && -n $2 ]] || { usage; return 64; }
@@ -118,8 +140,22 @@ parse_args() {
   done
 
   if [[ -z $ROLLOUT_MODE ]]; then
-    echo "choose exactly one of --prepare or --execute-plan-hash" >&2
+    echo "choose exactly one of --prepare, --execute-plan-hash, or --summarize" >&2
     return 64
+  fi
+  case "$ROLLOUT_HOST" in
+    lat1)
+      SOURCE_HOST_ID=finite-lat-1
+      RUNNER_DEST="$LAT1"
+      ;;
+    lat3)
+      SOURCE_HOST_ID=finite-lat-3
+      RUNNER_DEST="$LAT3"
+      ;;
+  esac
+  if [[ $ROLLOUT_MODE == summarize ]]; then
+    [[ $ROLLOUT_STATE_ROOT == /* ]] || invalid_value "ROLLOUT_STATE_ROOT: expected an absolute path"
+    return
   fi
   if [[ $ROLLOUT_MODE == execute && ! $EXECUTE_PLAN_HASH =~ ^[0-9a-f]{64}$ ]]; then
     echo "--execute-plan-hash requires exactly 64 lowercase hexadecimal characters" >&2
@@ -167,8 +203,8 @@ build_plan_cli_args() {
 # OpenSSH sends a remote command as one shell-parsed string. Build that one
 # string with Bash's %q and never append an unquoted caller value.
 run_remote_bash() {
-  local script="$1"
-  shift
+  local destination="$1" script="$2"
+  shift 2
   local remote_command quoted argument
   printf -v quoted '%q' "$script"
   remote_command="bash -c $quoted --"
@@ -177,11 +213,12 @@ run_remote_bash() {
     remote_command+=" $quoted"
   done
   # Never let SSH consume a caller's loop or process-substitution input.
-  ssh -n -o BatchMode=yes -- "$LAT1" "$remote_command"
+  ssh -n -o BatchMode=yes -- "$destination" "$remote_command"
 }
 
+# Core is the lifecycle authority and runs on lat1 for every rollout host.
 run_remote_cli() {
-  run_remote_bash 'set -euo pipefail
+  run_remote_bash "$LAT1" 'set -euo pipefail
 set -a
 . /etc/finite/core.env
 set +a
@@ -253,9 +290,18 @@ validate_plan() {
     [[ -z $machine_id ]] || validate_id "skipped source machine id" "$machine_id" || return
   done < <(jq -r '.skipped[] | [.project_id, (.agent_runtime_id // ""), (.source_host_id // ""), (.source_machine_id // "")] | @tsv' <<<"$plan")
 
-  if [[ $ROLLOUT_ALL == false && $(jq '.skipped | length' <<<"$plan") -ne 0 ]]; then
-    echo "runtime rollout refused: an explicitly requested project was skipped" >&2
-    return 65
+  # Prepare refuses any skip of an explicitly requested project. At execute
+  # time an already_on_target_artifact skip is recorded resume progress and is
+  # reconciled per entry; every other skip reason still refuses.
+  if [[ $ROLLOUT_ALL == false ]]; then
+    local unexpected_skips='.skipped | length'
+    if [[ $ROLLOUT_MODE == execute ]]; then
+      unexpected_skips='[.skipped[] | select(.reason != "already_on_target_artifact")] | length'
+    fi
+    if [[ $(jq "$unexpected_skips" <<<"$plan") -ne 0 ]]; then
+      echo "runtime rollout refused: an explicitly requested project was skipped" >&2
+      return 65
+    fi
   fi
   if [[ $ROLLOUT_ALL == true ]]; then
     jq -e --arg canary "$ROLLOUT_CANARY_PROJECT_ID" --arg host "$SOURCE_HOST_ID" '
@@ -320,13 +366,13 @@ while IFS= read -r name; do
 done < <(nerdctl --namespace finite ps --all --format '{{.Names}}')
 REMOTE
   set +e
-  snapshot="$(run_remote_bash "$provider_script" "${provider_args[@]}")"
+  snapshot="$(run_remote_bash "$RUNNER_DEST" "$provider_script" "${provider_args[@]}")"
   status=$?
   set -e
   ((status == 0)) || return "$status"
 
   local parsed_snapshot
-  parsed_snapshot="$(jq -Rsc --argjson expected "$request_entries" '
+  parsed_snapshot="$(jq -Rsc --arg host "$SOURCE_HOST_ID" --argjson expected "$request_entries" '
     split("\n") | map(select(length > 0) | split("\t")) as $rows
     | [$rows[] | select(.[0] == "SYSTEM")] as $systems
     | [$rows[] | select(.[0] == "TOPOLOGY") | {
@@ -354,7 +400,7 @@ REMOTE
       | if (.state | type) != "string" or (.state | length) == 0 then error("canonical state is missing")
         elif (.image | test("@sha256:[0-9a-f]{64}$") | not) then error("image is not digest pinned")
         elif .current_artifact_id == "" or .state_schema_version == "" then error("artifact labels are incomplete")
-        elif .runtime_label != "true" or .source_host_label != "finite-lat-1"
+        elif .runtime_label != "true" or .source_host_label != $host
           or .source_machine_label != .source_machine_id or .project_label != .project_id
           then error("ownership labels do not match")
         elif ($data_mounts | length) != 1 or $data_mounts[0].RW != true
@@ -366,7 +412,7 @@ REMOTE
         else {
           project_id, agent_runtime_id, source_machine_id, current_artifact_id, image,
           state_schema_version, state, data_source: $root,
-          ownership: {runtime:"true", source_host_id:"finite-lat-1", source_machine_id:.source_machine_id, project_id:.project_id},
+          ownership: {runtime:"true", source_host_id:$host, source_machine_id:.source_machine_id, project_id:.project_id},
           source_machine_owner_count: $source_owners,
           durable_root_owner_count: $durable_owners,
           host_port: (if .state == "running" then $ports[0] else null end)
@@ -407,7 +453,7 @@ while (($#)); do
 done
 REMOTE
   set +e
-  contacts="$(run_remote_bash "$contact_script" "${contact_args[@]}")"
+  contacts="$(run_remote_bash "$RUNNER_DEST" "$contact_script" "${contact_args[@]}")"
   status=$?
   set -e
   ((status == 0)) || return "$status"
@@ -544,11 +590,17 @@ EVENTS_FILE=""
 EVENT_FINAL_WRITTEN=false
 EVENT_PHASE=""
 PLAN_HASH=""
+RUN_ID=""
+PLAN_PLANNED_KEYS="[]"
+
+mint_run_id() {
+  printf 'run-%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+}
 
 append_event() {
   local event="$1" enriched
   [[ -n $EVENTS_FILE ]] || return 0
-  enriched="$(jq -c --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg plan_hash "$PLAN_HASH" --arg phase "$EVENT_PHASE" '. + {timestamp:$timestamp, plan_hash:$plan_hash, phase:$phase}' <<<"$event")"
+  enriched="$(jq -c --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg plan_hash "$PLAN_HASH" --arg phase "$EVENT_PHASE" --arg run_id "$RUN_ID" '. + {timestamp:$timestamp, plan_hash:$plan_hash, phase:$phase, run_id:$run_id}' <<<"$event")"
   printf '%s\n' "$enriched" >>"$EVENTS_FILE"
 }
 
@@ -560,13 +612,53 @@ record_final() {
   fi
 }
 
+# Terminal state is derived from this run's ledger, never asserted by the
+# driver: any failed entry means failure, absent entries without failures mean
+# interrupted (the first absent entry is the resume point), and a plan with
+# zero planned entries is a noop, never a success.
+derive_run_terminal() {
+  jq -cs --argjson planned "$PLAN_PLANNED_KEYS" --arg run_id "$RUN_ID" '
+    [.[] | select(.run_id == $run_id)] as $run
+    | ([$run[] | select(.event == "entry_postflight" and .status == "succeeded") | .project_id + "/" + .agent_runtime_id] | unique) as $passed
+    | ([$run[] | select((.event == "entry_preflight" or .event == "core" or .event == "entry_postflight") and .status == "failed") | .project_id + "/" + .agent_runtime_id] | unique) as $failed
+    | ([$run[] | select(.event != "final" and .status == "failed")] | length > 0) as $any_failed
+    | ($planned - $passed - $failed) as $absent
+    | (if $any_failed then {status:"failure", failed_entries:$failed}
+       elif ($planned | length) == 0 then {status:"noop"}
+       elif ($absent | length) > 0 then {status:"interrupted", resume_point:$absent[0]}
+       else {status:"success"} end)
+    | . + {planned_count:($planned | length), passed_count:($passed | length), failed_count:($failed | length), absent_count:($absent | length)}
+  ' "$EVENTS_FILE"
+}
+
+record_final_derived() {
+  local exit_code="$1" signal="${2:-}" derived
+  if [[ -n $EVENTS_FILE && $EVENT_FINAL_WRITTEN == false ]]; then
+    if ! derived="$(derive_run_terminal)"; then
+      derived='{"status":"unknown"}'
+    fi
+    # A nonzero exit without a signal and without any failed entry is a driver
+    # error, not an interruption.
+    if [[ -z $signal && $exit_code -ne 0 ]]; then
+      derived="$(jq -c 'if .status == "interrupted" then .status = "failure" else . end' <<<"$derived")"
+    fi
+    append_event "$(jq -cn --arg phase "$EVENT_PHASE" --argjson exit_code "$exit_code" --arg signal "$signal" --argjson derived "$derived" '
+      ({event:"final", phase:$phase, exit_code:$exit_code} + $derived
+       | if $signal == "" then . else . + {signal:$signal} end)')"
+    EVENT_FINAL_WRITTEN=true
+  fi
+}
+
 record_final_on_exit() {
   local exit_code="$1"
-  if ((exit_code == 0)); then
-    record_final success 0
-  else
-    record_final failure "$exit_code"
-  fi
+  record_final_derived "$exit_code"
+}
+
+record_on_signal() {
+  local signal="$1" exit_code="$2"
+  trap - INT TERM HUP
+  record_final_derived "$exit_code" "$signal"
+  exit "$exit_code"
 }
 
 initialize_evidence() {
@@ -582,12 +674,90 @@ initialize_evidence() {
   touch "$EVENTS_FILE"
   chmod 0600 "$EVENTS_FILE"
   EVENT_PHASE="$mode"
+  RUN_ID="$(mint_run_id)"
   append_event "$(jq -cn --arg phase "$mode" '{event:"start", phase:$phase}')"
   trap 'record_final_on_exit "$?"' EXIT
+  trap 'record_on_signal INT 130' INT
+  trap 'record_on_signal TERM 143' TERM
+  trap 'record_on_signal HUP 129' HUP
+}
+
+# A recomputed plan may differ from the approved plan only by progress:
+# approved entries Core now records on the target artifact. Anything else is
+# drift and refuses execution of the approved hash.
+plan_progress_compatible() {
+  local saved="$1" current="$2"
+  jq -en --argjson saved "$saved" --argjson current "$current" '
+    def core_fields: {schema_version, repo_revision, remote_system_closure, source_host_id,
+      target_artifact_id, target_reference, scope, excluded, canary};
+    def ident: {project_id, agent_runtime_id, source_machine_id};
+    ([$current.skipped[] | select(. as $entry | ($saved.skipped | index($entry)) == null)]) as $progress
+    | ($saved | core_fields) == ($current | core_fields)
+      and ([$current.planned[] | select(. as $entry | ($saved.planned | index($entry)) == null)] | length == 0)
+      and all($progress[]; .reason == "already_on_target_artifact")
+      and (([$saved.planned[] | ident] | sort)
+        == (([$current.planned[] | ident] + [$progress[] | ident]) | sort | unique))
+  ' >/dev/null
+}
+
+# Report every recorded run, oldest first, without mutating anything. A run
+# with a start but no final is unknown/incomplete, never success; runs in the
+# pre-run-id ledger format are grouped by start events and reported as legacy.
+summarize_rollout_evidence() {
+  local evidence_dir found=false
+  if [[ -d $ROLLOUT_STATE_ROOT ]]; then
+    for evidence_dir in "$ROLLOUT_STATE_ROOT"/*/; do
+      [[ -f $evidence_dir/plan.json && -f $evidence_dir/events.jsonl ]] || continue
+      found=true
+      summarize_one_plan "${evidence_dir%/}"
+    done
+  fi
+  if [[ $found == false ]]; then
+    echo "no rollout evidence under $ROLLOUT_STATE_ROOT"
+  fi
+}
+
+summarize_one_plan() {
+  local evidence_dir="$1" plan_hash planned events
+  plan_hash="$(basename "$evidence_dir")"
+  planned="$(jq -c '[.planned[]? | .project_id + "/" + .agent_runtime_id]' "$evidence_dir/plan.json")" || {
+    echo "plan $plan_hash: unreadable plan.json" >&2
+    return 65
+  }
+  events="$(jq -cs . "$evidence_dir/events.jsonl")" || {
+    echo "plan $plan_hash: unreadable events.jsonl" >&2
+    return 65
+  }
+  jq -rn --arg plan_hash "$plan_hash" --argjson planned "$planned" --argjson events "$events" '
+    ($events | length) as $count
+    | [range(0; $count) | select($events[.].event == "start")] as $starts
+    | if ($starts | length) == 0 then
+        "plan \($plan_hash): no start events"
+      else
+        [$starts[] as $first
+          | (($starts | map(select(. > $first)) | min) // $count) as $last
+          | $events[$first:$last]]
+        | .[] | . as $run
+        | ($run[0].run_id // "legacy") as $run_id
+        | ($run[0].phase // "unknown") as $phase
+        | ([$run[] | select(.event == "final")] | last) as $final
+        | ([$run[] | select(.event == "entry_postflight" and .status == "succeeded") | .project_id + "/" + .agent_runtime_id] | unique) as $passed
+        | ([$run[] | select((.event == "entry_preflight" or .event == "core" or .event == "entry_postflight") and .status == "failed") | .project_id + "/" + .agent_runtime_id] | unique) as $failed
+        | ($planned - $passed - $failed) as $absent
+        | (if $final == null then "unknown/incomplete"
+           elif $phase != "execute" then $final.status
+           elif ($failed | length) > 0 or ([$run[] | select(.event != "final" and .status == "failed")] | length) > 0 then "failure"
+           elif ($planned | length) == 0 then "noop"
+           elif ($absent | length) > 0 then "interrupted"
+           else "success" end) as $terminal
+        | "plan \($plan_hash) run \($run_id) phase=\($phase) terminal=\($terminal) recorded=\($final.status // "none") planned=\($planned | length) passed=\($passed | length) failed=\($failed | length) absent=\($absent | length) resume=\($absent[0] // "-")"
+      end
+  '
 }
 
 copy_paste_execute_command() {
   local -a command=("$REPO_ROOT/scripts/rollout-lat1-runtime-artifact" --execute-plan-hash "$PLAN_HASH")
+  command+=(--host "$ROLLOUT_HOST")
   command+=(--roll-runtime-artifact "$ROLLOUT_ARTIFACT_ID")
   command+=(--roll-admin-email "$ROLLOUT_ADMIN_EMAIL")
   command+=(--roll-admin-workos-user-id "$ROLLOUT_ADMIN_WORKOS_USER_ID")
@@ -626,9 +796,54 @@ inspect_one_entry() {
   jq -c '.provider_facts[0] + {remote_system_closure:.remote_system_closure}' <<<"$observed"
 }
 
+# Reconcile one planned entry against Core's durable state before acting on
+# it: an entry Core already records on the target artifact is verified and
+# skipped instead of re-enqueued. Core's enqueue is idempotent per (Runtime,
+# kind, target), so an identical upgrade request still in flight is returned
+# and awaited by the normal execute path instead of being duplicated. A future
+# non-mutating lifecycle probe (a read of runtime_control_requests) plugs in
+# here to distinguish attach-to-in-flight from a fresh enqueue without issuing
+# anything.
+entry_lifecycle_signal() {
+  local entry="$1"
+  local project_id runtime_id machine_id target_artifact_id
+  project_id="$(jq -r '.project_id' <<<"$entry")"
+  runtime_id="$(jq -r '.agent_runtime_id' <<<"$entry")"
+  machine_id="$(jq -r '.source_machine_id' <<<"$entry")"
+  target_artifact_id="$(jq -r '.target_artifact_id' <<<"$entry")"
+  local -a signal_args=(
+    runtime-artifact-rollout
+    --artifact-id "$target_artifact_id"
+    --source-host-id "$SOURCE_HOST_ID"
+    --admin-email "$ROLLOUT_ADMIN_EMAIL"
+    --admin-workos-user-id "$ROLLOUT_ADMIN_WORKOS_USER_ID"
+    --wait-timeout-seconds "$ROLLOUT_WAIT_TIMEOUT_SECONDS"
+    --project-id "$project_id"
+    --expected-agent-runtime-id "$runtime_id"
+    --expected-source-machine-id "$machine_id"
+    --plan-only
+  )
+  local report report_status
+  capture_remote_cli report report_status "${signal_args[@]}"
+  jq -er \
+    --arg project "$project_id" \
+    --arg runtime "$runtime_id" \
+    --arg machine "$machine_id" '
+      if (([.planned[] | select(.project_id == $project and .agent_runtime_id == $runtime and .source_machine_id == $machine)] | length) == 1
+          and .halted == false)
+      then "execute"
+      elif ([.skipped[] | select(.project_id == $project and .agent_runtime_id == $runtime and .source_machine_id == $machine and .reason == "already_on_target_artifact")] | length) == 1
+      then "already_on_target"
+      else error("unexpected lifecycle signal") end
+    ' <<<"$report" || {
+      echo "runtime rollout refused: could not reconcile Core state for $project_id ($runtime_id)" >&2
+      return 65
+    }
+}
+
 execute_exact_plan() {
   local reviewed_plan="$1"
-  local entry project_id runtime_id source_host_id machine_id target_artifact_id approved observed result result_status post
+  local entry project_id runtime_id source_host_id machine_id target_artifact_id approved signal observed result result_status post
   while IFS= read -r entry; do
     project_id="$(jq -r '.project_id' <<<"$entry")"
     runtime_id="$(jq -r '.agent_runtime_id' <<<"$entry")"
@@ -637,9 +852,35 @@ execute_exact_plan() {
     target_artifact_id="$(jq -r '.target_artifact_id' <<<"$entry")"
     approved="$(jq -cS --arg closure "$(jq -r '.remote_system_closure' <<<"$reviewed_plan")" '.provider_facts + {remote_system_closure:$closure}' <<<"$entry")"
 
+    signal="$(entry_lifecycle_signal "$entry")" || {
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_preflight", project_id:$project, agent_runtime_id:$runtime, status:"failed", detail:"lifecycle_reconcile_failed"}')"
+      return 65
+    }
+
+    if [[ $signal == already_on_target ]]; then
+      post="$(inspect_one_entry "$entry")"
+      jq -e \
+        --arg artifact "$target_artifact_id" \
+        --arg principal "$(jq -r '.agent_principal_sha256' <<<"$approved")" \
+        --argjson target "$(jq -c '.target_reference' <<<"$reviewed_plan")" '
+          .current_artifact_id == $artifact
+          and .agent_principal_sha256 == $principal
+          and .state == "running"
+          and ($target == null or (.image == $target.image and .state_schema_version == $target.state_schema_version))
+        ' <<<"$post" >/dev/null || {
+          echo "runtime rollout postflight failed for $project_id" >&2
+          append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_postflight", project_id:$project, agent_runtime_id:$runtime, status:"failed"}')"
+          return 65
+        }
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson provider_facts "$post" '{event:"entry_postflight", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", reconcile:"already_on_target", provider_facts:$provider_facts}')"
+      echo "==> already on target; verified $project_id ($runtime_id)"
+      continue
+    fi
+
     observed="$(inspect_one_entry "$entry")"
     if [[ $(jq -cS . <<<"$observed") != "$approved" ]]; then
       echo "runtime rollout refused: provider facts drifted before enqueue for $project_id" >&2
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_preflight", project_id:$project, agent_runtime_id:$runtime, status:"failed", detail:"provider_facts_drifted"}')"
       return 65
     fi
     append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson provider_facts "$observed" '{event:"entry_preflight", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", provider_facts:$provider_facts}')"
@@ -684,6 +925,7 @@ execute_exact_plan() {
         and (.outcomes[0].request_id | type == "string" and length > 0)
       ' <<<"$result" >/dev/null || {
         echo "runtime rollout refused: Core result failed exact-shape validation for $project_id" >&2
+        append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"core", project_id:$project, agent_runtime_id:$runtime, status:"failed", detail:"unexpected_core_result_shape"}')"
         return 65
       }
     append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --arg request "$(jq -r '.outcomes[0].request_id' <<<"$result")" '{event:"core", project_id:$project, agent_runtime_id:$runtime, request_id:$request, status:"succeeded"}')"
@@ -699,6 +941,7 @@ execute_exact_plan() {
         and ($target == null or (.image == $target.image and .state_schema_version == $target.state_schema_version))
       ' <<<"$post" >/dev/null || {
         echo "runtime rollout postflight failed for $project_id" >&2
+        append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_postflight", project_id:$project, agent_runtime_id:$runtime, status:"failed"}')"
         return 65
       }
     append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson provider_facts "$post" '{event:"entry_postflight", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", provider_facts:$provider_facts}')"
@@ -711,13 +954,18 @@ main() {
   if [[ $VALIDATE_ONLY == true ]]; then
     exit 0
   fi
+  if [[ $ROLLOUT_MODE == summarize ]]; then
+    summarize_rollout_evidence
+    exit 0
+  fi
 
   echo "==> recomputing Core scope and allowlisted provider facts on $SOURCE_HOST_ID"
-  local reviewed_plan canonical_plan plan_path saved_plan planned_count excluded_count excluded_summary skipped_count skip_summary current_plan_hash
+  local reviewed_plan canonical_plan plan_path saved_plan planned_count excluded_count excluded_summary skipped_count skip_summary current_plan_hash resume_with_progress
   reviewed_plan="$(capture_current_reviewed_plan)"
   canonical_plan="$(jq -cS . <<<"$reviewed_plan")"
   PLAN_HASH="$(sha256_text "$canonical_plan")"
   plan_path="$ROLLOUT_STATE_ROOT/$PLAN_HASH/plan.json"
+  PLAN_PLANNED_KEYS="$(jq -c '[.planned[] | .project_id + "/" + .agent_runtime_id]' <<<"$canonical_plan")"
   planned_count="$(jq '.planned | length' <<<"$canonical_plan")"
   excluded_count="$(jq '.excluded | length' <<<"$canonical_plan")"
   excluded_summary="$(jq -r '
@@ -742,33 +990,50 @@ main() {
     echo "==> plan: $plan_path"
     echo "==> review the plan, then execute exactly it with:"
     copy_paste_execute_command
-    record_final success 0
+    if ((planned_count == 0)); then
+      record_final noop 0
+    else
+      record_final success 0
+    fi
     exit 0
   fi
 
+  resume_with_progress=false
   if [[ $PLAN_HASH != "$EXECUTE_PLAN_HASH" ]]; then
     current_plan_hash="$PLAN_HASH"
     PLAN_HASH="$EXECUTE_PLAN_HASH"
     plan_path="$ROLLOUT_STATE_ROOT/$PLAN_HASH/plan.json"
-    if [[ -f $plan_path ]]; then
-      initialize_evidence execute true
-      append_event "$(jq -cn --arg current "$current_plan_hash" '{event:"plan_drift", status:"failed", current_plan_hash:$current}')"
+    if [[ -f $plan_path ]] \
+      && saved_plan="$(jq -cS . <"$plan_path")" \
+      && plan_progress_compatible "$saved_plan" "$canonical_plan"; then
+      resume_with_progress=true
+      PLAN_PLANNED_KEYS="$(jq -c '[.planned[] | .project_id + "/" + .agent_runtime_id]' <<<"$saved_plan")"
+      planned_count="$(jq '.planned | length' <<<"$saved_plan")"
+    else
+      if [[ -f $plan_path ]]; then
+        initialize_evidence execute true
+        append_event "$(jq -cn --arg current "$current_plan_hash" '{event:"plan_drift", status:"failed", current_plan_hash:$current}')"
+      fi
+      echo "runtime rollout refused: current plan hash $current_plan_hash does not match approved hash $EXECUTE_PLAN_HASH" >&2
+      exit 65
     fi
-    echo "runtime rollout refused: current plan hash $current_plan_hash does not match approved hash $EXECUTE_PLAN_HASH" >&2
-    exit 65
   fi
   initialize_evidence execute true
   saved_plan="$(jq -cS . <"$plan_path")" || {
     echo "runtime rollout refused: prepared plan is not valid JSON" >&2
     exit 65
   }
-  if [[ $saved_plan != "$canonical_plan" ]]; then
+  if [[ $saved_plan != "$canonical_plan" && $resume_with_progress == false ]]; then
     echo "runtime rollout refused: retained prepared plan does not equal the recomputed plan" >&2
     exit 65
   fi
-  echo "==> approved plan unchanged; upgrading $planned_count runtime(s) serially"
-  execute_exact_plan "$canonical_plan"
-  record_final success 0
+  if [[ $resume_with_progress == true ]]; then
+    echo "==> approved plan resumed: the recomputed plan differs only by entries Core already records on target; reconciling $planned_count runtime(s) serially"
+  else
+    echo "==> approved plan unchanged; upgrading $planned_count runtime(s) serially"
+  fi
+  execute_exact_plan "$saved_plan"
+  record_final_derived 0
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
