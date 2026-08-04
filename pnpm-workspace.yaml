@@ -7,5 +7,4 @@ sharedWorkspaceLockfile: false
 packages:
   - finitecomputer-v2/apps/dashboard
   - finitechat/apps/electron-chat
-  - finitechat/packages/finitechat-chat-ui
   - finite-sites/examples/nextjs-demo
