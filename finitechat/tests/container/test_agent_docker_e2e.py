@@ -204,13 +204,23 @@ class ResticRepositoryHelperTest(unittest.TestCase):
 
 class AgentRuntimeLauncherConfigTest(unittest.TestCase):
     @staticmethod
-    def _reconcile_config(existing: dict[str, Any], settings: dict[str, str]) -> dict[str, Any]:
+    def _reconcile_config(
+        existing: dict[str, Any] | None, settings: dict[str, str]
+    ) -> dict[str, Any]:
         namespace = runpy.run_path(str(REPO_ROOT / "containers/agent/reconcile_hermes_config.py"))
         return namespace["reconcile_config"](existing, settings)
 
     @staticmethod
     def _reconciler_settings() -> dict[str, str]:
         return {
+            "FINITE_CONFIG_MODEL": "deepseek-v4-flash-0731",
+            "FINITE_CONFIG_PROVIDER": "custom",
+            "FINITE_CONFIG_BASE_URL": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+            "FINITE_CONFIG_CONTEXT_LENGTH": "393216",
+            "FINITE_CONFIG_API_MODE": "chat_completions",
+            "FINITE_CONFIG_API_KEY_REFERENCE": "${FINITE_PRIVATE_API_KEY}",
+            "FINITE_CONFIG_TITLE_TIMEOUT_SECS": "2",
+            "FINITE_CONFIG_WORKSPACE": "/workspace",
             "FINITE_CONFIG_PLUGIN_NAME": "finitechat",
             "FINITE_CONFIG_AGENT_HOME": "/data/agent",
             "FINITE_CONFIG_FINITECHAT_BIN": "/usr/local/bin/finitechat",
@@ -218,6 +228,67 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             "FINITE_CONFIG_POLL_TIMEOUT_SECS": "30",
             "FINITE_CONFIG_POLL_LIMIT": "100",
         }
+
+    def test_reconciler_seeds_current_finite_private_model_and_context(self) -> None:
+        reconciled = self._reconcile_config(None, self._reconciler_settings())
+
+        self.assertEqual(
+            reconciled["model"],
+            {
+                "default": "deepseek-v4-flash-0731",
+                "provider": "custom",
+                "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                "context_length": 393216,
+                "api_mode": "chat_completions",
+                "api_key": "${FINITE_PRIVATE_API_KEY}",
+            },
+        )
+
+    def test_reconciler_migrates_only_the_legacy_finite_private_default(self) -> None:
+        existing = {
+            "model": {
+                "default": "glm-5-2",
+                "provider": "custom",
+                "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                "api_mode": "chat_completions",
+                "api_key": "${FINITE_PRIVATE_API_KEY}",
+                "temperature": 0.4,
+            }
+        }
+
+        reconciled = self._reconcile_config(existing, self._reconciler_settings())
+
+        self.assertEqual(reconciled["model"]["default"], "deepseek-v4-flash-0731")
+        self.assertEqual(reconciled["model"]["context_length"], 393216)
+        self.assertEqual(reconciled["model"]["temperature"], 0.4)
+
+    def test_reconciler_preserves_user_selected_model(self) -> None:
+        model = {
+            "default": "openai/gpt-5",
+            "provider": "openrouter",
+            "api_key": "${OPENROUTER_API_KEY}",
+        }
+
+        reconciled = self._reconcile_config(
+            {"model": model.copy()}, self._reconciler_settings()
+        )
+
+        self.assertEqual(reconciled["model"], model)
+
+    def test_reconciler_preserves_near_match_with_custom_route(self) -> None:
+        model = {
+            "default": "glm-5-2",
+            "provider": "custom",
+            "base_url": "https://inference.example.com/v1",
+            "api_mode": "chat_completions",
+            "api_key": "${FINITE_PRIVATE_API_KEY}",
+        }
+
+        reconciled = self._reconcile_config(
+            {"model": model.copy()}, self._reconciler_settings()
+        )
+
+        self.assertEqual(reconciled["model"], model)
 
     def test_reconciler_seeds_finitechat_display_defaults_without_touching_other_platforms(
         self,

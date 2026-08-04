@@ -22,14 +22,15 @@ service into one repo.
 
 ## Finite Private Routing Debt
 
-GLM 5.2 is currently deployed behind the historical
+DeepSeek V4 Flash 0731 is currently deployed behind the historical
 `https://kimi-k2-6.finite.containers.tinfoil.dev/v1` limiter URL. Keep that URL
-as the runtime default until the limiter has a renamed GLM route and the issued
-Finite Private token population has a recorded rollout. Do not "clean up" the
-URL name in v2 defaults as a cosmetic change.
-The domain name is historical only: the endpoint now serves model `glm-5-2`
-(limiter `/health` reports `defaultModel: glm-5-2`), and `glm-5-2` is the
-runner's `DEFAULT_FINITE_PRIVATE_MODEL`.
+as the runtime default until the limiter has a renamed DeepSeek route and the
+issued Finite Private token population has a recorded rollout. Do not "clean
+up" the URL name in v2 defaults as a cosmetic change.
+The domain name is historical only: the endpoint now serves model
+`deepseek-v4-flash-0731`, which is the runner's
+`DEFAULT_FINITE_PRIVATE_MODEL`. The server retains `glm-5-2` as a compatibility
+alias while older Agent Runtime images drain.
 
 ## Core Continuity Boundary
 

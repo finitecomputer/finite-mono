@@ -10,13 +10,15 @@ plugin_name="${FINITECHAT_HERMES_PLUGIN_NAME:-finitechat}"
 agent_name="${FINITECHAT_HERMES_AGENT_NAME:-${FINITE_AGENT_NAME:-${FINITECHAT_HERMES_ROOM_NAME:-Finite Agent}}}"
 agent_picture_url="${FINITECHAT_HERMES_AGENT_PICTURE_URL:-https://avatars.githubusercontent.com/u/274919006?v=4}"
 if [[ "${FINITE_DEFAULT_INFERENCE_PROFILE:-}" == "finite-private" ]]; then
-    model="${FINITECHAT_HERMES_MODEL:-${FINITE_PRIVATE_MODEL:-kimi-k2-6}}"
+    model="${FINITECHAT_HERMES_MODEL:-${FINITE_PRIVATE_MODEL:-deepseek-v4-flash-0731}}"
     provider="${FINITECHAT_HERMES_PROVIDER:-custom}"
     base_url="${FINITECHAT_HERMES_BASE_URL:-${FINITE_PRIVATE_BASE_URL:-https://kimi-k2-6.finite.containers.tinfoil.dev/v1}}"
+    context_length="${FINITECHAT_HERMES_CONTEXT_LENGTH:-${FINITE_PRIVATE_CONTEXT_LENGTH:-393216}}"
 else
     model="${FINITECHAT_HERMES_MODEL:-anthropic/claude-sonnet-4.6}"
     provider="${FINITECHAT_HERMES_PROVIDER:-openrouter}"
     base_url="${FINITECHAT_HERMES_BASE_URL:-https://openrouter.ai/api/v1}"
+    context_length="${FINITECHAT_HERMES_CONTEXT_LENGTH:-}"
 fi
 api_mode="${FINITECHAT_HERMES_API_MODE:-chat_completions}"
 api_key=""
@@ -66,6 +68,7 @@ run_with_config_environment() {
     FINITE_CONFIG_MODEL="$model" \
     FINITE_CONFIG_PROVIDER="$provider" \
     FINITE_CONFIG_BASE_URL="$base_url" \
+    FINITE_CONFIG_CONTEXT_LENGTH="$context_length" \
     FINITE_CONFIG_API_MODE="$api_mode" \
     FINITE_CONFIG_API_KEY_REFERENCE="$api_key_reference" \
     FINITE_CONFIG_PLUGIN_NAME="$plugin_name" \
