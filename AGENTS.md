@@ -35,6 +35,12 @@ Fedimint pattern described in `docs/fedimint-monorepo-structure-analysis.md`.
   workflows — this repo is the ONLY release host (doctrine §4).
 - **Deploys are defined in `infra/`** — per-host trees, CI-built digest-pinned
   images, runbooks. Nothing is built on a prod box.
+- **Services own their public route surface in code; the edge proxies, never
+  filters.** A service exposes exactly one public router (e.g. Finite
+  Identity's `public_router`) bound to a dedicated listener; Caddy
+  reverse-proxies that listener verbatim and never keeps a per-route
+  allowlist, so CLI/server contract skew at the edge is impossible by
+  construction.
 - **User data availability is the first security invariant.** Follow
   `docs/adr/0001-recoverability-precedes-operator-blindness.md`: do not remove a
   Recovery Authority, couple compute teardown to data purge, or claim stronger

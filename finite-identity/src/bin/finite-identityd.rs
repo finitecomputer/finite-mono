@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use finite_identity::authority::{
     AuthorityConfig, AuthorityState, DevMailer, HttpMailer, IdentityStore, MailProvider,
-    SystemClock, router,
+    SystemClock, public_router, router,
 };
 
 #[tokio::main]
@@ -21,6 +21,8 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     }
     let data = flag_value(&args, "--data").ok_or_else(usage)?;
     let listen = flag_value(&args, "--listen").unwrap_or_else(|| "127.0.0.1:8790".to_owned());
+    let public_listen =
+        flag_value(&args, "--public-listen").unwrap_or_else(|| "127.0.0.1:8791".to_owned());
     let external_base_url =
         flag_value(&args, "--external-base-url").ok_or("--external-base-url URL is required")?;
     let mailer = configure_mailer(&args)?;
@@ -34,6 +36,9 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     let address: SocketAddr = listen
         .parse()
         .map_err(|error| format!("invalid --listen address: {error}"))?;
+    let public_address: SocketAddr = public_listen
+        .parse()
+        .map_err(|error| format!("invalid --public-listen address: {error}"))?;
     let data_dir = PathBuf::from(data);
     let store = IdentityStore::open(data_dir.join("identity.db"))
         .map_err(|error| format!("cannot open identity store: {error}"))?;
@@ -52,8 +57,16 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|error| format!("cannot bind {address}: {error}"))?;
-    axum::serve(listener, router(state))
+    let public_listener = tokio::net::TcpListener::bind(public_address)
         .await
+        .map_err(|error| format!("cannot bind {public_address}: {error}"))?;
+    let full_server = axum::serve(listener, router(state.clone()));
+    let public_server = axum::serve(public_listener, public_router(state));
+    let (full_result, public_result) = tokio::join!(async move { full_server.await }, async move {
+        public_server.await
+    },);
+    full_result
+        .and(public_result)
         .map_err(|error| format!("server error: {error}"))
 }
 
@@ -107,7 +120,7 @@ fn configure_mailer(
 }
 
 fn usage() -> String {
-    "usage: finite-identityd serve --data DIR --external-base-url URL [--listen 127.0.0.1:8790] [--finite-vip-domain finite.vip] [--operator-token TOKEN] [--mailer dev --dev-print-email-tokens yes | --mailer resend|postmark --mail-from ADDR] (FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN enables the narrow Sites notification endpoint)".to_owned()
+    "usage: finite-identityd serve --data DIR --external-base-url URL [--listen 127.0.0.1:8790] [--public-listen 127.0.0.1:8791] [--finite-vip-domain finite.vip] [--operator-token TOKEN] [--mailer dev --dev-print-email-tokens yes | --mailer resend|postmark --mail-from ADDR] (FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN enables the narrow Sites notification endpoint)".to_owned()
 }
 
 #[cfg(test)]

@@ -110,6 +110,24 @@ impl IdentityClient {
         )
     }
 
+    /// Ask whether `actor_pubkey` satisfies `grant`. The public route requires
+    /// the NIP-98 signer to be `actor_pubkey` itself.
+    pub fn satisfies_grant(
+        &self,
+        key: &LocalIdentityKey,
+        grant: &str,
+        actor_pubkey: &str,
+        now: u64,
+    ) -> Result<SignedJsonRequest, ClientError> {
+        self.signed_json(
+            key,
+            "POST",
+            "/api/v1/principal-resolution/satisfies-grant",
+            serde_json::json!({ "grant": grant, "actor_pubkey": actor_pubkey }),
+            now,
+        )
+    }
+
     pub fn classify_authority_error(status: u16, code: &str) -> Option<AuthorityError> {
         if status < 400 {
             return None;

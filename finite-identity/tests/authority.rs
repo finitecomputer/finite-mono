@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use finite_identity::authority::{
-    AuthorityConfig, AuthorityState, FixedClock, IdentityStore, Mailer, router,
+    AuthorityConfig, AuthorityState, FixedClock, IdentityStore, Mailer, public_router, router,
 };
 use finite_identity::client::{AuthorityErrorKind, IdentityClient, LocalIdentityKey};
 use finite_identity::{FiniteIdentity, IdentityPaths, hex, nip98, npub};
@@ -1280,4 +1280,155 @@ async fn request_and_redeem_email_only(
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+fn public_fixture() -> (
+    axum::Router,
+    IdentityStore,
+    Arc<RecordingMailer>,
+    FixedClock,
+) {
+    let store = IdentityStore::open_memory().expect("open memory store");
+    let mailer = Arc::new(RecordingMailer::default());
+    let clock = FixedClock::new(NOW);
+    let state = AuthorityState::new(
+        store.clone(),
+        Arc::clone(&mailer) as Arc<dyn Mailer>,
+        clock.clone(),
+        AuthorityConfig {
+            external_base_url: BASE_URL.to_owned(),
+            finite_vip_domain: "finite.vip".to_owned(),
+            email_challenge_ttl_seconds: 600,
+            operator_token: Some(OPERATOR_TOKEN.to_owned()),
+            sites_notification_token: Some("sites-notification-test-token".to_owned()),
+        },
+    );
+    (public_router(state), store, mailer, clock)
+}
+
+/// POST an empty JSON object and report only the status: route-mounted probes
+/// must not depend on error body shapes (extractor rejections are plain text).
+async fn post_status(app: axum::Router, path: &str) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .status()
+}
+
+#[tokio::test]
+async fn public_router_serves_the_complete_public_surface() {
+    let (app, _store, _mailer, _clock) = public_fixture();
+
+    for uri in ["/health", "/.well-known/nostr.json?name=nobody"] {
+        let (status, _) = get_json(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri} must be served publicly");
+    }
+
+    // Badly authenticated or empty requests must still reach the route
+    // (4xx), proving the path is mounted on the public listener.
+    for path in [
+        "/api/v1/email-challenges",
+        "/api/v1/vip-email-bindings/redeem",
+        "/api/v1/email-only-principals/redeem",
+        "/api/v1/mailbox-proofs/redeem",
+        "/api/v1/nip05-resolution",
+        "/api/v1/principal-resolution/satisfies-grant",
+    ] {
+        let status = post_status(app.clone(), path).await;
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} must be served publicly"
+        );
+    }
+}
+
+#[tokio::test]
+async fn public_router_never_serves_private_routes() {
+    let (app, _store, _mailer, _clock) = public_fixture();
+
+    for path in [
+        "/api/v1/mailbox-proofs/consume",
+        "/internal/v1/sites-notifications",
+        "/api/v1/operator/inspect",
+        "/api/v1/operator/agent-email-bindings",
+        "/api/v1/operator/account-principal-bindings",
+        "/api/v1/operator/brain/agent-resolution",
+        "/api/v1/operator/brain/user-resolution",
+        "/api/v1/operator/disable-binding",
+    ] {
+        let status = post_status(app.clone(), path).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} must stay loopback-only"
+        );
+    }
+}
+
+#[tokio::test]
+async fn public_satisfies_grant_requires_the_actor_signature() {
+    let (app, store, _mailer, _clock) = public_fixture();
+    store
+        .bind_vip_email(ALICE_EMAIL, ALICE_PUBKEY, NOW)
+        .expect("persist binding");
+    let client = IdentityClient::new(BASE_URL);
+
+    // Unsigned requests are rejected.
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/v1/principal-resolution/satisfies-grant",
+        serde_json::json!({ "grant": ALICE_EMAIL, "actor_pubkey": ALICE_PUBKEY }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A valid signature from a different key than actor_pubkey is rejected.
+    let bob = LocalIdentityKey::from_secret(BOB_SECRET).expect("bob key");
+    let request = client
+        .satisfies_grant(&bob, ALICE_EMAIL, ALICE_PUBKEY, NOW)
+        .expect("signed request");
+    let (status, _) = signed_json_request(app.clone(), request).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The actor's own signature resolves the grant.
+    let alice = LocalIdentityKey::from_secret(ALICE_SECRET).expect("alice key");
+    let request = client
+        .satisfies_grant(&alice, ALICE_EMAIL, ALICE_PUBKEY, NOW)
+        .expect("signed request");
+    let (status, body) = signed_json_request(app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["satisfied"], true);
+    assert_eq!(body["principal"]["kind"], "native");
+}
+
+#[tokio::test]
+async fn nip05_allows_cross_origin_reads_served_by_the_service() {
+    let (app, _store, _mailer, _clock) = fixture();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/nostr.json?name=nobody")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
 }

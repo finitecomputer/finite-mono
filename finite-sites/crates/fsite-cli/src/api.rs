@@ -85,22 +85,18 @@ impl IdentityAuthorityClient {
         }
     }
 
-    pub fn satisfies_grant(&self, grant: &str, actor_pubkey: &str) -> Result<bool, CliError> {
-        let url = format!(
-            "{}/api/v1/principal-resolution/satisfies-grant",
-            self.base_url
-        );
-        let response = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .send_json(serde_json::json!({
-                "grant": grant,
-                "actor_pubkey": actor_pubkey,
-            }));
-        let value: serde_json::Value = identity_response_json(
-            response,
-            "POST",
-            "/api/v1/principal-resolution/satisfies-grant",
-        )?;
+    pub fn satisfies_grant(
+        &self,
+        key: &KeyFile,
+        grant: &str,
+        actor_pubkey: &str,
+    ) -> Result<bool, CliError> {
+        let key = identity_key(key)?;
+        let request = self
+            .client
+            .satisfies_grant(&key, grant, actor_pubkey, now_unix())
+            .map_err(|error| CliError::Key(error.to_string()))?;
+        let value: serde_json::Value = self.send_signed_json(request)?;
         value
             .get("satisfied")
             .and_then(serde_json::Value::as_bool)

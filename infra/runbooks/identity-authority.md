@@ -115,15 +115,32 @@ curl --fail --silent \
 
 Expected health JSON identifies `finite-identity` with status `ok`. The
 two unknown NIP-05 requests must return byte-identical JSON with an empty
-`names` map, proving both public origins reach one Authority. Verify that
-private routes are not exposed:
+`names` map, proving both public origins reach one Authority. The daemon also
+serves the service-owned public surface (`public_router`) on a second loopback
+listener, which the Caddy edge proxies verbatim:
+
+```sh
+curl --fail --silent http://127.0.0.1:8791/health
+```
+
+Verify that private routes are not exposed, and that the public resolution
+route now authenticates callers (unsigned requests get 401, never 404):
 
 ```sh
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   https://identity.finite.vip/api/v1/operator/inspect)" = 404
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-  https://identity.finite.vip/api/v1/principal-resolution/satisfies-grant)" = 404
+  -X POST -H 'Content-Type: application/json' -d '{}' \
+  https://identity.finite.vip/api/v1/mailbox-proofs/consume)" = 404
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' -d '{}' \
+  https://identity.finite.vip/api/v1/principal-resolution/satisfies-grant)" = 401
 ```
+
+The full edge contract — every Identity Authority route the fsite CLI calls
+must answer non-404 — is checked by `just identity-edge-contract` (static) and
+`scripts/identity-edge-contract-gate.py` (live probe against production or a
+`--target` override).
 
 The final product acceptance is one normal managed-agent creation. The Runner
 must fetch the Runtime's public `agent_npub`, bind its Core-assigned managed
