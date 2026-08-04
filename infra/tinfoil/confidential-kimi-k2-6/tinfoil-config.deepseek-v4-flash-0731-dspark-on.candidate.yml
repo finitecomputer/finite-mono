@@ -1,6 +1,6 @@
-# Staging copy for the DeepSeek-V4-Flash-0731 measured release in
-# finitecomputer/confidential-kimi-k2-6. Creating its measured release and
-# deploying it still require explicit approval.
+# Retained diagnostic copy of the DeepSeek-V4-Flash-0731 DSpark configuration.
+# On 2026-08-04 it booted after the NCCL fallback but generated corrupt output;
+# it is not an acceptable production candidate.
 cvm-version: 0.10.8
 cpus: 32
 memory: 524288
@@ -40,6 +40,7 @@ containers:
         "--tensor-parallel-size",
         "8",
         "--enable-expert-parallel",
+        "--disable-custom-all-reduce",
         "--tokenizer-mode",
         "deepseek_v4",
         "--tool-call-parser",
@@ -58,7 +59,7 @@ containers:
         "--max-model-len",
         "393216",
         "--max-num-seqs",
-        "256",
+        "64",
         "--max-num-batched-tokens",
         "8192",
         "--gpu-memory-utilization",
@@ -79,7 +80,7 @@ containers:
       test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
       interval: 30s
       timeout: 5s
-      start_period: 120m
+      start_period: 45m
 
   - name: "finite-private-limiter"
     # Current production limiter pin retained to keep this a model-only cutover.
@@ -104,7 +105,7 @@ containers:
       test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]
       interval: 30s
       timeout: 5s
-      start_period: 120m
+      start_period: 45m
 
 shim:
   upstream-container: finite-private-limiter

@@ -41,6 +41,8 @@ def _without_dspark(lines: list[str]) -> list[str]:
     result: list[str] = []
     skip_next = False
     for line in lines:
+        if line.lstrip().startswith("#"):
+            continue
         if skip_next:
             if DSPARK_CONFIG not in line:
                 result.append(line)
@@ -70,6 +72,7 @@ def _validate_one(text: str, *, dspark: bool, release_ready: bool) -> list[str]:
         '"256"',
         '"--tensor-parallel-size"',
         '"--enable-expert-parallel"',
+        '"--disable-custom-all-reduce"',
         '"--tokenizer-mode"',
         '"--tool-call-parser"',
         '"--enable-auto-tool-choice"',
@@ -79,7 +82,7 @@ def _validate_one(text: str, *, dspark: bool, release_ready: bool) -> list[str]:
         '"--max-model-len"',
         '"393216"',
         '"--max-num-seqs"',
-        '"256"',
+        '"64"',
         '"--max-num-batched-tokens"',
         '"8192"',
         '"--gpu-memory-utilization"',
@@ -150,7 +153,7 @@ def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
 
     violations.extend(_validate_one(on_text, dspark=True, release_ready=release_ready))
     violations.extend(_validate_one(off_text, dspark=False, release_ready=release_ready))
-    if _without_dspark(on_text.splitlines()) != off_text.splitlines():
+    if _without_dspark(on_text.splitlines()) != _without_dspark(off_text.splitlines()):
         violations.append("DSpark-on/off candidates differ by more than speculative decoding")
     return violations
 

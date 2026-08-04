@@ -1,10 +1,9 @@
 # Finite Private: DeepSeek-V4-Flash-0731 cutover
 
-This is the planned-downtime procedure for replacing the current GLM 5.2
-model in the existing Finite Private Tinfoil enclave with the official
-`deepseek-ai/DeepSeek-V4-Flash-0731` checkpoint. The successful-path downtime
-target is one hour. Preparation, image proof, and measured satellite releases
-must finish before that hour starts.
+This is the planned-downtime procedure and execution record for replacing GLM
+5.2 in the existing Finite Private Tinfoil enclave with the official
+`deepseek-ai/DeepSeek-V4-Flash-0731` checkpoint. The cutover completed on
+2026-08-04 within the accepted maintenance window.
 
 This runbook cements the plan; it does not authorize creating releases or
 relaunching production. Those mutations require fresh explicit approval. The
@@ -20,15 +19,41 @@ supporting model/runtime evidence is in
 | KV cache | Explicitly FP8 |
 | Runtime | vLLM 0.26.0, the latest stable release verified on 2026-08-03, pinned by x86_64 image digest; never a nightly or a floating `latest` tag |
 | Context | Start at the service's existing 393,216-token ceiling, not the checkpoint's full 1M maximum |
-| Speculation | DSpark with target-model verification; do not use approximate `synthetic` rejection sampling |
+| Speculation | Disabled for production: vLLM 0.26.0 DSpark reproducibly corrupted generation on this H200 shape, while target-only inference was coherent |
 | Compatibility | Preserve the public endpoint, private-vLLM → limiter → shim topology, sealed secret names, Core accounting, and `glm-5-2` compatibility alias |
-| Rollback | Keep both a measured DSpark-off DeepSeek tag and the current measured GLM tag ready before downtime |
+| Concurrency | Cap active vLLM sequences at 64; treat 32 as the comfortable low-tail tier and 64 as tonight's tested maximum |
+| Rollback | Preserve measured GLM tag `v2026-07-02-glm-5-2-limiter-routing-1` while production runs measured DeepSeek tag `v2026-08-04-deepseek-v4-flash-0731-prod-no-dspark-1` |
+
+## Execution result — 2026-08-04
+
+Production is `ready` on eight H200s with measured Tinfoil config hash
+`5fde69b04860f1d4629d13070b1a5161d6686cd940dcab74079508955016bdfc`.
+The exact production config uses vLLM 0.26.0, TP8 plus expert parallel, FP8 KV,
+NCCL all-reduce fallback, target-only decoding, a 393,216-token service
+ceiling, and `--max-num-seqs 64`.
+
+The original DSpark candidate first failed during CUDA-graph capture in the
+custom all-reduce kernel. `--disable-custom-all-reduce` fixed startup by using
+NCCL, but DSpark output was still corrupt and had roughly 1% acceptance. With
+DSpark removed and every other target-runtime choice retained, exact and
+sampled chat, streaming, Responses, reasoning, tool selection and tool-result
+continuation all became coherent. The production alias `glm-5-2`, invalid-key
+rejection, Core health, a synchronous settlement delta, and a real Hermes CLI
+request also passed.
+
+The short production workload measured 52.1 aggregate generation tok/s at
+concurrency 1 and 308.2 tok/s at 32, approximately matching rather than
+doubling the recorded GLM baseline. Two 64-way production passes completed
+without HTTP failures and recovered healthy, but showed p99 first-byte latency
+of 35.2s and 67.2s. Therefore 64 is a tested maximum, not a comfortable
+advertised capacity. The isolated debug probe completed 128 but the 256 tier
+hit external connection resets and recovered; neither is a production target.
 
 The DeepSeek image replaces GLM-specific parser, sparse-attention, DCP, and
-MTP arguments with the official DeepSeek V4 flags. Its starting shape includes
+MTP arguments with the official DeepSeek V4 flags. Its production shape includes
 `--trust-remote-code`, `--kv-cache-dtype fp8`, `--block-size 256`, DeepSeek V4
-tokenizer/tool/reasoning parsers, H200-supported kernel defaults, and the
-official seven-token DSpark configuration. The official recipe's
+tokenizer/tool/reasoning parsers, H200-supported kernel defaults, NCCL
+all-reduce fallback, and no speculative configuration. The official recipe's
 `deep_gemm_mega_moe` and FP4 indexer-cache additions are Blackwell overrides;
 do not carry them onto this H200 deployment by assumption. Parallelism and
 scheduler limits must be recorded in the measured candidate; they are not
@@ -78,15 +103,14 @@ The replacement is acceptable only when all of these are true:
 
 1. Chat, streaming, tool calls, reasoning, Responses, auth rejection, Core
    reservation/settlement, and a real Hermes conversation pass.
-2. Concurrency 1, 4, 8, 16, and 32 completes without HTTP failures, stuck
+2. Concurrency 1, 4, 8, 16, 32, and 64 completes without HTTP failures, stuck
    reservations, or p99 time-to-first-byte reaching 90 seconds.
 3. The service remains at least as capable as GLM under the current load. A
    measured 2× aggregate-throughput improvement is the target; 3× is upside.
    A healthy result below 2× is recorded honestly and requires an operator
    decision, but is not an automatic rollback by itself.
-4. The exploratory 64, 128, and 256 tiers either pass or reveal a clean,
-   recoverable saturation boundary. They do not become advertised capacity
-   merely because a short test succeeds.
+4. Any exploratory tier above 64 is diagnostic only. It does not become
+   advertised capacity merely because a short test succeeds.
 
 ## Preconditions — finish before downtime
 
@@ -223,17 +247,17 @@ infra/runbooks/finite-private-ops.sh gate
 
 Do not continue if the before-state is already unhealthy or ambiguous.
 
-### 2. Launch DeepSeek with DSpark — minutes 0–20
+### 2. Launch measured target-only DeepSeek — minutes 0–25
 
-With fresh explicit approval, relaunch only the exact measured DSpark-on tag:
+With fresh explicit approval, launch only the exact measured production tag:
 
 ```bash
-export FINITE_PRIVATE_RELAUNCH_APPROVED='<approved-deepseek-dspark-tag>'
-infra/runbooks/finite-private-ops.sh relaunch '<approved-deepseek-dspark-tag>'
+export FINITE_PRIVATE_RELAUNCH_APPROVED='v2026-08-04-deepseek-v4-flash-0731-prod-no-dspark-1'
+infra/runbooks/finite-private-ops.sh relaunch "$FINITE_PRIVATE_RELAUNCH_APPROVED"
 infra/runbooks/finite-private-ops.sh wait-ready
 ```
 
-Minute 20 is the hard readiness decision point. If the model is not deeply
+Minute 25 is the hard readiness decision point. If the model is not deeply
 ready, workers crash/OOM, an image or model pin differs, or the limiter cannot
 reach both vLLM and Core, begin GLM rollback. This protects enough of the
 announced incident window for the known-good model to load.
@@ -285,7 +309,7 @@ infra/runbooks/finite-private-ops.sh load-sweep
 
 At every tier record p50/p95/p99 TTFB, p50/p95 completion latency, generated
 tokens/second per request and in aggregate, status/error counts, GPU memory and
-utilization, scheduler queue depth, and DSpark accepted-token efficiency.
+utilization, and scheduler queue depth.
 
 For the 64/128/256 probes, stop the sweep at the first tier that produces any
 non-2xx response or request timeout, p99 TTFB at or above 90 seconds, a worker
@@ -309,23 +333,19 @@ Compare DeepSeek with the recorded GLM baseline using the same workload:
 | Healthy and ≥2× aggregate throughput | Performance target met; continue observation |
 | Healthy and ≥3× aggregate throughput | Upside target met; continue observation |
 | Healthy, no current-load regression, but <2× | Do not call it a performance win; operator chooses keep or rollback |
-| Only an exploratory 64/128/256 tier saturates cleanly | Keep the last clean tier as evidence; no automatic rollback |
+| Only an exploratory 128/256 tier saturates cleanly | Keep 64 as the production ceiling; no automatic rollback |
 
 End maintenance only after a final real-client request streams successfully,
 its Core reservation settles, health remains deep-ready, and the exact running
 measured tag/hash is recorded. Continue watching errors, latency, queue depth,
 GPU health, and reservation age after traffic returns.
 
-## DSpark-off fallback
+## DSpark follow-up
 
-Use the prepared measured DSpark-off release only when DeepSeek is otherwise
-healthy but DSpark itself produces a reproducible compatibility, stability, or
-performance problem. This is a second model relaunch and may exceed the
-one-hour target. Re-run the full functional smoke and at least concurrency 1,
-8, and 32; do not infer DSpark-off safety from the DSpark-on result.
-
-If the base DeepSeek runtime, model load, protocol surface, limiter, or
-accounting is unhealthy, skip this fallback and return directly to GLM.
+Do not re-enable DSpark in production from the 2026-08-03 measured tag. A
+future attempt requires an upstream fix or a new isolated candidate that
+passes exact-output comparison before any performance work. Keep target-only
+decoding as the authority until that proof exists.
 
 ## GLM rollback
 

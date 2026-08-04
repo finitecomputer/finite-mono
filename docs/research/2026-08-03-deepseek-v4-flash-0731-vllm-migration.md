@@ -5,6 +5,14 @@ GPU model while retaining the vLLM/private-limiter topology. This is a
 decision note, not authorization to build, measure, release, or relaunch an
 enclave.
 
+> Execution update (2026-08-04): production is now ready on measured tag
+> `v2026-08-04-deepseek-v4-flash-0731-prod-no-dspark-1`. DSpark was rejected
+> after reproducible corrupt output on vLLM 0.26.0/H200; target-only decoding
+> with FP8 KV, NCCL all-reduce fallback, TP8, and expert parallel passed
+> protocol, output, Hermes, settlement, and concurrency checks through 64.
+> Short-workload performance matched GLM at concurrency 1 and 32 rather than
+> reaching the hoped-for 2–3× improvement.
+
 ## Bottom line
 
 The claim is real, but the names have two different meanings:
