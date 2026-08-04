@@ -1,0 +1,11 @@
+# Repo-wide pnpm safety policy. Keep dependency installs scoped to the app
+# directories that already own their lockfiles.
+minimumReleaseAge: 10080
+recursiveInstall: false
+sharedWorkspaceLockfile: false
+
+packages:
+  - finitecomputer-v2/apps/dashboard
+  - finitechat/apps/electron-chat
+  - finitechat/packages/finitechat-chat-ui
+  - finite-sites/examples/nextjs-demo
