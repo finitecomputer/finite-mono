@@ -7,13 +7,15 @@ Tinfoil still requires the released `tinfoil-config.yml` at the satellite repo
 root.
 
 The candidate follows upstream
-[`tinfoilsh/confidential-glm5-2` v0.0.17](https://github.com/tinfoilsh/confidential-glm5-2/releases/tag/v0.0.17),
-commit `84b2e80`, for the model-side changes:
+[`tinfoilsh/confidential-glm5-2` v0.0.19](https://github.com/tinfoilsh/confidential-glm5-2/releases/tag/v0.0.19),
+commit `b9988c3`, for the model-side changes:
 
 - CVM `0.10.8`;
-- the v0.0.17 model image digest
-  `sha256:0a73ccd09e52d63ef101ac2911e54760b58ca6e0596cadfd219e096d54b1a396`,
-  which incorporates the vLLM 0.24 base update;
+- the v0.0.19 model image digest
+  `sha256:387c1ce5c64e31cc895d25cc73d96469ba61a8a3047414c1cbf0f00cfd5d578a`,
+  which uses the digest-pinned vLLM 0.26.0 Ubuntu 24.04 base;
+- Tinfoil's GLM sparse-MLA DCP/FP8 and reasoning-boundary patches;
+- the confidential-compute all-reduce safeguards from upstream v0.0.19;
 - `--enable-prompt-tokens-details`; and
 - `--max-num-seqs 32` for bounded concurrency/backpressure.
 
@@ -29,7 +31,7 @@ Finite-specific topology is intentionally preserved:
   `/ready` remain operator rollout gates; and
 - the optional limiter watchdog remains disabled.
 
-Upstream v0.0.17 added Tinfoil shim authentication to `/metrics`. That is not
+Upstream v0.0.19 uses Tinfoil shim authentication. That is not
 copied: Finite's shim must remain unauthenticated so the limiter can validate
 the Finite API key and perform reserve/settle accounting. Making the outer shim
 authenticated would replace, not strengthen, that product boundary. Metrics

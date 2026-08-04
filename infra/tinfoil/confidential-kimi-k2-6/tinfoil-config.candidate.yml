@@ -20,7 +20,7 @@ networks:
 
 containers:
   - name: "glm-5-2"
-    image: "ghcr.io/tinfoilsh/confidential-glm5-2@sha256:0a73ccd09e52d63ef101ac2911e54760b58ca6e0596cadfd219e096d54b1a396" # upstream v0.0.17, commit 84b2e80
+    image: "ghcr.io/tinfoilsh/confidential-glm5-2@sha256:387c1ce5c64e31cc895d25cc73d96469ba61a8a3047414c1cbf0f00cfd5d578a" # upstream v0.0.19, commit b9988c3
     runtime: nvidia
     gpus: all
     restart: always
@@ -28,6 +28,7 @@ containers:
       - PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       - RUNAI_STREAMER_MEMORY_LIMIT: "4294967296"
       - RUNAI_STREAMER_CONCURRENCY: "8"
+      - VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
     command:
       [
         "--model",
@@ -57,6 +58,8 @@ containers:
         "--load-format",
         "runai_streamer",
         "--disable-custom-all-reduce",
+        "--compilation-config",
+        '{"pass_config":{"fuse_allreduce_rms":false}}',
         "--max-model-len",
         "393216",
         "--max-num-seqs",
