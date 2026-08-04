@@ -2,6 +2,12 @@
 
 ## DeepSeek-V4-Flash-0731 preparation
 
+The 2026-08-04 attempt is preserved here for a later retry. DeepSeek was
+measured and exercised in production, then production was deliberately rolled
+back to GLM 5.2. Keep these candidates, the satellite branch, and their release
+tags as evidence; do not merge the DeepSeek model/runtime-default changes while
+GLM remains the production authority.
+
 The two `tinfoil-config.deepseek-v4-flash-0731-*.candidate.yml` files stage the
 planned model-only replacement described in
 [`finite-private-deepseek-v4-flash-0731-cutover.md`](../../runbooks/finite-private-deepseek-v4-flash-0731-cutover.md):

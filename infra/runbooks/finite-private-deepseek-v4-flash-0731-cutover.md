@@ -5,6 +5,15 @@ This is the planned-downtime procedure and execution record for replacing GLM
 `deepseek-ai/DeepSeek-V4-Flash-0731` checkpoint. The cutover completed on
 2026-08-04 within the accepted maintenance window.
 
+> **Current status (2026-08-04): rolled back and preserved for a later
+> attempt.** DeepSeek reached production readiness and passed the recorded
+> protocol/load checks, but the operator chose to restore GLM 5.2. Production
+> was relaunched to the prior measured GLM release
+> `v2026-07-02-glm-5-2-limiter-routing-1`. This branch, its satellite branch,
+> and all measured DeepSeek release tags remain the evidence and restart point;
+> none of the DeepSeek runtime-default changes should merge while GLM is the
+> production model.
+
 This runbook cements the plan; it does not authorize creating releases or
 relaunching production. Those mutations require fresh explicit approval. The
 supporting model/runtime evidence is in
