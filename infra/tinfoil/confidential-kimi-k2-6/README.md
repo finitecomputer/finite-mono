@@ -1,5 +1,14 @@
 # Finite Private next measured config
 
+> **Rejected production candidate (2026-08-04).** Upstream GLM v0.0.19 on
+> vLLM 0.26.0 reached deep readiness and passed chat, streaming, Responses,
+> authentication, and single-request load checks. The measured 32-sequence
+> release restarted the GLM worker during a 32-way load canary. A second
+> measured release capped at 16 sequences, but its worker restarted during the
+> first 8-way load canary. Production was therefore restored to the prior
+> known-good measured GLM release. Do not promote either vLLM 0.26 candidate
+> without an upstream/root-cause fix and a fresh measured load proof.
+
 `tinfoil-config.candidate.yml` is the reviewed source for the next update to
 the public `finitecomputer/confidential-kimi-k2-6` satellite. It is staged in
 mono so the product, limiter, and enclave changes can be reviewed together.
@@ -17,9 +26,9 @@ commit `b9988c3`, for the model-side changes:
 - Tinfoil's GLM sparse-MLA DCP/FP8 and reasoning-boundary patches;
 - the confidential-compute all-reduce safeguards from upstream v0.0.19;
 - `--enable-prompt-tokens-details`; and
-- `--max-num-seqs 16` for bounded concurrency/backpressure. The initial
-  vLLM 0.26 production canary at 32 caused the GLM worker to restart, so 32 is
-  not an accepted serving ceiling for this image.
+- `--max-num-seqs 16` for the second bounded concurrency/backpressure attempt.
+  Both 32 and 16 were rejected by the production results above; this file is
+  retained as evidence, not as a deployable recommendation.
 
 Finite-specific topology is intentionally preserved:
 
