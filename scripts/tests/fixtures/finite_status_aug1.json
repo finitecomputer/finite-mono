@@ -146,5 +146,16 @@
       {"event": "entry_postflight", "phase": "execute", "status": "succeeded", "agent_runtime_id": "runtime-lat1-straggler-02", "timestamp": "2026-08-01T10:34:00Z"},
       {"event": "final", "phase": "execute", "status": "failure", "exit_code": 17, "timestamp": "2026-08-01T10:35:00Z"}
     ]
+  },
+  "lifecycle_probe": {
+    "binary": "/run/current-system/sw/bin/finite-saas-runner",
+    "schema": "finite.lifecycle-probe.v1",
+    "available": true,
+    "agents": {
+      "runtime-lat1-target-01": {"verdict": "operable", "reason": null},
+      "runtime-lat1-straggler-01": {"verdict": "inoperable", "reason": "orphaned_task"},
+      "runtime-lat1-target-02": {"verdict": "unknown", "reason": "task_list_error"}
+    },
+    "errors": []
   }
 }

@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use finite_saas_runner::lifecycle_probe::{
+    LifecycleProbeConfig, LifecycleProbeRequest, probe_runtime_lifecycle,
+};
 use finite_saas_runner::phala::PhalaApiClient;
 use finite_saas_runner::{
     AgentCreationRunner, AgentIdentityAuthorityConfig, AppleContainerConfig,
@@ -52,6 +55,21 @@ enum Command {
         #[arg(long)]
         path: PathBuf,
     },
+    /// Probe one Kata Runtime's lifecycle-control health without mutating it.
+    ///
+    /// The probe is read-only by construction and exits 0 with a
+    /// `finite.lifecycle-probe.v1` JSON report for every completed probe,
+    /// including `unknown` verdicts. A nonzero exit means the probe itself
+    /// could not run.
+    #[command(name = "lifecycle-probe")]
+    LifecycleProbe {
+        #[arg(long)]
+        project_id: String,
+        #[arg(long)]
+        agent_runtime_id: String,
+        #[arg(long)]
+        source_machine_id: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -65,7 +83,56 @@ fn main() -> Result<()> {
             println!("{}", durable_state_manifest_sha256(&path)?);
             Ok(())
         }
+        Command::LifecycleProbe {
+            project_id,
+            agent_runtime_id,
+            source_machine_id,
+        } => lifecycle_probe(&project_id, &agent_runtime_id, &source_machine_id),
     }
+}
+
+fn lifecycle_probe(
+    project_id: &str,
+    agent_runtime_id: &str,
+    source_machine_id: &str,
+) -> Result<()> {
+    for (label, value) in [
+        ("--project-id", project_id),
+        ("--agent-runtime-id", agent_runtime_id),
+        ("--source-machine-id", source_machine_id),
+    ] {
+        if value.trim().is_empty()
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            bail!("{label} must be a simple identifier");
+        }
+    }
+    let config = LifecycleProbeConfig {
+        nerdctl_bin: optional_path("FC_RUNNER_KATA_NERDCTL_BIN", "nerdctl"),
+        ctr_bin: optional_path("FC_RUNNER_KATA_CTR_BIN", "ctr"),
+        namespace: optional_env("FC_RUNNER_KATA_NAMESPACE", "finite"),
+        source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
+        work_root: required_path("FC_RUNNER_WORK_ROOT")?,
+        sandbox_root: optional_path(
+            "FC_RUNNER_KATA_SANDBOX_ROOT",
+            "/run/kata-containers/shared/sandboxes",
+        ),
+        netns_root: optional_path("FC_RUNNER_KATA_NETNS_ROOT", "/var/run/netns"),
+        proc_root: optional_path("FC_RUNNER_KATA_PROC_ROOT", "/proc"),
+        command_timeout: Duration::from_secs(optional_u64("FC_RUNNER_COMMAND_TIMEOUT_SECS", 15)?),
+    };
+    let report = probe_runtime_lifecycle(
+        &config,
+        &LifecycleProbeRequest {
+            project_id: project_id.to_string(),
+            agent_runtime_id: agent_runtime_id.to_string(),
+            source_machine_id: source_machine_id.to_string(),
+        },
+    );
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 fn phala_workspace_identity() -> Result<()> {

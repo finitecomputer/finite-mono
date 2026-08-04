@@ -1,0 +1,32 @@
+#!/bin/sh
+# Read-only fake ctr for lifecycle-probe fixtures. The ONLY supported
+# invocation is the probe's no-op status read: `ctr --namespace <ns> tasks
+# list`. Anything else (kill, delete, ...) is recorded in
+# fake-state/mutations.log and rejected with exit 42.
+#
+# Behavior knobs under ./fake-state next to this script:
+#   tasks        full task table printed verbatim (TASK/PID/STATUS columns)
+#   tasks-error  printed to stderr with exit 1, e.g. the incident's
+#                "ttrpc: closed" control-channel failure
+set -eu
+state="$(dirname "$0")/fake-state"
+mkdir -p "$state"
+if [ "${1:-}" = "--namespace" ]; then shift 2; fi
+cmd="${1:-} ${2:-}"
+printf '%s\n' "$cmd" >>"$state/commands.log"
+case "$cmd" in
+  "tasks list")
+    if [ -f "$state/tasks-error" ]; then
+      cat "$state/tasks-error" >&2
+      exit 1
+    fi
+    if [ -f "$state/tasks" ]; then
+      cat "$state/tasks"
+    fi
+    ;;
+  *)
+    printf '%s\n' "$cmd" >>"$state/mutations.log"
+    echo "fixture ctr rejects non-read verb: $cmd" >&2
+    exit 42
+    ;;
+esac

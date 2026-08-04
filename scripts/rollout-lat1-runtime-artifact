@@ -615,19 +615,22 @@ record_final() {
 # Terminal state is derived from this run's ledger, never asserted by the
 # driver: any failed entry means failure, absent entries without failures mean
 # interrupted (the first absent entry is the resume point), and a plan with
-# zero planned entries is a noop, never a success.
+# zero planned entries is a noop, never a success. An entry the lifecycle
+# probe deliberately skipped is neither passed nor absent: it is recorded
+# progress and does not interrupt the run.
 derive_run_terminal() {
   jq -cs --argjson planned "$PLAN_PLANNED_KEYS" --arg run_id "$RUN_ID" '
     [.[] | select(.run_id == $run_id)] as $run
     | ([$run[] | select(.event == "entry_postflight" and .status == "succeeded") | .project_id + "/" + .agent_runtime_id] | unique) as $passed
     | ([$run[] | select((.event == "entry_preflight" or .event == "core" or .event == "entry_postflight") and .status == "failed") | .project_id + "/" + .agent_runtime_id] | unique) as $failed
+    | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "skipped") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_skipped
     | ([$run[] | select(.event != "final" and .status == "failed")] | length > 0) as $any_failed
-    | ($planned - $passed - $failed) as $absent
+    | ($planned - $passed - $failed - $probe_skipped) as $absent
     | (if $any_failed then {status:"failure", failed_entries:$failed}
        elif ($planned | length) == 0 then {status:"noop"}
        elif ($absent | length) > 0 then {status:"interrupted", resume_point:$absent[0]}
        else {status:"success"} end)
-    | . + {planned_count:($planned | length), passed_count:($passed | length), failed_count:($failed | length), absent_count:($absent | length)}
+    | . + {planned_count:($planned | length), passed_count:($passed | length), failed_count:($failed | length), absent_count:($absent | length), probe_skipped:($probe_skipped | length)}
   ' "$EVENTS_FILE"
 }
 
@@ -743,14 +746,15 @@ summarize_one_plan() {
         | ([$run[] | select(.event == "final")] | last) as $final
         | ([$run[] | select(.event == "entry_postflight" and .status == "succeeded") | .project_id + "/" + .agent_runtime_id] | unique) as $passed
         | ([$run[] | select((.event == "entry_preflight" or .event == "core" or .event == "entry_postflight") and .status == "failed") | .project_id + "/" + .agent_runtime_id] | unique) as $failed
-        | ($planned - $passed - $failed) as $absent
+        | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "skipped") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_skipped
+        | ($planned - $passed - $failed - $probe_skipped) as $absent
         | (if $final == null then "unknown/incomplete"
            elif $phase != "execute" then $final.status
            elif ($failed | length) > 0 or ([$run[] | select(.event != "final" and .status == "failed")] | length) > 0 then "failure"
            elif ($planned | length) == 0 then "noop"
            elif ($absent | length) > 0 then "interrupted"
            else "success" end) as $terminal
-        | "plan \($plan_hash) run \($run_id) phase=\($phase) terminal=\($terminal) recorded=\($final.status // "none") planned=\($planned | length) passed=\($passed | length) failed=\($failed | length) absent=\($absent | length) resume=\($absent[0] // "-")"
+        | "plan \($plan_hash) run \($run_id) phase=\($phase) terminal=\($terminal) recorded=\($final.status // "none") planned=\($planned | length) passed=\($passed | length) failed=\($failed | length) absent=\($absent | length) probe_skipped=\($probe_skipped | length) resume=\($absent[0] // "-")"
       end
   '
 }
@@ -800,10 +804,9 @@ inspect_one_entry() {
 # it: an entry Core already records on the target artifact is verified and
 # skipped instead of re-enqueued. Core's enqueue is idempotent per (Runtime,
 # kind, target), so an identical upgrade request still in flight is returned
-# and awaited by the normal execute path instead of being duplicated. A future
-# non-mutating lifecycle probe (a read of runtime_control_requests) plugs in
-# here to distinguish attach-to-in-flight from a fresh enqueue without issuing
-# anything.
+# and awaited by the normal execute path instead of being duplicated. Upgrade
+# eligibility is then gated by entry_lifecycle_probe below: Core state alone
+# cannot see an orphaned containerd task or a dead shim control channel.
 entry_lifecycle_signal() {
   local entry="$1"
   local project_id runtime_id machine_id target_artifact_id
@@ -841,6 +844,54 @@ entry_lifecycle_signal() {
     }
 }
 
+# Consult the runner's read-only lifecycle probe for one planned entry. The
+# probe proves the platform can still stop or replace the guest (control-state
+# consistency, containerd task liveness, duplicate writers); an HTTP 200 from
+# the Agent endpoint never could. On success the probe report is printed and
+# the caller reads the verdict from it. Any transport or shape failure is a
+# single "probe unavailable" condition (nonzero return, no output): rollouts
+# must not hard-fail because the probe itself is down.
+entry_lifecycle_probe() {
+  local entry="$1"
+  local project_id runtime_id machine_id
+  project_id="$(jq -r '.project_id' <<<"$entry")"
+  runtime_id="$(jq -r '.agent_runtime_id' <<<"$entry")"
+  machine_id="$(jq -r '.source_machine_id' <<<"$entry")"
+  local probe_script report status
+  read -r -d '' probe_script <<'REMOTE' || true
+set -euo pipefail
+[[ ${1:-} == provider-lifecycle-probe-v1 ]] || exit 64
+project_id="$2"
+runtime_id="$3"
+machine_id="$4"
+set -a
+. /etc/finite/runner.env
+set +a
+exec /run/current-system/sw/bin/finite-saas-runner lifecycle-probe \
+  --project-id "$project_id" --agent-runtime-id "$runtime_id" --source-machine-id "$machine_id"
+REMOTE
+  set +e
+  report="$(run_remote_bash "$RUNNER_DEST" "$probe_script" provider-lifecycle-probe-v1 "$project_id" "$runtime_id" "$machine_id")"
+  status=$?
+  set -e
+  ((status == 0)) || return 1
+  jq -e \
+    --arg project "$project_id" \
+    --arg runtime "$runtime_id" \
+    --arg machine "$machine_id" '
+      . as $report
+      | $report.schema == "finite.lifecycle-probe.v1"
+      and $report.runtime.project_id == $project
+      and $report.runtime.agent_runtime_id == $runtime
+      and $report.runtime.source_machine_id == $machine
+      and ($report.verdict | IN("operable", "degraded", "inoperable", "unknown"))
+      and ($report.reason == null or ($report.reason | type == "string" and length > 0))
+      and ($report.checks | type == "array")
+      and all($report.checks[]; (.name | type == "string") and (.status | IN("pass", "fail", "skip")))
+    ' <<<"$report" >/dev/null || return 1
+  printf '%s' "$report"
+}
+
 execute_exact_plan() {
   local reviewed_plan="$1"
   local entry project_id runtime_id source_host_id machine_id target_artifact_id approved signal observed result result_status post
@@ -875,6 +926,27 @@ execute_exact_plan() {
       append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson provider_facts "$post" '{event:"entry_postflight", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", reconcile:"already_on_target", provider_facts:$provider_facts}')"
       echo "==> already on target; verified $project_id ($runtime_id)"
       continue
+    fi
+
+    # Gate upgrade eligibility on lifecycle-control health. A non-operable
+    # verdict is a deliberate skip, never an error: the Agent keeps serving
+    # its current artifact and the run ledger records the evidence. When the
+    # probe itself is unreachable, keep today's Core-state behavior and mark
+    # the entry evidence as probe-unavailable.
+    local probe_report probe_verdict probe_reason
+    if probe_report="$(entry_lifecycle_probe "$entry")"; then
+      probe_verdict="$(jq -r '.verdict' <<<"$probe_report")"
+      if [[ $probe_verdict == operable ]]; then
+        append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", verdict:"operable"}')"
+      else
+        probe_reason="$(jq -r '.reason // "unspecified"' <<<"$probe_report")"
+        append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --arg verdict "$probe_verdict" --arg reason "$probe_reason" --argjson probe "$probe_report" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"skipped", verdict:$verdict, reason:$reason, probe:$probe}')"
+        echo "==> lifecycle probe verdict $probe_verdict ($probe_reason); deliberately skipping $project_id ($runtime_id), which keeps serving its current artifact"
+        continue
+      fi
+    else
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"unavailable", detail:"lifecycle probe unreachable; keeping Core-state behavior"}')"
+      echo "==> lifecycle probe unavailable for $project_id ($runtime_id); proceeding on Core-state evidence alone"
     fi
 
     observed="$(inspect_one_entry "$entry")"
