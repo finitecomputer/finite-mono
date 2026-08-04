@@ -13,6 +13,15 @@ This is the planned-downtime procedure and execution record for replacing GLM
 > and all measured DeepSeek release tags remain the evidence and restart point;
 > none of the DeepSeek runtime-default changes should merge while GLM is the
 > production model.
+>
+> Rollback verification completed at 2026-08-04 09:33 UTC. Tinfoil reported
+> the exact prior tag as `ready`; `/live`, deep `/health`, invalid-key
+> rejection, chat, streaming, Responses, repeated caller IDs, and a real
+> Hermes CLI turn passed. The bounded 32-way canary completed 32/32 with p99
+> TTFB 7.098 seconds and 256.374 aggregate generation tokens/second, followed
+> by healthy single-request recovery. Core recorded all 40 rollback-verification
+> requests as actual settlements with zero remaining `reserved` rows for the
+> dedicated canary key.
 
 This runbook cements the plan; it does not authorize creating releases or
 relaunching production. Those mutations require fresh explicit approval. The
