@@ -108,26 +108,44 @@ an unowned path selected all eight. An invalid Git range failed detection.
 
 ### 5. Validate the hard cut
 
-- [ ] Open a docs-only fixture pull request and verify only `changes` and
+- [x] Open a docs-only fixture pull request and verify only `changes` and
   `CI gate` execute successfully.
-- [ ] Open a dashboard-only fixture pull request and verify only `dashboard`,
+- [x] Open a dashboard-only fixture pull request and verify only `dashboard`,
   `nix-checks`, and `devfinity-smoke` execute between `changes` and `CI gate`.
-- [ ] Open a fixture pull request touching Rust or workflow code and verify all
+- [x] Open a fixture pull request touching Rust or workflow code and verify all
   eight existing jobs execute.
-- [ ] Deliberately fail one selected job and verify `CI gate` fails.
-- [ ] Verify cancellation of a selected job cannot produce a green gate.
-- [ ] Record the wall time and aggregate job-minutes for the three MVP cases.
+- [x] Deliberately fail one selected job and verify `CI gate` fails.
+- [x] Verify cancellation of a selected job cannot produce a green gate.
+- [x] Record the wall time and aggregate job-minutes for the three MVP cases.
+
+Live validation used temporary PR #390, which was closed without merging.
+Docs-only completed in 17 seconds wall time and 12 seconds of aggregate job
+execution. Dashboard-only completed in 7 minutes 21 seconds wall time and 13
+minutes 5 seconds of aggregate execution. The full route selected and executed
+all eight harnesses; its first attempt took 65 minutes 58 seconds wall time and
+41 minutes 21 seconds of aggregate execution. Seven harnesses passed, while the
+Brain matrix twice failed an existing Apple Container runtime readiness check;
+`CI gate` failed closed both times. A separate deliberately failing Dashboard
+fixture also made `CI gate` fail. Cancellation was covered by the isolated
+gate-result validation because GitHub does not expose single-job cancellation.
 
 ### 6. Switch merge enforcement
 
-- [ ] Confirm the exact check name emitted by GitHub is `CI gate`.
+- [x] Confirm the exact check name emitted by GitHub is `CI gate`.
 - [ ] Enable the repository ruleset or branch protection requiring only
   `CI gate` for pull requests to `main`.
 - [ ] Do not retain the eight individual jobs as required checks in parallel.
 - [ ] Confirm a new docs-only pull request can merge after its gate succeeds.
 - [ ] Confirm a failed full-suite pull request cannot merge.
-- [ ] Document rollback as removing the job conditions so all eight jobs run;
+- [x] Document rollback as removing the job conditions so all eight jobs run;
   do not weaken the gate's success rules.
+
+Activation order is part of the safety contract: prepare the `main` ruleset
+with only the GitHub Actions `CI gate` check while leaving it disabled, merge
+the workflow so `main` can emit that check, and only then activate the ruleset.
+Activating it earlier would block every pull request whose base workflow cannot
+yet emit `CI gate`. Rollback removes the eight job-level conditions to restore
+the legacy full-suite behavior while keeping `CI gate` fail-closed.
 
 ## MVP Exit Criteria
 
