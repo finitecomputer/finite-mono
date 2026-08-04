@@ -1,5 +1,44 @@
 # Finite Private next measured config
 
+## DeepSeek-V4-Flash-0731 preparation
+
+The two `tinfoil-config.deepseek-v4-flash-0731-*.candidate.yml` files stage the
+planned model-only replacement described in
+[`finite-private-deepseek-v4-flash-0731-cutover.md`](../../runbooks/finite-private-deepseek-v4-flash-0731-cutover.md):
+
+- official model revision
+  `deepseek-ai/DeepSeek-V4-Flash-0731@7872f01b1d1fe23eabc4c98b48bffcef5a386062`;
+- official vLLM 0.26.0 linux/amd64 image digest
+  `sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b`;
+- eight-H200 tensor + expert parallelism, FP8 KV cache, 393,216-token service
+  ceiling, DeepSeek V4 parsers, and both the canonical model name and retained
+  `glm-5-2` request alias;
+- identical DSpark-on and DSpark-off candidates, differing only by the exact
+  verified speculative-decoding argument; and
+- the current production limiter digest and public limiter/shim topology,
+  keeping this a model-only change.
+
+The official vLLM image is used directly because Tinfoil's existing
+DeepSeek-V4-Pro enclave demonstrates that pattern; there is no Finite-specific
+model-image fork or patch to maintain. Before release, prove the pinned image
+reports vLLM 0.26.0 on linux/amd64.
+
+Both files intentionally contain `REPLACE_WITH_TINFOIL_*` modelwrap
+placeholders. Prepare the pinned Hugging Face revision in **Tinfoil
+Containers → Models**, copy the generated `mpk` exactly, and use its root hash
+in the `/tinfoil/mpk/mpk-...` path. The prep contract accepts the explicit
+placeholders; the release-ready gate fails until they are replaced:
+
+```bash
+just finite-private-deepseek-contract
+python3 scripts/check_finite_private_deepseek_candidate.py --release-ready
+```
+
+Do not copy either file to the satellite root, create a release, or relaunch
+the enclave merely because the prep contract passes.
+
+## Existing GLM/limiter candidate
+
 `tinfoil-config.candidate.yml` is the reviewed source for the next update to
 the public `finitecomputer/confidential-kimi-k2-6` satellite. It is staged in
 mono so the product, limiter, and enclave changes can be reviewed together.

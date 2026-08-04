@@ -205,6 +205,10 @@ jobs:
         run: nix develop --command just lat1-secret-bootstrap-contract
       - name: lat2 runner guardrails contract
         run: nix develop --command just lat2-runner-guardrails-contract
+      - name: Finite Private load-sweep contract
+        run: nix develop --command just finite-private-load-contract
+      - name: Finite Private DeepSeek candidate contract
+        run: nix develop --command just finite-private-deepseek-contract
       - name: Evaluate production NixOS configuration
         run: nix eval .#nixosConfigurations.finite-lat-1.config.system.build.toplevel.drvPath
 

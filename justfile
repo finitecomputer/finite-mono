@@ -124,6 +124,16 @@ lat2-runner-guardrails-contract:
     bash -n infra/hosts/lat2/configure-runner-linger infra/hosts/lat2/restart-idle-runner infra/hosts/lat2/runner-maintenance
     python3 -m unittest scripts.tests.test_lat2_runner_guardrails
 
+# Guarded Finite Private concurrency sweep and synthetic streaming-metrics proof.
+finite-private-load-contract:
+    bash -n infra/runbooks/finite-private-ops.sh
+    python3 -m unittest scripts.tests.test_finite_private_ops
+
+# Exact model/runtime/topology pins for the staged DeepSeek Tinfoil candidates.
+finite-private-deepseek-contract:
+    python3 scripts/check_finite_private_deepseek_candidate.py --release-ready
+    python3 -m unittest scripts.tests.test_finite_private_deepseek_candidate
+
 # Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
 brain-product-matrix:
     bash scripts/tests/test_devfinity_brain_readiness.sh

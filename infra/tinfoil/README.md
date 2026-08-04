@@ -13,7 +13,7 @@ is to be measurable.
 
 | Repo | Enclave | Inputs pinned from mono |
 |---|---|---|
-| `finitecomputer/confidential-kimi-k2-6` | Finite Private inference (glm-5-2 vLLM, 8×GPU) + finite-private-limiter shim (:8002) | Legacy image today. The staged v0.0.17 + mono-limiter candidate is under `infra/tinfoil/confidential-kimi-k2-6/`; its limiter digest remains an intentional release blocker until built from the exact merged mono SHA. |
+| `finitecomputer/confidential-kimi-k2-6` | Finite Private inference (currently glm-5-2 vLLM, 8×GPU) + finite-private-limiter shim (:8002) | Legacy image today. The staged GLM v0.0.17 + mono-limiter candidate and separate model-only DeepSeek-V4-Flash-0731 DSpark-on/off candidates are under `infra/tinfoil/confidential-kimi-k2-6/`; DeepSeek remains blocked on its Tinfoil modelwrap MPK and explicit release approval. |
 | `finitecomputer/finite-searxng-tinfoil` | Token-gated SearXNG | Config/proxy sources under `finite-search/tinfoil/searxng-public/` in this repo (that dir mirrors the satellite's content, including its release workflows). |
 | `finitecomputer/tinfoil-agent-runtime-canary` | Agent runtime canary | The same `ghcr.io/finitecomputer/agent-runtime@sha256:...` digest proved and published by the canonical mono workflows; no Hermes-only rebuild. |
 

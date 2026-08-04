@@ -13,6 +13,9 @@ MODEL="${FINITE_PRIVATE_MODEL:-glm-5-2}"
 TIMEOUT_SECS="${FINITE_PRIVATE_CANARY_TIMEOUT_SECS:-180}"
 READY_TIMEOUT_SECS="${FINITE_PRIVATE_READY_TIMEOUT_SECS:-4200}"
 LOAD_MAX_FIRST_BYTE_SECS="${FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS:-90}"
+LOAD_CONCURRENCY="${FINITE_PRIVATE_LOAD_CONCURRENCY:-32}"
+LOAD_MAX_TOKENS="${FINITE_PRIVATE_LOAD_MAX_TOKENS:-64}"
+LOAD_SWEEP_APPROVAL="1,4,8,16,32,64,128,256"
 
 usage() {
   cat >&2 <<'EOF'
@@ -26,7 +29,8 @@ Read-only commands:
   stream-canary       Run chat streaming through the terminal SSE [DONE].
   responses-canary    Run an authenticated non-streaming /v1/responses canary.
   repeated-id-canary  Send two calls with one caller x-request-id.
-  load-canary         Run 32 concurrent short calls and enforce first-byte headroom.
+  load-canary [N]     Run N concurrent streaming calls (default 32) and report latency/throughput.
+  load-sweep          Run the guarded 1,4,8,16,32,64,128,256 maintenance-window sweep.
   negative-canary     Confirm an invalid Finite key is rejected.
   gate                Run status, live, health, negative-canary, and canary.
   wait-ready          Poll status and deep health until ready.
@@ -43,6 +47,9 @@ Environment:
   FINITE_PRIVATE_CANARY_TIMEOUT_SECS   default: 180
   FINITE_PRIVATE_READY_TIMEOUT_SECS    default: 4200
   FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS default: 90
+  FINITE_PRIVATE_LOAD_CONCURRENCY        default: 32
+  FINITE_PRIVATE_LOAD_MAX_TOKENS         default: 64
+  FINITE_PRIVATE_LOAD_SWEEP_APPROVED     must equal 1,4,8,16,32,64,128,256 for N > 32 or load-sweep
   FINITE_PRIVATE_RELAUNCH_APPROVED     must equal the exact TAG for relaunch
 EOF
 }
@@ -224,6 +231,13 @@ repeated_id_canary() {
   trap - RETURN
 }
 
+require_load_sweep_approval() {
+  if [ "${FINITE_PRIVATE_LOAD_SWEEP_APPROVED:-}" != "$LOAD_SWEEP_APPROVAL" ]; then
+    echo "refusing high-concurrency load: set FINITE_PRIVATE_LOAD_SWEEP_APPROVED=$LOAD_SWEEP_APPROVAL" >&2
+    exit 64
+  fi
+}
+
 load_canary() {
   require_command curl
   require_command python3
@@ -234,57 +248,194 @@ load_canary() {
   fi
   require_positive_integer FINITE_PRIVATE_CANARY_TIMEOUT_SECS "$TIMEOUT_SECS"
   require_positive_integer FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS "$LOAD_MAX_FIRST_BYTE_SECS"
-  local curl_config payload_file result_dir batch_id
+  local concurrency="${1:-$LOAD_CONCURRENCY}"
+  require_positive_integer FINITE_PRIVATE_LOAD_CONCURRENCY "$concurrency"
+  require_positive_integer FINITE_PRIVATE_LOAD_MAX_TOKENS "$LOAD_MAX_TOKENS"
+  if [ "$concurrency" -gt 32 ]; then
+    require_load_sweep_approval
+  fi
+  local curl_config payload_file result_dir batch_id batch_elapsed
   curl_config="$(mktemp)"
   payload_file="$(mktemp)"
   result_dir="$(mktemp -d)"
-  batch_id="$(date -u +%Y%m%dT%H%M%SZ)"
+  batch_id="$(date -u +%Y%m%dT%H%M%SZ)_$(python3 -c 'import time; print(time.time_ns())')"
   chmod 600 "$curl_config" "$payload_file"
   trap 'rm -f "$curl_config" "$payload_file"; rm -rf "$result_dir"' RETURN
   {
     printf '%s\n' 'header = "content-type: application/json"'
     printf 'header = "authorization: Bearer %s"\n' "$FINITE_PRIVATE_CANARY_API_KEY"
   } >"$curl_config"
-  printf '{"model":"%s","messages":[{"role":"user","content":"Reply with ok"}],"temperature":0,"max_tokens":8}' "$MODEL" >"$payload_file"
+  printf '{"model":"%s","messages":[{"role":"user","content":"Write a compact numbered list from 1 through 50."}],"temperature":0,"max_tokens":%s,"stream":true,"stream_options":{"include_usage":true}}' "$MODEL" "$LOAD_MAX_TOKENS" >"$payload_file"
   export FP_LOAD_CONFIG="$curl_config" FP_LOAD_PAYLOAD="$payload_file"
   export FP_LOAD_RESULTS="$result_dir" FP_LOAD_ENDPOINT="$ENDPOINT"
   export FP_LOAD_TIMEOUT="$TIMEOUT_SECS" FP_LOAD_BATCH_ID="$batch_id"
-  seq 1 32 | xargs -P 32 -I '{}' sh -c '
+  batch_elapsed="$(python3 - "$concurrency" <<'PY'
+import subprocess
+import sys
+import time
+
+concurrency = int(sys.argv[1])
+worker = r'''
     n="$1"
-    curl -sS --max-time "$FP_LOAD_TIMEOUT" --config "$FP_LOAD_CONFIG" \
+    curl -sS --no-buffer --max-time "$FP_LOAD_TIMEOUT" --config "$FP_LOAD_CONFIG" \
       -H "x-request-id: fp_load_${FP_LOAD_BATCH_ID}_${n}" \
       --data-binary "@$FP_LOAD_PAYLOAD" \
       --output "$FP_LOAD_RESULTS/body-${n}.json" \
-      --write-out "%{http_code}\t%{time_starttransfer}\n" \
-      "$FP_LOAD_ENDPOINT/v1/chat/completions" >"$FP_LOAD_RESULTS/metric-${n}.tsv"
-  ' sh '{}'
-  python3 - "$result_dir" "$LOAD_MAX_FIRST_BYTE_SECS" <<'PY'
+      --write-out "%{http_code}\t%{time_starttransfer}\t%{time_total}\n" \
+      "$FP_LOAD_ENDPOINT/v1/chat/completions" >"$FP_LOAD_RESULTS/metric-${n}.tsv" || true
+'''
+started_at = time.monotonic()
+result = subprocess.run(
+    ["xargs", "-P", str(concurrency), "-I", "{}", "sh", "-c", worker, "sh", "{}"],
+    input="".join(f"{number}\n" for number in range(1, concurrency + 1)),
+    text=True,
+    check=False,
+)
+elapsed = time.monotonic() - started_at
+print(f"{elapsed:.9f}")
+raise SystemExit(result.returncode)
+PY
+)"
+
+  if ! python3 - "$result_dir" "$LOAD_MAX_FIRST_BYTE_SECS" "$concurrency" "$batch_elapsed" <<'PY'
+import json
 import math
 import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
 limit = float(sys.argv[2])
-latencies = []
+expected = int(sys.argv[3])
+batch_elapsed = float(sys.argv[4])
+if not math.isfinite(batch_elapsed) or batch_elapsed <= 0:
+    raise SystemExit(f"load canary failed: invalid batch duration {batch_elapsed!r}")
+first_bytes = []
+totals = []
+completion_tokens = []
+prompt_tokens = []
 for path in sorted(root.glob("metric-*.tsv")):
-    status, first_byte = path.read_text(encoding="utf-8").strip().split("\t")
+    parts = path.read_text(encoding="utf-8").strip().split("\t")
+    if len(parts) != 3:
+        raise SystemExit(f"load canary failed: malformed metric {path.name}: {parts!r}")
+    status, first_byte, total = parts
     if status != "200":
         raise SystemExit(f"load canary failed: {path.name} returned HTTP {status}")
-    latencies.append(float(first_byte))
-if len(latencies) != 32:
-    raise SystemExit(f"load canary produced {len(latencies)} metrics, expected 32")
-latencies.sort()
-percentile = lambda p: latencies[max(0, math.ceil(p * len(latencies)) - 1)]
-p95, p99 = percentile(0.95), percentile(0.99)
-print(f"first-byte seconds: p95={p95:.3f} p99={p99:.3f} max_allowed={limit:.3f}")
-if p99 >= limit:
+    body_path = root / path.name.replace("metric-", "body-").replace(".tsv", ".json")
+    body = body_path.read_text(encoding="utf-8")
+    if "data: [DONE]" not in body:
+        raise SystemExit(f"load canary failed: {body_path.name} lacks terminal [DONE]")
+    usage = None
+    for line in body.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        try:
+            chunk = json.loads(line.removeprefix("data: "))
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"load canary failed: malformed SSE JSON in {body_path.name}: {error}")
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+    if usage is None:
+        raise SystemExit(f"load canary failed: {body_path.name} lacks streaming usage")
+    first_bytes.append(float(first_byte))
+    totals.append(float(total))
+    completion_tokens.append(int(usage.get("completion_tokens", 0)))
+    prompt_tokens.append(int(usage.get("prompt_tokens", 0)))
+
+if len(first_bytes) != expected:
+    raise SystemExit(f"load canary produced {len(first_bytes)} metrics, expected {expected}")
+if sum(completion_tokens) <= 0:
+    raise SystemExit("load canary reported no completion tokens")
+
+def percentile(values, proportion):
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(proportion * len(ordered)) - 1)]
+
+ttft_p50 = percentile(first_bytes, 0.50)
+ttft_p95 = percentile(first_bytes, 0.95)
+ttft_p99 = percentile(first_bytes, 0.99)
+total_p50 = percentile(totals, 0.50)
+total_p95 = percentile(totals, 0.95)
+total_p99 = percentile(totals, 0.99)
+generation_durations = [max(total - first_byte, 0.001) for total, first_byte in zip(totals, first_bytes)]
+per_request_rates = [
+    tokens / duration for tokens, duration in zip(completion_tokens, generation_durations)
+]
+aggregate_rate = sum(completion_tokens) / batch_elapsed
+
+print(
+    f"requests={expected} prompt_tokens={sum(prompt_tokens)} "
+    f"completion_tokens={sum(completion_tokens)} batch_seconds={batch_elapsed:.3f}"
+)
+print(
+    f"time_to_first_byte_seconds p50={ttft_p50:.3f} p95={ttft_p95:.3f} "
+    f"p99={ttft_p99:.3f} max_allowed={limit:.3f}"
+)
+print(
+    f"completion_seconds p50={total_p50:.3f} p95={total_p95:.3f} "
+    f"p99={total_p99:.3f}"
+)
+print(
+    f"generation_tokens_per_second per_request_p50={percentile(per_request_rates, 0.50):.3f} "
+    f"per_request_p95={percentile(per_request_rates, 0.95):.3f} "
+    f"aggregate={aggregate_rate:.3f}"
+)
+if ttft_p99 >= limit:
     raise SystemExit("load canary lacks required headroom below limiter first-byte timeout")
 PY
+  then
+    unset FP_LOAD_CONFIG FP_LOAD_PAYLOAD FP_LOAD_RESULTS FP_LOAD_ENDPOINT
+    unset FP_LOAD_TIMEOUT FP_LOAD_BATCH_ID
+    return 1
+  fi
   unset FP_LOAD_CONFIG FP_LOAD_PAYLOAD FP_LOAD_RESULTS FP_LOAD_ENDPOINT
   unset FP_LOAD_TIMEOUT FP_LOAD_BATCH_ID
   rm -f "$curl_config" "$payload_file"
   rm -rf "$result_dir"
   trap - RETURN
+}
+
+wait_load_recovery() {
+  local deadline=$((SECONDS + 120))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if health >/dev/null 2>&1; then
+      echo "Finite Private recovered after load tier"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "Finite Private did not recover within 120 seconds" >&2
+  return 1
+}
+
+load_sweep() {
+  require_load_sweep_approval
+  local tier
+  local failed_tier=""
+  for tier in 1 4 8 16 32 64 128 256; do
+    echo "=== Finite Private concurrency tier $tier ==="
+    if ! load_canary "$tier"; then
+      failed_tier="$tier"
+      echo "stopping sweep at failed tier $tier" >&2
+      break
+    fi
+    if ! health >/dev/null; then
+      failed_tier="$tier"
+      echo "stopping sweep because health failed after tier $tier" >&2
+      break
+    fi
+  done
+
+  echo "=== Finite Private post-sweep recovery proof ==="
+  wait_load_recovery
+  load_canary 1
+  load_canary 32
+  health >/dev/null
+
+  if [ -n "$failed_tier" ]; then
+    echo "sweep stopped at tier $failed_tier; use the previous clean tier as limit evidence" >&2
+    return 1
+  fi
+  echo "Finite Private concurrency sweep passed through 256"
 }
 
 negative_canary() {
@@ -362,7 +513,11 @@ case "$command" in
   stream-canary) stream_canary ;;
   responses-canary) responses_canary ;;
   repeated-id-canary) repeated_id_canary ;;
-  load-canary) load_canary ;;
+  load-canary)
+    shift
+    load_canary "${1:-}"
+    ;;
+  load-sweep) load_sweep ;;
   negative-canary) negative_canary ;;
   gate) gate ;;
   relaunch)
