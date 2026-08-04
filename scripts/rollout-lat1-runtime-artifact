@@ -847,10 +847,15 @@ entry_lifecycle_signal() {
 # Consult the runner's read-only lifecycle probe for one planned entry. The
 # probe proves the platform can still stop or replace the guest (control-state
 # consistency, containerd task liveness, duplicate writers); an HTTP 200 from
-# the Agent endpoint never could. On success the probe report is printed and
-# the caller reads the verdict from it. Any transport or shape failure is a
-# single "probe unavailable" condition (nonzero return, no output): rollouts
-# must not hard-fail because the probe itself is down.
+# the Agent endpoint never could. Return conventions:
+#   0: a well-formed probe report is on stdout; the caller reads the verdict.
+#   1: probe unavailable (transport failure or nonzero probe exit). Rollouts
+#      must not hard-fail because the probe itself is down, so the caller
+#      keeps today's Core-state behavior and marks the evidence unavailable.
+#   2: the probe exited 0 but its report failed shape validation. A process
+#      that claims success but speaks garbage is fail-CLOSED for eligibility:
+#      the caller deliberately skips the entry with reason
+#      probe_invalid_report instead of trusting it or ignoring it.
 entry_lifecycle_probe() {
   local entry="$1"
   local project_id runtime_id machine_id
@@ -888,7 +893,7 @@ REMOTE
       and ($report.reason == null or ($report.reason | type == "string" and length > 0))
       and ($report.checks | type == "array")
       and all($report.checks[]; (.name | type == "string") and (.status | IN("pass", "fail", "skip")))
-    ' <<<"$report" >/dev/null || return 1
+    ' <<<"$report" >/dev/null || return 2
   printf '%s' "$report"
 }
 
@@ -930,11 +935,16 @@ execute_exact_plan() {
 
     # Gate upgrade eligibility on lifecycle-control health. A non-operable
     # verdict is a deliberate skip, never an error: the Agent keeps serving
-    # its current artifact and the run ledger records the evidence. When the
-    # probe itself is unreachable, keep today's Core-state behavior and mark
-    # the entry evidence as probe-unavailable.
-    local probe_report probe_verdict probe_reason
-    if probe_report="$(entry_lifecycle_probe "$entry")"; then
+    # its current artifact and the run ledger records the evidence. A probe
+    # that exits 0 with a malformed report fails CLOSED (deliberate skip);
+    # only a probe that could not run at all keeps today's Core-state
+    # behavior, with the entry evidence marked probe-unavailable.
+    local probe_report probe_status probe_verdict probe_reason
+    set +e
+    probe_report="$(entry_lifecycle_probe "$entry")"
+    probe_status=$?
+    set -e
+    if ((probe_status == 0)); then
       probe_verdict="$(jq -r '.verdict' <<<"$probe_report")"
       if [[ $probe_verdict == operable ]]; then
         append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", verdict:"operable"}')"
@@ -944,6 +954,10 @@ execute_exact_plan() {
         echo "==> lifecycle probe verdict $probe_verdict ($probe_reason); deliberately skipping $project_id ($runtime_id), which keeps serving its current artifact"
         continue
       fi
+    elif ((probe_status == 2)); then
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"skipped", verdict:"unknown", reason:"probe_invalid_report", detail:"probe exited 0 with a malformed report; failing closed for upgrade eligibility"}')"
+      echo "==> lifecycle probe returned a malformed report for $project_id ($runtime_id); deliberately skipping it, which keeps serving its current artifact"
+      continue
     else
       append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"unavailable", detail:"lifecycle probe unreachable; keeping Core-state behavior"}')"
       echo "==> lifecycle probe unavailable for $project_id ($runtime_id); proceeding on Core-state evidence alone"

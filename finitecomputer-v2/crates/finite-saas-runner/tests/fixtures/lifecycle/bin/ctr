@@ -1,13 +1,17 @@
 #!/bin/sh
 # Read-only fake ctr for lifecycle-probe fixtures. The ONLY supported
-# invocation is the probe's no-op status read: `ctr --namespace <ns> tasks
-# list`. Anything else (kill, delete, ...) is recorded in
-# fake-state/mutations.log and rejected with exit 42.
+# invocations are the probe's read paths:
+#   ctr --namespace <ns> tasks list      (containerd metadata; never the shim)
+#   ctr --namespace <ns> tasks ps <id>   (no-op read answered by the shim)
+# Anything else (kill, delete, ...) is recorded in fake-state/mutations.log
+# and rejected with exit 42.
 #
 # Behavior knobs under ./fake-state next to this script:
-#   tasks        full task table printed verbatim (TASK/PID/STATUS columns)
-#   tasks-error  printed to stderr with exit 1, e.g. the incident's
-#                "ttrpc: closed" control-channel failure
+#   tasks           full task table printed verbatim (TASK/PID/STATUS columns)
+#   tasks-error     printed to stderr with exit 1 for `tasks list`
+#   tasks-ps        pid list printed verbatim for `tasks ps`
+#   tasks-ps-error  printed to stderr with exit 1 for `tasks ps`, e.g. the
+#                   incident's "ttrpc: closed" control-channel failure
 set -eu
 state="$(dirname "$0")/fake-state"
 mkdir -p "$state"
@@ -22,6 +26,17 @@ case "$cmd" in
     fi
     if [ -f "$state/tasks" ]; then
       cat "$state/tasks"
+    fi
+    ;;
+  "tasks ps")
+    if [ -f "$state/tasks-ps-error" ]; then
+      cat "$state/tasks-ps-error" >&2
+      exit 1
+    fi
+    if [ -f "$state/tasks-ps" ]; then
+      cat "$state/tasks-ps"
+    else
+      printf 'PID\n4242\n'
     fi
     ;;
   *)

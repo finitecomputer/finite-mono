@@ -678,6 +678,9 @@ def collect_lifecycle_probe(
     raw["available"] = True
     environment = dict(os.environ)
     try:
+        # Forward every probe-relevant runner env key so finite-status probes
+        # the same roots the rollout wrapper probes; site-specific overrides
+        # must not split the two views.
         environment.update(
             read_environment_values(
                 Path(CONTRACT["runner"]["environment_file"]),
@@ -685,6 +688,11 @@ def collect_lifecycle_probe(
                     "FC_RUNNER_SOURCE_HOST_ID",
                     "FC_RUNNER_WORK_ROOT",
                     "FC_RUNNER_KATA_NAMESPACE",
+                    "FC_RUNNER_KATA_NERDCTL_BIN",
+                    "FC_RUNNER_KATA_CTR_BIN",
+                    "FC_RUNNER_KATA_SANDBOX_ROOT",
+                    "FC_RUNNER_KATA_NETNS_ROOT",
+                    "FC_RUNNER_KATA_PROC_ROOT",
                 },
             )
         )

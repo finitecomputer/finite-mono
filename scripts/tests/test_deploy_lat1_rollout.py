@@ -744,7 +744,10 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(probe_events[0]["status"], "unavailable")
             self.assertEqual(events[-1]["status"], "success")
 
-    def test_probe_report_shape_mismatch_is_probe_unavailable(self) -> None:
+    def test_probe_report_shape_mismatch_fails_closed(self) -> None:
+        # The probe exited 0 but spoke garbage: fail CLOSED for upgrade
+        # eligibility — a deliberate skip-with-reason, never the
+        # proceed-on-Core-state "unavailable" path.
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             env, log, state_root, plan_hash = self.single_entry_environment(temp)
@@ -752,7 +755,18 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
 
             executed = self.execute_single_entry(env, plan_hash)
             self.assertEqual(executed.returncode, 0, executed.stderr)
-            self.assertIn("lifecycle probe unavailable", executed.stdout)
+            self.assertIn("deliberately skipping", executed.stdout)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(
+                any("provider-lifecycle-probe-v1" in call for call in calls)
+            )
+            self.assertFalse(
+                any(
+                    "--expected-agent-runtime-id" in call and "--plan-only" not in call
+                    for call in calls
+                ),
+                calls,
+            )
             events = [
                 event
                 for event in self.read_events(state_root, plan_hash)
@@ -761,16 +775,13 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             probe_events = [
                 event for event in events if event["event"] == "entry_lifecycle_probe"
             ]
-            self.assertEqual(probe_events[0]["status"], "unavailable")
+            self.assertEqual(len(probe_events), 1, events)
+            self.assertEqual(probe_events[0]["status"], "skipped")
+            self.assertEqual(probe_events[0]["verdict"], "unknown")
+            self.assertEqual(probe_events[0]["reason"], "probe_invalid_report")
             self.assertEqual(events[-1]["status"], "success")
-            calls = log.read_text(encoding="utf-8").splitlines()
-            self.assertTrue(
-                any(
-                    "--expected-agent-runtime-id" in call and "--plan-only" not in call
-                    for call in calls
-                ),
-                calls,
-            )
+            self.assertEqual(events[-1]["probe_skipped"], 1)
+            self.assertEqual(events[-1]["absent_count"], 0)
 
     def test_probe_operable_verdict_proceeds_and_is_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

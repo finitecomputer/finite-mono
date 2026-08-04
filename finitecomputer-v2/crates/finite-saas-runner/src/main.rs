@@ -115,13 +115,14 @@ fn lifecycle_probe(
         namespace: optional_env("FC_RUNNER_KATA_NAMESPACE", "finite"),
         source_host_id: required_env("FC_RUNNER_SOURCE_HOST_ID")?,
         work_root: required_path("FC_RUNNER_WORK_ROOT")?,
-        sandbox_root: optional_path(
-            "FC_RUNNER_KATA_SANDBOX_ROOT",
-            "/run/kata-containers/shared/sandboxes",
-        ),
+        sandbox_root: optional_path("FC_RUNNER_KATA_SANDBOX_ROOT", "/run/vc/sbs"),
         netns_root: optional_path("FC_RUNNER_KATA_NETNS_ROOT", "/var/run/netns"),
         proc_root: optional_path("FC_RUNNER_KATA_PROC_ROOT", "/proc"),
         command_timeout: Duration::from_secs(optional_u64("FC_RUNNER_COMMAND_TIMEOUT_SECS", 15)?),
+        overall_timeout: Duration::from_secs(optional_u64(
+            "FC_RUNNER_LIFECYCLE_PROBE_TIMEOUT_SECS",
+            60,
+        )?),
     };
     let report = probe_runtime_lifecycle(
         &config,

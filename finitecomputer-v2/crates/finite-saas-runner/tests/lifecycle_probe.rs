@@ -3,10 +3,13 @@
 //! The fake provider layer lives in `tests/fixtures/lifecycle/bin/` and is
 //! deliberately reusable by later recovery work: state is one file per field
 //! under `fake-state/`, and both fakes record and reject any non-read verb so
-//! every scenario also proves the probe mutated nothing.
+//! every scenario also proves the probe mutated nothing. The persist state
+//! fixtures mirror Kata's real Go-serialized `persistapi.SandboxState` shape
+//! (capitalized, tagless fields) under the real `/run/vc/sbs` layout.
 
 use finite_saas_runner::lifecycle_probe::{
-    LifecycleProbeConfig, LifecycleProbeRequest, LifecycleVerdict, probe_runtime_lifecycle,
+    CheckStatus, LifecycleProbeConfig, LifecycleProbeReport, LifecycleProbeRequest,
+    LifecycleVerdict, probe_runtime_lifecycle,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -46,10 +49,12 @@ fn new_fixture() -> ProbeFixture {
         namespace: "finite".to_string(),
         source_host_id: "finite-lat-1".to_string(),
         work_root: work_root.clone(),
-        sandbox_root: root.path().join("sandboxes"),
+        sandbox_root: root.path().join("sbs"),
         netns_root: root.path().join("netns"),
         proc_root: root.path().join("proc"),
-        command_timeout: Duration::from_secs(5),
+        // Generous bounds: CI runners are shared and heavily contended.
+        command_timeout: Duration::from_secs(30),
+        overall_timeout: Duration::from_secs(120),
     };
     ProbeFixture {
         _root: root,
@@ -75,6 +80,10 @@ impl ProbeFixture {
         field("mount", mount.to_str().unwrap());
     }
 
+    fn set_container_id(&self, name: &str, id: &str) {
+        fs::write(self.state.join(format!("{name}.id")), id).unwrap();
+    }
+
     fn add_task(&self, container_id: &str, status: &str) {
         let tasks = self.state.join("tasks");
         let mut contents = fs::read_to_string(&tasks)
@@ -87,15 +96,23 @@ impl ProbeFixture {
         fs::write(self.state.join("tasks-error"), stderr).unwrap();
     }
 
-    fn write_persist(&self, sandbox_id: &str, pid: Option<u64>) {
-        let dir = self.config.sandbox_root.join(format!("{MACHINE}-id"));
+    fn fail_task_ps_with(&self, stderr: &str) {
+        fs::write(self.state.join("tasks-ps-error"), stderr).unwrap();
+    }
+
+    /// Write Kata persist state in the real `persistapi.SandboxState` shape.
+    fn write_persist(&self, sandbox_container: &str, pid: Option<u64>) {
+        let dir = self.config.sandbox_root.join(container_id());
         fs::create_dir_all(&dir).unwrap();
-        let pid = pid
-            .map(|pid| format!(",\"hypervisor_pid\":{pid}"))
-            .unwrap_or_default();
+        let hypervisor = match pid {
+            Some(pid) => format!(r#","HypervisorState":{{"Pid":{pid},"Type":"qemu"}}"#),
+            None => String::new(),
+        };
         fs::write(
             dir.join("persist.json"),
-            format!("{{\"sandbox_id\":\"{sandbox_id}\",\"state\":\"running\"{pid}}}"),
+            format!(
+                r#"{{"State":"running","SandboxContainer":"{sandbox_container}","PersistVersion":2{hypervisor}}}"#
+            ),
         )
         .unwrap();
     }
@@ -115,7 +132,16 @@ impl ProbeFixture {
         fs::write(dir.join("comm"), format!("{comm}\n")).unwrap();
     }
 
-    fn probe(&self) -> finite_saas_runner::lifecycle_probe::LifecycleProbeReport {
+    /// A healthy runtime: owned canonical container, running task, live shim
+    /// channel, self-consistent persist state, visible QEMU VMM.
+    fn make_healthy(&self) {
+        self.add_container(MACHINE, "running", PROJECT, MACHINE, &self.state_root());
+        self.add_task(&container_id(), "RUNNING");
+        self.write_persist(MACHINE, Some(4242));
+        self.add_vmm_comm(4242, "qemu-system-x86");
+    }
+
+    fn probe(&self) -> LifecycleProbeReport {
         probe_runtime_lifecycle(
             &self.config,
             &LifecycleProbeRequest {
@@ -128,7 +154,7 @@ impl ProbeFixture {
 
     fn check<'a>(
         &self,
-        report: &'a finite_saas_runner::lifecycle_probe::LifecycleProbeReport,
+        report: &'a LifecycleProbeReport,
         name: &str,
     ) -> &'a finite_saas_runner::lifecycle_probe::LifecycleProbeCheck {
         report
@@ -165,26 +191,31 @@ fn container_id() -> String {
     format!("{MACHINE}-id")
 }
 
+/// Assertion failures must carry the whole report so CI logs are diagnosable.
+fn assert_verdict(report: &LifecycleProbeReport, expected: LifecycleVerdict) {
+    assert_eq!(
+        report.verdict,
+        expected,
+        "unexpected verdict; full report:\n{}",
+        serde_json::to_string_pretty(report).unwrap()
+    );
+}
+
 #[test]
 fn healthy_runtime_is_operable() {
     let fixture = new_fixture();
-    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
-    fixture.add_task(&container_id(), "RUNNING");
-    fixture.write_persist(&container_id(), Some(4242));
-    fixture.add_vmm_comm(4242, "qemu-system-x86");
+    fixture.make_healthy();
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Operable);
+    assert_verdict(&report, LifecycleVerdict::Operable);
     assert_eq!(report.reason, None);
     assert_eq!(report.schema, "finite.lifecycle-probe.v1");
     for check in &report.checks {
         assert!(
-            !matches!(
-                check.status,
-                finite_saas_runner::lifecycle_probe::CheckStatus::Fail
-            ),
-            "check {} unexpectedly failed: {check:?}",
-            check.name
+            !matches!(check.status, CheckStatus::Fail),
+            "check {} unexpectedly failed; full report:\n{}",
+            check.name,
+            serde_json::to_string_pretty(&report).unwrap()
         );
     }
     fixture.assert_nothing_mutated();
@@ -196,11 +227,11 @@ fn orphaned_vm_without_healthy_task_is_inoperable() {
     // task is orphaned, and a normal stop would time out.
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
-    fixture.write_persist(&container_id(), Some(4242));
+    fixture.write_persist(MACHINE, Some(4242));
     fixture.add_netns_record(&container_id());
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Inoperable);
+    assert_verdict(&report, LifecycleVerdict::Inoperable);
     assert_eq!(report.reason.as_deref(), Some("orphaned_task"));
     assert_eq!(
         fixture.check(&report, "containerd_task").finding,
@@ -221,16 +252,20 @@ fn orphaned_vm_without_healthy_task_is_inoperable() {
 #[test]
 fn ttrpc_closed_control_channel_is_inoperable() {
     // 2026-08-01 incident topology 2: old-VM shutdown repeatedly failed with
-    // `ttrpc: closed`. The no-op status read hits the same channel.
+    // `ttrpc: closed`. `tasks list` is answered from containerd metadata and
+    // still shows RUNNING for a dead-shim VM; only the shim-answered no-op
+    // read sees the closed channel.
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
-    fixture.fail_tasks_with("rpc error: code = Unavailable desc = ttrpc: closed\n");
+    fixture.add_task(&container_id(), "RUNNING");
+    fixture.fail_task_ps_with("rpc error: code = Unavailable desc = ttrpc: closed\n");
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Inoperable);
+    assert_verdict(&report, LifecycleVerdict::Inoperable);
     assert_eq!(report.reason.as_deref(), Some("control_channel_closed"));
     let task = fixture.check(&report, "containerd_task");
     assert_eq!(task.finding, Some("control_channel_closed"));
+    assert_eq!(task.evidence["task_status"].as_str(), Some("RUNNING"));
     assert!(task.evidence["stderr"].as_str().unwrap().contains("ttrpc"));
     fixture.assert_nothing_mutated();
 }
@@ -240,11 +275,11 @@ fn stale_cni_namespace_is_detected() {
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
     fixture.add_task(&container_id(), "PAUSED");
-    fixture.write_persist(&container_id(), None);
+    fixture.write_persist(MACHINE, None);
     fixture.add_netns_record(&container_id());
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Degraded);
+    assert_verdict(&report, LifecycleVerdict::Degraded);
     assert_eq!(report.reason.as_deref(), Some("task_not_running"));
     assert_eq!(
         fixture.check(&report, "cni_namespace").finding,
@@ -256,19 +291,33 @@ fn stale_cni_namespace_is_detected() {
 #[test]
 fn stale_kata_persist_state_is_detected() {
     let fixture = new_fixture();
-    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
-    fixture.add_task(&container_id(), "RUNNING");
-    fixture.write_persist("superseded-sandbox-id", Some(4242));
-    fixture.add_vmm_comm(4242, "qemu-system-x86");
+    fixture.make_healthy();
+    // Persist state belonging to a superseded container.
+    fixture.write_persist("superseded-container", Some(4242));
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Degraded);
+    assert_verdict(&report, LifecycleVerdict::Degraded);
     assert_eq!(report.reason.as_deref(), Some("stale_sandbox_state"));
     let sandbox = fixture.check(&report, "sandbox_state");
     assert_eq!(
-        sandbox.evidence["persist_sandbox_id"].as_str(),
-        Some("superseded-sandbox-id")
+        sandbox.evidence["persist_sandbox_container"].as_str(),
+        Some("superseded-container")
     );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn inconsistent_kata_persist_state_is_detected() {
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_task(&container_id(), "RUNNING");
+    let dir = fixture.config.sandbox_root.join(container_id());
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("persist.json"), b"{not json").unwrap();
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Degraded);
+    assert_eq!(report.reason.as_deref(), Some("sandbox_state_inconsistent"));
     fixture.assert_nothing_mutated();
 }
 
@@ -279,24 +328,22 @@ fn wrapped_qemu_process_name_is_detected() {
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
     fixture.add_task(&container_id(), "RUNNING");
-    fixture.write_persist(&container_id(), Some(4242));
+    fixture.write_persist(MACHINE, Some(4242));
     fixture.add_vmm_comm(4242, "wrap-qemu-syste");
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Degraded);
+    assert_verdict(&report, LifecycleVerdict::Degraded);
     assert_eq!(report.reason.as_deref(), Some("wrapped_vmm_process_name"));
     let vmm = fixture.check(&report, "vmm_process");
     assert_eq!(vmm.evidence["comm"].as_str(), Some("wrap-qemu-syste"));
+    assert_eq!(vmm.evidence["hypervisor_type"].as_str(), Some("qemu"));
     fixture.assert_nothing_mutated();
 }
 
 #[test]
 fn duplicate_durable_writer_is_inoperable() {
     let fixture = new_fixture();
-    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
-    fixture.add_task(&container_id(), "RUNNING");
-    fixture.write_persist(&container_id(), Some(4242));
-    fixture.add_vmm_comm(4242, "qemu-system-x86");
+    fixture.make_healthy();
     // A second container owns the same source machine and mounts the same
     // durable root (and therefore writes the same Agent npub).
     fixture.add_container(
@@ -308,7 +355,7 @@ fn duplicate_durable_writer_is_inoperable() {
     );
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Inoperable);
+    assert_verdict(&report, LifecycleVerdict::Inoperable);
     assert_eq!(report.reason.as_deref(), Some("duplicate_durable_writer"));
     let duplicates = fixture.check(&report, "duplicate_writers");
     assert_eq!(
@@ -323,11 +370,11 @@ fn missing_provider_handle_is_inoperable_and_gates_dependent_reads() {
     let fixture = new_fixture();
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Inoperable);
+    assert_verdict(&report, LifecycleVerdict::Inoperable);
     assert_eq!(report.reason.as_deref(), Some("provider_handle_missing"));
     assert_eq!(
         fixture.check(&report, "containerd_task").status,
-        finite_saas_runner::lifecycle_probe::CheckStatus::Skip
+        CheckStatus::Skip
     );
     fixture.assert_nothing_mutated();
 }
@@ -339,7 +386,88 @@ fn inconclusive_evidence_is_unknown_not_operable() {
     fixture.fail_tasks_with("connection refused\n");
 
     let report = fixture.probe();
-    assert_eq!(report.verdict, LifecycleVerdict::Unknown);
+    assert_verdict(&report, LifecycleVerdict::Unknown);
     assert_eq!(report.reason.as_deref(), Some("task_list_error"));
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn invalid_container_id_never_derives_state_paths() {
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.set_container_id(MACHINE, "../escape");
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("provider_handle_invalid"));
+    assert_eq!(
+        fixture.check(&report, "sandbox_state").status,
+        CheckStatus::Skip
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn unreadable_cni_inventory_is_unknown_not_skipped() {
+    let fixture = new_fixture();
+    fixture.make_healthy();
+    // A netns root that exists but is not a directory fails read_dir with a
+    // non-NotFound error on every platform.
+    fs::write(&fixture.config.netns_root, "not a directory").unwrap();
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("cni_inventory_unreadable"));
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn unreadable_vmm_comm_is_unknown_not_skipped() {
+    let fixture = new_fixture();
+    fixture.make_healthy();
+    // A directory at the comm path fails the bounded read on every platform.
+    let comm = fixture.config.proc_root.join("4242").join("comm");
+    fs::remove_file(&comm).unwrap();
+    fs::create_dir_all(&comm).unwrap();
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("vmm_process_unreadable"));
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn missing_vmm_pid_on_a_running_task_is_unknown_not_skipped() {
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_task(&container_id(), "RUNNING");
+    fixture.write_persist(MACHINE, None);
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("vmm_pid_unavailable"));
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn exceeded_overall_deadline_is_unknown_evidence() {
+    let fixture = new_fixture();
+    fixture.make_healthy();
+    let mut config = fixture.config.clone();
+    config.overall_timeout = Duration::ZERO;
+    let report = probe_runtime_lifecycle(
+        &config,
+        &LifecycleProbeRequest {
+            project_id: PROJECT.to_string(),
+            agent_runtime_id: RUNTIME.to_string(),
+            source_machine_id: MACHINE.to_string(),
+        },
+    );
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("probe_deadline_exceeded"));
+    assert_eq!(
+        fixture.check(&report, "duplicate_writers").finding,
+        Some("probe_deadline_exceeded")
+    );
     fixture.assert_nothing_mutated();
 }
