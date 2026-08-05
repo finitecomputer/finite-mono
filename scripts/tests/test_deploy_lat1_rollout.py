@@ -91,6 +91,9 @@ def provider_fact(
     host: str = "finite-lat-1",
 ) -> dict[str, object]:
     principal = f"npub1{runtime}principal"
+    work_root = (
+        "/data/finite-saas-runner" if host == "finite-lat-3" else "/var/lib/finite-saas-runner"
+    )
     return {
         "project_id": project,
         "agent_runtime_id": runtime,
@@ -99,7 +102,7 @@ def provider_fact(
         "image": image,
         "state_schema_version": "state-v1",
         "state": state,
-        "data_source": f"/var/lib/finite-saas-runner/kata/{runtime}",
+        "data_source": f"{work_root}/kata/{runtime}",
         "ownership": {
             "runtime": "true",
             "source_host_id": host,
