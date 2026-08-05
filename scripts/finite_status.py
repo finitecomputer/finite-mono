@@ -1030,6 +1030,12 @@ def build_rollout(raw: dict[str, Any] | None) -> dict[str, Any]:
     if terminal is None:
         status = "red"
         terminal_state = "interrupted-or-incomplete"
+    elif terminal.get("status") == "interrupted":
+        status = "red"
+        terminal_state = "interrupted"
+    elif terminal.get("status") == "noop":
+        status = "green"
+        terminal_state = "noop"
     elif terminal.get("status") != "success":
         status = "red"
         terminal_state = "failure"
