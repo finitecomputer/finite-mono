@@ -1552,10 +1552,7 @@ wait "$postgres_pid"
                 // signer+method+path). Devfinity stacks are disposable, so
                 // raise the ceiling generously; production deployments leave
                 // this unset and keep the real limits.
-                (
-                    "FINITE_BRAIN_PROTECTED_RATE_LIMIT",
-                    "10000:60".to_string(),
-                ),
+                ("FINITE_BRAIN_PROTECTED_RATE_LIMIT", "10000:60".to_string()),
                 ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
                 ("FC_CORE_API_BASE_URL", self.core_url()),
             ],
