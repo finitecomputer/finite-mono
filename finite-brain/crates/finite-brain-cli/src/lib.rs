@@ -4826,7 +4826,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let started = Instant::now();
             let mut requests = Vec::new();
-            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
+            while requests.len() < 4 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -5219,7 +5219,7 @@ mod tests {
             let started = Instant::now();
             let mut requests = Vec::new();
             let mut accepted_object = None::<(String, String, String)>;
-            while requests.len() < 6 && started.elapsed() < Duration::from_secs(5) {
+            while requests.len() < 7 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -6051,7 +6051,7 @@ mod tests {
             let mut requests = Vec::new();
             let mut write_count = 0_usize;
             let mut accepted_object = None::<(String, String)>;
-            while requests.len() < 4 && started.elapsed() < Duration::from_secs(5) {
+            while requests.len() < 5 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;

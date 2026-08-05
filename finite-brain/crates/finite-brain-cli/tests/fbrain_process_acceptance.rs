@@ -2645,7 +2645,7 @@ fn spawn_large_bootstrap_sync_server() -> (String, thread::JoinHandle<Vec<String
                 (
                     "200 OK",
                     json!({
-                        "latestSequence": 0,
+                        "latestSequence": 9,
                         "objects": [],
                         "forwardCompatiblePadding": padding
                     })
@@ -2719,6 +2719,7 @@ fn spawn_oversize_bootstrap_sync_server() -> (String, thread::JoinHandle<Vec<Str
                     128 * 1024 * 1024 + 1
                 )
                 .unwrap();
+                break;
             } else {
                 panic!("unexpected oversize-bootstrap sync request: {request_line}");
             }
@@ -3369,6 +3370,16 @@ fn built_fbrain_sync_accepts_bootstrap_larger_than_ureq_default_limit() {
     );
     let report: Value = serde_json::from_slice(&sync.stdout).unwrap();
     assert_eq!(report["status"], "caught-up");
+    assert_eq!(report["latestSequence"], 9);
+    let state: Value = serde_json::from_slice(
+        &fs::read(tree.join(".finitebrain/working-tree-state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["sync"]["latestSequence"], 9);
+    assert_eq!(
+        fs::read_to_string(tree.join("General/nested/strong-a.md")).unwrap(),
+        "# Cobalt cobalt cobalt\n\nCobalt cobalt cobalt cobalt durable evidence.\n"
+    );
     assert_eq!(requests.len(), 3);
     assert!(requests[2].contains("/v1/brains/brain/sync/bootstrap"));
 }
@@ -3377,7 +3388,10 @@ fn built_fbrain_sync_accepts_bootstrap_larger_than_ureq_default_limit() {
 fn built_fbrain_sync_rejects_bootstrap_over_128_mib_without_changing_projection() {
     let scratch = TempDir::new().unwrap();
     let tree = setup_access_loss_tree(&scratch);
+    let unresolved_path = tree.join("General/unresolved.md");
+    fs::write(&unresolved_path, "# Unresolved local edit\n").unwrap();
     let manifest_path = tree.join(".finitebrain/working-tree-state.json");
+    let agent_state_path = tree.join(".finitebrain/agent-state.json");
     let bootstrap_path = tree.join(".finitebrain/encrypted-sync/bootstrap.json");
     let materialized_path = tree.join("General/nested/strong-a.md");
     let cached_bootstrap = json!({ "latestSequence": 0, "objects": [] });
@@ -3385,6 +3399,8 @@ fn built_fbrain_sync_rejects_bootstrap_over_128_mib_without_changing_projection(
     #[cfg(unix)]
     fs::set_permissions(&bootstrap_path, fs::Permissions::from_mode(0o600)).unwrap();
     let manifest_before = fs::read(&manifest_path).unwrap();
+    let agent_state_before: Value =
+        serde_json::from_slice(&fs::read(&agent_state_path).unwrap()).unwrap();
     let bootstrap_before = fs::read(&bootstrap_path).unwrap();
     let materialized_before = fs::read(&materialized_path).unwrap();
     let (endpoint, server) = spawn_oversize_bootstrap_sync_server();
@@ -3404,10 +3420,20 @@ fn built_fbrain_sync_rejects_bootstrap_over_128_mib_without_changing_projection(
         String::from_utf8_lossy(&sync.stderr)
     );
     assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    let agent_state_after: Value =
+        serde_json::from_slice(&fs::read(&agent_state_path).unwrap()).unwrap();
+    assert_eq!(
+        agent_state_after["conflicts"], agent_state_before["conflicts"],
+        "bootstrap rejection must happen before local conflict bookkeeping"
+    );
     assert_eq!(fs::read(&bootstrap_path).unwrap(), bootstrap_before);
     assert_eq!(fs::read(&materialized_path).unwrap(), materialized_before);
-    assert_eq!(requests.len(), 3);
-    assert!(requests[2].contains("/v1/brains/brain/sync/bootstrap"));
+    assert_eq!(
+        fs::read_to_string(&unresolved_path).unwrap(),
+        "# Unresolved local edit\n"
+    );
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].contains("/v1/brains/brain/sync/bootstrap"));
 }
 
 #[test]

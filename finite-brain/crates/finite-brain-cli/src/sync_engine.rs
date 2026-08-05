@@ -99,6 +99,21 @@ pub(crate) fn run_working_tree_sync(
         &mounted_exports,
         &session_keys,
     );
+    let pending_local_changes = scan_working_tree_changes(&root, &prior_tree_state)
+        .map_err(|error| sync_stage_error("scan local Working Tree changes", &root, error))?;
+    if !pending_local_changes.is_empty() {
+        // Local submission is followed by a bootstrap so accepted writes can
+        // be confirmed from the authoritative projection. Validate that this
+        // required response is readable before any remote write or local
+        // conflict bookkeeping can mutate state.
+        fetch_bootstrap_remote_sync(
+            env,
+            &server_url,
+            &agent_state.brain_id,
+            "validated bootstrap response bound before local changes".to_owned(),
+        )
+        .map_err(|error| sync_stage_error("preflight remote bootstrap", &root, error))?;
+    }
     let local_result = push_local_working_tree_changes(
         env,
         &root,
@@ -107,6 +122,7 @@ pub(crate) fn run_working_tree_sync(
         &export,
         &mounted_exports,
         &session_keys,
+        pending_local_changes,
     )
     .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
     let force_bootstrap_reason = sync_bootstrap_reason(&local_result, newly_readable_keys);
@@ -1257,9 +1273,9 @@ fn push_local_working_tree_changes(
     export: &CliEncryptedBrainExport,
     mounted_exports: &[MountedFolderSyncContext],
     session_keys: &SessionFolderKeyring,
+    changes: Vec<WorkingTreeChange>,
 ) -> Result<LocalSyncResult, CliError> {
     let tree_state = read_working_tree_state(root)?;
-    let changes = scan_working_tree_changes(root, &tree_state)?;
     if changes.is_empty() {
         return Ok(LocalSyncResult::default());
     }
@@ -1868,6 +1884,7 @@ fn materialize_remote_projection(
             Some((&mounted.mount.source_folder_id, &mounted.display_path)),
         )?;
     }
+    validate_preserved_legacy_object_paths(&projection, &preserved_legacy_objects)?;
     projection.state.objects.extend(preserved_legacy_objects);
     let mut deleted_routes = deleted_folder_routes(export, bootstrap)?;
     for mounted in mounted_folders {
@@ -1925,6 +1942,50 @@ fn brain_role_for_actor(brain: &Brain, metadata: &CliBrainMetadata, actor_npub: 
         "guest"
     }
     .to_owned()
+}
+
+fn validate_preserved_legacy_object_paths(
+    projection: &WorkingTreeProjection,
+    preserved: &[WorkingTreeObjectManifestEntry],
+) -> Result<(), CliError> {
+    for object in preserved {
+        let folder = projection
+            .state
+            .folder_roots
+            .iter()
+            .find(|folder| {
+                folder.folder_id == object.folder_id
+                    && folder.source_brain_id == object.source_brain_id
+            })
+            .ok_or_else(|| {
+                CliError::InvalidInput(format!(
+                    "legacy Asset {} has no materialized Folder root",
+                    object.object_id
+                ))
+            })?;
+        let path = if folder.path.is_empty() {
+            object.path.clone()
+        } else {
+            format!("{}/{}", folder.path, object.path)
+        };
+        let path = SafeRelativePath::new("legacy_asset_path", path)
+            .map_err(|error| CliError::InvalidInput(error.to_string()))?
+            .to_string();
+        let collides_with_file = projection.files.keys().any(|candidate| {
+            candidate == &path
+                || candidate.starts_with(&format!("{path}/"))
+                || path.starts_with(&format!("{candidate}/"))
+        });
+        let collides_with_folder = projection.state.folder_roots.iter().any(|candidate| {
+            candidate.path == path || candidate.path.starts_with(&format!("{path}/"))
+        });
+        if collides_with_file || collides_with_folder {
+            return Err(CliError::InvalidInput(format!(
+                "legacy Asset path collision at {path}; preserved bytes were not changed"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn preserve_unreadable_prior_projection(
@@ -2392,6 +2453,16 @@ fn scan_working_tree_changes(
                         markdown: body,
                     }),
                 }
+            } else if known
+                .get(&relative_path)
+                .is_some_and(|object| object.content_type != "text/markdown")
+            {
+                // A pre-hard-cut client may have materialized these bytes and
+                // recorded them in the old manifest. Keep the local copy as a
+                // derived legacy artifact, while the remote projection reports
+                // the encrypted object as unsupported. It is not a pending
+                // local write and must not become a permanent sync conflict.
+                continue;
             } else {
                 changes.push(WorkingTreeChange::UpsertAsset {
                     path: SafeRelativePath::new("change_path", relative_path)
@@ -3321,7 +3392,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_reports_all_non_markdown_files_without_reading_or_uploading_bytes() {
+    fn scan_reports_new_non_markdown_files_without_reopening_preserved_legacy_assets() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         fs::create_dir_all(root.join("General/raw/assets")).unwrap();
@@ -3383,7 +3454,7 @@ mod tests {
 
         let changes = scan_working_tree_changes(root, &state).unwrap();
 
-        assert_eq!(changes.len(), 4);
+        assert_eq!(changes.len(), 2);
         assert!(changes.iter().all(|change| matches!(
             change,
             WorkingTreeChange::UpsertAsset {
@@ -3408,7 +3479,9 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(by_path.len(), 4);
+        assert_eq!(by_path.len(), 2);
+        assert!(by_path.contains_key("General/raw/assets/new.pdf"));
+        assert!(by_path.contains_key("General/stray.bin"));
         assert!(by_path.values().all(|intent| matches!(
             intent,
             WorkingTreeChangeIntent {
@@ -3441,16 +3514,7 @@ mod tests {
                 can_read: true,
                 metadata_only: false,
             }],
-            objects: vec![WorkingTreeObjectManifestEntry {
-                folder_id: "general".to_owned(),
-                source_brain_id: None,
-                path: "raw/assets/file.pdf".to_owned(),
-                object_id: "obj_assetfile0000".to_owned(),
-                revision: 1,
-                key_version: 1,
-                content_type: "application/pdf".to_owned(),
-                content_hash: sha256_hex(b"asset"),
-            }],
+            objects: Vec::new(),
             sync: WorkingTreeSyncState { latest_sequence: 1 },
         };
 
@@ -3858,6 +3922,75 @@ mod tests {
     }
 
     #[test]
+    fn incremental_page_update_keeps_cached_legacy_asset_ciphertext_byte_for_byte() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        initialize_private_working_tree(root).unwrap();
+        let legacy_ciphertext = "{\"legacy\":\"ciphertext-must-not-change\"}";
+        write_json_file(
+            &root.join(".finitebrain/encrypted-sync/bootstrap.json"),
+            &CliSyncBootstrap {
+                latest_sequence: 4,
+                objects: vec![
+                    CliSyncObject {
+                        folder_id: "home".to_owned(),
+                        object_id: "obj_page00000001".to_owned(),
+                        revision: 1,
+                        ciphertext: "old-page-ciphertext".to_owned(),
+                        deleted: false,
+                    },
+                    CliSyncObject {
+                        folder_id: "home".to_owned(),
+                        object_id: "obj_legacyasset03".to_owned(),
+                        revision: 1,
+                        ciphertext: legacy_ciphertext.to_owned(),
+                        deleted: false,
+                    },
+                ],
+                control_records: Vec::new(),
+            },
+        )
+        .unwrap();
+        let records = vec![CliSyncRecord {
+            sequence: 5,
+            record_event_id: "event-page-update".to_owned(),
+            record_type: "folder_object_revision".to_owned(),
+            folder_id: Some("home".to_owned()),
+            object_id: Some("obj_page00000001".to_owned()),
+            revision: Some(2),
+            actor_npub: "npub-actor".to_owned(),
+            client_created_at: "2026-08-04T00:00:00Z".to_owned(),
+            payload_json: serde_json::json!({
+                "ciphertext": "new-page-ciphertext"
+            })
+            .to_string(),
+            record_event_kind: 30_101,
+        }];
+
+        let incremental = apply_incremental_records(root, 4, 5, &records).unwrap();
+
+        assert_eq!(incremental.latest_sequence, 5);
+        assert_eq!(
+            incremental
+                .objects
+                .iter()
+                .find(|object| object.object_id == "obj_legacyasset03")
+                .unwrap()
+                .ciphertext,
+            legacy_ciphertext
+        );
+        assert_eq!(
+            incremental
+                .objects
+                .iter()
+                .find(|object| object.object_id == "obj_page00000001")
+                .unwrap()
+                .ciphertext,
+            "new-page-ciphertext"
+        );
+    }
+
+    #[test]
     fn materialize_remote_projection_opens_pages_and_preserves_legacy_asset_records() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
@@ -4023,6 +4156,173 @@ mod tests {
                 .contains("bytes were not materialized")
         );
         assert_eq!(state.sync.latest_sequence, 7);
+        assert!(
+            scan_working_tree_changes(root, &state)
+                .unwrap()
+                .iter()
+                .all(|change| !matches!(change, WorkingTreeChange::UpsertAsset { .. })),
+            "a preserved legacy Asset must not become a perpetual local conflict"
+        );
+
+        let legacy_ciphertext_before = bootstrap.objects[1].ciphertext.clone();
+        let rebootstrap_unsupported =
+            materialize_remote_projection(MaterializeRemoteProjectionContext {
+                env: &env,
+                root,
+                actor_npub: "npub-owner",
+                metadata: Some(&CliBrainMetadata::default()),
+                export: &export,
+                bootstrap: &bootstrap,
+                mounted_folders: &[],
+                path_overrides: &BTreeMap::new(),
+                session_keys: &session_keys,
+                prior_state: None,
+            })
+            .unwrap();
+        assert_eq!(rebootstrap_unsupported.len(), 1);
+        assert_eq!(bootstrap.objects[1].ciphertext, legacy_ciphertext_before);
+        assert_eq!(
+            fs::read(root.join("home/raw/assets/source.pdf")).unwrap(),
+            prior_local_asset
+        );
+    }
+
+    #[test]
+    fn preserved_legacy_asset_path_collision_fails_before_overwriting_local_bytes() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        initialize_private_working_tree(root).unwrap();
+        fs::create_dir_all(root.join("home/docs")).unwrap();
+        let prior_local_asset = b"only local legacy bytes";
+        fs::write(root.join("home/docs/collision.md"), prior_local_asset).unwrap();
+        let prior_state = BrainWorkingTreeStateManifest {
+            version: "finite-brain-working-tree-state-v1".to_owned(),
+            folder_roots: vec![WorkingTreeFolderRoot {
+                folder_id: "home".to_owned(),
+                source_brain_id: None,
+                path: "home".to_owned(),
+                can_read: true,
+                metadata_only: false,
+            }],
+            objects: vec![WorkingTreeObjectManifestEntry {
+                folder_id: "home".to_owned(),
+                source_brain_id: None,
+                path: "docs/collision.md".to_owned(),
+                object_id: "obj_legacyasset02".to_owned(),
+                revision: 1,
+                key_version: 1,
+                content_type: "application/octet-stream".to_owned(),
+                content_hash: sha256_hex(prior_local_asset),
+            }],
+            sync: WorkingTreeSyncState { latest_sequence: 0 },
+        };
+        write_json_file(
+            &root.join(".finitebrain/working-tree-state.json"),
+            &prior_state,
+        )
+        .unwrap();
+        let folder_key = FolderKey::from_bytes([5; 32]);
+        let mut session_keys = SessionFolderKeyring::default();
+        session_keys.insert("brain", "home", 1, folder_key.clone());
+        let env = CliEnvironment {
+            cwd: root.to_path_buf(),
+            config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
+            working_tree_root: None,
+            now: Some("2026-06-26T23:30:00Z".to_owned()),
+            identity_authority_url: None,
+            finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
+        };
+        let page_id = ObjectId::new("obj_pagecollision").unwrap();
+        let page_path = SafeRelativePath::new("page_path", "docs/collision.md").unwrap();
+        let page_plaintext =
+            encode_folder_object_page_plaintext(&page_path, "# Must not overwrite\n").unwrap();
+        let page_aad = FolderObjectAad {
+            brain_id: BrainId::new("brain").unwrap(),
+            folder_id: FolderId::new("home").unwrap(),
+            object_id: page_id.clone(),
+            key_version: 1,
+        };
+        let page_envelope = encrypt_folder_object(&folder_key, &page_aad, &page_plaintext).unwrap();
+        let asset_id = ObjectId::new("obj_legacyasset02").unwrap();
+        let asset_path = SafeRelativePath::new("asset_path", "docs/collision.md").unwrap();
+        let asset_plaintext = encode_folder_object_asset_plaintext(
+            &asset_path,
+            b"server legacy bytes",
+            "application/octet-stream",
+        )
+        .unwrap();
+        let asset_aad = FolderObjectAad {
+            brain_id: BrainId::new("brain").unwrap(),
+            folder_id: FolderId::new("home").unwrap(),
+            object_id: asset_id.clone(),
+            key_version: 1,
+        };
+        let asset_envelope =
+            encrypt_folder_object(&folder_key, &asset_aad, &asset_plaintext).unwrap();
+        let export = CliEncryptedBrainExport {
+            brain: CliExportBrain {
+                id: "brain".to_owned(),
+                kind: "personal".to_owned(),
+                name: "Brain".to_owned(),
+                owner_user_id: Some("npub-owner".to_owned()),
+            },
+            folders: vec![CliExportFolder {
+                id: "home".to_owned(),
+                path: "home".to_owned(),
+                access: "owner".to_owned(),
+                current_key_version: 1,
+                accessible: true,
+            }],
+            objects: Vec::new(),
+            key_grants: Vec::new(),
+            access_state: CliExportAccessState {
+                members: Vec::new(),
+                admins: Vec::new(),
+            },
+        };
+        let bootstrap = CliSyncBootstrap {
+            latest_sequence: 2,
+            objects: vec![
+                CliSyncObject {
+                    folder_id: "home".to_owned(),
+                    object_id: page_id.as_str().to_owned(),
+                    revision: 1,
+                    ciphertext: page_envelope.canonical_json(),
+                    deleted: false,
+                },
+                CliSyncObject {
+                    folder_id: "home".to_owned(),
+                    object_id: asset_id.as_str().to_owned(),
+                    revision: 1,
+                    ciphertext: asset_envelope.canonical_json(),
+                    deleted: false,
+                },
+            ],
+            control_records: Vec::new(),
+        };
+
+        let error = materialize_remote_projection(MaterializeRemoteProjectionContext {
+            env: &env,
+            root,
+            actor_npub: "npub-owner",
+            metadata: Some(&CliBrainMetadata::default()),
+            export: &export,
+            bootstrap: &bootstrap,
+            mounted_folders: &[],
+            path_overrides: &BTreeMap::new(),
+            session_keys: &session_keys,
+            prior_state: Some(&prior_state),
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("legacy Asset path collision"));
+        assert_eq!(
+            fs::read(root.join("home/docs/collision.md")).unwrap(),
+            prior_local_asset
+        );
     }
 
     #[test]
