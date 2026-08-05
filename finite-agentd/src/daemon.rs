@@ -55,6 +55,7 @@ const SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_AP
 const UNVERIFIED_HERMES_GENERATION: u64 = u64::MAX;
 const MAX_STARTUP_SPECIALIZATION_REARMS: u8 = 3;
 const HERMES_CONFIG_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
+const STARTUP_SPECIALIZATION_REVERIFY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[cfg(test)]
 #[derive(Default)]
@@ -592,12 +593,37 @@ fn spawn_startup_specialization_verifier(
     verified_hermes_generation: Arc<AtomicU64>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let desired = desired?;
-    Some(tokio::spawn(async move {
+    Some(spawn_startup_specialization_verifier_with_interval(
+        manager,
+        desired,
+        supervisor,
+        python,
+        script,
+        hermes_home,
+        verified_hermes_generation,
+        STARTUP_SPECIALIZATION_REVERIFY_INTERVAL,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_startup_specialization_verifier_with_interval(
+    manager: ConfigManager,
+    desired: MultimodalSpecializationDesiredStateV1,
+    supervisor: SupervisorHandle,
+    python: PathBuf,
+    script: PathBuf,
+    hermes_home: PathBuf,
+    verified_hermes_generation: Arc<AtomicU64>,
+    reverify_interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         let mut retry = StartupSpecializationRetry::default();
+        let mut admitted_process = None;
         loop {
             let before = supervisor.status().await;
             let Some((generation, pid)) = running_hermes_identity(&before) else {
                 verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
+                admitted_process = None;
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             };
@@ -606,6 +632,7 @@ fn spawn_startup_specialization_verifier(
                 .unwrap_or(false)
             {
                 verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
+                admitted_process = None;
                 if retry.rearm_pending {
                     let (decision, result) = attempt_startup_specialization_rearm(
                         &mut retry,
@@ -627,8 +654,25 @@ fn spawn_startup_specialization_verifier(
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
-            if verified_hermes_generation.load(Ordering::Relaxed) == generation {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+            if admitted_process == Some((generation, pid)) {
+                if let Err(error) = reverify_effective_startup_specialization_once(
+                    &manager,
+                    &desired,
+                    &supervisor,
+                    &python,
+                    &script,
+                    &hermes_home,
+                    &verified_hermes_generation,
+                    (generation, pid),
+                )
+                .await
+                {
+                    eprintln!(
+                        "finite-agentd: admitted specialization is degraded: {}",
+                        error.public_message()
+                    );
+                }
+                tokio::time::sleep(reverify_interval).await;
                 continue;
             }
             match verify_startup_specialization_once(
@@ -645,7 +689,8 @@ fn spawn_startup_specialization_verifier(
             {
                 Ok(()) => {
                     retry.reset();
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    admitted_process = Some((generation, pid));
+                    tokio::time::sleep(reverify_interval).await;
                     continue;
                 }
                 Err(error) => {
@@ -683,20 +728,46 @@ fn spawn_startup_specialization_verifier(
             }
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
-    }))
+    })
+}
+
+struct StartupSpecializationEffectivenessCheck {
+    probe_result: Result<(), AgentdError>,
+    same_process: bool,
+    config_matches: bool,
+}
+
+impl StartupSpecializationEffectivenessCheck {
+    fn is_effective(&self) -> bool {
+        self.probe_result.is_ok() && self.same_process && self.config_matches
+    }
+
+    fn into_result(self) -> Result<(), AgentdError> {
+        self.probe_result?;
+        if !self.same_process {
+            return Err(AgentdError::Config(
+                "Hermes changed generation during specialization verification".to_owned(),
+            ));
+        }
+        if !self.config_matches {
+            return Err(AgentdError::Config(
+                "Hermes specialization changed during semantic verification".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn verify_startup_specialization_once(
+async fn check_startup_specialization_effectiveness(
     manager: &ConfigManager,
     desired: &MultimodalSpecializationDesiredStateV1,
     supervisor: &SupervisorHandle,
     python: &Path,
     script: &Path,
     hermes_home: &Path,
-    verified_hermes_generation: &AtomicU64,
     expected_process: (u64, u32),
-) -> Result<(), AgentdError> {
+) -> Result<StartupSpecializationEffectivenessCheck, AgentdError> {
     let probe_result = if desired.capabilities.image {
         probe_hermes_vision(python, script, hermes_home).await
     } else {
@@ -711,7 +782,65 @@ async fn verify_startup_specialization_once(
     })
     .await
     .map_err(|error| AgentdError::Config(format!("specialization read-back failed: {error}")))??;
-    if probe_result.is_ok() && same_process && config_matches {
+    Ok(StartupSpecializationEffectivenessCheck {
+        probe_result,
+        same_process,
+        config_matches,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reverify_effective_startup_specialization_once(
+    manager: &ConfigManager,
+    desired: &MultimodalSpecializationDesiredStateV1,
+    supervisor: &SupervisorHandle,
+    python: &Path,
+    script: &Path,
+    hermes_home: &Path,
+    verified_hermes_generation: &AtomicU64,
+    expected_process: (u64, u32),
+) -> Result<(), AgentdError> {
+    let check = check_startup_specialization_effectiveness(
+        manager,
+        desired,
+        supervisor,
+        python,
+        script,
+        hermes_home,
+        expected_process,
+    )
+    .await?;
+    if check.is_effective() {
+        verified_hermes_generation.store(expected_process.0, Ordering::Relaxed);
+        Ok(())
+    } else {
+        verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
+        check.into_result()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn verify_startup_specialization_once(
+    manager: &ConfigManager,
+    desired: &MultimodalSpecializationDesiredStateV1,
+    supervisor: &SupervisorHandle,
+    python: &Path,
+    script: &Path,
+    hermes_home: &Path,
+    verified_hermes_generation: &AtomicU64,
+    expected_process: (u64, u32),
+) -> Result<(), AgentdError> {
+    let check = check_startup_specialization_effectiveness(
+        manager,
+        desired,
+        supervisor,
+        python,
+        script,
+        hermes_home,
+        expected_process,
+    )
+    .await?;
+    if check.is_effective() {
         let config_manager = manager.clone();
         tokio::task::spawn_blocking(move || {
             config_manager.confirm_startup_multimodal_specialization_semantics()
@@ -725,7 +854,9 @@ async fn verify_startup_specialization_once(
     }
 
     verified_hermes_generation.store(UNVERIFIED_HERMES_GENERATION, Ordering::Relaxed);
-    if let Err(error) = probe_result {
+    let probe_failed = check.probe_result.is_err();
+    let error = check.into_result().unwrap_err();
+    if probe_failed {
         let config_manager = manager.clone();
         let hermes_home = hermes_home.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -739,19 +870,7 @@ async fn verify_startup_specialization_once(
         })??;
         return Err(error);
     }
-    if !same_process {
-        return Err(AgentdError::Config(
-            "Hermes changed generation during specialization verification".to_owned(),
-        ));
-    }
-    if !config_matches {
-        return Err(AgentdError::Config(
-            "Hermes specialization changed during semantic verification".to_owned(),
-        ));
-    }
-    Err(AgentdError::Config(
-        "Hermes specialization verification failed".to_owned(),
-    ))
+    Err(error)
 }
 
 #[derive(Default)]
@@ -1777,6 +1896,108 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(verified.load(Ordering::Relaxed), current_process.0);
+        supervisor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ongoing_semantic_failure_degrades_without_rollback_or_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join("config.yaml");
+        fs::write(&config_path, "auxiliary: {}\n").unwrap();
+        let manager = ConfigManager::new(
+            &config_path,
+            Ledger::open(home.path().join("agentd.sqlite3")).unwrap(),
+        );
+        let mut desired =
+            MultimodalSpecializationDesiredStateV1::canonical("ongoing-semantic-check");
+        desired.capabilities.audio = false;
+        desired.worker_api_key = Some("worker-secret".to_owned());
+        manager
+            .activate_platform_managed_multimodal_specialization(&desired, || {
+                validate_hermes_config(home.path())
+            })
+            .unwrap();
+        let supervisor = start_supervisor(
+            daemon_test_process("finitechat"),
+            daemon_test_process("health"),
+            daemon_test_process("hermes"),
+        );
+        let admitted_process = wait_for_daemon_test_hermes(&supervisor).await;
+        let probe = home.path().join("ongoing-probe.sh");
+        fs::write(
+            &probe,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"RED\",\"video_analyze\":true}}'\n",
+                MULTIMODAL_HERMES_PROBE_MARKER
+            ),
+        )
+        .unwrap();
+        let verified_generation = Arc::new(AtomicU64::new(UNVERIFIED_HERMES_GENERATION));
+        let verifier = spawn_startup_specialization_verifier_with_interval(
+            manager,
+            desired,
+            supervisor.clone(),
+            PathBuf::from("/bin/sh"),
+            probe.clone(),
+            home.path().to_path_buf(),
+            Arc::clone(&verified_generation),
+            Duration::from_millis(10),
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while verified_generation.load(Ordering::Relaxed) != admitted_process.0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let admitted_config = fs::read(&config_path).unwrap();
+        fs::write(
+            &probe,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"BLUE\",\"video_analyze\":true}}'\n",
+                MULTIMODAL_HERMES_PROBE_MARKER
+            ),
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while verified_generation.load(Ordering::Relaxed) != UNVERIFIED_HERMES_GENERATION {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&config_path).unwrap(), admitted_config);
+        assert_eq!(
+            wait_for_daemon_test_hermes(&supervisor).await,
+            admitted_process,
+            "ongoing semantic failure must not restart Hermes"
+        );
+
+        fs::write(
+            &probe,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}{{\"success\":true,\"analysis\":\"RED\",\"video_analyze\":true}}'\n",
+                MULTIMODAL_HERMES_PROBE_MARKER
+            ),
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while verified_generation.load(Ordering::Relaxed) != admitted_process.0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            wait_for_daemon_test_hermes(&supervisor).await,
+            admitted_process,
+            "specialization recovery on the same process must not restart Hermes"
+        );
+        assert_eq!(fs::read(&config_path).unwrap(), admitted_config);
+
+        verifier.abort();
         supervisor.shutdown().await;
     }
 

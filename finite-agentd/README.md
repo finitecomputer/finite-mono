@@ -103,6 +103,11 @@ after the running Hermes catalog admits `video_analyze` and the installed
 Hermes-native vision tool passes the fixed semantic probe for the current
 Hermes process generation. Matching configuration bytes alone are not
 sufficient, and a restart triggers a new probe.
+Agentd also repeats the bounded semantic probe every five minutes for the
+admitted Hermes generation. A failed periodic probe clears `effective` but does
+not roll back the managed configuration or restart Hermes; the same generation
+can recover on a later successful probe while chat continues to use its
+independent health contract.
 Transient semantic failures restore the owned pre-images before rearming the
 still-desired profile. Initial reconciliation failures and restart failures use
 the same bounded policy; a failed restart first restores the prior managed

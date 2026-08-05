@@ -82,6 +82,9 @@ a missing, malformed, wrong-bundle, desired-only, ineffective, or
 cleanup-blocked state therefore fails creation and upgrade without making an
 already-serving chat runtime fail its recurring OCI healthcheck. Runtimes
 without that environment variable report both fields from generic readiness.
+Agentd periodically re-verifies an admitted specialization. A later semantic
+failure clears `admission_ready` while leaving `ready` unchanged; it does not
+restart or replace the serving Runtime.
 Binary, dependency, skill, and version validation happens once while building
 the image; it is not repeated every 30 seconds as part of runtime liveness.
 

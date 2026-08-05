@@ -17,9 +17,12 @@ a production deploy, restart, or runtime mutation.
   `aeon-multimodal` is not an alias or a converged state.
 - Provision the route-scoped worker credential outside the repository. Never
   print it or place it in Runtime status, Core facts, or the main-model key.
-- Deploy Runner capability advertisement before enabling the Core lifecycle
-  fence. Core-first is unsafe. Incapable Runners may still lease Stop/Destroy,
-  but not canonical creation or Restart/Recover/Upgrade.
+- Deploy the Core admission fence before the new Runner release. N Core leaves
+  canonical creation and Restart/Recover/Upgrade queued when an N-1 Runner
+  omits the specialization capability, while Stop/Destroy remain available.
+  Do not run N Runner against N-1 Core: the old lease contract cannot protect a
+  profile-less canonical creation from terminal rejection by the hard-cut
+  Runner. Upgrade Runners only after every Core instance enforces the fence.
 
 ## Configuration surfaces
 
@@ -78,6 +81,10 @@ convergence batch, and after cleanup.
 - Every provider requires `admission_ready` from `/healthz`; none implements a
   specialization-specific provider probe. Recurring OCI health and contact
   availability use `ready`, preserving basic chat when specialization degrades.
+- Agentd periodically repeats the bounded semantic probe for an admitted Hermes
+  generation. A later failure sets `effective=false` and
+  `admission_ready=false` without rolling back configuration, restarting
+  Hermes, or replacing the already-serving Runtime.
 - Run the targeted health, agentd, Runner provider, Core in-memory/PostgreSQL,
   finite-status, runtime-image, and Hermes probe gates before the applicable
   repository-wide checks.
