@@ -1,6 +1,33 @@
 use std::error::Error;
 use std::net::SocketAddr;
 
+/// Parse `FINITE_BRAIN_PROTECTED_RATE_LIMIT` as `max_requests:window_seconds`.
+/// Unset or empty keeps the production defaults; malformed values fail closed.
+fn protected_rate_limit_override(value: Option<String>) -> Result<Option<(u32, u64)>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let (max_requests, window_seconds) = value
+        .split_once(':')
+        .ok_or_else(|| "expected \"max_requests:window_seconds\"".to_owned())?;
+    let max_requests = max_requests
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| format!("invalid max_requests: {error}"))?;
+    let window_seconds = window_seconds
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("invalid window_seconds: {error}"))?;
+    if max_requests == 0 || window_seconds == 0 {
+        return Err("max_requests and window_seconds must be at least 1".to_owned());
+    }
+    Ok(Some((max_requests, window_seconds)))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args()
@@ -59,6 +86,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut state =
         finite_brain_server::server_state_with_sqlite_path(database_path, public_base_url)?;
+    if let Some((max_requests, window_seconds)) =
+        protected_rate_limit_override(std::env::var("FINITE_BRAIN_PROTECTED_RATE_LIMIT").ok())
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid FINITE_BRAIN_PROTECTED_RATE_LIMIT: {error}"),
+                )
+            })?
+    {
+        state = state.with_rate_limit(max_requests, window_seconds);
+    }
     if let Some(url) = identity_authority_url.as_ref() {
         state = state.with_identity_authority_url(url.clone());
     }
@@ -129,4 +167,54 @@ async fn main() -> Result<(), Box<dyn Error>> {
     axum::serve(listener, router).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::protected_rate_limit_override;
+
+    #[test]
+    fn protected_rate_limit_unset_or_empty_keeps_defaults() {
+        assert_eq!(protected_rate_limit_override(None).unwrap(), None);
+        assert_eq!(
+            protected_rate_limit_override(Some(String::new())).unwrap(),
+            None
+        );
+        assert_eq!(
+            protected_rate_limit_override(Some("   ".to_owned())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn protected_rate_limit_parses_max_requests_and_window() {
+        assert_eq!(
+            protected_rate_limit_override(Some("10000:60".to_owned())).unwrap(),
+            Some((10000, 60))
+        );
+        assert_eq!(
+            protected_rate_limit_override(Some(" 120 : 30 ".to_owned())).unwrap(),
+            Some((120, 30))
+        );
+    }
+
+    #[test]
+    fn protected_rate_limit_rejects_malformed_values() {
+        for value in [
+            "10000",
+            "10000:",
+            ":60",
+            "abc:60",
+            "10000:abc",
+            "10000:60:5",
+            "0:60",
+            "10000:0",
+            "-1:60",
+        ] {
+            assert!(
+                protected_rate_limit_override(Some(value.to_owned())).is_err(),
+                "expected {value:?} to be rejected"
+            );
+        }
+    }
 }
