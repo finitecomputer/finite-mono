@@ -175,7 +175,6 @@ async function main() {
       await assertAssetReferenceOnly(
         brain,
         runtimeContainerId,
-        brainId,
         expectedText,
       );
       console.log("brain Asset Source Note synced without inline bytes ok");
@@ -355,18 +354,20 @@ async function writeAgentAssetReference(
   brainId: string,
   filename: string,
 ) {
-  const root = `/data/workspace/finitebrain/${brainId}/agent-notes`;
+  const noteRoot = `/data/workspace/finitebrain/${brainId}/agent-notes`;
+  const assetRoot = "/data/workspace/asset-sources";
   dockerExec(machineId, [
     "env",
     `MATRIX_ASSET_FILENAME=${filename}`,
-    `MATRIX_ASSET_ROOT=${root}`,
+    `MATRIX_ASSET_ROOT=${assetRoot}`,
+    `MATRIX_BRAIN_NOTE_ROOT=${noteRoot}`,
     "/bin/bash",
     "-lc",
     [
       "set -euo pipefail",
-      'asset="$MATRIX_ASSET_ROOT/raw/assets/$MATRIX_ASSET_FILENAME"',
-      'note="$MATRIX_ASSET_ROOT/raw/matrix-asset.md"',
-      'mkdir -p "$MATRIX_ASSET_ROOT/raw/assets"',
+      'asset="$MATRIX_ASSET_ROOT/$MATRIX_ASSET_FILENAME"',
+      'note="$MATRIX_BRAIN_NOTE_ROOT/raw/matrix-asset.md"',
+      'mkdir -p "$MATRIX_ASSET_ROOT" "$MATRIX_BRAIN_NOTE_ROOT/raw"',
       "printf '\\000FiniteBrain\\377Asset\\n' >\"$asset\"",
       'cat >"$note" <<EOF',
       "---",
@@ -712,7 +713,6 @@ async function assertOwnerSeesNoteWithoutRefresh(brain: FrameLocator, expectedTe
 async function assertAssetReferenceOnly(
   brain: FrameLocator,
   machineId: string,
-  brainId: string,
   filename: string,
 ) {
   await assertOwnerSeesNoteWithoutRefresh(brain, filename);
@@ -731,7 +731,7 @@ async function assertAssetReferenceOnly(
     "Asset Source Note exposed an inline Brain download",
   );
 
-  const assetPath = `/data/workspace/finitebrain/${brainId}/agent-notes/raw/assets/${filename}`;
+  const assetPath = `/data/workspace/asset-sources/${filename}`;
   const digest = dockerExec(machineId, [
     "sha256sum",
     assetPath,
