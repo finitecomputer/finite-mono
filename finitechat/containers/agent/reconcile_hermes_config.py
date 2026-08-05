@@ -59,9 +59,7 @@ def _integer(settings: dict[str, str], key: str, *, minimum: int = 0) -> int:
     return value
 
 
-def _migrate_legacy_finite_private_model(
-    config: dict[str, Any], settings: dict[str, str]
-) -> None:
+def _migrate_legacy_finite_private_model(config: dict[str, Any], settings: dict[str, str]) -> None:
     """Move only the exact image-owned GLM default to the current model.
 
     Model configuration is otherwise durable and user-owned. Matching the

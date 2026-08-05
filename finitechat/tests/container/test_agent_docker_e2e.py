@@ -269,9 +269,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             "api_key": "${OPENROUTER_API_KEY}",
         }
 
-        reconciled = self._reconcile_config(
-            {"model": model.copy()}, self._reconciler_settings()
-        )
+        reconciled = self._reconcile_config({"model": model.copy()}, self._reconciler_settings())
 
         self.assertEqual(reconciled["model"], model)
 
@@ -284,9 +282,7 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             "api_key": "${FINITE_PRIVATE_API_KEY}",
         }
 
-        reconciled = self._reconcile_config(
-            {"model": model.copy()}, self._reconciler_settings()
-        )
+        reconciled = self._reconcile_config({"model": model.copy()}, self._reconciler_settings())
 
         self.assertEqual(reconciled["model"], model)
 
