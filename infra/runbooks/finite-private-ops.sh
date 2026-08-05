@@ -215,7 +215,8 @@ quality_canary() {
     echo "FINITE_PRIVATE_CANARY_API_KEY is required for quality-canary" >&2
     exit 1
   fi
-  python3 "$REPO_ROOT/scripts/check_deepseek_v4_0731_quality.py" \
+  FINITE_PRIVATE_CANARY_API_KEY="$FINITE_PRIVATE_CANARY_API_KEY" \
+    python3 "$REPO_ROOT/scripts/check_deepseek_v4_0731_quality.py" \
     --endpoint "$ENDPOINT/v1" \
     --model "$MODEL" \
     --lane self-hosted \

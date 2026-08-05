@@ -52,6 +52,22 @@ class DeepSeekV40731QualityTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("reasoning_content", detail)
 
+    def test_vllm_025_reasoning_field_is_accepted(self) -> None:
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "reasoning": "17 times 19 is 323.",
+                        "content": "323",
+                    }
+                }
+            ]
+        }
+
+        passed, _, reasoning_characters = _score(CASES[0], response)
+        self.assertTrue(passed)
+        self.assertGreater(reasoning_characters, 0)
+
     def test_tool_case_requires_named_tool_and_city(self) -> None:
         case = next(item for item in CASES if item.expected_tool)
         response = {

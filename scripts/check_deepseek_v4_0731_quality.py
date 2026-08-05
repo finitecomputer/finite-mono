@@ -142,8 +142,12 @@ def _score(case: QualityCase, response: dict[str, Any]) -> tuple[bool, str, int]
     if not isinstance(message, dict):
         return False, "missing assistant message", 0
     reasoning = message.get("reasoning_content")
+    if reasoning is None:
+        # vLLM 0.25.x serializes the parsed field as `reasoning`; newer
+        # OpenAI-compatible lanes commonly use `reasoning_content`.
+        reasoning = message.get("reasoning")
     if not isinstance(reasoning, str) or not reasoning.strip():
-        return False, "missing parsed reasoning_content", 0
+        return False, "missing parsed reasoning/reasoning_content", 0
 
     if case.expected_tool is not None:
         tool_calls = message.get("tool_calls")

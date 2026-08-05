@@ -64,10 +64,13 @@ jobs:
           docker pull "$PINNED"
           test "$(docker image inspect "$PINNED" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$PINNED" --format '{{index .Config.Labels "ai.finite.vllm.upstream-fix"}}')" = "77434861904a9f01ea4818fe9f0c7b2a5c05686e"
+          test "$(docker image inspect "$PINNED" --format '{{index .Config.Labels "ai.finite.vllm.rust-frontend-fix"}}')" = "77434861904a9f01ea4818fe9f0c7b2a5c05686e"
           docker run --rm --entrypoint python3 "$PINNED" \
             -c 'import importlib.metadata; assert importlib.metadata.version("vllm") == "0.25.1"'
           docker run --rm --entrypoint python3 "$PINNED" \
             /usr/local/libexec/patch_vllm_deepseek_v4_0731.py check
+          docker run --rm --entrypoint python3 "$PINNED" -c \
+            'import pathlib, vllm; b=(pathlib.Path(vllm.__path__[0])/"vllm-rs").read_bytes(); assert b"Beyond maximum" in b and b"Absolute maximum" in b'
 
       - name: Summarize
         env:
@@ -77,4 +80,4 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "\`$PINNED\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Base: vLLM 0.25.1; reasoning backport: 77434861904a9f01ea4818fe9f0c7b2a5c05686e" >> "$GITHUB_STEP_SUMMARY"
+          echo "Base: vLLM 0.25.1; Python and Rust reasoning backport: 77434861904a9f01ea4818fe9f0c7b2a5c05686e" >> "$GITHUB_STEP_SUMMARY"
