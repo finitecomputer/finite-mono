@@ -9643,6 +9643,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn email_brain_and_folder_invitations_for_one_recipient_coexist() {
+        let admin_keys = Keys::generate();
+        let brain_unwrap_keys = Keys::generate();
+        let folder_unwrap_keys = Keys::generate();
+        let brain_unwrap_npub = npub(&brain_unwrap_keys);
+        let folder_unwrap_npub = npub(&folder_unwrap_keys);
+        let delivered_invites = Arc::new(Mutex::new(Vec::<BrainInviteEmail>::new()));
+        let delivered_for_mailer = delivered_invites.clone();
+        let router = router_with_state(test_state().with_invite_mailer(move |email| {
+            delivered_for_mailer
+                .lock()
+                .expect("delivery capture mutex")
+                .push(email.clone());
+            Ok(())
+        }));
+        let create_brain = post_brain(
+            router.clone(),
+            &admin_keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(create_brain.status(), StatusCode::OK);
+        add_test_org_folders(&router, &admin_keys).await;
+        let invited_email = "same-recipient@example.com";
+        let expires_at = "2026-06-04T20:26:40Z";
+
+        let brain_payload_hash = "sha256-brain-bootstrap-payload";
+        let brain_authorization_event_json = email_bootstrap_authorization_event(
+            &admin_keys,
+            "acme",
+            invited_email,
+            &brain_unwrap_npub,
+            brain_payload_hash,
+            expires_at,
+            &[
+                ("getting-started", FolderAccessMode::AllMembers, 1),
+                ("restricted", FolderAccessMode::Restricted, 1),
+            ],
+        );
+        let brain_create_body = serde_json::json!({
+            "target": invited_email,
+            "initialFolderAccess": ["restricted"],
+            "expiresAt": expires_at,
+            "inviteUnwrapNpub": brain_unwrap_npub,
+            "bootstrapPayloadHash": brain_payload_hash,
+            "bootstrapWrappedEventJson": gift_wrap_event_json(&npub(&brain_unwrap_keys)),
+            "bootstrapAuthorizationEventJson": brain_authorization_event_json,
+        })
+        .to_string();
+        let brain_create = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(brain_create_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(brain_create.status(), StatusCode::OK);
+        let brain_invitation: BrainInvitationResponse = read_json(brain_create).await;
+        assert!(!brain_invitation.folder_only);
+        assert_eq!(brain_invitation.delivery_status.as_deref(), Some("sent"));
+
+        let folder_payload_hash = "sha256-folder-bootstrap-payload";
+        let folder_authorization_event_json = email_bootstrap_authorization_event(
+            &admin_keys,
+            "acme",
+            invited_email,
+            &folder_unwrap_npub,
+            folder_payload_hash,
+            expires_at,
+            &[("restricted", FolderAccessMode::Restricted, 1)],
+        );
+        let folder_create_body = serde_json::json!({
+            "target": invited_email,
+            "initialFolderAccess": ["restricted"],
+            "expiresAt": expires_at,
+            "inviteUnwrapNpub": folder_unwrap_npub,
+            "bootstrapPayloadHash": folder_payload_hash,
+            "bootstrapWrappedEventJson": gift_wrap_event_json(&npub(&folder_unwrap_keys)),
+            "bootstrapAuthorizationEventJson": folder_authorization_event_json,
+            "folderOnly": true,
+        })
+        .to_string();
+        let folder_create = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/restricted/invitations",
+            Some(folder_create_body),
+            TEST_NOW + 1,
+        )
+        .await;
+        let folder_status = folder_create.status();
+        let folder_body = read_text(folder_create).await;
+        assert_eq!(folder_status, StatusCode::OK, "{folder_body}");
+        let folder_invitation: BrainInvitationResponse =
+            serde_json::from_str(&folder_body).unwrap();
+        assert!(folder_invitation.folder_only);
+        assert_eq!(folder_invitation.delivery_status.as_deref(), Some("sent"));
+
+        {
+            let delivered = delivered_invites.lock().expect("delivery capture mutex");
+            assert_eq!(delivered.len(), 2);
+            assert_eq!(delivered[0].to, invited_email);
+            assert_eq!(delivered[0].subject, "Brain invitation");
+            assert!(delivered[0].text.contains(&brain_invitation.invite_code));
+            assert_eq!(delivered[1].to, invited_email);
+            assert_eq!(delivered[1].subject, "Folder invitation");
+            assert!(delivered[1].text.contains(&folder_invitation.invite_code));
+            assert!(delivered.iter().all(|email| !email.text.contains('#')));
+        }
+
+        let brain_list = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/invitations",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(brain_list.status(), StatusCode::OK);
+        let brain_list: BrainInvitationListResponse = read_json(brain_list).await;
+        assert_eq!(brain_list.invitations.len(), 1);
+        assert_eq!(brain_list.invitations[0].id, brain_invitation.id);
+
+        let folder_list = authed_request(
+            router,
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/folders/restricted/invitations",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(folder_list.status(), StatusCode::OK);
+        let folder_list: FolderInvitationListResponse = read_json(folder_list).await;
+        assert_eq!(folder_list.invitations.len(), 1);
+        assert!(matches!(
+            &folder_list.invitations[0],
+            FolderInvitationResourceResponse::Email(invitation)
+                if invitation.id == folder_invitation.id
+        ));
+    }
+
+    #[tokio::test]
     async fn brain_invitation_routing_keeps_active_finite_vip_nip05_on_npub_path() {
         let admin_keys = Keys::generate();
         let target_keys = Keys::generate();

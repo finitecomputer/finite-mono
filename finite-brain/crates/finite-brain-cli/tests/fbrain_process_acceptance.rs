@@ -164,6 +164,7 @@ fn spawn_real_brain_server(
                     identity_authority_url,
                     "process-identity-token",
                 )
+                .with_dev_invite_mailer()
                 .with_smoke_email_proofs(
                     "future-user@example.com,future-personal@example.com,existing-member@example.com,stale-user@example.com",
                 )
@@ -1393,6 +1394,32 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     smoke.pass();
 
     smoke.enter("unregisteredEmailFolderInvitationBootstrap");
+    let email_brain_invitation = run(
+        &home_a,
+        &tree_a,
+        &[
+            "invite",
+            "brain",
+            "create",
+            "--target",
+            "future-user@example.com",
+            "--json",
+        ],
+    );
+    assert!(
+        email_brain_invitation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&email_brain_invitation.stderr)
+    );
+    let email_brain_invitation: Value =
+        serde_json::from_slice(&email_brain_invitation.stdout).unwrap();
+    assert_eq!(email_brain_invitation["folderOnly"], json!(false));
+    assert_eq!(
+        email_brain_invitation["invitedEmail"],
+        "future-user@example.com"
+    );
+    assert_eq!(email_brain_invitation["deliveryStatus"], "sent");
+
     let email_folder_invitation = run(
         &home_a,
         &tree_a.join("Admin Only"),
@@ -1412,11 +1439,12 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     let email_folder_invitation: Value =
         serde_json::from_slice(&email_folder_invitation.stdout).unwrap();
-    assert_eq!(email_folder_invitation["folderOnly"], true);
+    assert_eq!(email_folder_invitation["folderOnly"], json!(true));
     assert_eq!(
         email_folder_invitation["invitedEmail"],
         "future-user@example.com"
     );
+    assert_eq!(email_folder_invitation["deliveryStatus"], "sent");
     assert_eq!(
         email_folder_invitation["initialFolderAccess"],
         json!(["admin-only"])
@@ -1464,6 +1492,14 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     );
     let listed_brain_invitations: Value =
         serde_json::from_slice(&listed_brain_invitations.stdout).unwrap();
+    assert!(
+        listed_brain_invitations["invitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|invitation| invitation["id"] == email_brain_invitation["id"]),
+        "the pending Brain Invitation must remain visible through the Brain collection"
+    );
     assert!(
         listed_brain_invitations["invitations"]
             .as_array()
@@ -1541,6 +1577,25 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         String::from_utf8_lossy(&duplicate_email_claim.stderr)
             .contains("invitation bootstrap is unavailable")
     );
+    let revoked_brain_invitation = run(
+        &home_a,
+        &tree_a,
+        &[
+            "invite",
+            "brain",
+            "revoke",
+            email_brain_invitation["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        revoked_brain_invitation.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked_brain_invitation.stderr)
+    );
+    let revoked_brain_invitation: Value =
+        serde_json::from_slice(&revoked_brain_invitation.stdout).unwrap();
+    assert_eq!(revoked_brain_invitation["status"], "revoked");
     let cancel_accepted = run(
         &home_a,
         &tree_a.join("Admin Only"),
