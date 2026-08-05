@@ -36,21 +36,26 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository_owner }}/deepseek-v4-vllm
           VERSION: ${{ inputs.version }}
         run: |
-          builder="deepseek-v4-vllm-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          docker buildx create --name "$builder" --use
-          docker buildx build \
+          version_ref="$IMAGE:$VERSION"
+          sha_ref="$IMAGE:sha-${GITHUB_SHA::12}"
+          docker build \
             --platform linux/amd64 \
             --build-arg "FINITE_MONO_REV=$GITHUB_SHA" \
             --file infra/images/deepseek-v4-vllm.Dockerfile \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:sha-${GITHUB_SHA::12}" \
-            --metadata-file image-metadata.json \
-            --push \
+            --tag "$version_ref" \
+            --tag "$sha_ref" \
             .
-          digest="$(jq -r '."containerimage.digest"' image-metadata.json)"
+          docker push "$sha_ref"
+          docker push "$version_ref"
+          docker pull "$version_ref" >/dev/null
+          digest="$(
+            docker image inspect "$version_ref" \
+              --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+              | sed -n "s#^$IMAGE@##p" \
+              | head -n 1
+          )"
           test -n "$digest"
-          test "$digest" != null
-          echo "pinned=$IMAGE:$VERSION@$digest" >> "$GITHUB_OUTPUT"
+          echo "pinned=$version_ref@$digest" >> "$GITHUB_OUTPUT"
 
       - name: Verify the published image contract
         env:
