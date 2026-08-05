@@ -1,0 +1,48 @@
+#!/bin/sh
+# Read-only fake nerdctl for lifecycle-probe fixtures. State is one file per
+# field under ./fake-state next to this script, mirroring the kata.rs test
+# fakes: <name>.image/.status/.project/.source/.host/.mount/.id/.artifact/.schema
+#
+# The ONLY supported verbs are the probe's read paths: `inspect` and `ps`.
+# Any other verb is a mutating or unsupported provider call: the attempt is
+# recorded in fake-state/mutations.log and rejected with exit 42, so a probe
+# that ever tries to mutate something fails its own test. Later recovery work
+# should reuse this fake and extend its read surface only.
+set -eu
+state="$(dirname "$0")/fake-state"
+mkdir -p "$state"
+if [ "${1:-}" = "--namespace" ]; then shift 2; fi
+cmd="${1:-}"
+shift || true
+printf '%s %s\n' "$cmd" "$*" >>"$state/commands.log"
+field() { cat "$state/$1.$2"; }
+field_or() { if [ -f "$state/$1.$2" ]; then cat "$state/$1.$2"; else printf '%s' "$3"; fi; }
+case "$cmd" in
+  inspect)
+    name="$1"
+    if [ ! -f "$state/$name.image" ]; then
+      echo "Error: No such object: $name" >&2
+      exit 1
+    fi
+    printf '[{"Id":"%s","Config":{"Labels":{"computer.finite.v2.runtime":"true","computer.finite.v2.source_host_id":"%s","computer.finite.v2.source_machine_id":"%s","computer.finite.v2.project_id":"%s","computer.finite.v2.runtime_artifact_id":"%s","computer.finite.v2.state_schema_version":"%s"},"Image":"%s","Env":[]},"State":{"Status":"%s"},"Mounts":[{"Source":"%s","Destination":"/data","RW":true}]}]\n' \
+      "$(field_or "$name" id "$name-id")" \
+      "$(field_or "$name" host finite-lat-1)" \
+      "$(field_or "$name" source "$name")" \
+      "$(field "$name" project)" \
+      "$(field_or "$name" artifact artifact-v1)" \
+      "$(field_or "$name" schema v1)" \
+      "$(field "$name" image)" \
+      "$(field "$name" status)" \
+      "$(field "$name" mount)"
+    ;;
+  ps)
+    for image in "$state"/*.image; do
+      if [ -f "$image" ]; then basename "$image" .image; fi
+    done
+    ;;
+  *)
+    printf '%s %s\n' "$cmd" "$*" >>"$state/mutations.log"
+    echo "fixture nerdctl rejects non-read verb: $cmd" >&2
+    exit 42
+    ;;
+esac

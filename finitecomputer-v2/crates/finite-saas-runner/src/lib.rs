@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 mod apple_container;
 mod kata;
+pub mod lifecycle_probe;
 pub mod phala;
 mod phala_inventory;
 pub mod retirement;
@@ -37,6 +38,10 @@ pub mod retirement;
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 pub use kata::{
     KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig, durable_state_manifest_sha256,
+};
+pub use lifecycle_probe::{
+    LIFECYCLE_PROBE_SCHEMA, LifecycleProbeConfig, LifecycleProbeReport, LifecycleProbeRequest,
+    LifecycleVerdict, probe_runtime_lifecycle,
 };
 pub use phala::{PhalaConfig, PhalaLauncher};
 

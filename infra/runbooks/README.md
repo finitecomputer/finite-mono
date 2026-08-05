@@ -91,6 +91,16 @@ Two rules apply to **every** release and promotion, no exceptions:
   timer/page-on-red policy and applying the revision to production are explicit
   operator steps, outside the implementation PR.
 
+  `finite-status` also reports per-Agent lifecycle-control health from the
+  runner's read-only `lifecycle-probe` (app health and lifecycle health are
+  separate fields; lifecycle verdicts gate upgrade eligibility only). The
+  probe reads root-only Kata/containerd state — `/run/vc/sbs/*/persist.json`,
+  `ctr --namespace finite tasks list`/`tasks ps`, `/var/run/netns`, and
+  `/proc/<pid>/comm` — so the collector must run as root (as in the `ssh -T
+  root@…` pattern above). Run as an unprivileged user, each Agent's lifecycle
+  field degrades to a displayed `unknown`, never a silent green. It issues no
+  mutating provider, Core, systemd, or Borg operation.
+
 - Nothing is built on a prod box. Images are CI-built, digest-pinned, from
   `infra/images/` (`infra/README.md` deploy principles).
 - Never open a snapshot SQLite file directly. Use

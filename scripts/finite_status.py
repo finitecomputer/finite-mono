@@ -115,6 +115,7 @@ DISTRIBUTION_QUERY = """select ar.source_host_id, ra.version_label, count(*)
 RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
        ar.id as agent_runtime_id,
        ar.project_id,
+       ar.source_machine_id,
        coalesce(p.display_name, ar.id) as agent_name,
        coalesce(ra.version_label, 'unknown') as version_label,
        case
@@ -134,6 +135,13 @@ RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
   left join projects p on p.id = ar.project_id
   left join runtime_status_snapshots rss on rss.agent_runtime_id = ar.id
   order by ar.source_host_id, ar.id;"""
+
+# The runner's read-only lifecycle probe. App health (endpoints, heartbeats)
+# and lifecycle-control health (can the platform stop/replace this guest) are
+# separate facts; this binary answers the second and is consumed per Agent.
+LIFECYCLE_PROBE_BINARY = "/run/current-system/sw/bin/finite-saas-runner"
+LIFECYCLE_PROBE_SCHEMA = "finite.lifecycle-probe.v1"
+LIFECYCLE_VERDICTS = ("operable", "degraded", "inoperable", "unknown")
 
 SYSTEMD_PROPERTIES = (
     "LoadState",
@@ -264,6 +272,7 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
                 "source_host_id",
                 "agent_runtime_id",
                 "project_id",
+                "source_machine_id",
                 "agent_name",
                 "version_label",
                 "link_state",
@@ -632,6 +641,109 @@ def collect_rollout() -> dict[str, Any]:
     }
 
 
+def probe_agent_entry(verdict: str, reason: str | None, detail: str | None = None) -> dict[str, Any]:
+    entry: dict[str, Any] = {"verdict": verdict, "reason": reason}
+    if detail is not None:
+        entry["detail"] = detail
+    return entry
+
+
+def collect_lifecycle_probe(
+    runtimes: list[dict[str, Any]], hostname: str
+) -> dict[str, Any]:
+    """Probe lifecycle-control health for this host's active Agents.
+
+    Read-only: the probe binary gates upgrade eligibility and never touches a
+    serving Agent. Every collection failure is recorded as an `unknown`
+    verdict on that Agent — unknown is a displayed state, never hidden.
+    """
+    binary = os.environ.get("FINITE_STATUS_LIFECYCLE_PROBE_BIN", LIFECYCLE_PROBE_BINARY)
+    candidates = [
+        row
+        for row in runtimes
+        if row.get("source_host_id") == hostname and row.get("link_state") == "active"
+    ]
+    raw: dict[str, Any] = {
+        "binary": binary,
+        "schema": LIFECYCLE_PROBE_SCHEMA,
+        "available": False,
+        "agents": {},
+        "errors": [],
+    }
+    if not candidates:
+        return raw
+    if not Path(binary).exists():
+        raw["errors"].append(f"lifecycle probe binary {binary} is not installed")
+        return raw
+    raw["available"] = True
+    environment = dict(os.environ)
+    try:
+        # Forward every probe-relevant runner env key so finite-status probes
+        # the same roots the rollout wrapper probes; site-specific overrides
+        # must not split the two views.
+        environment.update(
+            read_environment_values(
+                Path(CONTRACT["runner"]["environment_file"]),
+                {
+                    "FC_RUNNER_SOURCE_HOST_ID",
+                    "FC_RUNNER_WORK_ROOT",
+                    "FC_RUNNER_KATA_NAMESPACE",
+                    "FC_RUNNER_KATA_NERDCTL_BIN",
+                    "FC_RUNNER_KATA_CTR_BIN",
+                    "FC_RUNNER_KATA_SANDBOX_ROOT",
+                    "FC_RUNNER_KATA_NETNS_ROOT",
+                    "FC_RUNNER_KATA_PROC_ROOT",
+                },
+            )
+        )
+    except CollectionError as error:
+        raw["errors"].append(str(error))
+    for row in candidates:
+        runtime_id = row["agent_runtime_id"]
+        command = [
+            binary,
+            "lifecycle-probe",
+            "--project-id",
+            row["project_id"],
+            "--agent-runtime-id",
+            runtime_id,
+            "--source-machine-id",
+            row.get("source_machine_id") or "",
+        ]
+        try:
+            result = run_read_only(command, environment=environment)
+        except CollectionError as error:
+            raw["agents"][runtime_id] = probe_agent_entry(
+                "unknown", "probe_unavailable", str(error)
+            )
+            continue
+        if result.returncode != 0:
+            detail = result.stderr.strip() or f"exit {result.returncode}"
+            raw["agents"][runtime_id] = probe_agent_entry(
+                "unknown", "probe_unavailable", detail
+            )
+            continue
+        try:
+            report = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raw["agents"][runtime_id] = probe_agent_entry(
+                "unknown", "probe_invalid", str(error)
+            )
+            continue
+        if (
+            report.get("schema") != LIFECYCLE_PROBE_SCHEMA
+            or report.get("verdict") not in LIFECYCLE_VERDICTS
+        ):
+            raw["agents"][runtime_id] = probe_agent_entry(
+                "unknown", "probe_invalid", "unrecognized probe report shape"
+            )
+            continue
+        raw["agents"][runtime_id] = probe_agent_entry(
+            report["verdict"], report.get("reason")
+        )
+    return raw
+
+
 def expand_fixture(raw: dict[str, Any]) -> dict[str, Any]:
     groups = raw.get("core", {}).pop("runtime_groups", [])
     for group in groups:
@@ -642,6 +754,7 @@ def expand_fixture(raw: dict[str, Any]) -> dict[str, Any]:
                     "source_host_id": group["source_host_id"],
                     "agent_runtime_id": f"{group['id_prefix']}-{index:02d}",
                     "project_id": f"{group['project_prefix']}-{index:02d}",
+                    "source_machine_id": f"machine-{group['id_prefix']}-{index:02d}",
                     "agent_name": f"{group['name_prefix']} {index:02d}",
                     "version_label": group["version_label"],
                     "link_state": group["link_state"],
@@ -689,6 +802,7 @@ def build_fleet(
     core: dict[str, Any] | None,
     now: datetime,
     error: str | None = None,
+    probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if core is None:
         return {"status": "unknown", "error": error or "Core evidence unavailable"}
@@ -705,6 +819,7 @@ def build_fleet(
         return {"status": "unknown", "error": "no promoted, non-retired Runtime artifact"}
 
     target_version = target["version_label"]
+    probe_agents = (probe or {}).get("agents", {})
     hosts: dict[str, Any] = {}
     for row in core.get("runtimes", []):
         host = hosts.setdefault(
@@ -718,6 +833,11 @@ def build_fleet(
             "version_label": row["version_label"],
             "heartbeat": heartbeat_signal(row.get("last_heartbeat_at"), now),
         }
+        lifecycle = probe_agents.get(row["agent_runtime_id"])
+        if lifecycle is not None:
+            # App health (heartbeat/version above) and lifecycle-control
+            # health are separate facts; both are displayed per Agent.
+            entry["lifecycle"] = lifecycle
         host.setdefault(row.get("link_state", "unlinked"), host["unlinked"]).append(entry)
 
     host_reports: list[dict[str, Any]] = []
@@ -736,6 +856,10 @@ def build_fleet(
         non_fresh_heartbeats = [
             row for row in active if row["heartbeat"]["freshness"] != "fresh"
         ]
+        lifecycle_probed = [row for row in active if "lifecycle" in row]
+        lifecycle_attention = [
+            row for row in lifecycle_probed if row["lifecycle"]["verdict"] != "operable"
+        ]
         host_reports.append(
             {
                 "source_host_id": hostname,
@@ -750,6 +874,8 @@ def build_fleet(
                 "unlinked": groups["unlinked"],
                 "non_fresh_heartbeat_signals": stale,
                 "non_fresh_heartbeats": non_fresh_heartbeats,
+                "lifecycle_probed_count": len(lifecycle_probed),
+                "lifecycle_attention": lifecycle_attention,
             }
         )
 
@@ -776,7 +902,7 @@ def build_fleet(
         section_statuses.append("unknown")
     if not host_reports:
         section_statuses.append("unknown")
-    return {
+    report = {
         "status": combine_status(section_statuses),
         "evidence": "Core-recorded artifact/link state; not verified live compute",
         "status_basis": "active-link artifact convergence only",
@@ -791,6 +917,13 @@ def build_fleet(
         "distribution_consistent_with_detail_snapshot": distribution_consistent,
         "hosts": host_reports,
     }
+    if probe is not None:
+        report["lifecycle_probe"] = {
+            "available": bool(probe.get("available")),
+            "schema": probe.get("schema"),
+            "note": "lifecycle verdicts gate upgrade eligibility only; they never affect serving Agents",
+        }
+    return report
 
 
 def unit_status(properties: dict[str, Any], *, active_required: bool) -> str:
@@ -1069,7 +1202,7 @@ def report_exit_code(report: dict[str, Any]) -> int:
 
 def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
     errors = raw.get("collection_errors", {})
-    fleet = build_fleet(raw.get("core"), now, errors.get("core"))
+    fleet = build_fleet(raw.get("core"), now, errors.get("core"), raw.get("lifecycle_probe"))
     target_id = fleet.get("target_artifact", {}).get("id")
     sections = {
         "fleet_convergence": fleet,
@@ -1126,12 +1259,17 @@ def render_human(report: dict[str, Any]) -> str:
             f"promoted {target['promoted_at']}"
         )
         for host in fleet.get("hosts", []):
-            lines.append(
+            host_line = (
                 f"  {host['source_host_id']}: {host['on_target']}/{host['active_total']} active on target; "
                 f"{host['straggler_count']} stragglers; "
                 f"{host['intentionally_inactive_count']} intentionally inactive excluded; "
                 f"{host['non_fresh_heartbeat_signals']} non-fresh heartbeat signals"
             )
+            probed = host.get("lifecycle_probed_count", 0)
+            if probed:
+                attention = len(host.get("lifecycle_attention", []))
+                host_line += f"; lifecycle {probed - attention}/{probed} operable"
+            lines.append(host_line)
             for runtime in host["stragglers"]:
                 heartbeat = runtime["heartbeat"]
                 lines.append(
@@ -1154,6 +1292,13 @@ def render_human(report: dict[str, Any]) -> str:
                 lines.append(
                     f"    HEARTBEAT {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
                     f"{heartbeat['freshness']} ({human_age(heartbeat['age_seconds'])} old)"
+                )
+            for runtime in host.get("lifecycle_attention", []):
+                lifecycle = runtime["lifecycle"]
+                reason = lifecycle.get("reason") or "no reason recorded"
+                lines.append(
+                    f"    LIFECYCLE {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
+                    f"{lifecycle['verdict']} ({reason})"
                 )
     else:
         lines.append(f"  {fleet.get('error', 'unavailable')}")
@@ -1274,6 +1419,9 @@ def collect_live() -> tuple[dict[str, Any], datetime]:
     raw["host_health"] = collect_host_health(hostname)
     raw["recovery"] = collect_recovery(hostname)
     raw["rollout"] = collect_rollout()
+    raw["lifecycle_probe"] = collect_lifecycle_probe(
+        raw.get("core", {}).get("runtimes", []), hostname
+    )
     return raw, now
 
 

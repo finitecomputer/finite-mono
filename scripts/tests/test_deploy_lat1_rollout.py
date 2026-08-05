@@ -243,6 +243,30 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                   done
                   exit 0
                 fi
+                if [[ $command == *"provider-lifecycle-probe-v1"* ]]; then
+                  suffix="${command##*provider-lifecycle-probe-v1}"
+                  read -r project runtime machine <<<"$suffix"
+                  if [[ -n ${FAKE_PROBE_REPORT:-} ]]; then
+                    printf '%s\n' "$FAKE_PROBE_REPORT"
+                    exit "${FAKE_PROBE_STATUS:-0}"
+                  fi
+                  verdict="${FAKE_PROBE_VERDICT:-operable}"
+                  reason="$(jq -cn --arg verdict "$verdict" --arg reason "${FAKE_PROBE_REASON:-}" 'if $verdict == "operable" then null elif $reason == "" then "probe_finding" else $reason end')"
+                  jq -cn \
+                    --arg project "$project" \
+                    --arg runtime "$runtime" \
+                    --arg machine "$machine" \
+                    --arg verdict "$verdict" \
+                    --argjson reason "$reason" '
+                      {
+                        schema: "finite.lifecycle-probe.v1",
+                        runtime: {project_id: $project, agent_runtime_id: $runtime, source_machine_id: $machine, container_name: $machine},
+                        verdict: $verdict,
+                        reason: $reason,
+                        checks: [{name: "containerd_task", status: (if $verdict == "operable" then "pass" else "fail" end), finding: $reason, detail: "fixture", evidence: {}}]
+                      }'
+                  exit "${FAKE_PROBE_STATUS:-0}"
+                fi
                 if [[ -n ${FAKE_EXEC_RESULT:-} ]]; then
                   printf '%s\\n' "$FAKE_EXEC_RESULT"
                   exit "${FAKE_EXEC_STATUS:-0}"
@@ -611,6 +635,177 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             ]
             self.assertTrue(all("provider_facts" in event for event in postflights))
             self.assertNotIn("npub1", (state_root / plan_hash / "events.jsonl").read_text(encoding="utf-8"))
+
+    def execute_single_entry(
+        self, env: dict[str, str], plan_hash: str
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run_rollout(
+            "--execute-plan-hash",
+            plan_hash,
+            *self.actor_args(),
+            "--roll-project-id",
+            "project-a",
+            env=env,
+        )
+
+    def single_entry_environment(
+        self, temp: Path
+    ) -> tuple[dict[str, str], Path, Path, str]:
+        entry = plan_entry("project-a", "runtime-a", "kata-a")
+        facts = [provider_fact("project-a", "runtime-a", "kata-a")]
+        env, log, state_root = self.fake_ssh_environment(
+            temp, rollout_report([entry]), facts
+        )
+        prepared, plan_hash = self.prepare(env, "--roll-project-id", "project-a")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        log.write_text("", encoding="utf-8")
+        return env, log, state_root, plan_hash
+
+    def test_probe_non_operable_verdicts_skip_entry_and_keep_serving(self) -> None:
+        for verdict, reason in (
+            ("degraded", "wrapped_vmm_process_name"),
+            ("inoperable", "orphaned_task"),
+            ("unknown", "task_list_error"),
+        ):
+            with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory)
+                env, log, state_root, plan_hash = self.single_entry_environment(temp)
+                env["FAKE_PROBE_VERDICT"] = verdict
+                env["FAKE_PROBE_REASON"] = reason
+
+                executed = self.execute_single_entry(env, plan_hash)
+                self.assertEqual(executed.returncode, 0, executed.stderr)
+                self.assertIn("deliberately skipping", executed.stdout)
+                self.assertIn(verdict, executed.stdout)
+                # A skipped entry is never enqueued: no exact Core execution
+                # call and no provider postflight happened for it.
+                calls = log.read_text(encoding="utf-8").splitlines()
+                self.assertTrue(
+                    any("provider-lifecycle-probe-v1" in call for call in calls)
+                )
+                self.assertFalse(
+                    any(
+                        "--expected-agent-runtime-id" in call
+                        and "--plan-only" not in call
+                        for call in calls
+                    ),
+                    calls,
+                )
+                events = [
+                    event
+                    for event in self.read_events(state_root, plan_hash)
+                    if event["phase"] == "execute"
+                ]
+                probe_events = [
+                    event
+                    for event in events
+                    if event["event"] == "entry_lifecycle_probe"
+                ]
+                self.assertEqual(len(probe_events), 1, events)
+                self.assertEqual(probe_events[0]["status"], "skipped")
+                self.assertEqual(probe_events[0]["verdict"], verdict)
+                self.assertEqual(probe_events[0]["reason"], reason)
+                self.assertEqual(
+                    probe_events[0]["probe"]["schema"], "finite.lifecycle-probe.v1"
+                )
+                # A deliberate skip is safe by design: the run is a success
+                # with the skip recorded, never an interruption or failure.
+                self.assertEqual(events[-1]["event"], "final")
+                self.assertEqual(events[-1]["status"], "success")
+                self.assertEqual(events[-1]["probe_skipped"], 1)
+                self.assertEqual(events[-1]["absent_count"], 0)
+
+    def test_probe_unavailable_keeps_core_state_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, state_root, plan_hash = self.single_entry_environment(temp)
+            env["FAKE_PROBE_STATUS"] = "1"
+
+            executed = self.execute_single_entry(env, plan_hash)
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            self.assertIn("lifecycle probe unavailable", executed.stdout)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(
+                any(
+                    "--expected-agent-runtime-id" in call and "--plan-only" not in call
+                    for call in calls
+                ),
+                calls,
+            )
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            probe_events = [
+                event for event in events if event["event"] == "entry_lifecycle_probe"
+            ]
+            self.assertEqual(len(probe_events), 1, events)
+            self.assertEqual(probe_events[0]["status"], "unavailable")
+            self.assertEqual(events[-1]["status"], "success")
+
+    def test_probe_report_shape_mismatch_fails_closed(self) -> None:
+        # The probe exited 0 but spoke garbage: fail CLOSED for upgrade
+        # eligibility — a deliberate skip-with-reason, never the
+        # proceed-on-Core-state "unavailable" path.
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, state_root, plan_hash = self.single_entry_environment(temp)
+            env["FAKE_PROBE_REPORT"] = '{"schema":"something-else","verdict":"operable"}'
+
+            executed = self.execute_single_entry(env, plan_hash)
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            self.assertIn("deliberately skipping", executed.stdout)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(
+                any("provider-lifecycle-probe-v1" in call for call in calls)
+            )
+            self.assertFalse(
+                any(
+                    "--expected-agent-runtime-id" in call and "--plan-only" not in call
+                    for call in calls
+                ),
+                calls,
+            )
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            probe_events = [
+                event for event in events if event["event"] == "entry_lifecycle_probe"
+            ]
+            self.assertEqual(len(probe_events), 1, events)
+            self.assertEqual(probe_events[0]["status"], "skipped")
+            self.assertEqual(probe_events[0]["verdict"], "unknown")
+            self.assertEqual(probe_events[0]["reason"], "probe_invalid_report")
+            self.assertEqual(events[-1]["status"], "success")
+            self.assertEqual(events[-1]["probe_skipped"], 1)
+            self.assertEqual(events[-1]["absent_count"], 0)
+
+    def test_probe_operable_verdict_proceeds_and_is_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, state_root, plan_hash = self.single_entry_environment(temp)
+
+            executed = self.execute_single_entry(env, plan_hash)
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(
+                any("provider-lifecycle-probe-v1" in call for call in calls)
+            )
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            probe_events = [
+                event for event in events if event["event"] == "entry_lifecycle_probe"
+            ]
+            self.assertEqual(len(probe_events), 1, events)
+            self.assertEqual(probe_events[0]["status"], "succeeded")
+            self.assertEqual(probe_events[0]["verdict"], "operable")
+            self.assertEqual(events[-1]["status"], "success")
 
     def test_hash_drift_refuses_before_first_enqueue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

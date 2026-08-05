@@ -59,7 +59,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_RUNTIMES__",
-                "finite-lat-1,runtime-a,project-a,Agent A,v2,active,2026-08-01T00:00:00Z",
+                "finite-lat-1,runtime-a,project-a,machine-a,Agent A,v2,active,2026-08-01T00:00:00Z",
             ]
         )
         completed = subprocess.CompletedProcess(["psql"], 0, output, "")
@@ -213,6 +213,166 @@ class FiniteStatusTests(unittest.TestCase):
         rollout = finite_status.build_rollout(raw)
         self.assertEqual(rollout["status"], "green")
         self.assertEqual(rollout["terminal_state"], "noop")
+
+    def runtime_row(
+        self,
+        runtime: str,
+        *,
+        host: str = "finite-lat-1",
+        link_state: str = "active",
+    ) -> dict[str, str]:
+        return {
+            "source_host_id": host,
+            "agent_runtime_id": runtime,
+            "project_id": runtime.replace("runtime", "project"),
+            "source_machine_id": runtime.replace("runtime", "machine"),
+            "agent_name": runtime,
+            "version_label": "v2",
+            "link_state": link_state,
+            "last_heartbeat_at": "2026-08-01T00:00:00Z",
+        }
+
+    def probe_report(self, verdict: str, reason: str | None = None) -> str:
+        return json.dumps(
+            {
+                "schema": "finite.lifecycle-probe.v1",
+                "runtime": {
+                    "project_id": "project-a",
+                    "agent_runtime_id": "runtime-a",
+                    "source_machine_id": "machine-a",
+                    "container_name": "machine-a",
+                },
+                "verdict": verdict,
+                "reason": reason,
+                "checks": [],
+            }
+        )
+
+    def test_collect_lifecycle_probe_reports_per_agent_verdicts(self) -> None:
+        runtimes = [
+            self.runtime_row("runtime-a"),
+            self.runtime_row("runtime-b"),
+            self.runtime_row("runtime-remote", host="finite-lat-3"),
+            self.runtime_row("runtime-inactive", link_state="inactive"),
+        ]
+        reports = {
+            "runtime-a": self.probe_report("operable"),
+            "runtime-b": self.probe_report("inoperable", "orphaned_task"),
+        }
+
+        def fake_run(command, **kwargs):
+            runtime = command[command.index("--agent-runtime-id") + 1]
+            return subprocess.CompletedProcess(command, 0, reports[runtime], "")
+
+        with (
+            mock.patch.dict(
+                finite_status.os.environ,
+                {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"},
+            ),
+            mock.patch.object(finite_status, "run_read_only", side_effect=fake_run) as run,
+            mock.patch.object(
+                finite_status, "read_environment_values", return_value={}
+            ),
+        ):
+            raw = finite_status.collect_lifecycle_probe(runtimes, "finite-lat-1")
+
+        self.assertTrue(raw["available"])
+        self.assertEqual(
+            raw["agents"]["runtime-a"], {"verdict": "operable", "reason": None}
+        )
+        self.assertEqual(
+            raw["agents"]["runtime-b"],
+            {"verdict": "inoperable", "reason": "orphaned_task"},
+        )
+        # Only this host's active Agents are probed.
+        self.assertEqual(set(raw["agents"]), {"runtime-a", "runtime-b"})
+        command = run.call_args_list[0].args[0]
+        self.assertEqual(command[:2], ["/bin/sh", "lifecycle-probe"])
+        self.assertIn("machine-a", command)
+
+    def test_collect_lifecycle_probe_marks_failures_unknown(self) -> None:
+        runtimes = [
+            self.runtime_row("runtime-a"),
+            self.runtime_row("runtime-b"),
+            self.runtime_row("runtime-c"),
+            self.runtime_row("runtime-d"),
+        ]
+        outcomes = {
+            "runtime-a": subprocess.CompletedProcess([], 1, "", "boom"),
+            "runtime-b": subprocess.CompletedProcess([], 0, "not json", ""),
+            "runtime-c": subprocess.CompletedProcess(
+                [], 0, '{"schema":"other","verdict":"operable"}', ""
+            ),
+            "runtime-d": finite_status.CollectionError("probe missing"),
+        }
+
+        def fake_run(command, **kwargs):
+            outcome = outcomes[command[command.index("--agent-runtime-id") + 1]]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        with (
+            mock.patch.dict(
+                finite_status.os.environ,
+                {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"},
+            ),
+            mock.patch.object(finite_status, "run_read_only", side_effect=fake_run),
+            mock.patch.object(
+                finite_status, "read_environment_values", return_value={}
+            ),
+        ):
+            raw = finite_status.collect_lifecycle_probe(runtimes, "finite-lat-1")
+
+        self.assertEqual(raw["agents"]["runtime-a"]["verdict"], "unknown")
+        self.assertEqual(raw["agents"]["runtime-a"]["reason"], "probe_unavailable")
+        self.assertEqual(raw["agents"]["runtime-b"]["reason"], "probe_invalid")
+        self.assertEqual(raw["agents"]["runtime-c"]["reason"], "probe_invalid")
+        self.assertEqual(raw["agents"]["runtime-d"]["verdict"], "unknown")
+        self.assertEqual(raw["agents"]["runtime-d"]["reason"], "probe_unavailable")
+
+    def test_collect_lifecycle_probe_without_binary_is_unavailable(self) -> None:
+        with mock.patch.dict(
+            finite_status.os.environ,
+            {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/nonexistent/lifecycle-probe"},
+        ):
+            raw = finite_status.collect_lifecycle_probe(
+                [self.runtime_row("runtime-a")], "finite-lat-1"
+            )
+        self.assertFalse(raw["available"])
+        self.assertEqual(raw["agents"], {})
+        self.assertTrue(raw["errors"])
+
+    def test_lifecycle_health_is_a_separate_displayed_per_agent_field(self) -> None:
+        report = self.fixture_report()
+        fleet = report["sections"]["fleet_convergence"]
+        lat1 = next(
+            host for host in fleet["hosts"] if host["source_host_id"] == "finite-lat-1"
+        )
+        self.assertEqual(lat1["lifecycle_probed_count"], 3)
+        attention = {
+            row["agent_runtime_id"]: row["lifecycle"]
+            for row in lat1["lifecycle_attention"]
+        }
+        self.assertEqual(
+            attention["runtime-lat1-straggler-01"],
+            {"verdict": "inoperable", "reason": "orphaned_task"},
+        )
+        # unknown is a displayed state, not hidden
+        self.assertEqual(
+            attention["runtime-lat1-target-02"],
+            {"verdict": "unknown", "reason": "task_list_error"},
+        )
+        output = finite_status.render_human(report)
+        self.assertIn(
+            "LIFECYCLE Lat1 Straggler Agent 01 [runtime-lat1-straggler-01]: inoperable (orphaned_task)",
+            output,
+        )
+        self.assertIn(
+            "LIFECYCLE Lat1 Target Agent 02 [runtime-lat1-target-02]: unknown (task_list_error)",
+            output,
+        )
+        self.assertIn("lifecycle 1/3 operable", output)
 
 
 if __name__ == "__main__":
