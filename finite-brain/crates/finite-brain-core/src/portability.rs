@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn working_tree_materializes_accessible_pages_and_safe_agent_conventions() {
+    fn working_tree_materializes_markdown_and_omits_legacy_inline_asset_bytes() {
         let mut opened_page = page(
             "concepts",
             "obj_000000000001",
@@ -801,7 +801,7 @@ mod tests {
         assert!(projection.files.contains_key("Concepts/_index.md"));
         assert!(projection.files.contains_key("Concepts/_wiki/index.md"));
         assert!(projection.files.contains_key("Concepts/raw/.keep"));
-        assert!(projection.files.contains_key("Concepts/raw/assets/.keep"));
+        assert!(!projection.files.contains_key("Concepts/raw/assets/.keep"));
         assert!(projection.files.contains_key("Concepts/wiki/.keep"));
         assert!(projection.files.contains_key("Concepts/inventory/.keep"));
         assert!(projection.files.contains_key("Concepts/datasets/.keep"));
@@ -811,14 +811,14 @@ mod tests {
                 .files
                 .get("AGENTS.md")
                 .unwrap()
-                .contains("raw/assets/")
+                .contains("outside the Brain")
         );
         assert!(
             projection
                 .files
                 .get("Concepts/AGENTS.md")
                 .unwrap()
-                .contains("Source Note")
+                .contains("resource")
         );
         assert!(
             projection
@@ -841,13 +841,7 @@ mod tests {
                 .unwrap(),
             "# Deep Module\n\nOnly accessible text is materialized. #agent"
         );
-        assert_eq!(
-            projection
-                .binary_files
-                .get("Concepts/raw/assets/source.pdf")
-                .unwrap(),
-            b"%PDF-1.7\nasset bytes\n"
-        );
+        assert!(projection.binary_files.is_empty());
 
         let concepts = projection
             .state
@@ -867,16 +861,10 @@ mod tests {
         assert!(board.metadata_only);
         assert_eq!(projection.state.objects[0].revision, 7);
         assert_eq!(projection.state.objects[0].key_version, 3);
-        assert_eq!(projection.state.objects.len(), 2);
+        assert_eq!(projection.state.objects.len(), 1);
         assert_eq!(projection.state.objects[0].path, "compiled/deep/module.md");
         assert_eq!(projection.state.objects[0].content_type, "text/markdown");
         assert_eq!(projection.state.objects[0].content_hash.len(), 64);
-        assert_eq!(projection.state.objects[1].path, "raw/assets/source.pdf");
-        assert_eq!(projection.state.objects[1].content_type, "application/pdf");
-        assert_eq!(
-            projection.state.objects[1].content_hash,
-            sha256_hex(b"%PDF-1.7\nasset bytes\n")
-        );
         assert_eq!(projection.state.sync.latest_sequence, 42);
         assert_eq!(
             projection.directory.encrypted_sync.path,
@@ -893,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn working_tree_rejects_oversized_asset_materialization() {
+    fn working_tree_omits_oversized_legacy_asset_materialization() {
         let opened_asset = asset(
             "concepts",
             "obj_000000000099",
@@ -903,7 +891,7 @@ mod tests {
             &vec![7; MAX_WORKING_TREE_ASSET_BYTES + 1],
         );
 
-        let error = materialize_brain_working_tree(WorkingTreeMaterializeInput {
+        let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
             acting_role: "admin".to_owned(),
@@ -913,18 +901,14 @@ mod tests {
             locked_folders: Vec::new(),
             latest_sequence: 1,
         })
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(
-            error,
-            PortabilityError::WorkingTreeAssetTooLarge { size, max, .. }
-                if size == MAX_WORKING_TREE_ASSET_BYTES + 1
-                    && max == MAX_WORKING_TREE_ASSET_BYTES
-        ));
+        assert!(projection.binary_files.is_empty());
+        assert!(projection.state.objects.is_empty());
     }
 
     #[test]
-    fn working_tree_rejects_oversized_asset_batches() {
+    fn working_tree_omits_legacy_asset_batches() {
         let opened_assets = (0..=MAX_WORKING_TREE_ASSET_COUNT)
             .map(|index| {
                 asset(
@@ -938,7 +922,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let error = materialize_brain_working_tree(WorkingTreeMaterializeInput {
+        let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
             generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
             generated_by_npub: UserId::new("npub-admin").unwrap(),
             acting_role: "admin".to_owned(),
@@ -948,14 +932,10 @@ mod tests {
             locked_folders: Vec::new(),
             latest_sequence: 1,
         })
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(
-            error,
-            PortabilityError::WorkingTreeAssetCountExceeded { count, max }
-                if count == MAX_WORKING_TREE_ASSET_COUNT + 1
-                    && max == MAX_WORKING_TREE_ASSET_COUNT
-        ));
+        assert!(projection.binary_files.is_empty());
+        assert!(projection.state.objects.is_empty());
     }
 
     #[test]
@@ -1096,6 +1076,50 @@ mod tests {
         assert_eq!(intents[4].action, WorkingTreeIntentAction::Unresolved);
         assert_eq!(intents[4].route, WorkingTreeIntentRoute::Unresolved);
         assert!(intents[4].reason.as_ref().unwrap().contains("locked"));
+    }
+
+    #[test]
+    fn working_tree_rejects_new_binary_asset_writes_even_with_a_source_note() {
+        let projection = materialize_brain_working_tree(WorkingTreeMaterializeInput {
+            generated_at: "2026-06-24T00:00:00.000Z".to_owned(),
+            generated_by_npub: UserId::new("npub-admin").unwrap(),
+            acting_role: "admin".to_owned(),
+            brain: sample_brain(),
+            opened_pages: vec![page(
+                "concepts",
+                "obj_000000000010",
+                "Concepts",
+                "raw/source.md",
+                "---\ntype: source\ntitle: Source\nresource: file:///tmp/source.pdf\n---\n",
+            )],
+            opened_assets: Vec::new(),
+            locked_folders: Vec::new(),
+            latest_sequence: 42,
+        })
+        .unwrap();
+        let intent = plan_working_tree_change_intents(
+            &projection.state,
+            &[WorkingTreeChange::UpsertAsset {
+                path: SafeRelativePath::new("change_path", "Concepts/raw/assets/source.pdf")
+                    .unwrap(),
+                bytes: b"%PDF-1.7".to_vec(),
+                content_type: "application/pdf".to_owned(),
+                has_source_note: true,
+            }],
+        )
+        .pop()
+        .unwrap();
+
+        assert_eq!(intent.action, WorkingTreeIntentAction::Unresolved);
+        assert_eq!(intent.route, WorkingTreeIntentRoute::Unresolved);
+        assert!(intent.content.is_none());
+        assert!(
+            intent
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("Asset Source Note")
+        );
     }
 
     #[test]

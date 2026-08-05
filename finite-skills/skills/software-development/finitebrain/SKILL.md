@@ -73,8 +73,8 @@ fbrain -- <args>` may be the available entrypoint.
    Completion: the target Folder conventions, access boundary, existing wiki
    shape, and likely duplicate pages are known.
 4. Edit only readable content roots with ordinary file tools. Follow the
-   nearest `AGENTS.md` for layout. Current Working Trees use `raw/`,
-   `raw/assets/`, `wiki/`, `inventory/`, `datasets/`, and `output/`. Preserve
+   nearest `AGENTS.md` for layout. Current Working Trees use `raw/`, `wiki/`,
+   `inventory/`, `datasets/`, and `output/`. Preserve
    an older or imported Folder's existing noncanonical paths rather than moving
    durable Pages implicitly.
    Completion: the smallest coherent set of markdown files is changed.
@@ -112,9 +112,9 @@ managed Runtime, inspect both the Runtime catalog and
 If the expected skill is missing:
 
 1. Find authoritative primary documentation for the requested subject.
-2. Capture Markdown Source Notes under `raw/`. Store non-Markdown evidence
-   under `raw/assets/` and pair each Asset with a Source Note containing its
-   provenance.
+2. Capture Markdown Source Notes under `raw/`. Keep non-Markdown evidence bytes
+   outside the Brain and represent each Asset with one Source Note containing
+   its canonical `resource` URI and provenance.
 3. Write only sourced synthesis under `wiki/`, cite the captured Source Notes,
    update durable `index.md`, and append durable `log.md`.
 4. Describe the result as authoritative only to the extent supported by those
@@ -129,10 +129,10 @@ the requested content. Do not silently substitute model knowledge.
 A Brain is not one wiki with folders. It is a namespace of many
 Folder-scoped LLM wikis. Treat each readable FiniteBrain Folder as an
 independent access-scoped LLM wiki root unless its local instructions say
-otherwise. The wiki is Markdown-first: Markdown sources become immutable `raw/`
-notes, non-Markdown source files become Assets under `raw/assets/`, synthesized
-knowledge becomes cross-linked articles, and outputs build on the curated wiki
-instead of re-deriving context from scratch.
+otherwise. The wiki is Markdown-first: Markdown sources and Asset Source Notes
+become immutable `raw/` notes, non-Markdown bytes remain at canonical resources
+outside the Brain, synthesized knowledge becomes cross-linked articles, and
+outputs build on the curated wiki instead of re-deriving context from scratch.
 
 The LLM Wiki topic model maps to a FiniteBrain Folder. Folder Keys and Folder
 Access define which topic wikis the active user or agent can read. Indexes and
@@ -146,7 +146,6 @@ Working Tree profile is intentionally small:
 |-- index.md
 |-- log.md
 |-- raw/
-|   `-- assets/
 |-- wiki/
 |-- inventory/
 |-- datasets/
@@ -172,11 +171,13 @@ Core wiki rules:
 - Keep raw immutable. Once a URL, PDF, transcript, pasted source, or file is
   captured under `raw/`, do not edit it; synthesize corrections in the curated
   root named by the Folder's `AGENTS.md` (`wiki/` in current Working Trees).
-- Store non-Markdown source files under `raw/assets/`. Pair every Asset with a
-  Markdown Source Note that records provenance, content type, hash or extraction
-  status when known, and any extraction/transcription decisions.
-- Query and cite Source Notes before treating an Asset blob as knowledge. The
-  Asset preserves evidence; the Source Note is the agent-readable handle.
+- Represent each non-Markdown Asset with one Markdown Source Note under `raw/`.
+  Its frontmatter must contain `type`, `title`, and the canonical `resource` URI;
+  add `description` and known `finite_asset` content type, size, hash, or provider
+  revision facts when useful. Do not copy the bytes into the Brain.
+- Query and cite Asset Source Notes before treating a linked resource as
+  knowledge. The note is the durable human/agent-readable handle; availability
+  and mutability still depend on the external or machine-local resource.
 - Synthesize articles, do not copy sources. Articles should connect claims,
   entities, dates, open questions, and related pages.
 - Use structured frontmatter on durable knowledge Pages with at least `title`,

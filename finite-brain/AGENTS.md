@@ -23,10 +23,12 @@ until it moves into the shared `finite-skills` packaging path.
 ### Asset source notes
 
 FiniteBrain's LLM wiki surface is Markdown-first. Store non-Markdown source
-files as encrypted Assets under the containing Folder's `raw/assets/`, and pair
-each Asset with a Markdown Source Note in the same Folder. Agents should cite
-Source Notes from synthesized `wiki/` pages instead of treating blob bytes as
-the primary knowledge surface.
+bytes outside the Brain and represent each Asset with one Markdown Asset Source
+Note under the containing Folder's `raw/` tree. Its frontmatter includes
+`type`, `title`, and the canonical `resource` URI; `description` and known
+`finite_asset` facts are optional. Agents should cite these notes from
+synthesized `wiki/` pages instead of treating blob bytes as the primary
+knowledge surface.
 
 ## Engineering Style
 

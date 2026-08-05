@@ -1745,8 +1745,8 @@ if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
     record_brain_matrix_check agent-to-browser-notification
     brain_browser_smoke live-browser-folder "Matrix Browser Notification Folder" "$brain_id"
     record_brain_matrix_check browser-to-agent-notification
-    brain_browser_smoke live-agent-asset "matrix-notification-asset.bin" "$brain_id"
-    record_brain_matrix_check asset-exact-download
+    brain_browser_smoke live-agent-asset-reference "matrix-notification-asset.bin" "$brain_id"
+    record_brain_matrix_check asset-reference-without-inline-bytes
     # No browser is connected between smoke actions. Commit a local Agent edit,
     # wait until the supervisor has advanced its authoritative cursor, then
     # reconnect the Product Client and prove sequence catch-up without replay or
@@ -1904,7 +1904,7 @@ const requiredChecks = [
   "personal-context-and-open-workflow",
   "organization-admin-context-and-open-workflow",
   "organization-member-context-and-open-workflow",
-  "asset-exact-download",
+  "asset-reference-without-inline-bytes",
 ];
 const checks = Object.fromEntries(
   requiredChecks.map((name) => [name, fs.existsSync(path.join(checksPath, name))]),

@@ -299,7 +299,6 @@ _index.md
 log.md
 inbox/
 raw/
-  assets/
 wiki/
 inventory/
 datasets/
@@ -316,10 +315,12 @@ Scope rules:
   or source hints from Folders the active User cannot access.
 - Trusted clients and Agent Runtimes MUST filter by Folder access before
   reading, querying, compiling, indexing, or answering with content.
-- Non-Markdown source material SHOULD be captured as an Asset under
-  `raw/assets/` and paired with a Markdown Source Note in the same Folder.
-- Agents SHOULD cite and reason over Source Notes and synthesized wiki Pages,
-  not over opaque asset bytes directly.
+- Non-Markdown source material MUST remain outside Folder Objects. Agents
+  SHOULD represent it with an Asset Source Note under `raw/` whose Markdown
+  frontmatter contains a `type`, `title`, and one canonical `resource`.
+- Agents SHOULD cite and reason over Asset Source Notes and synthesized wiki
+  Pages. Folder Access to a note does not imply access to its external or
+  machine-local `resource`.
 - Content from a more-restricted Folder MUST NOT be synthesized into a
   less-restricted Folder, index, log, output, or public summary unless the User
   explicitly chooses a destination Folder whose audience is allowed to see the
@@ -388,20 +389,6 @@ Canonical Page plaintext has this shape:
 }
 ```
 
-Asset plaintext has this shape:
-
-```json
-{
-  "type": "asset",
-  "path": "raw/assets/source.pdf",
-  "filename": "source.pdf",
-  "contentType": "application/pdf",
-  "size": 12345,
-  "contentHash": "<sha256 hex of plaintext bytes>",
-  "bytesBase64": "<base64 plaintext asset bytes>"
-}
-```
-
 Rules:
 
 - Canonical Page plaintext uses `type: "page"` and
@@ -409,15 +396,19 @@ Rules:
 - The current hard-cut client also recognizes the versioned Markdown Page
   envelope `{ "version": "finite-folder-object-page-v1", "path": "...",
   "markdown": "..." }` and normalizes it to a Page.
-- Asset plaintext MUST use `type: "asset"` and a non-Markdown `contentType`.
-- Asset plaintext paths SHOULD live under `raw/assets/` inside the containing
-  Folder.
-- Every non-Markdown source Asset SHOULD have a Markdown Source Note Page in the
-  same Folder. The Source Note records provenance, content type, hash or
-  extraction status when known, and links to any synthesized wiki Pages.
-- Search, graph, and LLM Wiki synthesis SHOULD index Source Notes and Markdown
-  Pages first. Asset bytes are preserved evidence, not the primary knowledge
-  surface.
+- Asset Source Notes use canonical Page plaintext. Their Markdown frontmatter
+  MUST contain `type`, `title`, and one canonical `resource`; `description` and
+  a small `finite_asset` mapping of known content type, size, content hash, or
+  provider revision facts are optional.
+- `resource` points to bytes outside the Brain. A bare `resource` is useful but
+  MUST NOT be presented as immutable evidence unless an optional content hash
+  or provider revision identifies the bytes.
+- Search, graph, and LLM Wiki synthesis index Asset Source Notes as ordinary
+  Markdown Pages. No Folder Object plaintext type contains bulk binary bytes.
+- Pre-hard-cut non-Markdown plaintext is unsupported. A compatible client that
+  encounters it MUST preserve the encrypted server record, MUST NOT materialize
+  or rewrite its bytes, and SHOULD report the unsupported object without
+  preventing accessible Markdown Pages from opening.
 - Compatible clients MUST tolerate future plaintext types they do not
   understand by preserving encrypted records and avoiding lossy rewrites.
 
@@ -1066,15 +1057,6 @@ A Brain Directory is the portable local directory shape:
       "keyVersion": 1,
       "contentType": "text/markdown",
       "contentHash": "<sha256 hex>"
-    },
-    {
-      "folderId": "strategy",
-      "path": "raw/assets/source.pdf",
-      "objectId": "obj_asset_0123456789",
-      "revision": 1,
-      "keyVersion": 1,
-      "contentType": "application/pdf",
-      "contentHash": "<sha256 hex>"
     }
   ],
   "sync": {
@@ -1086,10 +1068,9 @@ A Brain Directory is the portable local directory shape:
 Materialization rules:
 
 - Accessible Folders are materialized as normal directories.
-- Accessible Pages are materialized as UTF-8 Markdown files. Accessible Assets
-  are materialized as ordinary files at their decrypted object path.
-- Non-Markdown files under `raw/assets/` SHOULD have a sibling or nearby
-  Markdown Source Note that explains provenance and extraction status.
+- Accessible Pages, including Asset Source Notes, are materialized as UTF-8
+  Markdown files. The working tree does not materialize bulk non-Markdown
+  bytes or create a `raw/assets/` directory.
 - Inaccessible ancestor Folders may be materialized as metadata-only containers
   to make accessible Child Folders reachable.
 - Inaccessible ciphertext may be stored under `.finitebrain/encrypted-sync`.
@@ -1242,6 +1223,19 @@ Response:
   "currentStateKind": "current_encrypted_brain_state"
 }
 ```
+
+Client bootstrap response boundary:
+
+- The Agent CLI MUST read a successful sync-bootstrap response through an
+  explicit 128 MiB maximum rather than the HTTP library's implicit 10 MiB
+  string-response ceiling.
+- A response above 128 MiB MUST fail with a clear bounded-response error before
+  JSON parsing and MUST NOT discard the last usable bootstrap, incremental
+  cursor, or unresolved local edits.
+- The 128 MiB boundary accommodates the existing 64 MiB Markdown wiki-check
+  allowance after encryption, base64, and JSON envelope overhead. It is not a
+  new Brain storage quota and does not change Page, object-count, sync-record,
+  or request-body limits.
 
 Incremental pull:
 
@@ -1726,9 +1720,15 @@ Opening an export:
 ### 13.1 Readable OKF Export
 
 Readable OKF Export is separate from Encrypted Brain Export. It contains
-decrypted Markdown Pages and readable asset files for accessible Folders and
-intentionally excludes Folder Keys, Folder Key Grants, encrypted sync state, and
-inaccessible ciphertext.
+decrypted Markdown Pages, including reference-preserving Asset Source Notes,
+for accessible Folders. It intentionally excludes bulk Asset bytes, Folder
+Keys, Folder Key Grants, encrypted sync state, and inaccessible ciphertext.
+
+FiniteBrain keeps Asset Source Notes close to the current Open Knowledge Format
+concept vocabulary, but this document does not claim that
+`finite-okf-brain-export-v1` conforms to a particular upstream OKF version.
+Full conformance work remains optional and unscheduled until a concrete
+interoperability need justifies it.
 
 An OKF bundle has this shape:
 
@@ -1738,9 +1738,6 @@ okf-export/
   content/
     <folder display path>/
       <page path>.md
-  attachments/
-    <folder display path>/
-      <attachment paths>
   _wiki/
     index.md
     backlinks.md
@@ -1815,8 +1812,10 @@ Round-trip expectations:
 - Encrypted Brain Export is the lossless encrypted portability format.
 - OKF Export is a readable portability format for accessible plaintext.
 - OKF export followed by OKF import into a new Brain SHOULD preserve Page
-  content, relative paths, Markdown links, generated wiki reports, and
-  attachment files for accessible content.
+  content, relative paths, Markdown links, generated wiki reports, and Asset
+  Source Note references for accessible content.
+- Readable OKF Export does not fetch, copy, or embed the bytes named by an Asset
+  Source Note's `resource`.
 - OKF round-trip is not expected to preserve Folder ids, object ids, revision
   history, ciphertext, Folder Keys, grants, invitations, mounts, or inaccessible
   omissions.
@@ -1843,6 +1842,9 @@ Import rules:
   existing accessible destination Page paths.
 - Omission entries are advisory and MUST NOT create inaccessible placeholder
   Pages.
+- Non-Markdown bundle attachments are outside the hard-cut import surface. The
+  importer MUST NOT upload their bytes as Folder Objects or silently convert
+  them into Asset Source Notes.
 
 Conflict modes:
 
@@ -1862,7 +1864,6 @@ Conventions:
 AGENTS.md
 _index.md
 raw/
-  assets/
 wiki/
 inventory/
 datasets/
@@ -1871,8 +1872,8 @@ output/
 
 - `AGENTS.md` gives local agent instructions for the Brain or Folder subtree.
 - `_index.md` is a human/agent navigation page for a Folder or bundle.
-- `raw/` contains source captures or immutable imported references.
-- `raw/assets/` contains non-Markdown source Assets.
+- `raw/` contains Markdown source captures and Asset Source Notes whose
+  `resource` points to non-Markdown bytes outside the Brain.
 - `wiki/` contains curated synthesized wiki pages.
 - `inventory/` contains source candidates, open questions, watch items, and
   next actions.
@@ -1887,18 +1888,21 @@ Agent discovery rules:
 - Agent writes are User writes. They are signed, encrypted, synced, and audited
   as the acting User.
 - Agents MUST NOT write decrypted content into `.finitebrain/encrypted-sync`.
-- Agents SHOULD store non-Markdown source files under `raw/assets/` and create
-  Markdown Source Notes that record provenance, content type, hash or extraction
-  status when known, and links to synthesized Pages.
-- Agents SHOULD query and cite Source Notes before treating an Asset blob as
-  knowledge.
+- Agents SHOULD create Asset Source Notes under `raw/` through the ordinary
+  Page-writing flow. The FiniteBrain skill and nearest `AGENTS.md` teach this
+  convention; it is not a special path validator or authorization role.
+- Agents SHOULD query and cite Asset Source Notes rather than treating a bare
+  external or machine-local resource as verified knowledge.
 - Generated reports in `output/` SHOULD state when they were generated, by which
   acting npub, and from which accessible Folder scope.
 - Reports MUST NOT include Page titles, Page paths, excerpts, backlinks, or
   tags from inaccessible Folders.
-- `raw/`, `raw/assets/`, `wiki/`, `inventory/`, `datasets/`, and `output/` are
+- `raw/`, `wiki/`, `inventory/`, `datasets/`, and `output/` are
   ordinary paths inside accessible Folders. They do not imply special Folder
   Access semantics.
+- Asset Reference authoring is agent-only in this profile. The Product Client
+  renders Asset Source Notes as ordinary Markdown and does not provide an Asset
+  uploader, attachment manager, specialized Asset editor, or availability UI.
 
 ## 14. Server Route Surface
 
@@ -2215,10 +2219,11 @@ A compatible implementation in another language should implement, in order:
     - `okf-brain.json` manifest.
     - Markdown link rewriting and omission handling.
     - OKF Import conflict modes.
+    - Reference-preserving Asset Source Notes without bundled Asset bytes.
 12. LLM Wiki and agent layer:
     - `AGENTS.md` discovery.
-    - `_index.md`, `raw/`, `raw/assets/`, `wiki/`, `inventory/`, `datasets/`,
-      and `output/` conventions.
+    - `_index.md`, `raw/`, `wiki/`, `inventory/`, `datasets/`, and `output/`
+      conventions.
     - Generated report visibility filtering.
 13. Operations and compatibility:
     - Backup/restore of SQLite metadata, sync, grants, sharing, and mounts.
@@ -2237,6 +2242,11 @@ Hard-cut rule:
 - Earlier prototype behaviors such as plaintext file routes, unauthenticated
   metadata shortcuts, reusable accepted Share Links, and JSON-only metadata
   storage are outside the Rust Portable v1 hard-cut surface.
+- Inline non-Markdown Folder Object Assets, `raw/assets/` working-tree
+  materialization, binary OKF attachment import/export, and dedicated Product
+  Client Asset authoring are also outside the hard-cut surface. Known demo and
+  development Brains may be explicitly reset at rollout; unknown encrypted
+  records are preserved rather than scanned, migrated, or deleted.
 - Implementations MAY build explicit import or migration tooling for old data,
   but MUST NOT make those paths the default secure flow.
 

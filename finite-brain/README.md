@@ -181,9 +181,10 @@ Folder-local `_index.md`, `config.md`, and `log.md` files when present.
   folders, auth files, key material, or generated state files.
 - Treat every readable top-level Folder as its own LLM wiki scope.
 - Keep each Folder's `_index.md` and `log.md` local to that Folder.
-- Store non-Markdown source files under that Folder's `raw/assets/` as Assets.
-- Pair every Asset with a Markdown Source Note in the same Folder, then cite
-  the Source Note from synthesized `wiki/` pages.
+- Keep non-Markdown Asset bytes outside the Brain.
+- Represent every Asset with one Markdown Asset Source Note under that Folder's
+  `raw/` tree. Record `type`, `title`, and the canonical `resource` URI, then
+  cite the note from synthesized `wiki/` pages.
 - Never summarize restricted Folder contents into less-restricted Folders,
   indexes, logs, or outputs.
 - Do not print or expose Nostr secrets, Folder Keys, grant plaintext, auth

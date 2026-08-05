@@ -426,15 +426,7 @@ pub(crate) fn update_local_folder_after_create(
             .sort_by(|left, right| left.path.cmp(&right.path));
         write_working_tree_state(&root, &tree)?;
     }
-    for subdir in [
-        "",
-        "raw",
-        "raw/assets",
-        "wiki",
-        "inventory",
-        "datasets",
-        "output",
-    ] {
+    for subdir in ["", "raw", "wiki", "inventory", "datasets", "output"] {
         fs::create_dir_all(root.join(path).join(subdir))?;
     }
     mutate_agent_state(env, |state, now| {

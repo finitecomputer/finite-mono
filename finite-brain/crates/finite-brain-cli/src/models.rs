@@ -264,6 +264,7 @@ pub(crate) struct SyncOnceReport {
     pub(crate) server_url: String,
     pub(crate) local_changes: Vec<SyncChangeReport>,
     pub(crate) remote_changes: Vec<SyncChangeReport>,
+    pub(crate) unsupported_objects: Vec<SyncChangeReport>,
     pub(crate) conflicts: Vec<SyncChangeReport>,
 }
 

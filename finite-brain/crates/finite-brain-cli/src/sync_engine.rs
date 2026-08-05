@@ -12,7 +12,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use finite_brain_core::portability::{
     BrainWorkingTreeStateManifest, FOLDER_CONVENTION_DIRECTORIES, MAX_WORKING_TREE_ASSET_BYTES,
-    OkfOmittedFolder, OpenedAsset, OpenedPage, WorkingTreeChange, WorkingTreeChangeIntent,
+    OkfOmittedFolder, OpenedPage, WorkingTreeChange, WorkingTreeChangeIntent,
     WorkingTreeFolderRoot, WorkingTreeIntentAction, WorkingTreeIntentContent,
     WorkingTreeIntentRoute, WorkingTreeMaterializeInput, WorkingTreeObjectManifestEntry,
     WorkingTreeProjection, folder_agent_instructions, folder_convention_marker,
@@ -34,12 +34,14 @@ use serde::Deserialize;
 use crate::initialize_private_working_tree;
 use crate::{
     APP_SPECIFIC_KIND, AdminAccessAction, AgentState, BrainMetadataView, CliEnvironment, CliError,
-    ConflictEntry, ConflictState, SessionFolderKeyring, SyncChangeReport, SyncOnceReport,
-    admin_access_change_event, current_tree_root, deterministic_id, folder_key_grant_request,
-    folder_required_recipients, load_signer, read_agent_state, read_json_file,
-    read_working_tree_state, server_url_for_command, sign_event, signed_json_request,
-    signed_json_request_to_server, tag_vec, timestamp, timestamp_from_unix, unix_timestamp,
-    write_agent_state, write_json_file, write_private_file_atomic, write_working_tree_state,
+    ConflictEntry, ConflictState, SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES, SessionFolderKeyring,
+    SyncChangeReport, SyncOnceReport, admin_access_change_event, current_tree_root,
+    deterministic_id, folder_key_grant_request, folder_required_recipients, load_signer,
+    read_agent_state, read_json_file, read_working_tree_state, server_url_for_command, sign_event,
+    signed_json_request, signed_json_request_to_server,
+    signed_json_request_to_server_with_response_limit, tag_vec, timestamp, timestamp_from_unix,
+    unix_timestamp, write_agent_state, write_json_file, write_private_file_atomic,
+    write_working_tree_state,
 };
 
 const CIPHER_AES_256_GCM: &str = "AES-256-GCM";
@@ -97,18 +99,60 @@ pub(crate) fn run_working_tree_sync(
         &mounted_exports,
         &session_keys,
     );
-    let local_result = push_local_working_tree_changes(
+    let pending_local_changes = scan_working_tree_changes(&root, &prior_tree_state)
+        .map_err(|error| sync_stage_error("scan local Working Tree changes", &root, error))?;
+    let mut preflight_remote_result = if !pending_local_changes.is_empty() {
+        // Local submission is followed by a bootstrap so accepted writes can
+        // be confirmed from the authoritative projection. Validate that this
+        // required response is readable before any remote write or local
+        // conflict bookkeeping can mutate state.
+        Some(
+            fetch_bootstrap_remote_sync(
+                env,
+                &server_url,
+                &agent_state.brain_id,
+                "validated bootstrap response bound before local changes".to_owned(),
+            )
+            .map_err(|error| sync_stage_error("preflight remote bootstrap", &root, error))?,
+        )
+    } else {
+        None
+    };
+    let push_context = PushLocalWorkingTreeContext {
         env,
-        &root,
-        &server_url,
-        &agent_state,
-        &export,
-        &mounted_exports,
-        &session_keys,
-    )
-    .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
+        server_url: &server_url,
+        agent_state: &agent_state,
+        export: &export,
+        mounted_exports: &mounted_exports,
+        session_keys: &session_keys,
+    };
+    let local_result = push_local_working_tree_changes(&push_context, &root, pending_local_changes)
+        .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
     let force_bootstrap_reason = sync_bootstrap_reason(&local_result, newly_readable_keys);
-    let remote_result = if let Some(reason) = force_bootstrap_reason {
+    let remote_result = if local_result.pushed_count > 0 {
+        confirm_local_changes_from_preflight(
+            env,
+            &server_url,
+            &agent_state.brain_id,
+            preflight_remote_result.take().ok_or_else(|| {
+                CliError::InvalidInput(
+                    "local writes require a validated bootstrap confirmation base".to_owned(),
+                )
+            })?,
+            force_bootstrap_reason.unwrap_or_else(|| {
+                "confirmed accepted local writes through incremental sync".to_owned()
+            }),
+        )
+        .map_err(|error| sync_stage_error("confirm local Working Tree changes", &root, error))?
+    } else if local_result.conflict_count > 0 {
+        let mut preflight = preflight_remote_result.take().ok_or_else(|| {
+            CliError::InvalidInput(
+                "local conflicts require a validated bootstrap projection".to_owned(),
+            )
+        })?;
+        preflight.report_reason = force_bootstrap_reason;
+        preflight
+    } else if let Some(reason) = force_bootstrap_reason {
         fetch_bootstrap_remote_sync(env, &server_url, &agent_state.brain_id, reason)
             .map_err(|error| sync_stage_error("fetch remote bootstrap", &root, error))?
     } else {
@@ -136,7 +180,7 @@ pub(crate) fn run_working_tree_sync(
     let opened_grants = session_keys.len();
     let mounted_materializations =
         fetch_mounted_folder_materializations(env, &server_url, mounted_exports)?;
-    materialize_remote_projection(MaterializeRemoteProjectionContext {
+    let unsupported_objects = materialize_remote_projection(MaterializeRemoteProjectionContext {
         env,
         root: &root,
         actor_npub: &auth.npub,
@@ -149,12 +193,8 @@ pub(crate) fn run_working_tree_sync(
         prior_state: Some(&prior_tree_state),
     })
     .map_err(|error| sync_stage_error("materialize remote projection", &root, error))?;
-    restore_conflicted_files(
-        &root,
-        &local_result.conflicted_markdown,
-        &local_result.conflicted_assets,
-    )
-    .map_err(|error| sync_stage_error("restore conflicted files", &root, error))?;
+    restore_conflicted_files(&root, &local_result.conflicted_markdown)
+        .map_err(|error| sync_stage_error("restore conflicted files", &root, error))?;
     let mut deleted_routes = deleted_folder_routes(&export, &remote_result.bootstrap)?;
     for mounted in &mounted_materializations {
         deleted_routes.extend(deleted_folder_routes(&mounted.export, &mounted.bootstrap)?);
@@ -235,6 +275,7 @@ pub(crate) fn run_working_tree_sync(
             .collect(),
         local_changes: local_result.changes,
         remote_changes,
+        unsupported_objects,
     })
 }
 
@@ -536,7 +577,14 @@ fn fetch_sync_bootstrap(
     brain_id: &str,
 ) -> Result<CliSyncBootstrap, CliError> {
     let path = format!("/v1/brains/{brain_id}/sync/bootstrap");
-    let response = signed_json_request_to_server(env, server_url, "GET", &path, None)?;
+    let response = signed_json_request_to_server_with_response_limit(
+        env,
+        server_url,
+        "GET",
+        &path,
+        None,
+        SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES,
+    )?;
     serde_json::from_value(response).map_err(CliError::from)
 }
 
@@ -599,6 +647,48 @@ fn fetch_incremental_remote_sync(
             Ok(result)
         }
     }
+}
+
+fn confirm_local_changes_from_preflight(
+    env: &CliEnvironment,
+    server_url: &str,
+    brain_id: &str,
+    preflight: RemoteSyncResult,
+    reason: String,
+) -> Result<RemoteSyncResult, CliError> {
+    let after_sequence = preflight.bootstrap.latest_sequence;
+    let pull = match fetch_all_sync_records(env, server_url, brain_id, after_sequence) {
+        Ok(pull) => pull,
+        Err(error)
+            if is_rebootstrap_required_error(&error)
+                || is_sync_records_route_unavailable(&error) =>
+        {
+            return fetch_bootstrap_remote_sync(
+                env,
+                server_url,
+                brain_id,
+                format!(
+                    "{reason}; incremental confirmation unavailable after sequence {after_sequence}, so the bounded bootstrap compatibility path was used"
+                ),
+            );
+        }
+        Err(error) => return Err(error),
+    };
+    let records = pull.records;
+    let bootstrap = apply_incremental_records_to_bootstrap(
+        preflight.bootstrap,
+        after_sequence,
+        pull.latest_sequence,
+        &records,
+    )
+    .map_err(CliError::InvalidInput)?;
+    Ok(RemoteSyncResult {
+        bootstrap,
+        records,
+        report_status: "applied".to_owned(),
+        report_reason: Some(reason),
+        used_bootstrap: true,
+    })
 }
 
 fn fetch_all_sync_records(
@@ -676,12 +766,27 @@ fn apply_incremental_records(
     latest_sequence: u64,
     records: &[CliSyncRecord],
 ) -> Result<CliSyncBootstrap, String> {
+    let base = incremental_base_bootstrap(root, after_sequence)?;
+    apply_incremental_records_to_bootstrap(base, after_sequence, latest_sequence, records)
+}
+
+fn apply_incremental_records_to_bootstrap(
+    base: CliSyncBootstrap,
+    after_sequence: u64,
+    latest_sequence: u64,
+    records: &[CliSyncRecord],
+) -> Result<CliSyncBootstrap, String> {
+    if base.latest_sequence != after_sequence {
+        return Err(format!(
+            "bootstrap sequence {} does not match cursor {after_sequence}",
+            base.latest_sequence
+        ));
+    }
     if latest_sequence < after_sequence {
         return Err(format!(
             "sync records latest sequence {latest_sequence} is older than cursor {after_sequence}"
         ));
     }
-    let base = incremental_base_bootstrap(root, after_sequence)?;
     let mut control_records = base.control_records;
     let mut objects = base
         .objects
@@ -1051,7 +1156,6 @@ fn write_sync_evidence(
 fn restore_conflicted_files(
     root: &Path,
     conflicted_markdown: &BTreeMap<String, String>,
-    conflicted_assets: &BTreeMap<String, Vec<u8>>,
 ) -> Result<(), CliError> {
     for (relative_path, markdown) in conflicted_markdown {
         let path = root.join(relative_path);
@@ -1059,13 +1163,6 @@ fn restore_conflicted_files(
             fs::create_dir_all(parent)?;
         }
         fs::write(path, markdown)?;
-    }
-    for (relative_path, bytes) in conflicted_assets {
-        let path = root.join(relative_path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, bytes)?;
     }
     Ok(())
 }
@@ -1251,33 +1348,38 @@ pub(crate) fn opened_export_folder_key_grants_tolerant(
         .collect()
 }
 
+struct PushLocalWorkingTreeContext<'a> {
+    env: &'a CliEnvironment,
+    server_url: &'a str,
+    agent_state: &'a AgentState,
+    export: &'a CliEncryptedBrainExport,
+    mounted_exports: &'a [MountedFolderSyncContext],
+    session_keys: &'a SessionFolderKeyring,
+}
+
 fn push_local_working_tree_changes(
-    env: &CliEnvironment,
+    context: &PushLocalWorkingTreeContext<'_>,
     root: &Path,
-    server_url: &str,
-    agent_state: &AgentState,
-    export: &CliEncryptedBrainExport,
-    mounted_exports: &[MountedFolderSyncContext],
-    session_keys: &SessionFolderKeyring,
+    changes: Vec<WorkingTreeChange>,
 ) -> Result<LocalSyncResult, CliError> {
     let tree_state = read_working_tree_state(root)?;
-    let changes = scan_working_tree_changes(root, &tree_state)?;
     if changes.is_empty() {
         return Ok(LocalSyncResult::default());
     }
 
     let intents = plan_working_tree_change_intents(&tree_state, &changes);
-    let mut current_key_version_by_folder = export
+    let mut current_key_version_by_folder = context
+        .export
         .folders
         .iter()
         .map(|folder| {
             (
-                (export.brain.id.clone(), folder.id.clone()),
+                (context.export.brain.id.clone(), folder.id.clone()),
                 folder.current_key_version,
             )
         })
         .collect::<BTreeMap<_, _>>();
-    for mounted in mounted_exports {
+    for mounted in context.mounted_exports {
         if let Some(folder) = mounted.source_folder() {
             current_key_version_by_folder.insert(
                 (mounted.export.brain.id.clone(), folder.id.clone()),
@@ -1285,18 +1387,18 @@ fn push_local_working_tree_changes(
             );
         }
     }
-    let signing_keys = load_signer(env)?.keys;
+    let signing_keys = load_signer(context.env)?.keys;
     let actor_npub = NostrPublicKey::from_protocol(signing_keys.public_key())
         .to_npub()
         .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
 
     let submit_context = SubmitIntentContext {
-        env,
-        server_url,
-        agent_state,
+        env: context.env,
+        server_url: context.server_url,
+        agent_state: context.agent_state,
         signing_keys: &signing_keys,
         actor_npub: &actor_npub,
-        session_keys,
+        session_keys: context.session_keys,
         current_key_version_by_folder: &current_key_version_by_folder,
     };
     let mut result = LocalSyncResult::default();
@@ -1317,7 +1419,7 @@ fn push_local_working_tree_changes(
                         .source_brain_id
                         .as_ref()
                         .map(ToString::to_string)
-                        .unwrap_or_else(|| agent_state.brain_id.clone());
+                        .unwrap_or_else(|| context.agent_state.brain_id.clone());
                     result.path_overrides.insert(
                         (
                             route_brain_id,
@@ -1337,7 +1439,12 @@ fn push_local_working_tree_changes(
                     "conflicted",
                     Some(reason.clone()),
                 ));
-                conflicts.push(conflict_for_change(change, intent, reason, timestamp(env)));
+                conflicts.push(conflict_for_change(
+                    change,
+                    intent,
+                    reason,
+                    timestamp(context.env),
+                ));
             }
             Err(error) if is_http_conflict(&error) => {
                 result.conflict_count += 1;
@@ -1352,7 +1459,7 @@ fn push_local_working_tree_changes(
                     change,
                     intent,
                     error.to_string(),
-                    timestamp(env),
+                    timestamp(context.env),
                 ));
             }
             Err(error) => return Err(error),
@@ -1360,7 +1467,7 @@ fn push_local_working_tree_changes(
     }
 
     if !conflicts.is_empty() {
-        mutate_agent_state_at_root(root, timestamp(env), |state, now| {
+        mutate_agent_state_at_root(root, timestamp(context.env), |state, now| {
             for conflict in conflicts {
                 if !state.conflicts.iter().any(|existing| {
                     existing.id == conflict.id && existing.state == ConflictState::Open
@@ -1733,7 +1840,7 @@ struct MaterializeRemoteProjectionContext<'a> {
 
 fn materialize_remote_projection(
     context: MaterializeRemoteProjectionContext<'_>,
-) -> Result<(), CliError> {
+) -> Result<Vec<SyncChangeReport>, CliError> {
     let MaterializeRemoteProjectionContext {
         env,
         root,
@@ -1775,14 +1882,17 @@ fn materialize_remote_projection(
         prior_paths.insert(key.clone(), path.clone());
     }
     let mut opened_pages = Vec::new();
-    let mut opened_assets = Vec::new();
+    let mut unsupported_objects = Vec::new();
+    let mut preserved_legacy_objects = Vec::new();
     let mut readable_folder_routes = BTreeSet::new();
     {
         let mut append_context = OpenedObjectsAppendContext {
             session_keys,
             prior_paths: &prior_paths,
+            prior_state,
             opened_pages: &mut opened_pages,
-            opened_assets: &mut opened_assets,
+            unsupported_objects: &mut unsupported_objects,
+            preserved_legacy_objects: &mut preserved_legacy_objects,
             readable_folder_routes: &mut readable_folder_routes,
         };
 
@@ -1846,7 +1956,7 @@ fn materialize_remote_projection(
             .unwrap_or_else(|| "unknown".to_owned()),
         brain,
         opened_pages,
-        opened_assets,
+        opened_assets: Vec::new(),
         locked_folders,
         latest_sequence: bootstrap.latest_sequence,
     })
@@ -1867,6 +1977,8 @@ fn materialize_remote_projection(
             Some((&mounted.mount.source_folder_id, &mounted.display_path)),
         )?;
     }
+    validate_preserved_legacy_object_paths(&projection, &prior_state.objects)?;
+    projection.state.objects.extend(preserved_legacy_objects);
     let mut deleted_routes = deleted_folder_routes(export, bootstrap)?;
     for mounted in mounted_folders {
         deleted_routes.extend(deleted_folder_routes(&mounted.export, &mounted.bootstrap)?);
@@ -1881,7 +1993,7 @@ fn materialize_remote_projection(
     remove_stale_object_files(root, &prior_state.objects, &projection.state.objects)?;
     remove_obsolete_compiled_convention_markers(root, &projection.state.folder_roots)?;
     write_projection_files(root, &projection.files, &projection.binary_files)?;
-    Ok(())
+    Ok(unsupported_objects)
 }
 
 fn brain_role_for_actor(brain: &Brain, metadata: &CliBrainMetadata, actor_npub: &str) -> String {
@@ -1923,6 +2035,53 @@ fn brain_role_for_actor(brain: &Brain, metadata: &CliBrainMetadata, actor_npub: 
         "guest"
     }
     .to_owned()
+}
+
+fn validate_preserved_legacy_object_paths(
+    projection: &WorkingTreeProjection,
+    preserved: &[WorkingTreeObjectManifestEntry],
+) -> Result<(), CliError> {
+    for object in preserved {
+        if object.content_type == "text/markdown" {
+            continue;
+        }
+        let folder = projection
+            .state
+            .folder_roots
+            .iter()
+            .find(|folder| {
+                folder.folder_id == object.folder_id
+                    && folder.source_brain_id == object.source_brain_id
+            })
+            .ok_or_else(|| {
+                CliError::InvalidInput(format!(
+                    "legacy Asset {} has no materialized Folder root",
+                    object.object_id
+                ))
+            })?;
+        let path = if folder.path.is_empty() {
+            object.path.clone()
+        } else {
+            format!("{}/{}", folder.path, object.path)
+        };
+        let path = SafeRelativePath::new("legacy_asset_path", path)
+            .map_err(|error| CliError::InvalidInput(error.to_string()))?
+            .to_string();
+        let collides_with_file = projection.files.keys().any(|candidate| {
+            candidate == &path
+                || candidate.starts_with(&format!("{path}/"))
+                || path.starts_with(&format!("{candidate}/"))
+        });
+        let collides_with_folder = projection.state.folder_roots.iter().any(|candidate| {
+            candidate.path == path || candidate.path.starts_with(&format!("{path}/"))
+        });
+        if collides_with_file || collides_with_folder {
+            return Err(CliError::InvalidInput(format!(
+                "legacy Asset path collision at {path}; preserved bytes were not changed"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn preserve_unreadable_prior_projection(
@@ -2081,8 +2240,10 @@ fn remove_deleted_folder_roots(
 struct OpenedObjectsAppendContext<'a> {
     session_keys: &'a SessionFolderKeyring,
     prior_paths: &'a BTreeMap<(String, String, String), String>,
+    prior_state: &'a BrainWorkingTreeStateManifest,
     opened_pages: &'a mut Vec<OpenedPage>,
-    opened_assets: &'a mut Vec<OpenedAsset>,
+    unsupported_objects: &'a mut Vec<SyncChangeReport>,
+    preserved_legacy_objects: &'a mut Vec<WorkingTreeObjectManifestEntry>,
     readable_folder_routes: &'a mut BTreeSet<(String, String)>,
 }
 
@@ -2158,22 +2319,41 @@ fn append_opened_objects_from_bootstrap(
                     content_type: "text/markdown".to_owned(),
                 });
             }
-            CliDecodedFolderObjectPlaintext::Asset {
-                path,
-                bytes,
-                content_type,
-            } => {
-                context.opened_assets.push(OpenedAsset {
-                    folder_id,
-                    source_brain_id: display_path_override.map(|_| source_brain_id.clone()),
-                    object_id,
-                    folder_display_path,
-                    asset_path: SafeRelativePath::new("asset_path", path)
-                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-                    bytes,
-                    revision: object.revision,
-                    key_version: envelope.key_version,
-                    content_type,
+            CliDecodedFolderObjectPlaintext::UnsupportedAsset { path, content_type } => {
+                let projected_path = format!("{folder_display_path}/{path}");
+                let manifest_source_brain_id =
+                    display_path_override.map(|_| export.brain.id.clone());
+                if let Some(prior) = context.prior_state.objects.iter().find(|prior| {
+                    prior.folder_id == object.folder_id
+                        && prior.object_id == object.object_id
+                        && prior.source_brain_id == manifest_source_brain_id
+                        && prior.content_type != "text/markdown"
+                }) {
+                    let mut preserved = prior.clone();
+                    preserved.revision = object.revision;
+                    preserved.key_version = envelope.key_version;
+                    if !context.preserved_legacy_objects.iter().any(|candidate| {
+                        candidate.object_id == preserved.object_id
+                            && candidate.folder_id == preserved.folder_id
+                            && candidate.source_brain_id == preserved.source_brain_id
+                    }) {
+                        context.preserved_legacy_objects.push(preserved);
+                    }
+                }
+                context.unsupported_objects.push(SyncChangeReport {
+                    status: "unsupported".to_owned(),
+                    action: "preserve".to_owned(),
+                    actor_npub: None,
+                    sequence: None,
+                    path: Some(projected_path),
+                    from_path: None,
+                    folder_id: Some(folder_id.to_string()),
+                    source_brain_id: manifest_source_brain_id,
+                    object_id: Some(object_id.as_str().to_owned()),
+                    route: "encrypted-record-preserved".to_owned(),
+                    reason: Some(format!(
+                        "legacy inline Asset ({content_type}) remains encrypted on the server; bytes were not materialized"
+                    )),
                 });
             }
         }
@@ -2354,7 +2534,6 @@ fn scan_working_tree_changes(
             continue;
         }
         let file_paths = collect_working_tree_file_paths(root, &folder_root)?;
-        let markdown_sources = read_folder_markdown_sources(root, &folder.path, &file_paths)?;
         for relative_path in file_paths {
             if is_generated_folder_file(&folder.path, &relative_path) {
                 continue;
@@ -2370,32 +2549,32 @@ fn scan_working_tree_changes(
                         markdown: body,
                     }),
                 }
+            } else if known
+                .get(&relative_path)
+                .is_some_and(|object| object.content_type != "text/markdown")
+            {
+                // A pre-hard-cut client may have materialized these bytes and
+                // recorded them in the old manifest. Keep the local copy as a
+                // derived legacy artifact, while the remote projection reports
+                // the encrypted object as unsupported. It is not a pending
+                // local write and must not become a permanent sync conflict.
+                continue;
             } else {
-                let bytes = read_working_tree_asset_bytes(root, &relative_path)?;
-                let local_asset_path = folder_local_path(&folder.path, &relative_path)?;
-                let has_source_note = markdown_sources
-                    .values()
-                    .any(|markdown| markdown_mentions_asset_path(markdown, &local_asset_path));
-                let violates_asset_convention =
-                    !local_asset_path.starts_with("raw/assets/") || !has_source_note;
-                if !matches!(
-                    known.get(&relative_path),
-                    Some(object) if object.content_hash == sha256_hex(&bytes)
-                        && !violates_asset_convention
-                ) {
-                    changes.push(WorkingTreeChange::UpsertAsset {
-                        path: SafeRelativePath::new("change_path", relative_path)
-                            .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-                        bytes,
-                        content_type: content_type_for_path(&local_asset_path).to_owned(),
-                        has_source_note,
-                    });
-                }
+                changes.push(WorkingTreeChange::UpsertAsset {
+                    path: SafeRelativePath::new("change_path", relative_path)
+                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+                    bytes: Vec::new(),
+                    content_type: "application/octet-stream".to_owned(),
+                    has_source_note: false,
+                });
             }
         }
     }
 
-    for (relative_path, _) in known {
+    for (relative_path, object) in known {
+        if object.content_type != "text/markdown" {
+            continue;
+        }
         if !seen.contains(&relative_path) && !root.join(&relative_path).exists() {
             changes.push(WorkingTreeChange::Delete {
                 path: SafeRelativePath::new("change_path", relative_path)
@@ -2459,102 +2638,11 @@ fn collect_working_tree_file_paths_inner(
     Ok(())
 }
 
-fn read_folder_markdown_sources(
-    root: &Path,
-    folder_path: &str,
-    file_paths: &[String],
-) -> Result<BTreeMap<String, String>, CliError> {
-    let mut sources = BTreeMap::new();
-    for relative_path in file_paths {
-        if is_generated_folder_file(folder_path, relative_path) || !is_markdown_path(relative_path)
-        {
-            continue;
-        }
-        let local_path = folder_local_path(folder_path, relative_path)?;
-        sources.insert(local_path, fs::read_to_string(root.join(relative_path))?);
-    }
-    Ok(sources)
-}
-
-fn markdown_mentions_asset_path(markdown: &str, asset_path: &str) -> bool {
-    let mut search_start = 0;
-    while let Some(offset) = markdown[search_start..].find(asset_path) {
-        let start = search_start + offset;
-        let end = start + asset_path.len();
-        let before = markdown[..start].chars().next_back();
-        let after = markdown[end..].chars().next();
-        if !is_source_path_char(before) && !is_source_path_char(after) {
-            return true;
-        }
-        search_start = end;
-    }
-    false
-}
-
-fn is_source_path_char(character: Option<char>) -> bool {
-    character.is_some_and(|value| {
-        value.is_ascii_alphanumeric() || matches!(value, '/' | '.' | '_' | '-' | '%' | '+')
-    })
-}
-
-fn read_working_tree_asset_bytes(root: &Path, relative_path: &str) -> Result<Vec<u8>, CliError> {
-    let path = root.join(relative_path);
-    let size = fs::metadata(&path)?.len();
-    if size > MAX_WORKING_TREE_ASSET_BYTES as u64 {
-        return Err(CliError::InvalidInput(format!(
-            "working tree asset {relative_path} exceeds size limit {MAX_WORKING_TREE_ASSET_BYTES}"
-        )));
-    }
-    let bytes = fs::read(path)?;
-    if bytes.len() > MAX_WORKING_TREE_ASSET_BYTES {
-        return Err(CliError::InvalidInput(format!(
-            "working tree asset {relative_path} exceeds size limit {MAX_WORKING_TREE_ASSET_BYTES}"
-        )));
-    }
-    Ok(bytes)
-}
-
 fn is_markdown_path(path: &str) -> bool {
     Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
         == Some("md")
-}
-
-fn folder_local_path(folder_path: &str, relative_path: &str) -> Result<String, CliError> {
-    relative_path
-        .strip_prefix(folder_path)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            CliError::InvalidInput(format!(
-                "path {relative_path} is outside Folder root {folder_path}"
-            ))
-        })
-}
-
-fn content_type_for_path(path: &str) -> &'static str {
-    match Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("pdf") => "application/pdf",
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        Some("csv") => "text/csv",
-        Some("json") => "application/json",
-        Some("txt") => "text/plain",
-        Some("mp3") => "audio/mpeg",
-        Some("wav") => "audio/wav",
-        Some("mp4") => "video/mp4",
-        Some("mov") => "video/quicktime",
-        _ => "application/octet-stream",
-    }
 }
 
 fn relative_path_string(root: &Path, path: &Path) -> Result<String, CliError> {
@@ -2606,6 +2694,9 @@ fn remove_stale_object_files(
         })
         .collect::<BTreeMap<_, _>>();
     for old in old_objects {
+        if old.content_type != "text/markdown" {
+            continue;
+        }
         let key = (
             old.source_brain_id.clone(),
             old.folder_id.clone(),
@@ -2881,7 +2972,6 @@ struct LocalSyncResult {
     changes: Vec<SyncChangeReport>,
     path_overrides: BTreeMap<(String, String, String), String>,
     conflicted_markdown: BTreeMap<String, String>,
-    conflicted_assets: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -2944,12 +3034,9 @@ fn preserve_conflicted_content(result: &mut LocalSyncResult, change: &WorkingTre
                 .conflicted_markdown
                 .insert(path.to_string(), markdown.clone());
         }
-        WorkingTreeChange::UpsertAsset { path, bytes, .. } => {
-            result
-                .conflicted_assets
-                .insert(path.to_string(), bytes.clone());
-        }
-        WorkingTreeChange::Rename { .. } | WorkingTreeChange::Delete { .. } => {}
+        WorkingTreeChange::UpsertAsset { .. }
+        | WorkingTreeChange::Rename { .. }
+        | WorkingTreeChange::Delete { .. } => {}
     }
 }
 
@@ -3000,9 +3087,11 @@ fn decode_folder_object_page_plaintext(
 ) -> Result<(String, String), CliError> {
     match decode_folder_object_plaintext(plaintext, fallback_path)? {
         CliDecodedFolderObjectPlaintext::Page { path, markdown } => Ok((path, markdown)),
-        CliDecodedFolderObjectPlaintext::Asset { path, .. } => Err(CliError::InvalidInput(
-            format!("folder object asset plaintext is not a Markdown Page: {path}"),
-        )),
+        CliDecodedFolderObjectPlaintext::UnsupportedAsset { path, .. } => {
+            Err(CliError::InvalidInput(format!(
+                "folder object asset plaintext is not a Markdown Page: {path}"
+            )))
+        }
     }
 }
 
@@ -3043,40 +3132,22 @@ fn decode_folder_object_plaintext(
         .and_then(|object_type| object_type.as_str())
         == Some("asset")
     {
-        let asset: CliFolderObjectAssetPlaintext =
-            serde_json::from_value(value).map_err(CliError::from)?;
-        let asset_path = SafeRelativePath::new("asset_path", asset.path)
+        let asset_path = value
+            .get("path")
+            .and_then(|path| path.as_str())
+            .ok_or_else(|| {
+                CliError::InvalidInput("folder object asset path is missing".to_owned())
+            })?;
+        let asset_path = SafeRelativePath::new("asset_path", asset_path)
             .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        if asset.size > MAX_WORKING_TREE_ASSET_BYTES as u64
-            || asset.bytes_base64.len() > MAX_WORKING_TREE_ASSET_BYTES * 2
-        {
-            return Err(CliError::InvalidInput(format!(
-                "folder object asset exceeds size limit {MAX_WORKING_TREE_ASSET_BYTES}"
-            )));
-        }
-        let bytes = BASE64_STANDARD
-            .decode(asset.bytes_base64.as_bytes())
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?;
-        if bytes.len() > MAX_WORKING_TREE_ASSET_BYTES {
-            return Err(CliError::InvalidInput(format!(
-                "folder object asset exceeds size limit {MAX_WORKING_TREE_ASSET_BYTES}"
-            )));
-        }
-        if asset.size != bytes.len() as u64 {
-            return Err(CliError::InvalidInput(
-                "folder object asset size does not match decoded bytes".to_owned(),
-            ));
-        }
-        let actual_hash = sha256_hex(&bytes);
-        if asset.content_hash != actual_hash {
-            return Err(CliError::InvalidInput(
-                "folder object asset hash does not match decoded bytes".to_owned(),
-            ));
-        }
-        return Ok(CliDecodedFolderObjectPlaintext::Asset {
+        let content_type = value
+            .get("contentType")
+            .and_then(|content_type| content_type.as_str())
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        return Ok(CliDecodedFolderObjectPlaintext::UnsupportedAsset {
             path: asset_path.to_string(),
-            bytes,
-            content_type: asset.content_type,
+            content_type,
         });
     }
     Ok(CliDecodedFolderObjectPlaintext::Page {
@@ -3086,15 +3157,8 @@ fn decode_folder_object_plaintext(
 }
 
 enum CliDecodedFolderObjectPlaintext {
-    Page {
-        path: String,
-        markdown: String,
-    },
-    Asset {
-        path: String,
-        bytes: Vec<u8>,
-        content_type: String,
-    },
+    Page { path: String, markdown: String },
+    UnsupportedAsset { path: String, content_type: String },
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
@@ -3424,7 +3488,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_detects_asset_pairs_and_reports_invalid_assets() {
+    fn scan_reports_new_non_markdown_files_without_reopening_preserved_legacy_assets() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         fs::create_dir_all(root.join("General/raw/assets")).unwrap();
@@ -3486,30 +3550,17 @@ mod tests {
 
         let changes = scan_working_tree_changes(root, &state).unwrap();
 
-        assert_eq!(changes.len(), 4);
-        assert!(changes.iter().any(|change| matches!(
+        assert_eq!(changes.len(), 2);
+        assert!(changes.iter().all(|change| matches!(
             change,
             WorkingTreeChange::UpsertAsset {
-                path,
                 bytes,
                 content_type,
-                has_source_note
-            } if path.as_str() == "General/raw/assets/existing.pdf"
-                && bytes == b"changed-pdf"
-                && content_type == "application/pdf"
-                && *has_source_note
-        )));
-        assert!(changes.iter().any(|change| matches!(
-            change,
-            WorkingTreeChange::UpsertAsset {
-                path,
-                bytes,
-                content_type,
-                has_source_note
-            } if path.as_str() == "General/raw/assets/new.pdf"
-                && bytes == b"new-pdf"
-                && content_type == "application/pdf"
-                && *has_source_note
+                has_source_note,
+                ..
+            } if bytes.is_empty()
+                && content_type == "application/octet-stream"
+                && !has_source_note
         )));
         let intents = plan_working_tree_change_intents(&state, &changes);
         let by_path = changes
@@ -3524,41 +3575,23 @@ mod tests {
             })
             .collect::<BTreeMap<_, _>>();
 
-        let existing = by_path.get("General/raw/assets/existing.pdf").unwrap();
-        assert_eq!(existing.action, WorkingTreeIntentAction::Update);
-        assert_eq!(existing.base_revision, Some(2));
-        assert!(matches!(
-            existing.content.as_ref(),
-            Some(WorkingTreeIntentContent::AssetBytes {
-                content_type,
-                bytes,
-            }) if content_type == "application/pdf"
-                && bytes == b"changed-pdf"
-        ));
-        assert_eq!(
-            by_path.get("General/raw/assets/new.pdf").unwrap().action,
-            WorkingTreeIntentAction::Create
-        );
-        assert!(matches!(
-            by_path.get("General/raw/assets/missing-note.pdf").unwrap(),
+        assert_eq!(by_path.len(), 2);
+        assert!(by_path.contains_key("General/raw/assets/new.pdf"));
+        assert!(by_path.contains_key("General/stray.bin"));
+        assert!(by_path.values().all(|intent| matches!(
+            intent,
             WorkingTreeChangeIntent {
                 action: WorkingTreeIntentAction::Unresolved,
+                route: WorkingTreeIntentRoute::Unresolved,
+                content: None,
                 reason: Some(reason),
                 ..
-            } if reason.contains("Source Note")
-        ));
-        assert!(matches!(
-            by_path.get("General/stray.bin").unwrap(),
-            WorkingTreeChangeIntent {
-                action: WorkingTreeIntentAction::Unresolved,
-                reason: Some(reason),
-                ..
-            } if reason.contains("raw/assets")
-        ));
+            } if reason.contains("Asset Source Note")
+        )));
     }
 
     #[test]
-    fn scan_requires_exact_asset_source_note_tokens() {
+    fn scan_does_not_treat_a_markdown_mention_as_permission_to_upload_binary_bytes() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         fs::create_dir_all(root.join("General/raw/assets")).unwrap();
@@ -3577,16 +3610,7 @@ mod tests {
                 can_read: true,
                 metadata_only: false,
             }],
-            objects: vec![WorkingTreeObjectManifestEntry {
-                folder_id: "general".to_owned(),
-                source_brain_id: None,
-                path: "raw/assets/file.pdf".to_owned(),
-                object_id: "obj_assetfile0000".to_owned(),
-                revision: 1,
-                key_version: 1,
-                content_type: "application/pdf".to_owned(),
-                content_hash: sha256_hex(b"asset"),
-            }],
+            objects: Vec::new(),
             sync: WorkingTreeSyncState { latest_sequence: 1 },
         };
 
@@ -3611,12 +3635,12 @@ mod tests {
                 action: WorkingTreeIntentAction::Unresolved,
                 reason: Some(reason),
                 ..
-            } if reason.contains("Source Note")
+            } if reason.contains("Asset Source Note")
         ));
     }
 
     #[test]
-    fn scan_rejects_oversized_assets_before_planning() {
+    fn scan_reports_oversized_non_markdown_files_without_reading_them() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         fs::create_dir_all(root.join("General/raw/assets")).unwrap();
@@ -3641,9 +3665,20 @@ mod tests {
             sync: WorkingTreeSyncState { latest_sequence: 1 },
         };
 
-        let error = scan_working_tree_changes(root, &state).unwrap_err();
-
-        assert!(error.to_string().contains("size limit"));
+        let changes = scan_working_tree_changes(root, &state).unwrap();
+        let asset = changes
+            .iter()
+            .find(|change| matches!(change, WorkingTreeChange::UpsertAsset { .. }))
+            .unwrap();
+        assert!(matches!(
+            asset,
+            WorkingTreeChange::UpsertAsset { bytes, .. } if bytes.is_empty()
+        ));
+        let intent = plan_working_tree_change_intents(&state, std::slice::from_ref(asset))
+            .pop()
+            .unwrap();
+        assert_eq!(intent.action, WorkingTreeIntentAction::Unresolved);
+        assert!(intent.content.is_none());
     }
 
     #[test]
@@ -3763,24 +3798,26 @@ mod tests {
     }
 
     #[test]
-    fn asset_plaintext_round_trips_with_hash_and_content_type() {
+    fn legacy_asset_plaintext_is_classified_without_decoding_inline_bytes() {
         let path = SafeRelativePath::new("asset_path", "raw/assets/source.pdf").unwrap();
-        let plaintext =
+        let encoded =
             encode_folder_object_asset_plaintext(&path, b"%PDF test\n", "application/pdf").unwrap();
+        let mut plaintext: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        plaintext["bytesBase64"] = serde_json::Value::String("not-valid-base64".to_owned());
 
-        match decode_folder_object_plaintext(plaintext.into_bytes(), "fallback.md".to_owned())
-            .unwrap()
+        match decode_folder_object_plaintext(
+            serde_json::to_vec(&plaintext).unwrap(),
+            "fallback.md".to_owned(),
+        )
+        .unwrap()
         {
-            CliDecodedFolderObjectPlaintext::Asset {
-                path,
-                bytes,
-                content_type,
-            } => {
+            CliDecodedFolderObjectPlaintext::UnsupportedAsset { path, content_type } => {
                 assert_eq!(path, "raw/assets/source.pdf");
-                assert_eq!(bytes, b"%PDF test\n");
                 assert_eq!(content_type, "application/pdf");
             }
-            CliDecodedFolderObjectPlaintext::Page { .. } => panic!("expected asset plaintext"),
+            CliDecodedFolderObjectPlaintext::Page { .. } => {
+                panic!("expected unsupported asset plaintext")
+            }
         }
     }
 
@@ -3843,7 +3880,7 @@ mod tests {
         assert_eq!(projection.state.folder_roots[0].folder_id, "home");
         assert!(projection.files.contains_key("home/AGENTS.md"));
         assert!(projection.files.contains_key("home/raw/.keep"));
-        assert!(projection.files.contains_key("home/raw/assets/.keep"));
+        assert!(!projection.files.contains_key("home/raw/assets/.keep"));
         assert!(projection.files.contains_key("home/wiki/.keep"));
         assert!(projection.files.contains_key("home/inventory/.keep"));
         assert!(projection.files.contains_key("home/datasets/.keep"));
@@ -3925,6 +3962,7 @@ mod tests {
         initialize_private_working_tree(root).unwrap();
         fs::create_dir_all(root.join("General")).unwrap();
         fs::write(root.join("General/old.md"), "# Old\n").unwrap();
+        fs::write(root.join("General/legacy.pdf"), b"legacy bytes").unwrap();
         let state = BrainWorkingTreeStateManifest {
             version: "finite-brain-working-tree-state-v1".to_owned(),
             folder_roots: vec![WorkingTreeFolderRoot {
@@ -3934,16 +3972,28 @@ mod tests {
                 can_read: true,
                 metadata_only: false,
             }],
-            objects: vec![WorkingTreeObjectManifestEntry {
-                folder_id: "general".to_owned(),
-                source_brain_id: None,
-                path: "old.md".to_owned(),
-                object_id: "obj_same0000000".to_owned(),
-                revision: 1,
-                key_version: 1,
-                content_type: "text/markdown".to_owned(),
-                content_hash: sha256_hex("# Old\n".as_bytes()),
-            }],
+            objects: vec![
+                WorkingTreeObjectManifestEntry {
+                    folder_id: "general".to_owned(),
+                    source_brain_id: None,
+                    path: "old.md".to_owned(),
+                    object_id: "obj_same0000000".to_owned(),
+                    revision: 1,
+                    key_version: 1,
+                    content_type: "text/markdown".to_owned(),
+                    content_hash: sha256_hex("# Old\n".as_bytes()),
+                },
+                WorkingTreeObjectManifestEntry {
+                    folder_id: "general".to_owned(),
+                    source_brain_id: None,
+                    path: "legacy.pdf".to_owned(),
+                    object_id: "obj_legacy000001".to_owned(),
+                    revision: 1,
+                    key_version: 1,
+                    content_type: "application/pdf".to_owned(),
+                    content_hash: sha256_hex(b"legacy bytes"),
+                },
+            ],
             sync: WorkingTreeSyncState { latest_sequence: 1 },
         };
         write_json_file(&root.join(".finitebrain/working-tree-state.json"), &state).unwrap();
@@ -3961,19 +4011,110 @@ mod tests {
         remove_stale_object_files(root, &state.objects, &new_objects).unwrap();
 
         assert!(!root.join("General/old.md").exists());
+        assert_eq!(
+            fs::read(root.join("General/legacy.pdf")).unwrap(),
+            b"legacy bytes"
+        );
     }
 
     #[test]
-    fn materialize_remote_projection_uses_encrypted_page_path_without_prior_state() {
+    fn incremental_page_update_keeps_cached_legacy_asset_ciphertext_byte_for_byte() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         initialize_private_working_tree(root).unwrap();
+        let legacy_ciphertext = "{\"legacy\":\"ciphertext-must-not-change\"}";
+        write_json_file(
+            &root.join(".finitebrain/encrypted-sync/bootstrap.json"),
+            &CliSyncBootstrap {
+                latest_sequence: 4,
+                objects: vec![
+                    CliSyncObject {
+                        folder_id: "home".to_owned(),
+                        object_id: "obj_page00000001".to_owned(),
+                        revision: 1,
+                        ciphertext: "old-page-ciphertext".to_owned(),
+                        deleted: false,
+                    },
+                    CliSyncObject {
+                        folder_id: "home".to_owned(),
+                        object_id: "obj_legacyasset03".to_owned(),
+                        revision: 1,
+                        ciphertext: legacy_ciphertext.to_owned(),
+                        deleted: false,
+                    },
+                ],
+                control_records: Vec::new(),
+            },
+        )
+        .unwrap();
+        let records = vec![CliSyncRecord {
+            sequence: 5,
+            record_event_id: "event-page-update".to_owned(),
+            record_type: "folder_object_revision".to_owned(),
+            folder_id: Some("home".to_owned()),
+            object_id: Some("obj_page00000001".to_owned()),
+            revision: Some(2),
+            actor_npub: "npub-actor".to_owned(),
+            client_created_at: "2026-08-04T00:00:00Z".to_owned(),
+            payload_json: serde_json::json!({
+                "ciphertext": "new-page-ciphertext"
+            })
+            .to_string(),
+            record_event_kind: 30_101,
+        }];
+
+        let incremental = apply_incremental_records(root, 4, 5, &records).unwrap();
+
+        assert_eq!(incremental.latest_sequence, 5);
+        assert_eq!(
+            incremental
+                .objects
+                .iter()
+                .find(|object| object.object_id == "obj_legacyasset03")
+                .unwrap()
+                .ciphertext,
+            legacy_ciphertext
+        );
+        assert_eq!(
+            incremental
+                .objects
+                .iter()
+                .find(|object| object.object_id == "obj_page00000001")
+                .unwrap()
+                .ciphertext,
+            "new-page-ciphertext"
+        );
+    }
+
+    #[test]
+    fn materialize_remote_projection_opens_pages_and_preserves_legacy_asset_records() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        initialize_private_working_tree(root).unwrap();
+        fs::create_dir_all(root.join("home/raw/assets")).unwrap();
+        let prior_local_asset = b"prior local bytes stay untouched";
+        fs::write(root.join("home/raw/assets/source.pdf"), prior_local_asset).unwrap();
         write_json_file(
             &root.join(".finitebrain/working-tree-state.json"),
             &BrainWorkingTreeStateManifest {
                 version: "finite-brain-working-tree-state-v1".to_owned(),
-                folder_roots: Vec::new(),
-                objects: Vec::new(),
+                folder_roots: vec![WorkingTreeFolderRoot {
+                    folder_id: "home".to_owned(),
+                    source_brain_id: None,
+                    path: "home".to_owned(),
+                    can_read: true,
+                    metadata_only: false,
+                }],
+                objects: vec![WorkingTreeObjectManifestEntry {
+                    folder_id: "home".to_owned(),
+                    source_brain_id: None,
+                    path: "raw/assets/source.pdf".to_owned(),
+                    object_id: "obj_legacyasset01".to_owned(),
+                    revision: 1,
+                    key_version: 1,
+                    content_type: "application/pdf".to_owned(),
+                    content_hash: sha256_hex(prior_local_asset),
+                }],
                 sync: WorkingTreeSyncState { latest_sequence: 0 },
             },
         )
@@ -4002,6 +4143,22 @@ mod tests {
             key_version: 1,
         };
         let envelope = encrypt_folder_object(&folder_key, &aad, &plaintext).unwrap();
+        let asset_object_id = ObjectId::new("obj_legacyasset01").unwrap();
+        let asset_path = SafeRelativePath::new("asset_path", "raw/assets/source.pdf").unwrap();
+        let asset_plaintext = encode_folder_object_asset_plaintext(
+            &asset_path,
+            b"server asset bytes",
+            "application/pdf",
+        )
+        .unwrap();
+        let asset_aad = FolderObjectAad {
+            brain_id: BrainId::new("brain").unwrap(),
+            folder_id: FolderId::new("home").unwrap(),
+            object_id: asset_object_id.clone(),
+            key_version: 1,
+        };
+        let asset_envelope =
+            encrypt_folder_object(&folder_key, &asset_aad, &asset_plaintext).unwrap();
         let export = CliEncryptedBrainExport {
             brain: CliExportBrain {
                 id: "brain".to_owned(),
@@ -4025,17 +4182,26 @@ mod tests {
         };
         let bootstrap = CliSyncBootstrap {
             latest_sequence: 7,
-            objects: vec![CliSyncObject {
-                folder_id: "home".to_owned(),
-                object_id: object_id.as_str().to_owned(),
-                revision: 2,
-                ciphertext: envelope.canonical_json(),
-                deleted: false,
-            }],
+            objects: vec![
+                CliSyncObject {
+                    folder_id: "home".to_owned(),
+                    object_id: object_id.as_str().to_owned(),
+                    revision: 2,
+                    ciphertext: envelope.canonical_json(),
+                    deleted: false,
+                },
+                CliSyncObject {
+                    folder_id: "home".to_owned(),
+                    object_id: asset_object_id.as_str().to_owned(),
+                    revision: 3,
+                    ciphertext: asset_envelope.canonical_json(),
+                    deleted: false,
+                },
+            ],
             control_records: Vec::new(),
         };
 
-        materialize_remote_projection(MaterializeRemoteProjectionContext {
+        let unsupported = materialize_remote_projection(MaterializeRemoteProjectionContext {
             env: &env,
             root,
             actor_npub: "npub-owner",
@@ -4054,9 +4220,205 @@ mod tests {
             "# Remote\n"
         );
         let state = read_working_tree_state(root).unwrap();
-        assert_eq!(state.objects.len(), 1);
-        assert_eq!(state.objects[0].path, "docs/from-envelope.md");
+        assert_eq!(state.objects.len(), 2);
+        assert!(
+            state
+                .objects
+                .iter()
+                .any(|object| object.path == "docs/from-envelope.md")
+        );
+        let preserved = state
+            .objects
+            .iter()
+            .find(|object| object.object_id == asset_object_id.as_str())
+            .unwrap();
+        assert_eq!(preserved.revision, 3);
+        assert_eq!(
+            fs::read(root.join("home/raw/assets/source.pdf")).unwrap(),
+            prior_local_asset
+        );
+        assert_eq!(unsupported.len(), 1);
+        assert_eq!(unsupported[0].status, "unsupported");
+        assert_eq!(unsupported[0].action, "preserve");
+        assert_eq!(
+            unsupported[0].object_id.as_deref(),
+            Some("obj_legacyasset01")
+        );
+        assert!(
+            unsupported[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("bytes were not materialized")
+        );
         assert_eq!(state.sync.latest_sequence, 7);
+        assert!(
+            scan_working_tree_changes(root, &state)
+                .unwrap()
+                .iter()
+                .all(|change| !matches!(change, WorkingTreeChange::UpsertAsset { .. })),
+            "a preserved legacy Asset must not become a perpetual local conflict"
+        );
+
+        let legacy_ciphertext_before = bootstrap.objects[1].ciphertext.clone();
+        let rebootstrap_unsupported =
+            materialize_remote_projection(MaterializeRemoteProjectionContext {
+                env: &env,
+                root,
+                actor_npub: "npub-owner",
+                metadata: Some(&CliBrainMetadata::default()),
+                export: &export,
+                bootstrap: &bootstrap,
+                mounted_folders: &[],
+                path_overrides: &BTreeMap::new(),
+                session_keys: &session_keys,
+                prior_state: None,
+            })
+            .unwrap();
+        assert_eq!(rebootstrap_unsupported.len(), 1);
+        assert_eq!(bootstrap.objects[1].ciphertext, legacy_ciphertext_before);
+        assert_eq!(
+            fs::read(root.join("home/raw/assets/source.pdf")).unwrap(),
+            prior_local_asset
+        );
+    }
+
+    #[test]
+    fn preserved_legacy_asset_path_collision_fails_before_overwriting_local_bytes() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        initialize_private_working_tree(root).unwrap();
+        fs::create_dir_all(root.join("home/docs")).unwrap();
+        let prior_local_asset = b"only local legacy bytes";
+        fs::write(root.join("home/docs/collision.md"), prior_local_asset).unwrap();
+        let prior_state = BrainWorkingTreeStateManifest {
+            version: "finite-brain-working-tree-state-v1".to_owned(),
+            folder_roots: vec![WorkingTreeFolderRoot {
+                folder_id: "home".to_owned(),
+                source_brain_id: None,
+                path: "home".to_owned(),
+                can_read: true,
+                metadata_only: false,
+            }],
+            objects: vec![WorkingTreeObjectManifestEntry {
+                folder_id: "home".to_owned(),
+                source_brain_id: None,
+                path: "docs/collision.md".to_owned(),
+                object_id: "obj_legacyasset02".to_owned(),
+                revision: 1,
+                key_version: 1,
+                content_type: "application/octet-stream".to_owned(),
+                content_hash: sha256_hex(prior_local_asset),
+            }],
+            sync: WorkingTreeSyncState { latest_sequence: 0 },
+        };
+        write_json_file(
+            &root.join(".finitebrain/working-tree-state.json"),
+            &prior_state,
+        )
+        .unwrap();
+        let folder_key = FolderKey::from_bytes([5; 32]);
+        let mut session_keys = SessionFolderKeyring::default();
+        session_keys.insert("brain", "home", 1, folder_key.clone());
+        let env = CliEnvironment {
+            cwd: root.to_path_buf(),
+            config_dir: root.join("config"),
+            server_url: None,
+            public_base_url: None,
+            working_tree_root: None,
+            now: Some("2026-06-26T23:30:00Z".to_owned()),
+            identity_authority_url: None,
+            finite_home: Some(root.join("finite-home")),
+            embedding_provider: None,
+        };
+        let page_id = ObjectId::new("obj_pagecollision").unwrap();
+        let page_path = SafeRelativePath::new("page_path", "docs/collision.md").unwrap();
+        let page_plaintext =
+            encode_folder_object_page_plaintext(&page_path, "# Must not overwrite\n").unwrap();
+        let page_aad = FolderObjectAad {
+            brain_id: BrainId::new("brain").unwrap(),
+            folder_id: FolderId::new("home").unwrap(),
+            object_id: page_id.clone(),
+            key_version: 1,
+        };
+        let page_envelope = encrypt_folder_object(&folder_key, &page_aad, &page_plaintext).unwrap();
+        let asset_id = ObjectId::new("obj_legacyasset02").unwrap();
+        let asset_path = SafeRelativePath::new("asset_path", "docs/collision.md").unwrap();
+        let asset_plaintext = encode_folder_object_asset_plaintext(
+            &asset_path,
+            b"server legacy bytes",
+            "application/octet-stream",
+        )
+        .unwrap();
+        let asset_aad = FolderObjectAad {
+            brain_id: BrainId::new("brain").unwrap(),
+            folder_id: FolderId::new("home").unwrap(),
+            object_id: asset_id.clone(),
+            key_version: 1,
+        };
+        let asset_envelope =
+            encrypt_folder_object(&folder_key, &asset_aad, &asset_plaintext).unwrap();
+        let export = CliEncryptedBrainExport {
+            brain: CliExportBrain {
+                id: "brain".to_owned(),
+                kind: "personal".to_owned(),
+                name: "Brain".to_owned(),
+                owner_user_id: Some("npub-owner".to_owned()),
+            },
+            folders: vec![CliExportFolder {
+                id: "home".to_owned(),
+                path: "home".to_owned(),
+                access: "owner".to_owned(),
+                current_key_version: 1,
+                accessible: true,
+            }],
+            objects: Vec::new(),
+            key_grants: Vec::new(),
+            access_state: CliExportAccessState {
+                members: Vec::new(),
+                admins: Vec::new(),
+            },
+        };
+        let bootstrap = CliSyncBootstrap {
+            latest_sequence: 2,
+            objects: vec![
+                CliSyncObject {
+                    folder_id: "home".to_owned(),
+                    object_id: page_id.as_str().to_owned(),
+                    revision: 1,
+                    ciphertext: page_envelope.canonical_json(),
+                    deleted: false,
+                },
+                CliSyncObject {
+                    folder_id: "home".to_owned(),
+                    object_id: asset_id.as_str().to_owned(),
+                    revision: 1,
+                    ciphertext: asset_envelope.canonical_json(),
+                    deleted: true,
+                },
+            ],
+            control_records: Vec::new(),
+        };
+
+        let error = materialize_remote_projection(MaterializeRemoteProjectionContext {
+            env: &env,
+            root,
+            actor_npub: "npub-owner",
+            metadata: Some(&CliBrainMetadata::default()),
+            export: &export,
+            bootstrap: &bootstrap,
+            mounted_folders: &[],
+            path_overrides: &BTreeMap::new(),
+            session_keys: &session_keys,
+            prior_state: Some(&prior_state),
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("legacy Asset path collision"));
+        assert_eq!(
+            fs::read(root.join("home/docs/collision.md")).unwrap(),
+            prior_local_asset
+        );
     }
 
     #[test]
@@ -4132,7 +4494,6 @@ mod tests {
         let empty_instructions = fs::read_to_string(root.join("home/AGENTS.md")).unwrap();
         let expected_conventions = [
             "raw/.keep",
-            "raw/assets/.keep",
             "wiki/.keep",
             "inventory/.keep",
             "datasets/.keep",
@@ -4380,7 +4741,6 @@ mod tests {
         assert!(!mounted_instructions.contains("compiled/"));
         for marker in [
             "raw/.keep",
-            "raw/assets/.keep",
             "wiki/.keep",
             "inventory/.keep",
             "datasets/.keep",

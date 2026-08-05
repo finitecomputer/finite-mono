@@ -156,8 +156,9 @@ writes no Brain content from model memory.
     research, so that Brain content is grounded in evidence.
 35. As a user, I want captured documentation stored durably under `raw/`, so
     that synthesized knowledge remains traceable.
-36. As a user, I want non-Markdown source files stored under `raw/assets/` with
-    paired Source Notes, so that provenance survives beyond the agent session.
+36. As a user, I want non-Markdown source files represented by Markdown Asset
+    Source Notes under `raw/`, so that provenance survives without copying bulk
+    bytes into the Brain.
 37. As a user, I want sourced synthesis written under `wiki/`, so that source
     material and curated knowledge remain distinct.
 38. As a reader, I want the resulting Page to reference its durable sources,
@@ -254,9 +255,9 @@ writes no Brain content from model memory.
 - The managed FiniteBrain skill explicitly requires agents to inspect the
   available installed skills before assuming a named domain skill exists.
 - When the expected domain skill is absent, the agent uses authoritative
-  primary documentation. It captures Markdown Source Notes under `raw/`,
-  non-Markdown Assets under `raw/assets/`, and provenance sufficient to
-  evaluate the synthesis.
+  primary documentation. It captures Markdown Source Notes and reference-only
+  Asset Source Notes under `raw/`, keeps non-Markdown bytes outside the Brain,
+  and records provenance sufficient to evaluate the synthesis.
 - Sourced synthesis is written under `wiki/` and connected to its durable
   Source Notes. The existing `index.md` and `log.md` closure rules still apply.
 - If no authoritative source can be found, the agent stops, explains the
@@ -307,10 +308,10 @@ writes no Brain content from model memory.
 - The managed-agent scenario seam presents an expected domain skill that is
   absent from the actual installed skill catalog.
 - With authoritative documentation available, the scenario proves the agent
-  inspects installed skills, captures durable sources under `raw/` or
-  `raw/assets/`, writes sourced synthesis under `wiki/`, updates durable
+  inspects installed skills, captures durable Markdown sources and Asset Source
+  Notes under `raw/`, writes sourced synthesis under `wiki/`, updates durable
   navigation/history, and does not describe unsupported claims as
-  authoritative.
+  authoritative or upload non-Markdown bytes.
 - With no authoritative documentation available, the scenario proves the
   agent reports the blocker and makes no requested Brain content changes.
 - Managed-skill static tests continue proving both skill copies are identical,

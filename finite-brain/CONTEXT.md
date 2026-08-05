@@ -484,9 +484,25 @@ generated answer or a new durable knowledge artifact.
 
 ### Asset
 
-An encrypted non-Markdown source file stored inside a Folder, such as a PDF,
-image, audio file, or other blob. An Asset is evidence or source material; it
-is not the primary LLM Wiki knowledge surface.
+A non-Markdown source such as a PDF, image, audio file, or other blob whose
+bytes live outside Folder Objects. One Asset Source Note points to those bytes.
+An Asset is evidence or source material; it is not the primary LLM Wiki
+knowledge surface. _Avoid_: Inline Asset.
+
+### Asset Reference
+
+The small, OKF-compatible frontmatter contract in an Asset Source Note. It has
+a `type`, `title`, and one canonical `resource`; `description` and known
+integrity facts are optional. The `resource` may be an external URI or a
+machine-local file URI. It does not contain the Asset bytes and is not a second
+Folder Object.
+
+### Asset Integrity
+
+The relationship between an Asset Reference and the exact Asset bytes it
+describes. Integrity is verified only when the Asset Reference includes a
+provider revision or content hash. A bare `resource` remains useful and
+discoverable, but is never presented as immutable evidence.
 
 ### Source Note
 
@@ -494,12 +510,13 @@ A Markdown Page that describes one captured source with provenance, extraction
 status, and human or agent-readable notes. Source Notes are the readable handles
 that LLM Wiki pages cite when synthesizing knowledge from raw material.
 
-### Asset Source Note Pair
+### Asset Source Note
 
-The expected pairing for non-Markdown source material: one Asset under
-`raw/assets/` plus one Source Note that explains and cites that Asset. The
-Asset preserves the original evidence, while the Source Note lets humans,
-agents, search, and graph flows reason over it.
+The single Brain-resident Markdown representation of a non-Markdown Asset. Its
+Asset Reference points to the bytes, while its body lets humans, agents,
+search, and graph flows reason over the source. Agents conventionally place it
+under the Folder's `raw/` tree; there is no Brain-resident `raw/assets/` blob
+directory. _Avoid_: Asset Source Note Pair.
 
 ### Graph View
 

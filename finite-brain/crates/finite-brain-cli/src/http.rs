@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,6 +14,8 @@ use crate::{
 
 pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
     "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST";
+const DEFAULT_JSON_RESPONSE_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -253,6 +255,24 @@ pub(crate) fn signed_json_request_to_server(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, CliError> {
+    signed_json_request_to_server_with_response_limit(
+        env,
+        server_url,
+        method,
+        path,
+        body,
+        DEFAULT_JSON_RESPONSE_LIMIT_BYTES,
+    )
+}
+
+pub(crate) fn signed_json_request_to_server_with_response_limit(
+    env: &CliEnvironment,
+    server_url: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    response_limit_bytes: usize,
+) -> Result<serde_json::Value, CliError> {
     let body = body.map(|body| serde_json::to_vec(&body)).transpose()?;
     let transport_url = absolute_server_url(server_url, path);
     let authorization_url = authorization_url_for_request(env, server_url, path);
@@ -260,11 +280,12 @@ pub(crate) fn signed_json_request_to_server(
     let signer = load_signer(env)?;
     let authorization =
         signed_http_auth_header(&signer.keys, method, &authorization_url, body.as_deref())?;
-    let response = http_request(
+    let response = http_request_with_response_limit(
         method,
         &transport_url,
         Some(&authorization),
         body.as_deref(),
+        response_limit_bytes,
     )?;
     if !(200..300).contains(&response.status) {
         return Err(CliError::HttpStatus {
@@ -282,11 +303,12 @@ fn parse_success_json(body: &str) -> Result<serde_json::Value, CliError> {
     serde_json::from_str(body).map_err(|error| CliError::HttpResponseDecode(error.to_string()))
 }
 
-pub(crate) fn http_request(
+fn http_request_with_response_limit(
     method: &str,
     url: &str,
     authorization: Option<&str>,
     body: Option<&[u8]>,
+    response_limit_bytes: usize,
 ) -> Result<HttpResponse, CliError> {
     validate_http_url(url)?;
     let body = body.unwrap_or_default();
@@ -314,14 +336,37 @@ pub(crate) fn http_request(
         Err(ureq::Error::Status(status, response)) => (status, response),
         Err(error) => return Err(CliError::Http(error.to_string())),
     };
-    let body = match response.into_string() {
-        Ok(body) => body,
-        Err(error) if !(200..300).contains(&status) => {
-            return Err(body_read_error(status, error.to_string()));
-        }
-        Err(error) => return Err(CliError::Http(error.to_string())),
-    };
+    if response
+        .header("Content-Length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > response_limit_bytes)
+    {
+        return Err(body_read_error(
+            status,
+            format!("response body exceeds the configured {response_limit_bytes}-byte limit"),
+        ));
+    }
+    let body = read_response_body(response.into_reader(), status, response_limit_bytes)?;
     Ok(HttpResponse { status, body })
+}
+
+fn read_response_body(
+    reader: impl Read,
+    status: u16,
+    response_limit_bytes: usize,
+) -> Result<String, CliError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(response_limit_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| body_read_error(status, error.to_string()))?;
+    if bytes.len() > response_limit_bytes {
+        return Err(body_read_error(
+            status,
+            format!("response body exceeds the configured {response_limit_bytes}-byte limit"),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| body_read_error(status, error.to_string()))
 }
 
 fn body_read_error(status: u16, error: String) -> CliError {
@@ -637,6 +682,20 @@ mod tests {
     fn body_read_failure_preserves_authoritative_non_success_status() {
         let error = body_read_error(409, "connection reset".to_owned());
         assert!(matches!(error, CliError::HttpStatus { status: 409, .. }));
+    }
+
+    #[test]
+    fn bounded_response_reader_accepts_exact_limit() {
+        let body = read_response_body(std::io::Cursor::new(b"1234"), 200, 4).unwrap();
+        assert_eq!(body, "1234");
+    }
+
+    #[test]
+    fn bounded_response_reader_rejects_one_byte_over_limit_before_json_decode() {
+        let error = read_response_body(std::io::Cursor::new(b"12345"), 200, 4).unwrap_err();
+        assert!(matches!(error, CliError::Http(_)));
+        assert!(error.to_string().contains("configured 4-byte limit"));
+        assert!(!matches!(error, CliError::HttpResponseDecode(_)));
     }
 
     #[test]

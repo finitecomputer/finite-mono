@@ -1,18 +1,12 @@
 use super::*;
 use crate::BrainKind;
 
-pub const FOLDER_CONVENTION_DIRECTORIES: [&str; 6] = [
-    "raw",
-    "raw/assets",
-    "wiki",
-    "inventory",
-    "datasets",
-    "output",
-];
+pub const FOLDER_CONVENTION_DIRECTORIES: [&str; 5] =
+    ["raw", "wiki", "inventory", "datasets", "output"];
 
 pub fn folder_agent_instructions(folder_id: &str) -> String {
     format!(
-        "# Folder Agent Instructions\n\nFolder id: `{folder_id}`\n\nUse `raw/` for source captures, `raw/assets/` for non-Markdown Assets, `wiki/` for durable synthesized pages, `inventory/` for source candidates and open questions, `datasets/` for manifests and query recipes, and `output/` for generated artifacts. Pair every Asset with a Markdown Source Note before citing it from synthesized work.\n"
+        "# Folder Agent Instructions\n\nFolder id: `{folder_id}`\n\nUse `raw/` for Markdown source captures and Asset Source Notes, `wiki/` for durable synthesized pages, `inventory/` for source candidates and open questions, `datasets/` for manifests and query recipes, and `output/` for generated artifacts. Keep non-Markdown Asset bytes outside the Brain. Represent each Asset with one Markdown Source Note under `raw/` whose frontmatter includes `type`, `title`, and its canonical `resource` URI, then cite that note from synthesized work.\n"
     )
 }
 
@@ -24,14 +18,8 @@ pub fn folder_convention_marker(folder_id: &str, convention: &str) -> String {
 pub fn materialize_brain_working_tree(
     input: WorkingTreeMaterializeInput,
 ) -> Result<WorkingTreeProjection, PortabilityError> {
-    if input.opened_assets.len() > MAX_WORKING_TREE_ASSET_COUNT {
-        return Err(PortabilityError::WorkingTreeAssetCountExceeded {
-            count: input.opened_assets.len(),
-            max: MAX_WORKING_TREE_ASSET_COUNT,
-        });
-    }
     let mut files = BTreeMap::new();
-    let mut binary_files = BTreeMap::new();
+    let binary_files = BTreeMap::new();
     let mut folder_roots = BTreeMap::<(Option<BrainId>, FolderId), WorkingTreeFolderRoot>::new();
     let mut objects = Vec::new();
     let mut folder_paths = input
@@ -45,12 +33,6 @@ pub fn materialize_brain_working_tree(
             .opened_pages
             .iter()
             .map(|page| page.folder_display_path.to_string()),
-    );
-    folder_paths.extend(
-        input
-            .opened_assets
-            .iter()
-            .map(|asset| asset.folder_display_path.to_string()),
     );
     folder_paths.extend(
         input
@@ -87,45 +69,9 @@ pub fn materialize_brain_working_tree(
         });
     }
 
-    for asset in &input.opened_assets {
-        folder_roots
-            .entry((asset.source_brain_id.clone(), asset.folder_id.clone()))
-            .or_insert_with(|| WorkingTreeFolderRoot {
-                folder_id: asset.folder_id.to_string(),
-                source_brain_id: asset.source_brain_id.as_ref().map(ToString::to_string),
-                path: asset.folder_display_path.to_string(),
-                can_read: true,
-                metadata_only: false,
-            });
-
-        let full_path = working_tree_page_path(&asset.folder_display_path, &asset.asset_path)?;
-        if folder_paths.contains(&full_path) {
-            return Err(PortabilityError::WorkingTreePathCollision { path: full_path });
-        }
-        if asset.bytes.len() > MAX_WORKING_TREE_ASSET_BYTES {
-            return Err(PortabilityError::WorkingTreeAssetTooLarge {
-                path: full_path,
-                size: asset.bytes.len(),
-                max: MAX_WORKING_TREE_ASSET_BYTES,
-            });
-        }
-        insert_working_tree_binary_file(
-            &files,
-            &mut binary_files,
-            &full_path,
-            asset.bytes.clone(),
-        )?;
-        objects.push(WorkingTreeObjectManifestEntry {
-            folder_id: asset.folder_id.to_string(),
-            source_brain_id: asset.source_brain_id.as_ref().map(ToString::to_string),
-            path: asset.asset_path.to_string(),
-            object_id: asset.object_id.as_str().to_owned(),
-            revision: asset.revision,
-            key_version: asset.key_version,
-            content_type: asset.content_type.clone(),
-            content_hash: sha256_hex(&asset.bytes),
-        });
-    }
+    // `opened_assets` remains in the compatibility input while pre-hard-cut
+    // clients may still identify legacy inline Asset plaintext. Current
+    // projections deliberately omit those bytes and their manifest entries.
 
     for locked in &input.locked_folders {
         folder_roots
@@ -311,21 +257,6 @@ fn insert_working_tree_file(
     Ok(())
 }
 
-fn insert_working_tree_binary_file(
-    files: &BTreeMap<String, String>,
-    binary_files: &mut BTreeMap<String, Vec<u8>>,
-    path: &str,
-    bytes: Vec<u8>,
-) -> Result<(), PortabilityError> {
-    validate_working_tree_file_path(path)?;
-    if files.contains_key(path) || binary_files.insert(path.to_owned(), bytes).is_some() {
-        return Err(PortabilityError::WorkingTreePathCollision {
-            path: path.to_owned(),
-        });
-    }
-    Ok(())
-}
-
 fn insert_working_tree_file_if_absent(
     files: &mut BTreeMap<String, String>,
     path: &str,
@@ -366,7 +297,7 @@ fn root_agents_file(brain: &Brain, actor: &UserId, acting_role: &str) -> String 
         BrainKind::Organization => "Organization Brain",
     };
     format!(
-        "# FiniteBrain {kind} Working Tree\n\nBrain ID: `{brain_id}`\nActing Member Identity: `{actor}`\nActing Brain role: `{acting_role}`\n\n- Read and write the materialized Folders available to this identity and role.\n- Store non-Markdown sources under a Folder's `raw/assets/` and pair each Asset with a Markdown Source Note.\n- Do not write decrypted content into `.finitebrain/encrypted-sync`.\n- Changes must be returned through the Product Client encrypted sync path.\n",
+        "# FiniteBrain {kind} Working Tree\n\nBrain ID: `{brain_id}`\nActing Member Identity: `{actor}`\nActing Brain role: `{acting_role}`\n\n- Read and write the materialized Folders available to this identity and role.\n- Keep non-Markdown Asset bytes outside the Brain and represent each one with a Markdown Asset Source Note under the Folder's `raw/` tree.\n- Do not write decrypted content into `.finitebrain/encrypted-sync`.\n- Changes must be returned through the Product Client encrypted sync path.\n",
         brain_id = brain.id,
     )
 }
@@ -490,54 +421,15 @@ fn plan_working_tree_upsert(
 }
 
 fn plan_working_tree_asset_upsert(
-    state: &BrainWorkingTreeStateManifest,
-    path: &SafeRelativePath,
-    bytes: &[u8],
-    content_type: &str,
-    has_source_note: bool,
+    _state: &BrainWorkingTreeStateManifest,
+    _path: &SafeRelativePath,
+    _bytes: &[u8],
+    _content_type: &str,
+    _has_source_note: bool,
 ) -> WorkingTreeChangeIntent {
-    let Some((root, local_path)) = resolve_working_tree_folder(state, path) else {
-        return unresolved_intent("path is outside materialized readable Folders");
-    };
-    if !root.can_read {
-        return unresolved_intent("Folder is locked in this working tree");
-    }
-    if !local_path.as_str().starts_with("raw/assets/") {
-        return unresolved_intent("non-Markdown Assets must live under raw/assets/");
-    }
-    if !has_source_note {
-        return unresolved_intent("Asset is missing a Markdown Source Note in this Folder");
-    }
-    if bytes.len() > MAX_WORKING_TREE_ASSET_BYTES {
-        return unresolved_intent("Asset exceeds the v1 working-tree size limit");
-    }
-    let source_brain_id = match source_brain_id_for_root(root) {
-        Ok(source_brain_id) => source_brain_id,
-        Err(reason) => return unresolved_intent(&reason),
-    };
-    let existing = object_for_local_path(state, root, &local_path);
-    let object_id = existing
-        .and_then(|object| ObjectId::new(object.object_id.clone()).ok())
-        .unwrap_or_else(|| generated_working_tree_object_id(&root.folder_id, &local_path));
-    WorkingTreeChangeIntent {
-        action: if existing.is_some() {
-            WorkingTreeIntentAction::Update
-        } else {
-            WorkingTreeIntentAction::Create
-        },
-        route: WorkingTreeIntentRoute::EncryptedObjectWrite,
-        folder_id: FolderId::new(root.folder_id.clone()).ok(),
-        source_brain_id,
-        object_id: Some(object_id),
-        target_path: Some(local_path),
-        from_path: None,
-        base_revision: existing.map(|object| object.revision),
-        content: Some(WorkingTreeIntentContent::AssetBytes {
-            bytes: bytes.to_vec(),
-            content_type: content_type.to_owned(),
-        }),
-        reason: None,
-    }
+    unresolved_intent(
+        "non-Markdown files are not stored in the Brain; create a Markdown Asset Source Note under raw/ with a canonical resource pointer",
+    )
 }
 
 fn plan_working_tree_rename(

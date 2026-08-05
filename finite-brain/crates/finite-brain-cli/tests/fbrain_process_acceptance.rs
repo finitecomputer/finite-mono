@@ -11,7 +11,12 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use finite_nostr::NostrPublicKey;
+use finite_brain_core::{
+    BrainId, FolderId, FolderKey, FolderKeyGrantPayload, FolderObjectAad, ObjectId,
+    encrypt_folder_object,
+};
+use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
+use nostr::{Keys, Kind};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -431,12 +436,11 @@ fn assert_canonical_folder_projection(folder_root: &Path, folder_id: &str) -> St
     assert_eq!(
         instructions,
         format!(
-            "# Folder Agent Instructions\n\nFolder id: `{folder_id}`\n\nUse `raw/` for source captures, `raw/assets/` for non-Markdown Assets, `wiki/` for durable synthesized pages, `inventory/` for source candidates and open questions, `datasets/` for manifests and query recipes, and `output/` for generated artifacts. Pair every Asset with a Markdown Source Note before citing it from synthesized work.\n"
+            "# Folder Agent Instructions\n\nFolder id: `{folder_id}`\n\nUse `raw/` for Markdown source captures and Asset Source Notes, `wiki/` for durable synthesized pages, `inventory/` for source candidates and open questions, `datasets/` for manifests and query recipes, and `output/` for generated artifacts. Keep non-Markdown Asset bytes outside the Brain. Represent each Asset with one Markdown Source Note under `raw/` whose frontmatter includes `type`, `title`, and its canonical `resource` URI, then cite that note from synthesized work.\n"
         )
     );
     for marker in [
         "raw/.keep",
-        "raw/assets/.keep",
         "wiki/.keep",
         "inventory/.keep",
         "datasets/.keep",
@@ -448,6 +452,7 @@ fn assert_canonical_folder_projection(folder_root: &Path, folder_id: &str) -> St
             folder_root.display()
         );
     }
+    assert!(!folder_root.join("raw/assets").exists());
     assert!(!folder_root.join("compiled/.keep").exists());
     instructions
 }
@@ -1774,6 +1779,12 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
         "# Beta edit\n\nBeta collaboration write proof.\n",
     )
     .unwrap();
+    let asset_source_note = "---\ntype: source\ntitle: Shared demo PDF\nresource: https://docs.example.test/shared-demo.pdf\ndescription: Canonical external demo source.\nfinite_asset:\n  content_type: application/pdf\n---\n\n# Shared demo PDF\n\nThe bytes remain at the canonical resource.\n";
+    fs::write(
+        tree_b.join("Restricted/raw/shared-demo-pdf.md"),
+        asset_source_note,
+    )
+    .unwrap();
     let beta_push = run(&home_b, &tree_b, &["sync", "now", "--json"]);
     assert!(
         beta_push.status.success(),
@@ -1792,6 +1803,10 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     assert_eq!(
         fs::read_to_string(tree_a.join("Restricted/beta-edit.md")).unwrap(),
         "# Beta edit\n\nBeta collaboration write proof.\n"
+    );
+    assert_eq!(
+        fs::read_to_string(tree_a.join("Restricted/raw/shared-demo-pdf.md")).unwrap(),
+        asset_source_note
     );
     assert_eq!(
         fs::read_to_string(tree_a.join("Admin Only/email-guest-edit.md")).unwrap(),
@@ -2650,6 +2665,197 @@ fn spawn_brain_access_revoked_server() -> (String, thread::JoinHandle<String>) {
     (endpoint, worker)
 }
 
+fn large_bootstrap_markdown_fixture() -> (Value, String) {
+    let keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
+    let recipient = NostrPublicKey::from_protocol(keys.public_key());
+    let recipient_npub = recipient.to_npub().unwrap();
+    let folder_key = FolderKey::from_bytes([11; 32]);
+    let grant_payload = FolderKeyGrantPayload {
+        version: "finite-folder-key-grant-v1".to_owned(),
+        brain_id: "brain".to_owned(),
+        folder_id: "general".to_owned(),
+        key_version: 1,
+        folder_key: folder_key.to_base64(),
+        issuer_npub: recipient_npub.clone(),
+        recipient_npub: recipient_npub.clone(),
+        created_at: "2026-07-22T18:00:00Z".to_owned(),
+    };
+    let rumor = build_rumor(
+        NostrPublicKey::from_protocol(keys.public_key()),
+        Kind::Custom(30_101),
+        Vec::new(),
+        grant_payload.canonical_json(),
+        1_753_206_400,
+    );
+    let wrapped = wrap_rumor(&keys, recipient, rumor).unwrap();
+    let grant = json!({
+        "folderId": "general",
+        "keyVersion": 1,
+        "issuerNpub": recipient_npub,
+        "recipientNpub": grant_payload.recipient_npub,
+        "wrappedEventJson": wrapped.as_json()
+    });
+    let object_id = ObjectId::new("obj_largebootstrap1").unwrap();
+    let plaintext = json!({
+        "version": "finite-folder-object-page-v1",
+        "path": "remote-large-bootstrap.md",
+        "markdown": "# Remote large bootstrap\n\nDelivered inside the oversized bootstrap response.\n"
+    })
+    .to_string();
+    let envelope = encrypt_folder_object(
+        &folder_key,
+        &FolderObjectAad {
+            brain_id: BrainId::new("brain").unwrap(),
+            folder_id: FolderId::new("general").unwrap(),
+            object_id,
+            key_version: 1,
+        },
+        plaintext,
+    )
+    .unwrap();
+    (grant, envelope.canonical_json())
+}
+
+fn spawn_large_bootstrap_sync_server(
+    export_grant: Value,
+    ciphertext: String,
+) -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let worker = thread::spawn(move || {
+        let started = Instant::now();
+        let mut requests = Vec::new();
+        while requests.len() < 3 && started.elapsed() < Duration::from_secs(10) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            let request_line = read_http_request_line(&mut stream);
+            let (status, body) = if request_line.contains("/export") {
+                (
+                    "200 OK",
+                    json!({
+                        "brain": {
+                            "id": "brain",
+                            "kind": "personal",
+                            "name": "Brain",
+                            "ownerUserId": null
+                        },
+                        "folders": [{
+                            "id": "general",
+                            "path": "General",
+                            "access": "owner",
+                            "currentKeyVersion": 1,
+                            "accessible": true
+                        }],
+                        "keyGrants": [export_grant],
+                        "accessState": { "members": [], "admins": [] }
+                    })
+                    .to_string(),
+                )
+            } else if request_line.contains("/sync/records") {
+                (
+                    "410 Gone",
+                    json!({ "error": "rebootstrap required from retention floor 1" }).to_string(),
+                )
+            } else if request_line.contains("/sync/bootstrap") {
+                let padding = "x".repeat(11 * 1024 * 1024);
+                (
+                    "200 OK",
+                    json!({
+                        "latestSequence": 9,
+                        "objects": [{
+                            "folderId": "general",
+                            "objectId": "obj_largebootstrap1",
+                            "revision": 1,
+                            "ciphertext": ciphertext,
+                            "deleted": false
+                        }],
+                        "forwardCompatiblePadding": padding
+                    })
+                    .to_string(),
+                )
+            } else {
+                panic!("unexpected large-bootstrap sync request: {request_line}");
+            };
+            requests.push(request_line);
+            let headers = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+        }
+        requests
+    });
+    (endpoint, worker)
+}
+
+fn spawn_oversize_bootstrap_sync_server() -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let worker = thread::spawn(move || {
+        let started = Instant::now();
+        let mut requests = Vec::new();
+        while requests.len() < 3 && started.elapsed() < Duration::from_secs(10) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            let request_line = read_http_request_line(&mut stream);
+            requests.push(request_line.clone());
+            if request_line.contains("/export") {
+                let body = json!({
+                    "brain": {
+                        "id": "brain",
+                        "kind": "personal",
+                        "name": "Brain",
+                        "ownerUserId": null
+                    },
+                    "folders": [],
+                    "keyGrants": [],
+                    "accessState": { "members": [], "admins": [] }
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            } else if request_line.contains("/sync/records") {
+                let body = json!({
+                    "error": "rebootstrap required from retention floor 1"
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 410 Gone\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            } else if request_line.contains("/sync/bootstrap") {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    128 * 1024 * 1024 + 1
+                )
+                .unwrap();
+                break;
+            } else {
+                panic!("unexpected oversize-bootstrap sync request: {request_line}");
+            }
+        }
+        requests
+    });
+    (endpoint, worker)
+}
+
 enum QueryProviderResponse {
     Malformed,
     RateLimited,
@@ -3269,6 +3475,93 @@ fn built_fbrain_full_brain_access_loss_pauses_without_deleting_local_work() {
     assert!(status.status.success());
     let status: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status["state"], "paused");
+}
+
+#[test]
+fn built_fbrain_sync_accepts_bootstrap_larger_than_ureq_default_limit() {
+    let scratch = TempDir::new().unwrap();
+    let tree = setup_access_loss_tree(&scratch);
+    let (grant, ciphertext) = large_bootstrap_markdown_fixture();
+    let (endpoint, server) = spawn_large_bootstrap_sync_server(grant, ciphertext);
+
+    let sync = run(
+        scratch.path(),
+        &tree,
+        &["sync", "now", "--server", &endpoint, "--json"],
+    );
+    let requests = server.join().unwrap();
+
+    assert!(
+        sync.status.success(),
+        "{}; requests={requests:?}",
+        String::from_utf8_lossy(&sync.stderr),
+    );
+    let report: Value = serde_json::from_slice(&sync.stdout).unwrap();
+    assert_eq!(report["status"], "applied-remote-records");
+    assert_eq!(report["latestSequence"], 9);
+    let state: Value = serde_json::from_slice(
+        &fs::read(tree.join(".finitebrain/working-tree-state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["sync"]["latestSequence"], 9);
+    assert_eq!(
+        fs::read_to_string(tree.join("General/remote-large-bootstrap.md")).unwrap(),
+        "# Remote large bootstrap\n\nDelivered inside the oversized bootstrap response.\n"
+    );
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].contains("/v1/brains/brain/sync/bootstrap"));
+}
+
+#[test]
+fn built_fbrain_sync_rejects_bootstrap_over_128_mib_without_changing_projection() {
+    let scratch = TempDir::new().unwrap();
+    let tree = setup_access_loss_tree(&scratch);
+    let unresolved_path = tree.join("General/unresolved.md");
+    fs::write(&unresolved_path, "# Unresolved local edit\n").unwrap();
+    let manifest_path = tree.join(".finitebrain/working-tree-state.json");
+    let agent_state_path = tree.join(".finitebrain/agent-state.json");
+    let bootstrap_path = tree.join(".finitebrain/encrypted-sync/bootstrap.json");
+    let materialized_path = tree.join("General/nested/strong-a.md");
+    let cached_bootstrap = json!({ "latestSequence": 0, "objects": [] });
+    write_json(&bootstrap_path, &cached_bootstrap);
+    #[cfg(unix)]
+    fs::set_permissions(&bootstrap_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let agent_state_before: Value =
+        serde_json::from_slice(&fs::read(&agent_state_path).unwrap()).unwrap();
+    let bootstrap_before = fs::read(&bootstrap_path).unwrap();
+    let materialized_before = fs::read(&materialized_path).unwrap();
+    let (endpoint, server) = spawn_oversize_bootstrap_sync_server();
+
+    let sync = run(
+        scratch.path(),
+        &tree,
+        &["sync", "now", "--server", &endpoint, "--json"],
+    );
+    let requests = server.join().unwrap();
+
+    assert!(!sync.status.success());
+    assert!(
+        String::from_utf8_lossy(&sync.stderr)
+            .contains("response body exceeds the configured 134217728-byte limit"),
+        "{}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    let agent_state_after: Value =
+        serde_json::from_slice(&fs::read(&agent_state_path).unwrap()).unwrap();
+    assert_eq!(
+        agent_state_after["conflicts"], agent_state_before["conflicts"],
+        "bootstrap rejection must happen before local conflict bookkeeping"
+    );
+    assert_eq!(fs::read(&bootstrap_path).unwrap(), bootstrap_before);
+    assert_eq!(fs::read(&materialized_path).unwrap(), materialized_before);
+    assert_eq!(
+        fs::read_to_string(&unresolved_path).unwrap(),
+        "# Unresolved local edit\n"
+    );
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].contains("/v1/brains/brain/sync/bootstrap"));
 }
 
 #[test]
