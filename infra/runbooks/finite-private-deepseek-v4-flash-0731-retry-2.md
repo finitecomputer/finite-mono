@@ -48,8 +48,12 @@ Supporting evidence is recorded in
 
 The staged config is
 [`tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml`](../tinfoil/confidential-kimi-k2-6/tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml).
-Its image field deliberately remains a placeholder until the manual image
-workflow reports a digest.
+The manual image workflow completed successfully as run `30975709857` from
+mono commit `878041d92c27188eac73d41156c2f1def355bea7`. It verified and pinned:
+
+```text
+ghcr.io/finitecomputer/deepseek-v4-vllm:0.25.1-0731-reasoning.2@sha256:a9b1ac4832a397996857959e09bda85b4620fe21c23df955bb81e7f89a732075
+```
 
 ## Preparation gates
 

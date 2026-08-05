@@ -21,7 +21,7 @@ networks:
 
 containers:
   - name: "deepseek-v4-flash-0731"
-    image: "REPLACE_WITH_MEASURED_DEEPSEEK_V4_VLLM_IMAGE"
+    image: "ghcr.io/finitecomputer/deepseek-v4-vllm:0.25.1-0731-reasoning.2@sha256:a9b1ac4832a397996857959e09bda85b4620fe21c23df955bb81e7f89a732075"
     runtime: nvidia
     gpus: all
     restart: always
