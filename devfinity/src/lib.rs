@@ -1545,6 +1545,14 @@ wait "$postgres_pid"
                         .to_string(),
                 ),
                 ("FINITE_BRAIN_INVITE_MAILER", "dev".to_string()),
+                // The Brain product matrix drives rapid synthetic
+                // collaboration sequences (repeated `fbrain sync now`, open,
+                // and admin calls within seconds) that trip the production
+                // protected-route limiter (120 requests per 60s per
+                // signer+method+path). Devfinity stacks are disposable, so
+                // raise the ceiling generously; production deployments leave
+                // this unset and keep the real limits.
+                ("FINITE_BRAIN_PROTECTED_RATE_LIMIT", "10000:60".to_string()),
                 ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
                 ("FC_CORE_API_BASE_URL", self.core_url()),
             ],
@@ -4383,6 +4391,7 @@ mod tests {
         assert!(yaml.contains("cargo run -p finite-brain-app"));
         assert!(yaml.contains("FINITE_BRAIN_PUBLIC_BASE_URL=http://127.0.0.1:13002"));
         assert!(yaml.contains("FINITE_BRAIN_INVITE_MAILER=dev"));
+        assert!(yaml.contains("FINITE_BRAIN_PROTECTED_RATE_LIMIT=10000:60"));
         assert!(
             yaml.contains("FINITE_BRAIN_SERVER_URL\\\":\\\"http://host.container.internal:18790")
         );
@@ -4633,6 +4642,7 @@ mod tests {
 
         assert!(finite_brain.contains("FINITE_BRAIN_ADDR=0.0.0.0:18790"));
         assert!(finite_brain.contains("FINITE_BRAIN_INVITE_MAILER=dev"));
+        assert!(finite_brain.contains("FINITE_BRAIN_PROTECTED_RATE_LIMIT=10000:60"));
         assert!(finite_brain.contains("host: \"127.0.0.1\""));
         assert!(yaml.contains("FC_BRAIN_UPSTREAM_URL=http://127.0.0.1:18790"));
         assert!(yaml.contains("FINITE_BRAIN_SERVER_URL\\\":\\\"http://192.168.67.1:18790"));
