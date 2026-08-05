@@ -202,12 +202,26 @@ enum PhalaRuntimeHandleEnvelope {
 struct PhalaRuntimeHandleV1 {
     cvm_id: String,
     app_id: String,
+    /// Core-acknowledged KMS/compose facts retained for a future in-place
+    /// update. Legacy handles omit this field and are never backfilled from
+    /// provider responses.
+    #[serde(default)]
+    provision_facts: Option<PhalaProvisionFactsV1>,
 }
 
 impl PhalaRuntimeHandleV1 {
     fn validate(&self) -> Result<(), RunnerError> {
         validate_provider_id(&self.cvm_id).map_err(runner_api_error)?;
-        validate_provider_id(&self.app_id).map_err(runner_api_error)
+        validate_provider_id(&self.app_id).map_err(runner_api_error)?;
+        if let Some(facts) = self.provision_facts.as_ref() {
+            facts.validate().map_err(runner_api_error)?;
+            if facts.app_id != self.app_id {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Phala runtime handle facts did not match its app id".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -215,6 +229,7 @@ impl PhalaRuntimeHandleV1 {
         Self {
             cvm_id: "cvm_fixture_01".to_string(),
             app_id: "app_fixture_01".to_string(),
+            provision_facts: None,
         }
     }
 
@@ -305,6 +320,16 @@ impl PhalaLauncher {
         self.client
             .as_ref()
             .map_err(|error| RunnerError::RuntimeLaunch(error.clone()))
+    }
+
+    #[cfg(test)]
+    fn check_runtime_health_url(&self, url: &str) -> Result<(), RunnerError> {
+        (self.health_check)(
+            url,
+            "Phala runtime /healthz",
+            self.config.readiness_timeout,
+            self.config.readiness_interval,
+        )
     }
 
     fn refresh_preflight(&self) -> Result<(), RunnerError> {
@@ -437,6 +462,8 @@ impl PhalaLauncher {
     }
 
     fn check_runtime_health(&self, cvm: &CvmInfo) -> Result<(), RunnerError> {
+        // The runtime's `/healthz` result is authoritative, including
+        // specialization. Phala API status is not a specialization probe.
         let base_url = cvm
             .public_application_endpoint()
             .map_err(runner_api_error)?
@@ -533,6 +560,7 @@ impl PhalaLauncher {
         let handle = PhalaRuntimeHandleV1 {
             cvm_id: cvm.id.clone(),
             app_id: provision.app_id().to_string(),
+            provision_facts: Some(provision.facts.clone()),
         };
         handle.validate()?;
         Ok(handle)
@@ -573,6 +601,7 @@ impl RuntimeLauncher for PhalaLauncher {
             active_sandbox_count: Some(snapshot.billable_resource_count),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            finite_private_profile: None,
         }
     }
 
@@ -583,10 +612,16 @@ impl RuntimeLauncher for PhalaLauncher {
     fn restart_runtime(
         &mut self,
         lease: &RuntimeControlLease,
-        _options: &RuntimeRestartOptions,
+        options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         self.config.validate()?;
         control_runtime_spec(lease, RunnerClass::Phala)?;
+        if options.specialization_bundle().is_some() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala restart cannot converge specialization without a rollback envelope"
+                    .to_string(),
+            ));
+        }
         let handle = self.runtime_handle(lease)?;
         let cvm = self.inspect_verified(&handle)?;
         if status_is_stopped(&cvm.status) {
@@ -616,6 +651,13 @@ impl RuntimeLauncher for PhalaLauncher {
         _options: &RuntimeRestartOptions,
     ) -> Result<RuntimeUpgradeFacts, RunnerError> {
         control_runtime_spec(lease, RunnerClass::Phala)?;
+        let handle = self.runtime_handle(lease)?;
+        if handle.provision_facts.is_none() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Phala specialization lifecycle requires Core-acknowledged provision facts"
+                    .to_string(),
+            ));
+        }
         Err(RunnerError::RuntimeLaunch(
             "Phala upgrade is disabled until the canary proves complete-environment update and rollback"
                 .to_string(),
@@ -824,6 +866,7 @@ impl RuntimeLauncher for PhalaLauncher {
         let handle = PhalaRuntimeHandleV1 {
             cvm_id: action.id,
             app_id: provision.app_id().to_string(),
+            provision_facts: Some(provision.facts.clone()),
         };
         handle.validate()?;
         let cvm = self.wait_for_running(&handle)?;
@@ -2377,6 +2420,24 @@ impl PhalaProvisionFactsV1 {
             node_id: provision.node_id,
         })
     }
+
+    fn validate(&self) -> Result<(), PhalaApiError> {
+        normalized_app_id(&self.app_id)?;
+        validate_provider_id(&self.compose_hash)?;
+        normalize_hex(&self.env_encrypt_public_key, 32, "environment public key")?;
+        if self.kms_reference != "phala" {
+            return Err(PhalaApiError::Contract(
+                "Phala handle facts selected an unexpected KMS",
+            ));
+        }
+        normalize_secp256k1_public_key(&self.kms_signer_public_key)?;
+        if self.instance_type != FINITE_INSTANCE_TYPE {
+            return Err(PhalaApiError::Contract(
+                "Phala handle facts selected an unexpected instance type",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Provision identifiers reconstructed only from the exact facts Core
@@ -2407,6 +2468,7 @@ impl PersistedProvision {
         let facts = serde_json::from_value::<PhalaProvisionFactsV1>(facts).map_err(|_| {
             PhalaApiError::Contract("Core returned invalid acknowledged Phala provision facts")
         })?;
+        facts.validate()?;
         Ok(Self { facts })
     }
 
@@ -2749,6 +2811,34 @@ mod tests {
       "public_key":"e33a1832c6562067ff8f844a61e51ad051f1180b66ec2551fb0251735f3ee90a",
       "signature":"8542c49081fbf4e03f62034f13fbf70630bdf256a53032e38465a27c36fd6bed7a5e7111652004aef37f7fd92fbfc1285212c4ae6a6154203a48f5e16cad2cef00"
     }"#;
+
+    #[test]
+    fn phala_readiness_rejects_an_ineffective_specialization_health_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let launcher = PhalaLauncher::new(PhalaConfig {
+            api_key: "fixture-api-key-not-a-secret".to_string(),
+            readiness_timeout: Duration::from_millis(30),
+            readiness_interval: Duration::from_millis(5),
+            ..PhalaConfig::default()
+        });
+        let error = launcher
+            .check_runtime_health_url(&format!("http://127.0.0.1:{port}/healthz"))
+            .unwrap_err();
+        assert!(error.to_string().contains("did not become ready"));
+        server.join().unwrap();
+    }
 
     #[derive(Debug)]
     struct CapturedRequest {
@@ -3114,6 +3204,7 @@ mod tests {
                     runtime_host: "fixture-runtime".to_string(),
                     runtime_status: RuntimeSummaryStatus::Online,
                     active_inference_profile: Some("finite-private".to_string()),
+                    effective_specialization_bundle: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
                 },
@@ -3541,6 +3632,7 @@ mod tests {
         let handle = PhalaRuntimeHandleV1 {
             cvm_id: "cvm_fixture_linked".to_string(),
             app_id: "app_fixture_01".to_string(),
+            provision_facts: None,
         };
         let server = FakePhalaServer::start(vec![
             json_response(linked),
@@ -3575,6 +3667,7 @@ mod tests {
         let wrong_handle = PhalaRuntimeHandleV1 {
             cvm_id: "cvm_fixture_wrong".to_string(),
             app_id: "app_fixture_01".to_string(),
+            provision_facts: None,
         };
         assert!(
             mismatch_launcher
@@ -3642,6 +3735,33 @@ mod tests {
         assert!(
             launcher
                 .upgrade_runtime(&control, &RuntimeRestartOptions::default())
+                .unwrap_err()
+                .to_string()
+                .contains("requires Core-acknowledged provision facts")
+        );
+        let facts = PhalaProvisionFactsV1 {
+            app_id: "11".repeat(20),
+            compose_hash: "compose_fixture_01".to_string(),
+            env_encrypt_public_key: "11".repeat(32),
+            kms_reference: "phala".to_string(),
+            kms_signer_public_key: format!("02{}", "22".repeat(32)),
+            instance_type: FINITE_INSTANCE_TYPE.to_string(),
+            node_id: Some(101),
+        };
+        let control_with_facts = sample_control_lease(
+            RuntimeControlKind::Upgrade,
+            Some(
+                PhalaRuntimeHandleV1 {
+                    cvm_id: "cvm_fixture_01".to_string(),
+                    app_id: "11".repeat(20),
+                    provision_facts: Some(facts),
+                }
+                .core_envelope(),
+            ),
+        );
+        assert!(
+            launcher
+                .upgrade_runtime(&control_with_facts, &RuntimeRestartOptions::default())
                 .unwrap_err()
                 .to_string()
                 .contains("upgrade is disabled")

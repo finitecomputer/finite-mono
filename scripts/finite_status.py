@@ -129,6 +129,23 @@ RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
          ) then 'inactive'
          else 'unlinked'
        end as link_state,
+       case
+         when ar.host_facts->>'active_inference_profile' = 'finite-private'
+           or exists (
+             select 1 from agent_creation_requests acr
+              where acr.agent_runtime_id = ar.id
+                and (
+                  acr.runtime_spec->'spec'->>'specializationProfile' = 'finite_private_multimodal'
+                  or (
+                    acr.runtime_spec->'spec'->>'specializationProfile' is null
+                    and acr.runtime_spec->'spec'->'secretReferences' ? 'FINITE_PRIVATE_API_KEY'
+                  )
+                )
+           )
+         then 'true'
+         else 'false'
+       end as specialization_required,
+       ar.host_facts->>'effective_specialization_bundle' as effective_specialization_bundle,
        rss.last_heartbeat_at
   from agent_runtimes ar
   left join runtime_artifacts ra on ra.id = ar.runtime_artifact_id
@@ -276,6 +293,8 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
                 "agent_name",
                 "version_label",
                 "link_state",
+                "specialization_required",
+                "effective_specialization_bundle",
                 "last_heartbeat_at",
             ],
         ),
@@ -758,6 +777,12 @@ def expand_fixture(raw: dict[str, Any]) -> dict[str, Any]:
                     "agent_name": f"{group['name_prefix']} {index:02d}",
                     "version_label": group["version_label"],
                     "link_state": group["link_state"],
+                    "specialization_required": group.get(
+                        "specialization_required", False
+                    ),
+                    "effective_specialization_bundle": group.get(
+                        "effective_specialization_bundle"
+                    ),
                     "last_heartbeat_at": group.get("last_heartbeat_at", ""),
                 }
             )
@@ -798,6 +823,10 @@ def combine_status(statuses: list[str]) -> str:
     return "green"
 
 
+def recorded_bool(value: Any) -> bool:
+    return value is True or str(value).lower() == "true"
+
+
 def build_fleet(
     core: dict[str, Any] | None,
     now: datetime,
@@ -831,6 +860,13 @@ def build_fleet(
             "project_id": row["project_id"],
             "agent_name": row["agent_name"],
             "version_label": row["version_label"],
+            "specialization_required": recorded_bool(
+                row.get("specialization_required", False)
+            ),
+            "effective_specialization_bundle": row.get(
+                "effective_specialization_bundle"
+            )
+            or None,
             "heartbeat": heartbeat_signal(row.get("last_heartbeat_at"), now),
         }
         lifecycle = probe_agents.get(row["agent_runtime_id"])
@@ -846,8 +882,18 @@ def build_fleet(
         groups = hosts[hostname]
         active = groups["active"]
         stragglers = [row for row in active if row["version_label"] != target_version]
+        specialization_violations = [
+            row
+            for row in active
+            if row["specialization_required"]
+            and row["effective_specialization_bundle"] != "finite-private-multimodal-v1"
+        ]
         on_target = len(active) - len(stragglers)
-        status = "red" if stragglers else ("unknown" if groups["unlinked"] else "green")
+        status = (
+            "red"
+            if stragglers or specialization_violations
+            else ("unknown" if groups["unlinked"] else "green")
+        )
         section_statuses.append(status)
         stale = sum(
             row["heartbeat"]["freshness"] != "fresh"
@@ -868,6 +914,8 @@ def build_fleet(
                 "on_target": on_target,
                 "straggler_count": len(stragglers),
                 "stragglers": stragglers,
+                "specialization_violation_count": len(specialization_violations),
+                "specialization_violations": specialization_violations,
                 "intentionally_inactive_count": len(groups["inactive"]),
                 "intentionally_inactive": groups["inactive"],
                 "unlinked_count": len(groups["unlinked"]),
@@ -905,7 +953,11 @@ def build_fleet(
     report = {
         "status": combine_status(section_statuses),
         "evidence": "Core-recorded artifact/link state; not verified live compute",
-        "status_basis": "active-link artifact convergence only",
+        "status_basis": "active-link artifact convergence and durable specialization facts",
+        "specialization_contract": {
+            "expected_bundle": "finite-private-multimodal-v1",
+            "required_state": "exact durable effective bundle for every active eligible runtime",
+        },
         "heartbeat_note": "timestamps are staleness signals, not lifecycle proof",
         "target_artifact": {
             "id": target["id"],
@@ -1262,6 +1314,7 @@ def render_human(report: dict[str, Any]) -> str:
             host_line = (
                 f"  {host['source_host_id']}: {host['on_target']}/{host['active_total']} active on target; "
                 f"{host['straggler_count']} stragglers; "
+                f"{host['specialization_violation_count']} specialization violations; "
                 f"{host['intentionally_inactive_count']} intentionally inactive excluded; "
                 f"{host['non_fresh_heartbeat_signals']} non-fresh heartbeat signals"
             )
@@ -1281,6 +1334,13 @@ def render_human(report: dict[str, Any]) -> str:
                 lines.append(
                     f"    UNKNOWN-LINK {runtime['agent_name']} [{runtime['agent_runtime_id']}]: "
                     f"{runtime['version_label']}"
+                )
+            for runtime in host["specialization_violations"]:
+                observed = runtime["effective_specialization_bundle"] or "missing"
+                lines.append(
+                    f"    SPECIALIZATION {runtime['agent_name']} "
+                    f"[{runtime['agent_runtime_id']}]: expected finite-private-multimodal-v1; "
+                    f"recorded {observed}"
                 )
             straggler_ids = {
                 runtime["agent_runtime_id"] for runtime in host["stragglers"]

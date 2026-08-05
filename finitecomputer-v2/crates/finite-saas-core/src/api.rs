@@ -3087,6 +3087,7 @@ fn authorize_runner_capacity(
             return Ok(RunnerLeaseCapacity {
                 runner_classes: credential.runner_classes.clone(),
                 runtime_capabilities: Some(legacy_kata_runtime_capabilities()),
+                finite_private_profile: None,
                 ..RunnerLeaseCapacity::default()
             });
         }
@@ -3539,6 +3540,7 @@ mod tests {
         serde_json::json!({
             "runnerClasses": [runner_class],
             "runtimeCapabilities": runtime_capabilities_json(runner_class == RunnerClass::Kata),
+            "finitePrivateProfile": "canonical_specialization_configured",
         })
     }
 
@@ -3606,6 +3608,7 @@ mod tests {
             ..current_kata.clone()
         };
         let compatibility = authorize_runner_capacity(&legacy_kata, None).unwrap();
+        assert_eq!(compatibility.finite_private_profile, None);
         let RuntimeCapabilitiesEnvelope::V1(capabilities) =
             compatibility.runtime_capabilities.unwrap();
         assert_eq!(
@@ -3750,6 +3753,7 @@ mod tests {
                 runtime_host: "internal-host".to_string(),
                 runtime_status: RuntimeSummaryStatus::Online,
                 active_inference_profile: None,
+                effective_specialization_bundle: None,
                 hermes_available: Some(true),
                 published_app_urls: vec!["https://legacy.example.test/wrong".to_string()],
             },
@@ -5536,7 +5540,8 @@ mod tests {
                                 "activeSandboxCount": 1,
                                 "availableMemoryBytes": 8589934592_u64,
                                 "runnerClasses": ["kata"],
-                                "runtimeCapabilities": runtime_capabilities_json(true)
+                                "runtimeCapabilities": runtime_capabilities_json(true),
+                                "finitePrivateProfile": "canonical_specialization_configured"
                             },
                             "now": "2026-05-25T13:00:01Z"
                         })
@@ -5638,6 +5643,7 @@ mod tests {
                             "runnerId": "runner-oslo-1",
                             "leaseToken": "lease-token-1",
                             "leaseSeconds": 300,
+                            "runnerCapacity": runner_capacity_json(RunnerClass::Kata),
                             "now": "2026-05-25T13:00:00Z"
                         })
                         .to_string(),
@@ -5816,6 +5822,7 @@ mod tests {
                             "runnerId": "runner-oslo-1",
                             "leaseToken": "lease-token-1",
                             "leaseSeconds": 300,
+                            "runnerCapacity": runner_capacity_json(RunnerClass::Kata),
                             "now": "2026-05-25T13:00:00Z"
                         })
                         .to_string(),
@@ -6635,6 +6642,7 @@ mod tests {
                 "runnerId": "runner-oslo-1",
                 "leaseToken": "lease-token-1",
                 "leaseSeconds": 300,
+                "runnerCapacity": runner_capacity_json(RunnerClass::Kata),
                 "now": "2026-05-25T13:00:00Z"
             })),
         )
@@ -7049,6 +7057,7 @@ mod tests {
                 "leaseToken": "restart-lease-1",
                 "leaseSeconds": 60,
                 "sourceHostId": "oslo-host-1",
+                "runnerCapacity": runner_capacity_json(RunnerClass::Kata),
                 "now": "2026-05-25T13:04:00Z"
             })),
         )
@@ -7118,7 +7127,10 @@ mod tests {
                 "leaseToken": "upgrade-lease-1",
                 "leaseSeconds": 60,
                 "sourceHostId": "oslo-host-1",
-                "runnerCapacity": { "runnerClasses": ["kata"] },
+                "runnerCapacity": {
+                    "runnerClasses": ["kata"],
+                    "finitePrivateProfile": "canonical_specialization_configured"
+                },
                 "now": "2026-05-25T13:05:30Z"
             })),
         )

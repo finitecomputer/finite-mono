@@ -59,7 +59,7 @@ class FiniteStatusTests(unittest.TestCase):
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_RUNTIMES__",
-                "finite-lat-1,runtime-a,project-a,machine-a,Agent A,v2,active,2026-08-01T00:00:00Z",
+                "finite-lat-1,runtime-a,project-a,machine-a,Agent A,v2,active,true,finite-private-multimodal-v1,2026-08-01T00:00:00Z",
             ]
         )
         completed = subprocess.CompletedProcess(["psql"], 0, output, "")
@@ -132,6 +132,33 @@ class FiniteStatusTests(unittest.TestCase):
         lat1 = next(host for host in fleet["hosts"] if host["source_host_id"] == "finite-lat-1")
         self.assertEqual(lat1["intentionally_inactive_count"], 6)
         self.assertEqual(lat1["unlinked_count"], 1)
+
+    def test_active_specialized_runtime_requires_exact_effective_bundle(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        runtime = raw["core"]["runtimes"][0]
+        runtime["specialization_required"] = True
+        runtime["effective_specialization_bundle"] = None
+        now = finite_status.parse_time(raw["now"])
+        fleet = finite_status.build_fleet(raw["core"], now)
+        lat1 = next(host for host in fleet["hosts"] if host["source_host_id"] == "finite-lat-1")
+        self.assertEqual(fleet["status"], "red")
+        self.assertEqual(lat1["specialization_violation_count"], 1)
+        self.assertEqual(
+            lat1["specialization_violations"][0]["agent_runtime_id"],
+            runtime["agent_runtime_id"],
+        )
+        self.assertIn("SPECIALIZATION", finite_status.render_human(
+            finite_status.build_report(raw, now)
+        ))
+
+        runtime["effective_specialization_bundle"] = "aeon-multimodal"
+        fleet = finite_status.build_fleet(raw["core"], now)
+        self.assertEqual(fleet["status"], "red")
+
+        runtime["effective_specialization_bundle"] = "finite-private-multimodal-v1"
+        fleet = finite_status.build_fleet(raw["core"], now)
+        self.assertEqual(lat1["straggler_count"], 7)
+        self.assertEqual(fleet["hosts"][0]["specialization_violation_count"], 0)
 
     def test_snapshot_manifest_is_checksum_only_and_accepts_sqlite_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

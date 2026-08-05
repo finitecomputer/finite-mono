@@ -218,6 +218,8 @@ impl Default for AppleHostAccess {
 const RUNTIME_ARTIFACT_ID_PREFIX: &str = "devfinity-runtime";
 const RUNTIME_IMAGE_REF: &str = "finite-agent-runtime:devfinity";
 const DEVFINITY_RUNNER_CREDENTIAL_ID: &str = "devfinity-apple-current";
+const FINITE_PRIVATE_SPECIALIZATION_WORKER_KEY_ENV: &str =
+    "FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY";
 const DEVFINITY_RUNNER_TOKEN_ENV: &str = "FC_CORE_RUNNER_CREDENTIAL_TOKEN_DEVFINITY_APPLE_CURRENT";
 const DEVFINITY_RUNNER_TOKEN: &str = "devfinity-runner-route-token";
 const DEVFINITY_USAGE_TOKEN: &str = "devfinity-finite-private-usage-token";
@@ -490,6 +492,11 @@ impl Stack {
                     "chat-capable local SaaS requires a Finite Private key. Run `just dev inference-key` once, or set FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY (preferred) or FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE"
                 );
             }
+            if !nonempty_env(FINITE_PRIVATE_SPECIALIZATION_WORKER_KEY_ENV) {
+                bail!(
+                    "chat-ready local SaaS requires {FINITE_PRIVATE_SPECIALIZATION_WORKER_KEY_ENV}; use the route-scoped specialization worker credential, or run --services-only"
+                );
+            }
             if self.profile == StackProfile::AppleSaas {
                 // Apple Container 1.1 reports `builder is not running` with exit 0,
                 // while `builder start` itself is idempotent. Invoke the operation
@@ -641,6 +648,7 @@ impl Stack {
             return Ok(());
         }
 
+        let mut runner_secrets = String::new();
         match self.inference_mode {
             InferenceMode::ChainedLimiter => {
                 let value = self.upstream_inference_key()?;
@@ -655,17 +663,22 @@ impl Stack {
             }
             InferenceMode::DirectKeyOverride => {
                 let value = required_secret_env("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE")?;
-                write_mode_600(
-                    &self.runner_secret_file(),
-                    format!(
-                        "export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE={}\n",
-                        shell_quote(&value)
-                    )
-                    .as_bytes(),
-                )?;
+                let _ = writeln!(
+                    runner_secrets,
+                    "export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE={}",
+                    shell_quote(&value)
+                );
             }
             InferenceMode::Missing => {}
         }
+        let specialization_worker_key =
+            required_secret_env(FINITE_PRIVATE_SPECIALIZATION_WORKER_KEY_ENV)?;
+        let _ = writeln!(
+            runner_secrets,
+            "export {FINITE_PRIVATE_SPECIALIZATION_WORKER_KEY_ENV}={}",
+            shell_quote(&specialization_worker_key)
+        );
+        write_mode_600(&self.runner_secret_file(), runner_secrets.as_bytes())?;
         Ok(())
     }
 
@@ -1838,12 +1851,10 @@ wait "$postgres_pid"
                 )
             ),
         ];
-        if self.inference_mode == InferenceMode::DirectKeyOverride {
-            command.push(format!(
-                ". {}",
-                shell_quote(&self.runner_secret_file().display().to_string())
-            ));
-        }
+        command.push(format!(
+            ". {}",
+            shell_quote(&self.runner_secret_file().display().to_string())
+        ));
         command.push("exec cargo run -p finite-saas-runner -- serve".to_string());
 
         let _ = writeln!(yaml, "  {process}:");
@@ -1926,6 +1937,14 @@ wait "$postgres_pid"
                                 "https://kimi-k2-6.finite.containers.tinfoil.dev/v1".to_string()
                             })
                     },
+                ),
+                (
+                    "FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_POLICY_EVIDENCE_ID",
+                    "devfinity-runtime-image-specialization-v1".to_string(),
+                ),
+                (
+                    "FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_DEPLOYMENT_VERIFIED",
+                    "true".to_string(),
                 ),
             ],
         );
@@ -4008,6 +4027,7 @@ fn validate_finite_private_api_key(input: &str) -> Result<&str> {
 fn scrub_devfinity_secrets(command: &mut Command) {
     command.env_remove("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY");
     command.env_remove("FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE");
+    command.env_remove(FINITE_PRIVATE_SPECIALIZATION_WORKER_KEY_ENV);
     command.env_remove("WORKOS_API_KEY");
     command.env_remove(WORKOS_STAGING_API_KEY_ENV);
     command.env_remove(WORKOS_STAGING_CLIENT_ID_ENV);
@@ -4448,6 +4468,11 @@ mod tests {
         assert!(!yaml.contains("FC_DASHBOARD_RUNNER_CLASSES"));
         assert!(yaml.contains("FC_RUNNER_RUNTIME_ENV_JSON="));
         assert!(yaml.contains("FC_CORE_RUNTIME_ENV_JSON="));
+        assert!(yaml.contains(
+            "FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_POLICY_EVIDENCE_ID=devfinity-runtime-image-specialization-v1"
+        ));
+        assert!(yaml.contains("FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_DEPLOYMENT_VERIFIED=true"));
+        assert!(!yaml.contains(FINITE_PRIVATE_SPECIALIZATION_WORKER_KEY_ENV));
         assert!(yaml.contains("FINITE_SITES_API"));
         assert!(yaml.contains("FINITE_BRAIN_SERVER_URL"));
         assert!(!yaml.contains("FC_DASHBOARD_DEV_LAUNCH_CODE"));
@@ -4777,11 +4802,15 @@ mod tests {
         command
             .args([
                 "-c",
-                "test -z \"${FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY:-}\" && test -z \"${FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE:-}\" && test -z \"${WORKOS_STAGING_API_KEY:-}\"",
+                "test -z \"${FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY:-}\" && test -z \"${FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE:-}\" && test -z \"${FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY:-}\" && test -z \"${WORKOS_STAGING_API_KEY:-}\"",
             ])
             .env("FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY", "must-not-leak")
             .env(
                 "FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE",
+                "must-not-leak",
+            )
+            .env(
+                FINITE_PRIVATE_SPECIALIZATION_WORKER_KEY_ENV,
                 "must-not-leak",
             )
             .env(WORKOS_STAGING_API_KEY_ENV, "must-not-leak");

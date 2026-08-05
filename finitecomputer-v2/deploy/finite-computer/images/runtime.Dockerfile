@@ -3,6 +3,7 @@
 # together from the one root workspace and lockfile.
 
 FROM rust:1.88-trixie AS finite-rust-builder
+ARG FINITE_AGENTD_MULTIMODAL_WORKER_URL=https://specialization.finite.vip/v1
 WORKDIR /build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
@@ -16,7 +17,8 @@ COPY finite-nostr ./finite-nostr
 COPY finitecomputer-v2/crates ./finitecomputer-v2/crates
 COPY finitechat ./finitechat
 COPY finite-sites ./finite-sites
-RUN cargo build --locked --release \
+RUN FINITE_AGENTD_MULTIMODAL_WORKER_URL="${FINITE_AGENTD_MULTIMODAL_WORKER_URL}" \
+    cargo build --locked --release \
       --package finite-agentd \
       --package finitechat-cli \
       --package fsite-cli \

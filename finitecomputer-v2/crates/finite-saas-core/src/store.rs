@@ -20,8 +20,8 @@ use crate::{
     FinitePrivateAdminState, FinitePrivateApiKey, FinitePrivateApiKeyStatus,
     FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateGrantStatus,
     FinitePrivateLimitProfile, FinitePrivateReservation, FinitePrivateReservationStatus,
-    FinitePrivateUsageDecision, FinitePrivateUsageNotice, FinitePrivateUsageStatus,
-    HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
+    FinitePrivateRunnerProfile, FinitePrivateUsageDecision, FinitePrivateUsageNotice,
+    FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
     LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
     ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
@@ -63,10 +63,11 @@ use crate::{
     runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_secret_references,
     runtime_spec_v1, runtime_upgrade_contact_endpoint,
     runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
-    source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    source_import_key, specialization_profile_from_host_facts, trim_to_option, valid_agent_npub,
+    valid_sha256_hex, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use serde::de::DeserializeOwned;
@@ -3226,6 +3227,12 @@ where
 {
     validate_runtime_spec_environment(runtime_environment)?;
     let runtime_secret_references = runtime_spec_secret_references(runtime_secret_references)?;
+    if !crate::runner_supports_finite_private_creation(
+        input.runner_capacity.as_ref(),
+        &runtime_secret_references,
+    ) {
+        return Ok(None);
+    }
     let now = input.now.unwrap_or(current_time_iso()?);
     let now_time = parse_time(&now)?;
     let runner_id =
@@ -3416,6 +3423,10 @@ where
             }
             None => select_latest_launchable_runtime_artifact(client).await?,
         };
+        // Core owns product intent: new Finite Private product creations use
+        // the promoted canonical Finite Private policy. Runner capability only gates which
+        // worker may claim this already-classified request.
+        let specialization_profile = Some(crate::new_finite_private_product_profile());
         let runtime_spec = build_runtime_spec_v1(
             RuntimeSpecIdentity {
                 operation_id: &request.id,
@@ -3428,6 +3439,7 @@ where
             runtime_environment.clone(),
             runtime_secret_references,
             RuntimeBootIntent::Normal,
+            specialization_profile,
         )?;
         Some((runtime_id, artifact.id, runtime_spec))
     } else {
@@ -5959,6 +5971,9 @@ fn runtime_host_facts_from_register_input(
             .runtime_status
             .unwrap_or(RuntimeSummaryStatus::Unknown),
         active_inference_profile: trim_to_option(input.active_inference_profile.as_deref()),
+        // Registration only records the requested runtime; readiness must
+        // complete before Core records the effective specialization bundle.
+        effective_specialization_bundle: None,
         hermes_available: input.hermes_available,
         published_app_urls: input.published_app_urls.clone(),
     }
@@ -5979,6 +5994,9 @@ fn runtime_host_facts_from_complete_input(
             .runtime_status
             .unwrap_or(RuntimeSummaryStatus::Unknown),
         active_inference_profile: trim_to_option(input.active_inference_profile.as_deref()),
+        effective_specialization_bundle: crate::effective_specialization_bundle_for_spec(
+            request.runtime_spec.as_ref(),
+        ),
         hermes_available: input.hermes_available,
         published_app_urls: input.published_app_urls.clone(),
     }
@@ -6961,6 +6979,46 @@ where
                 SELECT request.id
                 FROM runtime_control_requests AS request
                 JOIN agent_runtimes AS runtime ON runtime.id = request.agent_runtime_id
+                CROSS JOIN LATERAL (
+                  SELECT (
+                    runtime.host_facts->>'active_inference_profile'
+                      IS DISTINCT FROM 'finite-private'
+                    AND (
+                      runtime.host_facts->>'active_inference_profile' IS NOT NULL
+                      OR EXISTS (
+                        SELECT 1
+                        FROM agent_creation_requests AS creation
+                        WHERE creation.agent_runtime_id = request.agent_runtime_id
+                          AND creation.runtime_spec IS NOT NULL
+                          AND creation.runtime_spec->'spec'->>'specializationProfile' IS NULL
+                          AND NOT (
+                            creation.runtime_spec->'spec'->'secretReferences'
+                              ? 'FINITE_PRIVATE_API_KEY'
+                          )
+                      )
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM agent_creation_requests AS creation
+                      WHERE creation.agent_runtime_id = request.agent_runtime_id
+                        AND creation.runtime_spec->'spec'->>'specializationProfile'
+                          = 'finite_private_multimodal'
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM agent_creation_requests AS creation
+                      WHERE creation.agent_runtime_id = request.agent_runtime_id
+                        AND (
+                          creation.runtime_spec IS NULL
+                          OR (
+                            creation.runtime_spec->'spec'->>'specializationProfile' IS NULL
+                            AND creation.runtime_spec->'spec'->'secretReferences'
+                              ? 'FINITE_PRIVATE_API_KEY'
+                          )
+                        )
+                    )
+                  ) AS is_definitely_generic
+                ) AS runtime_profile
                 WHERE (
                         request.status = 'requested'
                         OR (
@@ -6985,6 +7043,17 @@ where
                           runtime.runtime_capabilities->'capabilities'->'runtime_retirement' = 'true'::jsonb
                         ELSE false
                       END
+                  AND (
+                    $8::bool
+                    OR request.kind IN ('stop', 'destroy')
+                    OR runtime_profile.is_definitely_generic
+                  )
+                  AND (
+                    request.kind <> 'restart'
+                    OR runtime.host_facts->>'effective_specialization_bundle'
+                      = 'finite-private-multimodal-v1'
+                    OR runtime_profile.is_definitely_generic
+                  )
                 ORDER BY request.created_at, request.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -7013,6 +7082,8 @@ where
                 &source_host_id,
                 &runner_classes,
                 &supported_control_kinds,
+                &capacity.finite_private_profile.is_some_and(|profile|
+                    profile == FinitePrivateRunnerProfile::CanonicalSpecializationConfigured),
             ],
             )
             .await
@@ -7083,7 +7154,27 @@ where
                 .await?
                 .ok_or(CoreError::RuntimeArtifactNotFound)?;
             let current_spec = if let Some(value) = row.get::<_, Option<Value>>("runtime_spec") {
-                serde_json::from_value(value).map_err(json_error)?
+                let mut current_spec: RuntimeSpecEnvelope =
+                    serde_json::from_value(value).map_err(json_error)?;
+                if let Some(profile) = specialization_profile_from_host_facts(&runtime.host_facts)
+                    && runtime_spec_v1(&current_spec)
+                        .specialization_profile
+                        .is_none()
+                {
+                    let RuntimeSpecEnvelope::V1(spec) = &mut current_spec;
+                    spec.specialization_profile = Some(profile);
+                    let value = serde_json::to_value(&current_spec).map_err(json_error)?;
+                    client
+                        .execute(
+                            "UPDATE agent_creation_requests
+                             SET runtime_spec = $2, updated_at = $3::text::timestamptz
+                             WHERE id = $1 AND runtime_spec IS NOT NULL",
+                            &[&row.get::<_, String>("id"), &value, &now],
+                        )
+                        .await
+                        .map_err(store_error)?;
+                }
+                current_spec
             } else {
                 let creation_id: String = row.get("id");
                 let creation_project_id: String = row.get("project_id");
@@ -7101,6 +7192,8 @@ where
                 {
                     return Err(CoreError::RuntimeSpecMismatch);
                 }
+                let specialization_profile =
+                    specialization_profile_from_host_facts(&runtime.host_facts);
                 let synthesized = build_runtime_spec_v1(
                     RuntimeSpecIdentity {
                         operation_id: &creation_id,
@@ -7117,6 +7210,7 @@ where
                     runtime_environment.clone(),
                     vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
                     RuntimeBootIntent::Normal,
+                    specialization_profile,
                 )?;
                 let value = serde_json::to_value(&synthesized).map_err(json_error)?;
                 client
@@ -7296,6 +7390,8 @@ where
             runtime.host_facts.runtime_host = upgrade.runtime_host.clone();
             runtime.host_facts.published_app_urls = upgrade.published_app_urls.clone();
             runtime.host_facts.hermes_available = Some(true);
+            runtime.host_facts.effective_specialization_bundle =
+                crate::effective_specialization_bundle_for_spec(upgrade.runtime_spec.as_ref());
             if let Some(capabilities) = upgrade.runtime_capabilities.as_ref() {
                 runtime.runtime_capabilities = Some(capabilities.clone());
             }
@@ -9817,8 +9913,9 @@ fn json_error(error: serde_json::Error) -> CoreError {
 mod tests {
     use super::*;
     use crate::{
-        FinitePrivateApiKeyStatus, RUNTIME_RELOCATION_SCHEMA, RunnerClass, RunnerLeaseCapacity,
-        RuntimeArtifactKind, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
+        FinitePrivateApiKeyStatus, FinitePrivateRunnerProfile, RUNTIME_RELOCATION_SCHEMA,
+        RunnerClass, RunnerLeaseCapacity, RuntimeArtifactKind, RuntimeCapabilitiesEnvelope,
+        RuntimeCapabilitiesV1,
     };
     use futures_util::FutureExt;
     use std::collections::BTreeSet;
@@ -9948,6 +10045,19 @@ mod tests {
             runner_classes: vec![RunnerClass::Phala],
             max_sandbox_count: Some(1),
             active_sandbox_count: Some(provider_inventory_count),
+            finite_private_profile: Some(
+                FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+            ),
+            ..RunnerLeaseCapacity::default()
+        }
+    }
+
+    fn canonical_kata_runner_capacity() -> RunnerLeaseCapacity {
+        RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::Kata],
+            finite_private_profile: Some(
+                FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+            ),
             ..RunnerLeaseCapacity::default()
         }
     }
@@ -10443,6 +10553,9 @@ mod tests {
                         runner_classes: vec![RunnerClass::AppleContainer],
                         max_sandbox_count: Some(1),
                         active_sandbox_count: Some(0),
+                        finite_private_profile: Some(
+                            FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
                         ..RunnerLeaseCapacity::default()
                     }),
                     source_host_id: Some("devfinity-apple".to_string()),
@@ -10945,10 +11058,7 @@ mod tests {
                     source_host_id: Some(source_host.to_string()),
                     lease_token: "create-lease".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: Some(RunnerLeaseCapacity {
-                        runner_classes: vec![RunnerClass::Kata],
-                        ..RunnerLeaseCapacity::default()
-                    }),
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: None,
                 })
                 .await
@@ -11044,10 +11154,7 @@ mod tests {
                         source_host_id: Some(source_host.to_string()),
                         lease_token: "wrong-host".to_string(),
                         lease_seconds: Some(300),
-                        runner_capacity: Some(RunnerLeaseCapacity {
-                            runner_classes: vec![RunnerClass::Kata],
-                            ..RunnerLeaseCapacity::default()
-                        }),
+                        runner_capacity: Some(canonical_kata_runner_capacity()),
                         now: None,
                     })
                     .await
@@ -11060,10 +11167,7 @@ mod tests {
                     source_host_id: Some(target_host.to_string()),
                     lease_token: "relocation-lease".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: Some(RunnerLeaseCapacity {
-                        runner_classes: vec![RunnerClass::Kata],
-                        ..RunnerLeaseCapacity::default()
-                    }),
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: None,
                 })
                 .await
@@ -11140,10 +11244,7 @@ mod tests {
                     source_host_id: Some(target_host.to_string()),
                     lease_token: "relocation-retry-lease".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: Some(RunnerLeaseCapacity {
-                        runner_classes: vec![RunnerClass::Kata],
-                        ..RunnerLeaseCapacity::default()
-                    }),
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: None,
                 })
                 .await
@@ -11270,7 +11371,7 @@ mod tests {
                     source_host_id: None,
                     lease_token: "lease-failed-launch-key".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: Some("2026-05-28T11:02:00Z".to_string()),
                 })
                 .await
@@ -11409,7 +11510,7 @@ mod tests {
                     runner_id: "ledger-runner-a".to_string(),
                     lease_token: "ledger-token-a".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     source_host_id: None,
                     now: None,
                 })
@@ -11510,7 +11611,7 @@ mod tests {
                     runner_id: "ledger-runner-b".to_string(),
                     lease_token: "ledger-token-b".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     source_host_id: None,
                     now: None,
                 })
@@ -11704,7 +11805,7 @@ mod tests {
                     runner_id: "ledger-current".to_string(),
                     lease_token: "ledger-current-token".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     source_host_id: None,
                     now: None,
                 })
@@ -11820,7 +11921,7 @@ mod tests {
                     source_host_id: None,
                     lease_token: "lease-row-native-1".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: Some("2026-05-28T12:02:00Z".to_string()),
                 })
                 .await
@@ -12029,7 +12130,7 @@ mod tests {
                     request_id: request_id.to_string(),
                     presented_api_key: "fpk_live_postgres_epoch".to_string(),
                     endpoint: "/v1/chat/completions".to_string(),
-                    model: "glm-5.2".to_string(),
+                    model: "deepseek-v4-flash-0731".to_string(),
                     estimated_prompt_tokens: units,
                     estimated_completion_tokens: 0,
                     estimated_usage_units: units,
@@ -12195,7 +12296,7 @@ mod tests {
                     source_host_id: None,
                     lease_token: format!("lease-admin-ops-{run}"),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: None,
                 })
                 .await
@@ -12228,6 +12329,32 @@ mod tests {
             let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
             let project_id = completed.project.id.clone();
 
+            // Simulate an N-1 Core row: retain the legacy private-key
+            // reference but remove the typed profile. The host fact remains
+            // finite-private, so the SQL admission fence must still require
+            // a capable Runner instead of trusting the profile-less shape.
+            let (raw_legacy, connection_legacy) =
+                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection_legacy = tokio::spawn(async move {
+                let _ = connection_legacy.await;
+            });
+            raw_legacy
+                .execute(
+                    "UPDATE agent_creation_requests
+                     SET runtime_spec = jsonb_set(
+                         runtime_spec,
+                         '{spec,specializationProfile}',
+                         'null'::jsonb,
+                         true
+                     )
+                     WHERE id = $1",
+                    &[&completed.request.id],
+                )
+                .await
+                .unwrap();
+            drop(raw_legacy);
+            connection_legacy.abort();
+
             // Provisioned-boxes overview reads back through Postgres state.
             let overviews = store.admin_runtime_overviews().await.unwrap();
             let overview = overviews
@@ -12257,10 +12384,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(restart.agent_runtime_id, runtime_id);
-            let control_lease = store
+            let incapable_control_lease = store
                 .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
-                    runner_id: format!("runner-admin-ops-{run}"),
-                    lease_token: format!("control-lease-{run}"),
+                    runner_id: format!("runner-incapable-{run}"),
+                    lease_token: format!("ctl-incapable-{run}"),
                     lease_seconds: Some(60),
                     source_host_id: Some("admin-ops-host".to_string()),
                     runner_capacity: Some(crate::RunnerLeaseCapacity {
@@ -12268,6 +12395,190 @@ mod tests {
                         runtime_capabilities: Some(kata_runtime_capabilities()),
                         ..crate::RunnerLeaseCapacity::default()
                     }),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                incapable_control_lease.is_none(),
+                "an N-1 runner cannot claim a profile-less private runtime with a host fact"
+            );
+
+            // The same profile-less private shape must remain fenced when the
+            // persisted host fact is also absent (the no-host-fact branch).
+            let (raw_no_host, connection_no_host) =
+                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection_no_host = tokio::spawn(async move {
+                let _ = connection_no_host.await;
+            });
+            raw_no_host
+                .execute(
+                    "UPDATE agent_runtimes
+                     SET host_facts = jsonb_set(
+                         host_facts,
+                         '{active_inference_profile}',
+                         'null'::jsonb,
+                         true
+                     )
+                     WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap();
+            drop(raw_no_host);
+            connection_no_host.abort();
+            let no_host_incapable_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-no-host-incapable-{run}"),
+                    lease_token: format!("ctl-no-host-incapable-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("admin-ops-host".to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                no_host_incapable_lease.is_none(),
+                "an N-1 runner cannot claim a profile-less private runtime without a host fact"
+            );
+
+            // The older pre-RuntimeSpec shape must hit the same fence even
+            // though Core would otherwise synthesize its private-key
+            // reference after granting the lease.
+            let (raw_null, connection_null) =
+                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection_null = tokio::spawn(async move {
+                let _ = connection_null.await;
+            });
+            raw_null
+                .execute(
+                    "UPDATE agent_creation_requests SET runtime_spec = NULL WHERE id = $1",
+                    &[&completed.request.id],
+                )
+                .await
+                .unwrap();
+            drop(raw_null);
+            connection_null.abort();
+            let null_spec_incapable_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-null-incapable-{run}"),
+                    lease_token: format!("ctl-null-incapable-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("admin-ops-host".to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                null_spec_incapable_lease.is_none(),
+                "an N-1 runner cannot claim a null-spec legacy private runtime"
+            );
+
+            let (raw_effective, connection_effective) =
+                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection_effective = tokio::spawn(async move {
+                let _ = connection_effective.await;
+            });
+            raw_effective
+                .execute(
+                    "UPDATE agent_runtimes
+                     SET host_facts = jsonb_set(
+                         host_facts,
+                         '{effective_specialization_bundle}',
+                         'null'::jsonb,
+                         true
+                     )
+                     WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap();
+            let capable_capacity = crate::RunnerLeaseCapacity {
+                runner_classes: vec![crate::RunnerClass::Kata],
+                runtime_capabilities: Some(kata_runtime_capabilities()),
+                finite_private_profile: Some(
+                    crate::FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                ),
+                ..crate::RunnerLeaseCapacity::default()
+            };
+            assert!(
+                store
+                    .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                        runner_id: format!("runner-missing-effective-{run}"),
+                        lease_token: format!("control-missing-effective-{run}"),
+                        lease_seconds: Some(60),
+                        source_host_id: Some("admin-ops-host".to_string()),
+                        runner_capacity: Some(capable_capacity.clone()),
+                        now: None,
+                    })
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "missing effective specialization must be fenced before lease"
+            );
+            raw_effective
+                .execute(
+                    "UPDATE agent_runtimes
+                     SET host_facts = jsonb_set(
+                         host_facts,
+                         '{effective_specialization_bundle}',
+                         to_jsonb('wrong-bundle'::text),
+                         true
+                     )
+                     WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                        runner_id: format!("runner-wrong-effective-{run}"),
+                        lease_token: format!("control-wrong-effective-{run}"),
+                        lease_seconds: Some(60),
+                        source_host_id: Some("admin-ops-host".to_string()),
+                        runner_capacity: Some(capable_capacity.clone()),
+                        now: None,
+                    })
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "wrong effective specialization must be fenced before lease"
+            );
+            raw_effective
+                .execute(
+                    "UPDATE agent_runtimes
+                     SET host_facts = jsonb_set(
+                         host_facts,
+                         '{effective_specialization_bundle}',
+                         to_jsonb('finite-private-multimodal-v1'::text),
+                         true
+                     )
+                     WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap();
+            drop(raw_effective);
+            connection_effective.abort();
+
+            let control_lease = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-admin-ops-{run}"),
+                    lease_token: format!("control-lease-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("admin-ops-host".to_string()),
+                    runner_capacity: Some(capable_capacity),
                     now: None,
                 })
                 .await
@@ -12445,6 +12756,92 @@ mod tests {
                             && event.target_id == runtime_id
                     })
             );
+
+            // An imported/legacy runtime can have a queued control row without
+            // any creation RuntimeSpec. With no positive host profile, that is
+            // ambiguous and must stay quarantined for an N-1 Runner.
+            let (raw_legacy, connection_legacy) =
+                tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection_legacy = tokio::spawn(async move {
+                let _ = connection_legacy.await;
+            });
+            raw_legacy
+                .execute(
+                    "UPDATE agent_runtimes
+                     SET host_facts = jsonb_set(
+                         host_facts,
+                         '{active_inference_profile}',
+                         'null'::jsonb,
+                         true
+                     )
+                     WHERE id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap();
+            raw_legacy
+                .execute(
+                    "DELETE FROM agent_creation_requests WHERE agent_runtime_id = $1",
+                    &[&runtime_id],
+                )
+                .await
+                .unwrap();
+            raw_legacy
+                .execute(
+                    "INSERT INTO runtime_control_requests (
+                         id, project_id, agent_runtime_id, source_host_id,
+                         source_machine_id, requested_by_user_id, kind, status,
+                         created_at, updated_at
+                     )
+                     SELECT $2, project_id, $1, source_host_id, source_machine_id,
+                            owner_user_id, 'restart', 'requested', NOW(), NOW()
+                     FROM agent_runtimes
+                     JOIN projects ON projects.id = agent_runtimes.project_id
+                     WHERE agent_runtimes.id = $1",
+                    &[&runtime_id, &format!("runtime_ctl_no_evidence_{run}")],
+                )
+                .await
+                .unwrap();
+            drop(raw_legacy);
+            connection_legacy.abort();
+            let no_evidence_incapable = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-no-evidence-incapable-{run}"),
+                    lease_token: format!("ctl-no-evidence-incapable-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("admin-ops-host".to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runner_classes: vec![crate::RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..crate::RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                no_evidence_incapable.is_none(),
+                "a no-evidence runtime must remain fenced for an N-1 Runner"
+            );
+            let no_evidence_capable = store
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: format!("runner-no-evidence-capable-{run}"),
+                    lease_token: format!("ctl-no-evidence-capable-{run}"),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("admin-ops-host".to_string()),
+                    runner_capacity: Some(crate::RunnerLeaseCapacity {
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..canonical_kata_runner_capacity()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("a capable Runner should claim no-evidence lifecycle");
+            assert_eq!(
+                no_evidence_capable.request.id,
+                format!("runtime_ctl_no_evidence_{run}")
+            );
         })
         .await;
     }
@@ -12509,7 +12906,7 @@ mod tests {
                     source_host_id: None,
                     lease_token: format!("lease-{run}"),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: None,
                 })
                 .await
@@ -12543,7 +12940,7 @@ mod tests {
                     hostname: None,
                     runtime_host: Some(host.to_string()),
                     runtime_status: Some(RuntimeSummaryStatus::Online),
-                    active_inference_profile: None,
+                    active_inference_profile: Some("finite-private".to_string()),
                     hermes_available: Some(true),
                     published_app_urls: vec!["http://127.0.0.1:41001/contact".to_string()],
                     now: None,
@@ -12656,7 +13053,7 @@ mod tests {
                     lease_token: format!("ctl-other-{run}"),
                     lease_seconds: Some(60),
                     source_host_id: Some("someotherhost".to_string()),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: None,
                 })
                 .await
@@ -12708,6 +13105,9 @@ mod tests {
                         draining: true,
                         runner_classes: vec![crate::RunnerClass::Kata],
                         runtime_capabilities: Some(kata_runtime_capabilities()),
+                        finite_private_profile: Some(
+                            crate::FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
                         ..crate::RunnerLeaseCapacity::default()
                     }),
                     now: None,
@@ -12862,6 +13262,9 @@ mod tests {
                     runner_capacity: Some(crate::RunnerLeaseCapacity {
                         runner_classes: vec![crate::RunnerClass::Kata],
                         runtime_capabilities: Some(kata_runtime_capabilities()),
+                        finite_private_profile: Some(
+                            crate::FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
                         ..crate::RunnerLeaseCapacity::default()
                     }),
                     now: None,
@@ -12933,6 +13336,9 @@ mod tests {
                     runner_capacity: Some(crate::RunnerLeaseCapacity {
                         runner_classes: vec![crate::RunnerClass::Kata],
                         runtime_capabilities: Some(kata_runtime_capabilities()),
+                        finite_private_profile: Some(
+                            crate::FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
                         ..crate::RunnerLeaseCapacity::default()
                     }),
                     now: None,
@@ -13025,6 +13431,10 @@ mod tests {
             assert_eq!(
                 upgraded_spec["spec"]["secretReferences"],
                 serde_json::json!(["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"])
+            );
+            assert_eq!(
+                upgraded_spec["spec"]["specializationProfile"],
+                serde_json::json!("finite_private_multimodal")
             );
             assert_eq!(
                 upgraded_spec["spec"]["environment"]["FINITE_BRAIN_SERVER_URL"],
@@ -13560,7 +13970,7 @@ mod tests {
                     runner_id: "runner-a".to_string(),
                     lease_token: "lease-a".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     source_host_id: Some("parthosta".to_string()),
                     now: None,
                 })
@@ -13575,7 +13985,7 @@ mod tests {
                     runner_id: "runner-a".to_string(),
                     lease_token: "lease-a2".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     source_host_id: Some("parthosta".to_string()),
                     now: None,
                 })
@@ -13589,7 +13999,7 @@ mod tests {
                     runner_id: "runner-b".to_string(),
                     lease_token: "lease-b".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     source_host_id: Some("parthostb".to_string()),
                     now: None,
                 })
@@ -13717,6 +14127,91 @@ mod tests {
                     .as_ref()
                     .and_then(|entitlement| entitlement.launch_code.as_deref()),
                 None
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_finite_private_creation_waits_for_canonical_runner_profile() {
+        with_isolated_postgres(|store| async move {
+            let launch_code = issue_test_launch_code(&store, "2026-05-25T12:00:00Z").await;
+            let created = store
+                .request_agent_creation(RequestAgentCreationInput {
+                    verified_email: "mixed-runner-postgres@finite.vip".to_string(),
+                    workos_user_id: "workos_mixed_runner_postgres".to_string(),
+                    display_name: "Mixed Runner Postgres Agent".to_string(),
+                    launch_code,
+                    idempotency_key: "mixed-runner-postgres-submit".to_string(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+
+            let old_runner_capacity: RunnerLeaseCapacity =
+                serde_json::from_value(serde_json::json!({
+                    "runnerClasses": ["kata"]
+                }))
+                .unwrap();
+            assert!(old_runner_capacity.finite_private_profile.is_none());
+            let missing_capacity_lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "missing-capacity-postgres-runner".to_string(),
+                    source_host_id: None,
+                    lease_token: "missing-capacity-postgres-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                missing_capacity_lease.is_none(),
+                "an omitted capacity envelope must leave canonical Finite Private work queued"
+            );
+            let old_runner_lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "old-postgres-runner".to_string(),
+                    source_host_id: None,
+                    lease_token: "old-postgres-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(old_runner_capacity),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                old_runner_lease.is_none(),
+                "an old Runner must leave canonical Finite Private work queued"
+            );
+
+            let candidate_lease = store
+                .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                    runner_id: "candidate-postgres-runner".to_string(),
+                    source_host_id: None,
+                    lease_token: "candidate-postgres-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        finite_private_profile: Some(
+                            FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: None,
+                })
+                .await
+                .unwrap()
+                .expect("a canonical candidate Runner must claim the retained request");
+            assert_eq!(candidate_lease.request.id, created.request.id);
+            let persisted_spec = candidate_lease
+                .request
+                .runtime_spec
+                .as_ref()
+                .expect("Core must persist the selected product profile");
+            assert_eq!(
+                runtime_spec_v1(persisted_spec).specialization_profile,
+                Some(crate::RuntimeSpecializationProfile::FinitePrivateMultimodal)
             );
         })
         .await;
@@ -13905,7 +14400,7 @@ mod tests {
                     source_host_id: None,
                     lease_token: lease_token.clone(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: None,
                 })
                 .await
@@ -14017,7 +14512,7 @@ mod tests {
                     source_host_id: None,
                     lease_token: "lease-golden-2".to_string(),
                     lease_seconds: Some(300),
-                    runner_capacity: None,
+                    runner_capacity: Some(canonical_kata_runner_capacity()),
                     now: None,
                 })
                 .await

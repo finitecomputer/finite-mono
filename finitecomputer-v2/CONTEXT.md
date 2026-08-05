@@ -71,6 +71,22 @@ _Avoid_: Shared launch code, Stripe promotion campaign
 A Finite Private credential issued for one Project or Agent Runtime.
 _Avoid_: User API key, shared provider fallback
 
+**Finite Private Specialization Profile**:
+The Finite-managed native Hermes capability profile that accompanies the
+canonical Finite Private inference profile, currently DeepSeek V4 Flash 0731.
+_Avoid_: Optional vision config, per-user specialization, model-named tool
+
+**Specialization-Ready Runner**:
+A Runner eligible to host the canonical Finite Private profile because
+it can provide and verify the active Finite Private Specialization Profile.
+_Avoid_: Best-effort Runner, configured box
+
+**Effective Specialization**:
+The verified state in which an Agent Runtime's running Hermes generation
+actually exposes the capabilities promised by its Finite Private
+Specialization Profile.
+_Avoid_: Configured specialization, desired-only specialization
+
 **Finite Private Runaway Guard**:
 A per-grant usage bound intended to interrupt an agent that loops on inference continuously.
 _Avoid_: Customer budget, dollar meter, pricing plan
@@ -230,6 +246,12 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
 - A **Project** has one primary **Agent Runtime** at launch.
 - **Core** stores the **Desired Runtime State** for an **Agent Runtime**.
 - A **Runtime Operation** moves an **Agent Runtime** toward **Desired Runtime State**.
+- The canonical Finite Private profile includes exactly one active
+  **Finite Private Specialization Profile**.
+- Only a **Specialization-Ready Runner** may accept an Agent Runtime whose
+  desired inference profile is canonical Finite Private.
+- Such an Agent Runtime is ready only after it reports **Effective
+  Specialization** for the active profile.
 - A Kata **Runtime Upgrade** is an explicit **Runtime Operation** bound to one
   promoted immutable artifact; ordinary restart does not select a new Kata
   image, and upgrade never flows through **Purge User Data** or Runtime destroy.

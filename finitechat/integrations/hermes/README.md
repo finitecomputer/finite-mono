@@ -61,14 +61,14 @@ Finite Chat conveys authenticated attachments to Hermes without choosing a
 model, rewriting the channel prompt, or registering Finite-specific agent
 tools. Specializations are runtime configuration behind Hermes's existing
 tools. For example, an `auxiliary.vision` profile can route Hermes's built-in
-`vision_analyze` and `video_analyze` tools to the AEON worker while the main
-model remains responsible for deciding whether those tools are useful.
+`vision_analyze` and `video_analyze` tools to the Finite multimodal worker while
+the main model remains responsible for deciding whether those tools are useful.
 
 ```yaml
 auxiliary:
   vision:
     base_url: https://inference.example/v1
-    api_key: ${AEON_API_KEY}
+    api_key: ${FINITE_SPECIALIZATION_WORKER_BEARER_TOKEN}
     model: nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast
     timeout: 120
 platform_toolsets:

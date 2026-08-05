@@ -701,6 +701,8 @@ impl KataLauncher {
         plan: &KataLaunchPlan,
         host_port: u16,
     ) -> Result<(), RunnerError> {
+        // `/healthz` is the sole runtime readiness contract. Kata must not
+        // inspect specialization through a backend-specific path.
         let started = Instant::now();
         loop {
             if self
@@ -750,6 +752,15 @@ impl KataLauncher {
         url: &str,
         response_name: &str,
     ) -> Result<Option<serde_json::Value>, RunnerError> {
+        self.probe_bounded_json_with_status(url, response_name, true)
+    }
+
+    fn probe_bounded_json_with_status(
+        &self,
+        url: &str,
+        response_name: &str,
+        accept_status_body: bool,
+    ) -> Result<Option<serde_json::Value>, RunnerError> {
         let response = match ureq::get(url)
             .timeout(
                 self.config
@@ -759,7 +770,8 @@ impl KataLauncher {
             .call()
         {
             Ok(response) => response,
-            Err(ureq::Error::Status(_, response)) => response,
+            Err(ureq::Error::Status(_, response)) if accept_status_body => response,
+            Err(ureq::Error::Status(_, _)) => return Ok(None),
             Err(ureq::Error::Transport(_)) => return Ok(None),
         };
         let mut body = Vec::new();
@@ -790,7 +802,7 @@ impl KataLauncher {
         plan: &KataLaunchPlan,
         host_port: u16,
     ) -> Result<Option<serde_json::Value>, RunnerError> {
-        self.probe_bounded_json(&plan.health_url(host_port), "health")
+        self.probe_bounded_json_with_status(&plan.health_url(host_port), "health", false)
     }
 
     fn probe_recovery_startup(
@@ -799,7 +811,7 @@ impl KataLauncher {
         host_port: u16,
         expected_operation_hash: &str,
     ) -> Result<KataRecoveryProbe, RunnerError> {
-        let Some(value) = self.probe_bounded_health(plan, host_port)? else {
+        let Some(value) = self.probe_bounded_json(&plan.health_url(host_port), "health")? else {
             return Ok(KataRecoveryProbe::Pending);
         };
         parse_kata_recovery_probe(&value, expected_operation_hash)
@@ -1725,6 +1737,7 @@ impl RuntimeLauncher for KataLauncher {
             active_sandbox_count: active_kata_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            finite_private_profile: None,
         }
     }
 
@@ -1743,9 +1756,15 @@ impl RuntimeLauncher for KataLauncher {
     fn restart_runtime(
         &mut self,
         lease: &RuntimeControlLease,
-        _options: &RuntimeRestartOptions,
+        options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         self.validate_ready()?;
+        if options.specialization_bundle().is_some() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata restart cannot converge specialization; use an immutable runtime upgrade"
+                    .to_string(),
+            ));
+        }
         let operation_plan = self.plan_for_control(lease)?;
         let _operation_lock = self.acquire_runtime_operation_lock(&operation_plan)?;
         let (plan, inspected) = self.validate_control(lease)?;
@@ -1769,6 +1788,12 @@ impl RuntimeLauncher for KataLauncher {
         options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         self.validate_ready()?;
+        if options.specialization_bundle().is_some() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata recovery cannot converge specialization; use an immutable runtime upgrade"
+                    .to_string(),
+            ));
+        }
         let spec = control_runtime_spec(lease, RunnerClass::Kata)?.ok_or_else(|| {
             RunnerError::RuntimeLaunch(
                 "Kata recovery requires a Core-bound RuntimeSpec".to_string(),
@@ -2162,6 +2187,7 @@ impl RuntimeLauncher for KataLauncher {
                 .get("computer.finite.v2.runtime_artifact_id")
                 .map(String::as_str)
                 == Some(target.id.as_str())
+            && specialization_environment_matches(&inspected.config, options)?
         {
             let rollback = self.inspect(&rollback_name)?;
             if let Some(rollback) = rollback.as_ref() {
@@ -3240,6 +3266,23 @@ fn kata_upgrade_environment(
     })
 }
 
+fn specialization_environment_matches(
+    inspected: &KataInspectConfig,
+    options: &RuntimeRestartOptions,
+) -> Result<bool, RunnerError> {
+    let Some(bundle) = options.specialization_bundle() else {
+        return Ok(true);
+    };
+    let environment = kata_inspected_environment(&inspected.environment)?
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    Ok(
+        environment.get(FINITE_SPECIALIZATION_BUNDLE_ENV) == Some(&bundle.bundle_id)
+            && environment.get(FINITE_SPECIALIZATION_WORKER_API_KEY_ENV)
+                == Some(&bundle.worker_api_key),
+    )
+}
+
 fn kata_recovery_environment(
     inspected: &KataInspectConfig,
     options: &RuntimeRestartOptions,
@@ -3925,6 +3968,40 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[test]
+    fn kata_readiness_rejects_an_ineffective_specialization_health_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let config = KataConfig {
+            readiness_timeout: Duration::from_millis(30),
+            readiness_interval: Duration::from_millis(5),
+            ..KataConfig::default()
+        };
+        let launcher = KataLauncher::new(config);
+        let plan = KataLaunchPlan {
+            container_name: "finite-kata-health-test".to_string(),
+            state_root: PathBuf::from("/tmp/finite-kata-health-test"),
+            metadata_root: PathBuf::from("/tmp/finite-kata-health-test-metadata"),
+            env_file: PathBuf::from("/tmp/finite-kata-health-test.env"),
+            host_address: "127.0.0.1".parse().unwrap(),
+            container_port: 8080,
+        };
+        let error = launcher.wait_for_runtime_http(&plan, port).unwrap_err();
+        assert!(error.to_string().contains("did not become ready"));
+        server.join().unwrap();
+    }
+
     #[derive(Clone)]
     struct TestRecoveryBehavior {
         operation_hash: String,
@@ -4257,6 +4334,7 @@ esac
                     runtime_host: "http://127.0.0.1:1".to_string(),
                     runtime_status: RuntimeSummaryStatus::Online,
                     active_inference_profile: Some("finite-private".to_string()),
+                    effective_specialization_bundle: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
                 },
@@ -4300,6 +4378,9 @@ esac
                 "https://sites.example".to_string(),
             )]),
             secret_references: vec!["FINITE_PRIVATE_API_KEY".to_string()],
+            specialization_profile: Some(
+                finite_saas_core::RuntimeSpecializationProfile::FinitePrivateMultimodal,
+            ),
         }));
         lease.target_runtime_artifact = None;
         lease
@@ -6041,7 +6122,11 @@ esac
                 "FAL_KEY".to_string(),
                 "fal-added-by-upgrade".to_string(),
             )]))
-            .unwrap();
+            .unwrap()
+            .with_specialization_bundle(SpecializationBundleRuntimeDefaults {
+                bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_string(),
+                worker_api_key: "specialization-worker-secret".to_string(),
+            });
         let environment = kata_upgrade_environment(&inspected, &options).unwrap();
         assert!(
             environment
@@ -6061,6 +6146,14 @@ esac
                 .entries
                 .contains(&("FAL_KEY".to_string(), "fal-added-by-upgrade".to_string()))
         );
+        assert!(environment.entries.contains(&(
+            "FINITE_SPECIALIZATION_BUNDLE".to_string(),
+            DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_string()
+        )));
+        assert!(environment.entries.contains(&(
+            "FINITE_SPECIALIZATION_WORKER_API_KEY".to_string(),
+            "specialization-worker-secret".to_string()
+        )));
         assert!(environment.secret_keys.contains("FAL_KEY"));
         assert!(
             environment
