@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: depot-ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
