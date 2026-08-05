@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
 
 import {
   chromium,
@@ -36,7 +35,7 @@ async function main() {
     "assert-absent",
     "live-agent-note",
     "live-browser-folder",
-    "live-agent-asset",
+    "live-agent-asset-reference",
     "reconnect-catchup",
     "live-browser-revocation",
     "live-browser-conflict",
@@ -44,13 +43,13 @@ async function main() {
   ]);
   if (!actions.has(action)) {
     throw new Error(
-      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human|create-folder|assert-folder|assert-absent|live-agent-note|live-browser-folder|live-agent-asset|reconnect-catchup|live-browser-revocation|live-browser-conflict|live-notification-hints",
+      "usage: devfinity-brain-smoke.ts bootstrap|assert-existing-personal|assert-org-first|assert-note|create-org-agent|create-org-human|create-folder|assert-folder|assert-absent|live-agent-note|live-browser-folder|live-agent-asset-reference|reconnect-catchup|live-browser-revocation|live-browser-conflict|live-notification-hints",
     );
   }
   if (!agentEmail.includes("@")) {
     throw new Error("DEVFINITY_BRAIN_AGENT_EMAIL must be an email");
   }
-  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human", "create-folder", "assert-folder", "assert-absent", "live-agent-note", "live-browser-folder", "live-agent-asset", "reconnect-catchup", "live-browser-revocation", "live-browser-conflict", "live-notification-hints"].includes(action) && !expectedText) {
+  if (["assert-note", "assert-org-first", "create-org-agent", "create-org-human", "create-folder", "assert-folder", "assert-absent", "live-agent-note", "live-browser-folder", "live-agent-asset-reference", "reconnect-catchup", "live-browser-revocation", "live-browser-conflict", "live-notification-hints"].includes(action) && !expectedText) {
     throw new Error(
       "DEVFINITY_BRAIN_EXPECTED_TEXT is required for assert-note",
     );
@@ -169,11 +168,17 @@ async function main() {
         `/data/workspace/finitebrain/${await selectedBrainId(brain)}/${slugFromFolderName(expectedText)}`,
       );
       console.log("brain browser-to-Agent notification convergence ok");
-    } else if (action === "live-agent-asset") {
+    } else if (action === "live-agent-asset-reference") {
       await waitForUnlockedBrain(brain, page);
-      await writeAgentAsset(runtimeContainerId, await selectedBrainId(brain), expectedText);
-      await assertAssetDownload(brain, page, expectedText);
-      console.log("brain Asset notification and exact download ok");
+      const brainId = await selectedBrainId(brain);
+      await writeAgentAssetReference(runtimeContainerId, brainId, expectedText);
+      await assertAssetReferenceOnly(
+        brain,
+        runtimeContainerId,
+        brainId,
+        expectedText,
+      );
+      console.log("brain Asset Source Note synced without inline bytes ok");
     } else if (action === "reconnect-catchup") {
       await waitForUnlockedBrain(brain, page);
       await assertOwnerSeesNoteWithoutRefresh(brain, expectedText);
@@ -345,12 +350,37 @@ async function writeAgentNote(machineId: string, brainId: string, marker: string
   ]);
 }
 
-async function writeAgentAsset(machineId: string, brainId: string, filename: string) {
+async function writeAgentAssetReference(
+  machineId: string,
+  brainId: string,
+  filename: string,
+) {
   const root = `/data/workspace/finitebrain/${brainId}/agent-notes`;
   dockerExec(machineId, [
+    "env",
+    `MATRIX_ASSET_FILENAME=${filename}`,
+    `MATRIX_ASSET_ROOT=${root}`,
     "/bin/bash",
     "-lc",
-    `mkdir -p '${root}/raw/assets' '${root}/raw'; printf '\\000FiniteBrain\\377Asset\\n' > '${root}/raw/assets/${filename}'; printf '# Matrix Asset\\n\\nAsset: raw/assets/${filename}\\n' > '${root}/raw/matrix-asset.md'`,
+    [
+      "set -euo pipefail",
+      'asset="$MATRIX_ASSET_ROOT/raw/assets/$MATRIX_ASSET_FILENAME"',
+      'note="$MATRIX_ASSET_ROOT/raw/matrix-asset.md"',
+      'mkdir -p "$MATRIX_ASSET_ROOT/raw/assets"',
+      "printf '\\000FiniteBrain\\377Asset\\n' >\"$asset\"",
+      'cat >"$note" <<EOF',
+      "---",
+      "type: asset",
+      'title: "Matrix Asset Reference: $MATRIX_ASSET_FILENAME"',
+      'resource: "file://$asset"',
+      "finite_asset:",
+      "  content_type: application/octet-stream",
+      "---",
+      "# Matrix Asset Reference: $MATRIX_ASSET_FILENAME",
+      "",
+      "The binary remains at [its canonical local resource](file://$asset).",
+      "EOF",
+    ].join("\n"),
   ]);
 }
 
@@ -679,35 +709,37 @@ async function assertOwnerSeesNoteWithoutRefresh(brain: FrameLocator, expectedTe
     .waitFor({ state: "visible", timeout: timeoutMs });
 }
 
-async function assertAssetDownload(
+async function assertAssetReferenceOnly(
   brain: FrameLocator,
-  page: Page,
+  machineId: string,
+  brainId: string,
   filename: string,
 ) {
-  const timeoutMs = Number(process.env.DEVFINITY_BRAIN_TIMEOUT_MS || 60_000);
-  const asset = brain
+  await assertOwnerSeesNoteWithoutRefresh(brain, filename);
+
+  const inlineAsset = brain
     .locator("#readerFolderList .obsidian-page-button.asset")
-    .filter({ hasText: filename, visible: true })
-    .first();
-  await asset.waitFor({ state: "visible", timeout: timeoutMs });
-  await asset.click();
-  await brain.locator("#readerPageContent").getByText(filename, { exact: true }).waitFor({
-    state: "visible",
-    timeout: timeoutMs,
-  });
-  await brain.locator("#readerPageContent").getByText("application/octet-stream", { exact: true }).waitFor({
-    state: "visible",
-    timeout: timeoutMs,
-  });
-  const downloadPromise = page.waitForEvent("download", { timeout: timeoutMs });
-  await brain.locator("#readerPageContent .asset-download-button").click();
-  const download = await downloadPromise;
-  assert.equal(download.suggestedFilename(), filename);
-  const path = await download.path();
-  assert.ok(path, "Asset download did not produce a local path");
-  assert.deepEqual(
-    await readFile(path),
-    Buffer.from([0, ...Buffer.from("FiniteBrain"), 255, ...Buffer.from("Asset\n")]),
+    .filter({ hasText: filename, visible: true });
+  assert.equal(
+    await inlineAsset.count(),
+    0,
+    "non-Markdown bytes appeared as an inline Brain Asset",
+  );
+  assert.equal(
+    await brain.locator("#readerPageContent .asset-download-button").count(),
+    0,
+    "Asset Source Note exposed an inline Brain download",
+  );
+
+  const assetPath = `/data/workspace/finitebrain/${brainId}/agent-notes/raw/assets/${filename}`;
+  const digest = dockerExec(machineId, [
+    "sha256sum",
+    assetPath,
+  ]).split(/\s/u)[0];
+  assert.equal(
+    digest,
+    "afcb8f2e722009f83487834905e0d459c8579e6262ca77ba1c633277ca157e09",
+    "local Asset bytes changed or disappeared during reference sync",
   );
 }
 
