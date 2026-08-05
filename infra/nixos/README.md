@@ -19,6 +19,29 @@ is deploy/manual-triggered, not periodic; the former 15-minute stop/start timer
 was removed because it broke chat streams. A disk mirror remains deferred and
 is defense in depth, not a backup.
 
+## Shared Kata Runner host role (one declaration, no drift)
+
+`modules/kata-runner-host.nix` is the single declaration of the Kata Runner
+role shared by finite-lat-1 and finite-lat-3. It renders the non-secret,
+host-identical Runner environment to `/etc/finite/runner-shared.env` and loads
+it BEFORE the operator-managed `/etc/finite/runner.env`, which keeps only
+credentials, drain state, and bounded incident overrides (its values still
+win). The shared file carries the pinned Runtime artifact, the Kata adapter
+settings, and `FC_RUNNER_KATA_STOP_TIMEOUT_SECS=180` — the value operators had
+to raise by hand on both hosts after the stock 30s timeout caused two false
+upgrade failures and halted a 25-Agent rollout.
+
+Drift rule: Runner-role changes go in the shared module. Host configs declare
+only genuine per-host differences through `finite.kataRunnerHost.*`
+(`coreUrl`, `runnerId`, `sourceHostId`, `workRoot`, optional
+`kataHostAddress`, `maxSandboxes`). `just runner-host-contract` evaluates both
+`nixosConfigurations` and fails CI if the rendered shared env or the
+module-owned unit shape drifts outside that declared per-host set. Hosts
+import `modules/finite-saas-runner.nix` directly before
+`modules/kata-runner-host.nix`; routing the base module through the shared
+module's own import changes definition merge order and rewrites rendered unit
+lines.
+
 ## finite-lat-3 storage canary
 
 `nixosConfigurations.finite-lat-3` is the pinned NixOS 26.05 storage-qualified
@@ -232,7 +255,7 @@ All root-owned, 0600 unless noted. Names only; sources are the old hosts.
 | File | Variable names | Value source |
 |---|---|---|
 | `/etc/finite/core.env` | `FC_CORE_DATABASE_URL` (embeds `POSTGRES_PASSWORD`), `FC_CORE_API_TOKEN`, `FC_CORE_RUNNER_CREDENTIALS_JSON`, one `FC_CORE_RUNNER_CREDENTIAL_TOKEN_*` variable per active Runner credential, `FC_FINITE_PRIVATE_USAGE_API_TOKEN`, `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, `FC_WORKOS_OPERATOR_ORG_ID` | Existing names come from the k8s Secret on old lat1. The checked-in production Kata generation may temporarily retain legacy `FC_CORE_RUNNER_API_TOKEN`; before any second worker starts, replace it with the metadata keyring and separately named Kata/Phala bearer variables documented in `finitecomputer-v2/docs/finite-stack-deployment.md`. Route and worker credentials must be distinct. The usage token pairs with the Tinfoil-sealed `FINITE_USAGE_API_SERVICE_KEY` — **do not rotate at cutover**. Core uses the WorkOS API key only to resolve the verified user record for a validated JWT `sub`. |
-| `/etc/finite/runner.env` | the generic Core, artifact, Kata, endpoint, and secret-reference names in `infra/hosts/lat1/systemd/runner.env.example`, including `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY` | provision the route-scoped Runner credential; select `kata`, the promoted mono runtime artifact, loopback Core, and the production Sites/Brain endpoints; copy the dedicated specialization worker client token from its owning host secret without reusing the GLM key |
+| `/etc/finite/runner.env` | only credentials and deliberate overrides: `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY`, drain state (see `infra/hosts/lat1/systemd/runner.env.example`); the shared non-secret keys are Nix-rendered to `/etc/finite/runner-shared.env` by `modules/kata-runner-host.nix` | provision the route-scoped Runner credential; copy the dedicated specialization worker client token from its owning host secret without reusing the GLM key |
 | `/etc/finite/phala-runner.env` | `FC_CORE_RUNNER_API_TOKEN`, `FC_RUNNER_PHALA_API_KEY`, `FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY` | Installed with `scripts/install-phala-canary-credentials` for the ACTIVE one-canary run. The script creates a distinct Core keyring credential named `finite-phala-runner-1`, bound to class `phala` and source host `finite-lat-1-phala-control-1`, and accepts the host-only Phala key through a hidden prompt. Never reuse the Kata token or put either credential in Runtime environment. Non-secret workspace/artifact/runtime facts are pinned in the Nix unit; shared runtime secrets enter through a systemd credential copy. |
 | `/etc/finite/identity-operator.env` | `FINITE_IDENTITY_OPERATOR_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-authority-credentials`. Systemd reads the same trusted provisioning credential for `finite-identityd`, Kata Runner, Phala Runner, Brain, and Hosted Device; it never enters a browser or Agent Runtime. The replaceable token is not identity data and may be regenerated consistently after host loss. |
 | `/etc/finite/identity-sites-notification.env` | `FINITE_IDENTITY_SITES_NOTIFICATION_TOKEN` | Created on lat1 without displaying the value by `scripts/install-identity-sites-notification-credential`. Only `finite-identityd` and `finitesitesd` read this narrow same-host credential. It authorizes Sites publication/access-request mail delivery only; it is not the Identity operator credential and must never enter the dashboard, Hosted Device, Runner, or Agent Runtime. Install it before switching to a system closure that requires the file. |

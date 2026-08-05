@@ -87,6 +87,12 @@ lat1-rollout-contract:
 lat1-healthcheck-contract:
     python3 scripts/check_lat1_healthcheck_contract.py
 
+# Anti-drift contract: both Kata Runner hosts render one shared runner-role
+# module; evaluated env and unit fragments may differ only in the declared
+# per-host set.
+runner-host-contract:
+    python3 scripts/check_runner_host_contract.py
+
 # Canonical read-only platform status: Nix-name contract plus Aug-1 fleet math.
 finite-status-contract:
     python3 scripts/check_finite_status_contract.py
