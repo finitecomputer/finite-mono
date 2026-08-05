@@ -13,7 +13,7 @@ FROM vllm/vllm-openai:v0.25.1@sha256:f0b9a0dc75a9fca3b6811e3279367b2d6a448055a00
 # fail-closed if either artifact changes.
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends \
-    build-essential ca-certificates curl libssl-dev patch pkg-config \
+    build-essential ca-certificates curl libprotobuf-dev libssl-dev patch pkg-config \
     protobuf-compiler \
   && rm -rf /var/lib/apt/lists/* \
   && curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
