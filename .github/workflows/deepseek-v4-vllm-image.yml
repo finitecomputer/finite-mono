@@ -1,0 +1,75 @@
+name: DeepSeek V4 vLLM Image
+
+run-name: Publish DeepSeek V4 vLLM ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Immutable candidate version, for example 0.25.1-0731-reasoning.1"
+        required: true
+        type: string
+
+concurrency:
+  group: deepseek-v4-vllm-image-${{ inputs.version }}
+
+jobs:
+  publish:
+    runs-on: [self-hosted, Linux, X64, finite-lat-2, docker]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push the source-pinned compatibility image
+        id: build
+        working-directory: deepseek-v4-vllm-${{ github.run_id }}-${{ github.run_attempt }}
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/deepseek-v4-vllm
+          VERSION: ${{ inputs.version }}
+        run: |
+          builder="deepseek-v4-vllm-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx create --name "$builder" --use
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg "FINITE_MONO_REV=$GITHUB_SHA" \
+            --file infra/images/deepseek-v4-vllm.Dockerfile \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:sha-${GITHUB_SHA::12}" \
+            --metadata-file image-metadata.json \
+            --push \
+            .
+          digest="$(jq -r '."containerimage.digest"' image-metadata.json)"
+          test -n "$digest"
+          test "$digest" != null
+          echo "pinned=$IMAGE:$VERSION@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the published image contract
+        env:
+          PINNED: ${{ steps.build.outputs.pinned }}
+        run: |
+          docker pull "$PINNED"
+          test "$(docker image inspect "$PINNED" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$PINNED" --format '{{index .Config.Labels "ai.finite.vllm.upstream-fix"}}')" = "77434861904a9f01ea4818fe9f0c7b2a5c05686e"
+          docker run --rm --entrypoint python3 "$PINNED" \
+            -c 'import importlib.metadata; assert importlib.metadata.version("vllm") == "0.25.1"'
+          docker run --rm --entrypoint python3 "$PINNED" \
+            /usr/local/libexec/patch_vllm_deepseek_v4_0731.py check
+
+      - name: Summarize
+        env:
+          PINNED: ${{ steps.build.outputs.pinned }}
+        run: |
+          echo "DeepSeek V4 0731 vLLM candidate:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$PINNED\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Base: vLLM 0.25.1; reasoning backport: 77434861904a9f01ea4818fe9f0c7b2a5c05686e" >> "$GITHUB_STEP_SUMMARY"
