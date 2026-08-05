@@ -16,6 +16,7 @@ LOAD_MAX_FIRST_BYTE_SECS="${FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS:-90}"
 LOAD_CONCURRENCY="${FINITE_PRIVATE_LOAD_CONCURRENCY:-32}"
 LOAD_MAX_TOKENS="${FINITE_PRIVATE_LOAD_MAX_TOKENS:-64}"
 LOAD_SWEEP_APPROVAL="1,4,8,16,32,64,128,256"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 usage() {
   cat >&2 <<'EOF'
@@ -28,6 +29,7 @@ Read-only commands:
   canary              Run an authenticated non-streaming chat canary.
   stream-canary       Run chat streaming through the terminal SSE [DONE].
   responses-canary    Run an authenticated non-streaming /v1/responses canary.
+  quality-canary      Score a short high/max reasoning and tool-use set using official sampling.
   repeated-id-canary  Send two calls with one caller x-request-id.
   load-canary [N]     Run N concurrent streaming calls (default 32) and report latency/throughput.
   load-sweep          Run the guarded 1,4,8,16,32,64,128,256 maintenance-window sweep.
@@ -45,6 +47,7 @@ Environment:
   FINITE_PRIVATE_CANARY_ENV_FILE       default: secrets/finite-private-canary.env
   FINITE_PRIVATE_CANARY_API_KEY        required for canary/gate
   FINITE_PRIVATE_CANARY_TIMEOUT_SECS   default: 180
+  FINITE_PRIVATE_QUALITY_EFFORTS       default: high,max; quality-canary only
   FINITE_PRIVATE_READY_TIMEOUT_SECS    default: 4200
   FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS default: 90
   FINITE_PRIVATE_LOAD_CONCURRENCY        default: 32
@@ -204,6 +207,20 @@ print(json.dumps(payload, sort_keys=True))
 PY
   rm -f "$curl_config" "$response_file"
   trap - RETURN
+}
+
+quality_canary() {
+  require_command python3
+  if [ -z "${FINITE_PRIVATE_CANARY_API_KEY:-}" ]; then
+    echo "FINITE_PRIVATE_CANARY_API_KEY is required for quality-canary" >&2
+    exit 1
+  fi
+  python3 "$REPO_ROOT/scripts/check_deepseek_v4_0731_quality.py" \
+    --endpoint "$ENDPOINT/v1" \
+    --model "$MODEL" \
+    --lane self-hosted \
+    --efforts "${FINITE_PRIVATE_QUALITY_EFFORTS:-high,max}" \
+    --timeout-seconds "$TIMEOUT_SECS"
 }
 
 repeated_id_canary() {
@@ -512,6 +529,7 @@ case "$command" in
   canary) canary ;;
   stream-canary) stream_canary ;;
   responses-canary) responses_canary ;;
+  quality-canary) quality_canary ;;
   repeated-id-canary) repeated_id_canary ;;
   load-canary)
     shift

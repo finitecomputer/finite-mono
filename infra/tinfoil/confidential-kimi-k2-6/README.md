@@ -2,46 +2,45 @@
 
 ## DeepSeek-V4-Flash-0731 preparation
 
-The 2026-08-04 attempt is preserved here for a later retry. DeepSeek was
-measured and exercised in production, then production was deliberately rolled
-back to GLM 5.2. Keep these candidates, the satellite branch, and their release
-tags as evidence; do not merge the DeepSeek model/runtime-default changes while
-GLM remains the production authority.
+The first 2026-08-04 attempt is preserved on its original mono and satellite
+branches. DeepSeek was measured and exercised in production, then production
+was deliberately rolled back to GLM 5.2. Keep those branches and release tags
+as evidence; do not merge the DeepSeek model/runtime-default changes while GLM
+remains the production authority.
 
-The two `tinfoil-config.deepseek-v4-flash-0731-*.candidate.yml` files stage the
-planned model-only replacement described in
-[`finite-private-deepseek-v4-flash-0731-cutover.md`](../../runbooks/finite-private-deepseek-v4-flash-0731-cutover.md):
+The target-only `tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml`
+now stages retry 2 as described in
+[`finite-private-deepseek-v4-flash-0731-retry-2.md`](../../runbooks/finite-private-deepseek-v4-flash-0731-retry-2.md):
 
 - official model revision
   `deepseek-ai/DeepSeek-V4-Flash-0731@7872f01b1d1fe23eabc4c98b48bffcef5a386062`;
-- official vLLM 0.26.0 linux/amd64 image digest
-  `sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b`;
-- eight-H200 tensor + expert parallelism, FP8 KV cache, 393,216-token service
+- a Finite compatibility image built from official vLLM 0.25.1 linux/amd64
+  digest `sha256:f0b9a0dc75a9fca3b6811e3279367b2d6a448055a000bfd13859587d74cef268`
+  with only upstream 0731 reasoning fix `7743486`, guarded by exact source
+  hashes;
+- eight-H200 data + expert parallelism, FP8 KV cache, 393,216-token service
   ceiling, DeepSeek V4 parsers, and both the canonical model name and retained
   `glm-5-2` request alias;
-- identical DSpark-on and DSpark-off candidates, differing only by the exact
-  verified speculative-decoding argument; and
+- target-only generation with DSpark excluded from retry 2; and
 - the current production limiter digest and public limiter/shim topology,
   keeping this a model-only change.
 
-The official vLLM image is used directly because Tinfoil's existing
-DeepSeek-V4-Pro enclave demonstrates that pattern; there is no Finite-specific
-model-image fork or patch to maintain. Before release, prove the pinned image
-reports vLLM 0.26.0 on linux/amd64.
+The retained `tinfoil-config.deepseek-v4-flash-0731-dspark-on.candidate.yml` is
+the first-attempt diagnostic artifact. It is intentionally excluded from the
+retry checker and must not be released for retry 2.
 
-Both files intentionally contain `REPLACE_WITH_TINFOIL_*` modelwrap
-placeholders. Prepare the pinned Hugging Face revision in **Tinfoil
-Containers → Models**, copy the generated `mpk` exactly, and use its root hash
-in the `/tinfoil/mpk/mpk-...` path. The prep contract accepts the explicit
-placeholders; the release-ready gate fails until they are replaced:
+The retry file retains the already measured Tinfoil MPK and deliberately
+contains `REPLACE_WITH_MEASURED_DEEPSEEK_V4_VLLM_IMAGE`. The prep contract
+accepts that explicit placeholder; the release-ready gate fails until the
+manual image workflow reports and pins an immutable digest:
 
 ```bash
 just finite-private-deepseek-contract
-python3 scripts/check_finite_private_deepseek_candidate.py --release-ready
+just finite-private-deepseek-release-contract
 ```
 
-Do not copy either file to the satellite root, create a release, or relaunch
-the enclave merely because the prep contract passes.
+Do not publish the image, copy the retry file to the satellite root, create a
+release, or relaunch the enclave merely because the prep contract passes.
 
 ## Existing GLM/limiter candidate
 

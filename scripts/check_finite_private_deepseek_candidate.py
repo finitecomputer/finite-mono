@@ -6,10 +6,6 @@ import re
 from pathlib import Path
 
 
-ON_CANDIDATE = Path(
-    "infra/tinfoil/confidential-kimi-k2-6/"
-    "tinfoil-config.deepseek-v4-flash-0731-dspark-on.candidate.yml"
-)
 OFF_CANDIDATE = Path(
     "infra/tinfoil/confidential-kimi-k2-6/"
     "tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml"
@@ -18,18 +14,15 @@ MODEL_REPO = (
     'repo: "deepseek-ai/DeepSeek-V4-Flash-0731@'
     '7872f01b1d1fe23eabc4c98b48bffcef5a386062"'
 )
-VLLM_IMAGE = (
-    'image: "vllm/vllm-openai:v0.26.0@sha256:'
-    '770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b"'
+VLLM_IMAGE_PLACEHOLDER = 'image: "REPLACE_WITH_MEASURED_DEEPSEEK_V4_VLLM_IMAGE"'
+VLLM_IMAGE_PATTERN = re.compile(
+    r'image: "ghcr\.io/finitecomputer/deepseek-v4-vllm:'
+    r'0\.25\.1-0731-reasoning\.[0-9]+@sha256:[0-9a-f]{64}"'
 )
 LIMITER_IMAGE = (
     'image: "ghcr.io/finitecomputer/finite-private-limiter:'
     '2026-07-02.glm52.health.1@sha256:'
     'f977b238439ff4caa3f416bf1ec8f16ed383640d7417262d26ed4388c8624d5c"'
-)
-DSPARK_CONFIG = (
-    "{\"method\":\"dspark\",\"num_speculative_tokens\":7,"
-    "\"draft_sample_method\":\"greedy\"}"
 )
 MPK_PATTERN = re.compile(
     r'mpk: "(?P<root>[0-9a-f]{64})_(?P<offset>[0-9]+)_'
@@ -37,25 +30,7 @@ MPK_PATTERN = re.compile(
 )
 
 
-def _without_dspark(lines: list[str]) -> list[str]:
-    result: list[str] = []
-    skip_next = False
-    for line in lines:
-        if line.lstrip().startswith("#"):
-            continue
-        if skip_next:
-            if DSPARK_CONFIG not in line:
-                result.append(line)
-            skip_next = False
-            continue
-        if line.strip() == '"--speculative-config",':
-            skip_next = True
-            continue
-        result.append(line)
-    return result
-
-
-def _validate_one(text: str, *, dspark: bool, release_ready: bool) -> list[str]:
+def _validate_one(text: str, *, release_ready: bool) -> list[str]:
     violations: list[str] = []
     required = (
         "cvm-version: 0.10.8",
@@ -63,33 +38,23 @@ def _validate_one(text: str, *, dspark: bool, release_ready: bool) -> list[str]:
         "memory: 524288",
         "gpus: 8",
         MODEL_REPO,
-        VLLM_IMAGE,
         LIMITER_IMAGE,
         '"--trust-remote-code"',
-        '"--kv-cache-dtype"',
-        '"fp8"',
-        '"--block-size"',
-        '"256"',
-        '"--tensor-parallel-size"',
+        '"--kv-cache-dtype",\n        "fp8"',
+        '"--block-size",\n        "256"',
+        '"--data-parallel-size",\n        "8"',
         '"--enable-expert-parallel"',
-        '"--disable-custom-all-reduce"',
-        '"--tokenizer-mode"',
-        '"--tool-call-parser"',
+        '"--tokenizer-mode",\n        "deepseek_v4"',
+        '"--tool-call-parser",\n        "deepseek_v4"',
         '"--enable-auto-tool-choice"',
-        '"--reasoning-parser"',
-        '"deepseek_v4"',
+        '"--reasoning-parser",\n        "deepseek_v4"',
         '"--enable-prompt-tokens-details"',
-        '"--max-model-len"',
-        '"393216"',
-        '"--max-num-seqs"',
-        '"64"',
-        '"--max-num-batched-tokens"',
-        '"8192"',
-        '"--gpu-memory-utilization"',
-        '"0.95"',
+        '"--max-model-len",\n        "393216"',
+        '"--max-num-seqs",\n        "64"',
+        '"--max-num-batched-tokens",\n        "512"',
+        '"--gpu-memory-utilization",\n        "0.95"',
         '"--no-enable-flashinfer-autotune"',
-        '"--compilation-config"',
-        '"FULL_DECODE_ONLY"',
+        '"--compilation-config",\n        \'{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}\'',
         '"--served-model-name"',
         '"deepseek-v4-flash-0731"',
         '"glm-5-2"',
@@ -116,15 +81,21 @@ def _validate_one(text: str, *, dspark: bool, release_ready: bool) -> list[str]:
         '"--attention-backend"',
         '"runai_streamer"',
         '"synthetic"',
+        '"--tensor-parallel-size"',
+        '"--disable-custom-all-reduce"',
+        '"--speculative-config"',
+        "dspark",
+        "vllm/vllm-openai:v0.26.0",
     ):
         if forbidden in text:
             violations.append(f"forbidden carried-forward or unsupported flag: {forbidden}")
 
-    has_dspark = DSPARK_CONFIG in text
-    if dspark and not has_dspark:
-        violations.append("DSpark-on candidate lacks the exact verified DSpark config")
-    if not dspark and has_dspark:
-        violations.append("DSpark-off candidate still enables DSpark")
+    has_measured_image = VLLM_IMAGE_PATTERN.search(text) is not None
+    has_image_placeholder = VLLM_IMAGE_PLACEHOLDER in text
+    if release_ready and not has_measured_image:
+        violations.append("retry candidate lacks a measured DeepSeek vLLM image digest")
+    elif not release_ready and not (has_measured_image or has_image_placeholder):
+        violations.append("retry candidate has neither a measured image nor the prep placeholder")
 
     mpk_match = MPK_PATTERN.search(text)
     model_path_match = re.search(r'"/tinfoil/mpk/mpk-([0-9a-f]{64})"', text)
@@ -146,15 +117,11 @@ def _validate_one(text: str, *, dspark: bool, release_ready: bool) -> list[str]:
 def check_repository(root: Path, *, release_ready: bool = False) -> list[str]:
     violations: list[str] = []
     try:
-        on_text = (root / ON_CANDIDATE).read_text(encoding="utf-8")
         off_text = (root / OFF_CANDIDATE).read_text(encoding="utf-8")
     except FileNotFoundError as error:
         return [f"missing DeepSeek candidate: {error.filename}"]
 
-    violations.extend(_validate_one(on_text, dspark=True, release_ready=release_ready))
-    violations.extend(_validate_one(off_text, dspark=False, release_ready=release_ready))
-    if _without_dspark(on_text.splitlines()) != _without_dspark(off_text.splitlines()):
-        violations.append("DSpark-on/off candidates differ by more than speculative decoding")
+    violations.extend(_validate_one(off_text, release_ready=release_ready))
     return violations
 
 

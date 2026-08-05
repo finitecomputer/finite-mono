@@ -131,8 +131,13 @@ finite-private-load-contract:
 
 # Exact model/runtime/topology pins for the staged DeepSeek Tinfoil candidates.
 finite-private-deepseek-contract:
+    bash -n infra/runbooks/finite-private-ops.sh
+    python3 scripts/check_finite_private_deepseek_candidate.py
+    python3 -m unittest scripts.tests.test_patch_vllm_deepseek_v4_0731 scripts.tests.test_check_deepseek_v4_0731_quality scripts.tests.test_finite_private_deepseek_candidate scripts.tests.test_finite_private_ops
+
+# Separately invoked only after the runtime image has been published and pinned.
+finite-private-deepseek-release-contract:
     python3 scripts/check_finite_private_deepseek_candidate.py --release-ready
-    python3 -m unittest scripts.tests.test_finite_private_deepseek_candidate
 
 # Disposable Docker-backed real Hermes/managed-skill/fbrain/Brain/Product Client matrix.
 brain-product-matrix:

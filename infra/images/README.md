@@ -17,6 +17,7 @@ runs.
 | `finite-saas-core` | `core.Dockerfile` (context: repo root) | `service-images.yml` | (retained; lat1 runs the nix binary, not this image) |
 | `finite-saas-dashboard` | `dashboard.Dockerfile` (context: repo root; includes the shared Finite Chat UI package) | `service-images.yml` | lat1 (podman oci-container, digest-pinned in `modules/dashboard.nix`) |
 | `private-limiter` | `private-limiter.Dockerfile` (context: repo root) | `service-images.yml` | Finite Private Tinfoil CVM (digest pinned in confidential-kimi-k2-6) |
+| `deepseek-v4-vllm` | `deepseek-v4-vllm.Dockerfile` (official vLLM 0.25.1 base plus the source-hash-guarded upstream 0731 reasoning fix) | `deepseek-v4-vllm-image.yml` | Prepared Finite Private DeepSeek-V4-Flash-0731 retry candidate; publishing and deployment are manual, separately authorized steps |
 | `finite-specialization-worker` | `specialization-worker.Dockerfile` (context: repo root) | `service-images.yml` | shared AEON capability worker on clawland (digest-pinned Kubernetes deployment) |
 | `agent-runtime` | `finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile` via `finitecomputer-v2/scripts/build_runtime_image.py` (one staged monorepo + root lockfile) | `runtime-image.yml`, whose build-once smoke proves the exact local image ID before push; `hermes-runtime-smoke.yml` is optional source preflight | local Docker, Kata, Phala, and agent canary lanes |
 
@@ -36,6 +37,11 @@ Notes:
   it is not a second publishable product Runtime.
 - The self-hosted-runner workflows run on the `finite-lat-2-mono` runner
   (registered 2026-07-09; lat2 is the CI runner box now).
+- The DeepSeek vLLM compatibility image is deliberately separate from the
+  ordinary service-image matrix because its CUDA base is large and its release
+  cadence follows an upstream model/runtime compatibility boundary. The
+  workflow verifies vLLM `0.25.1`, the exact upstream reasoning-fix label, and
+  the installed patched-source hashes before reporting a usable digest.
 - Version tags are date-based for images (`2026-07-08.1`); every push also
   gets a `sha-<git sha>` tag and the workflow summary prints the pinned
   `name:tag@digest` to use in manifests.
