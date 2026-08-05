@@ -387,8 +387,9 @@ impl AppleContainerLauncher {
     fn wait_for_runtime_http(&self, plan: &AppleContainerLaunchPlan) -> Result<(), RunnerError> {
         // Runtime management owns generic process readiness only. The product
         // contact URL is a published fact, while chat admission remains the
-        // Finite Chat Device's concern.
-        wait_for_http_json_ready(
+        // Finite Chat Device's concern. The health response is authoritative
+        // for required specialization; no Apple-specific probe is allowed.
+        wait_for_http_json_admission(
             &plan.health_url,
             "Apple Container runtime /healthz",
             self.config.readiness_timeout,
@@ -535,6 +536,7 @@ impl RuntimeLauncher for AppleContainerLauncher {
             active_sandbox_count: active_owned_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            finite_private_profile: None,
         }
     }
 
@@ -556,6 +558,12 @@ impl RuntimeLauncher for AppleContainerLauncher {
         options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         self.validate_ready()?;
+        if options.specialization_bundle().is_some() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Apple Container specialization lifecycle is quarantined until a rollback envelope is available"
+                    .to_string(),
+            ));
+        }
         let plan = self.validate_control_ownership(lease)?;
         let inspected = self
             .inspect_owned_with_policy(&plan, &lease.runtime.project_id, true)?
@@ -896,6 +904,23 @@ fn apple_container_replacement_required(
     options: &RuntimeRestartOptions,
 ) -> bool {
     inspected.image_descriptor_digest.as_deref() != Some(desired_image_descriptor_digest)
+        || options.specialization_bundle().is_some_and(|bundle| {
+            [
+                ("FINITE_SPECIALIZATION_BUNDLE", bundle.bundle_id.as_str()),
+                (
+                    "FINITE_SPECIALIZATION_WORKER_API_KEY",
+                    bundle.worker_api_key.as_str(),
+                ),
+            ]
+            .into_iter()
+            .any(|(desired_key, desired_value)| {
+                inspected
+                    .environment
+                    .iter()
+                    .rfind(|(current_key, _)| current_key == desired_key)
+                    .is_none_or(|(_, current_value)| current_value != desired_value)
+            })
+        })
         || options
             .environment()
             .iter()
@@ -1163,6 +1188,8 @@ pub(crate) fn apple_command_env_keys(command: &AppleContainerCommand) -> Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn config() -> AppleContainerConfig {
         AppleContainerConfig {
@@ -1186,6 +1213,33 @@ mod tests {
             host_port: 18080,
             container_port: 8080,
         }
+    }
+
+    #[test]
+    fn apple_readiness_rejects_an_ineffective_specialization_health_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"ready":true,"admission_ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let launcher = AppleContainerLauncher::new(AppleContainerConfig {
+            readiness_timeout: Duration::from_millis(30),
+            readiness_interval: Duration::from_millis(5),
+            ..config()
+        });
+        let mut launch_plan = plan();
+        launch_plan.health_url = format!("http://127.0.0.1:{port}/healthz");
+        let error = launcher.wait_for_runtime_http(&launch_plan).unwrap_err();
+        assert!(error.to_string().contains("did not become ready"));
+        server.join().unwrap();
     }
 
     fn inspected_json(project_id: &str) -> Vec<u8> {
@@ -1282,7 +1336,11 @@ mod tests {
             "FAL_KEY".to_string(),
             "fal-added-by-replacement".to_string(),
         )]))
-        .unwrap();
+        .unwrap()
+        .with_specialization_bundle(SpecializationBundleRuntimeDefaults {
+            bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_string(),
+            worker_api_key: "specialization-worker-secret".to_string(),
+        });
 
         let environment = merge_desired_runtime_environment(inspected.environment, &options);
         let command =
@@ -1325,6 +1383,14 @@ mod tests {
         assert_eq!(
             replacement_environment.get("FAL_KEY"),
             Some(&"fal-added-by-replacement".to_string())
+        );
+        assert_eq!(
+            replacement_environment.get("FINITE_SPECIALIZATION_BUNDLE"),
+            Some(&DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_string())
+        );
+        assert_eq!(
+            replacement_environment.get("FINITE_SPECIALIZATION_WORKER_API_KEY"),
+            Some(&"specialization-worker-secret".to_string())
         );
         assert!(!format!("{command:?}").contains("existing-inference-key"));
         assert!(!format!("{command:?}").contains("fal-added-by-replacement"));

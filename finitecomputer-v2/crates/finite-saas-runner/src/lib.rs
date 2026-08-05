@@ -1,15 +1,16 @@
 use finite_saas_core::{
     AgentCreationLease, AgentCreationRequest, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, LeaseRuntimeControlRequestInput, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    FailRuntimeControlRequestInput, FinitePrivateRunnerProfile, LeaseRuntimeControlRequestInput,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RegisterAgentCreationRuntimeInput, RelayHeartbeat, RenewRuntimeControlRequestInput,
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
     RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePlacement,
     RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
-    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
+    RuntimeSpecializationProfile, RuntimeSummaryStatus,
+    api::RecordProviderOperationTransitionRequest,
     runtime_relay_token_hash as hash_runtime_relay_token,
 };
 #[cfg(test)]
@@ -57,7 +58,7 @@ pub const DEFAULT_FINITE_PRIVATE_BASE_URL: &str =
     "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
 pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "deepseek-v4-flash-0731";
 pub const DEFAULT_FINITE_PRIVATE_CONTEXT_LENGTH: usize = 393_216;
-pub const DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE: &str = "aeon-multimodal";
+pub const DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE: &str = "finite-private-multimodal-v1";
 pub const DEFAULT_FINITECHAT_SERVER_URL: &str = "https://chat.finite.computer";
 pub const DEFAULT_FINITE_AGENT_PICTURE_URL: &str =
     "https://avatars.githubusercontent.com/u/274919006?v=4";
@@ -75,6 +76,8 @@ const MAX_RUNTIME_ENVIRONMENT_TOTAL_BYTES: usize = 32 * 1024;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_ENTRIES: usize = 64;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
 const MAX_RUNTIME_SECRET_ENVIRONMENT_TOTAL_BYTES: usize = 128 * 1024;
+const MAX_RUNTIME_HEALTH_RESPONSE_BYTES: u64 = 64 * 1024;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 
 pub(crate) fn state_preserving_runtime_capabilities(
     runtime_upgrade: bool,
@@ -120,28 +123,22 @@ fn wait_with_captured_output(
     program: &Path,
     timeout: Duration,
 ) -> Result<Output, RunnerError> {
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| RunnerError::CommandExecution {
             program: program.display().to_string(),
             message: "failed to capture stdout".to_string(),
         })?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| RunnerError::CommandExecution {
             program: program.display().to_string(),
             message: "failed to capture stderr".to_string(),
         })?;
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
+    let stdout_reader = thread::spawn(move || read_bounded_output(stdout));
+    let stderr_reader = thread::spawn(move || read_bounded_output(stderr));
 
     let started = Instant::now();
     let status = loop {
@@ -200,6 +197,38 @@ fn wait_with_captured_output(
         stdout,
         stderr,
     })
+}
+
+fn read_bounded_output<R: Read>(mut reader: R) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    Ok(bytes)
+}
+
+fn redact_command_output(output: &str, environment: &[(OsString, OsString)]) -> String {
+    // Replace longer values first: a short public value (for example `1` or
+    // `true`) may be contained inside a credential and would otherwise split
+    // the credential before its full value can be redacted.
+    let mut values = environment
+        .iter()
+        .map(|(_, value)| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    values.dedup();
+    values
+        .into_iter()
+        .fold(output.to_string(), |redacted, value| {
+            redacted.replace(&value, "<redacted>")
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -455,6 +484,16 @@ where
         let runtime_capabilities = self.launcher.runtime_capabilities();
         let mut runner_capacity = self.launcher.runner_capacity();
         runner_capacity.runtime_capabilities = Some(runtime_capabilities.clone());
+        let finite_private_profile = self
+            .default_finite_private
+            .as_ref()
+            .map(finite_private_runner_profile)
+            .transpose();
+        runner_capacity.finite_private_profile = finite_private_profile
+            .as_ref()
+            .ok()
+            .and_then(|profile| *profile)
+            .flatten();
         if runner_capacity.runner_classes.is_empty() {
             return Ok(RunOnceOutcome::CapacityUnavailable {
                 reason: "runner advertises no classes".to_string(),
@@ -469,6 +508,12 @@ where
             Some(&runner_capacity),
         )? {
             return self.run_runtime_control(lease, lease_token);
+        }
+        if let Err(error) = finite_private_profile {
+            return Ok(RunOnceOutcome::CapacityUnavailable {
+                reason: error.to_string(),
+                runner_capacity,
+            });
         }
         if let Some(reason) = runner_capacity.agent_creation_rejection_reason() {
             return Ok(RunOnceOutcome::CapacityUnavailable {
@@ -777,6 +822,61 @@ where
             RuntimeControlKind::Stop | RuntimeControlKind::Destroy => None,
         };
         let runtime_spec = control_runtime_spec(&lease, self.launcher.runner_class())?;
+        if matches!(
+            kind,
+            RuntimeControlKind::Restart
+                | RuntimeControlKind::RecoverKnownGoodChatRuntime
+                | RuntimeControlKind::Upgrade
+        ) && runtime_spec.is_none()
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "lifecycle control requires an authoritative RuntimeSpec".to_string(),
+            ));
+        }
+        if matches!(
+            kind,
+            RuntimeControlKind::Restart
+                | RuntimeControlKind::RecoverKnownGoodChatRuntime
+                | RuntimeControlKind::Upgrade
+        ) && runtime_spec.is_some_and(runtime_spec_has_ambiguous_legacy_private_shape)
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "RuntimeSpec with FINITE_PRIVATE_API_KEY must declare specialization_profile"
+                    .to_string(),
+            ));
+        }
+        if kind == RuntimeControlKind::Restart
+            && lease.runtime.host_facts.active_inference_profile.as_deref()
+                == Some("finite-private")
+            && lease
+                .runtime
+                .host_facts
+                .effective_specialization_bundle
+                .as_deref()
+                != Some(DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE)
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "specialized runtime restart requires an exact effective specialization bundle"
+                    .to_string(),
+            ));
+        }
+        if kind == RuntimeControlKind::Restart
+            && runtime_spec.is_some_and(|spec| {
+                spec.specialization_profile
+                    == Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+            })
+            && lease
+                .runtime
+                .host_facts
+                .effective_specialization_bundle
+                .as_deref()
+                != Some(DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE)
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "canonical Finite Private restart requires an exact effective specialization bundle"
+                    .to_string(),
+            ));
+        }
         let desired_environment = runtime_spec
             .map(|spec| spec.environment.clone())
             .unwrap_or_else(|| self.runtime_environment.clone());
@@ -790,8 +890,32 @@ where
         } else {
             BTreeMap::new()
         };
-        let restart_options = RuntimeRestartOptions::new(desired_environment)?
+        let mut restart_options = RuntimeRestartOptions::new(desired_environment)?
             .with_secret_environment(desired_secret_environment)?;
+        // Validate the authoritative model/bundle contract for every
+        // specialized lifecycle operation. Restart is non-mutating and
+        // preserves the existing environment, so only Upgrade receives the
+        // bundle needed to construct a replacement.
+        let lifecycle_bundle = if matches!(
+            kind,
+            RuntimeControlKind::Restart
+                | RuntimeControlKind::RecoverKnownGoodChatRuntime
+                | RuntimeControlKind::Upgrade
+        ) {
+            runtime_spec
+                .map(|spec| self.lifecycle_specialization_bundle(spec))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        if matches!(
+            kind,
+            RuntimeControlKind::Upgrade | RuntimeControlKind::RecoverKnownGoodChatRuntime
+        ) && let Some(bundle) = lifecycle_bundle
+        {
+            restart_options = restart_options.with_specialization_bundle(bundle);
+        }
         let operation_result: Result<RuntimeControlCompletionFacts, RunnerError> = match kind {
             RuntimeControlKind::Restart => self
                 .launcher
@@ -995,23 +1119,37 @@ where
             secret_environment,
             ..RuntimeLaunchOptions::default()
         };
+        // A universal private-key reference is present on legacy and generic
+        // RuntimeSpecs too. Only the typed profile is an authoritative signal
+        // that this lease requires the canonical specialization contract.
         let requires_finite_private = runtime_spec.is_some_and(|spec| {
+            spec.specialization_profile
+                == Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+        });
+        let has_finite_private_secret_reference = runtime_spec.is_some_and(|spec| {
             spec.secret_references
                 .iter()
                 .any(|reference| reference == "FINITE_PRIVATE_API_KEY")
         });
+        if requires_finite_private && !has_finite_private_secret_reference {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "canonical Finite Private RuntimeSpec omitted its secret reference".to_string(),
+            ));
+        }
         let Some(defaults) = self.default_finite_private.clone() else {
             if requires_finite_private {
                 return Err(RunnerError::InvalidRuntimeEnvironment(
-                    "RuntimeSpec Finite Private secret reference could not be resolved".to_string(),
+                    "canonical Finite Private RuntimeSpec could not be resolved".to_string(),
                 ));
             }
             return Ok(options);
         };
+        // A bound generic/legacy RuntimeSpec is launched using only its Core
+        // environment, even when it carries the universal key reference.
+        // The defaults below still apply to a creation lease with no bound
+        // RuntimeSpec, which is how canonical creation is provisioned.
         if runtime_spec.is_some() && !requires_finite_private {
-            return Err(RunnerError::InvalidRuntimeEnvironment(
-                "RuntimeSpec omitted the Finite Private secret reference".to_string(),
-            ));
+            return Ok(options);
         }
         let specialization_bundle = specialization_bundle_for_finite_private_profile(&defaults)?;
         if let Some(raw_api_key) = defaults
@@ -1055,6 +1193,50 @@ where
             specialization_bundle,
         });
         Ok(options)
+    }
+
+    fn lifecycle_specialization_bundle(
+        &self,
+        spec: &RuntimeSpecV1,
+    ) -> Result<Option<SpecializationBundleRuntimeDefaults>, RunnerError> {
+        // This helper is reached only for Restart/Recover/Upgrade. Stop and
+        // Destroy intentionally bypass specialization material so retirement
+        // remains available during a mixed-version rollout.
+        // The typed Core profile, not the universal private-key reference,
+        // determines whether lifecycle work needs specialization material.
+        if spec.specialization_profile
+            != Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+        {
+            return Ok(None);
+        }
+        if !spec
+            .secret_references
+            .iter()
+            .any(|reference| reference == "FINITE_PRIVATE_API_KEY")
+        {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "canonical Finite Private RuntimeSpec omitted its secret reference".to_string(),
+            ));
+        }
+        let Some(defaults) = self.default_finite_private.as_ref() else {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "canonical Finite Private lifecycle requires the active specialization bundle"
+                    .to_string(),
+            ));
+        };
+        if defaults.model != DEFAULT_FINITE_PRIVATE_MODEL {
+            return Err(RunnerError::InvalidRuntimeEnvironment(
+                "canonical Finite Private lifecycle conflicts with the Runner model".to_string(),
+            ));
+        }
+        specialization_bundle_for_finite_private_profile(defaults)?
+            .ok_or_else(|| {
+                RunnerError::InvalidRuntimeEnvironment(
+                    "canonical Finite Private lifecycle requires the active specialization bundle"
+                        .to_string(),
+                )
+            })
+            .map(Some)
     }
 
     fn wait_for_runtime_heartbeat(&mut self, source_machine_id: &str) -> Result<(), RunnerError> {
@@ -1549,30 +1731,42 @@ fn specialization_bundle_for_finite_private_profile(
     if defaults.model != DEFAULT_FINITE_PRIVATE_MODEL {
         return Ok(None);
     }
-    defaults
-        .specialization_bundle
-        .clone()
-        .map(|mut specialization_bundle| {
-            if specialization_bundle.bundle_id != DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE {
-                return Err(RunnerError::InvalidRuntimeEnvironment(format!(
-                    "unsupported Finite Private specialization bundle {:?}",
-                    specialization_bundle.bundle_id
-                )));
-            }
-            specialization_bundle.worker_api_key =
-                specialization_bundle.worker_api_key.trim().to_owned();
-            if specialization_bundle.worker_api_key.is_empty()
-                || specialization_bundle.worker_api_key.len()
-                    > MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES
-            {
-                return Err(RunnerError::InvalidRuntimeEnvironment(
-                    "Finite Private specialization worker credential is empty or oversized"
-                        .to_string(),
-                ));
-            }
-            Ok(specialization_bundle)
-        })
-        .transpose()
+    let specialization_bundle = defaults.specialization_bundle.clone().ok_or_else(|| {
+        RunnerError::InvalidRuntimeEnvironment(
+            "canonical Finite Private DeepSeek V4 Flash 0731 requires the active specialization bundle"
+                .to_string(),
+        )
+    })?;
+    validate_specialization_bundle(specialization_bundle).map(Some)
+}
+
+fn finite_private_runner_profile(
+    defaults: &FinitePrivateRuntimeDefaults,
+) -> Result<Option<FinitePrivateRunnerProfile>, RunnerError> {
+    let specialization_bundle = specialization_bundle_for_finite_private_profile(defaults)?;
+    Ok(specialization_bundle
+        .is_some()
+        .then_some(FinitePrivateRunnerProfile::CanonicalSpecializationConfigured))
+}
+
+fn validate_specialization_bundle(
+    mut specialization_bundle: SpecializationBundleRuntimeDefaults,
+) -> Result<SpecializationBundleRuntimeDefaults, RunnerError> {
+    if specialization_bundle.bundle_id != DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE {
+        return Err(RunnerError::InvalidRuntimeEnvironment(format!(
+            "unsupported Finite Private specialization bundle {:?}",
+            specialization_bundle.bundle_id
+        )));
+    }
+    specialization_bundle.worker_api_key = specialization_bundle.worker_api_key.trim().to_owned();
+    if specialization_bundle.worker_api_key.is_empty()
+        || specialization_bundle.worker_api_key.len() > MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES
+    {
+        return Err(RunnerError::InvalidRuntimeEnvironment(
+            "Finite Private specialization worker credential is empty or oversized".to_string(),
+        ));
+    }
+    Ok(specialization_bundle)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1613,6 +1807,7 @@ pub struct RuntimeLaunchOptions {
 pub struct RuntimeRestartOptions {
     environment: BTreeMap<String, String>,
     secret_environment: BTreeMap<String, String>,
+    specialization_bundle: Option<SpecializationBundleRuntimeDefaults>,
 }
 
 fn runtime_spec_v1(envelope: &RuntimeSpecEnvelope) -> &RuntimeSpecV1 {
@@ -1644,6 +1839,12 @@ fn creation_runtime_spec(
             )
         })?;
     validate_runtime_spec_contract(spec, runner_class)?;
+    if runtime_spec_has_ambiguous_legacy_private_shape(spec) {
+        return Err(RunnerError::InvalidRuntimeEnvironment(
+            "RuntimeSpec with FINITE_PRIVATE_API_KEY must declare specialization_profile"
+                .to_string(),
+        ));
+    }
     if spec.operation_id != lease.request.id
         || spec.project_id != lease.project.id
         || spec.agent_runtime_id != expected_runtime_id
@@ -1747,6 +1948,14 @@ fn validate_runtime_spec_contract(
     Ok(())
 }
 
+fn runtime_spec_has_ambiguous_legacy_private_shape(spec: &RuntimeSpecV1) -> bool {
+    spec.specialization_profile.is_none()
+        && spec
+            .secret_references
+            .iter()
+            .any(|reference| reference == "FINITE_PRIVATE_API_KEY")
+}
+
 fn runtime_spec_image_is_immutable(reference: &str) -> bool {
     let Some((repository, digest)) = reference.trim().rsplit_once("@sha256:") else {
         return false;
@@ -1762,6 +1971,7 @@ impl RuntimeRestartOptions {
         Ok(Self {
             environment,
             secret_environment: BTreeMap::new(),
+            specialization_bundle: None,
         })
     }
 
@@ -1782,6 +1992,18 @@ impl RuntimeRestartOptions {
     pub fn secret_environment(&self) -> &BTreeMap<String, String> {
         &self.secret_environment
     }
+
+    fn with_specialization_bundle(
+        mut self,
+        specialization_bundle: SpecializationBundleRuntimeDefaults,
+    ) -> Self {
+        self.specialization_bundle = Some(specialization_bundle);
+        self
+    }
+
+    pub(crate) fn specialization_bundle(&self) -> Option<&SpecializationBundleRuntimeDefaults> {
+        self.specialization_bundle.as_ref()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1791,8 +2013,8 @@ pub struct FinitePrivateLaunchKey {
     pub base_url: String,
     pub model: String,
     pub revoke_on_launch_failure: bool,
-    /// Optional automatic profile activation. A missing host credential must
-    /// never prevent a normal Finite Private agent launch.
+    /// Required for the canonical Finite Private model and absent from
+    /// noncanonical Finite Private profiles.
     pub specialization_bundle: Option<SpecializationBundleRuntimeDefaults>,
 }
 
@@ -1845,6 +2067,18 @@ fn merge_desired_runtime_environment(
     mut existing: Vec<(String, String)>,
     options: &RuntimeRestartOptions,
 ) -> Vec<(String, String)> {
+    if let Some(bundle) = options.specialization_bundle() {
+        upsert_runtime_environment(
+            &mut existing,
+            "FINITE_SPECIALIZATION_BUNDLE",
+            &bundle.bundle_id,
+        );
+        upsert_runtime_environment(
+            &mut existing,
+            "FINITE_SPECIALIZATION_WORKER_API_KEY",
+            &bundle.worker_api_key,
+        );
+    }
     for (key, value) in &mut existing {
         if let Some(desired) = options.environment().get(key) {
             *value = desired.clone();
@@ -1866,6 +2100,17 @@ fn merge_desired_runtime_environment(
         }
     }
     existing
+}
+
+fn upsert_runtime_environment(existing: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some((_, existing_value)) = existing
+        .iter_mut()
+        .rfind(|(existing_key, _)| existing_key == key)
+    {
+        *existing_value = value.to_owned();
+    } else {
+        existing.push((key.to_owned(), value.to_owned()));
+    }
 }
 
 fn resolve_runtime_secret_environment(
@@ -2454,11 +2699,11 @@ impl DockerLauncher {
                 message: error.to_string(),
             })?;
         let output = wait_with_captured_output(child, &command.program, timeout)?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stdout = redact_command_output(&String::from_utf8_lossy(&output.stdout), &command.env);
         if output.status.success() {
             return Ok(stdout);
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = redact_command_output(&String::from_utf8_lossy(&output.stderr), &command.env);
         Err(RunnerError::CommandExecution {
             program: command.program.display().to_string(),
             message: format!(
@@ -2485,7 +2730,10 @@ impl DockerLauncher {
     }
 
     fn wait_for_runtime_http(&self, plan: &DockerLaunchPlan) -> Result<(), RunnerError> {
-        wait_for_http_json_ready(
+        // The runtime health response is authoritative, including any
+        // required Finite Private specialization state. Do not add a
+        // provider-specific specialization probe here.
+        wait_for_http_json_admission(
             &plan.health_url,
             "Docker runtime /healthz",
             self.config.readiness_timeout,
@@ -2562,6 +2810,7 @@ impl RuntimeLauncher for DockerLauncher {
             active_sandbox_count: active_docker_container_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            finite_private_profile: None,
         }
     }
 
@@ -2580,9 +2829,15 @@ impl RuntimeLauncher for DockerLauncher {
     fn restart_runtime(
         &mut self,
         lease: &RuntimeControlLease,
-        _options: &RuntimeRestartOptions,
+        options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         self.validate_ready()?;
+        if options.specialization_bundle().is_some() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Docker restart cannot converge specialization; use an immutable runtime upgrade"
+                    .to_string(),
+            ));
+        }
         if lease.runtime.source_host_id != self.config.source_host_id {
             return Err(RunnerError::RuntimeLaunch(format!(
                 "runtime belongs to source host {}, not {}",
@@ -3029,7 +3284,7 @@ fn docker_equivalent_runtime_env(
     entries
 }
 
-fn wait_for_http_json_ready(
+fn wait_for_http_json_admission(
     url: &str,
     name: &str,
     timeout: Duration,
@@ -3041,30 +3296,19 @@ fn wait_for_http_json_ready(
             .timeout(interval.max(Duration::from_millis(250)))
             .call()
         {
-            Ok(response) => match response.into_json::<serde_json::Value>() {
+            Ok(response) => match read_bounded_json_response(response) {
                 Ok(value) => {
-                    if value
-                        .get("ready")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                    {
+                    if runtime_admission_ready(&value) {
                         return Ok(());
                     }
-                    value
-                        .get("error")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("ready=false")
-                        .to_string()
+                    "runtime health reported admission_ready=false".to_string()
                 }
-                Err(error) => format!("invalid JSON: {error}"),
+                Err(error) => error,
             },
-            Err(ureq::Error::Status(status, response)) => {
-                let body = response
-                    .into_string()
-                    .unwrap_or_else(|_| "<unreadable response body>".to_string());
-                format!("HTTP {status}: {body}")
+            Err(ureq::Error::Status(status, _response)) => {
+                format!("HTTP {status}: runtime health is not ready")
             }
-            Err(error) => error.to_string(),
+            Err(_error) => "runtime health request failed".to_string(),
         };
         if started.elapsed() >= timeout {
             return Err(RunnerError::RuntimeLaunch(format!(
@@ -3074,6 +3318,27 @@ fn wait_for_http_json_ready(
         }
         thread::sleep(interval);
     }
+}
+
+fn runtime_admission_ready(value: &serde_json::Value) -> bool {
+    value.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+        && value
+            .get("admission_ready")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+fn read_bounded_json_response(response: ureq::Response) -> Result<serde_json::Value, String> {
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_RUNTIME_HEALTH_RESPONSE_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| "runtime health response could not be read".to_string())?;
+    if body.len() as u64 > MAX_RUNTIME_HEALTH_RESPONSE_BYTES {
+        return Err("runtime health response exceeded the bounded limit".to_string());
+    }
+    serde_json::from_slice(&body).map_err(|_| "runtime health returned invalid JSON".to_string())
 }
 
 fn active_docker_container_count(config: &DockerConfig) -> Option<u32> {
@@ -3242,11 +3507,16 @@ impl EnclaviaLauncher {
         }
 
         let output = wait_with_captured_output(child, &self.config.enclavia_bin, timeout)?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stdin_environment = stdin
+            .map(|value| vec![(OsString::from("stdin"), OsString::from(value))])
+            .unwrap_or_default();
+        let stdout =
+            redact_command_output(&String::from_utf8_lossy(&output.stdout), &stdin_environment);
         if output.status.success() {
             return Ok(stdout);
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr =
+            redact_command_output(&String::from_utf8_lossy(&output.stderr), &stdin_environment);
         Err(RunnerError::CommandExecution {
             program: self.config.enclavia_bin.display().to_string(),
             message: format!(
@@ -3478,7 +3748,9 @@ impl EnclaviaLauncher {
     }
 
     fn wait_for_runtime_http(&self, endpoint: &EnclaviaEndpoint) -> Result<(), RunnerError> {
-        wait_for_http_json_ready(
+        // Enclavia uses the same runtime health contract as every provider;
+        // specialization is never probed through the provider API.
+        wait_for_http_json_admission(
             &endpoint.health_url,
             "Enclavia runtime /proxy/healthz",
             self.config.readiness_timeout,
@@ -3526,6 +3798,7 @@ impl RuntimeLauncher for EnclaviaLauncher {
             active_sandbox_count: active_enclavia_enclave_count(&self.config),
             available_memory_bytes: self.config.available_memory_bytes,
             runtime_capabilities: Some(self.runtime_capabilities()),
+            finite_private_profile: None,
         }
     }
 
@@ -3544,9 +3817,15 @@ impl RuntimeLauncher for EnclaviaLauncher {
     fn restart_runtime(
         &mut self,
         lease: &RuntimeControlLease,
-        _options: &RuntimeRestartOptions,
+        options: &RuntimeRestartOptions,
     ) -> Result<(), RunnerError> {
         self.validate_ready()?;
+        if options.specialization_bundle().is_some() {
+            return Err(RunnerError::RuntimeLaunch(
+                "Enclavia restart cannot converge specialization; immutable replacement is required"
+                    .to_string(),
+            ));
+        }
         ensure_runtime_belongs_to_source(
             &lease.runtime.source_host_id,
             &self.config.source_host_id,
@@ -3889,25 +4168,27 @@ mod tests {
         let configured_profile = finite_private_defaults();
         let bundle = specialization_bundle_for_finite_private_profile(&configured_profile)
             .unwrap()
-            .expect("the canonical Finite Private profile should activate AEON");
+            .expect(
+                "the canonical Finite Private profile should activate multimodal specialization",
+            );
         assert_eq!(
             bundle.bundle_id,
             DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
         );
 
-        let other_finite_private_profile = FinitePrivateRuntimeDefaults {
-            model: "another-finite-private-model".to_owned(),
+        let legacy_glm_profile = FinitePrivateRuntimeDefaults {
+            model: "glm-5-2".to_owned(),
             specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
                 bundle_id: "not-validated-for-this-profile".to_owned(),
-                worker_api_key: "unused-for-noncanonical-profile".to_owned(),
+                worker_api_key: "unused-for-legacy-glm".to_owned(),
             }),
             ..FinitePrivateRuntimeDefaults::default()
         };
         assert!(
-            specialization_bundle_for_finite_private_profile(&other_finite_private_profile)
+            specialization_bundle_for_finite_private_profile(&legacy_glm_profile)
                 .unwrap()
                 .is_none(),
-            "specialization admission must depend on the canonical Finite Private profile, not a runner host or user"
+            "specialization admission must require canonical DeepSeek, not the legacy GLM identity"
         );
     }
 
@@ -3928,8 +4209,71 @@ mod tests {
             wait_with_captured_output(child, Path::new("sh"), Duration::from_secs(5)).unwrap();
 
         assert!(output.status.success());
-        assert!(output.stdout.len() > 64 * 1024);
-        assert!(output.stderr.len() > 64 * 1024);
+        assert_eq!(output.stdout.len(), MAX_COMMAND_OUTPUT_BYTES);
+        assert_eq!(output.stderr.len(), MAX_COMMAND_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn command_output_redacts_environment_values() {
+        let environment = vec![
+            (
+                OsString::from("FINITE_PRIVATE_API_KEY"),
+                OsString::from("fpk-secret"),
+            ),
+            (
+                OsString::from("PUBLIC_URL"),
+                OsString::from("https://finite.chat"),
+            ),
+        ];
+        let redacted = redact_command_output(
+            "failed fpk-secret at https://finite.chat; fpk-secret again",
+            &environment,
+        );
+        assert_eq!(
+            redacted,
+            "failed <redacted> at <redacted>; <redacted> again"
+        );
+        assert!(!redacted.contains("fpk-secret"));
+    }
+
+    #[test]
+    fn command_output_redacts_overlapping_environment_values() {
+        let environment = vec![
+            (OsString::from("PUBLIC_FLAG"), OsString::from("1")),
+            (
+                OsString::from("FINITE_PRIVATE_API_KEY"),
+                OsString::from("fpk-secret-1"),
+            ),
+        ];
+        let redacted = redact_command_output("credential=fpk-secret-1 flag=1", &environment);
+        assert_eq!(redacted, "credential=<redacted> flag=<redacted>");
+        assert!(!redacted.contains("fpk-secret-1"));
+    }
+
+    #[test]
+    fn enclavia_stdin_secret_is_redacted_from_command_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_cli = temp.path().join("enclavia");
+        std::fs::write(
+            &fake_cli,
+            "#!/bin/sh\ncat\nprintf '%s' ' stderr=fpk-enclavia-secret' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let launcher = EnclaviaLauncher::new(EnclaviaConfig {
+            enclavia_bin: fake_cli,
+            ..EnclaviaConfig::default()
+        });
+        let error = launcher
+            .run_enclavia_capture(
+                Vec::new(),
+                Some("fpk-enclavia-secret"),
+                Duration::from_secs(5),
+            )
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(!message.contains("fpk-enclavia-secret"));
+        assert!(message.contains("<redacted>"));
     }
 
     #[test]
@@ -3996,7 +4340,8 @@ mod tests {
             "runner-1",
             300,
         )
-        .unwrap();
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
 
         let outcome = runner.run_once().unwrap();
         assert_eq!(outcome, RunOnceOutcome::Idle);
@@ -4011,6 +4356,9 @@ mod tests {
     fn run_once_with_no_advertised_classes_claims_no_work() {
         let capacity = RunnerLeaseCapacity {
             runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
+            finite_private_profile: Some(
+                FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+            ),
             ..RunnerLeaseCapacity::default()
         };
         let mut runner = AgentCreationRunner::new(
@@ -4021,7 +4369,8 @@ mod tests {
             "runner-1",
             300,
         )
-        .unwrap();
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
 
         let outcome = runner.run_once().unwrap();
 
@@ -4046,6 +4395,9 @@ mod tests {
             active_sandbox_count: Some(2),
             available_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
+            finite_private_profile: Some(
+                FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+            ),
         };
         let mut runner = AgentCreationRunner::new(
             FakeQueue::idle(),
@@ -4057,6 +4409,7 @@ mod tests {
         )
         .unwrap();
 
+        runner = runner.with_default_finite_private_inference(finite_private_defaults());
         let outcome = runner.run_once().unwrap();
 
         assert_eq!(
@@ -4083,6 +4436,7 @@ mod tests {
             active_sandbox_count: Some(2),
             available_memory_bytes: Some(1024 * 1024 * 1024),
             runtime_capabilities: Some(state_preserving_runtime_capabilities(false)),
+            finite_private_profile: None,
         };
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_lease(sample_lease("agent_request_123")),
@@ -4109,7 +4463,20 @@ mod tests {
 
     #[test]
     fn run_once_restarts_runtime_control_request_before_launch_work() {
-        let runtime_control = sample_runtime_control_lease("runtime_ctl_123");
+        let mut runtime_control = sample_runtime_control_lease("runtime_ctl_123");
+        runtime_control.runtime.placement = Some(RuntimePlacement {
+            runner_class: RunnerClass::LocalDocker,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        });
+        runtime_control.runtime_spec = Some(sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::LocalDocker,
+            BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "http://192.168.64.1:18789".to_string(),
+            )]),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        ));
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()).with_next_heartbeat(
                 RelayHeartbeat {
@@ -4123,6 +4490,7 @@ mod tests {
             300,
         )
         .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults())
         .with_runtime_environment(BTreeMap::from([(
             "FINITE_SITES_API".to_string(),
             "http://192.168.64.1:18789".to_string(),
@@ -4160,11 +4528,47 @@ mod tests {
                 Some("oslo-host-1".to_string())
             )
         );
+        assert_eq!(
+            runner.queue.runtime_control_capacities[0]
+                .as_ref()
+                .and_then(|capacity| capacity.finite_private_profile),
+            Some(FinitePrivateRunnerProfile::CanonicalSpecializationConfigured)
+        );
         assert_eq!(runner.queue.completed_runtime_control.len(), 1);
         assert_eq!(
             runner.queue.heartbeat_checks,
             vec!["oslo-agent-001".to_string(), "oslo-agent-001".to_string()]
         );
+        assert!(runner.queue.failed_runtime_control.is_empty());
+    }
+
+    #[test]
+    fn run_once_rejects_lifecycle_control_without_authoritative_runtime_spec() {
+        let runtime_control = sample_runtime_control_lease("runtime_ctl_no_spec");
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control).with_next_heartbeat(
+                RelayHeartbeat {
+                    last_seen_at: "2026-05-25T13:00:10Z".to_string(),
+                    ..sample_heartbeat("oslo-agent-001")
+                },
+            ),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let error = runner.run_once().unwrap_err();
+        assert!(matches!(
+            error,
+            RunnerError::InvalidRuntimeEnvironment(message)
+                if message == "lifecycle control requires an authoritative RuntimeSpec"
+        ));
+        assert!(runner.launcher.restarted.is_empty());
+        assert!(runner.launcher.stopped.is_empty());
+        assert!(runner.launcher.destroyed.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
         assert!(runner.queue.failed_runtime_control.is_empty());
     }
 
@@ -4203,6 +4607,7 @@ mod tests {
             300,
         )
         .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults())
         .with_runtime_environment(BTreeMap::from([(
             "FINITE_SITES_API".to_string(),
             "https://runner-default.invalid".to_string(),
@@ -4230,6 +4635,173 @@ mod tests {
                 .is_empty(),
             "ordinary restart must not refresh Runtime secrets"
         );
+    }
+
+    #[test]
+    fn runtime_restart_rejects_ambiguous_pre_profile_spec_before_provider_mutation() {
+        // N Runner must fail closed when N-1 Core sends the old ambiguous shape:
+        // a universal key reference without an explicit specialization profile.
+        let mut runtime_control = sample_runtime_control_lease("runtime_ctl_pre_profile");
+        runtime_control.runtime.host_facts.active_inference_profile = None;
+        runtime_control
+            .runtime
+            .host_facts
+            .effective_specialization_bundle = None;
+        runtime_control.runtime.placement = Some(RuntimePlacement {
+            runner_class: RunnerClass::LocalDocker,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        });
+        runtime_control.runtime_spec = Some(sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::LocalDocker,
+            BTreeMap::from([(
+                "FINITE_SITES_API".to_string(),
+                "https://api.finite.chat".to_string(),
+            )]),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        ));
+        if let Some(RuntimeSpecEnvelope::V1(spec)) = runtime_control.runtime_spec.as_mut() {
+            spec.specialization_profile = None;
+        }
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control).with_next_heartbeat(
+                RelayHeartbeat {
+                    last_seen_at: "2026-05-25T13:00:10Z".to_string(),
+                    ..sample_heartbeat("oslo-agent-001")
+                },
+            ),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
+
+        let error = runner.run_once().unwrap_err();
+        assert!(matches!(
+            error,
+            RunnerError::InvalidRuntimeEnvironment(message)
+                if message.contains("must declare specialization_profile")
+        ));
+        assert!(runner.launcher.restarted.is_empty());
+        assert!(runner.launcher.restart_options.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_policy_carries_active_specialization_for_existing_canonical_private_runtime() {
+        let mut runtime_control = sample_runtime_control_lease("runtime_ctl_specialization");
+        runtime_control.runtime.placement = Some(RuntimePlacement {
+            runner_class: RunnerClass::LocalDocker,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        });
+        runtime_control.runtime_spec = Some(sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::LocalDocker,
+            BTreeMap::new(),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        ));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control).with_next_heartbeat(
+                RelayHeartbeat {
+                    last_seen_at: "2026-05-25T13:00:10Z".to_string(),
+                    ..sample_heartbeat("oslo-agent-001")
+                },
+            ),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::RuntimeRestarted { .. }));
+        assert!(
+            runner.launcher.restart_options[0]
+                .specialization_bundle()
+                .is_none(),
+            "ordinary restart preserves the already-converged runtime environment"
+        );
+    }
+
+    #[test]
+    fn canonical_restart_quarantines_missing_effective_specialization_fact() {
+        let mut runtime_control = sample_runtime_control_lease("runtime_ctl_failed_upgrade");
+        runtime_control.runtime.host_facts.active_inference_profile = None;
+        runtime_control
+            .runtime
+            .host_facts
+            .effective_specialization_bundle = None;
+        runtime_control.runtime.placement = Some(RuntimePlacement {
+            runner_class: RunnerClass::LocalDocker,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        });
+        runtime_control.runtime_spec = Some(sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::LocalDocker,
+            BTreeMap::new(),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        ));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
+
+        let outcome = runner.run_once();
+
+        assert!(matches!(
+            outcome,
+            Err(RunnerError::InvalidRuntimeEnvironment(failure_message))
+                if failure_message.contains("requires an exact effective specialization bundle")
+        ));
+        assert!(runner.launcher.restarted.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
+        assert_eq!(runner.queue.failed_runtime_control.len(), 0);
+    }
+
+    #[test]
+    fn canonical_lifecycle_rejects_runner_model_drift_before_provider_mutation() {
+        let mut runtime_control = sample_runtime_control_lease("runtime_ctl_model_drift");
+        runtime_control.runtime.placement = Some(RuntimePlacement {
+            runner_class: RunnerClass::LocalDocker,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        });
+        runtime_control.runtime_spec = Some(sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::LocalDocker,
+            BTreeMap::new(),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        ));
+        let mut defaults = finite_private_defaults();
+        defaults.model = "custom-model".to_string();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(defaults);
+
+        let error = runner.run_once().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with the Runner model")
+        );
+        assert!(runner.launcher.restarted.is_empty());
+        assert!(runner.launcher.restart_options.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
     }
 
     #[test]
@@ -4270,6 +4842,8 @@ mod tests {
 
     #[test]
     fn run_once_dispatches_core_bound_known_good_recovery_to_kata() {
+        // Generic recovery remains supported; specialized recovery is
+        // quarantined until it has a rollback-safe environment path.
         let mut runtime_control = sample_runtime_control_lease_with_kind(
             "runtime_ctl_recovery",
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
@@ -4286,7 +4860,7 @@ mod tests {
                 "FINITE_SITES_API".to_string(),
                 "https://api.finite.chat".to_string(),
             )]),
-            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+            vec![],
         );
         let RuntimeSpecEnvelope::V1(spec) = &mut runtime_spec;
         spec.boot_intent = RuntimeBootIntent::RecoverKnownGood;
@@ -4301,7 +4875,8 @@ mod tests {
             "runner-1",
             300,
         )
-        .unwrap();
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
 
         let outcome = runner.run_once().unwrap();
 
@@ -4326,6 +4901,49 @@ mod tests {
             "recovery must not rewrite persisted capabilities"
         );
         assert!(runner.queue.failed_runtime_control.is_empty());
+    }
+
+    #[test]
+    fn specialized_kata_recovery_fails_before_provider_or_lock_mutation() {
+        let mut runtime_control = sample_runtime_control_lease_with_kind(
+            "runtime_ctl_specialized_recovery",
+            RuntimeControlKind::RecoverKnownGoodChatRuntime,
+        );
+        let placement = RuntimePlacement {
+            runner_class: RunnerClass::Kata,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        };
+        runtime_control.runtime.placement = Some(placement);
+        let mut runtime_spec = sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::Kata,
+            BTreeMap::new(),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        );
+        let RuntimeSpecEnvelope::V1(spec) = &mut runtime_spec;
+        spec.boot_intent = RuntimeBootIntent::RecoverKnownGood;
+        runtime_control.runtime_spec = Some(runtime_spec);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample())
+                .for_kata()
+                .without_core_heartbeat(),
+            FixedLeaseTokens::new(["lease-specialized-recovery"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
+
+        let outcome = runner.run_once().unwrap();
+        assert!(
+            matches!(&outcome, RunOnceOutcome::RuntimeRecoveryFailed { .. }),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert!(runner.launcher.recovered.is_empty());
+        assert!(runner.launcher.restart_options.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
+        assert_eq!(runner.queue.failed_runtime_control.len(), 1);
     }
 
     #[test]
@@ -4366,6 +4984,7 @@ mod tests {
             300,
         )
         .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults())
         .with_runtime_secret_environment(BTreeMap::from([(
             "FAL_KEY".to_string(),
             "fal-added-on-upgrade".to_string(),
@@ -4410,6 +5029,59 @@ mod tests {
     }
 
     #[test]
+    fn run_once_rejects_ambiguous_n_minus_one_upgrade_before_provider_mutation() {
+        let mut runtime_control = sample_runtime_upgrade_lease("runtime_ctl_upgrade_n_minus_one");
+        let placement = RuntimePlacement {
+            runner_class: RunnerClass::Kata,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        };
+        runtime_control.runtime.placement = Some(placement);
+        let mut runtime_spec = sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::Kata,
+            BTreeMap::new(),
+            vec!["FINITE_PRIVATE_API_KEY".to_string(), "FAL_KEY".to_string()],
+        );
+        let RuntimeSpecEnvelope::V1(spec) = &mut runtime_spec;
+        spec.runtime_artifact_id = "artifact-v2".to_string();
+        spec.runtime_image_digest = runtime_control
+            .target_runtime_artifact
+            .as_ref()
+            .unwrap()
+            .reference
+            .clone();
+        spec.specialization_profile = None;
+        runtime_control.runtime_spec = Some(runtime_spec);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample())
+                .for_kata()
+                .without_core_heartbeat(),
+            FixedLeaseTokens::new(["lease-upgrade-n-minus-one"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults())
+        .with_runtime_secret_environment(BTreeMap::from([(
+            "FAL_KEY".to_string(),
+            "fal-added-on-upgrade".to_string(),
+        )]))
+        .unwrap();
+
+        let error = runner.run_once().unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunnerError::InvalidRuntimeEnvironment(message)
+                if message.contains("must declare specialization_profile")
+        ));
+        assert!(runner.launcher.upgraded.is_empty());
+        assert!(runner.launcher.restart_options.is_empty());
+        assert!(runner.queue.completed_runtime_control.is_empty());
+    }
+
+    #[test]
     fn upgrade_capabilities_are_bounded_by_exact_target_artifact() {
         let legacy = sample_runtime_upgrade_lease("runtime_ctl_legacy");
         let bounded = artifact_bounded_upgrade_runtime_capabilities(
@@ -4438,7 +5110,8 @@ mod tests {
             "runner-1",
             300,
         )
-        .unwrap();
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults());
 
         let outcome = runner.run_once().unwrap();
 
@@ -4579,7 +5252,17 @@ mod tests {
 
     #[test]
     fn run_once_fails_restart_when_runtime_does_not_publish_new_heartbeat() {
-        let runtime_control = sample_runtime_control_lease("runtime_ctl_123");
+        let mut runtime_control = sample_runtime_control_lease("runtime_ctl_123");
+        runtime_control.runtime.placement = Some(RuntimePlacement {
+            runner_class: RunnerClass::LocalDocker,
+            runtime_resource_class: RuntimeResourceClass::Vcpu4Memory8Gib,
+        });
+        runtime_control.runtime_spec = Some(sample_runtime_spec(
+            &runtime_control.request.id,
+            RunnerClass::LocalDocker,
+            BTreeMap::new(),
+            vec!["FINITE_PRIVATE_API_KEY".to_string()],
+        ));
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
             FakeLauncher::ready(RuntimeLaunchFacts::sample()),
@@ -4588,6 +5271,7 @@ mod tests {
             300,
         )
         .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults())
         .with_runtime_ready_polling(Duration::from_millis(0), Duration::from_millis(1));
 
         let outcome = runner.run_once().unwrap();
@@ -4920,6 +5604,12 @@ mod tests {
             Some("finite-agent_123")
         );
         assert_eq!(runner.launcher.launch_options.len(), 1);
+        assert_eq!(
+            runner.queue.lease_capacities[0]
+                .as_ref()
+                .and_then(|capacity| capacity.finite_private_profile),
+            Some(FinitePrivateRunnerProfile::CanonicalSpecializationConfigured)
+        );
         let finite_private = runner.launcher.launch_options[0]
             .finite_private
             .as_ref()
@@ -5037,10 +5727,10 @@ mod tests {
     }
 
     #[test]
-    fn run_once_launches_without_specialization_when_credential_is_missing() {
-        let lease = sample_lease("agent_request_123");
+    fn run_once_refuses_canonical_finite_private_before_creation_lease_when_specialization_is_missing()
+     {
         let mut runner = AgentCreationRunner::new(
-            FakeQueue::with_lease(lease),
+            FakeQueue::idle(),
             FakeLauncher::ready(RuntimeLaunchFacts::sample()),
             FixedLeaseTokens::new(["lease-1"]),
             "runner-1",
@@ -5051,25 +5741,84 @@ mod tests {
 
         let outcome = runner.run_once().unwrap();
 
-        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
-        assert_eq!(runner.launcher.launch_count, 1);
-        assert_eq!(runner.queue.provisioned.len(), 1);
-        assert!(
-            runner.launcher.launch_options[0]
-                .finite_private
-                .as_ref()
-                .expect("Finite Private key should be passed to launcher")
-                .specialization_bundle
-                .is_none()
-        );
+        assert!(matches!(
+            outcome,
+            RunOnceOutcome::CapacityUnavailable { ref reason, .. }
+                if reason.contains("canonical Finite Private DeepSeek V4 Flash 0731 requires")
+        ));
+        assert_eq!(runner.queue.runtime_control_leases.len(), 1);
+        assert!(runner.queue.leases.is_empty());
+        assert_eq!(runner.launcher.launch_count, 0);
+        assert!(runner.queue.provisioned.is_empty());
         assert!(runner.queue.failed.is_empty());
     }
 
     #[test]
-    fn run_once_fails_closed_when_configured_specialization_is_invalid() {
-        let lease = sample_lease("agent_request_123");
+    fn run_once_rejects_ambiguous_n_minus_one_creation_spec_before_provider_mutation() {
+        let mut lease = sample_spec_lease("agent_request_n_minus_one");
+        if let Some(RuntimeSpecEnvelope::V1(spec)) = lease.request.runtime_spec.as_mut() {
+            spec.specialization_profile = None;
+        }
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_lease(lease),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(finite_private_defaults())
+        .with_runtime_secret_environment(BTreeMap::from([(
+            "FAL_KEY".to_string(),
+            "fal-test-secret".to_string(),
+        )]))
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(
+            outcome,
+            RunOnceOutcome::LaunchFailed { ref failure_message, .. }
+                if failure_message.contains("must declare specialization_profile")
+        ));
+        assert_eq!(runner.launcher.launch_count, 0);
+        assert!(runner.launcher.launch_options.is_empty());
+        assert!(runner.queue.provisioned.is_empty());
+        assert!(runner.queue.registered.is_empty());
+    }
+
+    #[test]
+    fn run_once_keeps_existing_runtime_controls_available_when_specialization_is_missing() {
+        let runtime_control =
+            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Stop);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults::default());
+
+        let outcome = runner.run_once().unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::RuntimeStopped {
+                request_id: runtime_control.request.id,
+                runtime_id: runtime_control.runtime.id,
+            }
+        );
+        assert_eq!(runner.queue.runtime_control_leases.len(), 1);
+        assert!(runner.queue.leases.is_empty());
+        assert_eq!(runner.queue.completed_runtime_control.len(), 1);
+    }
+
+    #[test]
+    fn run_once_refuses_empty_specialization_credential_before_creation_lease() {
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::idle(),
             FakeLauncher::ready(RuntimeLaunchFacts::sample()),
             FixedLeaseTokens::new(["lease-1"]),
             "runner-1",
@@ -5086,14 +5835,113 @@ mod tests {
 
         let outcome = runner.run_once().unwrap();
 
-        assert!(matches!(outcome, RunOnceOutcome::LaunchFailed { .. }));
+        assert!(matches!(
+            outcome,
+            RunOnceOutcome::CapacityUnavailable { ref reason, .. }
+                if reason.contains("specialization worker credential is empty or oversized")
+        ));
+        assert_eq!(runner.queue.runtime_control_leases.len(), 1);
+        assert!(runner.queue.leases.is_empty());
         assert_eq!(runner.launcher.launch_count, 0);
         assert!(runner.queue.provisioned.is_empty());
-        assert!(
-            runner.queue.failed[0]
-                .failure_message
-                .contains("specialization worker credential is empty or oversized")
+        assert!(runner.queue.failed.is_empty());
+    }
+
+    #[test]
+    fn run_once_refuses_oversized_specialization_credential_before_creation_lease() {
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::idle(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults {
+            specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
+                bundle_id: DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_owned(),
+                worker_api_key: "s".repeat(MAX_RUNTIME_SECRET_ENVIRONMENT_VALUE_BYTES + 1),
+            }),
+            ..FinitePrivateRuntimeDefaults::default()
+        });
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(
+            outcome,
+            RunOnceOutcome::CapacityUnavailable { ref reason, .. }
+                if reason.contains("specialization worker credential is empty or oversized")
+        ));
+        assert_eq!(runner.queue.runtime_control_leases.len(), 1);
+        assert!(runner.queue.leases.is_empty());
+        assert_eq!(runner.launcher.launch_count, 0);
+    }
+
+    #[test]
+    fn run_once_refuses_legacy_specialization_bundle_without_exposing_credential() {
+        let worker_credential = "do-not-leak-specialization-worker-credential";
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::idle(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults {
+            specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
+                bundle_id: "aeon-multimodal".to_owned(),
+                worker_api_key: worker_credential.to_owned(),
+            }),
+            ..FinitePrivateRuntimeDefaults::default()
+        });
+
+        let outcome = runner.run_once().unwrap();
+        let diagnostic = match outcome {
+            RunOnceOutcome::CapacityUnavailable { reason, .. } => reason,
+            other => panic!("expected launch failure, got {other:?}"),
+        };
+
+        assert!(diagnostic.contains("unsupported Finite Private specialization bundle"));
+        assert!(!diagnostic.contains(worker_credential));
+        assert_eq!(runner.queue.runtime_control_leases.len(), 1);
+        assert!(runner.queue.leases.is_empty());
+        assert_eq!(runner.launcher.launch_count, 0);
+    }
+
+    #[test]
+    fn run_once_leaves_noncanonical_finite_private_profiles_outside_specialization_policy() {
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_default_finite_private_inference(FinitePrivateRuntimeDefaults {
+            model: "another-finite-private-model".to_owned(),
+            specialization_bundle: None,
+            ..FinitePrivateRuntimeDefaults::default()
+        });
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert_eq!(runner.queue.runtime_control_leases.len(), 1);
+        assert_eq!(runner.queue.leases.len(), 1);
+        assert_eq!(
+            runner.queue.lease_capacities[0]
+                .as_ref()
+                .and_then(|capacity| capacity.finite_private_profile),
+            None
         );
+        let finite_private = runner.launcher.launch_options[0]
+            .finite_private
+            .as_ref()
+            .expect("noncanonical Finite Private still receives its inference key");
+        assert_eq!(finite_private.model, "another-finite-private-model");
+        assert!(finite_private.specialization_bundle.is_none());
     }
 
     #[test]
@@ -5737,7 +6585,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_runtime_readiness_depends_only_on_generic_health() {
+    fn docker_runtime_admission_requires_explicit_admission_health() {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5749,7 +6597,7 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..bytes_read]);
             assert!(request.starts_with("GET /healthz "));
 
-            let body = r#"{"ready":true}"#;
+            let body = r#"{"ready":true,"admission_ready":true}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -5776,6 +6624,84 @@ mod tests {
         };
 
         launcher.wait_for_runtime_http(&plan).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn runtime_admission_fails_closed_without_a_boolean_admission_decision() {
+        for value in [
+            serde_json::json!({"ready": true}),
+            serde_json::json!({"ready": true, "admission_ready": null}),
+            serde_json::json!({"ready": true, "admission_ready": "true"}),
+            serde_json::json!({"ready": false, "admission_ready": true}),
+        ] {
+            assert!(!runtime_admission_ready(&value), "{value}");
+        }
+        assert!(runtime_admission_ready(
+            &serde_json::json!({"ready": true, "admission_ready": true})
+        ));
+    }
+
+    #[test]
+    fn provider_readiness_rejects_desired_only_authoritative_health() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"ready":true,"admission_ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false,"cleanup_blocked":false}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let error = wait_for_http_json_admission(
+            &format!("http://{address}/healthz"),
+            "authoritative runtime /healthz",
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("did not become ready"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn enclavia_readiness_rejects_an_ineffective_specialization_health_response() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let launcher = EnclaviaLauncher::new(EnclaviaConfig {
+            readiness_timeout: Duration::from_millis(30),
+            readiness_interval: Duration::from_millis(5),
+            ..EnclaviaConfig::default()
+        });
+        let endpoint = EnclaviaEndpoint {
+            enclave_id: "enclave-health-test".to_string(),
+            hostname: "127.0.0.1".to_string(),
+            public_base_url: format!("http://127.0.0.1:{port}"),
+            health_url: format!("http://127.0.0.1:{port}/healthz"),
+            contact_url: format!("http://127.0.0.1:{port}/contact"),
+        };
+        let error = launcher.wait_for_runtime_http(&endpoint).unwrap_err();
+        assert!(error.to_string().contains("did not become ready"));
         server.join().unwrap();
     }
 
@@ -6412,6 +7338,12 @@ mod tests {
             lease: &RuntimeControlLease,
             options: &RuntimeRestartOptions,
         ) -> Result<(), RunnerError> {
+            if options.specialization_bundle().is_some() {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Kata recovery cannot converge specialization; use an immutable runtime upgrade"
+                        .to_string(),
+                ));
+            }
             self.recovered.push(lease.runtime.source_machine_id.clone());
             self.restart_options.push(options.clone());
             self.restart_result
@@ -6579,6 +7511,10 @@ mod tests {
         environment: BTreeMap<String, String>,
         secret_references: Vec<String>,
     ) -> RuntimeSpecEnvelope {
+        let specialization_profile = secret_references
+            .iter()
+            .any(|reference| reference == "FINITE_PRIVATE_API_KEY")
+            .then_some(RuntimeSpecializationProfile::FinitePrivateMultimodal);
         RuntimeSpecEnvelope::V1(RuntimeSpecV1 {
             operation_id: operation_id.to_string(),
             project_id: "project_123".to_string(),
@@ -6608,6 +7544,7 @@ mod tests {
             boot_intent: RuntimeBootIntent::Normal,
             environment,
             secret_references,
+            specialization_profile,
         })
     }
 
@@ -6706,6 +7643,9 @@ mod tests {
                     runtime_host: "oslo-host-1".to_string(),
                     runtime_status: RuntimeSummaryStatus::Online,
                     active_inference_profile: Some("finite-private".to_string()),
+                    effective_specialization_bundle: Some(
+                        DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_string(),
+                    ),
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
                 },

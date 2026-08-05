@@ -20,7 +20,7 @@ import json
 import sys
 
 if sys.argv[1:] == ["auth", "status"]:
-    print(json.dumps({"npub": "npub1agent", "account_id": "a" * 64}))
+    print(json.dumps({"npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme", "account_id": "a" * 64}))
     sys.exit(0)
 sys.exit(2)
 """
@@ -46,11 +46,13 @@ class AgentHealthServerTest(unittest.TestCase):
                 "FINITECHAT_HOME",
                 "FINITECHAT_BIN",
                 "FINITE_AGENT_BOOT_INTENT_JSON",
+                "FINITE_SPECIALIZATION_BUNDLE",
             )
         }
         os.environ["FINITECHAT_HOME"] = str(self.agent_home)
         os.environ["FINITECHAT_BIN"] = str(self.fake_bin)
         os.environ.pop("FINITE_AGENT_BOOT_INTENT_JSON", None)
+        os.environ.pop("FINITE_SPECIALIZATION_BUNDLE", None)
         try:
             spec = importlib.util.spec_from_file_location(
                 "agent_health_server_under_test", HEALTH_SERVER
@@ -73,8 +75,35 @@ class AgentHealthServerTest(unittest.TestCase):
             json.dumps(payload), encoding="utf-8"
         )
 
+    def write_identity(self, payload: object) -> None:
+        self.fake_bin.write_text(
+            f"#!/usr/bin/env python3\nimport json\nprint(json.dumps({payload!r}))\n",
+            encoding="utf-8",
+        )
+        self.fake_bin.chmod(0o755)
+
     def write_startup_report(self, payload: object) -> None:
         (self.agent_home / "startup-report.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def write_agentd_status(self, specialization: object) -> None:
+        status_path = self.agent_home / "agentd" / "status.json"
+        status_path.parent.mkdir(exist_ok=True)
+        status_path.write_text(
+            json.dumps(
+                {
+                    "version": "0.1.0",
+                    "processes": {
+                        "processes": {
+                            name: {"state": "running"}
+                            for name in ("finitechat", "health", "hermes")
+                        }
+                    },
+                    "specialization": specialization,
+                    "raw_config": {"worker_api_key": "must-not-escape"},
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def test_contact_is_the_agent_principal_not_an_invite_session(self) -> None:
         self.write_bridge({"status": "connected", "ok": True})
@@ -82,8 +111,12 @@ class AgentHealthServerTest(unittest.TestCase):
         payload = self.health.runtime_health()
 
         self.assertTrue(self.health.runtime_ready(payload))
-        self.assertEqual(payload["npub"], "npub1agent")
-        self.assertEqual(payload["agent_npub"], "npub1agent")
+        self.assertEqual(
+            payload["npub"], "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme"
+        )
+        self.assertEqual(
+            payload["agent_npub"], "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme"
+        )
         self.assertEqual(payload["account_id"], "a" * 64)
         self.assertEqual(payload["bridge"], {"status": "connected", "ok": True})
         self.assertEqual(payload["agentd"], {"status": "starting", "ok": True})
@@ -103,6 +136,27 @@ class AgentHealthServerTest(unittest.TestCase):
         missing_identity = self.health.runtime_health()
         self.assertFalse(self.health.runtime_ready(missing_identity))
         self.assertIsNone(missing_identity["agent_npub"])
+
+    def test_malformed_identity_fails_closed(self) -> None:
+        self.write_bridge({"status": "connected", "ok": True})
+        for identity in (
+            {},
+            {"npub": "wrong", "account_id": "account"},
+            {"npub": 1, "account_id": "account"},
+        ):
+            with self.subTest(identity=identity):
+                self.write_identity(identity)
+                payload = self.health.runtime_health()
+                self.assertFalse(payload["ready"])
+                self.assertFalse(self.health.runtime_ready(payload))
+                self.assertEqual(payload["error"], "identity unavailable")
+
+    def test_oversized_identity_fails_closed(self) -> None:
+        self.write_bridge({"status": "connected", "ok": True})
+        self.write_identity({"npub": "npub1" + "a" * 100, "account_id": "account"})
+        payload = self.health.runtime_health()
+        self.assertFalse(payload["ready"])
+        self.assertFalse(self.health.runtime_ready(payload))
 
     def test_agentd_required_waits_for_all_supervised_processes(self) -> None:
         self.health.__dict__["AGENTD_REQUIRED"] = True
@@ -158,7 +212,10 @@ class AgentHealthServerTest(unittest.TestCase):
                     }
                 ],
                 "refusals": [],
-                "identity": {"npub": "npub1agent", "secret": "must-not-escape"},
+                "identity": {
+                    "npub": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzqujme",
+                    "secret": "must-not-escape",
+                },
                 "state_roots": {
                     "/data": {"present": True, "writable": True, "path": "/secret"},
                     "/data/agent": {"present": True, "writable": True},
@@ -243,6 +300,150 @@ class AgentHealthServerTest(unittest.TestCase):
             payload["startup"]["error_code"],
             "startup_report_missing_for_recovery_intent",
         )
+
+    def test_required_specialization_is_redacted_and_gates_admission_not_chat(self) -> None:
+        self.health.__dict__["EXPECTED_SPECIALIZATION_BUNDLE"] = "finite-private-multimodal-v1"
+        self.addCleanup(setattr, self.health, "EXPECTED_SPECIALIZATION_BUNDLE", None)
+        self.write_bridge({"status": "connected", "ok": True})
+
+        cases = (
+            None,
+            {"bundle_id": None, "desired": False, "effective": False, "cleanup_blocked": False},
+            {
+                "bundle_id": "wrong-bundle",
+                "desired": True,
+                "effective": True,
+                "cleanup_blocked": False,
+            },
+            {
+                "bundle_id": "finite-private-multimodal-v1",
+                "desired": True,
+                "effective": False,
+                "cleanup_blocked": False,
+            },
+            {
+                "bundle_id": "finite-private-multimodal-v1",
+                "desired": False,
+                "effective": False,
+                "cleanup_blocked": True,
+            },
+        )
+        for specialization in cases:
+            with self.subTest(specialization=specialization):
+                self.write_agentd_status(specialization)
+                payload = self.health.runtime_health()
+                self.assertTrue(self.health.runtime_ready(payload))
+                self.assertTrue(payload["ready"])
+                self.assertFalse(payload["admission_ready"])
+
+        self.write_agentd_status(
+            {
+                "bundle_id": "finite-private-multimodal-v1",
+                "desired": True,
+                "effective": True,
+                "cleanup_blocked": False,
+            }
+        )
+        payload = self.health.runtime_health()
+        self.assertTrue(self.health.runtime_ready(payload))
+        self.assertTrue(payload["ready"])
+        self.assertTrue(payload["admission_ready"])
+        self.assertEqual(
+            payload["agentd"]["specialization"],
+            {
+                "bundle_id": "finite-private-multimodal-v1",
+                "desired": True,
+                "effective": True,
+            },
+        )
+        self.assertNotIn("must-not-escape", json.dumps(payload))
+
+    def test_malformed_specialization_status_fails_closed_when_required(self) -> None:
+        self.health.__dict__["EXPECTED_SPECIALIZATION_BUNDLE"] = "finite-private-multimodal-v1"
+        self.addCleanup(setattr, self.health, "EXPECTED_SPECIALIZATION_BUNDLE", None)
+        self.write_bridge({"status": "connected", "ok": True})
+        self.write_agentd_status(
+            {
+                "bundle_id": "finite-private-multimodal-v1",
+                "desired": "true",
+                "effective": True,
+                "cleanup_blocked": False,
+            }
+        )
+        payload = self.health.runtime_health()
+        self.assertTrue(self.health.runtime_ready(payload))
+        self.assertFalse(payload["admission_ready"])
+        self.assertNotIn("specialization", payload["agentd"])
+
+    def test_noncanonical_runtime_keeps_generic_readiness_without_specialization(self) -> None:
+        self.write_bridge({"status": "connected", "ok": True})
+        self.write_agentd_status(None)
+        payload = self.health.runtime_health()
+        self.assertTrue(self.health.runtime_ready(payload))
+        self.assertTrue(payload["admission_ready"])
+
+    def test_bridge_projection_is_allowlisted_and_bounded(self) -> None:
+        self.write_bridge(
+            {
+                "status": "connected" + "x" * 1000,
+                "ok": True,
+                "error": "bridge-secret" + "x" * 1000,
+                "raw_config": "must-not-escape",
+                "service_url": "https://internal.example",
+            }
+        )
+        payload = self.health.runtime_health()
+        bridge = payload["bridge"]
+        self.assertEqual(bridge["status"], ("connected" + "x" * 1000)[:64])
+        self.assertEqual(bridge["error"], "bridge error")
+        self.assertNotIn("raw_config", bridge)
+        self.assertNotIn("internal.example", json.dumps(bridge))
+
+    def test_oversized_health_artifacts_fail_closed_and_startup_lists_are_capped(self) -> None:
+        self.write_bridge({"status": "connected", "ok": True})
+        oversized = self.agent_home / "hermes-bridge-status.json"
+        oversized.write_text(
+            "{" + '"x":"' + "x" * (self.health.MAX_HEALTH_ARTIFACT_BYTES + 1) + '"}',
+            encoding="utf-8",
+        )
+        payload = self.health.runtime_health()
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["bridge"]["status"], "unavailable")
+
+        self.write_bridge({"status": "connected", "ok": True})
+        self.write_startup_report(
+            {
+                "schema_version": 1,
+                "report_kind": "finite_agent_startup",
+                "boot_mode": "recover_known_good",
+                "status": "completed",
+                "phase": "complete",
+                "actions": [
+                    {"action": "transient_cleanup", "status": "completed"}
+                    for _ in range(self.health.MAX_STARTUP_ITEMS + 10)
+                ],
+                "refusals": [],
+            }
+        )
+        payload = self.health.runtime_health()
+        self.assertEqual(len(payload["startup"]["actions"]), self.health.MAX_STARTUP_ITEMS)
+
+    def test_required_specialization_changes_only_admission_ready_field(self) -> None:
+        self.health.__dict__["EXPECTED_SPECIALIZATION_BUNDLE"] = "finite-private-multimodal-v1"
+        self.addCleanup(setattr, self.health, "EXPECTED_SPECIALIZATION_BUNDLE", None)
+        self.write_bridge({"status": "connected", "ok": True})
+        self.write_agentd_status(
+            {
+                "bundle_id": "finite-private-multimodal-v1",
+                "desired": True,
+                "effective": False,
+                "cleanup_blocked": False,
+            }
+        )
+        payload = self.health.runtime_health()
+        self.assertTrue(payload["ready"])
+        self.assertFalse(payload["admission_ready"])
+        self.assertEqual(self.health.runtime_http_status(payload), 200)
 
 
 if __name__ == "__main__":

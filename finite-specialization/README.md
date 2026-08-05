@@ -48,7 +48,8 @@ building a router or generator.
   fragment is
   [config/working/vision-input.spark-nemotron3-nano.hermes-fragment.yaml](config/working/vision-input.spark-nemotron3-nano.hermes-fragment.yaml).
 - [Austin Multimodal Spark AEON Gemma 12B](docs/checkpoints/2026-07-13-austin-multimodal-spark-aeon-gemma12.md)
-  is the historical rollback checkpoint retained for the prior public slot.
+  is retained only as historical verification evidence; it is not a runtime
+  configuration or rollback target.
 - [Austin Vision Spark Qwopus](docs/checkpoints/2026-07-07-austin-vision-spark-qwopus.md)
   is the historical first verified specialization: a text-only Hermes agent using
   `auxiliary.vision` backed by the canonical Spark public-beta AEON Gemma 12B

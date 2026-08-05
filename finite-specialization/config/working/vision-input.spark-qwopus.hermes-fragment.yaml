@@ -14,7 +14,7 @@ specialization:
   status: verified_first_working_specialization
   verified_at: "2026-07-07"
   capability_id: vision-input
-  target_agent_profile: glm52-text-agent
+  target_agent_profile: finite-private-text-agent
   hermes_surface: auxiliary.vision
   backing_plane: spark-public-beta
 

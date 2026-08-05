@@ -11,7 +11,7 @@ from hermes_cli.tools_config import _get_platform_tools
 from model_tools import get_tool_definitions
 from tools.vision_tools import vision_analyze_tool
 
-MARKER = "FINITE_AEON_HERMES_PROBE "
+MARKER = "FINITE_MULTIMODAL_HERMES_PROBE "
 RED_FIXTURE = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAEAQMAAACTPww9AAAAA1BMVEX/AAAZ4gk3"

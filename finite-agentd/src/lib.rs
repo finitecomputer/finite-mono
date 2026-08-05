@@ -8,12 +8,12 @@ mod transport;
 use thiserror::Error;
 
 pub use config::{
-    AeonSpecializationDesiredStateV1, ConfigApplyResultV1, ConfigManager, ConfigOfferPolicyV1,
-    ConfigPreviewV1, DEFAULT_AEON_SPECIALIZATION_BUNDLE, DEFAULT_AEON_SPECIALIZATION_MODEL,
-    DEFAULT_AEON_SPECIALIZATION_WORKER_URL, HermesConfigOfferV1, HermesConfigRollbackV1,
-    SpecializationCapabilitiesV1, SpecializationNormalizationLimitsV1,
-    SpecializationPromptVersionsV1, SpecializationReconcileResultV1, VISION_CONFIG_PATH,
-    redact_value,
+    ConfigApplyResultV1, ConfigManager, ConfigOfferPolicyV1, ConfigPreviewV1,
+    DEFAULT_MULTIMODAL_SPECIALIZATION_BUNDLE, DEFAULT_MULTIMODAL_SPECIALIZATION_MODEL,
+    DEFAULT_MULTIMODAL_SPECIALIZATION_WORKER_URL, HermesConfigOfferV1, HermesConfigRollbackV1,
+    MultimodalSpecializationDesiredStateV1, SpecializationCapabilitiesV1,
+    SpecializationNormalizationLimitsV1, SpecializationPromptVersionsV1,
+    SpecializationReconcileResultV1, VISION_CONFIG_PATH, redact_value,
 };
 pub use daemon::{
     AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, StartupSpecializationBundleConfig,
@@ -42,6 +42,8 @@ pub enum AgentdError {
     Config(String),
     #[error("configuration conflict: {0}")]
     ConfigConflict(String),
+    #[error("startup specialization cleanup blocked: {0}")]
+    CleanupBlocked(String),
     #[error("unsupported configuration path: {0}")]
     UnsupportedConfigPath(String),
     #[error("transport failure: {0}")]
@@ -64,6 +66,7 @@ impl AgentdError {
             Self::InvalidPayload(_) => "invalid_payload",
             Self::ConflictingRequestId(_) => "conflicting_request_id",
             Self::ConfigConflict(_) => "config_conflict",
+            Self::CleanupBlocked(_) => "cleanup_blocked",
             Self::UnsupportedConfigPath(_) => "unsupported_config_path",
             Self::Config(_) | Self::Yaml(_) => "config_invalid",
             Self::Supervisor(_) => "supervisor_unavailable",
@@ -80,6 +83,7 @@ impl AgentdError {
             Self::UnsupportedCommand(command) => format!("Command {command:?} is not supported."),
             Self::InvalidPayload(message)
             | Self::ConfigConflict(message)
+            | Self::CleanupBlocked(message)
             | Self::Config(message)
             | Self::Supervisor(message)
             | Self::Transport(message)

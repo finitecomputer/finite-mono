@@ -1041,6 +1041,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "finitechat-proto 0.1.0",
+ "fs4",
  "futures-util",
  "reqwest",
  "rusqlite",

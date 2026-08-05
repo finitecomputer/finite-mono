@@ -9,7 +9,7 @@ specialization:
   status: active_verified_specialization
   verified_at: "2026-07-18"
   capability_id: vision-input
-  target_agent_profile: glm52-text-agent
+  target_agent_profile: finite-private-text-agent
   hermes_surface: auxiliary.vision
   backing_plane: spark-public-beta
 
@@ -35,13 +35,13 @@ compatibility_bridge:
   secret_inputs:
     FINITE_SPECIALIZATION_WORKER_BEARER_TOKEN: external_secret_only
   reconciliation:
-    command: agent.specialization.aeon.reconcile
-    schema: finite.agent.specialization.aeon.reconcile.v1
+    command: agent.specialization.multimodal.reconcile
+    schema: finite.agent.specialization.multimodal.reconcile.v1
     owned_path: auxiliary.vision
   prompt_versions:
-    image: aeon-image-analysis-v1
-    audio: aeon-audio-understanding-v1
-    video: aeon-video-understanding-v1
+    image: finite-multimodal-image-v1
+    audio: finite-multimodal-audio-v1
+    video: finite-multimodal-video-v1
   normalization_limits:
     max_images: 8
     max_inline_bytes: 16777216

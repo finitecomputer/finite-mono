@@ -55,14 +55,14 @@ spark_backing:
     - cron_delivery
 
 agent_profiles:
-  - id: glm52-text-agent
+  - id: finite-private-text-agent
     status: example
     main_model:
-      provider: zai
-      model: glm-5.2
+      provider: custom
+      model: deepseek-v4-flash-0731
       multimodal: false
-    notes: Text-only main agent profile. Confirm the provider alias and exact
-      model ID against the live Hermes install before materializing.
+    notes: Canonical text-only Finite Private agent profile. Specialization
+      identity stays independent of the current main-model name.
 
 capabilities:
   - id: semantic-embedding
@@ -157,7 +157,7 @@ capabilities:
       - id: vision-input.spark-nemotron3-nano
         status: active_verified_specialization
         verified_at: "2026-07-18"
-        agent_profile: glm52-text-agent
+        agent_profile: finite-private-text-agent
         hermes_fragment: config/working/vision-input.spark-nemotron3-nano.hermes-fragment.yaml
         checkpoint: docs/checkpoints/2026-07-18-austin-multimodal-spark-nemotron3-nano.md
         model: nemotron-3-nano-omni-30b-a3b-reasoning-nvfp4-fast
@@ -233,8 +233,8 @@ capabilities:
       checking.
 
 open_questions:
-  - Which provider alias and exact model ID identify GLM 5.2 in the target
-    Hermes install?
+  - Which provider alias and exact model ID identify the canonical Finite
+    Private model in the target Hermes install?
   - Which provider should own vision for text-only main models?
   - Which STT/TTS providers are default for Finite-hosted versus self-managed
     machines?

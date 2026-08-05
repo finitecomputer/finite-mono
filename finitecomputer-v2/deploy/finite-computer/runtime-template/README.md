@@ -71,9 +71,22 @@ runtime image. It packages:
 The OCI healthcheck performs one bounded loopback request to `/healthz`. That
 endpoint is supervised by `finite-agentd` and returns success only when the
 durable identity is usable, the Finite Chat bridge is healthy, and the
-`finitechat`, health, and Hermes processes are all running. Binary, dependency,
-skill, and version validation happens once while building the image; it is not
-repeated every 30 seconds as part of runtime liveness.
+`finitechat`, health, and Hermes processes are all running. For a runtime
+launched with `FINITE_SPECIALIZATION_BUNDLE`, the same response also projects
+agentd's secret-free `specialization` state (`bundle_id`, `desired`, and
+`effective`). The public `ready` field and HTTP status protect basic chat and
+process health. The separate `admission_ready` field additionally requires the
+expected bundle to be desired and effective for the current Hermes generation.
+Runners require `admission_ready` before accepting new or replacement compute;
+a missing, malformed, wrong-bundle, desired-only, ineffective, or
+cleanup-blocked state therefore fails creation and upgrade without making an
+already-serving chat runtime fail its recurring OCI healthcheck. Runtimes
+without that environment variable report both fields from generic readiness.
+Agentd periodically re-verifies an admitted specialization. A later semantic
+failure clears `admission_ready` while leaving `ready` unchanged; it does not
+restart or replace the serving Runtime.
+Binary, dependency, skill, and version validation happens once while building
+the image; it is not repeated every 30 seconds as part of runtime liveness.
 
 On a genuinely fresh Agent Home, the gateway launcher atomically seeds the
 image baseline into the durable managed-skills directory and exposes that path

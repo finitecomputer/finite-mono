@@ -36,6 +36,141 @@ pub struct ConfigHistory {
     pub rolled_back: bool,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct StartupSpecializationState {
+    pub phase: StartupSpecializationPhase,
+    pub proposal_id: String,
+    pub before_bytes: Vec<u8>,
+    pub vision_before: Option<serde_json::Value>,
+    pub video_toolset_added: bool,
+    pub exact_restore_eligible: bool,
+    pub applied_bytes: Vec<u8>,
+    pub transition_before_bytes: Vec<u8>,
+    pub previous_applied_bytes: Option<Vec<u8>>,
+    pub previous_proposal_id: Option<String>,
+    pub previous_video_toolset_added: Option<bool>,
+    pub vision_applied_hash: String,
+    pub previous_vision_applied_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupSpecializationPhase {
+    Applying,
+    Active,
+    Removing,
+    SemanticRollback,
+}
+
+impl StartupSpecializationPhase {
+    pub fn parse(value: &str) -> Result<Self, AgentdError> {
+        match value {
+            "applying" => Ok(Self::Applying),
+            "active" => Ok(Self::Active),
+            "removing" => Ok(Self::Removing),
+            "semantic_rollback" => Ok(Self::SemanticRollback),
+            _ => Err(AgentdError::Ledger(format!(
+                "startup specialization state has invalid phase {value:?}"
+            ))),
+        }
+    }
+}
+
+impl StartupSpecializationState {
+    fn validate(self) -> Result<Self, AgentdError> {
+        let previous_fields = [
+            self.previous_applied_bytes.is_some(),
+            self.previous_proposal_id.is_some(),
+            self.previous_video_toolset_added.is_some(),
+            self.previous_vision_applied_hash.is_some(),
+        ];
+        if previous_fields.iter().any(|present| *present)
+            && !previous_fields.iter().all(|present| *present)
+        {
+            return Err(AgentdError::Ledger(
+                "startup specialization prior-generation snapshot is incomplete".to_owned(),
+            ));
+        }
+        if self.phase == StartupSpecializationPhase::SemanticRollback
+            && !previous_fields.iter().all(|present| *present)
+        {
+            return Err(AgentdError::Ledger(
+                "startup specialization semantic rollback has no complete prior generation"
+                    .to_owned(),
+            ));
+        }
+        if previous_fields.iter().all(|present| *present)
+            && (self
+                .previous_proposal_id
+                .as_deref()
+                .is_none_or(str::is_empty)
+                || self
+                    .previous_vision_applied_hash
+                    .as_deref()
+                    .is_none_or(str::is_empty))
+        {
+            return Err(AgentdError::Ledger(
+                "startup specialization prior-generation identity metadata is empty".to_owned(),
+            ));
+        }
+        if self.proposal_id.is_empty() || self.vision_applied_hash.is_empty() {
+            return Err(AgentdError::Ledger(
+                "startup specialization state has empty identity metadata".to_owned(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+impl PartialEq<&str> for StartupSpecializationPhase {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(
+            (self, *other),
+            (Self::Applying, "applying")
+                | (Self::Active, "active")
+                | (Self::Removing, "removing")
+                | (Self::SemanticRollback, "semantic_rollback")
+        )
+    }
+}
+
+impl std::fmt::Debug for StartupSpecializationState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StartupSpecializationState")
+            .field("phase", &self.phase)
+            .field("proposal_id", &self.proposal_id)
+            .field("before_bytes", &"<redacted>")
+            .field("vision_before", &"<redacted>")
+            .field("video_toolset_added", &self.video_toolset_added)
+            .field("exact_restore_eligible", &self.exact_restore_eligible)
+            .field("applied_bytes", &"<redacted>")
+            .field("transition_before_bytes", &"<redacted>")
+            .field("previous_applied_bytes", &"<redacted>")
+            .field("previous_proposal_id", &self.previous_proposal_id)
+            .field(
+                "previous_video_toolset_added",
+                &self.previous_video_toolset_added,
+            )
+            .field("vision_applied_hash", &self.vision_applied_hash)
+            .field(
+                "previous_vision_applied_hash",
+                &self.previous_vision_applied_hash,
+            )
+            .finish()
+    }
+}
+
+pub struct StartupSpecializationApplyIntent<'a> {
+    pub proposal_id: &'a str,
+    pub before_bytes: &'a [u8],
+    pub transition_before_bytes: &'a [u8],
+    pub vision_before: Option<&'a serde_json::Value>,
+    pub video_toolset_added: bool,
+    pub exact_restore_eligible: bool,
+    pub applied_bytes: &'a [u8],
+    pub vision_applied_hash: &'a str,
+}
+
 impl Ledger {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, AgentdError> {
         let path = path.into();
@@ -70,6 +205,25 @@ impl Ledger {
                 proposal_id TEXT NOT NULL,
                 applied_hash TEXT NOT NULL,
                 FOREIGN KEY(proposal_id) REFERENCES config_history(proposal_id)
+            );
+            CREATE TABLE IF NOT EXISTS startup_specialization_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                phase TEXT NOT NULL CHECK (
+                    phase IN ('applying', 'active', 'removing', 'semantic_rollback')
+                ),
+                proposal_id TEXT NOT NULL,
+                before_bytes BLOB NOT NULL,
+                vision_before_json TEXT,
+                video_toolset_added INTEGER NOT NULL,
+                exact_restore_eligible INTEGER NOT NULL DEFAULT 1,
+                applied_bytes BLOB NOT NULL,
+                transition_before_bytes BLOB NOT NULL,
+                previous_applied_bytes BLOB,
+                previous_proposal_id TEXT,
+                previous_video_toolset_added INTEGER,
+                vision_applied_hash TEXT NOT NULL,
+                previous_vision_applied_hash TEXT,
+                updated_at_ms INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS authorized_principals (
                 account_id TEXT PRIMARY KEY,
@@ -272,6 +426,319 @@ impl Ledger {
         Ok(())
     }
 
+    pub fn startup_specialization_state(
+        &self,
+    ) -> Result<Option<StartupSpecializationState>, AgentdError> {
+        let connection = self.connection()?;
+        let record = connection
+            .query_row(
+                "SELECT phase, proposal_id, before_bytes, vision_before_json,
+                        video_toolset_added, exact_restore_eligible,
+                        applied_bytes, transition_before_bytes, previous_applied_bytes,
+                        previous_proposal_id, previous_video_toolset_added,
+                        vision_applied_hash, previous_vision_applied_hash
+                 FROM startup_specialization_state WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)? != 0,
+                        row.get::<_, i64>(5)? != 0,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                        row.get::<_, Option<Vec<u8>>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
+                        row.get::<_, String>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                    ))
+                },
+            )
+            .optional()?;
+        record
+            .map(
+                |(
+                    phase,
+                    proposal_id,
+                    before_bytes,
+                    vision_before,
+                    video_toolset_added,
+                    exact_restore_eligible,
+                    applied_bytes,
+                    transition_before_bytes,
+                    previous_applied_bytes,
+                    previous_proposal_id,
+                    previous_video_toolset_added,
+                    vision_applied_hash,
+                    previous_vision_applied_hash,
+                )| {
+                    StartupSpecializationState {
+                        phase: StartupSpecializationPhase::parse(&phase)?,
+                        proposal_id,
+                        before_bytes,
+                        vision_before: vision_before
+                            .map(|value| serde_json::from_str(&value))
+                            .transpose()?,
+                        video_toolset_added,
+                        exact_restore_eligible,
+                        applied_bytes,
+                        transition_before_bytes,
+                        previous_applied_bytes,
+                        previous_proposal_id,
+                        previous_video_toolset_added,
+                        vision_applied_hash,
+                        previous_vision_applied_hash,
+                    }
+                    .validate()
+                },
+            )
+            .transpose()
+    }
+
+    pub fn begin_startup_specialization_apply(
+        &self,
+        intent: &StartupSpecializationApplyIntent<'_>,
+    ) -> Result<(), AgentdError> {
+        let vision_before = intent
+            .vision_before
+            .map(serde_json::to_string)
+            .transpose()?;
+        self.connection()?.execute(
+            "INSERT INTO startup_specialization_state(
+                singleton, phase, proposal_id, before_bytes, vision_before_json,
+                video_toolset_added, exact_restore_eligible, applied_bytes,
+                transition_before_bytes, vision_applied_hash, updated_at_ms
+             ) VALUES (1, 'applying', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(singleton) DO UPDATE SET
+                phase = 'applying',
+                previous_applied_bytes = excluded.transition_before_bytes,
+                previous_proposal_id = startup_specialization_state.proposal_id,
+                previous_video_toolset_added =
+                    startup_specialization_state.video_toolset_added,
+                previous_vision_applied_hash =
+                    startup_specialization_state.vision_applied_hash,
+                proposal_id = excluded.proposal_id,
+                video_toolset_added =
+                    startup_specialization_state.video_toolset_added
+                    OR excluded.video_toolset_added,
+                exact_restore_eligible =
+                    startup_specialization_state.exact_restore_eligible
+                    AND excluded.transition_before_bytes =
+                        startup_specialization_state.applied_bytes,
+                applied_bytes = excluded.applied_bytes,
+                transition_before_bytes = excluded.transition_before_bytes,
+                vision_applied_hash = excluded.vision_applied_hash,
+                updated_at_ms = excluded.updated_at_ms",
+            params![
+                intent.proposal_id,
+                intent.before_bytes,
+                vision_before,
+                intent.video_toolset_added,
+                intent.exact_restore_eligible,
+                intent.applied_bytes,
+                intent.transition_before_bytes,
+                intent.vision_applied_hash,
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_startup_specialization_apply(&self) -> Result<(), AgentdError> {
+        let changed = self.connection()?.execute(
+            "UPDATE startup_specialization_state
+             SET phase = 'active', updated_at_ms = ?1
+             WHERE singleton = 1 AND phase = 'applying'",
+            [now_ms()],
+        )?;
+        if changed != 1 {
+            return Err(AgentdError::Ledger(
+                "startup specialization activation intent is unavailable".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn update_interrupted_startup_specialization_apply(
+        &self,
+        applied_bytes: &[u8],
+        rollback_bytes: &[u8],
+    ) -> Result<(), AgentdError> {
+        let changed = self.connection()?.execute(
+            "UPDATE startup_specialization_state
+             SET applied_bytes = ?1,
+                 transition_before_bytes = ?2,
+                 previous_applied_bytes =
+                     CASE WHEN previous_applied_bytes IS NULL
+                          THEN NULL ELSE ?2 END,
+                 exact_restore_eligible = 0,
+                 updated_at_ms = ?3
+             WHERE singleton = 1 AND phase = 'applying'",
+            params![applied_bytes, rollback_bytes, now_ms()],
+        )?;
+        if changed != 1 {
+            return Err(AgentdError::Ledger(
+                "startup specialization activation intent is unavailable".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn confirm_startup_specialization_semantics(&self) -> Result<(), AgentdError> {
+        let changed = self.connection()?.execute(
+            "UPDATE startup_specialization_state
+             SET transition_before_bytes = applied_bytes,
+                 previous_applied_bytes = NULL,
+                 previous_proposal_id = NULL,
+                 previous_video_toolset_added = NULL,
+                 previous_vision_applied_hash = NULL,
+                 updated_at_ms = ?1
+             WHERE singleton = 1 AND phase = 'active'",
+            [now_ms()],
+        )?;
+        if changed != 1 {
+            return Err(AgentdError::Ledger(
+                "active startup specialization is unavailable for semantic confirmation".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn begin_unverified_startup_specialization_rollback(&self) -> Result<(), AgentdError> {
+        let changed = self.connection()?.execute(
+            "UPDATE startup_specialization_state
+             SET phase = 'semantic_rollback', updated_at_ms = ?1
+             WHERE singleton = 1 AND phase = 'active'
+               AND previous_applied_bytes IS NOT NULL",
+            [now_ms()],
+        )?;
+        if changed != 1 {
+            return Err(AgentdError::Ledger(
+                "startup specialization has no unverified rotation to roll back".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn finish_unverified_startup_specialization_rollback(
+        &self,
+        applied_bytes: &[u8],
+    ) -> Result<(), AgentdError> {
+        let changed = self.connection()?.execute(
+            "UPDATE startup_specialization_state
+             SET phase = 'active',
+                 exact_restore_eligible =
+                     exact_restore_eligible AND previous_applied_bytes = ?1,
+                 applied_bytes = ?1,
+                 transition_before_bytes = ?1,
+                 proposal_id = previous_proposal_id,
+                 video_toolset_added = previous_video_toolset_added,
+                 vision_applied_hash = previous_vision_applied_hash,
+                 previous_applied_bytes = NULL,
+                 previous_proposal_id = NULL,
+                 previous_video_toolset_added = NULL,
+                 previous_vision_applied_hash = NULL,
+                 updated_at_ms = ?2
+             WHERE singleton = 1 AND phase = 'semantic_rollback'
+               AND previous_applied_bytes IS NOT NULL",
+            params![applied_bytes, now_ms()],
+        )?;
+        if changed != 1 {
+            return Err(AgentdError::Ledger(
+                "startup specialization has no unverified rotation to roll back".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn cancel_unverified_startup_specialization_rollback(&self) -> Result<(), AgentdError> {
+        let changed = self.connection()?.execute(
+            "UPDATE startup_specialization_state
+             SET phase = 'active', updated_at_ms = ?1
+             WHERE singleton = 1 AND phase = 'semantic_rollback'",
+            [now_ms()],
+        )?;
+        if changed != 1 {
+            return Err(AgentdError::Ledger(
+                "startup specialization semantic rollback intent is unavailable".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn cancel_startup_specialization_apply(&self) -> Result<(), AgentdError> {
+        let state = self.startup_specialization_state()?.ok_or_else(|| {
+            AgentdError::Ledger(
+                "startup specialization activation intent is unavailable".to_owned(),
+            )
+        })?;
+        if state.previous_applied_bytes.is_some() {
+            self.connection()?.execute(
+                "UPDATE startup_specialization_state
+                 SET phase = 'active',
+                     applied_bytes = previous_applied_bytes,
+                     proposal_id = previous_proposal_id,
+                     video_toolset_added = previous_video_toolset_added,
+                     vision_applied_hash = previous_vision_applied_hash,
+                     previous_applied_bytes = NULL,
+                     previous_proposal_id = NULL,
+                     previous_video_toolset_added = NULL,
+                     transition_before_bytes = previous_applied_bytes,
+                     previous_vision_applied_hash = NULL,
+                     updated_at_ms = ?1
+                 WHERE singleton = 1 AND phase = 'applying'",
+                [now_ms()],
+            )?;
+        } else {
+            self.clear_startup_specialization()?;
+        }
+        Ok(())
+    }
+
+    pub fn begin_startup_specialization_removal(
+        &self,
+        transition_before_bytes: &[u8],
+    ) -> Result<(), AgentdError> {
+        let changed = self.connection()?.execute(
+            "UPDATE startup_specialization_state
+             SET phase = 'removing', transition_before_bytes = ?1, updated_at_ms = ?2
+             WHERE singleton = 1 AND phase = 'active'",
+            params![transition_before_bytes, now_ms()],
+        )?;
+        if changed != 1 {
+            return Err(AgentdError::Ledger(
+                "active startup specialization is unavailable for removal".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn cancel_startup_specialization_removal(&self) -> Result<(), AgentdError> {
+        let changed = self.connection()?.execute(
+            "UPDATE startup_specialization_state
+             SET phase = 'active', updated_at_ms = ?1
+             WHERE singleton = 1 AND phase = 'removing'",
+            [now_ms()],
+        )?;
+        if changed != 1 {
+            return Err(AgentdError::Ledger(
+                "startup specialization removal intent is unavailable".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn clear_startup_specialization(&self) -> Result<(), AgentdError> {
+        self.connection()?.execute(
+            "DELETE FROM startup_specialization_state WHERE singleton = 1",
+            [],
+        )?;
+        Ok(())
+    }
+
     fn connection(&self) -> Result<Connection, AgentdError> {
         Connection::open(&self.path).map_err(AgentdError::from)
     }
@@ -386,5 +853,52 @@ mod tests {
 
         let reopened = Ledger::open(path).unwrap();
         assert!(reopened.principal_is_authorized("user-account").unwrap());
+    }
+
+    #[test]
+    fn startup_specialization_state_rejects_incomplete_prior_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agentd.sqlite3");
+        let ledger = Ledger::open(&path).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO startup_specialization_state(
+                    singleton, phase, proposal_id, before_bytes, vision_before_json,
+                    video_toolset_added, exact_restore_eligible, applied_bytes,
+                    transition_before_bytes, previous_applied_bytes,
+                    vision_applied_hash, updated_at_ms
+                 ) VALUES (1, 'active', 'proposal', X'01', NULL, 0, 1, X'02',
+                           X'02', X'03', 'hash', 1)",
+                [],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            ledger.startup_specialization_state(),
+            Err(AgentdError::Ledger(_))
+        ));
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute("DELETE FROM startup_specialization_state", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO startup_specialization_state(
+                    singleton, phase, proposal_id, before_bytes, vision_before_json,
+                    video_toolset_added, exact_restore_eligible, applied_bytes,
+                    transition_before_bytes, previous_applied_bytes,
+                    previous_proposal_id, previous_video_toolset_added,
+                    vision_applied_hash, previous_vision_applied_hash, updated_at_ms
+                 ) VALUES (1, 'active', 'current', X'01', NULL, 0, 1, X'02',
+                           X'02', X'03', '', 0, 'current-hash', '', 1)",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            ledger.startup_specialization_state(),
+            Err(AgentdError::Ledger(_))
+        ));
     }
 }

@@ -13,6 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
@@ -218,6 +219,14 @@ def parse_args() -> argparse.Namespace:
         help=f"hermes-agent package version, default: {DEFAULT_HERMES_AGENT_VERSION}",
     )
     parser.add_argument(
+        "--agentd-multimodal-worker-url",
+        default=os.environ.get("FC_RUNTIME_AGENTD_MULTIMODAL_WORKER_URL"),
+        help=(
+            "optional compile-time worker URL for a disposable local Runtime image; "
+            "release images retain the canonical product URL"
+        ),
+    )
+    parser.add_argument(
         "--context-dir",
         type=Path,
         help="optional persistent staged image build context",
@@ -255,6 +264,14 @@ def build_image(
             f"FINITE_MONO_REV={mono_sha}",
         ]
     )
+    if args.agentd_multimodal_worker_url:
+        build.extend(
+            [
+                "--build-arg",
+                "FINITE_AGENTD_MULTIMODAL_WORKER_URL="
+                f"{args.agentd_multimodal_worker_url}",
+            ]
+        )
     if platform:
         build.extend(["--platform", platform])
         # Docker's legacy builder accepts --platform but does not populate the
@@ -289,6 +306,25 @@ def main() -> int:
             "--hermes-agent-version is release-pinned to "
             f"{DEFAULT_HERMES_AGENT_VERSION}, got {args.hermes_agent_version}"
         )
+    if args.agentd_multimodal_worker_url:
+        worker_url = args.agentd_multimodal_worker_url.strip()
+        parsed_worker_url = urlparse(worker_url)
+        if (
+            parsed_worker_url.scheme != "http"
+            or parsed_worker_url.hostname != "host.docker.internal"
+            or parsed_worker_url.port is None
+            or parsed_worker_url.path.rstrip("/") != "/v1"
+            or parsed_worker_url.params
+            or parsed_worker_url.query
+            or parsed_worker_url.fragment
+            or parsed_worker_url.username
+            or parsed_worker_url.password
+        ):
+            raise SystemExit(
+                "--agentd-multimodal-worker-url is restricted to the disposable "
+                "http://host.docker.internal:<port>/v1 development seam"
+            )
+        args.agentd_multimodal_worker_url = worker_url
 
     source_facts = repo_metadata("finite-mono", MONOREPO_ROOT)
     mono_sha = source_facts.pop("head", None)

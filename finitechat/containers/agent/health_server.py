@@ -17,6 +17,7 @@ PORT = int(os.environ.get("FINITE_AGENT_HTTP_PORT", "8080"))
 BRIDGE_STATUS_FILE = AGENT_HOME / "hermes-bridge-status.json"
 AGENTD_STATUS_FILE = AGENT_HOME / "agentd" / "status.json"
 STARTUP_REPORT_FILE = AGENT_HOME / "startup-report.json"
+EXPECTED_SPECIALIZATION_BUNDLE = os.environ.get("FINITE_SPECIALIZATION_BUNDLE", "").strip() or None
 RECOVERY_BOOT_INTENT_ACTIVE = bool(os.environ.get("FINITE_AGENT_BOOT_INTENT_JSON"))
 AGENTD_REQUIRED = os.environ.get("FINITE_AGENTD_REQUIRED", "").lower() in {
     "1",
@@ -24,6 +25,15 @@ AGENTD_REQUIRED = os.environ.get("FINITE_AGENTD_REQUIRED", "").lower() in {
     "yes",
     "on",
 }
+MAX_HEALTH_ARTIFACT_BYTES = 64 * 1024
+MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
+MAX_STARTUP_ITEMS = 64
+
+
+def _bounded_text(value: object, fallback: str = "starting", limit: int = 128) -> str:
+    return value[:limit] if isinstance(value, str) else fallback
+
+
 RECOVERY_ACTIONS = {
     "canonical_plugin_reinstall",
     "generated_finitechat_config_reconcile",
@@ -88,6 +98,14 @@ RECOVERY_REMEDIATIONS = {
 }
 
 
+def _read_json_file(path: Path) -> Any:
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_HEALTH_ARTIFACT_BYTES + 1)
+    if len(raw) > MAX_HEALTH_ARTIFACT_BYTES:
+        raise ValueError("health artifact exceeded bounded limit")
+    return json.loads(raw.decode("utf-8"))
+
+
 def identity() -> dict[str, Any]:
     config_path = AGENT_HOME / "config.json"
     if not config_path.exists():
@@ -100,48 +118,107 @@ def identity() -> dict[str, Any]:
             text=True,
             timeout=5,
         )
+        if len(proc.stdout.encode("utf-8")) > MAX_HEALTH_ARTIFACT_BYTES:
+            return {"ready": False, "error": "identity unavailable"}
         value = json.loads(proc.stdout)
-    except Exception as exc:
-        return {"ready": False, "error": str(exc)}
+    except Exception:
+        return {"ready": False, "error": "identity unavailable"}
+    if not isinstance(value, dict):
+        return {"ready": False, "error": "identity unavailable"}
+    npub = value.get("npub")
+    account_id = value.get("account_id")
+    if (
+        not isinstance(npub, str)
+        or not npub.startswith("npub1")
+        or len(npub) > 100
+        or not isinstance(account_id, str)
+        or len(account_id) > 128
+    ):
+        return {"ready": False, "error": "identity unavailable"}
     return {
         "ready": True,
-        "npub": value.get("npub"),
-        "account_id": value.get("account_id"),
+        "npub": npub,
+        "account_id": account_id,
     }
 
 
 def bridge_status() -> dict[str, Any]:
     try:
-        payload = json.loads(BRIDGE_STATUS_FILE.read_text(encoding="utf-8"))
+        payload = _read_json_file(BRIDGE_STATUS_FILE)
     except FileNotFoundError:
         return {"status": "starting", "ok": False}
-    except Exception as exc:
-        return {"status": "unavailable", "ok": False, "error": str(exc)}
+    except Exception:
+        return {"status": "unavailable", "ok": False, "error": "bridge status unavailable"}
     if not isinstance(payload, dict):
         return {
             "status": "unavailable",
             "ok": False,
             "error": "bridge status is not an object",
         }
-    return payload
+    status = payload.get("status")
+    safe = {
+        "status": _bounded_text(status, fallback="unavailable", limit=64),
+        "ok": payload.get("ok") is True,
+    }
+    error = payload.get("error")
+    if isinstance(error, str) and error:
+        safe["error"] = "bridge error"
+    return safe
 
 
 def agentd_status() -> dict[str, Any]:
     try:
-        payload = json.loads(AGENTD_STATUS_FILE.read_text(encoding="utf-8"))
+        payload = _read_json_file(AGENTD_STATUS_FILE)
     except FileNotFoundError:
         return {"status": "starting", "ok": not AGENTD_REQUIRED}
-    except Exception as exc:
-        return {"status": "unavailable", "ok": False, "error": str(exc)}
-    processes = payload.get("processes", {}).get("processes", {})
+    except Exception:
+        return {"status": "unavailable", "ok": False, "error": "agentd status unavailable"}
+    if not isinstance(payload, dict):
+        return {"status": "unavailable", "ok": False, "error": "agentd status is not an object"}
+    process_payload = payload.get("processes")
+    process_map = process_payload.get("processes") if isinstance(process_payload, dict) else None
+    if not isinstance(process_map, dict):
+        process_map = {}
     required = ("finitechat", "health", "hermes")
-    ok = all(processes.get(name, {}).get("state") == "running" for name in required)
-    return {
+    ok = all(
+        isinstance(process_map.get(name), dict) and process_map[name].get("state") == "running"
+        for name in required
+    )
+    status = {
         "status": "running" if ok else "starting",
         "ok": ok,
-        "version": payload.get("version"),
-        "processes": {name: processes.get(name, {}).get("state", "starting") for name in required},
+        "version": _bounded_text(payload.get("version"), fallback="unknown"),
+        "processes": {
+            name: _bounded_text(
+                process_map[name].get("state", "starting"),
+            )
+            if isinstance(process_map.get(name), dict)
+            else "starting"
+            for name in required
+        },
     }
+    specialization = payload.get("specialization")
+    if isinstance(specialization, dict):
+        bundle_id = specialization.get("bundle_id")
+        desired = specialization.get("desired")
+        effective = specialization.get("effective")
+        cleanup_blocked = specialization.get("cleanup_blocked")
+        if (
+            (bundle_id is None or (isinstance(bundle_id, str) and len(bundle_id) <= 128))
+            and isinstance(desired, bool)
+            and isinstance(effective, bool)
+            and isinstance(cleanup_blocked, bool)
+        ):
+            # This is the complete public specialization projection. Never
+            # copy agentd's raw config or credential-bearing fields here.
+            status["specialization"] = {
+                "bundle_id": bundle_id,
+                "desired": desired,
+                # Cleanup-blocked is an ineffective state, but is not a
+                # separate public field in the health contract.
+                "effective": effective and not cleanup_blocked,
+            }
+    return status
 
 
 def _invalid_startup_report(
@@ -158,7 +235,7 @@ def _invalid_startup_report(
 
 def startup_report() -> dict[str, Any] | None:
     try:
-        payload = json.loads(STARTUP_REPORT_FILE.read_text(encoding="utf-8"))
+        payload = _read_json_file(STARTUP_REPORT_FILE)
     except FileNotFoundError:
         if RECOVERY_BOOT_INTENT_ACTIVE:
             return _invalid_startup_report("startup_report_missing_for_recovery_intent")
@@ -182,7 +259,7 @@ def startup_report() -> dict[str, Any] | None:
     identity = payload.get("identity")
     safe_actions = []
     if isinstance(actions, list):
-        for action in actions:
+        for action in actions[:MAX_STARTUP_ITEMS]:
             if not isinstance(action, dict):
                 continue
             action_name = action.get("action")
@@ -196,7 +273,7 @@ def startup_report() -> dict[str, Any] | None:
             safe_actions.append(safe_action)
     safe_refusals = []
     if isinstance(refusals, list):
-        for refusal in refusals:
+        for refusal in refusals[:MAX_STARTUP_ITEMS]:
             if not isinstance(refusal, dict):
                 continue
             code = refusal.get("code")
@@ -282,6 +359,14 @@ def runtime_health() -> dict[str, Any]:
     startup = startup_report()
     if startup is not None:
         payload["startup"] = startup
+    # Basic chat/process readiness remains independent from the specialization
+    # admission gate. Runners require both fields before accepting a new or
+    # replacement Runtime; recurring OCI health follows only `ready` so an
+    # auxiliary specialization failure cannot take basic chat offline.
+    payload["ready"] = runtime_ready(payload)
+    payload["admission_ready"] = runtime_admission_ready(payload)
+    if len(json.dumps(payload, sort_keys=True).encode("utf-8")) > MAX_HEALTH_RESPONSE_BYTES:
+        return {"ready": False, "error": "health payload exceeded bounded limit"}
     return payload
 
 
@@ -294,18 +379,36 @@ def runtime_ready(payload: dict[str, Any]) -> bool:
     )
 
 
+def runtime_admission_ready(payload: dict[str, Any]) -> bool:
+    if not runtime_ready(payload):
+        return False
+    if EXPECTED_SPECIALIZATION_BUNDLE is None:
+        return True
+    specialization = payload.get("agentd", {}).get("specialization")
+    return (
+        isinstance(specialization, dict)
+        and specialization.get("bundle_id") == EXPECTED_SPECIALIZATION_BUNDLE
+        and specialization.get("desired") is True
+        and specialization.get("effective") is True
+    )
+
+
+def runtime_http_status(payload: dict[str, Any]) -> int:
+    return 200 if runtime_ready(payload) else 503
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/healthz":
             payload = runtime_health()
-            self._write(200 if runtime_ready(payload) else 503, payload)
+            self._write(runtime_http_status(payload), payload)
             return
         if self.path in {"/contact", "/invite"}:
             # `/invite` is a temporary URL-compatibility alias for already
             # recorded Runtime facts. It serves contact metadata only and does
             # not recreate the removed invite-session admission protocol.
             payload = runtime_health()
-            self._write(200 if runtime_ready(payload) else 503, payload)
+            self._write(runtime_http_status(payload), payload)
             return
         self._write(404, {"ready": False, "error": "not found"})
 

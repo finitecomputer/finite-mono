@@ -214,6 +214,17 @@ pub struct RuntimeSpecV1 {
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
     pub secret_references: Vec<String>,
+    /// Core's durable classification of the runtime's inference contract.
+    /// Missing on pre-profile specs; lifecycle controllers must not infer it
+    /// from current Runner defaults.
+    #[serde(default)]
+    pub specialization_profile: Option<RuntimeSpecializationProfile>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSpecializationProfile {
+    FinitePrivateMultimodal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -723,6 +734,11 @@ pub struct HostOwnedRuntimeFacts {
     pub runtime_host: String,
     pub runtime_status: RuntimeSummaryStatus,
     pub active_inference_profile: Option<String>,
+    /// Exact specialization bundle proven effective by the runtime health
+    /// contract. Legacy rows omit this fact and remain quarantined for
+    /// specialized lifecycle operations.
+    #[serde(default)]
+    pub effective_specialization_bundle: Option<String>,
     pub hermes_available: Option<bool>,
     pub published_app_urls: Vec<String>,
 }
@@ -1762,6 +1778,32 @@ pub struct RunnerLeaseCapacity {
     /// all-false envelope supports no lifecycle leases.
     #[serde(default)]
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
+    /// Finite Private inference contract configured on this Runner. This is
+    /// an admission claim, not proof that specialization is effective inside
+    /// a particular Runtime. Older Runner binaries omit this expand-only
+    /// field and remain eligible only for Stop/Destroy retirement controls,
+    /// not Finite Private creation or Restart/Recover/Upgrade lifecycle work.
+    #[serde(default)]
+    pub finite_private_profile: Option<FinitePrivateRunnerProfile>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinitePrivateRunnerProfile {
+    CanonicalSpecializationConfigured,
+}
+
+pub(crate) fn runner_supports_finite_private_creation(
+    runner_capacity: Option<&RunnerLeaseCapacity>,
+    runtime_secret_references: &[String],
+) -> bool {
+    !runtime_secret_references
+        .iter()
+        .any(|reference| reference == FINITE_PRIVATE_SECRET_REFERENCE)
+        || runner_capacity.is_some_and(|capacity| {
+            capacity.finite_private_profile
+                == Some(FinitePrivateRunnerProfile::CanonicalSpecializationConfigured)
+        })
 }
 
 impl RunnerLeaseCapacity {
@@ -3217,6 +3259,12 @@ impl BridgeCoreState {
     ) -> CoreResult<Option<AgentCreationLease>> {
         validate_runtime_spec_environment(runtime_environment)?;
         let runtime_secret_references = runtime_spec_secret_references(runtime_secret_references)?;
+        if !runner_supports_finite_private_creation(
+            input.runner_capacity.as_ref(),
+            &runtime_secret_references,
+        ) {
+            return Ok(None);
+        }
         let now = input.now.unwrap_or(current_time_iso()?);
         let now_time = parse_time(&now)?;
         let runner_id = trim_to_option(Some(&input.runner_id))
@@ -3347,6 +3395,10 @@ impl BridgeCoreState {
                 Some(artifact_id) => self.launchable_runtime_artifact(artifact_id)?,
                 None => self.latest_launchable_runtime_artifact()?,
             };
+            // Core owns product intent: new Finite Private product creations
+            // use the promoted canonical Finite Private policy. Runner capability only gates
+            // which worker may claim this already-classified request.
+            let specialization_profile = Some(new_finite_private_product_profile());
             let runtime_spec = build_runtime_spec_v1(
                 RuntimeSpecIdentity {
                     operation_id: &candidate.id,
@@ -3359,6 +3411,7 @@ impl BridgeCoreState {
                 runtime_environment.clone(),
                 runtime_secret_references,
                 RuntimeBootIntent::Normal,
+                specialization_profile,
             )?;
             Some((runtime_id, artifact.id, runtime_spec))
         } else {
@@ -3510,10 +3563,40 @@ impl BridgeCoreState {
                             self.agent_runtimes
                                 .get(&request.agent_runtime_id)
                                 .is_some_and(|runtime| {
+                                    let creations = self
+                                        .agent_creation_requests
+                                        .values()
+                                        .filter(|creation| {
+                                            creation.agent_runtime_id.as_deref()
+                                                == Some(request.agent_runtime_id.as_str())
+                                        });
+                                    let has_authoritative_generic_shape =
+                                        runtime_has_authoritative_generic_shape(runtime, creations);
+                                    let capable = capacity.finite_private_profile
+                                        == Some(FinitePrivateRunnerProfile::CanonicalSpecializationConfigured);
+                                    let specialization_capability_required = matches!(
+                                        request.kind,
+                                        RuntimeControlKind::Restart
+                                            | RuntimeControlKind::RecoverKnownGoodChatRuntime
+                                            | RuntimeControlKind::Upgrade
+                                    ) && !has_authoritative_generic_shape;
+                                    let exact_effective_restart_required =
+                                        request.kind == RuntimeControlKind::Restart
+                                            && !has_authoritative_generic_shape;
+
                                     runtime.placement.is_some_and(|placement| {
                                         capacity.supports_runner_class(placement.runner_class)
                                     }) && runtime.supports_runtime_control(request.kind)
                                         && capacity.supports_runtime_control(request.kind)
+                                        && (!specialization_capability_required || capable)
+                                        && (!exact_effective_restart_required
+                                            || runtime
+                                                .host_facts
+                                                .effective_specialization_bundle
+                                                .as_deref()
+                                                == Some(
+                                                    CANONICAL_FINITE_PRIVATE_SPECIALIZATION_BUNDLE,
+                                                ))
                                 })
                         })
                 })
@@ -3609,6 +3692,8 @@ impl BridgeCoreState {
                 {
                     return Err(CoreError::RuntimeSpecMismatch);
                 }
+                let specialization_profile =
+                    specialization_profile_from_host_facts(&runtime.host_facts);
                 let synthesized = build_runtime_spec_v1(
                     RuntimeSpecIdentity {
                         operation_id: &creation.id,
@@ -3625,6 +3710,7 @@ impl BridgeCoreState {
                     runtime_environment.clone(),
                     vec![FINITE_PRIVATE_SECRET_REFERENCE.to_string()],
                     RuntimeBootIntent::Normal,
+                    specialization_profile,
                 )?;
                 let stored = self
                     .agent_creation_requests
@@ -3634,6 +3720,25 @@ impl BridgeCoreState {
                 stored.runtime_spec = Some(synthesized.clone());
                 stored.updated_at = now.clone();
                 current_spec = Some(synthesized);
+            }
+            if let (Some(profile), Some(spec)) = (
+                specialization_profile_from_host_facts(&runtime.host_facts),
+                current_spec.as_mut(),
+            ) && runtime_spec_v1(spec).specialization_profile.is_none()
+            {
+                let RuntimeSpecEnvelope::V1(spec_v1) = spec;
+                spec_v1.specialization_profile = Some(profile);
+                let creation_id = creation
+                    .as_ref()
+                    .ok_or(CoreError::RuntimeSpecMismatch)?
+                    .id
+                    .clone();
+                let stored = self
+                    .agent_creation_requests
+                    .get_mut(&creation_id)
+                    .ok_or(CoreError::AgentCreationRequestNotFound)?;
+                stored.runtime_spec = Some(spec.clone());
+                stored.updated_at = now.clone();
             }
             let runtime_spec = current_spec
                 .as_ref()
@@ -3900,7 +4005,7 @@ impl BridgeCoreState {
                 runtime_host,
                 published_app_urls,
                 contact_endpoint,
-                _,
+                upgraded_spec,
                 capabilities,
             )) = upgrade_facts.as_ref()
             {
@@ -3910,6 +4015,8 @@ impl BridgeCoreState {
                 runtime.host_facts.runtime_host = runtime_host.clone();
                 runtime.host_facts.published_app_urls = published_app_urls.clone();
                 runtime.host_facts.hermes_available = Some(true);
+                runtime.host_facts.effective_specialization_bundle =
+                    effective_specialization_bundle_for_spec(upgraded_spec.as_ref());
                 if let Some(capabilities) = capabilities {
                     runtime.runtime_capabilities = Some(capabilities.clone());
                 }
@@ -4191,6 +4298,10 @@ impl BridgeCoreState {
                 .runtime_status
                 .unwrap_or(RuntimeSummaryStatus::Unknown),
             active_inference_profile: trim_to_option(input.active_inference_profile.as_deref()),
+            // Registration only records what the runtime claims to support. The
+            // effective bundle is proven and persisted after readiness in the
+            // completion path below.
+            effective_specialization_bundle: None,
             hermes_available: input.hermes_available,
             published_app_urls: input.published_app_urls,
         };
@@ -4400,6 +4511,9 @@ impl BridgeCoreState {
                 .runtime_status
                 .unwrap_or(RuntimeSummaryStatus::Unknown),
             active_inference_profile: trim_to_option(input.active_inference_profile.as_deref()),
+            effective_specialization_bundle: effective_specialization_bundle_for_spec(
+                request.runtime_spec.as_ref(),
+            ),
             hermes_available: input.hermes_available,
             published_app_urls: input.published_app_urls,
         };
@@ -7024,6 +7138,7 @@ fn host_facts_from_record(record: &ExistingHostProjectImport) -> HostOwnedRuntim
             .unwrap_or_else(|| normalize_id_part(&record.source_host_id)),
         runtime_status: record.runtime_status,
         active_inference_profile: trim_to_option(record.active_inference_profile.as_deref()),
+        effective_specialization_bundle: None,
         hermes_available: record.hermes_available,
         published_app_urls: record.published_app_urls.clone(),
     }
@@ -7051,6 +7166,74 @@ const RUNTIME_SPEC_SERVICE_PORT: u16 = 8080;
 const RUNTIME_SPEC_HEALTH_PATH: &str = "/healthz";
 const RUNTIME_SPEC_CONTACT_PATH: &str = "/contact";
 pub(crate) const FINITE_PRIVATE_SECRET_REFERENCE: &str = "FINITE_PRIVATE_API_KEY";
+pub(crate) const CANONICAL_FINITE_PRIVATE_PROFILE: &str = "finite-private";
+pub(crate) const CANONICAL_FINITE_PRIVATE_SPECIALIZATION_BUNDLE: &str =
+    "finite-private-multimodal-v1";
+
+pub(crate) fn effective_specialization_bundle_for_spec(
+    spec: Option<&RuntimeSpecEnvelope>,
+) -> Option<String> {
+    spec.and_then(|spec| {
+        (runtime_spec_v1(spec).specialization_profile
+            == Some(RuntimeSpecializationProfile::FinitePrivateMultimodal))
+        .then_some(CANONICAL_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_string())
+    })
+}
+
+/// Current product policy: every new Finite Private creation uses the canonical
+/// model with the promoted specialization. Runner capacity is only an
+/// eligibility gate.
+pub(crate) fn new_finite_private_product_profile() -> RuntimeSpecializationProfile {
+    RuntimeSpecializationProfile::FinitePrivateMultimodal
+}
+
+/// Promote an existing runtime's authoritative Finite Private host fact into
+/// the universal typed profile during its explicit Runtime Upgrade. This is a
+/// one-way cutover; obsolete bundle identifiers are never accepted as aliases.
+pub(crate) fn specialization_profile_from_host_facts(
+    facts: &HostOwnedRuntimeFacts,
+) -> Option<RuntimeSpecializationProfile> {
+    (facts.active_inference_profile.as_deref() == Some(CANONICAL_FINITE_PRIVATE_PROFILE))
+        .then_some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+}
+
+fn runtime_has_authoritative_generic_shape<'a>(
+    runtime: &AgentRuntime,
+    creations: impl Iterator<Item = &'a AgentCreationRequest>,
+) -> bool {
+    if specialization_profile_from_host_facts(&runtime.host_facts).is_some() {
+        return false;
+    }
+    let creations = creations.collect::<Vec<_>>();
+    let has_generic_evidence = runtime
+        .host_facts
+        .active_inference_profile
+        .as_deref()
+        .is_some_and(|profile| profile != CANONICAL_FINITE_PRIVATE_PROFILE)
+        || creations.iter().any(|creation| {
+            creation.runtime_spec.as_ref().is_some_and(|spec| {
+                let spec = runtime_spec_v1(spec);
+                spec.specialization_profile.is_none()
+                    && !spec
+                        .secret_references
+                        .iter()
+                        .any(|reference| reference == FINITE_PRIVATE_SECRET_REFERENCE)
+            })
+        });
+    let has_private_or_ambiguous_evidence = creations.iter().any(|creation| {
+        creation.runtime_spec.as_ref().is_none_or(|spec| {
+            let spec = runtime_spec_v1(spec);
+            spec.specialization_profile
+                == Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+                || (spec.specialization_profile.is_none()
+                    && spec
+                        .secret_references
+                        .iter()
+                        .any(|reference| reference == FINITE_PRIVATE_SECRET_REFERENCE))
+        })
+    });
+    has_generic_evidence && !has_private_or_ambiguous_evidence
+}
 
 pub(crate) struct RuntimeSpecIdentity<'a> {
     pub operation_id: &'a str,
@@ -7066,6 +7249,7 @@ pub(crate) fn build_runtime_spec_v1(
     environment: BTreeMap<String, String>,
     secret_references: Vec<String>,
     boot_intent: RuntimeBootIntent,
+    specialization_profile: Option<RuntimeSpecializationProfile>,
 ) -> CoreResult<RuntimeSpecEnvelope> {
     let spec = RuntimeSpecV1 {
         operation_id: identity.operation_id.to_string(),
@@ -7086,6 +7270,7 @@ pub(crate) fn build_runtime_spec_v1(
         boot_intent,
         environment,
         secret_references,
+        specialization_profile,
     };
     validate_runtime_spec_v1(&spec, artifact)?;
     Ok(RuntimeSpecEnvelope::V1(spec))
@@ -7230,6 +7415,7 @@ pub(crate) fn runtime_operation_spec_v1(
     let environment = refreshed_environment
         .cloned()
         .unwrap_or_else(|| current.environment.clone());
+    let specialization_profile = current.specialization_profile;
     build_runtime_spec_v1(
         identity,
         desired_artifact,
@@ -7237,6 +7423,7 @@ pub(crate) fn runtime_operation_spec_v1(
         environment,
         secret_references,
         boot_intent,
+        specialization_profile,
     )
 }
 
@@ -7283,6 +7470,14 @@ fn validate_runtime_spec_v1(spec: &RuntimeSpecV1, artifact: &RuntimeArtifact) ->
         }
     }
     if references.len() > 64 {
+        return Err(CoreError::RuntimeSpecMismatch);
+    }
+    if spec.specialization_profile.is_some()
+        && !spec
+            .secret_references
+            .iter()
+            .any(|reference| reference == FINITE_PRIVATE_SECRET_REFERENCE)
+    {
         return Err(CoreError::RuntimeSpecMismatch);
     }
     Ok(())
@@ -8177,6 +8372,28 @@ fn finite_private_next_daily_reset_at(now: OffsetDateTime) -> CoreResult<String>
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_runtime_profile_backfill_requires_exact_persisted_canonical_fact() {
+        let mut facts = HostOwnedRuntimeFacts {
+            display_name: "legacy".to_string(),
+            hostname: None,
+            runtime_host: "http://127.0.0.1:8080".to_string(),
+            runtime_status: RuntimeSummaryStatus::Online,
+            active_inference_profile: Some(CANONICAL_FINITE_PRIVATE_PROFILE.to_string()),
+            effective_specialization_bundle: None,
+            hermes_available: Some(true),
+            published_app_urls: Vec::new(),
+        };
+        assert_eq!(
+            specialization_profile_from_host_facts(&facts),
+            Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+        );
+        facts.active_inference_profile = Some("main".to_string());
+        assert_eq!(specialization_profile_from_host_facts(&facts), None);
+        facts.active_inference_profile = None;
+        assert_eq!(specialization_profile_from_host_facts(&facts), None);
+    }
+
     const NOW: &str = "2026-05-25T12:00:00Z";
     const LATER: &str = "2026-05-25T13:00:00Z";
 
@@ -8185,6 +8402,19 @@ mod tests {
             runner_classes: vec![RunnerClass::Phala],
             max_sandbox_count: Some(1),
             active_sandbox_count: Some(provider_inventory_count),
+            finite_private_profile: Some(
+                FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+            ),
+            ..RunnerLeaseCapacity::default()
+        }
+    }
+
+    fn canonical_kata_runner_capacity() -> RunnerLeaseCapacity {
+        RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::Kata],
+            finite_private_profile: Some(
+                FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+            ),
             ..RunnerLeaseCapacity::default()
         }
     }
@@ -8821,6 +9051,9 @@ mod tests {
                 lease_seconds: Some(300),
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some(LATER.to_string()),
@@ -8828,6 +9061,108 @@ mod tests {
             .unwrap()
             .expect("Kata worker should claim Kata placement");
         assert_eq!(kata.request.id, requested.request.id);
+    }
+
+    #[test]
+    fn mixed_version_core_refuses_old_runner_for_finite_private_creation_then_leases_to_candidate()
+    {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let launch_code = issue_test_launch_code(&mut state);
+        let requested = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "mixed-runner@finite.vip".to_string(),
+                workos_user_id: "user_workos_mixed_runner".to_string(),
+                display_name: "Mixed Runner Agent".to_string(),
+                launch_code,
+                idempotency_key: "mixed-runner-submit".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        let old_runner_capacity: RunnerLeaseCapacity = serde_json::from_value(json!({
+            "runnerClasses": ["kata"]
+        }))
+        .unwrap();
+        assert!(
+            old_runner_capacity.finite_private_profile.is_none(),
+            "an N-1 Runner payload must not acquire the expand-only capability by default"
+        );
+
+        let old_runner_lease = state
+            .lease_agent_creation_request_with_runtime_configuration(
+                LeaseAgentCreationRequestInput {
+                    runner_id: "old-kata-runner".to_string(),
+                    source_host_id: None,
+                    lease_token: "old-runner-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(old_runner_capacity),
+                    now: Some(LATER.to_string()),
+                },
+                &BTreeMap::new(),
+                &[],
+            )
+            .unwrap();
+        assert!(
+            old_runner_lease.is_none(),
+            "Core must not lease Finite Private creation to an old Runner that cannot advertise specialization"
+        );
+
+        let noncanonical_runner_lease = state
+            .lease_agent_creation_request_with_runtime_configuration(
+                LeaseAgentCreationRequestInput {
+                    runner_id: "noncanonical-kata-runner".to_string(),
+                    source_host_id: None,
+                    lease_token: "noncanonical-runner-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        finite_private_profile: None,
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some(LATER.to_string()),
+                },
+                &BTreeMap::new(),
+                &[],
+            )
+            .unwrap();
+        assert!(
+            noncanonical_runner_lease.is_none(),
+            "Core must not lease canonical Finite Private creation to a noncanonical Runner"
+        );
+
+        let candidate_lease = state
+            .lease_agent_creation_request_with_runtime_configuration(
+                LeaseAgentCreationRequestInput {
+                    runner_id: "candidate-kata-runner".to_string(),
+                    source_host_id: None,
+                    lease_token: "candidate-runner-lease".to_string(),
+                    lease_seconds: Some(300),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        finite_private_profile: Some(
+                            FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some(LATER.to_string()),
+                },
+                &BTreeMap::new(),
+                &[],
+            )
+            .unwrap()
+            .expect("candidate Runner should lease Finite Private creation");
+        assert_eq!(candidate_lease.request.id, requested.request.id);
+        assert_eq!(
+            runtime_spec_v1(
+                candidate_lease
+                    .request
+                    .runtime_spec
+                    .as_ref()
+                    .expect("Core must persist the selected product profile")
+            )
+            .specialization_profile,
+            Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+        );
     }
 
     #[test]
@@ -8863,6 +9198,9 @@ mod tests {
                     lease_seconds: Some(300),
                     runner_capacity: Some(RunnerLeaseCapacity {
                         runner_classes: vec![RunnerClass::Kata],
+                        finite_private_profile: Some(
+                            FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
                         ..RunnerLeaseCapacity::default()
                     }),
                     now: Some(LATER.to_string()),
@@ -8909,6 +9247,9 @@ mod tests {
                     lease_seconds: Some(300),
                     runner_capacity: Some(RunnerLeaseCapacity {
                         runner_classes: vec![RunnerClass::Kata],
+                        finite_private_profile: Some(
+                            FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
                         ..RunnerLeaseCapacity::default()
                     }),
                     now: Some("2026-05-25T13:06:00Z".to_string()),
@@ -8975,6 +9316,9 @@ mod tests {
                 lease_seconds: Some(300),
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 source_host_id: None,
@@ -9242,6 +9586,9 @@ mod tests {
                 lease_seconds: Some(300),
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 source_host_id: None,
@@ -9507,6 +9854,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(kata_runtime_capabilities()),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some(LATER.to_string()),
@@ -9524,7 +9874,10 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-token-2".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..canonical_kata_runner_capacity()
+                }),
                 now: Some("2026-05-25T13:01:00Z".to_string()),
             })
             .unwrap();
@@ -9725,6 +10078,7 @@ mod tests {
                     runtime_host: "host-test".to_string(),
                     runtime_status: RuntimeSummaryStatus::Online,
                     active_inference_profile: None,
+                    effective_specialization_bundle: None,
                     hermes_available: Some(true),
                     published_app_urls: Vec::new(),
                 },
@@ -9779,7 +10133,10 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..canonical_kata_runner_capacity()
+                }),
                 now: Some(LATER.to_string()),
             })
             .unwrap_err();
@@ -9813,7 +10170,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(canonical_kata_runner_capacity()),
                 now: Some(LATER.to_string()),
             })
             .unwrap()
@@ -9925,6 +10282,23 @@ mod tests {
             AgentCreationRequestStatus::Running
         );
         assert_eq!(completed.project.id, requested.project.id);
+        let runtime = state
+            .agent_runtimes
+            .get(
+                completed
+                    .request
+                    .agent_runtime_id
+                    .as_ref()
+                    .expect("completed runtime id"),
+            )
+            .expect("completed runtime should persist host facts");
+        assert_eq!(
+            runtime
+                .host_facts
+                .effective_specialization_bundle
+                .as_deref(),
+            Some(CANONICAL_FINITE_PRIVATE_SPECIALIZATION_BUNDLE)
+        );
     }
 
     #[test]
@@ -9976,6 +10350,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(kata_runtime_capabilities()),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some("2026-05-25T13:04:00Z".to_string()),
@@ -10061,6 +10438,9 @@ mod tests {
                     runner_capacity: Some(RunnerLeaseCapacity {
                         runner_classes: vec![RunnerClass::Kata],
                         runtime_capabilities: Some(kata_runtime_capabilities()),
+                        finite_private_profile: Some(
+                            FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
                         ..RunnerLeaseCapacity::default()
                     }),
                     now: Some("2026-05-25T13:06:00Z".to_string()),
@@ -10068,6 +10448,483 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn canonical_specialized_lifecycle_waits_for_capable_runner_and_backfills_profile() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "new@finite.vip",
+            "user_workos_new",
+            "specialization-fence",
+            "oslo-agent-specialization",
+            "artifact-v1",
+            "2026-05-25T13:02:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        let creation = state
+            .agent_creation_requests
+            .values_mut()
+            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+            .expect("creation request should exist");
+        if let Some(RuntimeSpecEnvelope::V1(spec)) = creation.runtime_spec.as_mut() {
+            spec.specialization_profile = None;
+        }
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .host_facts
+            .effective_specialization_bundle = None;
+
+        let restart = state
+            .request_runtime_restart(RequestRuntimeRestartInput {
+                verified_email: "new@finite.vip".to_string(),
+                workos_user_id: "user_workos_new".to_string(),
+                project_id,
+                now: Some("2026-05-25T13:03:00Z".to_string()),
+            })
+            .unwrap();
+        let incapable = RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::Kata],
+            runtime_capabilities: Some(kata_runtime_capabilities()),
+            ..RunnerLeaseCapacity::default()
+        };
+        assert!(
+            state
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-incapable".to_string(),
+                    lease_token: "lease-incapable".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(incapable),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state.runtime_control_requests[&restart.id].status,
+            RuntimeControlRequestStatus::Requested
+        );
+
+        assert!(
+            state
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-capable-missing-effective".to_string(),
+                    lease_token: "lease-capable-missing-effective".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..canonical_kata_runner_capacity()
+                    }),
+                    now: Some("2026-05-25T13:05:00Z".to_string()),
+                })
+                .unwrap()
+                .is_none(),
+            "desired-only legacy state must not consume a restart lease"
+        );
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .host_facts
+            .effective_specialization_bundle = Some("wrong-bundle".to_string());
+        assert!(
+            state
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-capable-wrong-effective".to_string(),
+                    lease_token: "lease-capable-wrong-effective".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..canonical_kata_runner_capacity()
+                    }),
+                    now: Some("2026-05-25T13:05:30Z".to_string()),
+                })
+                .unwrap()
+                .is_none(),
+            "a wrong effective bundle must not consume a restart lease"
+        );
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .host_facts
+            .effective_specialization_bundle =
+            Some(CANONICAL_FINITE_PRIVATE_SPECIALIZATION_BUNDLE.to_string());
+        let lease = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-capable".to_string(),
+                lease_token: "lease-capable".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..canonical_kata_runner_capacity()
+                }),
+                now: Some("2026-05-25T13:06:00Z".to_string()),
+            })
+            .unwrap()
+            .expect("capable runner should lease restart");
+        assert_eq!(
+            runtime_spec_v1(lease.runtime_spec.as_ref().expect("runtime spec"))
+                .specialization_profile,
+            Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+        );
+        let stored = state
+            .agent_creation_requests
+            .values()
+            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+            .expect("creation request should remain present");
+        assert_eq!(
+            runtime_spec_v1(stored.runtime_spec.as_ref().expect("backfilled spec"))
+                .specialization_profile,
+            Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+        );
+    }
+
+    #[test]
+    fn fresh_canonical_creation_lease_contains_per_runtime_private_secret_reference() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "fresh-canonical@finite.vip",
+            "user_workos_fresh_canonical",
+            "fresh-canonical-submit",
+            "oslo-agent-fresh-canonical",
+            "artifact-v1",
+            "2026-05-25T13:02:00Z",
+        );
+        let creation = state
+            .agent_creation_requests
+            .values()
+            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+            .expect("fresh canonical creation should remain persisted");
+        let spec = runtime_spec_v1(creation.runtime_spec.as_ref().expect("RuntimeSpec"));
+        assert_eq!(
+            spec.specialization_profile,
+            Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
+        );
+        assert_eq!(
+            spec.secret_references.first().map(String::as_str),
+            Some(FINITE_PRIVATE_SECRET_REFERENCE)
+        );
+    }
+
+    #[test]
+    fn ambiguous_private_lifecycle_without_host_fact_waits_for_capable_runner() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "legacy-private@finite.vip",
+            "user_workos_legacy_private",
+            "legacy-private-submit",
+            "oslo-agent-legacy-private",
+            "artifact-v1",
+            "2026-05-25T13:02:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .host_facts
+            .active_inference_profile = None;
+        let creation = state
+            .agent_creation_requests
+            .values_mut()
+            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+            .expect("creation request should exist");
+        if let Some(RuntimeSpecEnvelope::V1(spec)) = creation.runtime_spec.as_mut() {
+            spec.specialization_profile = None;
+            assert!(
+                spec.secret_references
+                    .iter()
+                    .any(|reference| reference == "FINITE_PRIVATE_API_KEY")
+            );
+        }
+        let restart = state
+            .request_runtime_restart(RequestRuntimeRestartInput {
+                verified_email: "legacy-private@finite.vip".to_string(),
+                workos_user_id: "user_workos_legacy_private".to_string(),
+                project_id,
+                now: Some("2026-05-25T13:03:00Z".to_string()),
+            })
+            .unwrap();
+        let incapable = RunnerLeaseCapacity {
+            runner_classes: vec![RunnerClass::Kata],
+            runtime_capabilities: Some(kata_runtime_capabilities()),
+            ..RunnerLeaseCapacity::default()
+        };
+        assert!(
+            state
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-legacy-private-incapable".to_string(),
+                    lease_token: "lease-legacy-private-incapable".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(incapable),
+                    now: Some("2026-05-25T13:04:00Z".to_string()),
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state.runtime_control_requests[&restart.id].status,
+            RuntimeControlRequestStatus::Requested
+        );
+
+        // The older pre-RuntimeSpec shape is equally ambiguous: Core would
+        // synthesize the universal private-key reference only after leasing.
+        let creation = state
+            .agent_creation_requests
+            .values_mut()
+            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+            .expect("creation request should remain present");
+        creation.runtime_spec = None;
+        assert!(
+            state
+                .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                    runner_id: "runner-legacy-null-incapable".to_string(),
+                    lease_token: "lease-legacy-null-incapable".to_string(),
+                    lease_seconds: Some(60),
+                    source_host_id: Some("oslo-host-1".to_string()),
+                    runner_capacity: Some(RunnerLeaseCapacity {
+                        runner_classes: vec![RunnerClass::Kata],
+                        runtime_capabilities: Some(kata_runtime_capabilities()),
+                        ..RunnerLeaseCapacity::default()
+                    }),
+                    now: Some("2026-05-25T13:05:00Z".to_string()),
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unrelated_null_creation_does_not_fence_generic_lifecycle() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "generic-lifecycle@finite.vip",
+            "user_workos_generic_lifecycle",
+            "generic-lifecycle-submit",
+            "oslo-agent-generic-lifecycle",
+            "artifact-v1",
+            "2026-05-25T13:02:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .host_facts
+            .active_inference_profile = None;
+        let matching_creation = state
+            .agent_creation_requests
+            .values_mut()
+            .find(|request| request.agent_runtime_id.as_deref() == Some(runtime_id.as_str()))
+            .expect("matching creation request should exist");
+        if let Some(RuntimeSpecEnvelope::V1(spec)) = matching_creation.runtime_spec.as_mut() {
+            spec.specialization_profile = None;
+            spec.secret_references.clear();
+        }
+
+        let unrelated_launch_code = issue_test_launch_code(&mut state);
+        let unrelated = state
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: "unrelated-pending@finite.vip".to_string(),
+                workos_user_id: "user_workos_unrelated_pending".to_string(),
+                display_name: "Unrelated Pending Agent".to_string(),
+                launch_code: unrelated_launch_code,
+                idempotency_key: "unrelated-pending-submit".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        assert_eq!(
+            unrelated.request.status,
+            AgentCreationRequestStatus::Requested
+        );
+        assert!(unrelated.request.runtime_spec.is_none());
+
+        let restart = state
+            .request_runtime_restart(RequestRuntimeRestartInput {
+                verified_email: "generic-lifecycle@finite.vip".to_string(),
+                workos_user_id: "user_workos_generic_lifecycle".to_string(),
+                project_id,
+                now: Some("2026-05-25T13:03:00Z".to_string()),
+            })
+            .unwrap();
+        let lease = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-generic-lifecycle".to_string(),
+                lease_token: "lease-generic-lifecycle".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:04:00Z".to_string()),
+            })
+            .unwrap()
+            .expect("unrelated null creation must not fence generic lifecycle");
+        assert_eq!(lease.request.id, restart.id);
+    }
+
+    #[test]
+    fn lifecycle_without_creation_or_host_fact_requires_capable_runner() {
+        let mut state = BridgeCoreState::default();
+        promote_runtime_artifact(&mut state);
+        let runtime_id = complete_self_serve_agent(
+            &mut state,
+            "no-evidence@finite.vip",
+            "user_workos_no_evidence",
+            "no-evidence-submit",
+            "oslo-agent-no-evidence",
+            "artifact-v1",
+            "2026-05-25T13:02:00Z",
+        );
+        let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        state
+            .agent_runtimes
+            .get_mut(&runtime_id)
+            .unwrap()
+            .host_facts
+            .active_inference_profile = None;
+        state
+            .agent_creation_requests
+            .retain(|_, request| request.agent_runtime_id.as_deref() != Some(runtime_id.as_str()));
+        let request_id = "runtime_ctl_no_evidence".to_string();
+        state.runtime_control_requests.insert(
+            request_id.clone(),
+            RuntimeControlRequest {
+                id: request_id.clone(),
+                project_id,
+                agent_runtime_id: runtime_id.clone(),
+                source_host_id: "oslo-host-1".to_string(),
+                source_machine_id: "oslo-agent-no-evidence".to_string(),
+                requested_by_user_id: "user_workos_no_evidence".to_string(),
+                kind: RuntimeControlKind::Restart,
+                target_runtime_artifact_id: None,
+                status: RuntimeControlRequestStatus::Requested,
+                runner_id: None,
+                lease_token: None,
+                lease_expires_at: None,
+                failure_message: None,
+                created_at: "2026-05-25T13:03:00Z".to_string(),
+                updated_at: "2026-05-25T13:03:00Z".to_string(),
+                completed_at: None,
+            },
+        );
+        let incapable = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-no-evidence-incapable".to_string(),
+                lease_token: "lease-no-evidence-incapable".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:04:00Z".to_string()),
+            })
+            .unwrap();
+        assert!(
+            incapable.is_none(),
+            "no-evidence lifecycle must stay quarantined"
+        );
+        let capable = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-no-evidence-capable".to_string(),
+                lease_token: "lease-no-evidence-capable".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..canonical_kata_runner_capacity()
+                }),
+                now: Some("2026-05-25T13:05:00Z".to_string()),
+            })
+            .unwrap()
+            .expect("capable Runner should claim no-evidence lifecycle");
+        assert_eq!(capable.request.id, request_id);
+
+        let generic_runtime_id = complete_self_serve_agent(
+            &mut state,
+            "generic-host-fact@finite.vip",
+            "user_workos_generic_host_fact",
+            "generic-host-fact-submit",
+            "oslo-agent-generic-host-fact",
+            "artifact-v1",
+            "2026-05-25T13:06:00Z",
+        );
+        let generic_project_id = state.agent_runtimes[&generic_runtime_id].project_id.clone();
+        state
+            .agent_runtimes
+            .get_mut(&generic_runtime_id)
+            .unwrap()
+            .host_facts
+            .active_inference_profile = Some("main".to_string());
+        let generic_creation = state
+            .agent_creation_requests
+            .values_mut()
+            .find(|request| {
+                request.agent_runtime_id.as_deref() == Some(generic_runtime_id.as_str())
+            })
+            .unwrap();
+        if let Some(RuntimeSpecEnvelope::V1(spec)) = generic_creation.runtime_spec.as_mut() {
+            spec.specialization_profile = None;
+            spec.secret_references.clear();
+        }
+        let generic_request_id = "runtime_ctl_generic_host_fact".to_string();
+        state.runtime_control_requests.insert(
+            generic_request_id.clone(),
+            RuntimeControlRequest {
+                id: generic_request_id.clone(),
+                project_id: generic_project_id,
+                agent_runtime_id: generic_runtime_id,
+                source_host_id: "oslo-host-1".to_string(),
+                source_machine_id: "oslo-agent-generic-host-fact".to_string(),
+                requested_by_user_id: "user_workos_generic_host_fact".to_string(),
+                kind: RuntimeControlKind::Restart,
+                target_runtime_artifact_id: None,
+                status: RuntimeControlRequestStatus::Requested,
+                runner_id: None,
+                lease_token: None,
+                lease_expires_at: None,
+                failure_message: None,
+                created_at: "2026-05-25T13:07:00Z".to_string(),
+                updated_at: "2026-05-25T13:07:00Z".to_string(),
+                completed_at: None,
+            },
+        );
+        let generic_lease = state
+            .lease_runtime_control_request(LeaseRuntimeControlRequestInput {
+                runner_id: "runner-generic-host-fact".to_string(),
+                lease_token: "lease-generic-host-fact".to_string(),
+                lease_seconds: Some(60),
+                source_host_id: Some("oslo-host-1".to_string()),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(kata_runtime_capabilities()),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                now: Some("2026-05-25T13:08:00Z".to_string()),
+            })
+            .unwrap()
+            .expect("positive generic host fact should remain eligible");
+        assert_eq!(generic_lease.request.id, generic_request_id);
     }
 
     #[test]
@@ -10183,6 +11040,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(kata_runtime_capabilities()),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some("2026-05-25T13:04:00Z".to_string()),
@@ -10260,6 +11120,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(kata_runtime_capabilities()),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some("2026-05-25T13:07:00Z".to_string()),
@@ -10599,6 +11462,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(kata_runtime_capabilities()),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some(LATER.to_string()),
@@ -10612,7 +11478,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-b".to_string(),
                 lease_seconds: Some(60),
-                runner_capacity: None,
+                runner_capacity: Some(canonical_kata_runner_capacity()),
                 now: Some("2026-05-25T13:02:00Z".to_string()),
             })
             .unwrap()
@@ -10668,7 +11534,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(canonical_kata_runner_capacity()),
                 now: Some(LATER.to_string()),
             })
             .unwrap();
@@ -10714,7 +11580,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(canonical_kata_runner_capacity()),
                 now: Some(LATER.to_string()),
             })
             .unwrap();
@@ -10778,7 +11644,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(canonical_kata_runner_capacity()),
                 now: Some(LATER.to_string()),
             })
             .unwrap()
@@ -11154,7 +12020,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: "paid-lease-1".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(canonical_kata_runner_capacity()),
                 now: Some("2026-05-25T13:01:00Z".to_string()),
             })
             .unwrap()
@@ -11565,7 +12431,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: "lease-token-1".to_string(),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(canonical_kata_runner_capacity()),
                 now: Some(LATER.to_string()),
             })
             .unwrap()
@@ -11954,7 +12820,7 @@ mod tests {
                 request_id: "req-private-weekly-1".to_string(),
                 presented_api_key: "fpk_live_secret".to_string(),
                 endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
+                model: "deepseek-v4-flash-0731".to_string(),
                 estimated_prompt_tokens: 800,
                 estimated_completion_tokens: 0,
                 estimated_usage_units: 800,
@@ -11971,7 +12837,7 @@ mod tests {
                 request_id: "req-private-weekly-2".to_string(),
                 presented_api_key: "fpk_live_secret".to_string(),
                 endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
+                model: "deepseek-v4-flash-0731".to_string(),
                 estimated_prompt_tokens: 300,
                 estimated_completion_tokens: 0,
                 estimated_usage_units: 300,
@@ -12034,7 +12900,7 @@ mod tests {
                 request_id: "req-status-window".to_string(),
                 presented_api_key: "fpk_live_status_read".to_string(),
                 endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
+                model: "deepseek-v4-flash-0731".to_string(),
                 estimated_prompt_tokens: 10,
                 estimated_completion_tokens: 0,
                 estimated_usage_units: 10,
@@ -12087,7 +12953,7 @@ mod tests {
                 request_id: "req-before-reset".to_string(),
                 presented_api_key: "fpk_live_reset".to_string(),
                 endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
+                model: "deepseek-v4-flash-0731".to_string(),
                 estimated_prompt_tokens: 10,
                 estimated_completion_tokens: 0,
                 estimated_usage_units: 10,
@@ -12181,7 +13047,7 @@ mod tests {
                     request_id: request_id.to_string(),
                     presented_api_key: "fpk_live_notice".to_string(),
                     endpoint: "/v1/chat/completions".to_string(),
-                    model: "glm-5.2".to_string(),
+                    model: "deepseek-v4-flash-0731".to_string(),
                     estimated_prompt_tokens: units,
                     estimated_completion_tokens: 0,
                     estimated_usage_units: units,
@@ -12263,7 +13129,7 @@ mod tests {
                 request_id: "req-settle-retry".to_string(),
                 presented_api_key: "fpk_live_settle".to_string(),
                 endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5.2".to_string(),
+                model: "deepseek-v4-flash-0731".to_string(),
                 estimated_prompt_tokens: 100,
                 estimated_completion_tokens: 0,
                 estimated_usage_units: 100,
@@ -12580,6 +13446,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(kata_runtime_capabilities()),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some("2026-05-25T13:04:30Z".to_string()),
@@ -13054,6 +13923,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(kata_runtime_capabilities()),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some(LATER.to_string()),
@@ -13235,6 +14107,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(kata_runtime_capabilities()),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some("2026-05-25T13:04:50Z".to_string()),
@@ -13288,6 +14163,9 @@ mod tests {
                     runner_capacity: Some(RunnerLeaseCapacity {
                         runner_classes: vec![RunnerClass::Kata],
                         runtime_capabilities: Some(kata_runtime_capabilities()),
+                        finite_private_profile: Some(
+                            FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                        ),
                         ..RunnerLeaseCapacity::default()
                     }),
                     now: Some("2026-05-25T13:05:00Z".to_string()),
@@ -13317,6 +14195,10 @@ mod tests {
         assert_eq!(
             runtime_spec_v1(synthesized_upgrade_spec).secret_references,
             vec!["FINITE_PRIVATE_API_KEY", "FAL_KEY", "XAI_API_KEY"]
+        );
+        assert_eq!(
+            runtime_spec_v1(synthesized_upgrade_spec).specialization_profile,
+            Some(RuntimeSpecializationProfile::FinitePrivateMultimodal)
         );
         assert_eq!(
             runtime_spec_v1(synthesized_upgrade_spec).environment,
@@ -13452,6 +14334,9 @@ mod tests {
                 runner_capacity: Some(RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::Kata],
                     runtime_capabilities: Some(recovery_capabilities),
+                    finite_private_profile: Some(
+                        FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+                    ),
                     ..RunnerLeaseCapacity::default()
                 }),
                 now: Some("2026-05-25T13:07:01Z".to_string()),
@@ -13547,6 +14432,9 @@ mod tests {
         let capacity = RunnerLeaseCapacity {
             runner_classes: vec![RunnerClass::Kata],
             runtime_capabilities: Some(kata_runtime_capabilities()),
+            finite_private_profile: Some(
+                FinitePrivateRunnerProfile::CanonicalSpecializationConfigured,
+            ),
             ..RunnerLeaseCapacity::default()
         };
         let stop_lease = state
@@ -13748,7 +14636,7 @@ mod tests {
                 source_host_id: None,
                 lease_token: format!("lease-{source_machine_id}"),
                 lease_seconds: Some(300),
-                runner_capacity: None,
+                runner_capacity: Some(canonical_kata_runner_capacity()),
                 now: Some(LATER.to_string()),
             })
             .unwrap()

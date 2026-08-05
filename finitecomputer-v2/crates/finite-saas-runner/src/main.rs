@@ -507,30 +507,47 @@ fn serve() -> Result<()> {
         Duration::from_millis(optional_u64("FC_RUNNER_MAX_ERROR_BACKOFF_MS", 30_000)?.max(1_000));
     let mut error_backoff = idle_interval;
     let mut last_error: Option<String> = None;
+    let mut last_capacity_reason: Option<String> = None;
 
     // Fail the supervised process for static configuration or Core artifact
     // lookup errors. Provider inventory/preflight failures are represented as
     // unavailable creation capacity so persisted runtime controls remain
     // serviceable; later cycle failures are retried as transient outages.
     match run_cycle()? {
-        RunOnceOutcome::Idle | RunOnceOutcome::CapacityUnavailable { .. } => {}
+        RunOnceOutcome::Idle => {}
+        RunOnceOutcome::CapacityUnavailable { reason, .. } => {
+            eprintln!("runner creation capacity unavailable: {reason}");
+            last_capacity_reason = Some(reason);
+        }
         outcome => println!("{}", serde_json::to_string(&outcome)?),
     }
 
     loop {
         match run_cycle() {
-            Ok(RunOnceOutcome::Idle | RunOnceOutcome::CapacityUnavailable { .. }) => {
+            Ok(RunOnceOutcome::Idle) => {
+                last_capacity_reason = None;
+                last_error = None;
+                error_backoff = idle_interval;
+                thread::sleep(idle_interval);
+            }
+            Ok(RunOnceOutcome::CapacityUnavailable { reason, .. }) => {
+                if last_capacity_reason.as_deref() != Some(&reason) {
+                    eprintln!("runner creation capacity unavailable: {reason}");
+                    last_capacity_reason = Some(reason);
+                }
                 last_error = None;
                 error_backoff = idle_interval;
                 thread::sleep(idle_interval);
             }
             Ok(outcome) => {
+                last_capacity_reason = None;
                 last_error = None;
                 error_backoff = idle_interval;
                 println!("{}", serde_json::to_string(&outcome)?);
                 thread::sleep(idle_interval);
             }
             Err(error) => {
+                last_capacity_reason = None;
                 let message = error.to_string();
                 if last_error.as_deref() != Some(&message) {
                     eprintln!("runner cycle failed: {message}");

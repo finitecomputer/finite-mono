@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 finitechat-proto = { path = "../finitechat/crates/finitechat-proto" }
+fs4.workspace = true
 futures-util.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 rusqlite.workspace = true

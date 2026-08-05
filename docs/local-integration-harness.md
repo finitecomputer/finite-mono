@@ -84,6 +84,19 @@ export FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=<finite-private-key>
 Devfinity fails before starting the stack when neither credential is present.
 It will not present a chat UI whose model calls are known to fail.
 
+Chat-ready local SaaS also requires the route-scoped multimodal specialization
+credential. Keep it outside the repository and export only its name/value into
+the Devfinity process:
+
+```sh
+export FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY=<specialization-worker-key>
+```
+
+Devfinity stores it only in its ignored, mode-`0600` Runner secret file. The
+Runner injects the universal `finite-private-multimodal-v1` identity into the
+Runtime; the generated process-compose YAML and status surfaces never contain
+the credential.
+
 For Brain integration work that has no operator inference credential, an
 explicit one-run exception can exercise Hosted Device identity, owner pairing,
 the Agent Working Tree, and Apple Container restart persistence without making
@@ -92,6 +105,7 @@ an LLM request:
 ```sh
 DEVFINITY_BRAIN_ONLY_SMOKE=1 \
   FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=devfinity-brain-smoke-unused \
+  FC_RUNNER_FINITE_PRIVATE_SPECIALIZATION_WORKER_API_KEY=<specialization-worker-key> \
   just dev saas-smoke
 ```
 
@@ -106,9 +120,11 @@ gate:
 just brain-product-matrix
 ```
 
-It launches the canonical image through the local Docker Runner against a fresh
-temporary devfinity state root and a deterministic OpenAI-compatible model
-stub. The model still drives real Hermes terminal tool calls, reads the
+It launches a disposable canonical image through the local Docker Runner
+against a fresh temporary devfinity state root and a deterministic
+OpenAI-compatible model stub. That image compiles its specialization worker
+allowlist to the same hermetic stub; release images retain the compile-time
+`https://specialization.finite.vip/v1` product value. The model still drives real Hermes terminal tool calls, reads the
 installed managed FiniteBrain skill, invokes the built `fbrain`, signs real
 Brain HTTP, and crosses Hosted Device and Product Client boundaries. The gate
 proves negative, unclear, and affirmative Personal setup, agent-first and

@@ -25,9 +25,9 @@ pub const DEFAULT_VISION_MODEL: &str = "nemotron-3-nano-omni-30b-a3b-reasoning-n
 pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v1-5";
 pub const DEFAULT_EMBEDDING_MODEL_VERSION: &str = "nomic-embed-text-v1-5/2026-07-21";
 pub const VERIFIED_EMBEDDING_PLAINTEXT_POLICY: &str = "verified-no-content-logging-no-retention-v1";
-pub const IMAGE_PROMPT_VERSION: &str = "aeon-image-analysis-v1";
-pub const AUDIO_PROMPT_VERSION: &str = "aeon-audio-understanding-v1";
-pub const VIDEO_PROMPT_VERSION: &str = "aeon-video-understanding-v1";
+pub const IMAGE_PROMPT_VERSION: &str = "finite-multimodal-image-v1";
+pub const AUDIO_PROMPT_VERSION: &str = "finite-multimodal-audio-v1";
+pub const VIDEO_PROMPT_VERSION: &str = "finite-multimodal-video-v1";
 const IMAGE_CAPABILITY_PROMPT: &str = "Interpret the supplied image faithfully. Follow the user's instruction, distinguish visible facts from uncertainty, and do not invoke tools.";
 const AUDIO_CAPABILITY_PROMPT: &str = "Interpret the supplied audio semantically rather than returning a transcript alone. Follow the user's instruction, distinguish audible facts from uncertainty, and do not invoke tools.";
 const VIDEO_CAPABILITY_PROMPT: &str = "Interpret the chronological timestamped frames as one visual sequence. Follow the user's instruction, distinguish visible facts from uncertainty, do not infer unheard audio, and do not invoke tools.";
@@ -3399,7 +3399,7 @@ mod tests {
         assert_eq!(captured.1["input"][0]["role"], "developer");
         assert_eq!(
             captured.1["metadata"]["finite_prompt_version"],
-            "aeon-image-analysis-v1"
+            "finite-multimodal-image-v1"
         );
         assert_eq!(captured.1["input"][1]["content"][1]["type"], "input_image");
     }
@@ -3860,10 +3860,10 @@ mod tests {
             .await
             .unwrap();
         assert!(metrics.contains(
-            "finite_specialization_last_failure_duration_milliseconds{capability=\"image\",error_class=\"media_decode_failed\",model_alias=\"qwopus-test\",state_version=\"aeon-image-analysis-v1\",surface=\"tyk-public-frontdoor\"}"
+            "finite_specialization_last_failure_duration_milliseconds{capability=\"image\",error_class=\"media_decode_failed\",model_alias=\"qwopus-test\",state_version=\"finite-multimodal-image-v1\",surface=\"tyk-public-frontdoor\"}"
         ));
         assert!(metrics.contains(&format!(
-            "finite_specialization_last_failure_request_identifier{{capability=\"image\",error_class=\"media_decode_failed\",model_alias=\"qwopus-test\",state_version=\"aeon-image-analysis-v1\",surface=\"tyk-public-frontdoor\"}} {}",
+            "finite_specialization_last_failure_request_identifier{{capability=\"image\",error_class=\"media_decode_failed\",model_alias=\"qwopus-test\",state_version=\"finite-multimodal-image-v1\",surface=\"tyk-public-frontdoor\"}} {}",
             bounded_request_identifier("req-malformed-image")
         )));
     }
@@ -4143,8 +4143,8 @@ mod tests {
             },
             prompt_versions: InvocationPromptVersions {
                 image: IMAGE_PROMPT_VERSION.to_owned(),
-                audio: "aeon-audio-understanding-v1".to_owned(),
-                video: "aeon-video-understanding-v1".to_owned(),
+                audio: "finite-multimodal-audio-v1".to_owned(),
+                video: "finite-multimodal-video-v1".to_owned(),
             },
             normalization_limits: InvocationNormalizationLimits {
                 max_images: 2,
