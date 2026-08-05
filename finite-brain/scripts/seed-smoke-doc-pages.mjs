@@ -106,8 +106,8 @@ It is organized around the Portable v1 model:
 
 - Brains are the top-level privacy container.
 - Folders are independent access and crypto boundaries.
-- Pages and Assets are encrypted Folder Objects.
-- Asset Source Notes make non-Markdown source files usable by agents.
+- Markdown Pages are encrypted Folder Objects.
+- Asset Source Notes point to non-Markdown bytes outside the Brain and make them usable by agents.
 - The Product Client opens Folder Key Grants, decrypts readable Pages, and builds local views.
 
 Start with [[Brain Model]], [[Product Client]], [[Asset Source Notes]], [[Folder Keys]], and [[Sync Append Log]].
@@ -124,10 +124,10 @@ FiniteBrain keeps the LLM wiki Markdown-first while preserving original evidence
 
 The rule is simple:
 
-- put non-Markdown source files under the containing Folder's raw/assets/ path;
-- store those files as encrypted Assets, not plaintext server blobs;
-- create a Markdown Source Note in the same Folder for each Asset;
-- record provenance, content type, hash or extraction status, and useful notes;
+- keep non-Markdown Asset bytes outside the Brain;
+- create one Markdown Asset Source Note under the containing Folder's raw/ tree;
+- record type, title, the canonical resource URI, provenance, and useful notes;
+- record content type, size, hash, or provider revision when known;
 - cite Source Notes from synthesized wiki/ pages instead of citing blob bytes directly.
 
 This gives users a durable evidence trail and gives agents something readable to search, link, summarize, and verify.
@@ -285,12 +285,11 @@ Read [[Brain Invites]], [[Shared Folder Mounts]], and [[Mounted Folder Routing]]
 
 OKF is the readable import/export format for accessible content.
 
-The agent wiki layer is the local working-tree shape agents use after the client decrypts Pages and Assets:
+The agent wiki layer is the local working-tree shape agents use after the client decrypts Pages:
 
 - AGENTS.md for operating instructions;
 - _index.md for folder summaries;
-- raw/ for captured source material;
-- raw/assets/ for non-Markdown Assets;
+- raw/ for captured Markdown and Asset Source Notes;
 - wiki/ for durable synthesized pages;
 - inventory/, datasets/, and output/ for workflow material.
 
@@ -578,14 +577,13 @@ Related pages: [[OKF Import Conflicts]], [[Working Tree Projection]], and [[Back
     title: "Working Tree Projection",
     text: `# Working Tree Projection
 
-The working-tree projection turns accessible decrypted Pages and Assets into a local folder/files view.
+The working-tree projection turns accessible decrypted Markdown Pages into a local folder/files view.
 
 Conventions include:
 
 - AGENTS.md for agent instructions;
 - _index.md for folder summaries;
-- raw/ for captured source material;
-- raw/assets/ for non-Markdown Assets;
+- raw/ for captured Markdown and Asset Source Notes whose resources stay outside the Brain;
 - wiki/ for durable synthesized pages;
 - inventory/, datasets/, and output/ for agent workflows.
 
@@ -625,8 +623,7 @@ Expected report areas:
 
 - wiki/ for durable synthesized pages;
 - output/ for one-off run artifacts;
-- raw/ for source material that should remain easy to audit.
-- raw/assets/ for non-Markdown Assets that need Source Notes.
+- raw/ for source material and Asset Source Notes that should remain easy to audit.
 
 Reports should link back to source Pages like [[Rust Workspace Architecture]] and [[Folder Object Crypto]].
 `,
@@ -1111,14 +1108,13 @@ Agent-facing wiki folders use a predictable shape.
 Common paths:
 
 - _index.md for a human and agent summary;
-- raw/ for captured source material;
-- raw/assets/ for non-Markdown Assets;
+- raw/ for captured Markdown and Asset Source Notes;
 - wiki/ for durable synthesized pages;
 - inventory/ for source candidates, open questions, and next actions;
 - datasets/ for manifests, schemas, samples, and query recipes;
 - output/ for run artifacts and reports.
 
-Every Asset should have a Markdown Source Note in the same Folder before an agent cites it from synthesized work.
+Every Asset should have one Markdown Asset Source Note under raw/ before an agent cites it from synthesized work. The note points to the bytes at their canonical resource outside the Brain.
 
 These paths are conventions inside an accessible working tree. The encrypted server state remains Folder Objects and sync records.
 `,

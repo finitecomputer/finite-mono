@@ -1,6 +1,6 @@
 # ADR 0008: Store Assets With Markdown Source Notes
 
-Status: accepted
+Status: superseded by ADR 0044
 
 Date: 2026-07-03
 

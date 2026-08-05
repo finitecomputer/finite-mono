@@ -878,6 +878,7 @@ pub(crate) fn reconcile_local_search_paths(
             })
             .collect(),
         remote_changes: Vec::new(),
+        unsupported_objects: Vec::new(),
         conflicts: Vec::new(),
     };
     reconcile_search_changes(root, &report)

@@ -1886,6 +1886,7 @@ fn write_sync_change_rows<W: Write>(
 ) -> Result<(), CliError> {
     write_sync_change_group(output, "local changes", &report.local_changes)?;
     write_sync_change_group(output, "remote changes", &report.remote_changes)?;
+    write_sync_change_group(output, "unsupported objects", &report.unsupported_objects)?;
     write_sync_change_group(output, "conflicts", &report.conflicts)
 }
 
@@ -10566,6 +10567,7 @@ mod tests {
                 reason: None,
             }],
             remote_changes: Vec::new(),
+            unsupported_objects: Vec::new(),
             conflicts: Vec::new(),
         };
 
