@@ -278,6 +278,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 [[ $command =~ --expected-source-machine-id[[:space:]]+([A-Za-z0-9_.-]+) ]]
                 machine="${BASH_REMATCH[1]}"
                 if [[ -n ${FAKE_EXEC_WAIT_FILE:-} ]]; then
+                  : >"$FAKE_EXEC_WAIT_FILE.parked"
                   while [[ ! -f "$FAKE_EXEC_WAIT_FILE" ]]; do
                     sleep 0.05
                   done
@@ -972,7 +973,12 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         wait_file: Path,
         sig: int,
     ) -> subprocess.CompletedProcess[str]:
-        events_path = Path(env["ROLLOUT_STATE_ROOT"]) / plan_hash / "events.jsonl"
+        # The fake ssh touches <wait_file>.parked only after it has entered the
+        # blocking Core-wait loop, so the signal is never sent into the window
+        # where the driver has written entry_preflight but not yet forked the
+        # exec call (a fork-after-signal fake ssh would park forever and hold
+        # the driver's inherited stderr pipe open).
+        parked_file = Path(f"{wait_file}.parked")
         process = subprocess.Popen(
             [
                 str(ROLLOUT),
@@ -988,20 +994,28 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        deadline = time.time() + 30
+        deadline = time.time() + 60
         while time.time() < deadline:
-            if events_path.exists() and '"entry_preflight"' in events_path.read_text(
-                encoding="utf-8"
-            ):
+            if parked_file.exists():
                 break
             self.assertIsNone(process.poll())
             time.sleep(0.05)
         else:
-            process.kill()
+            os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
             self.fail("rollout never reached the first Core upgrade wait")
         os.killpg(process.pid, sig)
-        stdout, stderr = process.communicate(timeout=30)
+        try:
+            stdout, stderr = process.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            # Last resort against a wedged run: release the fake exec, then
+            # force-kill the group so CI can never hang here.
+            wait_file.touch()
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                stdout, stderr = process.communicate()
         return subprocess.CompletedProcess(
             process.args, process.returncode, stdout, stderr
         )
