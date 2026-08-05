@@ -118,17 +118,16 @@ pub(crate) fn run_working_tree_sync(
     } else {
         None
     };
-    let local_result = push_local_working_tree_changes(
+    let push_context = PushLocalWorkingTreeContext {
         env,
-        &root,
-        &server_url,
-        &agent_state,
-        &export,
-        &mounted_exports,
-        &session_keys,
-        pending_local_changes,
-    )
-    .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
+        server_url: &server_url,
+        agent_state: &agent_state,
+        export: &export,
+        mounted_exports: &mounted_exports,
+        session_keys: &session_keys,
+    };
+    let local_result = push_local_working_tree_changes(&push_context, &root, pending_local_changes)
+        .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
     let force_bootstrap_reason = sync_bootstrap_reason(&local_result, newly_readable_keys);
     let remote_result = if local_result.pushed_count > 0 {
         confirm_local_changes_from_preflight(
@@ -1349,14 +1348,18 @@ pub(crate) fn opened_export_folder_key_grants_tolerant(
         .collect()
 }
 
+struct PushLocalWorkingTreeContext<'a> {
+    env: &'a CliEnvironment,
+    server_url: &'a str,
+    agent_state: &'a AgentState,
+    export: &'a CliEncryptedBrainExport,
+    mounted_exports: &'a [MountedFolderSyncContext],
+    session_keys: &'a SessionFolderKeyring,
+}
+
 fn push_local_working_tree_changes(
-    env: &CliEnvironment,
+    context: &PushLocalWorkingTreeContext<'_>,
     root: &Path,
-    server_url: &str,
-    agent_state: &AgentState,
-    export: &CliEncryptedBrainExport,
-    mounted_exports: &[MountedFolderSyncContext],
-    session_keys: &SessionFolderKeyring,
     changes: Vec<WorkingTreeChange>,
 ) -> Result<LocalSyncResult, CliError> {
     let tree_state = read_working_tree_state(root)?;
@@ -1365,17 +1368,18 @@ fn push_local_working_tree_changes(
     }
 
     let intents = plan_working_tree_change_intents(&tree_state, &changes);
-    let mut current_key_version_by_folder = export
+    let mut current_key_version_by_folder = context
+        .export
         .folders
         .iter()
         .map(|folder| {
             (
-                (export.brain.id.clone(), folder.id.clone()),
+                (context.export.brain.id.clone(), folder.id.clone()),
                 folder.current_key_version,
             )
         })
         .collect::<BTreeMap<_, _>>();
-    for mounted in mounted_exports {
+    for mounted in context.mounted_exports {
         if let Some(folder) = mounted.source_folder() {
             current_key_version_by_folder.insert(
                 (mounted.export.brain.id.clone(), folder.id.clone()),
@@ -1383,18 +1387,18 @@ fn push_local_working_tree_changes(
             );
         }
     }
-    let signing_keys = load_signer(env)?.keys;
+    let signing_keys = load_signer(context.env)?.keys;
     let actor_npub = NostrPublicKey::from_protocol(signing_keys.public_key())
         .to_npub()
         .map_err(|error| CliError::InvalidSigner(error.to_string()))?;
 
     let submit_context = SubmitIntentContext {
-        env,
-        server_url,
-        agent_state,
+        env: context.env,
+        server_url: context.server_url,
+        agent_state: context.agent_state,
         signing_keys: &signing_keys,
         actor_npub: &actor_npub,
-        session_keys,
+        session_keys: context.session_keys,
         current_key_version_by_folder: &current_key_version_by_folder,
     };
     let mut result = LocalSyncResult::default();
@@ -1415,7 +1419,7 @@ fn push_local_working_tree_changes(
                         .source_brain_id
                         .as_ref()
                         .map(ToString::to_string)
-                        .unwrap_or_else(|| agent_state.brain_id.clone());
+                        .unwrap_or_else(|| context.agent_state.brain_id.clone());
                     result.path_overrides.insert(
                         (
                             route_brain_id,
@@ -1435,7 +1439,12 @@ fn push_local_working_tree_changes(
                     "conflicted",
                     Some(reason.clone()),
                 ));
-                conflicts.push(conflict_for_change(change, intent, reason, timestamp(env)));
+                conflicts.push(conflict_for_change(
+                    change,
+                    intent,
+                    reason,
+                    timestamp(context.env),
+                ));
             }
             Err(error) if is_http_conflict(&error) => {
                 result.conflict_count += 1;
@@ -1450,7 +1459,7 @@ fn push_local_working_tree_changes(
                     change,
                     intent,
                     error.to_string(),
-                    timestamp(env),
+                    timestamp(context.env),
                 ));
             }
             Err(error) => return Err(error),
@@ -1458,7 +1467,7 @@ fn push_local_working_tree_changes(
     }
 
     if !conflicts.is_empty() {
-        mutate_agent_state_at_root(root, timestamp(env), |state, now| {
+        mutate_agent_state_at_root(root, timestamp(context.env), |state, now| {
             for conflict in conflicts {
                 if !state.conflicts.iter().any(|existing| {
                     existing.id == conflict.id && existing.state == ConflictState::Open
