@@ -701,16 +701,15 @@ impl KataLauncher {
         plan: &KataLaunchPlan,
         host_port: u16,
     ) -> Result<(), RunnerError> {
-        // `/healthz` is the sole runtime readiness contract. Kata must not
-        // inspect specialization through a backend-specific path.
+        // `/healthz` is the sole runtime admission contract. Its
+        // `admission_ready` field includes required specialization without a
+        // Kata-specific backend probe.
         let started = Instant::now();
         loop {
             if self
                 .probe_bounded_health(plan, host_port)?
                 .as_ref()
-                .and_then(|value| value.get("ready"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
+                .is_some_and(super::runtime_admission_ready)
             {
                 return Ok(());
             }
@@ -3976,9 +3975,9 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).unwrap();
-            let body = r#"{"ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
+            let body = r#"{"ready":true,"admission_ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
             let response = format!(
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
@@ -4072,7 +4071,7 @@ mod tests {
                                 } else if recovery.visible.load(Ordering::Relaxed) {
                                     if recovery.accepted {
                                         format!(
-                                            r#"{{"ready":true,"agent_npub":"{npub}","startup":{{"schema_version":1,"report_kind":"finite_agent_startup","boot_mode":"recover_known_good","status":"completed","phase":"complete","ok":true,"operation_id_hash":"{}","identity":{{"npub":"{npub}"}}}}}}"#,
+                                            r#"{{"ready":true,"admission_ready":true,"agent_npub":"{npub}","startup":{{"schema_version":1,"report_kind":"finite_agent_startup","boot_mode":"recover_known_good","status":"completed","phase":"complete","ok":true,"operation_id_hash":"{}","identity":{{"npub":"{npub}"}}}}}}"#,
                                             recovery.operation_hash
                                         )
                                     } else {
@@ -4082,10 +4081,10 @@ mod tests {
                                         )
                                     }
                                 } else {
-                                    r#"{"ready":true}"#.to_string()
+                                    r#"{"ready":true,"admission_ready":true}"#.to_string()
                                 }
                             }
-                            None => r#"{"ready":true}"#.to_string(),
+                            None => r#"{"ready":true,"admission_ready":true}"#.to_string(),
                         }
                     };
                     let refused = recovery.as_ref().is_some_and(|recovery| {

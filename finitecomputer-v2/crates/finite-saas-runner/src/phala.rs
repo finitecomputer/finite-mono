@@ -12,7 +12,7 @@ use super::{
     RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions, RuntimeUpgradeFacts,
     control_runtime_spec, creation_runtime_spec, docker_equivalent_runtime_env,
     hash_runtime_relay_token, random_runtime_bootstrap_token,
-    state_preserving_runtime_capabilities, wait_for_http_json_ready,
+    state_preserving_runtime_capabilities, wait_for_http_json_admission,
 };
 use crate::phala_inventory::{
     AppRevision, AppsPage, CurrentUserResponse, FiniteProviderInventory, InventoryContractError,
@@ -286,7 +286,7 @@ impl PhalaLauncher {
             client,
             preflight: shared_preflight(),
             preflight_refresh_interval: PREFLIGHT_REFRESH_INTERVAL,
-            health_check: wait_for_http_json_ready,
+            health_check: wait_for_http_json_admission,
         }
     }
 
@@ -2820,9 +2820,9 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).unwrap();
-            let body = r#"{"ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
+            let body = r#"{"ready":true,"admission_ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
             let response = format!(
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();

@@ -2733,7 +2733,7 @@ impl DockerLauncher {
         // The runtime health response is authoritative, including any
         // required Finite Private specialization state. Do not add a
         // provider-specific specialization probe here.
-        wait_for_http_json_ready(
+        wait_for_http_json_admission(
             &plan.health_url,
             "Docker runtime /healthz",
             self.config.readiness_timeout,
@@ -3284,7 +3284,7 @@ fn docker_equivalent_runtime_env(
     entries
 }
 
-fn wait_for_http_json_ready(
+fn wait_for_http_json_admission(
     url: &str,
     name: &str,
     timeout: Duration,
@@ -3298,14 +3298,10 @@ fn wait_for_http_json_ready(
         {
             Ok(response) => match read_bounded_json_response(response) {
                 Ok(value) => {
-                    if value
-                        .get("ready")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                    {
+                    if runtime_admission_ready(&value) {
                         return Ok(());
                     }
-                    "runtime health reported ready=false".to_string()
+                    "runtime health reported admission_ready=false".to_string()
                 }
                 Err(error) => error,
             },
@@ -3322,6 +3318,14 @@ fn wait_for_http_json_ready(
         }
         thread::sleep(interval);
     }
+}
+
+fn runtime_admission_ready(value: &serde_json::Value) -> bool {
+    value.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+        && value
+            .get("admission_ready")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
 }
 
 fn read_bounded_json_response(response: ureq::Response) -> Result<serde_json::Value, String> {
@@ -3746,7 +3750,7 @@ impl EnclaviaLauncher {
     fn wait_for_runtime_http(&self, endpoint: &EnclaviaEndpoint) -> Result<(), RunnerError> {
         // Enclavia uses the same runtime health contract as every provider;
         // specialization is never probed through the provider API.
-        wait_for_http_json_ready(
+        wait_for_http_json_admission(
             &endpoint.health_url,
             "Enclavia runtime /proxy/healthz",
             self.config.readiness_timeout,
@@ -6581,7 +6585,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_runtime_readiness_depends_only_on_generic_health() {
+    fn docker_runtime_admission_requires_explicit_admission_health() {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -6593,7 +6597,7 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..bytes_read]);
             assert!(request.starts_with("GET /healthz "));
 
-            let body = r#"{"ready":true}"#;
+            let body = r#"{"ready":true,"admission_ready":true}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -6624,6 +6628,21 @@ mod tests {
     }
 
     #[test]
+    fn runtime_admission_fails_closed_without_a_boolean_admission_decision() {
+        for value in [
+            serde_json::json!({"ready": true}),
+            serde_json::json!({"ready": true, "admission_ready": null}),
+            serde_json::json!({"ready": true, "admission_ready": "true"}),
+            serde_json::json!({"ready": false, "admission_ready": true}),
+        ] {
+            assert!(!runtime_admission_ready(&value), "{value}");
+        }
+        assert!(runtime_admission_ready(
+            &serde_json::json!({"ready": true, "admission_ready": true})
+        ));
+    }
+
+    #[test]
     fn provider_readiness_rejects_desired_only_authoritative_health() {
         use std::io::{Read, Write};
 
@@ -6633,7 +6652,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).unwrap();
-            let body = r#"{"ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false,"cleanup_blocked":false}}}"#;
+            let body = r#"{"ready":true,"admission_ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false,"cleanup_blocked":false}}}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -6641,7 +6660,7 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
 
-        let error = wait_for_http_json_ready(
+        let error = wait_for_http_json_admission(
             &format!("http://{address}/healthz"),
             "authoritative runtime /healthz",
             Duration::from_millis(20),

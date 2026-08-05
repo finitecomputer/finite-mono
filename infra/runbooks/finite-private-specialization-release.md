@@ -48,14 +48,16 @@ convergence batch, and after cleanup.
    available while canonical Restart/Recover/Upgrade require the capability.
 2. **New runtimes:** launch one disposable canonical runtime through Docker,
    Kata, Phala, Apple Container, and Enclavia where enabled. Each adapter must
-   accept only the existing `/healthz` result. Retain status evidence showing
-   the exact effective bundle `finite-private-multimodal-v1`; do not inspect raw
-   Hermes configuration or call the worker directly.
+   require `admission_ready=true` from the existing `/healthz` result. Retain
+   status evidence showing the exact effective bundle
+   `finite-private-multimodal-v1`; do not inspect raw Hermes configuration or
+   call the worker directly.
 3. **Existing runtimes:** use the explicit immutable Kata Runtime Upgrade path.
    An authoritative `active_inference_profile=finite-private` host fact is
    promoted transactionally to the universal typed profile. Missing or
    conflicting facts fail closed. Desired-only, wrong-bundle, ineffective, and
-   cleanup-blocked runtimes remain unready.
+   cleanup-blocked replacement compute remains admission-ineligible and rolls
+   back without making the prior chat runtime unavailable.
 4. **Quarantines:** Docker and Enclavia prove creation/readiness only. Apple
    Container existing-runtime specialization replacement and Kata
    RecoverKnownGood remain disabled until they have durable rollback
@@ -71,9 +73,11 @@ convergence batch, and after cleanup.
 ## Verification
 
 - Health projects only bounded, allowlisted public fields plus bundle id,
-  desired, and effective. It never exposes credentials or raw Hermes config.
-- Every provider uses `/healthz`; none implements a specialization-specific
-  provider probe.
+  desired, effective, and the composite `admission_ready` decision. It never
+  exposes credentials or raw Hermes config.
+- Every provider requires `admission_ready` from `/healthz`; none implements a
+  specialization-specific provider probe. Recurring OCI health and contact
+  availability use `ready`, preserving basic chat when specialization degrades.
 - Run the targeted health, agentd, Runner provider, Core in-memory/PostgreSQL,
   finite-status, runtime-image, and Hermes probe gates before the applicable
   repository-wide checks.

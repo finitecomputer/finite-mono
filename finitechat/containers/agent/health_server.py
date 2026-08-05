@@ -359,24 +359,31 @@ def runtime_health() -> dict[str, Any]:
     startup = startup_report()
     if startup is not None:
         payload["startup"] = startup
-    # The body and HTTP status carry the same composite readiness result. This
-    # matters for providers (such as Kata) that inspect bounded JSON bodies
-    # even when the HTTP response is a non-2xx status.
+    # Basic chat/process readiness remains independent from the specialization
+    # admission gate. Runners require both fields before accepting a new or
+    # replacement Runtime; recurring OCI health follows only `ready` so an
+    # auxiliary specialization failure cannot take basic chat offline.
     payload["ready"] = runtime_ready(payload)
+    payload["admission_ready"] = runtime_admission_ready(payload)
     if len(json.dumps(payload, sort_keys=True).encode("utf-8")) > MAX_HEALTH_RESPONSE_BYTES:
         return {"ready": False, "error": "health payload exceeded bounded limit"}
     return payload
 
 
 def runtime_ready(payload: dict[str, Any]) -> bool:
-    generic_ready = (
+    return (
         bool(payload.get("ready"))
         and payload.get("bridge", {}).get("ok") is not False
         and payload.get("agentd", {}).get("ok") is not False
         and payload.get("startup", {}).get("ok") is not False
     )
-    if not generic_ready or EXPECTED_SPECIALIZATION_BUNDLE is None:
-        return generic_ready
+
+
+def runtime_admission_ready(payload: dict[str, Any]) -> bool:
+    if not runtime_ready(payload):
+        return False
+    if EXPECTED_SPECIALIZATION_BUNDLE is None:
+        return True
     specialization = payload.get("agentd", {}).get("specialization")
     return (
         isinstance(specialization, dict)
@@ -386,18 +393,22 @@ def runtime_ready(payload: dict[str, Any]) -> bool:
     )
 
 
+def runtime_http_status(payload: dict[str, Any]) -> int:
+    return 200 if runtime_ready(payload) else 503
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/healthz":
             payload = runtime_health()
-            self._write(200 if runtime_ready(payload) else 503, payload)
+            self._write(runtime_http_status(payload), payload)
             return
         if self.path in {"/contact", "/invite"}:
             # `/invite` is a temporary URL-compatibility alias for already
             # recorded Runtime facts. It serves contact metadata only and does
             # not recreate the removed invite-session admission protocol.
             payload = runtime_health()
-            self._write(200 if runtime_ready(payload) else 503, payload)
+            self._write(runtime_http_status(payload), payload)
             return
         self._write(404, {"ready": False, "error": "not found"})
 

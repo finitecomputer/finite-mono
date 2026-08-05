@@ -301,7 +301,7 @@ class AgentHealthServerTest(unittest.TestCase):
             "startup_report_missing_for_recovery_intent",
         )
 
-    def test_required_specialization_is_redacted_and_ready_only_when_effective(self) -> None:
+    def test_required_specialization_is_redacted_and_gates_admission_not_chat(self) -> None:
         self.health.__dict__["EXPECTED_SPECIALIZATION_BUNDLE"] = "finite-private-multimodal-v1"
         self.addCleanup(setattr, self.health, "EXPECTED_SPECIALIZATION_BUNDLE", None)
         self.write_bridge({"status": "connected", "ok": True})
@@ -332,8 +332,9 @@ class AgentHealthServerTest(unittest.TestCase):
             with self.subTest(specialization=specialization):
                 self.write_agentd_status(specialization)
                 payload = self.health.runtime_health()
-                self.assertFalse(self.health.runtime_ready(payload))
-                self.assertFalse(payload["ready"])
+                self.assertTrue(self.health.runtime_ready(payload))
+                self.assertTrue(payload["ready"])
+                self.assertFalse(payload["admission_ready"])
 
         self.write_agentd_status(
             {
@@ -346,6 +347,7 @@ class AgentHealthServerTest(unittest.TestCase):
         payload = self.health.runtime_health()
         self.assertTrue(self.health.runtime_ready(payload))
         self.assertTrue(payload["ready"])
+        self.assertTrue(payload["admission_ready"])
         self.assertEqual(
             payload["agentd"]["specialization"],
             {
@@ -369,7 +371,8 @@ class AgentHealthServerTest(unittest.TestCase):
             }
         )
         payload = self.health.runtime_health()
-        self.assertFalse(self.health.runtime_ready(payload))
+        self.assertTrue(self.health.runtime_ready(payload))
+        self.assertFalse(payload["admission_ready"])
         self.assertNotIn("specialization", payload["agentd"])
 
     def test_noncanonical_runtime_keeps_generic_readiness_without_specialization(self) -> None:
@@ -377,6 +380,7 @@ class AgentHealthServerTest(unittest.TestCase):
         self.write_agentd_status(None)
         payload = self.health.runtime_health()
         self.assertTrue(self.health.runtime_ready(payload))
+        self.assertTrue(payload["admission_ready"])
 
     def test_bridge_projection_is_allowlisted_and_bounded(self) -> None:
         self.write_bridge(
@@ -424,7 +428,7 @@ class AgentHealthServerTest(unittest.TestCase):
         payload = self.health.runtime_health()
         self.assertEqual(len(payload["startup"]["actions"]), self.health.MAX_STARTUP_ITEMS)
 
-    def test_required_specialization_changes_public_ready_field(self) -> None:
+    def test_required_specialization_changes_only_admission_ready_field(self) -> None:
         self.health.__dict__["EXPECTED_SPECIALIZATION_BUNDLE"] = "finite-private-multimodal-v1"
         self.addCleanup(setattr, self.health, "EXPECTED_SPECIALIZATION_BUNDLE", None)
         self.write_bridge({"status": "connected", "ok": True})
@@ -437,7 +441,9 @@ class AgentHealthServerTest(unittest.TestCase):
             }
         )
         payload = self.health.runtime_health()
-        self.assertFalse(payload["ready"])
+        self.assertTrue(payload["ready"])
+        self.assertFalse(payload["admission_ready"])
+        self.assertEqual(self.health.runtime_http_status(payload), 200)
 
 
 if __name__ == "__main__":

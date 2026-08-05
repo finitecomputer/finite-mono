@@ -74,13 +74,16 @@ durable identity is usable, the Finite Chat bridge is healthy, and the
 `finitechat`, health, and Hermes processes are all running. For a runtime
 launched with `FINITE_SPECIALIZATION_BUNDLE`, the same response also projects
 agentd's secret-free `specialization` state (`bundle_id`, `desired`, and
-`effective`); `/healthz` stays unready until the expected bundle is both desired
-and effective for the current Hermes generation. A missing, malformed,
-wrong-bundle, desired-only, ineffective, or cleanup-blocked state therefore
-cannot pass provider readiness. Runtimes without that environment
-variable retain generic readiness. Binary, dependency, skill, and version
-validation happens once while building the image; it is not repeated every 30
-seconds as part of runtime liveness.
+`effective`). The public `ready` field and HTTP status protect basic chat and
+process health. The separate `admission_ready` field additionally requires the
+expected bundle to be desired and effective for the current Hermes generation.
+Runners require `admission_ready` before accepting new or replacement compute;
+a missing, malformed, wrong-bundle, desired-only, ineffective, or
+cleanup-blocked state therefore fails creation and upgrade without making an
+already-serving chat runtime fail its recurring OCI healthcheck. Runtimes
+without that environment variable report both fields from generic readiness.
+Binary, dependency, skill, and version validation happens once while building
+the image; it is not repeated every 30 seconds as part of runtime liveness.
 
 On a genuinely fresh Agent Home, the gateway launcher atomically seeds the
 image baseline into the durable managed-skills directory and exposes that path

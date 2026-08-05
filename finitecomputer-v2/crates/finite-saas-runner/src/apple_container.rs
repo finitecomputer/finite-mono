@@ -389,7 +389,7 @@ impl AppleContainerLauncher {
         // contact URL is a published fact, while chat admission remains the
         // Finite Chat Device's concern. The health response is authoritative
         // for required specialization; no Apple-specific probe is allowed.
-        wait_for_http_json_ready(
+        wait_for_http_json_admission(
             &plan.health_url,
             "Apple Container runtime /healthz",
             self.config.readiness_timeout,
@@ -1223,9 +1223,9 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).unwrap();
-            let body = r#"{"ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
+            let body = r#"{"ready":true,"admission_ready":false,"agentd":{"specialization":{"bundle_id":"finite-private-multimodal-v1","desired":true,"effective":false}}}"#;
             let response = format!(
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).unwrap();
