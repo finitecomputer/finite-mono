@@ -11,7 +11,12 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use finite_nostr::NostrPublicKey;
+use finite_brain_core::{
+    BrainId, FolderId, FolderKey, FolderKeyGrantPayload, FolderObjectAad, ObjectId,
+    encrypt_folder_object,
+};
+use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
+use nostr::{Keys, Kind};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -2605,7 +2610,62 @@ fn spawn_brain_access_revoked_server() -> (String, thread::JoinHandle<String>) {
     (endpoint, worker)
 }
 
-fn spawn_large_bootstrap_sync_server() -> (String, thread::JoinHandle<Vec<String>>) {
+fn large_bootstrap_markdown_fixture() -> (Value, String) {
+    let keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
+    let recipient = NostrPublicKey::from_protocol(keys.public_key());
+    let recipient_npub = recipient.to_npub().unwrap();
+    let folder_key = FolderKey::from_bytes([11; 32]);
+    let grant_payload = FolderKeyGrantPayload {
+        version: "finite-folder-key-grant-v1".to_owned(),
+        brain_id: "brain".to_owned(),
+        folder_id: "general".to_owned(),
+        key_version: 1,
+        folder_key: folder_key.to_base64(),
+        issuer_npub: recipient_npub.clone(),
+        recipient_npub: recipient_npub.clone(),
+        created_at: "2026-07-22T18:00:00Z".to_owned(),
+    };
+    let rumor = build_rumor(
+        NostrPublicKey::from_protocol(keys.public_key()),
+        Kind::Custom(30_101),
+        Vec::new(),
+        grant_payload.canonical_json(),
+        1_753_206_400,
+    );
+    let wrapped = wrap_rumor(&keys, recipient, rumor).unwrap();
+    let grant = json!({
+        "folderId": "general",
+        "keyVersion": 1,
+        "issuerNpub": recipient_npub,
+        "recipientNpub": grant_payload.recipient_npub,
+        "wrappedEventJson": wrapped.as_json()
+    });
+    let object_id = ObjectId::new("obj_largebootstrap1").unwrap();
+    let plaintext = json!({
+        "version": "finite-folder-object-page-v1",
+        "path": "remote-large-bootstrap.md",
+        "markdown": "# Remote large bootstrap\n\nDelivered inside the oversized bootstrap response.\n"
+    })
+    .to_string();
+    let envelope = encrypt_folder_object(
+        &folder_key,
+        &FolderObjectAad {
+            brain_id: BrainId::new("brain").unwrap(),
+            folder_id: FolderId::new("general").unwrap(),
+            object_id,
+            key_version: 1,
+        },
+        plaintext,
+    )
+    .unwrap();
+    (grant, envelope.canonical_json())
+}
+
+fn spawn_large_bootstrap_sync_server(
+    export_grant: Value,
+    ciphertext: String,
+) -> (String, thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -2629,8 +2689,14 @@ fn spawn_large_bootstrap_sync_server() -> (String, thread::JoinHandle<Vec<String
                             "name": "Brain",
                             "ownerUserId": null
                         },
-                        "folders": [],
-                        "keyGrants": [],
+                        "folders": [{
+                            "id": "general",
+                            "path": "General",
+                            "access": "owner",
+                            "currentKeyVersion": 1,
+                            "accessible": true
+                        }],
+                        "keyGrants": [export_grant],
                         "accessState": { "members": [], "admins": [] }
                     })
                     .to_string(),
@@ -2646,7 +2712,13 @@ fn spawn_large_bootstrap_sync_server() -> (String, thread::JoinHandle<Vec<String
                     "200 OK",
                     json!({
                         "latestSequence": 9,
-                        "objects": [],
+                        "objects": [{
+                            "folderId": "general",
+                            "objectId": "obj_largebootstrap1",
+                            "revision": 1,
+                            "ciphertext": ciphertext,
+                            "deleted": false
+                        }],
                         "forwardCompatiblePadding": padding
                     })
                     .to_string(),
@@ -3354,7 +3426,8 @@ fn built_fbrain_full_brain_access_loss_pauses_without_deleting_local_work() {
 fn built_fbrain_sync_accepts_bootstrap_larger_than_ureq_default_limit() {
     let scratch = TempDir::new().unwrap();
     let tree = setup_access_loss_tree(&scratch);
-    let (endpoint, server) = spawn_large_bootstrap_sync_server();
+    let (grant, ciphertext) = large_bootstrap_markdown_fixture();
+    let (endpoint, server) = spawn_large_bootstrap_sync_server(grant, ciphertext);
 
     let sync = run(
         scratch.path(),
@@ -3369,7 +3442,7 @@ fn built_fbrain_sync_accepts_bootstrap_larger_than_ureq_default_limit() {
         String::from_utf8_lossy(&sync.stderr),
     );
     let report: Value = serde_json::from_slice(&sync.stdout).unwrap();
-    assert_eq!(report["status"], "caught-up");
+    assert_eq!(report["status"], "applied-remote-records");
     assert_eq!(report["latestSequence"], 9);
     let state: Value = serde_json::from_slice(
         &fs::read(tree.join(".finitebrain/working-tree-state.json")).unwrap(),
@@ -3377,8 +3450,8 @@ fn built_fbrain_sync_accepts_bootstrap_larger_than_ureq_default_limit() {
     .unwrap();
     assert_eq!(state["sync"]["latestSequence"], 9);
     assert_eq!(
-        fs::read_to_string(tree.join("General/nested/strong-a.md")).unwrap(),
-        "# Cobalt cobalt cobalt\n\nCobalt cobalt cobalt cobalt durable evidence.\n"
+        fs::read_to_string(tree.join("General/remote-large-bootstrap.md")).unwrap(),
+        "# Remote large bootstrap\n\nDelivered inside the oversized bootstrap response.\n"
     );
     assert_eq!(requests.len(), 3);
     assert!(requests[2].contains("/v1/brains/brain/sync/bootstrap"));

@@ -4826,7 +4826,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let started = Instant::now();
             let mut requests = Vec::new();
-            while requests.len() < 4 && started.elapsed() < Duration::from_secs(5) {
+            while requests.len() < 3 && started.elapsed() < Duration::from_secs(5) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(10));
                     continue;
@@ -6101,6 +6101,40 @@ mod tests {
                         serde_json::json!({
                             "latestSequence": objects.len() as u64,
                             "objects": objects
+                        })
+                        .to_string(),
+                    )
+                } else if request_line.contains("/sync/records") {
+                    let records = accepted_object
+                        .as_ref()
+                        .map(|(object_id, ciphertext)| {
+                            vec![serde_json::json!({
+                                "sequence": 1,
+                                "recordEventId": "evt-accepted-local-write",
+                                "recordType": "folder_object_revision",
+                                "folderId": "general",
+                                "objectId": object_id,
+                                "revision": 1,
+                                "actorNpub": "npub-local-writer",
+                                "clientCreatedAt": "2026-06-24T20:46:36Z",
+                                "payloadJson": remote_revision_payload_json_for_object(
+                                    object_id,
+                                    ciphertext,
+                                ),
+                                "recordEventKind": APP_SPECIFIC_KIND
+                            })]
+                        })
+                        .unwrap_or_default();
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "brainId": "brain",
+                            "afterSequence": 0,
+                            "latestSequence": records.len() as u64,
+                            "records": records,
+                            "count": records.len(),
+                            "hasMore": false,
+                            "nextSequence": records.len() as u64
                         })
                         .to_string(),
                     )
@@ -11722,6 +11756,21 @@ mod tests {
                 .filter(|request| request.starts_with("PUT "))
                 .count(),
             2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("/sync/bootstrap"))
+                .count(),
+            1,
+            "accepted writes must be confirmed incrementally without refetching the full bootstrap"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("/sync/records"))
+                .count(),
+            1
         );
 
         let tree_state = read_working_tree_state(&tree).unwrap();

@@ -101,19 +101,23 @@ pub(crate) fn run_working_tree_sync(
     );
     let pending_local_changes = scan_working_tree_changes(&root, &prior_tree_state)
         .map_err(|error| sync_stage_error("scan local Working Tree changes", &root, error))?;
-    if !pending_local_changes.is_empty() {
+    let mut preflight_remote_result = if !pending_local_changes.is_empty() {
         // Local submission is followed by a bootstrap so accepted writes can
         // be confirmed from the authoritative projection. Validate that this
         // required response is readable before any remote write or local
         // conflict bookkeeping can mutate state.
-        fetch_bootstrap_remote_sync(
-            env,
-            &server_url,
-            &agent_state.brain_id,
-            "validated bootstrap response bound before local changes".to_owned(),
+        Some(
+            fetch_bootstrap_remote_sync(
+                env,
+                &server_url,
+                &agent_state.brain_id,
+                "validated bootstrap response bound before local changes".to_owned(),
+            )
+            .map_err(|error| sync_stage_error("preflight remote bootstrap", &root, error))?,
         )
-        .map_err(|error| sync_stage_error("preflight remote bootstrap", &root, error))?;
-    }
+    } else {
+        None
+    };
     let local_result = push_local_working_tree_changes(
         env,
         &root,
@@ -126,7 +130,30 @@ pub(crate) fn run_working_tree_sync(
     )
     .map_err(|error| sync_stage_error("push local Working Tree changes", &root, error))?;
     let force_bootstrap_reason = sync_bootstrap_reason(&local_result, newly_readable_keys);
-    let remote_result = if let Some(reason) = force_bootstrap_reason {
+    let remote_result = if local_result.pushed_count > 0 {
+        confirm_local_changes_from_preflight(
+            env,
+            &server_url,
+            &agent_state.brain_id,
+            preflight_remote_result.take().ok_or_else(|| {
+                CliError::InvalidInput(
+                    "local writes require a validated bootstrap confirmation base".to_owned(),
+                )
+            })?,
+            force_bootstrap_reason.unwrap_or_else(|| {
+                "confirmed accepted local writes through incremental sync".to_owned()
+            }),
+        )
+        .map_err(|error| sync_stage_error("confirm local Working Tree changes", &root, error))?
+    } else if local_result.conflict_count > 0 {
+        let mut preflight = preflight_remote_result.take().ok_or_else(|| {
+            CliError::InvalidInput(
+                "local conflicts require a validated bootstrap projection".to_owned(),
+            )
+        })?;
+        preflight.report_reason = force_bootstrap_reason;
+        preflight
+    } else if let Some(reason) = force_bootstrap_reason {
         fetch_bootstrap_remote_sync(env, &server_url, &agent_state.brain_id, reason)
             .map_err(|error| sync_stage_error("fetch remote bootstrap", &root, error))?
     } else {
@@ -623,6 +650,32 @@ fn fetch_incremental_remote_sync(
     }
 }
 
+fn confirm_local_changes_from_preflight(
+    env: &CliEnvironment,
+    server_url: &str,
+    brain_id: &str,
+    preflight: RemoteSyncResult,
+    reason: String,
+) -> Result<RemoteSyncResult, CliError> {
+    let after_sequence = preflight.bootstrap.latest_sequence;
+    let pull = fetch_all_sync_records(env, server_url, brain_id, after_sequence)?;
+    let records = pull.records;
+    let bootstrap = apply_incremental_records_to_bootstrap(
+        preflight.bootstrap,
+        after_sequence,
+        pull.latest_sequence,
+        &records,
+    )
+    .map_err(CliError::InvalidInput)?;
+    Ok(RemoteSyncResult {
+        bootstrap,
+        records,
+        report_status: "applied".to_owned(),
+        report_reason: Some(reason),
+        used_bootstrap: true,
+    })
+}
+
 fn fetch_all_sync_records(
     env: &CliEnvironment,
     server_url: &str,
@@ -698,12 +751,27 @@ fn apply_incremental_records(
     latest_sequence: u64,
     records: &[CliSyncRecord],
 ) -> Result<CliSyncBootstrap, String> {
+    let base = incremental_base_bootstrap(root, after_sequence)?;
+    apply_incremental_records_to_bootstrap(base, after_sequence, latest_sequence, records)
+}
+
+fn apply_incremental_records_to_bootstrap(
+    base: CliSyncBootstrap,
+    after_sequence: u64,
+    latest_sequence: u64,
+    records: &[CliSyncRecord],
+) -> Result<CliSyncBootstrap, String> {
+    if base.latest_sequence != after_sequence {
+        return Err(format!(
+            "bootstrap sequence {} does not match cursor {after_sequence}",
+            base.latest_sequence
+        ));
+    }
     if latest_sequence < after_sequence {
         return Err(format!(
             "sync records latest sequence {latest_sequence} is older than cursor {after_sequence}"
         ));
     }
-    let base = incremental_base_bootstrap(root, after_sequence)?;
     let mut control_records = base.control_records;
     let mut objects = base
         .objects
@@ -1884,7 +1952,7 @@ fn materialize_remote_projection(
             Some((&mounted.mount.source_folder_id, &mounted.display_path)),
         )?;
     }
-    validate_preserved_legacy_object_paths(&projection, &preserved_legacy_objects)?;
+    validate_preserved_legacy_object_paths(&projection, &prior_state.objects)?;
     projection.state.objects.extend(preserved_legacy_objects);
     let mut deleted_routes = deleted_folder_routes(export, bootstrap)?;
     for mounted in mounted_folders {
@@ -1949,6 +2017,9 @@ fn validate_preserved_legacy_object_paths(
     preserved: &[WorkingTreeObjectManifestEntry],
 ) -> Result<(), CliError> {
     for object in preserved {
+        if object.content_type == "text/markdown" {
+            continue;
+        }
         let folder = projection
             .state
             .folder_roots
@@ -4298,7 +4369,7 @@ mod tests {
                     object_id: asset_id.as_str().to_owned(),
                     revision: 1,
                     ciphertext: asset_envelope.canonical_json(),
-                    deleted: false,
+                    deleted: true,
                 },
             ],
             control_records: Vec::new(),
