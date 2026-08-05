@@ -28,8 +28,12 @@ import {
   coreProductProjectForRouteId,
   coreProductProjects,
   coreRuntimeCapabilitiesSupport,
+  coreRuntimeControlConflictMessage,
+  CoreFetchError,
+  isCoreRuntimeControlConflict,
   type CoreAgentCreationRequestSummary,
   type CoreAdminRuntimeOverview,
+  type CorePublicRuntimeControl,
   type CoreRuntimeCapabilities,
   type CoreVisibleProject,
   loadCoreDashboardSummary,
@@ -663,4 +667,39 @@ test("dashboard summary uses one Core request and falls back safely to independe
     }
     globalThis.fetch = previousFetch;
   }
+});
+
+test("a Core 409 is a runtime-control conflict; other failures are not", () => {
+  assert.equal(
+    isCoreRuntimeControlConflict(new CoreFetchError("restart already running", 409)),
+    true
+  );
+  assert.equal(
+    isCoreRuntimeControlConflict(new CoreFetchError("core unavailable", 500)),
+    false
+  );
+  assert.equal(isCoreRuntimeControlConflict(new Error("conflict")), false);
+  assert.equal(isCoreRuntimeControlConflict("409"), false);
+});
+
+test("the runtime-control conflict message names the in-progress request", () => {
+  const control = (kind: CorePublicRuntimeControl["kind"]): CorePublicRuntimeControl => ({
+    id: "control_1",
+    kind,
+    status: "running",
+    retrying: false,
+    created_at: "2026-08-01T00:00:00Z",
+    updated_at: "2026-08-01T00:00:00Z",
+  });
+
+  assert.match(coreRuntimeControlConflictMessage(control("restart")), /restart is already in progress/u);
+  assert.match(coreRuntimeControlConflictMessage(control("stop")), /stop is already in progress/u);
+  assert.match(
+    coreRuntimeControlConflictMessage(control("recover_known_good_chat_runtime")),
+    /chat recovery is already in progress/u
+  );
+  assert.match(
+    coreRuntimeControlConflictMessage(null),
+    /Another request is already in progress/u
+  );
 });

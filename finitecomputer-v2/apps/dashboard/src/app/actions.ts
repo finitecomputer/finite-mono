@@ -31,6 +31,7 @@ import {
   coreProjectSupportsHostedStop,
   coreProjectSupportsRetirement,
   issueCoreFinitePrivateApiKey,
+  isCoreRuntimeControlConflict,
   linkCoreStripeCustomer,
   loadCoreAdminRuntimes,
   loadCoreBillingOverview,
@@ -68,7 +69,11 @@ export async function restartCoreRuntimeAction(formData: FormData) {
     throw new Error("This agent cannot be restarted from the dashboard.");
   }
 
-  await requestCoreRuntimeRestart(access.coreProject.project.id);
+  try {
+    await requestCoreRuntimeRestart(access.coreProject.project.id);
+  } catch (caught) {
+    runtimeControlConflictRedirect(machineId, caught);
+  }
 
   const redirectPath = String(formData.get("redirectPath") ?? `/dashboard/machines/${machineId}`);
   revalidatePath("/dashboard");
@@ -92,7 +97,11 @@ export async function recoverCoreRuntimeAction(formData: FormData) {
     throw new Error("Chat recovery is not available for this agent.");
   }
 
-  await requestCoreRuntimeRecoverKnownGoodChat(access.coreProject.project.id);
+  try {
+    await requestCoreRuntimeRecoverKnownGoodChat(access.coreProject.project.id);
+  } catch (caught) {
+    runtimeControlConflictRedirect(machineId, caught);
+  }
 
   const redirectPath = String(formData.get("redirectPath") ?? `/dashboard/machines/${machineId}`);
   revalidatePath("/dashboard");
@@ -111,7 +120,11 @@ export async function stopCoreRuntimeAction(formData: FormData) {
     throw new Error("This agent cannot be stopped from the dashboard.");
   }
 
-  await requestCoreRuntimeStop(access.coreProject.project.id);
+  try {
+    await requestCoreRuntimeStop(access.coreProject.project.id);
+  } catch (caught) {
+    runtimeControlConflictRedirect(machineId, caught);
+  }
 
   const redirectPath = String(formData.get("redirectPath") ?? `/dashboard/machines/${machineId}`);
   revalidatePath("/dashboard");
@@ -511,4 +524,19 @@ export async function adminOpsRotateKeyAction(
       error: error instanceof Error ? error.message : "Rotating the key failed.",
     };
   }
+}
+
+/**
+ * A Core 409 means a runtime-control request is already in progress for the
+ * agent — a conflict state, not a server failure. Surface it inline on the
+ * machine page instead of letting the error boundary render a full-page
+ * error. Every other error class keeps the existing behavior.
+ */
+function runtimeControlConflictRedirect(machineId: string, caught: unknown): never {
+  if (!isCoreRuntimeControlConflict(caught)) throw caught;
+  revalidatePath("/dashboard");
+  revalidatePath(`/dashboard/machines/${machineId}`);
+  redirect(
+    `/dashboard/machines/${encodeURIComponent(machineId)}?runtimeControl=conflict`
+  );
 }
