@@ -187,6 +187,24 @@ fn valid_container_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
+/// Whether an observed `/proc/<pid>/comm` can be the expected hypervisor's
+/// VMM process. The kernel truncates comm to 15 bytes and the Nix wrapper
+/// prepends a dot to the binary name, so the fleet's real QEMU shapes are
+/// `qemu-system-x86_64`, `qemu-system-x8`, and `.qemu-system-x8` (verified
+/// live on lat3). Matching is therefore on the hypervisor-family prefix
+/// after stripping one wrapper dot: every truncation of the real binary name
+/// that survives at 15 bytes still carries the `qemu-system-` prefix, and
+/// anything that does not (an unrelated process at the VMM pid) is a genuine
+/// anomaly, not a wrapped name.
+fn vmm_comm_matches_expected(comm: &str, hypervisor_type: &str) -> bool {
+    let family = match hypervisor_type {
+        "" | "qemu" => "qemu-system-",
+        other => other,
+    };
+    let normalized = comm.strip_prefix('.').unwrap_or(comm);
+    normalized.len() >= family.len() && normalized.starts_with(family)
+}
+
 /// Run the probe. Always returns a report: internal failures surface as
 /// `unknown` verdicts carrying their evidence, never as a hard error, so
 /// callers distinguish "probe ran and could not determine" from "probe could
@@ -1042,15 +1060,18 @@ impl Probe<'_> {
                 );
             }
         };
-        // Name-based process matching missed wrapped QEMU names during the
-        // incident; compare against the hypervisor type the sandbox itself
-        // recorded and surface the observed comm as evidence.
+        // The runner's Kata control path never identifies VMM processes by
+        // name (liveness comes from containerd), so this matcher is
+        // probe-local and deliberately narrow: it accepts exactly the comm
+        // shapes Kata/QEMU on NixOS produces — the full binary name and its
+        // 15-char kernel comm truncations, with or without the Nix wrapper's
+        // leading dot — and rejects everything else.
         let expected = if persist.hypervisor.hypervisor_type.is_empty() {
             "qemu"
         } else {
             persist.hypervisor.hypervisor_type.as_str()
         };
-        if comm.starts_with(expected) {
+        if vmm_comm_matches_expected(&comm, expected) {
             LifecycleProbeCheck::pass(
                 "vmm_process",
                 format!("VMM process {pid} is visible as {comm}"),
@@ -1061,7 +1082,7 @@ impl Probe<'_> {
                 "vmm_process",
                 "wrapped_vmm_process_name",
                 format!(
-                    "VMM process {pid} is visible only under the wrapped name {comm}; name-based process matching for {expected} would miss it"
+                    "VMM process {pid} is visible only as {comm}, which is not a {expected} hypervisor process; name-based process matching would miss it"
                 ),
                 serde_json::json!({"pid": pid, "comm": comm, "hypervisor_type": expected}),
             )
@@ -1239,6 +1260,27 @@ mod tests {
         assert!(!valid_container_id("a/b"));
         assert!(!valid_container_id("a\\b"));
         assert!(!valid_container_id("a b"));
+    }
+
+    #[test]
+    fn vmm_comm_matching_accepts_fleet_shapes_and_rejects_strangers() {
+        // Full binary name and both kernel-truncated shapes (verified live on
+        // lat3: the Nix wrapper yields comm `.qemu-system-x8`).
+        assert!(vmm_comm_matches_expected("qemu-system-x86_64", "qemu"));
+        assert!(vmm_comm_matches_expected("qemu-system-x8", "qemu"));
+        assert!(vmm_comm_matches_expected(".qemu-system-x8", "qemu"));
+        assert!(vmm_comm_matches_expected("qemu-system-x86", "qemu"));
+        // Empty persist type falls back to the qemu family.
+        assert!(vmm_comm_matches_expected(".qemu-system-x8", ""));
+        // Non-qemu hypervisor types match their own family prefix.
+        assert!(vmm_comm_matches_expected("firecracker", "firecracker"));
+        // Genuinely wrong processes at the VMM pid are real anomalies.
+        assert!(!vmm_comm_matches_expected("sshd", "qemu"));
+        assert!(!vmm_comm_matches_expected("wrap-qemu-syste", "qemu"));
+        assert!(!vmm_comm_matches_expected("kata-shim", "qemu"));
+        assert!(!vmm_comm_matches_expected("", "qemu"));
+        assert!(!vmm_comm_matches_expected(".", "qemu"));
+        assert!(!vmm_comm_matches_expected("qemu-syst", "qemu"));
     }
 
     #[test]

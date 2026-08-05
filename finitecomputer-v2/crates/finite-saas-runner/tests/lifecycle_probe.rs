@@ -456,6 +456,49 @@ fn wrapped_qemu_process_name_is_detected() {
 }
 
 #[test]
+fn nix_wrapped_truncated_qemu_comm_is_accepted() {
+    // The fleet's real shape (verified live on lat3): the Nix wrapper plus
+    // the kernel's 15-char comm truncation turns
+    // `/nix/store/.../qemu-system-x86_64` into comm `.qemu-system-x8`. This
+    // exact production value must NOT raise wrapped_vmm_process_name.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_task(&container_id(), "RUNNING");
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_vmm_comm(4242, ".qemu-system-x8");
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Operable);
+    assert_eq!(
+        fixture.check(&report, "vmm_process").status,
+        CheckStatus::Pass,
+        "production comm wrongly rejected; full report:\n{}",
+        serde_json::to_string_pretty(&report).unwrap()
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn non_qemu_process_at_vmm_pid_is_an_anomaly() {
+    // An unrelated process at the recorded VMM pid is a real anomaly, not a
+    // wrapped name: the finding must still fire.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_task(&container_id(), "RUNNING");
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_vmm_comm(4242, "sshd");
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Degraded);
+    assert_eq!(report.reason.as_deref(), Some("wrapped_vmm_process_name"));
+    assert_eq!(
+        fixture.check(&report, "vmm_process").evidence["comm"].as_str(),
+        Some("sshd")
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
 fn duplicate_durable_writer_is_inoperable() {
     let fixture = new_fixture();
     fixture.make_healthy();
