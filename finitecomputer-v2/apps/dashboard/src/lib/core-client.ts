@@ -1480,11 +1480,36 @@ async function coreFetch<T>(
   return parsed as T;
 }
 
-class CoreFetchError extends Error {
+export class CoreFetchError extends Error {
   constructor(message: string, public readonly status: number) {
     super(message);
     this.name = "CoreFetchError";
   }
+}
+
+/** Core rejects an overlapping runtime-control request (for example, a second
+ * restart while one is running) with a 409. It is a conflict state, not a
+ * server failure, so callers can surface it inline. */
+export function isCoreRuntimeControlConflict(error: unknown): boolean {
+  return error instanceof CoreFetchError && error.status === 409;
+}
+
+/** Inline message for a rejected-overlap runtime control, naming the request
+ * currently in progress when Core reports one. */
+export function coreRuntimeControlConflictMessage(
+  control: CorePublicRuntimeControl | null | undefined
+): string {
+  if (!control) {
+    return "Another request is already in progress for this agent. Wait for it to finish, then try again.";
+  }
+  const action = {
+    restart: "restart",
+    stop: "stop",
+    recover_known_good_chat_runtime: "chat recovery",
+    upgrade: "runtime upgrade",
+    destroy: "retirement",
+  }[control.kind];
+  return `A ${action} is already in progress for this agent. Wait for it to finish, then try again.`;
 }
 
 async function coreServiceFetch<T>(

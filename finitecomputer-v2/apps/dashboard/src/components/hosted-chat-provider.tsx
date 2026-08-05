@@ -12,6 +12,7 @@ import {
 
 import {
   CHAT_INVALID_UPDATE_MESSAGE,
+  CHAT_NAVIGATION_TIMEOUT_MESSAGE,
   CHAT_UNAVAILABLE_MESSAGE,
 } from "@/lib/chat-product-copy";
 import {
@@ -43,19 +44,19 @@ import {
   type HostedChatRetryAttempt,
 } from "@/lib/hosted-web-chat-retry";
 import {
+  applyHostedChatSelectionIntent,
+  HOSTED_CHAT_NAVIGATION_TIMEOUT_MS,
   hostedChatSelectionFromState,
   hostedChatSelectionIntentTarget,
-  projectHostedChatVisibleSelection,
+  settleHostedChatSnapshotSelection,
   type HostedChatSelection,
+  type HostedChatSelectionIntent,
 } from "@/lib/hosted-web-chat-selection";
 import {
   pendingChatRefreshAdvancesTranscript,
+  preservePendingChatRefreshSelection,
   type PendingChatRefreshTarget,
 } from "@/lib/hosted-web-chat-refresh";
-import {
-  recordHostedChatNavigation,
-  type HostedChatSnapshotSource,
-} from "@/lib/hosted-web-chat-journal";
 
 const STREAM_RECONNECT_DELAY_MS = 1_000;
 const REVOKED_DESKTOP_MESSAGE =
@@ -121,43 +122,46 @@ export function HostedChatProvider({
   const nextMutationSequenceRef = useRef(0);
   const latestAppliedMutationSequenceRef = useRef(0);
   const snapshotSequenceRef = useRef(0);
+  const selectionIntentRef = useRef<HostedChatSelectionIntent | null>(null);
   const selectionIntentTokenRef = useRef(0);
-  const visibleSelectionRef = useRef<HostedChatSelection | null>(null);
   const serverSelectionRef = useRef<HostedChatSelection | null>(null);
+  const localSelectionRef = useRef<HostedChatSelection | null>(null);
   const hostedAuthorityRef = useRef<HostedChatState | null>(null);
   const localDeviceRef = useRef<ElectronLocalDevice | null>(null);
   const hasState = state !== null;
 
-  // Every applied snapshot funnels through here. The browser-visible route is
-  // durable client navigation state: daemon snapshots update transcripts and
-  // activity but cannot move it. Daemon selection initializes a new browser
-  // and becomes a fallback only if the visible route disappears.
-  const setMergedState = useCallback((
-    next: HostedChatState,
-    source: HostedChatSnapshotSource
-  ) => {
-    const snapshotSelection = hostedChatSelectionFromState(next);
-    serverSelectionRef.current = snapshotSelection;
-    const projected = projectHostedChatVisibleSelection(
-      visibleSelectionRef.current,
-      next
-    );
-    visibleSelectionRef.current = projected.selection;
-    recordHostedChatNavigation({
-      source,
-      snapshot_sequence: snapshotSequenceRef.current,
-      snapshot_rev: next.rev,
-      snapshot_selection: snapshotSelection,
-      visible_selection: projected.selection,
-      navigation_intent_generation: selectionIntentTokenRef.current,
-      decision: projected.decision,
-    });
+  // Every applied snapshot funnels through here. While a navigation click is
+  // pending, snapshots keep their content but present the clicked selection:
+  // selection-only actions do not bump the daemon rev, so stream snapshots
+  // generated before the click persists otherwise yank the highlight back.
+  // With no click in flight the foreground is device-scoped: daemon snapshots
+  // merge their content freely but may not move a valid local selection.
+  const setMergedState = useCallback((next: HostedChatState) => {
+    serverSelectionRef.current = hostedChatSelectionFromState(next);
+    const intent = selectionIntentRef.current;
+    let applied: HostedChatState;
+    if (intent) {
+      const result = applyHostedChatSelectionIntent(intent, next);
+      if (result.confirmed) {
+        selectionIntentRef.current = null;
+        setSelectionPending(false);
+        localSelectionRef.current = hostedChatSelectionFromState(result.state);
+      }
+      applied = result.state;
+    } else {
+      const settled = settleHostedChatSnapshotSelection(
+        localSelectionRef.current,
+        next
+      );
+      localSelectionRef.current = settled.selection;
+      applied = settled.state;
+    }
     setState((current) => {
       const merged = {
-        ...projected.state,
-        hosted_agent_binding: projected.state.hosted_agent_binding === undefined
+        ...applied,
+        hosted_agent_binding: applied.hosted_agent_binding === undefined
           ? current?.hosted_agent_binding ?? null
-          : projected.state.hosted_agent_binding,
+          : applied.hosted_agent_binding,
       };
       stateRef.current = merged;
       return merged;
@@ -180,7 +184,7 @@ export function HostedChatProvider({
     }
     snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
     snapshotSequenceRef.current += 1;
-    setMergedState(next, "http");
+    setMergedState(next);
     return true;
   }, [setMergedState]);
 
@@ -211,7 +215,7 @@ export function HostedChatProvider({
     );
     snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
     snapshotSequenceRef.current += 1;
-    setMergedState(next, "mutation");
+    setMergedState(next);
     return true;
   }, [setMergedState]);
 
@@ -433,39 +437,38 @@ export function HostedChatProvider({
     allowEqualRevision = true
   ) => {
     const navigationAction = isHostedChatNavigationAction(action);
-    const request = () => runtime
-      ? requestElectronMutationSnapshot(
-        (bridge) => bridge.dispatchDaemonAction(action),
-        allowEqualRevision,
-        navigationAction
-      )
-      : requestMutationSnapshot("/actions", {
+    const request = () => {
+      if (runtime) {
+        // The in-process bridge cannot abort a dispatched action, so bound
+        // the wait instead; a late response still applies through the normal
+        // snapshot path after the intent has been released.
+        return withNavigationTimeout(requestElectronMutationSnapshot(
+          (bridge) => bridge.dispatchDaemonAction(action),
+          allowEqualRevision,
+          navigationAction
+        ));
+      }
+      return requestMutationSnapshot("/actions", {
         method: "POST",
         body: JSON.stringify(action),
+        signal: navigationAction
+          ? AbortSignal.timeout(HOSTED_CHAT_NAVIGATION_TIMEOUT_MS)
+          : undefined,
       }, allowEqualRevision, navigationAction);
+    };
 
     if (!navigationAction) return request();
 
-    // Explicit navigation immediately owns the visible route. The route stays
-    // browser-owned after confirmation; later send/SSE/refresh snapshots
-    // cannot reinterpret daemon persistence as a new navigation command.
+    // Pin the clicked selection immediately. The pin clears when a snapshot
+    // confirms it (setMergedState); if the request fails, times out, or the
+    // server refuses the selection, fall back to the server's own selection
+    // so the UI never sticks on a selection the daemon rejected.
     const target = hostedChatSelectionIntentTarget(action);
     const token = ++selectionIntentTokenRef.current;
-    setSelectionPending(true);
     if (target) {
-      visibleSelectionRef.current = target;
-      if (stateRef.current) {
-        recordHostedChatNavigation({
-          source: "navigation",
-          snapshot_sequence: snapshotSequenceRef.current,
-          snapshot_rev: stateRef.current.rev,
-          snapshot_selection:
-            serverSelectionRef.current ?? hostedChatSelectionFromState(stateRef.current),
-          visible_selection: target,
-          navigation_intent_generation: token,
-          decision: "navigation",
-        });
-      }
+      selectionIntentRef.current = { ...target, token };
+      localSelectionRef.current = target;
+      setSelectionPending(true);
       setState((current) => {
         const selected = current ? { ...current, ...target } : current;
         stateRef.current = selected;
@@ -473,32 +476,40 @@ export function HostedChatProvider({
       });
     }
 
+    const releaseIntent = (caught?: unknown) => {
+      if (selectionIntentRef.current?.token !== token) return;
+      selectionIntentRef.current = null;
+      setSelectionPending(false);
+      if (isHostedChatNavigationTimeout(caught)) {
+        setTransportError(CHAT_NAVIGATION_TIMEOUT_MESSAGE);
+      }
+      const serverSelection = serverSelectionRef.current;
+      if (serverSelection) {
+        localSelectionRef.current = serverSelection;
+        setState((current) => {
+          const selected = current ? { ...current, ...serverSelection } : current;
+          stateRef.current = selected;
+          return selected;
+        });
+      }
+    };
+
     const finishNavigation = (next: HostedChatState) => {
       if (selectionIntentTokenRef.current !== token) return;
-      setSelectionPending(false);
-      const explicitSelection = hostedChatSelectionFromState(next);
-      visibleSelectionRef.current = explicitSelection;
-      setState((current) => {
-        if (!current) return current;
-        const projected = projectHostedChatVisibleSelection(explicitSelection, current);
-        visibleSelectionRef.current = projected.selection;
-        stateRef.current = projected.state;
-        return projected.state;
-      });
-    };
-    const failNavigation = () => {
-      if (selectionIntentTokenRef.current !== token) return;
-      setSelectionPending(false);
-      const fallback = serverSelectionRef.current;
-      if (!fallback) return;
-      visibleSelectionRef.current = fallback;
-      setState((current) => {
-        if (!current) return current;
-        const projected = projectHostedChatVisibleSelection(fallback, current);
-        visibleSelectionRef.current = projected.selection;
-        stateRef.current = projected.state;
-        return projected.state;
-      });
+      if (!target) {
+        // Navigation without a knowable target (New chat, new topic): the
+        // completed request IS the explicit user action, so its response
+        // selection becomes the local foreground. This is the one non-click
+        // path allowed to move the foreground, and only on success.
+        const selection = hostedChatSelectionFromState(next);
+        localSelectionRef.current = selection;
+        setState((current) => {
+          const selected = current ? { ...current, ...selection } : current;
+          stateRef.current = selected;
+          return selected;
+        });
+      }
+      releaseIntent();
     };
 
     // Send selection-changing actions in click order so delayed network
@@ -506,10 +517,9 @@ export function HostedChatProvider({
     // selection. This is intentionally not a global mutation queue: messages,
     // typing, reads, and uploads still run independently of navigation.
     const pending = navigationMutationTailRef.current.then(request, request);
-    void pending.then(finishNavigation, failNavigation);
     navigationMutationTailRef.current = pending.then(
-      () => undefined,
-      () => undefined
+      finishNavigation,
+      releaseIntent
     );
     return pending;
   }, [requestElectronMutationSnapshot, requestMutationSnapshot, runtime]);
@@ -544,7 +554,7 @@ export function HostedChatProvider({
       }
       snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, false);
       snapshotSequenceRef.current += 1;
-      setMergedState(next, "pending_refresh");
+      setMergedState(preservePendingChatRefreshSelection(next, target));
       setTransportError(null);
       return true;
     } catch {
@@ -607,7 +617,7 @@ export function HostedChatProvider({
           if (!shouldApplyStreamHostedChatSnapshot(source, next.rev)) return;
           snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, true);
           snapshotSequenceRef.current += 1;
-          setMergedState(next, "electron_stream");
+          setMergedState(next);
           setTransportError(null);
           setStreamConnected(true);
         } catch (caught) {
@@ -684,7 +694,7 @@ export function HostedChatProvider({
           )) return;
           snapshotSourceRef.current = recordHostedChatSnapshot(source, next.rev, true);
           snapshotSequenceRef.current += 1;
-          setMergedState(next, "sse");
+          setMergedState(next);
           setTransportError(null);
           setStreamConnected(true);
         } catch {
@@ -793,4 +803,32 @@ function isHostedChatNavigationAction(action: HostedChatAction) {
     || "OpenChat" in action
     || "CreateTopic" in action
     || "StartTopicChatIntent" in action;
+}
+
+class HostedChatNavigationTimeoutError extends Error {
+  constructor() {
+    super("Chat navigation timed out.");
+    this.name = "HostedChatNavigationTimeoutError";
+  }
+}
+
+function isHostedChatNavigationTimeout(error: unknown) {
+  return error instanceof HostedChatNavigationTimeoutError
+    || (error instanceof Error && error.name === "TimeoutError");
+}
+
+/** Bound a navigation request that cannot take an AbortSignal (the Electron
+ * bridge). The loser keeps running; its late result applies normally after
+ * the intent has been released. */
+function withNavigationTimeout<T>(pending: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new HostedChatNavigationTimeoutError()),
+      HOSTED_CHAT_NAVIGATION_TIMEOUT_MS
+    );
+  });
+  return Promise.race([pending, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }

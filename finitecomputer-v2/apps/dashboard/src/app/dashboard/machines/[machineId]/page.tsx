@@ -31,6 +31,7 @@ import {
   coreProjectSupportsHostedRecovery,
   coreProjectSupportsHostedRestart,
   coreProjectSupportsHostedStop,
+  coreRuntimeControlConflictMessage,
   loadCoreFinitePrivateUsageStatus,
   type CoreFinitePrivateUsageResult,
   type CoreRuntimeStatus,
@@ -47,7 +48,7 @@ export default async function MachineDetailPage({
   searchParams,
 }: {
   params: Promise<{ machineId: string }>;
-  searchParams: Promise<{ removal?: string | string[] }>;
+  searchParams: Promise<{ removal?: string | string[]; runtimeControl?: string | string[] }>;
 }) {
   const { machineId } = await params;
   const query = await searchParams;
@@ -68,6 +69,8 @@ export default async function MachineDetailPage({
     );
     const removal = firstSearchParam(query.removal);
     if (removal) destination.searchParams.set("removal", removal);
+    const runtimeControl = firstSearchParam(query.runtimeControl);
+    if (runtimeControl) destination.searchParams.set("runtimeControl", runtimeControl);
     redirect(`${destination.pathname}${destination.search}`);
   }
 
@@ -76,6 +79,7 @@ export default async function MachineDetailPage({
       access={access}
       finitePrivateUsage={finitePrivateUsage}
       removalResult={firstSearchParam(query.removal)}
+      runtimeControlResult={firstSearchParam(query.runtimeControl)}
     />
   );
 }
@@ -84,10 +88,12 @@ async function ImportedMachineOverview({
   access,
   finitePrivateUsage,
   removalResult,
+  runtimeControlResult,
 }: {
   access: DashboardMachineAccess;
   finitePrivateUsage: CoreFinitePrivateUsageResult;
   removalResult: string | null;
+  runtimeControlResult: string | null;
 }) {
   const activeRetirement =
     access.coreProject.active_runtime_control?.kind === "destroy"
@@ -129,6 +135,14 @@ async function ImportedMachineOverview({
           role="status"
         >
           This agent cannot be retired from the dashboard.
+        </section>
+      ) : null}
+      {runtimeControlResult === "conflict" ? (
+        <section
+          className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm"
+          role="status"
+        >
+          {coreRuntimeControlConflictMessage(access.coreProject.active_runtime_control)}
         </section>
       ) : null}
       <AgentHeroCard

@@ -1702,10 +1702,12 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .waitFor({ state: "visible" });
       assert.equal(hostedDevice.state.app.selected_chat_id, "chat_browser_agent");
 
-      // Once OpenChat is fully confirmed, a later higher-revision stream can
-      // still carry another daemon selection (for example, a scoped send in a
-      // concurrently active Chat). It may merge that Chat's transcript, but
-      // it is not browser navigation intent and must not move the visible pane.
+      // Cross-device tripwire: with no click in flight, a snapshot whose
+      // daemon selection diverges from this browser's (for example, a scoped
+      // send in a concurrently active Chat on another device) may update
+      // background state but must NOT move the visible pane. Selection is
+      // device-scoped; only an explicit local click, a vanished local
+      // selection, or first load may move the foreground.
       hostedDevice.state.app.selected_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.topics[0]!.active_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.messages.push({
@@ -1725,26 +1727,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           .getByText("Remembered background stream.", { exact: true })
           .isVisible(),
         false,
-        "background transcript update changed the visible Chat"
-      );
-      const navigationJournal = await page.evaluate(() =>
-        (window as unknown as {
-          __finiteChatNavigationJournal?: Array<{
-            source: string;
-            decision: string;
-            snapshot_selection: { selected_chat_id: string | null };
-            visible_selection: { selected_chat_id: string | null };
-          }>;
-        }).__finiteChatNavigationJournal ?? []
-      );
-      assert(
-        navigationJournal.some((entry) =>
-          entry.source === "sse"
-          && entry.decision === "preserved"
-          && entry.snapshot_selection.selected_chat_id === "chat_browser_remembered"
-          && entry.visible_selection.selected_chat_id === "chat_browser_agent"
-        ),
-        "navigation journal did not explain why the background selection was ignored"
+        "a divergent daemon selection moved the visible Chat without a local click"
       );
 
       const completedBeforeBackgroundChatNavigation =
