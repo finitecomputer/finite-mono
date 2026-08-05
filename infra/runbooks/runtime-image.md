@@ -202,6 +202,37 @@ Do not edit a prepared roster to make it pass; prepare a fresh plan after
 resolving the concrete drift. Do not use this rollout path to reconstruct
 missing compute.
 
+#### Lifecycle probe gate, skips, and the override
+
+Before enqueueing each entry, the wrapper consults the runner's read-only
+`lifecycle-probe` (the same probe `finite-status` reports): it proves the
+platform can still stop or replace the guest, which Core state alone cannot
+see. A non-operable verdict (`degraded`, `inoperable`, `unknown`) is a
+**deliberate skip, not a failure**: the entry is not enqueued, the Agent
+keeps serving its current artifact, and the run ledger records the full
+probe report under an `entry_lifecycle_probe` / `skipped` event. Resolve a
+skip by fixing the underlying lifecycle-control finding, then re-executing
+the **same approved plan hash** — the skipped entry is the resume point and
+runs normally once the probe is green. If prepare-time or execute-time
+provider facts drifted instead, re-`--prepare` and approve the new hash;
+never edit retained evidence.
+
+For an exactly-one-agent emergency where the probe verdict is understood and
+the upgrade must proceed anyway, add `--probe-override` to the execute
+command. It requires exactly one `--roll-project-id`, hard-refuses
+`--roll-all`, still runs the probe and records its full report, and converts
+only the verdict into a loudly logged proceed (`entry_lifecycle_probe` /
+`override` event, stderr banner, `probe_overridden` in `--summarize`);
+provider-fact drift checks, preflight, postflight, serial order, and
+stop-on-first-failure all still apply. A malformed probe report has no
+verdict to override and remains a fail-closed skip.
+
+Running `finite-saas-core runtime-artifact-rollout` directly by hand
+**bypasses this entire gate** — the probe, the provider-fact drift checks,
+and postflight verification — and is now reserved for break-glass situations
+where the wrapper itself cannot run. Prefer `--probe-override` for any
+forced single-agent upgrade; it keeps every other safety check intact.
+
 For the Finite Private quota-notice rollout, keep this first wave to exactly
 one explicitly named canary project. Before enqueueing, prove the new narrow
 edge routes exist without consuming a real reset: invalid bearer requests to
