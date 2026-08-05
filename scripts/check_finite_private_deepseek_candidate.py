@@ -48,6 +48,8 @@ def _validate_one(text: str, *, release_ready: bool) -> list[str]:
         '"--tool-call-parser",\n        "deepseek_v4"',
         '"--enable-auto-tool-choice"',
         '"--reasoning-parser",\n        "deepseek_v4"',
+        '"--default-chat-template-kwargs",\n'
+        '        \'{"enable_thinking":true}\'',
         '"--enable-prompt-tokens-details"',
         '"--max-model-len",\n        "393216"',
         '"--max-num-seqs",\n        "64"',

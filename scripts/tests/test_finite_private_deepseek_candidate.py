@@ -98,6 +98,21 @@ class FinitePrivateDeepSeekCandidateTests(unittest.TestCase):
             any("data-parallel-size" in item for item in violations), violations
         )
 
+    def test_missing_default_thinking_mode_is_rejected(self) -> None:
+        text = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8")
+        text = text.replace(
+            '        "--default-chat-template-kwargs",\n'
+            '        \'{"enable_thinking":true}\',\n',
+            "",
+        )
+        with temporary_candidate(text) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+
+        self.assertTrue(
+            any("default-chat-template-kwargs" in item for item in violations),
+            violations,
+        )
+
     def test_dspark_is_rejected_from_target_only_retry(self) -> None:
         text = (ROOT / OFF_CANDIDATE).read_text(encoding="utf-8")
         text = text.replace(

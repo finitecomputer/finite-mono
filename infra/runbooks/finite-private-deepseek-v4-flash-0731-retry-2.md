@@ -44,6 +44,7 @@ Supporting evidence is recorded in
 | Scheduler ceiling | `max-num-seqs=64`, `max-num-batched-tokens=512` |
 | Context | 393,216 service tokens |
 | Sampling for quality proof | `temperature=1.0`, `top_p=0.95`, explicit thinking high/max |
+| Default reasoning mode | vLLM `--default-chat-template-kwargs '{"enable_thinking":true}'`; request overrides remain authoritative |
 | Rollback | Exact measured GLM tag above remains the only rollback authority |
 
 The staged config is
