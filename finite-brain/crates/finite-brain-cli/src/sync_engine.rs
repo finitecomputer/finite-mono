@@ -658,7 +658,23 @@ fn confirm_local_changes_from_preflight(
     reason: String,
 ) -> Result<RemoteSyncResult, CliError> {
     let after_sequence = preflight.bootstrap.latest_sequence;
-    let pull = fetch_all_sync_records(env, server_url, brain_id, after_sequence)?;
+    let pull = match fetch_all_sync_records(env, server_url, brain_id, after_sequence) {
+        Ok(pull) => pull,
+        Err(error)
+            if is_rebootstrap_required_error(&error)
+                || is_sync_records_route_unavailable(&error) =>
+        {
+            return fetch_bootstrap_remote_sync(
+                env,
+                server_url,
+                brain_id,
+                format!(
+                    "{reason}; incremental confirmation unavailable after sequence {after_sequence}, so the bounded bootstrap compatibility path was used"
+                ),
+            );
+        }
+        Err(error) => return Err(error),
+    };
     let records = pull.records;
     let bootstrap = apply_incremental_records_to_bootstrap(
         preflight.bootstrap,

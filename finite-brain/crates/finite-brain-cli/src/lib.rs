@@ -6042,6 +6042,7 @@ mod tests {
 
     fn start_partial_success_sync_server(
         export_grants: Vec<Value>,
+        records_route_available: bool,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -6105,6 +6106,18 @@ mod tests {
                         .to_string(),
                     )
                 } else if request_line.contains("/sync/records") {
+                    if !records_route_available {
+                        let response_body = serde_json::json!({
+                            "error": "sync records route unavailable on this server version"
+                        })
+                        .to_string();
+                        let response = format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                            response_body.len()
+                        );
+                        stream.write_all(response.as_bytes()).unwrap();
+                        continue;
+                    }
                     let records = accepted_object
                         .as_ref()
                         .map(|(object_id, ciphertext)| {
@@ -11732,7 +11745,7 @@ mod tests {
         let actor_npub = load_signer(&env).unwrap().npub;
         let export_grant =
             export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
-        let (server_url, server) = start_partial_success_sync_server(vec![export_grant]);
+        let (server_url, server) = start_partial_success_sync_server(vec![export_grant], true);
         let mut output = Vec::new();
         run_with_env(
             ["sync", "now", "--server", &server_url, "--json"],
@@ -11787,6 +11800,88 @@ mod tests {
         let state = read_agent_state(&tree).unwrap();
         assert_eq!(state.conflicts.len(), 1);
         assert_eq!(state.conflicts[0].path.as_deref(), Some("General/b.md"));
+    }
+
+    #[test]
+    fn sync_now_confirms_accepted_write_on_server_without_incremental_records() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let tree = tmp.path().join("brain");
+        initialize_private_working_tree(&tree).unwrap();
+        fs::create_dir_all(tree.join("General")).unwrap();
+        fs::write(tree.join("General/accepted.md"), "# Accepted\n").unwrap();
+        let folder_key = FolderKey::from_bytes([9; 32]);
+        let now = "2026-06-24T20:46:36Z";
+        let mut state = AgentState::new("brain", now);
+        state.server_url = Some("http://127.0.0.1:9".to_owned());
+        state.daemon.state = DaemonRunState::Running;
+        write_agent_state(&tree, &state).unwrap();
+        write_json_file(
+            &tree.join(".finitebrain/working-tree-state.json"),
+            &BrainWorkingTreeStateManifest {
+                version: WORKING_TREE_STATE_VERSION.to_owned(),
+                folder_roots: vec![WorkingTreeFolderRoot {
+                    folder_id: "general".to_owned(),
+                    source_brain_id: None,
+                    path: "General".to_owned(),
+                    can_read: true,
+                    metadata_only: false,
+                }],
+                objects: Vec::new(),
+                sync: WorkingTreeSyncState { latest_sequence: 0 },
+            },
+        )
+        .unwrap();
+        let mut env = env_for(&tmp);
+        env.cwd = tree.clone();
+        let actor_npub = load_signer(&env).unwrap().npub;
+        let export_grant =
+            export_grant_for_test(&env, "brain", "general", 1, &folder_key, &actor_npub);
+        let (server_url, server) = start_partial_success_sync_server(vec![export_grant], false);
+        let mut output = Vec::new();
+
+        run_with_env(
+            ["sync", "now", "--server", &server_url, "--json"],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(report["status"], "pushed-local-changes");
+        assert_eq!(report["localChanges"][0]["status"], "pushed");
+        assert_eq!(
+            fs::read_to_string(tree.join("General/accepted.md")).unwrap(),
+            "# Accepted\n"
+        );
+        let tree_state = read_working_tree_state(&tree).unwrap();
+        assert_eq!(tree_state.objects.len(), 1);
+        assert_eq!(tree_state.objects[0].path, "accepted.md");
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("PUT "))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("/sync/records"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.contains("/sync/bootstrap"))
+                .count(),
+            2
+        );
     }
 
     #[test]
