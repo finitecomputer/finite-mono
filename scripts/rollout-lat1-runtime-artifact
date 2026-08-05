@@ -147,10 +147,12 @@ parse_args() {
     lat1)
       SOURCE_HOST_ID=finite-lat-1
       RUNNER_DEST="$LAT1"
+      RUNNER_WORK_ROOT=/var/lib/finite-saas-runner
       ;;
     lat3)
       SOURCE_HOST_ID=finite-lat-3
       RUNNER_DEST="$LAT3"
+      RUNNER_WORK_ROOT=/data/finite-saas-runner
       ;;
   esac
   if [[ $ROLLOUT_MODE == summarize ]]; then
@@ -372,7 +374,7 @@ REMOTE
   ((status == 0)) || return "$status"
 
   local parsed_snapshot
-  parsed_snapshot="$(jq -Rsc --arg host "$SOURCE_HOST_ID" --argjson expected "$request_entries" '
+  parsed_snapshot="$(jq -Rsc --arg host "$SOURCE_HOST_ID" --argjson expected "$request_entries" --arg work_root_re "^${RUNNER_WORK_ROOT}/kata/[A-Za-z0-9_.-]+$" '
     split("\n") | map(select(length > 0) | split("\t")) as $rows
     | [$rows[] | select(.[0] == "SYSTEM")] as $systems
     | [$rows[] | select(.[0] == "TOPOLOGY") | {
@@ -404,7 +406,7 @@ REMOTE
           or .source_machine_label != .source_machine_id or .project_label != .project_id
           then error("ownership labels do not match")
         elif ($data_mounts | length) != 1 or $data_mounts[0].RW != true
-          or ($root | test("^/var/lib/finite-saas-runner/kata/[A-Za-z0-9_.-]+$") | not)
+          or ($root | test($work_root_re) | not)
           then error("durable /data bind is not exact")
         elif $source_owners != 1 or $durable_owners != 1 then error("ambiguous container topology")
         elif .state == "running" and (($ports | length) != 1 or ($ports[0] | test("^[0-9]{1,5}$") | not))
