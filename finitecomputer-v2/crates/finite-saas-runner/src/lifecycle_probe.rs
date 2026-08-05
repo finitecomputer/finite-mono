@@ -276,9 +276,10 @@ struct ProbeInspectMount {
 
 /// The readable subset of Kata's Go-serialized `persistapi.SandboxState`
 /// (`<sandbox_root>/<sandbox-id>/persist.json`, tagless capitalized fields).
-/// The on-disk directory name is the sandbox id; `SandboxContainer` names the
-/// container the sandbox was created for, and `HypervisorState.Pid` is the
-/// VMM process.
+/// The on-disk directory name is the sandbox id; `SandboxContainer` is the
+/// **container id** the sandbox was created for (verified on the live fleet:
+/// it equals the nerdctl container id and the state-dir hash, not the
+/// container name), and `HypervisorState.Pid` is the VMM process.
 #[derive(Debug, serde::Deserialize)]
 struct SandboxPersist {
     #[serde(rename = "State", default)]
@@ -375,8 +376,7 @@ impl Probe<'_> {
         checks.push(task_check);
 
         // 3. Kata sandbox persist state is readable and self-consistent.
-        let (sandbox_check, persist) =
-            self.check_sandbox_state(&canonical, container_name, task_state.as_ref());
+        let (sandbox_check, persist) = self.check_sandbox_state(&canonical, task_state.as_ref());
         checks.push(sandbox_check);
 
         // The duplicate-writer scan issues one inspect per inventory member;
@@ -723,7 +723,6 @@ impl Probe<'_> {
     fn check_sandbox_state(
         &self,
         canonical: &CanonicalHandle,
-        container_name: &str,
         task_state: Option<&TaskState>,
     ) -> (LifecycleProbeCheck, Option<SandboxPersist>) {
         let path = self
@@ -788,19 +787,21 @@ impl Probe<'_> {
                 None,
             );
         }
-        if persist.sandbox_container != container_name {
+        // Reality-first: the persist record's SandboxContainer is a container
+        // id, so it is compared against the live inspected container's actual
+        // id from nerdctl, never against the container name.
+        if persist.sandbox_container != canonical.container_id {
             return (
                 LifecycleProbeCheck::fail(
                     "sandbox_state",
                     "stale_sandbox_state",
                     format!(
-                        "the Kata sandbox persist state belongs to {} but the live container is {}",
-                        persist.sandbox_container, container_name
+                        "the Kata sandbox persist state belongs to container id {} but the live container id is {}",
+                        persist.sandbox_container, canonical.container_id
                     ),
                     serde_json::json!({
                         "path": path,
                         "persist_sandbox_container": persist.sandbox_container,
-                        "container_name": container_name,
                         "container_id": canonical.container_id,
                     }),
                 ),
@@ -818,7 +819,6 @@ impl Probe<'_> {
                     serde_json::json!({
                         "path": path,
                         "persist_sandbox_container": persist.sandbox_container,
-                        "container_name": container_name,
                         "container_id": canonical.container_id,
                     }),
                 ),
