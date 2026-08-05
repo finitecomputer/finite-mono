@@ -807,6 +807,194 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(probe_events[0]["verdict"], "operable")
             self.assertEqual(events[-1]["status"], "success")
 
+    def test_probe_override_proceeds_despite_non_operable_verdict(self) -> None:
+        for verdict, reason in (
+            ("degraded", "wrapped_vmm_process_name"),
+            ("inoperable", "orphaned_task"),
+        ):
+            with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory)
+                env, log, state_root, plan_hash = self.single_entry_environment(temp)
+                env["FAKE_PROBE_VERDICT"] = verdict
+                env["FAKE_PROBE_REASON"] = reason
+
+                executed = self.run_rollout(
+                    "--execute-plan-hash",
+                    plan_hash,
+                    *self.actor_args(),
+                    "--roll-project-id",
+                    "project-a",
+                    "--probe-override",
+                    env=env,
+                )
+                self.assertEqual(executed.returncode, 0, executed.stderr)
+                # Loud operator-facing evidence: a stderr banner and an
+                # OVERRIDDEN stdout line, never a quiet proceed.
+                self.assertIn("--probe-override", executed.stderr)
+                self.assertIn("overrode the lifecycle probe gate", executed.stderr)
+                self.assertIn(verdict, executed.stderr)
+                self.assertIn("OVERRIDDEN", executed.stdout)
+                # The entry proceeded end to end: probe ran, exact Core
+                # enqueue happened, and postflight still verified it.
+                calls = log.read_text(encoding="utf-8").splitlines()
+                self.assertTrue(
+                    any("provider-lifecycle-probe-v1" in call for call in calls)
+                )
+                self.assertTrue(
+                    any(
+                        "--expected-agent-runtime-id" in call
+                        and "--plan-only" not in call
+                        for call in calls
+                    ),
+                    calls,
+                )
+                events = [
+                    event
+                    for event in self.read_events(state_root, plan_hash)
+                    if event["phase"] == "execute"
+                ]
+                probe_events = [
+                    event
+                    for event in events
+                    if event["event"] == "entry_lifecycle_probe"
+                ]
+                self.assertEqual(len(probe_events), 1, events)
+                # The override event is loud and carries the full probe
+                # report with the verdict and reason.
+                self.assertEqual(probe_events[0]["status"], "override")
+                self.assertEqual(probe_events[0]["verdict"], verdict)
+                self.assertEqual(probe_events[0]["reason"], reason)
+                self.assertEqual(
+                    probe_events[0]["probe"]["schema"], "finite.lifecycle-probe.v1"
+                )
+                postflights = [
+                    event
+                    for event in events
+                    if event["event"] == "entry_postflight"
+                    and event["status"] == "succeeded"
+                ]
+                self.assertEqual(len(postflights), 1, events)
+                self.assertEqual(events[-1]["event"], "final")
+                self.assertEqual(events[-1]["status"], "success")
+                self.assertEqual(events[-1]["probe_overridden"], 1)
+                self.assertEqual(events[-1]["probe_skipped"], 0)
+                self.assertEqual(events[-1]["absent_count"], 0)
+
+                # The override is visible in --summarize output.
+                summarized = self.run_rollout(
+                    "--summarize", env={"ROLLOUT_STATE_ROOT": str(state_root)}
+                )
+                self.assertEqual(summarized.returncode, 0, summarized.stderr)
+                self.assertIn("terminal=success", summarized.stdout)
+                self.assertIn("probe_overridden=1", summarized.stdout)
+
+    def test_probe_override_does_not_bypass_plan_drift_refusal(self) -> None:
+        # The override only relaxes the probe gate: provider-fact drift
+        # between prepare and execute still refuses the approved hash before
+        # anything is enqueued.
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, _, plan_hash = self.single_entry_environment(temp)
+            env["FAKE_PROBE_VERDICT"] = "inoperable"
+            env["FAKE_PROBE_REASON"] = "orphaned_task"
+            drifted = json.loads(env["FAKE_PROVIDER_FACTS"])
+            drifted[0]["test_agent_principal"] = "npub1changedprincipal"
+            env["FAKE_PROVIDER_FACTS"] = json.dumps(drifted)
+            log.write_text("", encoding="utf-8")
+
+            refused = self.run_rollout(
+                "--execute-plan-hash",
+                plan_hash,
+                *self.actor_args(),
+                "--roll-project-id",
+                "project-a",
+                "--probe-override",
+                env=env,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("does not match approved hash", refused.stderr)
+            self.assertFalse(
+                any(
+                    "--expected-agent-runtime-id" in call
+                    for call in log.read_text(encoding="utf-8").splitlines()
+                )
+            )
+
+    def test_probe_override_refuses_broad_or_multi_project_scope(self) -> None:
+        broad = self.run_rollout(
+            "--validate-only",
+            "--prepare",
+            *self.actor_args(),
+            "--roll-all",
+            "--roll-canary-project-id",
+            "project-canary",
+            "--probe-override",
+        )
+        self.assertEqual(broad.returncode, 64)
+        self.assertIn("--roll-all", broad.stderr)
+
+        multi = self.run_rollout(
+            "--validate-only",
+            "--prepare",
+            *self.actor_args(),
+            "--roll-project-id",
+            "project-a",
+            "--roll-project-id",
+            "project-b",
+            "--probe-override",
+        )
+        self.assertEqual(multi.returncode, 64)
+        self.assertIn("exactly one --roll-project-id", multi.stderr)
+
+        single = self.run_rollout(
+            "--validate-only",
+            "--prepare",
+            *self.actor_args(),
+            "--roll-project-id",
+            "project-a",
+            "--probe-override",
+        )
+        self.assertEqual(single.returncode, 0, single.stderr)
+
+    def test_probe_override_still_fails_closed_on_malformed_report(self) -> None:
+        # A probe that exits 0 with garbage has no verdict to override: the
+        # fail-closed deliberate skip is unchanged even under the override.
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, state_root, plan_hash = self.single_entry_environment(temp)
+            env["FAKE_PROBE_REPORT"] = '{"schema":"something-else","verdict":"operable"}'
+
+            executed = self.run_rollout(
+                "--execute-plan-hash",
+                plan_hash,
+                *self.actor_args(),
+                "--roll-project-id",
+                "project-a",
+                "--probe-override",
+                env=env,
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            self.assertIn("deliberately skipping", executed.stdout)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            self.assertFalse(
+                any(
+                    "--expected-agent-runtime-id" in call and "--plan-only" not in call
+                    for call in calls
+                ),
+                calls,
+            )
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            probe_events = [
+                event for event in events if event["event"] == "entry_lifecycle_probe"
+            ]
+            self.assertEqual(len(probe_events), 1, events)
+            self.assertEqual(probe_events[0]["status"], "skipped")
+            self.assertEqual(probe_events[0]["reason"], "probe_invalid_report")
+
     def test_hash_drift_refuses_before_first_enqueue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
