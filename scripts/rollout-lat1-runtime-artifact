@@ -874,7 +874,14 @@ machine_id="$4"
 set -a
 . /etc/finite/runner.env
 set +a
-exec /run/current-system/sw/bin/finite-saas-runner lifecycle-probe \
+# The runner package is not in systemPackages on every host; resolve the
+# binary from the service unit that runs it, falling back to the profile.
+# systemd 260 prints ExecStart as a structured record: "{ path=/nix/store/... ; ... }"
+runner_bin="/run/current-system/sw/bin/finite-saas-runner"
+if [[ ! -x $runner_bin ]]; then
+  runner_bin="$(systemctl show finite-saas-runner.service -p ExecStart --value | sed -n 's/^{ path=\([^ ;]*\).*/\1/p')"
+fi
+exec "$runner_bin" lifecycle-probe \
   --project-id "$project_id" --agent-runtime-id "$runtime_id" --source-machine-id "$machine_id"
 REMOTE
   set +e
