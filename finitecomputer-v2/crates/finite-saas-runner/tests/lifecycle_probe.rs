@@ -106,7 +106,14 @@ impl ProbeFixture {
 
     /// Write Kata persist state in the real `persistapi.SandboxState` shape.
     fn write_persist(&self, sandbox_container: &str, pid: Option<u64>) {
-        let dir = self.config.sandbox_root.join(container_id());
+        self.write_hash_persist(&container_id(), sandbox_container, pid);
+    }
+
+    /// Write persist state under an explicit sandbox directory: `dir_id` is
+    /// the `/run/vc/sbs/<dir_id>` component (on the fleet, the container id)
+    /// and `sandbox_container` is the record's `SandboxContainer` field.
+    fn write_hash_persist(&self, dir_id: &str, sandbox_container: &str, pid: Option<u64>) {
+        let dir = self.config.sandbox_root.join(dir_id);
         fs::create_dir_all(&dir).unwrap();
         let hypervisor = match pid {
             Some(pid) => format!(r#","HypervisorState":{{"Pid":{pid},"Type":"qemu"}}"#),
@@ -141,7 +148,7 @@ impl ProbeFixture {
     fn make_healthy(&self) {
         self.add_container(MACHINE, "running", PROJECT, MACHINE, &self.state_root());
         self.add_task(&container_id(), "RUNNING");
-        self.write_persist(MACHINE, Some(4242));
+        self.write_persist(&container_id(), Some(4242));
         self.add_vmm_comm(4242, "qemu-system-x86");
     }
 
@@ -209,11 +216,13 @@ fn assert_verdict(report: &LifecycleProbeReport, expected: LifecycleVerdict) {
 fn runtime_id_state_root_with_machine_named_container_is_operable() {
     // Production validation on lat3 (canary runtime_354cb67be83d38733cae):
     // the container is machine-named, its durable /data bind is named by the
-    // agent runtime id. This exact divergence must read operable.
+    // agent runtime id, and its Kata persist record names the hash container
+    // id (verified: SandboxContainer == the nerdctl container id, NOT the
+    // container name). This exact divergence must read operable.
     let fixture = new_fixture();
     let machine = "finite-kata-0fb1fc92761b75188cfc";
     let runtime_id = "runtime_354cb67be83d38733cae";
-    let container_id = format!("{machine}-id");
+    let container_id = "c4ac3912158f15196e403d848d0cfbbd52d2f1dce96bbe40c3dc8fced3f2ce25";
     fixture.add_container(
         machine,
         "running",
@@ -221,16 +230,9 @@ fn runtime_id_state_root_with_machine_named_container_is_operable() {
         machine,
         &fixture.config.work_root.join("kata").join(runtime_id),
     );
-    fixture.add_task(&container_id, "RUNNING");
-    let persist_dir = fixture.config.sandbox_root.join(&container_id);
-    fs::create_dir_all(&persist_dir).unwrap();
-    fs::write(
-        persist_dir.join("persist.json"),
-        format!(
-            r#"{{"State":"running","SandboxContainer":"{machine}","PersistVersion":2,"HypervisorState":{{"Pid":4242,"Type":"qemu"}}}}"#
-        ),
-    )
-    .unwrap();
+    fixture.set_container_id(machine, container_id);
+    fixture.add_task(container_id, "RUNNING");
+    fixture.write_hash_persist(container_id, container_id, Some(4242));
     fixture.add_vmm_comm(4242, "qemu-system-x86");
 
     let request = LifecycleProbeRequest {
@@ -240,6 +242,47 @@ fn runtime_id_state_root_with_machine_named_container_is_operable() {
     };
     let report = probe_runtime_lifecycle(&fixture.config, &request);
     assert_verdict(&report, LifecycleVerdict::Operable);
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn hash_named_persist_for_a_different_container_id_is_stale() {
+    // Same topology, but the persist record names a DIFFERENT container id:
+    // genuinely stale sandbox state, degraded with evidence.
+    let fixture = new_fixture();
+    let machine = "finite-kata-0fb1fc92761b75188cfc";
+    let runtime_id = "runtime_354cb67be83d38733cae";
+    let container_id = "c4ac3912158f15196e403d848d0cfbbd52d2f1dce96bbe40c3dc8fced3f2ce25";
+    let stale_id = "9b1c4e2a7f0d4856a3e2c1b0d9f8a7c6e5d4c3b2a19081726354ffe0d1c2b3a4";
+    fixture.add_container(
+        machine,
+        "running",
+        PROJECT,
+        machine,
+        &fixture.config.work_root.join("kata").join(runtime_id),
+    );
+    fixture.set_container_id(machine, container_id);
+    fixture.add_task(container_id, "RUNNING");
+    fixture.write_hash_persist(container_id, stale_id, Some(4242));
+    fixture.add_vmm_comm(4242, "qemu-system-x86");
+
+    let request = LifecycleProbeRequest {
+        project_id: PROJECT.to_string(),
+        agent_runtime_id: runtime_id.to_string(),
+        source_machine_id: machine.to_string(),
+    };
+    let report = probe_runtime_lifecycle(&fixture.config, &request);
+    assert_verdict(&report, LifecycleVerdict::Degraded);
+    assert_eq!(report.reason.as_deref(), Some("stale_sandbox_state"));
+    let sandbox = fixture.check(&report, "sandbox_state");
+    assert_eq!(
+        sandbox.evidence["persist_sandbox_container"].as_str(),
+        Some(stale_id)
+    );
+    assert_eq!(
+        sandbox.evidence["container_id"].as_str(),
+        Some(container_id)
+    );
     fixture.assert_nothing_mutated();
 }
 
@@ -299,7 +342,7 @@ fn orphaned_vm_without_healthy_task_is_inoperable() {
     // task is orphaned, and a normal stop would time out.
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
-    fixture.write_persist(MACHINE, Some(4242));
+    fixture.write_persist(&container_id(), Some(4242));
     fixture.add_netns_record(&container_id());
 
     let report = fixture.probe();
@@ -347,7 +390,7 @@ fn stale_cni_namespace_is_detected() {
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
     fixture.add_task(&container_id(), "PAUSED");
-    fixture.write_persist(MACHINE, None);
+    fixture.write_persist(&container_id(), None);
     fixture.add_netns_record(&container_id());
 
     let report = fixture.probe();
@@ -364,8 +407,8 @@ fn stale_cni_namespace_is_detected() {
 fn stale_kata_persist_state_is_detected() {
     let fixture = new_fixture();
     fixture.make_healthy();
-    // Persist state belonging to a superseded container.
-    fixture.write_persist("superseded-container", Some(4242));
+    // Persist state belonging to a superseded container id.
+    fixture.write_persist("superseded-container-id", Some(4242));
 
     let report = fixture.probe();
     assert_verdict(&report, LifecycleVerdict::Degraded);
@@ -373,7 +416,7 @@ fn stale_kata_persist_state_is_detected() {
     let sandbox = fixture.check(&report, "sandbox_state");
     assert_eq!(
         sandbox.evidence["persist_sandbox_container"].as_str(),
-        Some("superseded-container")
+        Some("superseded-container-id")
     );
     fixture.assert_nothing_mutated();
 }
@@ -400,7 +443,7 @@ fn wrapped_qemu_process_name_is_detected() {
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
     fixture.add_task(&container_id(), "RUNNING");
-    fixture.write_persist(MACHINE, Some(4242));
+    fixture.write_persist(&container_id(), Some(4242));
     fixture.add_vmm_comm(4242, "wrap-qemu-syste");
 
     let report = fixture.probe();
@@ -513,7 +556,7 @@ fn missing_vmm_pid_on_a_running_task_is_unknown_not_skipped() {
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
     fixture.add_task(&container_id(), "RUNNING");
-    fixture.write_persist(MACHINE, None);
+    fixture.write_persist(&container_id(), None);
 
     let report = fixture.probe();
     assert_verdict(&report, LifecycleVerdict::Unknown);
