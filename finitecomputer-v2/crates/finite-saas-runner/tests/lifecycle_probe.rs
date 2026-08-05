@@ -64,8 +64,12 @@ fn new_fixture() -> ProbeFixture {
 }
 
 impl ProbeFixture {
+    /// Fleet reality (verified on lat1 and lat3): durable state roots are
+    /// named by the agent runtime id (Core's `durable_state_id`), while the
+    /// container is named by the source machine id. Encoding the divergence
+    /// here means every scenario exercises it.
     fn state_root(&self) -> PathBuf {
-        self.config.work_root.join("kata").join(MACHINE)
+        self.config.work_root.join("kata").join(RUNTIME)
     }
 
     /// Register one container with the fake provider layer.
@@ -88,7 +92,7 @@ impl ProbeFixture {
         let tasks = self.state.join("tasks");
         let mut contents = fs::read_to_string(&tasks)
             .unwrap_or_else(|_| "TASK                PID       STATUS\n".to_string());
-        contents.push_str(&format!("{container_id:<20}4242      {status}\n"));
+        contents.push_str(&format!("{container_id}  4242      {status}\n"));
         fs::write(&tasks, contents).unwrap();
     }
 
@@ -199,6 +203,74 @@ fn assert_verdict(report: &LifecycleProbeReport, expected: LifecycleVerdict) {
         "unexpected verdict; full report:\n{}",
         serde_json::to_string_pretty(report).unwrap()
     );
+}
+
+#[test]
+fn runtime_id_state_root_with_machine_named_container_is_operable() {
+    // Production validation on lat3 (canary runtime_354cb67be83d38733cae):
+    // the container is machine-named, its durable /data bind is named by the
+    // agent runtime id. This exact divergence must read operable.
+    let fixture = new_fixture();
+    let machine = "finite-kata-0fb1fc92761b75188cfc";
+    let runtime_id = "runtime_354cb67be83d38733cae";
+    let container_id = format!("{machine}-id");
+    fixture.add_container(
+        machine,
+        "running",
+        PROJECT,
+        machine,
+        &fixture.config.work_root.join("kata").join(runtime_id),
+    );
+    fixture.add_task(&container_id, "RUNNING");
+    let persist_dir = fixture.config.sandbox_root.join(&container_id);
+    fs::create_dir_all(&persist_dir).unwrap();
+    fs::write(
+        persist_dir.join("persist.json"),
+        format!(
+            r#"{{"State":"running","SandboxContainer":"{machine}","PersistVersion":2,"HypervisorState":{{"Pid":4242,"Type":"qemu"}}}}"#
+        ),
+    )
+    .unwrap();
+    fixture.add_vmm_comm(4242, "qemu-system-x86");
+
+    let request = LifecycleProbeRequest {
+        project_id: PROJECT.to_string(),
+        agent_runtime_id: runtime_id.to_string(),
+        source_machine_id: machine.to_string(),
+    };
+    let report = probe_runtime_lifecycle(&fixture.config, &request);
+    assert_verdict(&report, LifecycleVerdict::Operable);
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn machine_named_state_root_is_a_mismatch_not_an_expectation() {
+    // The pre-fix probe expected the durable root to be machine-named. On the
+    // real fleet that layout is wrong, so a machine-named bind must still
+    // fail closed as provider_handle_mismatch (with the observed mount as
+    // evidence), never silently pass.
+    let fixture = new_fixture();
+    let machine_named_root = fixture.config.work_root.join("kata").join(MACHINE);
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &machine_named_root);
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Inoperable);
+    assert_eq!(report.reason.as_deref(), Some("provider_handle_mismatch"));
+    let canonical = fixture.check(&report, "canonical_handle");
+    assert_eq!(canonical.evidence["durable_bind_ok"], false);
+    assert!(
+        canonical.evidence["expected_state_root"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("kata/{RUNTIME}")),
+        "expected the runtime-id root in evidence; full report:\n{}",
+        serde_json::to_string_pretty(&report).unwrap()
+    );
+    assert_eq!(
+        canonical.evidence["observed_data_mounts"][0].as_str(),
+        Some(machine_named_root.to_str().unwrap())
+    );
+    fixture.assert_nothing_mutated();
 }
 
 #[test]

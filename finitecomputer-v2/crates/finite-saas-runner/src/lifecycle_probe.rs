@@ -329,8 +329,20 @@ impl Probe<'_> {
 
         // 1. Control-state consistency, part one: the provider handle exists
         // and its ownership labels and durable /data bind match Core's
-        // durable record (the request identity).
-        let state_root = self.config.work_root.join("kata").join(container_name);
+        // durable record (the request identity). Core sets the RuntimeSpec's
+        // durable_state_id to the agent runtime id, so the durable state root
+        // is named by the runtime id, never by the container/machine name
+        // (kata_launch_plan_for_source_machine derives it the same way).
+        let durable_state_id = sanitize_sandbox_name(&request.agent_runtime_id);
+        let state_root = self
+            .config
+            .work_root
+            .join("kata")
+            .join(if durable_state_id.is_empty() {
+                container_name.to_string()
+            } else {
+                durable_state_id
+            });
         // Every canonical-handle failure leaves no trustworthy handle, so all
         // dependent reads are gated on it.
         let canonical = match self.check_canonical_handle(request, container_name, &state_root) {
@@ -442,12 +454,15 @@ impl Probe<'_> {
             })
             .map(|(key, _)| *key)
             .collect();
-        let durable_bind_ok = inspected.mounts.iter().any(|mount| {
+        // The expectation is derived (runtime-id state root), but the truth
+        // carried downstream is the provider-observed mount: the duplicate
+        // writer scan compares against what is actually mounted.
+        let durable_bind = inspected.mounts.iter().find(|mount| {
             mount.destination == Path::new("/data")
                 && mount.source == state_root
                 && mount.read_write
         });
-        if !mismatched.is_empty() || !durable_bind_ok {
+        if !mismatched.is_empty() || durable_bind.is_none() {
             return Err(LifecycleProbeCheck::fail(
                 "canonical_handle",
                 "provider_handle_mismatch",
@@ -456,10 +471,20 @@ impl Probe<'_> {
                     "container_name": container_name,
                     "mismatched_labels": mismatched,
                     "expected_state_root": state_root,
-                    "durable_bind_ok": durable_bind_ok,
+                    "durable_bind_ok": durable_bind.is_some(),
+                    "observed_data_mounts": inspected
+                        .mounts
+                        .iter()
+                        .filter(|mount| mount.destination == Path::new("/data"))
+                        .map(|mount| mount.source.clone())
+                        .collect::<Vec<_>>(),
                 }),
             ));
         }
+        let observed_state_root = durable_bind
+            .expect("durable bind checked above")
+            .source
+            .clone();
         if !valid_container_id(&inspected.id) {
             return Err(LifecycleProbeCheck::fail(
                 "canonical_handle",
@@ -479,13 +504,13 @@ impl Probe<'_> {
                     "container_id": inspected.id,
                     "status": inspected.state.status,
                     "image": inspected.config.image,
-                    "state_root": state_root,
+                    "state_root": observed_state_root,
                 }),
             ),
             CanonicalHandle {
                 container_id: inspected.id,
                 status: inspected.state.status,
-                state_root: state_root.to_path_buf(),
+                state_root: observed_state_root,
             },
         ))
     }
