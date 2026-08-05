@@ -21,7 +21,12 @@ usage: scripts/rollout-lat1-runtime-artifact [--validate-only] [--host lat1|lat3
   --roll-admin-email EMAIL \
   --roll-admin-workos-user-id ID \
   (--roll-project-id PROJECT_ID... | --roll-all --roll-canary-project-id PROJECT_ID) \
-  [--roll-wait-timeout-seconds SECS]
+  [--roll-wait-timeout-seconds SECS] [--probe-override]
+
+--probe-override (exactly-one-agent emergencies only) requires exactly one
+  --roll-project-id, refuses --roll-all, and converts a non-operable lifecycle
+  probe verdict from a deliberate skip into a loudly logged proceed; every
+  other check (provider-fact drift, preflight, postflight) still applies.
 EOF
 }
 
@@ -63,6 +68,7 @@ parse_args() {
   ROLLOUT_WAIT_TIMEOUT_SECONDS=1200
   ROLLOUT_PROJECT_IDS=()
   ROLLOUT_HOST=lat1
+  PROBE_OVERRIDE=false
 
   while (($#)); do
     case "$1" in
@@ -131,6 +137,10 @@ parse_args() {
         ROLLOUT_WAIT_TIMEOUT_SECONDS="$2"
         shift 2
         ;;
+      --probe-override)
+        PROBE_OVERRIDE=true
+        shift
+        ;;
       *)
         echo "unknown runtime rollout option: $1" >&2
         usage
@@ -179,6 +189,16 @@ parse_args() {
   elif [[ ${#ROLLOUT_PROJECT_IDS[@]} -eq 0 || -n $ROLLOUT_CANARY_PROJECT_ID ]]; then
     echo "choose explicit projects, or --roll-all with one canary" >&2
     return 64
+  fi
+  if [[ $PROBE_OVERRIDE == true ]]; then
+    if [[ $ROLLOUT_ALL == true ]]; then
+      echo "--probe-override is an exactly-one-agent emergency control and cannot be combined with --roll-all" >&2
+      return 64
+    fi
+    if [[ ${#ROLLOUT_PROJECT_IDS[@]} -ne 1 ]]; then
+      echo "--probe-override requires exactly one --roll-project-id" >&2
+      return 64
+    fi
   fi
   validate_local_inputs
 }
@@ -626,13 +646,14 @@ derive_run_terminal() {
     | ([$run[] | select(.event == "entry_postflight" and .status == "succeeded") | .project_id + "/" + .agent_runtime_id] | unique) as $passed
     | ([$run[] | select((.event == "entry_preflight" or .event == "core" or .event == "entry_postflight") and .status == "failed") | .project_id + "/" + .agent_runtime_id] | unique) as $failed
     | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "skipped") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_skipped
+    | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "override") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_overridden
     | ([$run[] | select(.event != "final" and .status == "failed")] | length > 0) as $any_failed
     | ($planned - $passed - $failed - $probe_skipped) as $absent
     | (if $any_failed then {status:"failure", failed_entries:$failed}
        elif ($planned | length) == 0 then {status:"noop"}
        elif ($absent | length) > 0 then {status:"interrupted", resume_point:$absent[0]}
        else {status:"success"} end)
-    | . + {planned_count:($planned | length), passed_count:($passed | length), failed_count:($failed | length), absent_count:($absent | length), probe_skipped:($probe_skipped | length)}
+    | . + {planned_count:($planned | length), passed_count:($passed | length), failed_count:($failed | length), absent_count:($absent | length), probe_skipped:($probe_skipped | length), probe_overridden:($probe_overridden | length)}
   ' "$EVENTS_FILE"
 }
 
@@ -749,6 +770,7 @@ summarize_one_plan() {
         | ([$run[] | select(.event == "entry_postflight" and .status == "succeeded") | .project_id + "/" + .agent_runtime_id] | unique) as $passed
         | ([$run[] | select((.event == "entry_preflight" or .event == "core" or .event == "entry_postflight") and .status == "failed") | .project_id + "/" + .agent_runtime_id] | unique) as $failed
         | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "skipped") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_skipped
+        | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "override") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_overridden
         | ($planned - $passed - $failed - $probe_skipped) as $absent
         | (if $final == null then "unknown/incomplete"
            elif $phase != "execute" then $final.status
@@ -756,7 +778,7 @@ summarize_one_plan() {
            elif ($planned | length) == 0 then "noop"
            elif ($absent | length) > 0 then "interrupted"
            else "success" end) as $terminal
-        | "plan \($plan_hash) run \($run_id) phase=\($phase) terminal=\($terminal) recorded=\($final.status // "none") planned=\($planned | length) passed=\($passed | length) failed=\($failed | length) absent=\($absent | length) probe_skipped=\($probe_skipped | length) resume=\($absent[0] // "-")"
+        | "plan \($plan_hash) run \($run_id) phase=\($phase) terminal=\($terminal) recorded=\($final.status // "none") planned=\($planned | length) passed=\($passed | length) failed=\($failed | length) absent=\($absent | length) probe_skipped=\($probe_skipped | length) probe_overridden=\($probe_overridden | length) resume=\($absent[0] // "-")"
       end
   '
 }
@@ -768,6 +790,9 @@ copy_paste_execute_command() {
   command+=(--roll-admin-email "$ROLLOUT_ADMIN_EMAIL")
   command+=(--roll-admin-workos-user-id "$ROLLOUT_ADMIN_WORKOS_USER_ID")
   command+=(--roll-wait-timeout-seconds "$ROLLOUT_WAIT_TIMEOUT_SECONDS")
+  if [[ $PROBE_OVERRIDE == true ]]; then
+    command+=(--probe-override)
+  fi
   local project_id
   if [[ $ROLLOUT_ALL == true ]]; then
     command+=(--roll-all --roll-canary-project-id "$ROLLOUT_CANARY_PROJECT_ID")
@@ -947,7 +972,11 @@ execute_exact_plan() {
     # its current artifact and the run ledger records the evidence. A probe
     # that exits 0 with a malformed report fails CLOSED (deliberate skip);
     # only a probe that could not run at all keeps today's Core-state
-    # behavior, with the entry evidence marked probe-unavailable.
+    # behavior, with the entry evidence marked probe-unavailable. The
+    # --probe-override emergency control converts a well-formed non-operable
+    # verdict into a loudly logged proceed (status "override" in the ledger,
+    # full report retained); it never overrides a malformed report, which has
+    # no verdict to override, and every other check below still applies.
     local probe_report probe_status probe_verdict probe_reason
     set +e
     probe_report="$(entry_lifecycle_probe "$entry")"
@@ -957,6 +986,11 @@ execute_exact_plan() {
       probe_verdict="$(jq -r '.verdict' <<<"$probe_report")"
       if [[ $probe_verdict == operable ]]; then
         append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", verdict:"operable"}')"
+      elif [[ $PROBE_OVERRIDE == true ]]; then
+        probe_reason="$(jq -r '.reason // "unspecified"' <<<"$probe_report")"
+        append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --arg verdict "$probe_verdict" --arg reason "$probe_reason" --argjson probe "$probe_report" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"override", verdict:$verdict, reason:$reason, probe:$probe}')"
+        echo "WARNING: --probe-override set; the operator overrode the lifecycle probe gate for $project_id ($runtime_id): verdict $probe_verdict ($probe_reason); proceeding with provider-fact drift checks, enqueue, and postflight fully intact" >&2
+        echo "==> lifecycle probe verdict $probe_verdict ($probe_reason) OVERRIDDEN by the operator for $project_id ($runtime_id); proceeding with the upgrade"
       else
         probe_reason="$(jq -r '.reason // "unspecified"' <<<"$probe_report")"
         append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --arg verdict "$probe_verdict" --arg reason "$probe_reason" --argjson probe "$probe_report" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"skipped", verdict:$verdict, reason:$reason, probe:$probe}')"
