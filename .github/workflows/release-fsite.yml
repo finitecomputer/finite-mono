@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runs_on: ubuntu-latest
+          - runs_on: depot-ubuntu-24.04
             asset_name: fsite-linux-x86_64
             target: x86_64-unknown-linux-gnu
           - runs_on: macos-14
@@ -78,7 +78,7 @@ jobs:
 
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:

@@ -18,7 +18,7 @@ jobs:
   preflight:
     name: Pinned API and inventory preflight
     if: ${{ inputs.confirm_read_only }}
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 20
     environment: phala-staging
     env:

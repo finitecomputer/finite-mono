@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runs_on: ubuntu-latest
+          - runs_on: depot-ubuntu-24.04
             asset_name: finitechat-linux-x86_64
             target: x86_64-unknown-linux-gnu
           - runs_on: macos-14
@@ -196,7 +196,7 @@ jobs:
     needs:
       - build
       - electron
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
