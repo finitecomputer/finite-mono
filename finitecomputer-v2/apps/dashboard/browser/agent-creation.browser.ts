@@ -1702,9 +1702,14 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
         .waitFor({ state: "visible" });
       assert.equal(hostedDevice.state.app.selected_chat_id, "chat_browser_agent");
 
-      // A scoped send in another Chat updates its metadata without changing
-      // the daemon selection. Core owns that invariant; full state snapshots
-      // can therefore keep selection and the selected transcript window aligned.
+      // Cross-device tripwire: with no click in flight, a snapshot whose
+      // daemon selection diverges from this browser's (for example, a scoped
+      // send in a concurrently active Chat on another device) may update
+      // background state but must NOT move the visible pane. Selection is
+      // device-scoped; only an explicit local click, a vanished local
+      // selection, or first load may move the foreground.
+      hostedDevice.state.app.selected_chat_id = "chat_browser_remembered";
+      hostedDevice.state.app.topics[0]!.active_chat_id = "chat_browser_remembered";
       hostedDevice.state.app.messages.push({
         ...hostedMessage("Remembered background stream.", false, 15),
         message_id: "message_remembered_background",
@@ -1722,7 +1727,7 @@ test("dashboard agent creation browser states", { timeout: 180_000 }, async () =
           .getByText("Remembered background stream.", { exact: true })
           .isVisible(),
         false,
-        "background transcript update changed the visible Chat"
+        "a divergent daemon selection moved the visible Chat without a local click"
       );
 
       const completedBeforeBackgroundChatNavigation =

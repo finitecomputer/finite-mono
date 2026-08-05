@@ -15,6 +15,15 @@ export type HostedChatSelection = {
  */
 export type HostedChatSelectionIntent = HostedChatSelection & { token: number };
 
+/**
+ * Bound on a pinned navigation click. Matches the hosted-device request
+ * deadline (15s) in hosted-web-device.ts: the navigation request rides the
+ * same endpoint, so a longer pin would outlive the request that could
+ * confirm it. On expiry the provider releases the intent and restores the
+ * last coherent applied snapshot.
+ */
+export const HOSTED_CHAT_NAVIGATION_TIMEOUT_MS = 15_000;
+
 export function hostedChatSelectionFromState(state: HostedChatState): HostedChatSelection {
   return {
     selected_room_id: state.selected_room_id ?? null,
@@ -97,4 +106,62 @@ export function applyHostedChatSelectionIntent(
     },
     confirmed: false,
   };
+}
+
+export type HostedChatSettledSelection = {
+  state: HostedChatState;
+  selection: HostedChatSelection;
+  decision: "initial" | "preserved" | "fallback";
+};
+
+/**
+ * Settle an applied snapshot against the browser's local foreground
+ * selection. Selection is device-scoped: the daemon-selected foreground is
+ * adopted only when the browser has no local selection (first load) or the
+ * local selection genuinely vanished from the snapshot. A daemon selection
+ * that merely differs — another device's click, a scoped send elsewhere —
+ * updates transcript, unread, and background state freely but must not move
+ * this browser's foreground.
+ *
+ * Both adopt paths return the snapshot object untouched so the foreground
+ * and its windowed transcript always come from the same snapshot.
+ */
+export function settleHostedChatSnapshotSelection(
+  local: HostedChatSelection | null,
+  next: HostedChatState
+): HostedChatSettledSelection {
+  if (local && hostedChatSelectionExists(local, next)) {
+    return {
+      state: { ...next, ...local },
+      selection: local,
+      decision: "preserved",
+    };
+  }
+  return {
+    state: next,
+    selection: hostedChatSelectionFromState(next),
+    decision: local === null ? "initial" : "fallback",
+  };
+}
+
+export function hostedChatSelectionExists(
+  selection: HostedChatSelection,
+  state: HostedChatState
+) {
+  const roomId = selection.selected_room_id;
+  if (!roomId) return state.rooms.length === 0;
+  if (!state.rooms.some((room) => room.room_id === roomId)) return false;
+
+  const topicId = selection.selected_topic_id;
+  if (!topicId) return true;
+  const topic = state.topics.find(
+    (candidate) =>
+      candidate.room_id === roomId
+      && candidate.topic_id === topicId
+  );
+  if (!topic) return false;
+
+  const chatId = selection.selected_chat_id;
+  if (!chatId) return true;
+  return topic.chats.some((chat) => chat.chat_id === chatId);
 }

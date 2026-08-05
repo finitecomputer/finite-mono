@@ -12,6 +12,7 @@ import {
 
 import {
   CHAT_INVALID_UPDATE_MESSAGE,
+  CHAT_NAVIGATION_TIMEOUT_MESSAGE,
   CHAT_UNAVAILABLE_MESSAGE,
 } from "@/lib/chat-product-copy";
 import {
@@ -44,8 +45,10 @@ import {
 } from "@/lib/hosted-web-chat-retry";
 import {
   applyHostedChatSelectionIntent,
+  HOSTED_CHAT_NAVIGATION_TIMEOUT_MS,
   hostedChatSelectionFromState,
   hostedChatSelectionIntentTarget,
+  settleHostedChatSnapshotSelection,
   type HostedChatSelection,
   type HostedChatSelectionIntent,
 } from "@/lib/hosted-web-chat-selection";
@@ -122,6 +125,7 @@ export function HostedChatProvider({
   const selectionIntentRef = useRef<HostedChatSelectionIntent | null>(null);
   const selectionIntentTokenRef = useRef(0);
   const serverSelectionRef = useRef<HostedChatSelection | null>(null);
+  const localSelectionRef = useRef<HostedChatSelection | null>(null);
   const hostedAuthorityRef = useRef<HostedChatState | null>(null);
   const localDeviceRef = useRef<ElectronLocalDevice | null>(null);
   const hasState = state !== null;
@@ -130,19 +134,34 @@ export function HostedChatProvider({
   // pending, snapshots keep their content but present the clicked selection:
   // selection-only actions do not bump the daemon rev, so stream snapshots
   // generated before the click persists otherwise yank the highlight back.
+  // With no click in flight the foreground is device-scoped: daemon snapshots
+  // merge their content freely but may not move a valid local selection.
   const setMergedState = useCallback((next: HostedChatState) => {
     serverSelectionRef.current = hostedChatSelectionFromState(next);
-    const applied = applyHostedChatSelectionIntent(selectionIntentRef.current, next);
-    if (applied.confirmed) {
-      selectionIntentRef.current = null;
-      setSelectionPending(false);
+    const intent = selectionIntentRef.current;
+    let applied: HostedChatState;
+    if (intent) {
+      const result = applyHostedChatSelectionIntent(intent, next);
+      if (result.confirmed) {
+        selectionIntentRef.current = null;
+        setSelectionPending(false);
+        localSelectionRef.current = hostedChatSelectionFromState(result.state);
+      }
+      applied = result.state;
+    } else {
+      const settled = settleHostedChatSnapshotSelection(
+        localSelectionRef.current,
+        next
+      );
+      localSelectionRef.current = settled.selection;
+      applied = settled.state;
     }
     setState((current) => {
       const merged = {
-        ...applied.state,
-        hosted_agent_binding: applied.state.hosted_agent_binding === undefined
+        ...applied,
+        hosted_agent_binding: applied.hosted_agent_binding === undefined
           ? current?.hosted_agent_binding ?? null
-          : applied.state.hosted_agent_binding,
+          : applied.hosted_agent_binding,
       };
       stateRef.current = merged;
       return merged;
@@ -418,28 +437,37 @@ export function HostedChatProvider({
     allowEqualRevision = true
   ) => {
     const navigationAction = isHostedChatNavigationAction(action);
-    const request = () => runtime
-      ? requestElectronMutationSnapshot(
-        (bridge) => bridge.dispatchDaemonAction(action),
-        allowEqualRevision,
-        navigationAction
-      )
-      : requestMutationSnapshot("/actions", {
+    const request = () => {
+      if (runtime) {
+        // The in-process bridge cannot abort a dispatched action, so bound
+        // the wait instead; a late response still applies through the normal
+        // snapshot path after the intent has been released.
+        return withNavigationTimeout(requestElectronMutationSnapshot(
+          (bridge) => bridge.dispatchDaemonAction(action),
+          allowEqualRevision,
+          navigationAction
+        ));
+      }
+      return requestMutationSnapshot("/actions", {
         method: "POST",
         body: JSON.stringify(action),
+        signal: navigationAction
+          ? AbortSignal.timeout(HOSTED_CHAT_NAVIGATION_TIMEOUT_MS)
+          : undefined,
       }, allowEqualRevision, navigationAction);
+    };
 
     if (!navigationAction) return request();
 
     // Pin the clicked selection immediately. The pin clears when a snapshot
-    // confirms it (setMergedState); if the request fails or the server
-    // refuses the selection, fall back to the server's own selection so the
-    // UI never sticks on a selection the daemon rejected.
+    // confirms it (setMergedState); if the request fails, times out, or the
+    // server refuses the selection, fall back to the server's own selection
+    // so the UI never sticks on a selection the daemon rejected.
     const target = hostedChatSelectionIntentTarget(action);
-    let token: number | null = null;
+    const token = ++selectionIntentTokenRef.current;
     if (target) {
-      token = ++selectionIntentTokenRef.current;
       selectionIntentRef.current = { ...target, token };
+      localSelectionRef.current = target;
       setSelectionPending(true);
       setState((current) => {
         const selected = current ? { ...current, ...target } : current;
@@ -448,12 +476,16 @@ export function HostedChatProvider({
       });
     }
 
-    const releaseIntent = () => {
-      if (token === null || selectionIntentRef.current?.token !== token) return;
+    const releaseIntent = (caught?: unknown) => {
+      if (selectionIntentRef.current?.token !== token) return;
       selectionIntentRef.current = null;
       setSelectionPending(false);
+      if (isHostedChatNavigationTimeout(caught)) {
+        setTransportError(CHAT_NAVIGATION_TIMEOUT_MESSAGE);
+      }
       const serverSelection = serverSelectionRef.current;
       if (serverSelection) {
+        localSelectionRef.current = serverSelection;
         setState((current) => {
           const selected = current ? { ...current, ...serverSelection } : current;
           stateRef.current = selected;
@@ -462,13 +494,31 @@ export function HostedChatProvider({
       }
     };
 
+    const finishNavigation = (next: HostedChatState) => {
+      if (selectionIntentTokenRef.current !== token) return;
+      if (!target) {
+        // Navigation without a knowable target (New chat, new topic): the
+        // completed request IS the explicit user action, so its response
+        // selection becomes the local foreground. This is the one non-click
+        // path allowed to move the foreground, and only on success.
+        const selection = hostedChatSelectionFromState(next);
+        localSelectionRef.current = selection;
+        setState((current) => {
+          const selected = current ? { ...current, ...selection } : current;
+          stateRef.current = selected;
+          return selected;
+        });
+      }
+      releaseIntent();
+    };
+
     // Send selection-changing actions in click order so delayed network
     // arrival cannot make the server persist an older intent as the final
     // selection. This is intentionally not a global mutation queue: messages,
     // typing, reads, and uploads still run independently of navigation.
     const pending = navigationMutationTailRef.current.then(request, request);
     navigationMutationTailRef.current = pending.then(
-      releaseIntent,
+      finishNavigation,
       releaseIntent
     );
     return pending;
@@ -753,4 +803,32 @@ function isHostedChatNavigationAction(action: HostedChatAction) {
     || "OpenChat" in action
     || "CreateTopic" in action
     || "StartTopicChatIntent" in action;
+}
+
+class HostedChatNavigationTimeoutError extends Error {
+  constructor() {
+    super("Chat navigation timed out.");
+    this.name = "HostedChatNavigationTimeoutError";
+  }
+}
+
+function isHostedChatNavigationTimeout(error: unknown) {
+  return error instanceof HostedChatNavigationTimeoutError
+    || (error instanceof Error && error.name === "TimeoutError");
+}
+
+/** Bound a navigation request that cannot take an AbortSignal (the Electron
+ * bridge). The loser keeps running; its late result applies normally after
+ * the intent has been released. */
+function withNavigationTimeout<T>(pending: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new HostedChatNavigationTimeoutError()),
+      HOSTED_CHAT_NAVIGATION_TIMEOUT_MS
+    );
+  });
+  return Promise.race([pending, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
