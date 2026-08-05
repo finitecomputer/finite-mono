@@ -378,7 +378,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 )?),
                 readiness_timeout: runtime_ready_timeout,
                 readiness_interval: runtime_ready_interval,
-                stop_timeout_secs: optional_u64("FC_RUNNER_KATA_STOP_TIMEOUT_SECS", 30)?,
+                stop_timeout_secs: optional_u64("FC_RUNNER_KATA_STOP_TIMEOUT_SECS", 180)?,
                 retirement: optional_kata_retirement_config()?,
             });
             run_once_with_launcher(

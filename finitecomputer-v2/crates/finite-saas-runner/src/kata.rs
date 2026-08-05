@@ -151,7 +151,10 @@ impl Default for KataConfig {
             launch_timeout: DEFAULT_LAUNCH_TIMEOUT,
             readiness_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
             readiness_interval: DEFAULT_RUNTIME_READY_INTERVAL,
-            stop_timeout_secs: 30,
+            // Real fleet stops of loaded 8GB Kata VMs take 60-90s; a grace
+            // below that escalates to a force-kill mid-shutdown, which
+            // produced the rollout's ttrpc:closed false failures.
+            stop_timeout_secs: 180,
             retirement: None,
         }
     }
@@ -872,6 +875,31 @@ impl KataLauncher {
     }
 
     fn stop_compute(&self, container_name: &str) -> Result<(), RunnerError> {
+        if self.stop_command(container_name).is_ok() {
+            return Ok(());
+        }
+        // A stop that failed at the CLI level may still have stopped the
+        // compute: the outer watchdog can kill nerdctl after the container
+        // exited, and a grace-expired escalation severs the shim channel only
+        // after teardown began. Believe the provider state, not the CLI exit.
+        if self.compute_stopped(container_name) {
+            return Ok(());
+        }
+        // Still running: one bounded retry with a fresh full grace. Anything
+        // that cannot be proven stopped afterwards is a genuine failure.
+        match self.stop_command(container_name) {
+            Ok(()) => Ok(()),
+            Err(retry_error) => {
+                if self.compute_stopped(container_name) {
+                    Ok(())
+                } else {
+                    Err(retry_error)
+                }
+            }
+        }
+    }
+
+    fn stop_command(&self, container_name: &str) -> Result<(), RunnerError> {
         self.run_checked(
             self.command(vec![
                 OsString::from("stop"),
@@ -882,6 +910,17 @@ impl KataLauncher {
             self.graceful_stop_command_timeout(),
         )?;
         Ok(())
+    }
+
+    /// The stop's goal is "compute down". A container that is gone or no
+    /// longer running has reached it, however the stop CLI itself reported.
+    /// Anything unreadable stays unproven, so this fails closed.
+    fn compute_stopped(&self, container_name: &str) -> bool {
+        match self.inspect(container_name) {
+            Ok(None) => true,
+            Ok(Some(inspected)) => inspected.state.status != "running",
+            Err(_) => false,
+        }
     }
 
     fn graceful_stop_command_timeout(&self) -> Duration {
@@ -2442,15 +2481,7 @@ impl RuntimeLauncher for KataLauncher {
         let (plan, inspected) = self.validate_control(lease)?;
         self.reconcile_recovery_helpers(&plan, &lease.runtime.project_id, &inspected, None)?;
         if inspected.state.status == "running" {
-            self.run_checked(
-                self.command(vec![
-                    OsString::from("stop"),
-                    OsString::from("--time"),
-                    OsString::from(self.config.stop_timeout_secs.to_string()),
-                    OsString::from(&plan.container_name),
-                ]),
-                self.graceful_stop_command_timeout(),
-            )?;
+            self.stop_compute(&plan.container_name)?;
         }
         Ok(())
     }
@@ -4094,7 +4125,28 @@ case "$cmd" in
     for name in "$@"; do :; done
     write_field "$name" status running ;;
   stop)
+    time=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "--time" ]; then time="$arg"; fi
+      prev="$arg"
+    done
     for name in "$@"; do :; done
+    if [ -f "$root/stuck-stop" ]; then
+      echo "injected stuck stop" >&2
+      exit 42
+    fi
+    delay=0
+    if [ -f "$root/$name.stop-delay" ]; then delay="$(cat "$root/$name.stop-delay")"; fi
+    if [ "$delay" -gt "${time:-0}" ]; then
+      # Grace expired mid-shutdown: containerd escalates and force-kills the
+      # shim. The VM still dies, but the control channel is severed — the
+      # production false failure (force cleanup timed out + ttrpc: closed).
+      write_field "$name" status exited
+      echo "rpc error: code = Unavailable desc = ttrpc: closed" >&2
+      exit 1
+    fi
+    if [ "$delay" -gt 0 ]; then sleep "$delay"; fi
     write_field "$name" status exited
     if [ -f "$root/block-after-stop" ]; then
       : > "$root/stop-blocked"
@@ -4363,6 +4415,10 @@ esac
             launch_timeout: Duration::from_secs(2),
             readiness_timeout: Duration::from_secs(2),
             readiness_interval: Duration::from_millis(10),
+            // Pin the pre-fix grace so tests asserting exact stop invocations
+            // stay stable across the default's changes; tests that exercise
+            // the fleet default set their own value.
+            stop_timeout_secs: 30,
             ..KataConfig::default()
         };
         let launcher = KataLauncher::new(config);
@@ -5841,6 +5897,8 @@ esac
 
     #[test]
     fn kata_upgrade_stop_failure_restarts_and_verifies_old_canonical() {
+        // A genuine stop failure: the stop CLI fails AND the old compute is
+        // still running afterwards. The upgrade must fail and restore.
         let old_server = TestHttpServer::start("npub1sameagent");
         let temp = tempfile::tempdir().unwrap();
         let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
@@ -5854,7 +5912,7 @@ esac
             old_server.port,
             &plan.state_root,
         );
-        std::fs::write(fake_state.join("fail-stop-after-exit"), "1").unwrap();
+        std::fs::write(fake_state.join("stuck-stop"), "1").unwrap();
 
         let error = launcher
             .upgrade_runtime(
@@ -5862,7 +5920,7 @@ esac
                 &RuntimeRestartOptions::default(),
             )
             .unwrap_err();
-        assert!(error.to_string().contains("injected stop failure"));
+        assert!(error.to_string().contains("injected stuck stop"), "{error}");
         assert_eq!(
             std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
                 .unwrap(),
@@ -5874,15 +5932,9 @@ esac
             old_image
         );
         let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
-        let stop = commands
-            .find(&format!("stop --time 30 {}", plan.container_name))
-            .unwrap();
-        let restart = commands
-            .find(&format!("start {}", plan.container_name))
-            .unwrap();
         assert!(
-            stop < restart,
-            "old canonical must restart after stop failure"
+            commands.contains(&format!("stop --time 30 {}", plan.container_name)),
+            "the failing stop was issued: {commands}"
         );
         assert!(
             !commands.contains("run --detach"),
@@ -5899,10 +5951,15 @@ esac
     }
 
     #[test]
-    fn kata_upgrade_stop_timeout_restarts_and_verifies_old_canonical() {
+    fn kata_upgrade_stop_that_exited_past_the_watchdog_is_not_a_failure() {
+        // The watchdog kills nerdctl while the canonical container has
+        // already exited (the case graceful_stop_command_timeout's comment
+        // warns about). The provider state proves the compute is down, so
+        // the upgrade must proceed instead of failing and restoring.
         let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
         let temp = tempfile::tempdir().unwrap();
-        let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
         // Leave enough budget for unrelated fake-provider commands under the
         // default parallel test runner while still timing out the injected
         // ten-second stop below.
@@ -5920,46 +5977,173 @@ esac
         );
         std::fs::write(fake_state.join("timeout-stop-after-exit"), "1").unwrap();
 
-        let error = launcher
+        let facts = launcher
             .upgrade_runtime(
                 &upgrade_lease("runtime_ctl_upgrade_stop_timeout"),
                 &RuntimeRestartOptions::default(),
             )
-            .unwrap_err();
-        assert!(error.to_string().contains("timed out"));
+            .unwrap();
+        assert_eq!(facts.runtime_artifact_id, "artifact-v2");
         assert_eq!(
-            std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
+            std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
                 .unwrap(),
-            "running"
+            target_artifact().reference
         );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        assert!(
+            commands.contains(&format!("stop --time 0 {}", plan.container_name)),
+            "the timed-out stop was still issued first: {commands}"
+        );
+        assert!(
+            commands.contains("run --detach"),
+            "candidate takeover proceeds once the provider proves the stop: {commands}"
+        );
+        assert!(
+            !commands.contains(&format!("start {}", plan.container_name)),
+            "a verifiably stopped canonical must not be restored: {commands}"
+        );
+    }
+
+    #[test]
+    fn kata_upgrade_escalated_slow_stop_is_not_a_false_failure() {
+        // Production replay (scaled): the guest's graceful stop takes longer
+        // than the grace (fleet: ~60-90s under load vs the old 30s default;
+        // here 3s vs 1s). containerd escalates and force-kills the shim
+        // mid-shutdown, so the stop CLI surfaces `ttrpc: closed` — but the
+        // compute is verifiably down, so the upgrade must proceed, not be
+        // recorded as a failure.
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        launcher.config.command_timeout = Duration::from_secs(5);
+        launcher.config.stop_timeout_secs = 1;
+        let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            old_image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.stop-delay", plan.container_name)),
+            "3",
+        )
+        .unwrap();
+
+        let facts = launcher
+            .upgrade_runtime(
+                &upgrade_lease("runtime_ctl_upgrade_escalated_stop"),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(facts.runtime_artifact_id, "artifact-v2");
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
+                .unwrap(),
+            target_artifact().reference
+        );
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        assert!(
+            !commands.contains(&format!("start {}", plan.container_name)),
+            "a completed stop must not trigger a restore: {commands}"
+        );
+    }
+
+    #[test]
+    fn kata_upgrade_slow_stop_within_grace_succeeds() {
+        // The fleet's normal case under the new default: a stop that is slow
+        // (~90s on loaded 8GB VMs; scaled to 2s here) but inside the grace
+        // completes without escalation and the upgrade succeeds.
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        launcher.config.command_timeout = Duration::from_secs(10);
+        launcher.config.stop_timeout_secs = 5;
+        let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            old_image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.stop-delay", plan.container_name)),
+            "2",
+        )
+        .unwrap();
+
+        let facts = launcher
+            .upgrade_runtime(
+                &upgrade_lease("runtime_ctl_upgrade_slow_stop"),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(facts.runtime_artifact_id, "artifact-v2");
+        let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
+        assert_eq!(
+            commands.matches("stop --time 5 ").count(),
+            1,
+            "a graceful slow stop needs exactly one stop call: {commands}"
+        );
+    }
+
+    #[test]
+    fn kata_upgrade_stuck_stop_fails_closed_after_one_bounded_retry() {
+        // A genuinely stuck stop (the compute never goes down) must still
+        // fail closed — after exactly one bounded retry — and restore the old
+        // canonical.
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, old_server.port);
+        let old_image = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            old_image,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(fake_state.join("stuck-stop"), "1").unwrap();
+
+        let error = launcher
+            .upgrade_runtime(
+                &upgrade_lease("runtime_ctl_upgrade_stuck_stop"),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("injected stuck stop"), "{error}");
         assert_eq!(
             std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
                 .unwrap(),
             old_image
         );
         let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
-        let stop = commands
-            .find(&format!("stop --time 0 {}", plan.container_name))
-            .unwrap();
-        let restart = commands
-            .find(&format!("start {}", plan.container_name))
-            .unwrap();
-        assert!(
-            stop < restart,
-            "old canonical must restart after stop timeout"
+        assert_eq!(
+            commands
+                .matches(&format!("stop --time 30 {}", plan.container_name))
+                .count(),
+            2,
+            "a stuck stop gets exactly one bounded retry: {commands}"
         );
         assert!(
             !commands.contains("run --detach"),
-            "candidate takeover must not begin after stop timeout"
+            "candidate takeover must not begin while the old compute is stuck: {commands}"
         );
-        assert!(
-            old_server.health_requests.load(Ordering::Relaxed) >= 1,
-            "restored canonical must pass health readiness"
-        );
-        assert!(
-            old_server.contact_requests.load(Ordering::Relaxed) >= 2,
-            "restored canonical must re-prove the original Agent Principal"
-        );
+    }
+
+    #[test]
+    fn kata_stop_timeout_default_reflects_real_fleet_stops() {
+        assert_eq!(KataConfig::default().stop_timeout_secs, 180);
     }
 
     #[test]
