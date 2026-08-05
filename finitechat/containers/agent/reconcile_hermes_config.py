@@ -19,6 +19,14 @@ class ConfigError(RuntimeError):
 
 
 LEGACY_PLUGIN_NAMES = ("finite-platform", "finite")
+LEGACY_FINITE_PRIVATE_MODEL = "glm-5-2"
+FINITE_PRIVATE_PROVIDER = "custom"
+FINITE_PRIVATE_BASE_URL = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+FINITE_PRIVATE_API_MODES = ("chat_completions", None)
+FINITE_PRIVATE_KEY_REFERENCES = (
+    "${FINITE_PRIVATE_API_KEY}",
+    "${FINITECHAT_HERMES_API_KEY}",
+)
 
 
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -51,6 +59,38 @@ def _integer(settings: dict[str, str], key: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _migrate_legacy_finite_private_model(config: dict[str, Any], settings: dict[str, str]) -> None:
+    """Move only the exact image-owned GLM default to the current model.
+
+    Model configuration is otherwise durable and user-owned. Matching the
+    complete Finite Private route/provider/key shape prevents an image restart
+    from overwriting a deliberate custom-provider or model selection.
+    """
+
+    if (
+        settings.get("FINITE_CONFIG_PROVIDER") != FINITE_PRIVATE_PROVIDER
+        or settings.get("FINITE_CONFIG_BASE_URL") != FINITE_PRIVATE_BASE_URL
+    ):
+        return
+    model = config.get("model")
+    if not isinstance(model, dict):
+        return
+    if (
+        model.get("default") != LEGACY_FINITE_PRIVATE_MODEL
+        or model.get("provider") != FINITE_PRIVATE_PROVIDER
+        or model.get("base_url") != FINITE_PRIVATE_BASE_URL
+        or model.get("api_mode") not in FINITE_PRIVATE_API_MODES
+        or model.get("api_key") not in FINITE_PRIVATE_KEY_REFERENCES
+    ):
+        return
+    model["default"] = settings["FINITE_CONFIG_MODEL"]
+    model["context_length"] = _integer(
+        settings,
+        "FINITE_CONFIG_CONTEXT_LENGTH",
+        minimum=1,
+    )
+
+
 def reconcile_config(
     existing: dict[str, Any] | None,
     settings: dict[str, str],
@@ -61,7 +101,8 @@ def reconcile_config(
 
     Model/provider configuration and non-Finite platforms are seeded only when
     no config exists. Once Hermes owns the file, this function deliberately
-    leaves those sections semantically unchanged.
+    leaves those sections semantically unchanged except for narrowly matched,
+    versioned migrations of an image-owned default.
     """
 
     first_seed = existing is None
@@ -74,6 +115,13 @@ def reconcile_config(
             "base_url": settings["FINITE_CONFIG_BASE_URL"],
             "api_mode": settings["FINITE_CONFIG_API_MODE"],
         }
+        context_length = settings.get("FINITE_CONFIG_CONTEXT_LENGTH", "")
+        if context_length:
+            model["context_length"] = _integer(
+                settings,
+                "FINITE_CONFIG_CONTEXT_LENGTH",
+                minimum=1,
+            )
         api_key_reference = settings.get("FINITE_CONFIG_API_KEY_REFERENCE", "")
         if api_key_reference:
             model["api_key"] = api_key_reference
@@ -100,9 +148,13 @@ def reconcile_config(
             }
         )
 
-    # These are the only settings Finite repairs after first boot. They keep
-    # the encrypted transport and managed skill catalog reachable without
-    # turning the runtime launcher into a second Hermes configuration store.
+    if not first_seed:
+        _migrate_legacy_finite_private_model(config, settings)
+
+    # Outside the explicit migration above, these are the only settings Finite
+    # repairs after first boot. They keep the encrypted transport and managed
+    # skill catalog reachable without turning the runtime launcher into a
+    # second Hermes configuration store.
     plugins = _mapping(config, "plugins")
     enabled_plugins = _string_list(plugins, "enabled")
     plugin_name = settings["FINITE_CONFIG_PLUGIN_NAME"]

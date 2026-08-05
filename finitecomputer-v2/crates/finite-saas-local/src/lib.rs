@@ -8,7 +8,7 @@
 //! ```text
 //! agent runtime -> local limiter (admission vs local Core, local metering)
 //!               -> deployed limiter (prod admission with ONE operator key)
-//!               -> confidential vLLM (glm-5-2)
+//!               -> confidential vLLM (DeepSeek V4 Flash 0731)
 //! ```
 //!
 //! The orchestration decisions (env/config assembly, upstream path handling,
@@ -21,12 +21,13 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 /// Deployed Finite Private limiter, as agents address it. The domain keeps
-/// the historical kimi-k2-6 name but the endpoint now serves `glm-5-2`
+/// the historical kimi-k2-6 name but the endpoint now serves DeepSeek V4
+/// Flash 0731
 /// (see docs/service-dependencies.md, Finite Private Routing Debt).
 pub const DEFAULT_DEPLOYED_LIMITER_BASE_URL: &str =
     "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
 /// Model served by the deployed Finite Private endpoint.
-pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "glm-5-2";
+pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "deepseek-v4-flash-0731";
 /// Default listen address for the chained local limiter.
 pub const DEFAULT_LIMITER_LISTEN_ADDR: &str = "127.0.0.1:18002";
 /// Environment variable holding the one operator-held real `fpk_...` key used

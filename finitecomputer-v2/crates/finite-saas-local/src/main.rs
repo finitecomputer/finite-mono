@@ -21,7 +21,7 @@ enum Command {
     /// deployed limiter, so locally provisioned (local-Core) keys work for
     /// real inference: agents -> this limiter (local admission/metering) ->
     /// deployed limiter (one operator key from
-    /// FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY) -> glm-5-2.
+    /// FC_LOCAL_FINITE_PRIVATE_UPSTREAM_KEY) -> DeepSeek V4 Flash 0731.
     #[command(name = "finite-private-limiter-up")]
     FinitePrivateLimiterUp {
         /// Address the chained limiter listens on. Port 0 picks a free port.

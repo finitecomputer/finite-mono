@@ -51,11 +51,12 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 const RUNTIME_RETIREMENT_LEASE_SECONDS: i64 = 60 * 60;
 // The deployed limiter domain keeps the historical kimi-k2-6 name but now
-// serves glm-5-2 (see docs/service-dependencies.md, Finite Private Routing
-// Debt). Do not rename the URL as a cosmetic change.
+// serves DeepSeek V4 Flash 0731 (see docs/service-dependencies.md, Finite
+// Private Routing Debt). Do not rename the URL as a cosmetic change.
 pub const DEFAULT_FINITE_PRIVATE_BASE_URL: &str =
     "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
-pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "glm-5-2";
+pub const DEFAULT_FINITE_PRIVATE_MODEL: &str = "deepseek-v4-flash-0731";
+pub const DEFAULT_FINITE_PRIVATE_CONTEXT_LENGTH: usize = 393_216;
 pub const DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE: &str = "aeon-multimodal";
 pub const DEFAULT_FINITECHAT_SERVER_URL: &str = "https://chat.finite.computer";
 pub const DEFAULT_FINITE_AGENT_PICTURE_URL: &str =
@@ -2022,9 +2023,11 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
             | "GATEWAY_ALLOW_ALL_USERS"
             | "FINITE_DEFAULT_INFERENCE_PROFILE"
             | "FINITE_PRIVATE_MODEL"
+            | "FINITE_PRIVATE_CONTEXT_LENGTH"
             | "FINITE_PRIVATE_BASE_URL"
             | "FINITE_PRIVATE_API_KEY"
             | "FINITECHAT_HERMES_MODEL"
+            | "FINITECHAT_HERMES_CONTEXT_LENGTH"
             | "FINITECHAT_HERMES_PROVIDER"
             | "FINITECHAT_HERMES_BASE_URL"
             | "FINITECHAT_HERMES_API_MODE"
@@ -2956,6 +2959,10 @@ fn docker_equivalent_runtime_env(
                 finite_private.model.clone(),
             ),
             (
+                "FINITE_PRIVATE_CONTEXT_LENGTH".to_string(),
+                DEFAULT_FINITE_PRIVATE_CONTEXT_LENGTH.to_string(),
+            ),
+            (
                 "FINITE_PRIVATE_BASE_URL".to_string(),
                 finite_private.base_url.clone(),
             ),
@@ -3878,13 +3885,13 @@ mod tests {
     }
 
     #[test]
-    fn specialization_bundle_is_scoped_only_to_the_glm_finite_private_profile() {
-        let configured_glm_profile = finite_private_defaults();
-        let glm_bundle = specialization_bundle_for_finite_private_profile(&configured_glm_profile)
+    fn specialization_bundle_is_scoped_only_to_the_canonical_finite_private_profile() {
+        let configured_profile = finite_private_defaults();
+        let bundle = specialization_bundle_for_finite_private_profile(&configured_profile)
             .unwrap()
-            .expect("the canonical Finite Private GLM profile should activate AEON");
+            .expect("the canonical Finite Private profile should activate AEON");
         assert_eq!(
-            glm_bundle.bundle_id,
+            bundle.bundle_id,
             DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE
         );
 
@@ -3892,7 +3899,7 @@ mod tests {
             model: "another-finite-private-model".to_owned(),
             specialization_bundle: Some(SpecializationBundleRuntimeDefaults {
                 bundle_id: "not-validated-for-this-profile".to_owned(),
-                worker_api_key: "unused-for-non-glm".to_owned(),
+                worker_api_key: "unused-for-noncanonical-profile".to_owned(),
             }),
             ..FinitePrivateRuntimeDefaults::default()
         };
@@ -3900,7 +3907,7 @@ mod tests {
             specialization_bundle_for_finite_private_profile(&other_finite_private_profile)
                 .unwrap()
                 .is_none(),
-            "specialization admission must depend on the Finite Private GLM profile, not a runner host or user"
+            "specialization admission must depend on the canonical Finite Private profile, not a runner host or user"
         );
     }
 
@@ -4920,7 +4927,7 @@ mod tests {
         assert_eq!(finite_private.raw_api_key, "fpk_live_test");
         assert_eq!(finite_private.base_url, DEFAULT_FINITE_PRIVATE_BASE_URL);
         assert_eq!(finite_private.model, DEFAULT_FINITE_PRIVATE_MODEL);
-        assert_eq!(finite_private.model, "glm-5-2");
+        assert_eq!(finite_private.model, "deepseek-v4-flash-0731");
         let specialization_bundle = finite_private
             .specialization_bundle
             .as_ref()
@@ -5416,10 +5423,11 @@ mod tests {
         assert_env(&env, "FINITECHAT_WORKSPACE", "/data/workspace");
         assert_env(&env, "FINITECHAT_HERMES_AGENT_DEVICE_ID", "agent");
         assert_env(&env, "FINITECHAT_HERMES_PROVIDER", "custom");
-        assert_env(&env, "FINITECHAT_HERMES_MODEL", "glm-5-2");
-        assert_env(&env, "FINITE_PRIVATE_MODEL", "glm-5-2");
+        assert_env(&env, "FINITECHAT_HERMES_MODEL", "deepseek-v4-flash-0731");
+        assert_env(&env, "FINITE_PRIVATE_MODEL", "deepseek-v4-flash-0731");
+        assert_env(&env, "FINITE_PRIVATE_CONTEXT_LENGTH", "393216");
         // The endpoint domain keeps the historical kimi name; the served model
-        // is glm-5-2.
+        // is DeepSeek V4 Flash 0731.
         assert_env(
             &env,
             "FINITECHAT_HERMES_BASE_URL",
