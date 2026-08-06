@@ -66,6 +66,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+pub mod rejected_entry_diagnostic;
+
 pub const FINITECHAT_CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
