@@ -11,6 +11,7 @@ members = [
     "finite-identity",
     "finite-nostr",
     "finite-release",
+    "finite-service-directory",
     "finitecomputer-v2/crates/finite-core",
     "finitecomputer-v2/crates/finite-private-limiter",
     "finitecomputer-v2/crates/finite-saas-core",
@@ -59,6 +60,7 @@ finite-brain-store = { path = "finite-brain/crates/finite-brain-store" }
 finite-identity = { path = "finite-identity" }
 finite-nostr = { path = "finite-nostr" }
 finite-release = { path = "finite-release" }
+finite-service-directory = { path = "finite-service-directory" }
 finitechat-delivery = { path = "finitechat/crates/finitechat-delivery" }
 finitechat-transport = { path = "finitechat/crates/finitechat-transport" }
 flate2 = "1"

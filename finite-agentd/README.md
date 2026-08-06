@@ -61,9 +61,27 @@ successful sync and kept for diagnosis on failure.
 `FINITE_ALLOW_INSECURE_BUNDLE_URL=1` admits plain-http bundle URLs for the
 local dev harness only; production bundles are always https.
 
+`agent.skills.sync` also accepts a channel form, mutually exclusive with the
+explicit URL form: payload `{"channel": "canary"}` freshly fetches Core's
+signed service directory from `FINITE_SERVICE_DIRECTORY_URL`, verifies it
+against the same release public key, resolves the channel's `skills_bundle`
+head (a distinct `skills_channel_head_missing` failure when the channel has no
+head), and then runs the identical fetch/verify/apply path with the resolved
+tarball sha256 as the expectation. The success result carries `channel` as
+proof the bundle was resolved through the directory.
+
+When `FINITE_SERVICE_DIRECTORY_URL` is set, the daemon also fetches and
+verifies the directory on start and every 15 minutes (jittered ±20%),
+atomically caching it at `/data/agent/service-directory.json`. Refresh
+failures are logged and keep the previous cache. The
+`finitechat/containers/agent/finite_service_directory.py` accessor (staged at
+`/opt/finite_service_directory.py`) reads that verified cache read-only to
+expose service base URLs; it performs no crypto and no network I/O.
+
 The same path is reachable in-guest without a chat-channel sender through the
 one-shot CLI verb `finite-agentd skills-sync --tarball-url <u> --manifest-url
-<u> --tarball-sha256 <hex>` (operator/test entry, used by the devfinity
+<u> --tarball-sha256 <hex>`, or `finite-agentd skills-sync --channel canary`
+for the channel form (operator/test entry, used by the devfinity
 `DEVFINITY_SKILLS_SYNC_SMOKE` variant over `container exec`). It resolves the
 same settings from the environment, runs the identical fetch/verify/apply
 code, records the command in the same durable ledger under a

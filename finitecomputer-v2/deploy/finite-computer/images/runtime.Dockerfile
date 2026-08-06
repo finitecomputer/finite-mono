@@ -14,6 +14,7 @@ COPY finite-brain ./finite-brain
 COPY finite-identity ./finite-identity
 COPY finite-nostr ./finite-nostr
 COPY finite-release ./finite-release
+COPY finite-service-directory ./finite-service-directory
 COPY finitecomputer-v2/crates ./finitecomputer-v2/crates
 COPY finitechat ./finitechat
 COPY finite-sites ./finite-sites
@@ -116,6 +117,7 @@ COPY finitechat/containers/agent/health_server.py /opt/health_server.py
 COPY finitechat/containers/agent/reconcile_hermes_config.py /opt/reconcile_hermes_config.py
 COPY finitechat/containers/agent/recover_chat_boot.py /opt/recover_chat_boot.py
 COPY finitechat/containers/agent/probe_hermes_vision.py /opt/probe_hermes_vision.py
+COPY finitechat/containers/agent/finite_service_directory.py /opt/finite_service_directory.py
 COPY finitechat/containers/agent/run_hermes_gateway.sh /opt/run_hermes_gateway.sh
 COPY finitecomputer-v2/deploy/finite-computer/runtime-template/healthcheck.sh /runtime/healthcheck.sh
 COPY finitecomputer-v2/deploy/finite-computer/runtime-template/README.md /runtime/README.md

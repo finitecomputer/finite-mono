@@ -1,5 +1,5 @@
 [package]
-name = "finite-agentd"
+name = "finite-service-directory"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,33 +7,22 @@ repository.workspace = true
 publish = false
 
 [lib]
-name = "finite_agentd"
+name = "finite_service_directory"
 path = "src/lib.rs"
 
-[[bin]]
-name = "finite-agentd"
-path = "src/main.rs"
-
 [dependencies]
-clap.workspace = true
 ed25519-dalek.workspace = true
 finite-release.workspace = true
-finite-service-directory.workspace = true
-finitechat-proto = { path = "../finitechat/crates/finitechat-proto" }
 futures-util.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
-sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "process", "sync"] }
 
 [dev-dependencies]
 hex.workspace = true
-tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 
 [lints]
 workspace = true

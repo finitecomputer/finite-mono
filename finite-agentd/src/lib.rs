@@ -1,6 +1,7 @@
 mod config;
 mod connections;
 mod daemon;
+mod directory;
 mod ledger;
 mod skills;
 mod supervisor;
@@ -21,7 +22,7 @@ pub use daemon::{
     read_status, run_daemon,
 };
 pub use ledger::{CommandDecision, Ledger};
-pub use skills::run_skills_sync_cli;
+pub use skills::{SkillsSyncRequest, run_skills_sync_cli};
 pub use supervisor::{ProcessStatus, SupervisorStatus};
 
 #[derive(Debug, Error)]
@@ -56,6 +57,10 @@ pub enum AgentdError {
     MissingReleaseKey,
     #[error("skills bundle rejected: {0}")]
     SkillsBundle(String),
+    #[error("service directory unavailable: {0}")]
+    ServiceDirectory(String),
+    #[error("release channel has no skills bundle head: {0}")]
+    SkillsChannelHeadMissing(String),
     #[error("unsupported command: {0}")]
     UnsupportedCommand(String),
     #[error("invalid command payload: {0}")]
@@ -68,6 +73,8 @@ impl AgentdError {
             Self::Unauthorized => "unauthorized",
             Self::MissingReleaseKey => "release_key_missing",
             Self::SkillsBundle(_) => "skills_bundle_rejected",
+            Self::ServiceDirectory(_) => "service_directory_unavailable",
+            Self::SkillsChannelHeadMissing(_) => "skills_channel_head_missing",
             Self::UnsupportedCommand(_) => "unsupported_command",
             Self::InvalidPayload(_) => "invalid_payload",
             Self::ConflictingRequestId(_) => "conflicting_request_id",
@@ -90,7 +97,11 @@ impl AgentdError {
                     .to_owned()
             }
             Self::UnsupportedCommand(command) => format!("Command {command:?} is not supported."),
-            Self::InvalidPayload(message)
+            Self::SkillsChannelHeadMissing(channel) => format!(
+                "The service directory advertises no skills_bundle head for channel {channel:?}."
+            ),
+            Self::ServiceDirectory(message)
+            | Self::InvalidPayload(message)
             | Self::ConfigConflict(message)
             | Self::Config(message)
             | Self::Supervisor(message)

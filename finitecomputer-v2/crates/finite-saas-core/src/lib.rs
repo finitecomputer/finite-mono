@@ -6528,6 +6528,12 @@ impl BridgeCoreState {
             .cloned()
     }
 
+    /// Every release channel head, ordered by `"{channel}/{artifact_kind}"`
+    /// key. The service directory endpoint joins these with their artifacts.
+    pub fn list_release_channel_heads(&self) -> Vec<ReleaseChannelHead> {
+        self.release_channel_heads.values().cloned().collect()
+    }
+
     fn launchable_runtime_artifact(&self, id: &str) -> CoreResult<RuntimeArtifact> {
         let artifact = self
             .runtime_artifacts
@@ -10000,6 +10006,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(repointed.artifact_id, "finite-skills-v2");
+        assert_eq!(state.list_release_channel_heads(), vec![repointed]);
     }
 
     #[test]

@@ -31,6 +31,7 @@ use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
 };
+use crate::directory::{SERVICE_DIRECTORY_URL_ENV, spawn_directory_refresher};
 use crate::ledger::{CommandDecision, Ledger, hex_digest};
 use crate::skills::{
     ALLOW_INSECURE_BUNDLE_URL_ENV, DEFAULT_FINITE_CLI_PATH, FINITE_CLI_PATH_ENV,
@@ -91,6 +92,10 @@ pub struct DaemonConfig {
     pub release_public_key: Option<String>,
     pub allow_insecure_bundle_url: bool,
     pub finite_cli: PathBuf,
+    /// Core's signed service directory endpoint. When set, the daemon
+    /// refreshes `<agent home>/service-directory.json` periodically and
+    /// `agent.skills.sync` accepts the channel form.
+    pub service_directory_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +199,10 @@ impl DaemonConfig {
                 std::env::var(FINITE_CLI_PATH_ENV)
                     .unwrap_or_else(|_| DEFAULT_FINITE_CLI_PATH.to_owned()),
             ),
+            service_directory_url: std::env::var(SERVICE_DIRECTORY_URL_ENV)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
         })
     }
 
@@ -338,6 +347,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         startup_specialization_desired.clone(),
         Arc::clone(&verified_hermes_generation),
     );
+    // First refresh on daemon start, then every 15 minutes (jittered).
+    spawn_directory_refresher(&config);
 
     wait_for_bridge(&bridge).await?;
     let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);

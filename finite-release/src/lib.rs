@@ -42,6 +42,23 @@ pub enum ReleaseError {
     InvalidKey(String),
     #[error("bundle verification failed: {0}")]
     VerificationFailed(String),
+    #[error("URL refused by policy: {0}")]
+    UrlPolicy(String),
+}
+
+/// Dev-harness-only escape hatch admitting plain-http bundle/directory URLs.
+pub const ALLOW_INSECURE_BUNDLE_URL_ENV: &str = "FINITE_ALLOW_INSECURE_BUNDLE_URL";
+
+/// The one https-or-dev-escape URL policy for fetched release material
+/// (bundles and service directories). `allow_insecure` is the caller's
+/// [`ALLOW_INSECURE_BUNDLE_URL_ENV`] setting.
+pub fn check_bundle_url_policy(url: &str, allow_insecure: bool) -> Result<(), ReleaseError> {
+    if url.starts_with("https://") || (allow_insecure && url.starts_with("http://")) {
+        return Ok(());
+    }
+    Err(ReleaseError::UrlPolicy(format!(
+        "bundle URLs must use https ({ALLOW_INSECURE_BUNDLE_URL_ENV}=1 admits http in the dev harness only): {url:?}"
+    )))
 }
 
 /// Signed release manifest for one managed skills bundle.
@@ -221,30 +238,25 @@ pub fn parse_verifying_key_hex(value: &str) -> Result<VerifyingKey, ReleaseError
         .map_err(|error| ReleaseError::InvalidKey(format!("invalid ed25519 public key: {error}")))
 }
 
-/// Sign the manifest's canonical bytes; the current `signature` field value
-/// is ignored.
-pub fn signature_for_manifest(
-    manifest: &SkillsBundleManifestV1,
-    signing_key: &SigningKey,
-) -> Result<String, ReleaseError> {
-    let message = canonical_signing_bytes(manifest)?;
-    let signature = signing_key.sign(&message);
-    Ok(format!(
+/// `ed25519:<base64>` signature over `message` — the one signature encoding
+/// for all Finite release material.
+pub fn signature_string(message: &[u8], signing_key: &SigningKey) -> String {
+    let signature = signing_key.sign(message);
+    format!(
         "{SIGNATURE_PREFIX}{}",
         BASE64_STANDARD.encode(signature.to_bytes())
-    ))
+    )
 }
 
-pub fn verify_manifest_signature(
-    manifest: &SkillsBundleManifestV1,
+/// Verify an `ed25519:<base64>` signature string over `message`.
+pub fn verify_signature_string(
+    message: &[u8],
+    signature: &str,
     public_key: &VerifyingKey,
 ) -> Result<(), ReleaseError> {
-    let encoded = manifest
-        .signature
-        .strip_prefix(SIGNATURE_PREFIX)
-        .ok_or_else(|| {
-            ReleaseError::InvalidManifest(format!("signature must start with {SIGNATURE_PREFIX:?}"))
-        })?;
+    let encoded = signature.strip_prefix(SIGNATURE_PREFIX).ok_or_else(|| {
+        ReleaseError::InvalidManifest(format!("signature must start with {SIGNATURE_PREFIX:?}"))
+    })?;
     let bytes: [u8; 64] = BASE64_STANDARD
         .decode(encoded)
         .ok()
@@ -252,14 +264,115 @@ pub fn verify_manifest_signature(
         .ok_or_else(|| {
             ReleaseError::InvalidManifest("signature must be 64 bytes of base64".to_owned())
         })?;
-    let message = canonical_signing_bytes(manifest)?;
     public_key
-        .verify_strict(&message, &Signature::from_bytes(&bytes))
+        .verify_strict(message, &Signature::from_bytes(&bytes))
         .map_err(|_| {
             ReleaseError::VerificationFailed(
-                "manifest signature does not verify against the release public key".to_owned(),
+                "signature does not verify against the release public key".to_owned(),
             )
         })
+}
+
+/// Canonical JSON: compact separators, object keys recursively byte-sorted.
+/// This reproduces `serde_json::to_vec` over `BTreeMap`-backed objects (the
+/// manifest canonicalization above) without depending on `serde_json`'s map
+/// ordering feature flags.
+pub fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, ReleaseError> {
+    let mut out = Vec::new();
+    write_canonical_json(value, &mut out)?;
+    Ok(out)
+}
+
+fn write_canonical_json(value: &Value, out: &mut Vec<u8>) -> Result<(), ReleaseError> {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            out.push(b'{');
+            for (index, key) in keys.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(&serde_json::to_vec(key)?);
+                out.push(b':');
+                write_canonical_json(&map[key.as_str()], out)?;
+            }
+            out.push(b'}');
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(b',');
+                }
+                write_canonical_json(item, out)?;
+            }
+            out.push(b']');
+        }
+        other => out.extend_from_slice(&serde_json::to_vec(other)?),
+    }
+    Ok(())
+}
+
+/// The canonical bytes a signed JSON document's `signature` field covers: the
+/// top-level object with `signature` removed, in [`canonical_json_bytes`]
+/// form. This is the one canonicalization shared by every signed Finite JSON
+/// document (e.g. the Core service directory).
+pub fn document_signing_bytes(document: &Value) -> Result<Vec<u8>, ReleaseError> {
+    let Value::Object(map) = document else {
+        return Err(ReleaseError::InvalidManifest(
+            "signed documents must be JSON objects".to_owned(),
+        ));
+    };
+    let mut unsigned = map.clone();
+    unsigned.remove("signature");
+    canonical_json_bytes(&Value::Object(unsigned))
+}
+
+/// Sign a JSON document's canonical bytes (any existing `signature` field is
+/// ignored). Returns the `ed25519:<base64>` value to store in `signature`.
+pub fn sign_document(document: &Value, signing_key: &SigningKey) -> Result<String, ReleaseError> {
+    Ok(signature_string(
+        &document_signing_bytes(document)?,
+        signing_key,
+    ))
+}
+
+/// Verify a JSON document's `signature` field against its canonical bytes.
+pub fn verify_document_signature(
+    document: &Value,
+    public_key: &VerifyingKey,
+) -> Result<(), ReleaseError> {
+    let signature = document
+        .get("signature")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ReleaseError::InvalidManifest("document has no signature field".to_owned())
+        })?;
+    verify_signature_string(&document_signing_bytes(document)?, signature, public_key)
+}
+
+/// Sign the manifest's canonical bytes; the current `signature` field value
+/// is ignored.
+pub fn signature_for_manifest(
+    manifest: &SkillsBundleManifestV1,
+    signing_key: &SigningKey,
+) -> Result<String, ReleaseError> {
+    Ok(signature_string(
+        &canonical_signing_bytes(manifest)?,
+        signing_key,
+    ))
+}
+
+pub fn verify_manifest_signature(
+    manifest: &SkillsBundleManifestV1,
+    public_key: &VerifyingKey,
+) -> Result<(), ReleaseError> {
+    verify_signature_string(
+        &canonical_signing_bytes(manifest)?,
+        &manifest.signature,
+        public_key,
+    )
 }
 
 /// Every regular file under `root` as `(relative POSIX path, absolute path)`,
@@ -367,7 +480,9 @@ pub fn compute_tree_digest(root: &Path) -> Result<String, ReleaseError> {
 }
 
 /// Pack `source` into `<artifact-id>.tar.gz` plus a signed
-/// `<artifact-id>.manifest.json` under `out_dir`.
+/// `<artifact-id>.tar.gz.manifest.json` under `out_dir` (the manifest URL for
+/// a hosted bundle is derived by appending `.manifest.json` to its tarball
+/// URL).
 ///
 /// The tarball is deterministic: entries sorted by relative POSIX path,
 /// zeroed mtimes/uids/gids, normalized 0644/0755 modes, root-relative paths.
@@ -443,7 +558,7 @@ pub fn pack_skills_bundle(
         .join(format!("{}.tar.gz", request.artifact_id));
     let manifest_path = request
         .out_dir
-        .join(format!("{}.manifest.json", request.artifact_id));
+        .join(format!("{}.tar.gz.manifest.json", request.artifact_id));
     fs::write(&tarball_path, &tarball_bytes)?;
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     manifest_bytes.push(b'\n');
@@ -691,6 +806,71 @@ mod tests {
             "1".repeat(64)
         );
         assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+    }
+
+    #[test]
+    fn packed_bundle_manifest_uses_the_appended_filename_convention() {
+        let out = tempfile::tempdir().unwrap();
+        let packed = pack_fixture(out.path());
+        assert_eq!(
+            packed.manifest_path.file_name().unwrap().to_str().unwrap(),
+            "skills-test.tar.gz.manifest.json",
+            "the manifest URL is derived by appending .manifest.json to the tarball URL"
+        );
+        assert_eq!(
+            packed.tarball_path.file_name().unwrap().to_str().unwrap(),
+            "skills-test.tar.gz"
+        );
+    }
+
+    #[test]
+    fn canonical_document_signing_sorts_keys_recursively_and_drops_the_signature() {
+        let document = serde_json::json!({
+            "schema": "finite_service_directory.v1",
+            "services": { "sites": { "base_url": "https://sites.test" } },
+            "channels": { "canary": { "skills_bundle": { "artifact_id": "a-1" } } },
+            "generated_at": "2026-08-06T00:00:00Z",
+            "signature": "ed25519:ignored",
+        });
+        let bytes = document_signing_bytes(&document).unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.clone()).unwrap(),
+            "{\"channels\":{\"canary\":{\"skills_bundle\":{\"artifact_id\":\"a-1\"}}},\
+             \"generated_at\":\"2026-08-06T00:00:00Z\",\"schema\":\"finite_service_directory.v1\",\
+             \"services\":{\"sites\":{\"base_url\":\"https://sites.test\"}}}"
+        );
+
+        let signing_key = test_signing_key();
+        let mut signed = document.clone();
+        signed["signature"] = Value::from(sign_document(&document, &signing_key).unwrap());
+        verify_document_signature(&signed, &signing_key.verifying_key()).unwrap();
+
+        let mut tampered = signed.clone();
+        tampered["services"]["sites"]["base_url"] = Value::from("https://forged.test");
+        assert!(matches!(
+            verify_document_signature(&tampered, &signing_key.verifying_key()).unwrap_err(),
+            ReleaseError::VerificationFailed(_)
+        ));
+        let unsigned = serde_json::json!({ "schema": "finite_service_directory.v1" });
+        assert!(matches!(
+            verify_document_signature(&unsigned, &signing_key.verifying_key()).unwrap_err(),
+            ReleaseError::InvalidManifest(_)
+        ));
+    }
+
+    #[test]
+    fn bundle_url_policy_admits_https_and_gates_http_behind_the_dev_escape() {
+        check_bundle_url_policy("https://releases.finite.computer/x.tar.gz", false).unwrap();
+        check_bundle_url_policy("http://127.0.0.1:18791/x.tar.gz", true).unwrap();
+        for refused in [
+            ("http://127.0.0.1:18791/x.tar.gz", false),
+            ("file:///etc/passwd", true),
+            ("ftp://release.invalid/x", true),
+        ] {
+            let error = check_bundle_url_policy(refused.0, refused.1).unwrap_err();
+            assert!(matches!(error, ReleaseError::UrlPolicy(_)));
+            assert!(error.to_string().contains("https"));
+        }
     }
 
     #[test]

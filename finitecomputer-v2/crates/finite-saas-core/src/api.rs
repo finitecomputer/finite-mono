@@ -45,11 +45,14 @@ use finite_core::{
     StoreRelayChatLogInput, StoreRelayChatSnapshotInput, StoreRelayResultInput,
     StoreRelayStatusSnapshotInput, UpdateRelayChatConversationInput,
 };
+use finite_service_directory::{
+    ChannelBundleV1, SERVICE_DIRECTORY_SCHEMA, ServiceDirectoryV1, ServiceEntryV1,
+};
 use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::env;
 use std::path::PathBuf;
@@ -60,6 +63,8 @@ use tokio::sync::{Notify, broadcast};
 use tokio::time::{Instant, timeout};
 
 const SERVICE_AUTH_HEADER: &str = "authorization";
+const SERVICE_DIRECTORY_SERVICES_ENV: &str = "FC_CORE_SERVICE_DIRECTORY_SERVICES_JSON";
+const RELEASE_SIGNING_KEY_ENV: &str = "FC_CORE_RELEASE_SIGNING_KEY";
 const WORKOS_USER_ID_HEADER: &str = "x-finite-workos-user-id";
 const WORKOS_EMAIL_HEADER: &str = "x-finite-workos-email";
 const WORKOS_EMAIL_VERIFIED_HEADER: &str = "x-finite-workos-email-verified";
@@ -80,6 +85,74 @@ pub struct CoreApiState {
     relay_store: RelayStore,
     result_waiters: RelayWaiters,
     chat_watchers: ChatWatchers,
+    service_directory: ServiceDirectoryConfig,
+}
+
+/// Deployment configuration for the signed service directory endpoint.
+///
+/// The advertised services come verbatim from
+/// `FC_CORE_SERVICE_DIRECTORY_SERVICES_JSON`; the ed25519 seed comes from
+/// `FC_CORE_RELEASE_SIGNING_KEY` (the release key family). Without the key
+/// the endpoint answers 503 — the directory is only ever served signed.
+#[derive(Clone, Default)]
+pub struct ServiceDirectoryConfig {
+    services: BTreeMap<String, ServiceEntryV1>,
+    signing_key: Option<ed25519_dalek::SigningKey>,
+}
+
+impl ServiceDirectoryConfig {
+    pub fn new(
+        services: BTreeMap<String, ServiceEntryV1>,
+        signing_key: Option<ed25519_dalek::SigningKey>,
+    ) -> Result<Self, String> {
+        for (name, entry) in &services {
+            if !valid_service_directory_name(name) {
+                return Err(format!(
+                    "{SERVICE_DIRECTORY_SERVICES_ENV} service name {name:?} must match ^[a-z][a-z0-9_]{{0,63}}$"
+                ));
+            }
+            if !entry.base_url.starts_with("https://") && !entry.base_url.starts_with("http://") {
+                return Err(format!(
+                    "{SERVICE_DIRECTORY_SERVICES_ENV} service {name:?} base_url must be an http(s) URL"
+                ));
+            }
+        }
+        Ok(Self {
+            services,
+            signing_key,
+        })
+    }
+
+    /// Read and validate the deployment environment. An absent or empty
+    /// services value is a valid empty map; an absent signing key leaves the
+    /// endpoint answering 503.
+    pub fn from_env() -> Result<Self, String> {
+        let services = match optional_env_value(SERVICE_DIRECTORY_SERVICES_ENV) {
+            None => BTreeMap::new(),
+            Some(raw) => {
+                serde_json::from_str::<BTreeMap<String, ServiceEntryV1>>(&raw).map_err(|error| {
+                    format!("{SERVICE_DIRECTORY_SERVICES_ENV} is not a valid services map: {error}")
+                })?
+            }
+        };
+        let signing_key = optional_env_value(RELEASE_SIGNING_KEY_ENV)
+            .map(|raw| {
+                finite_release::parse_signing_key_hex(&raw)
+                    .map_err(|error| format!("{RELEASE_SIGNING_KEY_ENV} is invalid: {error}"))
+            })
+            .transpose()?;
+        Self::new(services, signing_key)
+    }
+}
+
+fn valid_service_directory_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    name.len() <= 64
+        && first.is_ascii_lowercase()
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 #[derive(Debug)]
@@ -768,6 +841,25 @@ pub fn router_with_agent_creation_placement(
     )
 }
 
+/// Build the public API with an explicit service directory configuration.
+/// This exists for tests and local tooling; deployments configure the
+/// directory through the environment.
+pub fn router_with_service_directory(
+    store: CoreStore,
+    auth: CoreAuth,
+    service_directory: ServiceDirectoryConfig,
+) -> Router {
+    router_with_state_options(
+        store,
+        auth,
+        default_relay_state_dir(),
+        false,
+        false,
+        None,
+        service_directory,
+    )
+}
+
 pub fn router_with_relay_state_dir(
     store: CoreStore,
     auth: CoreAuth,
@@ -822,6 +914,30 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     runtime_retirement_enabled: bool,
     agent_creation_placement: Option<RuntimePlacement>,
 ) -> Router {
+    // Invalid directory configuration fails the process at router build, the
+    // same fail-fast boundary as the other FC_CORE_* deployment values.
+    let service_directory =
+        ServiceDirectoryConfig::from_env().expect("invalid service directory configuration");
+    router_with_state_options(
+        store,
+        auth,
+        relay_state_dir,
+        runtime_upgrades_enabled,
+        runtime_retirement_enabled,
+        agent_creation_placement,
+        service_directory,
+    )
+}
+
+fn router_with_state_options(
+    store: CoreStore,
+    auth: CoreAuth,
+    relay_state_dir: impl Into<PathBuf>,
+    runtime_upgrades_enabled: bool,
+    runtime_retirement_enabled: bool,
+    agent_creation_placement: Option<RuntimePlacement>,
+    service_directory: ServiceDirectoryConfig,
+) -> Router {
     let standard_stripe_price_id = optional_env_value("FC_CORE_STANDARD_STRIPE_PRICE_ID")
         .or_else(|| optional_env_value("STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID"));
     let state = CoreApiState {
@@ -834,10 +950,15 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         relay_store: RelayStore::new(relay_state_dir.into()),
         result_waiters: RelayWaiters::default(),
         chat_watchers: ChatWatchers::default(),
+        service_directory,
     };
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route(
+            "/api/core/v1/service-directory",
+            get(service_directory_document),
+        )
         .route(
             "/api/core/v1/brain/agent-account",
             post(brain_agent_account),
@@ -1129,6 +1250,101 @@ fn optional_env_value(name: &str) -> Option<String> {
 
 async fn healthz() -> Json<serde_json::Value> {
     Json(json!({ "ok": true }))
+}
+
+/// `GET /api/core/v1/service-directory`: the unauthenticated, ed25519-signed
+/// advertisement of service base URLs, client version expectations, and
+/// release channel heads. Never served unsigned: without the signing key the
+/// endpoint answers 503 with a distinct error code.
+async fn service_directory_document(State(state): State<CoreApiState>) -> Response {
+    let Some(signing_key) = &state.service_directory.signing_key else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "service_directory_unsigned",
+                "message": format!(
+                    "{RELEASE_SIGNING_KEY_ENV} is not configured; the service directory is only ever served signed"
+                ),
+            })),
+        )
+            .into_response();
+    };
+    match build_signed_service_directory(&state, signing_key).await {
+        Ok(directory) => {
+            let mut response = Json(directory).into_response();
+            response
+                .headers_mut()
+                .insert("cache-control", HeaderValue::from_static("max-age=60"));
+            response
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn build_signed_service_directory(
+    state: &CoreApiState,
+    signing_key: &ed25519_dalek::SigningKey,
+) -> Result<ServiceDirectoryV1, ApiError> {
+    let mut joined = Vec::new();
+    for head in state.store.list_release_channel_heads().await? {
+        let artifact = state.store.runtime_artifact(&head.artifact_id).await?;
+        joined.push((head, artifact));
+    }
+    let channels = service_directory_channels(joined);
+    let mut directory = ServiceDirectoryV1 {
+        schema: SERVICE_DIRECTORY_SCHEMA.to_owned(),
+        generated_at: crate::current_time_iso()?,
+        services: state.service_directory.services.clone(),
+        channels,
+        signature: String::new(),
+    };
+    directory.sign(signing_key).map_err(|error| {
+        ApiError::from(anyhow::anyhow!("service directory signing failed: {error}"))
+    })?;
+    Ok(directory)
+}
+
+/// Join release channel heads with their artifacts into the directory's
+/// `channels` map. A head may outlive its artifact's promotion, so only
+/// promoted, unretired, digest-pinned bundle artifacts are advertised; heads
+/// whose artifact is missing, demoted, retired, or not a bundle are skipped.
+fn service_directory_channels(
+    joined: impl IntoIterator<Item = (crate::ReleaseChannelHead, Option<RuntimeArtifact>)>,
+) -> BTreeMap<String, BTreeMap<String, ChannelBundleV1>> {
+    let mut channels: BTreeMap<String, BTreeMap<String, ChannelBundleV1>> = BTreeMap::new();
+    for (head, artifact) in joined {
+        if !head.artifact_kind.is_bundle() {
+            continue;
+        }
+        let Some(artifact) = artifact else {
+            continue;
+        };
+        if artifact.kind != head.artifact_kind
+            || artifact.promoted_at.is_none()
+            || artifact.retired_at.is_some()
+        {
+            continue;
+        }
+        let Some(tarball_sha256) = artifact.content_sha256 else {
+            continue;
+        };
+        channels
+            .entry(head.channel.as_str().to_owned())
+            .or_default()
+            .insert(
+                head.artifact_kind.as_str().to_owned(),
+                ChannelBundleV1 {
+                    artifact_id: artifact.id,
+                    version_label: artifact.version_label,
+                    // Derived by convention: the manifest lives beside the
+                    // tarball under the appended name.
+                    manifest_url: format!("{}.manifest.json", artifact.reference),
+                    tarball_url: artifact.reference,
+                    tarball_sha256,
+                },
+            );
+    }
+    channels
 }
 
 async fn brain_agent_account(
@@ -3565,6 +3781,226 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    fn directory_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[5_u8; 32])
+    }
+
+    fn directory_services() -> std::collections::BTreeMap<String, ServiceEntryV1> {
+        std::collections::BTreeMap::from([(
+            "sites".to_string(),
+            ServiceEntryV1 {
+                base_url: "http://192.168.64.1:18789".to_string(),
+                client_version: Some(finite_service_directory::ClientVersionV1 {
+                    min: "0.0.0".to_string(),
+                    current: "0.0.0".to_string(),
+                }),
+            },
+        )])
+    }
+
+    fn skills_bundle_upsert(id: &str, promoted: bool) -> UpsertRuntimeArtifactInput {
+        UpsertRuntimeArtifactInput {
+            id: id.to_string(),
+            kind: RuntimeArtifactKind::SkillsBundle,
+            reference: format!("http://192.168.64.1:18791/{id}.tar.gz"),
+            version_label: format!("label-{id}"),
+            source_git_sha: None,
+            finitec_version: None,
+            hermes_source_ref: None,
+            finite_platform_plugin_ref: None,
+            state_schema_version: "finite-skills-tree-v1".to_string(),
+            base_image: None,
+            recover_known_good_chat: false,
+            content_sha256: Some("a".repeat(64)),
+            promoted,
+            now: Some("2026-08-06T00:00:00Z".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn service_directory_endpoint_serves_a_signed_verifiable_document() {
+        let store = CoreStore::memory();
+        store
+            .upsert_runtime_artifact(skills_bundle_upsert("skills-head", true))
+            .await
+            .unwrap();
+        store
+            .set_release_channel_head(crate::SetReleaseChannelHeadInput {
+                channel: crate::ReleaseChannelName::Canary,
+                artifact_kind: RuntimeArtifactKind::SkillsBundle,
+                artifact_id: "skills-head".to_string(),
+                now: Some("2026-08-06T00:00:00Z".to_string()),
+            })
+            .await
+            .unwrap();
+        let config =
+            ServiceDirectoryConfig::new(directory_services(), Some(directory_signing_key()))
+                .unwrap();
+        let app = router_with_service_directory(store, test_auth(), config);
+
+        // Unauthenticated read: no authorization header at all.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/service-directory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("max-age=60")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        // The document round-trips through the resolver crate's verifying
+        // parser with the release public key...
+        let directory = ServiceDirectoryV1::from_verified_json_bytes(
+            &body,
+            &directory_signing_key().verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(directory.schema, SERVICE_DIRECTORY_SCHEMA);
+        assert_eq!(
+            directory.service_base_url("sites"),
+            Some("http://192.168.64.1:18789")
+        );
+        let bundle = directory.channel_bundle("canary", "skills_bundle").unwrap();
+        assert_eq!(bundle.artifact_id, "skills-head");
+        assert_eq!(
+            bundle.tarball_url,
+            "http://192.168.64.1:18791/skills-head.tar.gz"
+        );
+        assert_eq!(
+            bundle.manifest_url,
+            "http://192.168.64.1:18791/skills-head.tar.gz.manifest.json"
+        );
+        assert_eq!(bundle.tarball_sha256, "a".repeat(64));
+
+        // ...and a different key refuses it.
+        let wrong_key = ed25519_dalek::SigningKey::from_bytes(&[6_u8; 32]).verifying_key();
+        assert!(ServiceDirectoryV1::from_verified_json_bytes(&body, &wrong_key).is_err());
+    }
+
+    #[tokio::test]
+    async fn service_directory_endpoint_refuses_to_serve_unsigned() {
+        let config = ServiceDirectoryConfig::new(directory_services(), None).unwrap();
+        let app = router_with_service_directory(CoreStore::memory(), test_auth(), config);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/core/v1/service-directory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "service_directory_unsigned");
+    }
+
+    #[test]
+    fn service_directory_channels_exclude_unusable_heads() {
+        let now = "2026-08-06T00:00:00Z".to_string();
+        let artifact = |id: &str, promoted: bool, retired: bool, digest: bool| RuntimeArtifact {
+            id: id.to_string(),
+            kind: RuntimeArtifactKind::SkillsBundle,
+            reference: format!("http://192.168.64.1:18791/{id}.tar.gz"),
+            version_label: format!("label-{id}"),
+            source_git_sha: None,
+            finitec_version: None,
+            hermes_source_ref: None,
+            finite_platform_plugin_ref: None,
+            state_schema_version: "finite-skills-tree-v1".to_string(),
+            base_image: None,
+            recover_known_good_chat: false,
+            content_sha256: digest.then(|| "a".repeat(64)),
+            created_at: now.clone(),
+            promoted_at: promoted.then(|| now.clone()),
+            retired_at: retired.then(|| now.clone()),
+        };
+        let head = |channel, id: &str| crate::ReleaseChannelHead {
+            channel,
+            artifact_kind: RuntimeArtifactKind::SkillsBundle,
+            artifact_id: id.to_string(),
+            updated_at: now.clone(),
+        };
+
+        let channels = service_directory_channels(vec![
+            (
+                head(crate::ReleaseChannelName::Canary, "usable"),
+                Some(artifact("usable", true, false, true)),
+            ),
+            (
+                head(crate::ReleaseChannelName::Stable, "demoted"),
+                Some(artifact("demoted", false, false, true)),
+            ),
+            (
+                head(crate::ReleaseChannelName::Stable, "retired"),
+                Some(artifact("retired", true, true, true)),
+            ),
+            (
+                head(crate::ReleaseChannelName::Stable, "undigested"),
+                Some(artifact("undigested", true, false, false)),
+            ),
+            (head(crate::ReleaseChannelName::Stable, "missing"), None),
+        ]);
+
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels["canary"]["skills_bundle"].artifact_id, "usable");
+        assert!(!channels.contains_key("stable"));
+    }
+
+    #[test]
+    fn service_directory_config_validates_names_and_base_urls() {
+        let entry = |base_url: &str| ServiceEntryV1 {
+            base_url: base_url.to_string(),
+            client_version: None,
+        };
+        ServiceDirectoryConfig::new(
+            std::collections::BTreeMap::from([
+                ("finite_private".to_string(), entry("https://limits.test")),
+                ("core".to_string(), entry("http://192.168.64.1:4200")),
+            ]),
+            None,
+        )
+        .unwrap();
+        for bad_name in ["", "Sites", "9core", "finite-private", &"a".repeat(65)] {
+            assert!(
+                ServiceDirectoryConfig::new(
+                    std::collections::BTreeMap::from([(
+                        bad_name.to_string(),
+                        entry("https://ok.test")
+                    )]),
+                    None,
+                )
+                .is_err(),
+                "{bad_name:?} must be refused"
+            );
+        }
+        assert!(
+            ServiceDirectoryConfig::new(
+                std::collections::BTreeMap::from([(
+                    "sites".to_string(),
+                    entry("ftp://not-http.test")
+                )]),
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

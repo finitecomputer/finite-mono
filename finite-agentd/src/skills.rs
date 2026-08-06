@@ -16,12 +16,13 @@ use finitechat_proto::{
     RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
 };
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::process::Command as TokioCommand;
 
 use crate::AgentdError;
 use crate::daemon::{DaemonConfig, failure_result, load_agent_identity, success_result};
+use crate::directory::{SERVICE_DIRECTORY_URL_ENV, fetch_verified_directory};
 use crate::ledger::{CommandDecision, Ledger};
 
 pub(crate) const SKILLS_SYNC_SCHEMA: &str = "finite.agent.skills.sync.v1";
@@ -32,16 +33,74 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const CLI_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) const RELEASE_PUBLIC_KEY_ENV: &str = "FINITE_RELEASE_PUBLIC_KEY";
-pub(crate) const ALLOW_INSECURE_BUNDLE_URL_ENV: &str = "FINITE_ALLOW_INSECURE_BUNDLE_URL";
+/// One shared URL policy for all fetched release material; the env name and
+/// enforcement live in `finite-release`.
+pub(crate) const ALLOW_INSECURE_BUNDLE_URL_ENV: &str =
+    finite_release::ALLOW_INSECURE_BUNDLE_URL_ENV;
 pub(crate) const FINITE_CLI_PATH_ENV: &str = "FINITE_CLI_PATH";
 pub(crate) const DEFAULT_FINITE_CLI_PATH: &str = "/runtime/bin/finite";
 
-#[derive(Debug, Deserialize)]
+/// `agent.skills.sync` payload. Two mutually exclusive forms:
+/// the explicit form pins the exact bundle (`tarballUrl` + `manifestUrl` +
+/// `tarballSha256`); the channel form (`channel`) resolves the bundle through
+/// a fresh fetch of the signed service directory.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct SkillsSyncRequest {
+pub struct SkillsSyncRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tarball_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tarball_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExplicitBundleRef {
     pub tarball_url: String,
     pub manifest_url: String,
     pub tarball_sha256: String,
+}
+
+#[derive(Debug)]
+enum SkillsSyncSource {
+    Explicit(ExplicitBundleRef),
+    Channel(String),
+}
+
+impl SkillsSyncRequest {
+    fn source(&self) -> Result<SkillsSyncSource, AgentdError> {
+        let explicit = [&self.tarball_url, &self.manifest_url, &self.tarball_sha256];
+        match (&self.channel, explicit.iter().any(|field| field.is_some())) {
+            (Some(_), true) => Err(AgentdError::InvalidPayload(
+                "channel and explicit bundle fields are mutually exclusive".to_owned(),
+            )),
+            (Some(channel), false) => {
+                let channel = channel.trim();
+                if channel.is_empty() {
+                    return Err(AgentdError::InvalidPayload(
+                        "channel must not be empty".to_owned(),
+                    ));
+                }
+                Ok(SkillsSyncSource::Channel(channel.to_owned()))
+            }
+            (None, _) => match (&self.tarball_url, &self.manifest_url, &self.tarball_sha256) {
+                (Some(tarball_url), Some(manifest_url), Some(tarball_sha256)) => {
+                    Ok(SkillsSyncSource::Explicit(ExplicitBundleRef {
+                        tarball_url: tarball_url.clone(),
+                        manifest_url: manifest_url.clone(),
+                        tarball_sha256: tarball_sha256.clone(),
+                    }))
+                }
+                _ => Err(AgentdError::InvalidPayload(
+                    "either channel, or tarballUrl + manifestUrl + tarballSha256, is required"
+                        .to_owned(),
+                )),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +115,9 @@ pub(crate) struct SkillsSyncSettings {
     pub allow_insecure_url: bool,
     /// The in-image `finite` CLI that owns the atomic adoption step.
     pub finite_cli: PathBuf,
+    /// Core's signed service directory endpoint; required for the channel
+    /// form.
+    pub service_directory_url: Option<String>,
 }
 
 impl SkillsSyncSettings {
@@ -65,22 +127,41 @@ impl SkillsSyncSettings {
             release_public_key: config.release_public_key.clone(),
             allow_insecure_url: config.allow_insecure_bundle_url,
             finite_cli: config.finite_cli.clone(),
+            service_directory_url: config.service_directory_url.clone(),
         }
     }
+}
+
+/// Resolve the channel's skills bundle through a fresh fetch-and-verify of
+/// the service directory (never the cache: sync acts on channel heads).
+async fn resolve_channel_bundle(
+    settings: &SkillsSyncSettings,
+    public_key_hex: &str,
+    channel: &str,
+) -> Result<ExplicitBundleRef, AgentdError> {
+    let directory_url = settings.service_directory_url.as_deref().ok_or_else(|| {
+        AgentdError::Config(format!(
+            "{SERVICE_DIRECTORY_URL_ENV} is not configured; channel-based skills sync is unavailable"
+        ))
+    })?;
+    let directory =
+        fetch_verified_directory(directory_url, public_key_hex, settings.allow_insecure_url)
+            .await?;
+    let bundle = directory
+        .channel_bundle(channel, finite_service_directory::SKILLS_BUNDLE_KIND)
+        .ok_or_else(|| AgentdError::SkillsChannelHeadMissing(channel.to_owned()))?;
+    Ok(ExplicitBundleRef {
+        tarball_url: bundle.tarball_url.clone(),
+        manifest_url: bundle.manifest_url.clone(),
+        tarball_sha256: bundle.tarball_sha256.clone(),
+    })
 }
 
 pub(crate) async fn sync_skills(
     settings: &SkillsSyncSettings,
     request: &SkillsSyncRequest,
 ) -> Result<Value, AgentdError> {
-    let expected_tarball_sha256 = request.tarball_sha256.trim().to_ascii_lowercase();
-    if !finite_release::is_lower_hex_256(&expected_tarball_sha256) {
-        return Err(AgentdError::InvalidPayload(
-            "tarballSha256 must be 64 hex characters".to_owned(),
-        ));
-    }
-    check_url_policy(&request.tarball_url, settings.allow_insecure_url)?;
-    check_url_policy(&request.manifest_url, settings.allow_insecure_url)?;
+    let source = request.source()?;
     let public_key_hex = settings
         .release_public_key
         .as_deref()
@@ -88,6 +169,21 @@ pub(crate) async fn sync_skills(
     let public_key = finite_release::parse_verifying_key_hex(public_key_hex).map_err(|error| {
         AgentdError::Config(format!("{RELEASE_PUBLIC_KEY_ENV} is invalid: {error}"))
     })?;
+    let (bundle_ref, channel) = match source {
+        SkillsSyncSource::Explicit(explicit) => (explicit, None),
+        SkillsSyncSource::Channel(channel) => (
+            resolve_channel_bundle(settings, public_key_hex, &channel).await?,
+            Some(channel),
+        ),
+    };
+    let expected_tarball_sha256 = bundle_ref.tarball_sha256.trim().to_ascii_lowercase();
+    if !finite_release::is_lower_hex_256(&expected_tarball_sha256) {
+        return Err(AgentdError::InvalidPayload(
+            "tarballSha256 must be 64 hex characters".to_owned(),
+        ));
+    }
+    check_url_policy(&bundle_ref.tarball_url, settings.allow_insecure_url)?;
+    check_url_policy(&bundle_ref.manifest_url, settings.allow_insecure_url)?;
 
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
@@ -95,7 +191,7 @@ pub(crate) async fn sync_skills(
         .build()?;
     let manifest_bytes = fetch_bounded(
         &client,
-        &request.manifest_url,
+        &bundle_ref.manifest_url,
         MANIFEST_FETCH_CAP_BYTES,
         "manifest",
     )
@@ -111,7 +207,7 @@ pub(crate) async fn sync_skills(
 
     let tarball_bytes = fetch_bounded(
         &client,
-        &request.tarball_url,
+        &bundle_ref.tarball_url,
         TARBALL_FETCH_CAP_BYTES,
         "tarball",
     )
@@ -147,6 +243,11 @@ pub(crate) async fn sync_skills(
                 "artifactId": artifact_id,
                 "treeDigest": manifest.tree_digest,
             });
+            if let Some(channel) = channel {
+                // Proof the bundle was resolved through the service
+                // directory, not named by the caller.
+                result["channel"] = json!(channel);
+            }
             match cli_output.get("skillCount").and_then(Value::as_u64) {
                 Some(skill_count) => {
                     result["skillCount"] = json!(skill_count);
@@ -173,15 +274,8 @@ pub(crate) async fn sync_skills(
 pub async fn run_skills_sync_cli(
     config: &DaemonConfig,
     request_id: &str,
-    tarball_url: &str,
-    manifest_url: &str,
-    tarball_sha256: &str,
+    request: SkillsSyncRequest,
 ) -> Result<Value, AgentdError> {
-    let request = SkillsSyncRequest {
-        tarball_url: tarball_url.to_owned(),
-        manifest_url: manifest_url.to_owned(),
-        tarball_sha256: tarball_sha256.to_owned(),
-    };
     let settings = SkillsSyncSettings::from_daemon_config(config);
     std::fs::create_dir_all(config.state_dir())?;
     let ledger = Ledger::open(config.state_dir().join("agentd.sqlite3"))?;
@@ -200,11 +294,10 @@ pub async fn run_skills_sync_cli(
         resource_key: None,
         body: RuntimeCommandJsonPayloadV1 {
             schema: SKILLS_SYNC_SCHEMA.to_owned(),
-            json_payload: serde_json::to_vec(&json!({
-                "tarballUrl": request.tarball_url,
-                "manifestUrl": request.manifest_url,
-                "tarballSha256": request.tarball_sha256,
-            }))?,
+            // The request serializes exactly as the daemon's typed payload
+            // (camelCase, absent fields omitted), so ledger fingerprints stay
+            // stable between the CLI and chat-channel entries.
+            json_payload: serde_json::to_vec(&request)?,
         },
     };
 
@@ -248,12 +341,8 @@ fn replayed_result_value(
 }
 
 fn check_url_policy(url: &str, allow_insecure: bool) -> Result<(), AgentdError> {
-    if url.starts_with("https://") || (allow_insecure && url.starts_with("http://")) {
-        return Ok(());
-    }
-    Err(AgentdError::InvalidPayload(format!(
-        "bundle URLs must use https ({ALLOW_INSECURE_BUNDLE_URL_ENV}=1 admits http in the dev harness only): {url:?}"
-    )))
+    finite_release::check_bundle_url_policy(url, allow_insecure)
+        .map_err(|error| AgentdError::InvalidPayload(error.to_string()))
 }
 
 async fn fetch_bounded(
@@ -309,7 +398,7 @@ fn stage_and_verify(
     }
     std::fs::create_dir_all(staging_dir)?;
     let tarball_path = staging_dir.join(format!("{}.tar.gz", manifest.artifact_id));
-    let manifest_path = staging_dir.join(format!("{}.manifest.json", manifest.artifact_id));
+    let manifest_path = staging_dir.join(format!("{}.tar.gz.manifest.json", manifest.artifact_id));
     std::fs::write(&tarball_path, tarball_bytes)?;
     std::fs::write(&manifest_path, manifest_bytes)?;
     let tree = staging_dir.join("tree");
@@ -369,6 +458,29 @@ mod tests {
             release_public_key: Some(hex::encode(test_signing_key().verifying_key().to_bytes())),
             allow_insecure_url: true,
             finite_cli: finite_cli.to_path_buf(),
+            service_directory_url: None,
+        }
+    }
+
+    fn explicit_request(
+        tarball_url: impl Into<String>,
+        manifest_url: impl Into<String>,
+        tarball_sha256: impl Into<String>,
+    ) -> SkillsSyncRequest {
+        SkillsSyncRequest {
+            tarball_url: Some(tarball_url.into()),
+            manifest_url: Some(manifest_url.into()),
+            tarball_sha256: Some(tarball_sha256.into()),
+            channel: None,
+        }
+    }
+
+    fn channel_request(channel: impl Into<String>) -> SkillsSyncRequest {
+        SkillsSyncRequest {
+            tarball_url: None,
+            manifest_url: None,
+            tarball_sha256: None,
+            channel: Some(channel.into()),
         }
     }
 
@@ -448,11 +560,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut locked = settings(dir.path(), Path::new("/nonexistent"));
         locked.allow_insecure_url = false;
-        let request = SkillsSyncRequest {
-            tarball_url: "http://127.0.0.1:1/bundle.tar.gz".to_owned(),
-            manifest_url: "http://127.0.0.1:1/bundle.manifest.json".to_owned(),
-            tarball_sha256: "a".repeat(64),
-        };
+        let request = explicit_request(
+            "http://127.0.0.1:1/bundle.tar.gz",
+            "http://127.0.0.1:1/bundle.manifest.json",
+            "a".repeat(64),
+        );
 
         let error = sync_skills(&locked, &request).await.unwrap_err();
         assert!(matches!(error, AgentdError::InvalidPayload(_)));
@@ -464,11 +576,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut unkeyed = settings(dir.path(), Path::new("/nonexistent"));
         unkeyed.release_public_key = None;
-        let request = SkillsSyncRequest {
-            tarball_url: "https://release.invalid/bundle.tar.gz".to_owned(),
-            manifest_url: "https://release.invalid/bundle.manifest.json".to_owned(),
-            tarball_sha256: "a".repeat(64),
-        };
+        let request = explicit_request(
+            "https://release.invalid/bundle.tar.gz",
+            "https://release.invalid/bundle.manifest.json",
+            "a".repeat(64),
+        );
 
         let error = sync_skills(&unkeyed, &request).await.unwrap_err();
         assert!(matches!(error, AgentdError::MissingReleaseKey));
@@ -499,11 +611,11 @@ mod tests {
             ),
         );
         let staging_root = dir.path().join("staging");
-        let request = SkillsSyncRequest {
-            tarball_url: format!("{base_url}/skills-demo.tar.gz"),
-            manifest_url: format!("{base_url}/skills-demo.manifest.json"),
-            tarball_sha256: packed.manifest.tarball_sha256.clone(),
-        };
+        let request = explicit_request(
+            format!("{base_url}/skills-demo.tar.gz"),
+            format!("{base_url}/skills-demo.manifest.json"),
+            packed.manifest.tarball_sha256.clone(),
+        );
 
         let result = sync_skills(&settings(&staging_root, &cli), &request)
             .await
@@ -540,11 +652,11 @@ mod tests {
         .await;
         let cli = write_fake_cli(dir.path(), "exit 7");
         let staging_root = dir.path().join("staging");
-        let request = SkillsSyncRequest {
-            tarball_url: format!("{base_url}/skills-demo.tar.gz"),
-            manifest_url: format!("{base_url}/skills-demo.manifest.json"),
-            tarball_sha256: packed.manifest.tarball_sha256.clone(),
-        };
+        let request = explicit_request(
+            format!("{base_url}/skills-demo.tar.gz"),
+            format!("{base_url}/skills-demo.manifest.json"),
+            packed.manifest.tarball_sha256.clone(),
+        );
 
         let error = sync_skills(&settings(&staging_root, &cli), &request)
             .await
@@ -567,11 +679,11 @@ mod tests {
         )])
         .await;
         let cli = write_fake_cli(dir.path(), "exit 7");
-        let request = SkillsSyncRequest {
-            tarball_url: format!("{base_url}/absent.tar.gz"),
-            manifest_url: format!("{base_url}/skills-demo.manifest.json"),
-            tarball_sha256: "b".repeat(64),
-        };
+        let request = explicit_request(
+            format!("{base_url}/absent.tar.gz"),
+            format!("{base_url}/skills-demo.manifest.json"),
+            "b".repeat(64),
+        );
 
         let error = sync_skills(&settings(dir.path(), &cli), &request)
             .await
@@ -605,11 +717,11 @@ mod tests {
             "echo 'finite skills sync failed: injected CLI failure' >&2\nexit 1",
         );
         let staging_root = dir.path().join("staging");
-        let request = SkillsSyncRequest {
-            tarball_url: format!("{base_url}/skills-demo.tar.gz"),
-            manifest_url: format!("{base_url}/skills-demo.manifest.json"),
-            tarball_sha256: packed.manifest.tarball_sha256.clone(),
-        };
+        let request = explicit_request(
+            format!("{base_url}/skills-demo.tar.gz"),
+            format!("{base_url}/skills-demo.manifest.json"),
+            packed.manifest.tarball_sha256.clone(),
+        );
 
         let error = sync_skills(&settings(&staging_root, &cli), &request)
             .await
@@ -621,6 +733,157 @@ mod tests {
             staging_root.join("skills-demo/tree").exists(),
             "the verified tree must remain for diagnosis"
         );
+    }
+
+    /// A signed `finite_service_directory.v1` document advertising the packed
+    /// test bundle as the canary skills head (or no head at all).
+    fn signed_directory_bytes(
+        bundle_base_url: Option<&str>,
+        packed: &finite_release::PackOutput,
+    ) -> Vec<u8> {
+        use std::collections::BTreeMap;
+
+        use finite_service_directory::{
+            ChannelBundleV1, SERVICE_DIRECTORY_SCHEMA, ServiceDirectoryV1, ServiceEntryV1,
+        };
+
+        let mut channels = BTreeMap::new();
+        if let Some(base_url) = bundle_base_url {
+            let tarball_url = format!("{base_url}/skills-demo.tar.gz");
+            channels.insert(
+                "canary".to_owned(),
+                BTreeMap::from([(
+                    finite_service_directory::SKILLS_BUNDLE_KIND.to_owned(),
+                    ChannelBundleV1 {
+                        artifact_id: packed.manifest.artifact_id.clone(),
+                        version_label: packed.manifest.version_label.clone(),
+                        manifest_url: format!("{tarball_url}.manifest.json"),
+                        tarball_url,
+                        tarball_sha256: packed.manifest.tarball_sha256.clone(),
+                    },
+                )]),
+            );
+        }
+        let mut directory = ServiceDirectoryV1 {
+            schema: SERVICE_DIRECTORY_SCHEMA.to_owned(),
+            generated_at: "2026-08-06T00:00:00Z".to_owned(),
+            services: BTreeMap::from([(
+                "sites".to_owned(),
+                ServiceEntryV1 {
+                    base_url: "http://192.168.64.1:18789".to_owned(),
+                    client_version: None,
+                },
+            )]),
+            channels,
+            signature: String::new(),
+        };
+        directory.sign(&test_signing_key()).unwrap();
+        serde_json::to_vec(&directory).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_channel_form_resolves_the_bundle_through_the_signed_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let packed = packed_bundle(dir.path());
+        let bundle_base = serve_bytes(vec![
+            (
+                "/skills-demo.tar.gz".to_owned(),
+                std::fs::read(&packed.tarball_path).unwrap(),
+            ),
+            (
+                "/skills-demo.tar.gz.manifest.json".to_owned(),
+                std::fs::read(&packed.manifest_path).unwrap(),
+            ),
+        ])
+        .await;
+        let directory_base = serve_bytes(vec![(
+            "/api/core/v1/service-directory".to_owned(),
+            signed_directory_bytes(Some(&bundle_base), &packed),
+        )])
+        .await;
+        let cli = write_fake_cli(
+            dir.path(),
+            "printf '%s\\n' '{\"applied\": true, \"skillCount\": 1, \"treeDigest\": \"ignored\"}'",
+        );
+        let staging_root = dir.path().join("staging");
+        let mut settings = settings(&staging_root, &cli);
+        settings.service_directory_url =
+            Some(format!("{directory_base}/api/core/v1/service-directory"));
+
+        let result = sync_skills(&settings, &channel_request("canary"))
+            .await
+            .unwrap();
+
+        assert_eq!(result["applied"], json!(true));
+        assert_eq!(result["artifactId"], json!("skills-demo"));
+        assert_eq!(
+            result["channel"],
+            json!("canary"),
+            "the result must prove the bundle was resolved through the directory"
+        );
+        assert_eq!(result["treeDigest"], json!(packed.manifest.tree_digest));
+    }
+
+    #[tokio::test]
+    async fn a_channel_with_no_skills_bundle_head_is_a_distinct_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let packed = packed_bundle(dir.path());
+        let directory_base = serve_bytes(vec![(
+            "/api/core/v1/service-directory".to_owned(),
+            signed_directory_bytes(None, &packed),
+        )])
+        .await;
+        let cli = write_fake_cli(dir.path(), "exit 7");
+        let mut settings = settings(dir.path(), &cli);
+        settings.service_directory_url =
+            Some(format!("{directory_base}/api/core/v1/service-directory"));
+
+        let error = sync_skills(&settings, &channel_request("canary"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AgentdError::SkillsChannelHeadMissing(_)));
+        assert_eq!(error.public_code(), "skills_channel_head_missing");
+        assert!(error.public_message().contains("canary"));
+    }
+
+    #[tokio::test]
+    async fn the_channel_form_requires_a_configured_directory_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = write_fake_cli(dir.path(), "exit 7");
+        let error = sync_skills(&settings(dir.path(), &cli), &channel_request("canary"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentdError::Config(_)));
+        assert!(error.public_message().contains(SERVICE_DIRECTORY_URL_ENV));
+    }
+
+    #[tokio::test]
+    async fn channel_and_explicit_bundle_fields_are_mutually_exclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = write_fake_cli(dir.path(), "exit 7");
+        let mut request = explicit_request(
+            "https://release.invalid/bundle.tar.gz",
+            "https://release.invalid/bundle.tar.gz.manifest.json",
+            "a".repeat(64),
+        );
+        request.channel = Some("canary".to_owned());
+        let error = sync_skills(&settings(dir.path(), &cli), &request)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentdError::InvalidPayload(_)));
+        assert!(error.public_message().contains("mutually exclusive"));
+
+        let empty = SkillsSyncRequest {
+            tarball_url: None,
+            manifest_url: None,
+            tarball_sha256: None,
+            channel: None,
+        };
+        let error = sync_skills(&settings(dir.path(), &cli), &empty)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentdError::InvalidPayload(_)));
     }
 
     fn daemon_config(agent_home: &Path, finite_cli: &Path) -> DaemonConfig {
@@ -641,6 +904,7 @@ mod tests {
             release_public_key: Some(hex::encode(test_signing_key().verifying_key().to_bytes())),
             allow_insecure_bundle_url: true,
             finite_cli: finite_cli.to_path_buf(),
+            service_directory_url: None,
         }
     }
 
@@ -673,9 +937,11 @@ mod tests {
         let first = run_skills_sync_cli(
             &config,
             "cli-request-1",
-            &format!("{base_url}/skills-demo.tar.gz"),
-            &format!("{base_url}/skills-demo.manifest.json"),
-            &packed.manifest.tarball_sha256,
+            explicit_request(
+                format!("{base_url}/skills-demo.tar.gz"),
+                format!("{base_url}/skills-demo.manifest.json"),
+                packed.manifest.tarball_sha256.clone(),
+            ),
         )
         .await
         .unwrap();
@@ -692,9 +958,11 @@ mod tests {
         let replayed = run_skills_sync_cli(
             &config,
             "cli-request-1",
-            &format!("{base_url}/skills-demo.tar.gz"),
-            &format!("{base_url}/skills-demo.manifest.json"),
-            &packed.manifest.tarball_sha256,
+            explicit_request(
+                format!("{base_url}/skills-demo.tar.gz"),
+                format!("{base_url}/skills-demo.manifest.json"),
+                packed.manifest.tarball_sha256.clone(),
+            ),
         )
         .await
         .unwrap();
@@ -720,9 +988,11 @@ mod tests {
         let error = run_skills_sync_cli(
             &config,
             "cli-request-unkeyed",
-            "https://release.invalid/bundle.tar.gz",
-            "https://release.invalid/bundle.manifest.json",
-            &"a".repeat(64),
+            explicit_request(
+                "https://release.invalid/bundle.tar.gz",
+                "https://release.invalid/bundle.manifest.json",
+                "a".repeat(64),
+            ),
         )
         .await
         .unwrap_err();
@@ -733,9 +1003,11 @@ mod tests {
         let replayed = run_skills_sync_cli(
             &config,
             "cli-request-unkeyed",
-            "https://release.invalid/bundle.tar.gz",
-            "https://release.invalid/bundle.manifest.json",
-            &"a".repeat(64),
+            explicit_request(
+                "https://release.invalid/bundle.tar.gz",
+                "https://release.invalid/bundle.manifest.json",
+                "a".repeat(64),
+            ),
         )
         .await
         .unwrap_err();

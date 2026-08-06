@@ -1592,13 +1592,13 @@ JS
 }
 
 # Publish a signed skills bundle carrying one marker skill, prove the runtime
-# fetches/verifies/applies it through the exact agent.skills.sync path, then
-# prove a tampered tarball is refused with the applied baseline intact.
-# Cheap smoke: no model turns are needed.
+# resolves it from the signed service directory (channel form) and applies it
+# through the exact agent.skills.sync path, then prove a tampered tarball is
+# refused with the applied baseline intact. Cheap smoke: no model turns.
 run_skills_sync_smoke() {
   local devfinity_state_root skills_tmp publish_json sync_json tampered_json
   local artifact_id tarball_url manifest_url tarball_sha256 tree_digest tarball_path
-  local tampered_path tampered_url
+  local tampered_path tampered_url sites_port directory_sites attempt
   local marker_path=/data/agent/managed-skills/finite/current/devfinity-smoke-skill/SKILL.md
 
   need cargo
@@ -1632,15 +1632,18 @@ JS
 )"
   echo "published signed skills bundle $artifact_id to the canary channel"
 
+  # PRIMARY positive path: the channel form. The agent resolves the bundle
+  # itself from Core's signed service directory — no URLs are handed to it.
   sync_json="$state_dir/saas-smoke-skills-sync.json"
   runtime_exec "$container_machine_id" finite-agentd skills-sync \
-    --tarball-url "$tarball_url" \
-    --manifest-url "$manifest_url" \
-    --tarball-sha256 "$tarball_sha256" >"$sync_json"
+    --channel canary >"$sync_json"
   node - "$sync_json" "$artifact_id" "$tree_digest" <<'JS'
 const fs = require("node:fs");
 const sync = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 if (sync.applied !== true) throw new Error(`skills sync did not apply: ${JSON.stringify(sync)}`);
+if (sync.channel !== "canary") {
+  throw new Error(`skills sync must report the resolved channel: ${JSON.stringify(sync)}`);
+}
 if (sync.artifactId !== process.argv[3]) {
   throw new Error(`skills sync applied ${sync.artifactId}, expected ${process.argv[3]}`);
 }
@@ -1649,7 +1652,25 @@ if (sync.treeDigest !== process.argv[4]) {
 }
 JS
   runtime_exec "$container_machine_id" test -f "$marker_path"
-  echo "signed skills bundle converged inside the Agent Runtime"
+  echo "signed skills bundle resolved from the canary channel and converged inside the Agent Runtime"
+
+  # The daemon's directory refresher caches the verified document on /data;
+  # the read-only python accessor must surface the sites base URL from it.
+  sites_port="${sites_api_url##*:}"
+  directory_sites=""
+  for attempt in $(seq 1 30); do
+    if directory_sites="$(runtime_exec "$container_machine_id" \
+      python3 /opt/finite_service_directory.py sites 2>/dev/null)"; then
+      break
+    fi
+    directory_sites=""
+    sleep 2
+  done
+  if [[ "$directory_sites" != http*":$sites_port" ]]; then
+    echo "verified service-directory cache did not advertise sites (got: ${directory_sites:-<absent>})" >&2
+    return 1
+  fi
+  echo "verified service-directory cache advertises sites at $directory_sites"
 
   # Serve a tampered copy at a second path and replay the sync with the
   # ORIGINAL sha256: the runtime must refuse it and keep the applied baseline.

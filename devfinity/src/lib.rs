@@ -352,6 +352,9 @@ pub struct Stack {
     /// Hex ed25519 release verification key generated per run; present once
     /// `prepare_host_environment` has ensured the run's release keypair.
     release_public_key: Option<String>,
+    /// Hex ed25519 release signing seed for the same run keypair; Core signs
+    /// the service directory with it.
+    release_signing_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -423,6 +426,7 @@ impl Stack {
             apple_host_access: AppleHostAccess::default(),
             apple_container_name_prefix,
             release_public_key: None,
+            release_signing_key: None,
         })
     }
 
@@ -487,9 +491,10 @@ impl Stack {
 
     pub fn prepare_host_environment(&mut self, dry_run: bool) -> Result<()> {
         if !self.profile.includes_runtime() {
-            if self.fresh_services_state {
-                return Ok(());
-            }
+            // Core signs the service directory in every profile, so even the
+            // portable services-only stack needs the run's release keypair.
+            self.release_public_key = Some(self.ensure_release_keys()?);
+            self.release_signing_key = Some(self.read_release_signing_key()?);
             return Ok(());
         }
         if self.fresh_services_state {
@@ -563,6 +568,7 @@ impl Stack {
         // release verification key into every launched agent container, so the
         // keypair must exist before the process-compose config is written.
         self.release_public_key = Some(self.ensure_release_keys()?);
+        self.release_signing_key = Some(self.read_release_signing_key()?);
         Ok(())
     }
 
@@ -1372,13 +1378,22 @@ wait "$postgres_pid"
         }
         let mut core_environment = vec![
             ("FC_CORE_DATABASE_URL", self.database_url()),
-            ("FC_CORE_BIND", format!("127.0.0.1:{}", self.ports.core)),
+            // Bound like the other container-consumed services: agents fetch
+            // the signed service directory straight from Core.
+            (
+                "FC_CORE_BIND",
+                format!("{}:{}", self.service_bind_host(), self.ports.core),
+            ),
             ("WORKOS_CLIENT_ID", self.workos_mode.client_id().to_string()),
             (
                 "FC_WORKOS_OPERATOR_ORG_ID",
                 self.workos_mode.operator_org_id().to_string(),
             ),
             ("FC_CORE_RUNTIME_ENV_JSON", self.runtime_env_json()),
+            (
+                "FC_CORE_SERVICE_DIRECTORY_SERVICES_JSON",
+                self.service_directory_services_json(),
+            ),
             (
                 "FC_CORE_AGENT_CREATION_PLACEMENT_JSON",
                 serde_json::json!({
@@ -1388,6 +1403,11 @@ wait "$postgres_pid"
                 .to_string(),
             ),
         ];
+        if let Some(release_signing_key) = &self.release_signing_key {
+            // The run's release seed also signs the service directory (one
+            // key family locally, exactly as in production).
+            core_environment.push(("FC_CORE_RELEASE_SIGNING_KEY", release_signing_key.clone()));
+        }
         if self.workos_mode.is_fixture() {
             core_environment.extend([
                 ("WORKOS_API_BASE_URL", self.workos_fixture_url()),
@@ -1639,8 +1659,34 @@ wait "$postgres_pid"
         if let Some(release_public_key) = &self.release_public_key {
             environment["FINITE_RELEASE_PUBLIC_KEY"] = serde_json::json!(release_public_key);
             environment["FINITE_ALLOW_INSECURE_BUNDLE_URL"] = serde_json::json!("1");
+            // Agents verify the directory with the same run key, so the URL
+            // only ships alongside it.
+            environment["FINITE_SERVICE_DIRECTORY_URL"] =
+                serde_json::json!(self.service_directory_url());
         }
         environment.to_string()
+    }
+
+    /// Core's signed service-directory endpoint as agent containers reach it.
+    fn service_directory_url(&self) -> String {
+        format!("{}/api/core/v1/service-directory", self.runtime_core_url())
+    }
+
+    /// The `services` map Core advertises through the signed directory, in
+    /// the same container-reachable host-access forms the runtime env uses.
+    /// Client version expectations are stubs until services enforce floors.
+    fn service_directory_services_json(&self) -> String {
+        let client_version = serde_json::json!({ "min": "0.0.0", "current": "0.0.0" });
+        let entry = |base_url: String| serde_json::json!({ "base_url": base_url, "client_version": client_version });
+        serde_json::json!({
+            "core": entry(self.runtime_core_url()),
+            "chat": entry(self.runtime_finitechat_url()),
+            "sites": entry(self.finitesites_api_url()),
+            "brain": entry(self.runtime_finite_brain_url()),
+            "identity": entry(self.runtime_finite_identity_url()),
+            "finite_private": entry(self.runtime_limiter_root_url()),
+        })
+        .to_string()
     }
 
     fn write_skills_releases(&self, yaml: &mut String) {
@@ -2874,6 +2920,27 @@ wait "$postgres_pid"
         format!("http://127.0.0.1:{}", self.ports.core)
     }
 
+    /// Core's base URL as agent containers reach it. Profiles without a
+    /// runtime publish for host-local consumers instead.
+    fn runtime_core_url(&self) -> String {
+        let host = if self.profile.includes_runtime() {
+            self.apple_host_access.runtime_host.as_str()
+        } else {
+            "127.0.0.1"
+        };
+        format!("http://{host}:{}", self.ports.core)
+    }
+
+    /// Finite Identity's base URL in the same container-reachable form.
+    fn runtime_finite_identity_url(&self) -> String {
+        let host = if self.profile.includes_runtime() {
+            self.apple_host_access.runtime_host.as_str()
+        } else {
+            "127.0.0.1"
+        };
+        format!("http://{host}:{}", self.ports.finite_identity)
+    }
+
     fn dashboard_url(&self) -> String {
         format!("{}/dashboard", self.dashboard_origin())
     }
@@ -3266,6 +3333,22 @@ wait "$postgres_pid"
         Ok(value)
     }
 
+    /// Read this run's release signing seed (hex) for Core's directory
+    /// signing. `ensure_release_keys` must have run first.
+    fn read_release_signing_key(&self) -> Result<String> {
+        let signing_key = self.release_keys_dir().join("release.key");
+        let value = fs::read_to_string(&signing_key)
+            .with_context(|| format!("failed to read {}", signing_key.display()))?;
+        let value = value.trim().to_ascii_lowercase();
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!(
+                "devfinity release signing key at {} is not 64 hex characters",
+                signing_key.display()
+            );
+        }
+        Ok(value)
+    }
+
     /// Pack and sign a skills tree with this run's release key, host it from
     /// the `skills-releases` static server, register it as a promoted Core
     /// `skills_bundle` artifact, and point the canary channel at it. Prints
@@ -3316,7 +3399,9 @@ wait "$postgres_pid"
         let tarball_sha256 = json_string_field(&packed, "tarballSha256")?;
         let base_url = self.runtime_skills_releases_url();
         let tarball_url = format!("{base_url}/{artifact_id}.tar.gz");
-        let manifest_url = format!("{base_url}/{artifact_id}.manifest.json");
+        // Append convention: the manifest URL is the tarball URL plus
+        // `.manifest.json`, exactly as the service directory derives it.
+        let manifest_url = format!("{tarball_url}.manifest.json");
 
         self.run_core_cli(
             &[
@@ -3360,7 +3445,7 @@ wait "$postgres_pid"
                 "tarballSha256": tarball_sha256,
                 "treeDigest": tree_digest,
                 "tarballPath": releases_dir.join(format!("{artifact_id}.tar.gz")),
-                "manifestPath": releases_dir.join(format!("{artifact_id}.manifest.json")),
+                "manifestPath": releases_dir.join(format!("{artifact_id}.tar.gz.manifest.json")),
                 "releasePublicKey": release_public_key,
             })
         );
@@ -4622,7 +4707,80 @@ mod tests {
                 value.contains("FINITE_ALLOW_INSECURE_BUNDLE_URL\\\":\\\"1"),
                 "{env_name}: {value}"
             );
+            // Agents fetch the signed directory straight from Core over the
+            // container-reachable host.
+            assert!(
+                value.contains(
+                    "FINITE_SERVICE_DIRECTORY_URL\\\":\\\"http://host.container.internal:14200/api/core/v1/service-directory"
+                ),
+                "{env_name}: {value}"
+            );
         }
+    }
+
+    #[test]
+    fn core_serves_the_service_directory_for_containers_and_signs_with_the_run_seed() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        stack.release_public_key = Some("ab".repeat(32));
+        stack.release_signing_key = Some("cd".repeat(32));
+        let yaml = stack.process_compose_yaml();
+
+        // Core binds the shared service host so containers can reach the
+        // directory endpoint.
+        assert!(yaml.contains("FC_CORE_BIND=127.0.0.1:14200"));
+        assert!(yaml.contains(&format!("FC_CORE_RELEASE_SIGNING_KEY={}", "cd".repeat(32))));
+        let services = yaml
+            .lines()
+            .find(|line| line.contains("FC_CORE_SERVICE_DIRECTORY_SERVICES_JSON"))
+            .expect("services json missing from generated yaml");
+        for service in [
+            "core",
+            "chat",
+            "sites",
+            "brain",
+            "identity",
+            "finite_private",
+        ] {
+            assert!(
+                services.contains(&format!("\\\"{service}\\\"")),
+                "{services}"
+            );
+        }
+        // Container-reachable host-access forms, same as the runtime env.
+        assert!(
+            services
+                .contains("sites\\\":{\\\"base_url\\\":\\\"http://host.container.internal:18789"),
+            "{services}"
+        );
+        assert!(
+            services
+                .contains("core\\\":{\\\"base_url\\\":\\\"http://host.container.internal:14200"),
+            "{services}"
+        );
+        assert!(services.contains("client_version"), "{services}");
+    }
+
+    #[test]
+    fn services_only_profile_serves_the_directory_for_host_local_consumers() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity"))
+            .unwrap()
+            .with_profile(StackProfile::ServicesOnly);
+        stack.release_signing_key = Some("cd".repeat(32));
+        let yaml = stack.process_compose_yaml();
+        assert!(yaml.contains("FC_CORE_BIND=127.0.0.1:14200"));
+        assert!(yaml.contains("FC_CORE_RELEASE_SIGNING_KEY"));
+        let services = yaml
+            .lines()
+            .find(|line| line.contains("FC_CORE_SERVICE_DIRECTORY_SERVICES_JSON"))
+            .expect("services json missing from generated yaml");
+        assert!(
+            services.contains("sites\\\":{\\\"base_url\\\":\\\"http://127.0.0.1:18789"),
+            "{services}"
+        );
+        assert_eq!(
+            stack.service_directory_url(),
+            "http://127.0.0.1:14200/api/core/v1/service-directory"
+        );
     }
 
     #[test]

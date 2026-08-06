@@ -102,9 +102,11 @@ connect, and all Brain/Apple assertions still run.
 The skills release channel has its own focused variant that needs no model
 turns. After the runtime is healthy it publishes a signed skills bundle
 carrying a marker skill through `devfinity publish-skills`, drives the exact
-`agent.skills.sync` path in-guest with `finite-agentd skills-sync` over
-`container exec`, asserts convergence, and proves a tampered tarball is
-refused with the applied baseline intact:
+`agent.skills.sync` path in-guest with `finite-agentd skills-sync --channel
+canary` over `container exec` (the agent resolves the bundle itself from
+Core's signed service directory), asserts convergence plus the verified
+`/data/agent/service-directory.json` cache, and proves a tampered tarball is
+refused through the explicit-URL form with the applied baseline intact:
 
 ```sh
 DEVFINITY_SKILLS_SYNC_SMOKE=1 \

@@ -572,6 +572,13 @@ impl CoreStore {
         }
     }
 
+    pub async fn list_release_channel_heads(&self) -> CoreResult<Vec<ReleaseChannelHead>> {
+        match self {
+            Self::Memory(store) => store.list_release_channel_heads().await,
+            Self::Postgres(store) => store.list_release_channel_heads().await,
+        }
+    }
+
     pub async fn approve_finite_private_grant(
         &self,
         input: ApproveFinitePrivateGrantInput,
@@ -1284,6 +1291,11 @@ impl MemoryCoreStore {
     ) -> CoreResult<Option<ReleaseChannelHead>> {
         let state = self.state.lock().await;
         Ok(state.release_channel_head(channel, kind))
+    }
+
+    pub async fn list_release_channel_heads(&self) -> CoreResult<Vec<ReleaseChannelHead>> {
+        let state = self.state.lock().await;
+        Ok(state.list_release_channel_heads())
     }
 
     pub async fn approve_finite_private_grant(
@@ -2187,6 +2199,20 @@ impl PostgresCoreStore {
             .map_err(store_error)?;
         row.map(|row| release_channel_head_from_row(&row))
             .transpose()
+    }
+
+    pub async fn list_release_channel_heads(&self) -> CoreResult<Vec<ReleaseChannelHead>> {
+        let client = self.connection().await?;
+        let rows = client
+            .query(
+                "SELECT channel, artifact_kind, artifact_id, updated_at::text
+                 FROM release_channel_heads
+                 ORDER BY channel, artifact_kind",
+                &[],
+            )
+            .await
+            .map_err(store_error)?;
+        rows.iter().map(release_channel_head_from_row).collect()
     }
 
     pub async fn approve_finite_private_grant(
@@ -14398,6 +14424,9 @@ mod tests {
                 .unwrap();
             assert_eq!(read_back.artifact_id, bundle.id);
             assert_eq!(read_back.artifact_kind, RuntimeArtifactKind::SkillsBundle);
+            let listed = store.list_release_channel_heads().await.unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0], read_back);
 
             // Kind mismatch and unknown artifacts refuse on the SQL path too.
             assert!(matches!(

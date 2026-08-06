@@ -20,14 +20,21 @@ enum Command {
     },
     /// Fetch, verify, and apply one signed skills bundle through the exact
     /// `agent.skills.sync` command path (operator/test entry, no chat sender).
+    /// Either name the exact bundle (`--tarball-url` + `--manifest-url` +
+    /// `--tarball-sha256`) or resolve it through the signed service directory
+    /// (`--channel`).
     #[command(name = "skills-sync")]
     SkillsSync {
+        #[arg(long, conflicts_with = "channel", requires = "manifest_url")]
+        tarball_url: Option<String>,
+        #[arg(long, conflicts_with = "channel", requires = "tarball_sha256")]
+        manifest_url: Option<String>,
+        #[arg(long, conflicts_with = "channel", requires = "tarball_url")]
+        tarball_sha256: Option<String>,
+        /// Release channel (stable or canary) whose skills bundle head to
+        /// resolve from the service directory (fresh fetch, verified).
         #[arg(long)]
-        tarball_url: String,
-        #[arg(long)]
-        manifest_url: String,
-        #[arg(long)]
-        tarball_sha256: String,
+        channel: Option<String>,
     },
 }
 
@@ -62,6 +69,7 @@ async fn run() -> Result<(), finite_agentd::AgentdError> {
             tarball_url,
             manifest_url,
             tarball_sha256,
+            channel,
         } => {
             let request_id = format!(
                 "cli-skills-sync-{}-{}",
@@ -74,9 +82,12 @@ async fn run() -> Result<(), finite_agentd::AgentdError> {
             let result = finite_agentd::run_skills_sync_cli(
                 &config,
                 &request_id,
-                &tarball_url,
-                &manifest_url,
-                &tarball_sha256,
+                finite_agentd::SkillsSyncRequest {
+                    tarball_url,
+                    manifest_url,
+                    tarball_sha256,
+                    channel,
+                },
             )
             .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);

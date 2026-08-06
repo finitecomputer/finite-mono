@@ -6,8 +6,12 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use finite_release::{
     PackRequest, ReleaseError, generate_signing_key, pack_skills_bundle, parse_signing_key_hex,
-    parse_verifying_key_hex, verify_skills_bundle,
+    parse_verifying_key_hex, verify_document_signature, verify_skills_bundle,
 };
+
+/// Schema of the signed Core service directory (`finite-service-directory`
+/// owns the typed document; this bin only checks the signature envelope).
+const SERVICE_DIRECTORY_SCHEMA: &str = "finite_service_directory.v1";
 
 #[derive(Debug, Parser)]
 #[command(name = "finite-release")]
@@ -41,6 +45,15 @@ enum Command {
         /// RFC 3339 creation instant; defaults to the current UTC time.
         #[arg(long)]
         now: Option<String>,
+    },
+    /// Verify a signed service-directory JSON document's signature.
+    VerifyDirectory {
+        /// Path to the directory document JSON (e.g. a curl download).
+        #[arg(long)]
+        file: PathBuf,
+        /// 32-byte hex public key, or a path to a file containing it.
+        #[arg(long)]
+        public_key: String,
     },
     /// Verify a packed skills bundle end to end.
     VerifySkills {
@@ -97,6 +110,32 @@ fn run(args: Args) -> Result<(), ReleaseError> {
                         "tarball": packed.tarball_path,
                         "manifest": packed.manifest_path,
                     },
+                })
+            );
+            Ok(())
+        }
+        Command::VerifyDirectory { file, public_key } => {
+            let public_key = load_public_key(&public_key)?;
+            let document: serde_json::Value = serde_json::from_slice(&fs::read(&file)?)?;
+            let schema = document.get("schema").and_then(serde_json::Value::as_str);
+            if schema != Some(SERVICE_DIRECTORY_SCHEMA) {
+                return Err(ReleaseError::InvalidManifest(format!(
+                    "expected schema {SERVICE_DIRECTORY_SCHEMA:?}, found {schema:?}"
+                )));
+            }
+            verify_document_signature(&document, &public_key)?;
+            let services: Vec<&str> = document
+                .get("services")
+                .and_then(serde_json::Value::as_object)
+                .map(|services| services.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "verified": true,
+                    "schema": SERVICE_DIRECTORY_SCHEMA,
+                    "generatedAt": document.get("generated_at"),
+                    "services": services,
                 })
             );
             Ok(())
