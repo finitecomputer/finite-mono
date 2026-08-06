@@ -2,6 +2,7 @@ use std::io::Write;
 
 mod app;
 mod auth;
+mod diagnose;
 mod hermes;
 
 use finitechat_delivery::{HttpKeyPackageId, HttpKeyPackagePublication};
@@ -103,6 +104,7 @@ where
         }
         Some("app") => app::run(args.into_iter().skip(1).collect(), output),
         Some("auth") => auth::run(args.into_iter().skip(1).collect(), output),
+        Some("diagnose") => diagnose::run(args.into_iter().skip(1).collect(), output),
         Some("hermes") => hermes::run(args.into_iter().skip(1).collect(), output),
         Some("http") => {
             let request = prepare_http_request(args.into_iter().skip(1))?;
@@ -672,10 +674,11 @@ pub(crate) fn reject_extra_args(args: &[String]) -> Result<(), CliError> {
 
 fn usage() -> String {
     format!(
-        "usage: finitechat <http-smoke|http|auth|hermes|app>\n\n{}\n\n{}\n\n{}\n\n{}",
+        "usage: finitechat <http-smoke|http|auth|hermes|app|diagnose>\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
         auth::usage(),
         hermes::hermes_usage(),
         app::usage(),
+        diagnose::usage(),
         http_usage()
     )
 }
