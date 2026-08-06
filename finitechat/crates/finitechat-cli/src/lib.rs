@@ -2,6 +2,7 @@ use std::io::Write;
 
 mod app;
 mod auth;
+mod capture;
 mod diagnose;
 mod hermes;
 
@@ -14,6 +15,7 @@ use finitechat_http::{
     ObserveDeviceLivenessRequest, ReportInvalidCommitRequest, RevokeDeviceRequest,
     SaveAccountRoomRequest, UpdateRoomAdminsRequest,
 };
+use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::{DeviceRef, RoomProtocol};
 use finitechat_transport::engine::KeyPackage;
 use finitechat_transport::{GroupId, MemberId, MessageId};
@@ -104,6 +106,7 @@ where
         }
         Some("app") => app::run(args.into_iter().skip(1).collect(), output),
         Some("auth") => auth::run(args.into_iter().skip(1).collect(), output),
+        Some("capture") => capture::run(args.into_iter().skip(1).collect(), output),
         Some("diagnose") => diagnose::run(args.into_iter().skip(1).collect(), output),
         Some("hermes") => hermes::run(args.into_iter().skip(1).collect(), output),
         Some("http") => {
@@ -661,6 +664,24 @@ pub(crate) fn parse_u64(name: &'static str, value: &str) -> Result<u64, CliError
         .map_err(|_| CliError::Usage(format!("{name} must be an unsigned integer")))
 }
 
+/// Parse a 64-character lowercase hex account secret into a Nostr secret
+/// key. Callers read the hex from a file, never from a CLI argument.
+pub(crate) fn parse_account_secret(hex: &str) -> Result<NostrSecretKey, CliError> {
+    let invalid = || {
+        CliError::Usage(
+            "the account secret must be 64 lowercase hex characters (32 bytes)".to_owned(),
+        )
+    };
+    if hex.len() != NOSTR_SECRET_KEY_BYTES * 2 {
+        return Err(invalid());
+    }
+    let mut bytes = [0u8; NOSTR_SECRET_KEY_BYTES];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).map_err(|_| invalid())?;
+    }
+    NostrSecretKey::from_bytes(bytes).map_err(|_| invalid())
+}
+
 pub(crate) fn reject_extra_args(args: &[String]) -> Result<(), CliError> {
     if args.is_empty() {
         Ok(())
@@ -674,10 +695,11 @@ pub(crate) fn reject_extra_args(args: &[String]) -> Result<(), CliError> {
 
 fn usage() -> String {
     format!(
-        "usage: finitechat <http-smoke|http|auth|hermes|app|diagnose>\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+        "usage: finitechat <http-smoke|http|auth|hermes|app|capture|diagnose>\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
         auth::usage(),
         hermes::hermes_usage(),
         app::usage(),
+        capture::usage(),
         diagnose::usage(),
         http_usage()
     )
