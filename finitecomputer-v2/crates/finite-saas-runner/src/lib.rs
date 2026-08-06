@@ -2040,6 +2040,12 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
 }
 
 fn secret_runtime_environment_key(key: &str) -> bool {
+    // Public verification material passes through the non-secret channel even
+    // though its name ends in KEY. Keep this allowlist in lockstep with Core's
+    // `runtime_spec_secret_environment_key`.
+    if key == "FINITE_RELEASE_PUBLIC_KEY" {
+        return false;
+    }
     ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
         .iter()
         .any(|part| key.split('_').any(|segment| segment == *part))
@@ -5636,10 +5642,14 @@ mod tests {
 
     #[test]
     fn opaque_runtime_environment_is_bounded_non_secret_and_cannot_override_contract() {
-        let valid = BTreeMap::from([(
-            "FINITE_SITES_API".to_string(),
-            "http://192.168.64.1:18789".to_string(),
-        )]);
+        let valid = BTreeMap::from([
+            (
+                "FINITE_SITES_API".to_string(),
+                "http://192.168.64.1:18789".to_string(),
+            ),
+            // Public verification material rides the non-secret channel.
+            ("FINITE_RELEASE_PUBLIC_KEY".to_string(), "ab".repeat(32)),
+        ]);
         validate_runtime_environment(&valid).unwrap();
         let restart_options = RuntimeRestartOptions::new(valid.clone()).unwrap();
 
@@ -6657,6 +6667,7 @@ mod tests {
             state_schema_version: "state-v1".to_string(),
             base_image: None,
             recover_known_good_chat: false,
+            content_sha256: None,
             created_at: "2026-05-25T13:00:00Z".to_string(),
             promoted_at: Some("2026-05-25T13:01:00Z".to_string()),
             retired_at: None,

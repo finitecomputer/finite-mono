@@ -61,6 +61,15 @@ successful sync and kept for diagnosis on failure.
 `FINITE_ALLOW_INSECURE_BUNDLE_URL=1` admits plain-http bundle URLs for the
 local dev harness only; production bundles are always https.
 
+The same path is reachable in-guest without a chat-channel sender through the
+one-shot CLI verb `finite-agentd skills-sync --tarball-url <u> --manifest-url
+<u> --tarball-sha256 <hex>` (operator/test entry, used by the devfinity
+`DEVFINITY_SKILLS_SYNC_SMOKE` variant over `container exec`). It resolves the
+same settings from the environment, runs the identical fetch/verify/apply
+code, records the command in the same durable ledger under a
+`cli-skills-sync-*` request id, prints the result JSON to stdout, and exits
+nonzero on failure.
+
 Specialization reconciliation owns only the `auxiliary.vision` Hermes config
 field. Its typed AEON desired state includes the worker endpoint, canonical
 model alias, independently declared image/audio/video capabilities, prompt

@@ -612,22 +612,22 @@ impl CommandExecutor {
                 self.ledger.finish_command(&request.request_id, &result)?;
                 result
             } else {
-                failure_result(request, AgentdError::Unauthorized)
+                failure_result(request, &AgentdError::Unauthorized)
             }
         } else if !authorized {
-            failure_result(request, AgentdError::Unauthorized)
+            failure_result(request, &AgentdError::Unauthorized)
         } else {
             match self.ledger.begin_command(request) {
                 Ok(CommandDecision::Replay(result)) => result,
                 Ok(CommandDecision::Execute | CommandDecision::Resume) => {
                     let result = match self.execute(request).await {
                         Ok(body) => success_result(request, body)?,
-                        Err(error) => failure_result(request, error),
+                        Err(error) => failure_result(request, &error),
                     };
                     self.ledger.finish_command(&request.request_id, &result)?;
                     result
                 }
-                Err(error) => failure_result(request, error),
+                Err(error) => failure_result(request, &error),
             }
         };
 
@@ -952,7 +952,7 @@ fn parse_body<T: DeserializeOwned>(
     })
 }
 
-fn success_result(
+pub(crate) fn success_result(
     request: &RuntimeCommandRequestV1,
     body: Value,
 ) -> Result<RuntimeCommandResultV1, AgentdError> {
@@ -973,7 +973,10 @@ fn success_result(
     Ok(result)
 }
 
-fn failure_result(request: &RuntimeCommandRequestV1, error: AgentdError) -> RuntimeCommandResultV1 {
+pub(crate) fn failure_result(
+    request: &RuntimeCommandRequestV1,
+    error: &AgentdError,
+) -> RuntimeCommandResultV1 {
     RuntimeCommandResultV1 {
         payload_kind: RuntimeCommandPayloadKindV1::Result,
         request_id: request.request_id.clone(),
@@ -1005,7 +1008,7 @@ fn validate_hermes_config(hermes_home: &Path) -> Result<(), AgentdError> {
     }
 }
 
-fn load_agent_identity(agent_home: &Path) -> Result<DeviceRef, AgentdError> {
+pub(crate) fn load_agent_identity(agent_home: &Path) -> Result<DeviceRef, AgentdError> {
     let config =
         serde_json::from_slice::<AgentConfigFile>(&fs::read(agent_home.join("config.json"))?)?;
     Ok(DeviceRef::new(config.account_id, config.device_id))

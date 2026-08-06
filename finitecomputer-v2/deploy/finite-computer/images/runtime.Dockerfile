@@ -13,6 +13,7 @@ COPY finite-agentd ./finite-agentd
 COPY finite-brain ./finite-brain
 COPY finite-identity ./finite-identity
 COPY finite-nostr ./finite-nostr
+COPY finite-release ./finite-release
 COPY finitecomputer-v2/crates ./finitecomputer-v2/crates
 COPY finitechat ./finitechat
 COPY finite-sites ./finite-sites

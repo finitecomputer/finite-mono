@@ -6511,8 +6511,10 @@ impl BridgeCoreState {
             artifact_id,
             updated_at: now,
         };
-        self.release_channel_heads
-            .insert(release_channel_key(input.channel, input.artifact_kind), head.clone());
+        self.release_channel_heads.insert(
+            release_channel_key(input.channel, input.artifact_kind),
+            head.clone(),
+        );
         Ok(head)
     }
 
@@ -7492,6 +7494,12 @@ fn runtime_spec_reserved_environment_key(key: &str) -> bool {
 }
 
 fn runtime_spec_secret_environment_key(key: &str) -> bool {
+    // Public verification material passes through the non-secret channel even
+    // though its name ends in KEY. Keep this allowlist in lockstep with
+    // Runner's `secret_runtime_environment_key`.
+    if key == "FINITE_RELEASE_PUBLIC_KEY" {
+        return false;
+    }
     ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
         .iter()
         .any(|part| key.split('_').any(|segment| segment == *part))
@@ -9639,6 +9647,13 @@ mod tests {
                 Err(CoreError::RuntimeSpecMismatch)
             ));
         }
+        // Public verification material rides the non-secret channel even
+        // though its name ends in KEY.
+        validate_runtime_spec_environment(&BTreeMap::from([(
+            "FINITE_RELEASE_PUBLIC_KEY".to_string(),
+            "ab".repeat(32),
+        )]))
+        .unwrap();
     }
 
     #[test]
@@ -9869,10 +9884,11 @@ mod tests {
 
         let mut image_with_digest = skills_bundle_input("finite-skills-v1", &digest, true);
         image_with_digest.kind = RuntimeArtifactKind::OciImage;
-        image_with_digest.reference =
-            format!("ghcr.io/finite/runtime@sha256:{}", "d".repeat(64));
+        image_with_digest.reference = format!("ghcr.io/finite/runtime@sha256:{}", "d".repeat(64));
         assert!(matches!(
-            state.upsert_runtime_artifact(image_with_digest).unwrap_err(),
+            state
+                .upsert_runtime_artifact(image_with_digest)
+                .unwrap_err(),
             CoreError::InvalidRuntimeArtifactContentSha256
         ));
 
@@ -9898,7 +9914,11 @@ mod tests {
             .upsert_runtime_artifact(skills_bundle_input("finite-skills-v1", &digest, true))
             .unwrap();
         state
-            .upsert_runtime_artifact(skills_bundle_input("finite-skills-unpromoted", &digest, false))
+            .upsert_runtime_artifact(skills_bundle_input(
+                "finite-skills-unpromoted",
+                &digest,
+                false,
+            ))
             .unwrap();
 
         assert!(matches!(
@@ -9965,7 +9985,11 @@ mod tests {
 
         // Repointing an existing head is a plain update, not an error.
         state
-            .upsert_runtime_artifact(skills_bundle_input("finite-skills-v2", &"a".repeat(64), true))
+            .upsert_runtime_artifact(skills_bundle_input(
+                "finite-skills-v2",
+                &"a".repeat(64),
+                true,
+            ))
             .unwrap();
         let repointed = state
             .set_release_channel_head(SetReleaseChannelHeadInput {

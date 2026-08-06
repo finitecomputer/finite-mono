@@ -27,19 +27,19 @@ use crate::{
     ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
     ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReleaseChannelHead, ReleaseChannelName, RuntimeArtifactKind, SetReleaseChannelHeadInput,
     ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
-    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RetryRuntimeControlRequestInput,
-    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeRelayCredential, RuntimeRelocationEnvelope, RuntimeRelocationV1,
+    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat, ReleaseChannelHead,
+    ReleaseChannelName, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
+    RequestAgentCreationResult, RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
+    RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeArtifactKind, RuntimeBootIntent,
+    RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding, RuntimeControlKind,
+    RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
+    RuntimeRelayCredential, RuntimeRelocationEnvelope, RuntimeRelocationV1,
     RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
-    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
+    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus, SetReleaseChannelHeadInput,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
     UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
@@ -65,10 +65,10 @@ use crate::{
     runtime_spec_v1, runtime_upgrade_contact_endpoint,
     runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
     source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
-    validate_runtime_artifact_content,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    validate_runtime_artifact_content, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use serde::de::DeserializeOwned;
@@ -2185,7 +2185,8 @@ impl PostgresCoreStore {
             )
             .await
             .map_err(store_error)?;
-        row.map(|row| release_channel_head_from_row(&row)).transpose()
+        row.map(|row| release_channel_head_from_row(&row))
+            .transpose()
     }
 
     pub async fn approve_finite_private_grant(
@@ -14418,7 +14419,9 @@ mod tests {
             let connection = tokio::spawn(async move {
                 let _ = connection.await;
             });
-            let latest = select_latest_launchable_runtime_artifact(&raw).await.unwrap();
+            let latest = select_latest_launchable_runtime_artifact(&raw)
+                .await
+                .unwrap();
             assert_eq!(latest.kind, RuntimeArtifactKind::OciImage);
             drop(raw);
             connection.abort();

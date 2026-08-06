@@ -1591,6 +1591,90 @@ JS
   echo "requesting-user Share revocation invalidated live and future Sites sessions"
 }
 
+# Publish a signed skills bundle carrying one marker skill, prove the runtime
+# fetches/verifies/applies it through the exact agent.skills.sync path, then
+# prove a tampered tarball is refused with the applied baseline intact.
+# Cheap smoke: no model turns are needed.
+run_skills_sync_smoke() {
+  local devfinity_state_root skills_tmp publish_json sync_json tampered_json
+  local artifact_id tarball_url manifest_url tarball_sha256 tree_digest tarball_path
+  local tampered_path tampered_url
+  local marker_path=/data/agent/managed-skills/finite/current/devfinity-smoke-skill/SKILL.md
+
+  need cargo
+  need python3
+  devfinity_state_root="$(cd "$state_dir/../.." && pwd)"
+  skills_tmp="$(mktemp -d "$state_dir/saas-smoke-skills-src.XXXXXX")"
+  cp -R "$repo_root/finite-skills/skills/." "$skills_tmp/"
+  mkdir "$skills_tmp/devfinity-smoke-skill"
+  cat >"$skills_tmp/devfinity-smoke-skill/SKILL.md" <<'SKILL'
+---
+name: devfinity-smoke-skill
+description: Marker skill proving the local skills release channel converges.
+---
+
+This marker skill exists only for the devfinity skills sync smoke.
+SKILL
+
+  publish_json="$state_dir/saas-smoke-skills-publish.json"
+  cargo run --quiet -p devfinity -- --state-dir "$devfinity_state_root" \
+    publish-skills --source "$skills_tmp" >"$publish_json"
+  IFS=$'\t' read -r artifact_id tarball_url manifest_url tarball_sha256 tree_digest tarball_path \
+    <<<"$(node - "$publish_json" <<'JS'
+const fs = require("node:fs");
+const publish = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const fields = ["artifactId", "tarballUrl", "manifestUrl", "tarballSha256", "treeDigest", "tarballPath"];
+for (const field of fields) {
+  if (!publish[field]) throw new Error(`publish-skills output is missing ${field}`);
+}
+process.stdout.write(fields.map((field) => publish[field]).join("\t"));
+JS
+)"
+  echo "published signed skills bundle $artifact_id to the canary channel"
+
+  sync_json="$state_dir/saas-smoke-skills-sync.json"
+  runtime_exec "$container_machine_id" finite-agentd skills-sync \
+    --tarball-url "$tarball_url" \
+    --manifest-url "$manifest_url" \
+    --tarball-sha256 "$tarball_sha256" >"$sync_json"
+  node - "$sync_json" "$artifact_id" "$tree_digest" <<'JS'
+const fs = require("node:fs");
+const sync = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (sync.applied !== true) throw new Error(`skills sync did not apply: ${JSON.stringify(sync)}`);
+if (sync.artifactId !== process.argv[3]) {
+  throw new Error(`skills sync applied ${sync.artifactId}, expected ${process.argv[3]}`);
+}
+if (sync.treeDigest !== process.argv[4]) {
+  throw new Error(`skills sync treeDigest ${sync.treeDigest} does not match published ${process.argv[4]}`);
+}
+JS
+  runtime_exec "$container_machine_id" test -f "$marker_path"
+  echo "signed skills bundle converged inside the Agent Runtime"
+
+  # Serve a tampered copy at a second path and replay the sync with the
+  # ORIGINAL sha256: the runtime must refuse it and keep the applied baseline.
+  tampered_path="${tarball_path%.tar.gz}.tampered.tar.gz"
+  tampered_url="${tarball_url%.tar.gz}.tampered.tar.gz"
+  python3 - "$tarball_path" "$tampered_path" <<'PY'
+import sys
+
+data = bytearray(open(sys.argv[1], "rb").read())
+data[len(data) // 2] ^= 0x01
+open(sys.argv[2], "wb").write(bytes(data))
+PY
+  tampered_json="$state_dir/saas-smoke-skills-tampered.json"
+  if runtime_exec "$container_machine_id" finite-agentd skills-sync \
+    --tarball-url "$tampered_url" \
+    --manifest-url "$manifest_url" \
+    --tarball-sha256 "$tarball_sha256" >"$tampered_json" 2>&1; then
+    echo "a tampered skills bundle was unexpectedly accepted" >&2
+    return 1
+  fi
+  runtime_exec "$container_machine_id" test -f "$marker_path"
+  echo "tampered skills bundle refused; managed baseline intact"
+  rm -rf "$skills_tmp" "$tampered_path"
+}
+
 need curl
 need node
 need process-compose
@@ -1615,6 +1699,10 @@ if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_BRAIN_ONLY_SMOKE
 fi
 if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "1" ]]; then
   echo "DEVFINITY_SITES_ONLY_SMOKE must be 0 or 1" >&2
+  exit 64
+fi
+if [[ "${DEVFINITY_SKILLS_SYNC_SMOKE:-0}" != "0" && "${DEVFINITY_SKILLS_SYNC_SMOKE:-0}" != "1" ]]; then
+  echo "DEVFINITY_SKILLS_SYNC_SMOKE must be 0 or 1" >&2
   exit 64
 fi
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "0" \
@@ -1715,6 +1803,17 @@ wait_for_runtime
 container_machine_id="$(runtime_container_id)"
 wait_http "Agent Runtime" "$runtime_url/healthz" 180
 wait_http "Agent contact" "$runtime_url/contact" 180
+if [[ "${DEVFINITY_SKILLS_SYNC_SMOKE:-0}" == "1" ]]; then
+  # Focused variant: drive the full publish -> fetch -> verify -> apply path
+  # through the healthy runtime, then stop. It skips the inference-heavy
+  # assertions the way DEVFINITY_BRAIN_ONLY_SMOKE does.
+  run_skills_sync_smoke
+  echo "devfinity skills sync smoke passed"
+  echo "project_id=$project_id"
+  echo "runtime_id=$machine_id"
+  echo "source_machine_id=$container_machine_id"
+  exit 0
+fi
 start_chat_updates
 wait_for_connected_chat
 if [[ "${DEVFINITY_BRAIN_ONLY_SMOKE:-0}" == "0" && "${DEVFINITY_SITES_ONLY_SMOKE:-0}" == "0" ]]; then

@@ -99,6 +99,26 @@ This does not pass or replace the canonical real-chat acceptance. It only
 skips the three inference reply assertions; the Hosted Web Device must still
 connect, and all Brain/Apple assertions still run.
 
+The skills release channel has its own focused variant that needs no model
+turns. After the runtime is healthy it publishes a signed skills bundle
+carrying a marker skill through `devfinity publish-skills`, drives the exact
+`agent.skills.sync` path in-guest with `finite-agentd skills-sync` over
+`container exec`, asserts convergence, and proves a tampered tarball is
+refused with the applied baseline intact:
+
+```sh
+DEVFINITY_SKILLS_SYNC_SMOKE=1 \
+  FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=devfinity-skills-smoke-unused \
+  just dev saas-smoke
+```
+
+`devfinity publish-skills [--source <dir>] [--version-label <v>]` also works
+standalone against a running stack: it packs `finite-skills/skills` (or
+`--source`) with the run's release key from `<run>/release-keys/`, hosts the
+tarball+manifest from the `skills-releases` static process, registers a
+promoted `skills_bundle` Core artifact, points the canary channel at it, and
+prints the bundle JSON.
+
 The complete Greenfield Brain setup/deletion matrix is a separate disposable
 gate:
 

@@ -18,6 +18,17 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Fetch, verify, and apply one signed skills bundle through the exact
+    /// `agent.skills.sync` command path (operator/test entry, no chat sender).
+    #[command(name = "skills-sync")]
+    SkillsSync {
+        #[arg(long)]
+        tarball_url: String,
+        #[arg(long)]
+        manifest_url: String,
+        #[arg(long)]
+        tarball_sha256: String,
+    },
 }
 
 #[tokio::main]
@@ -45,6 +56,30 @@ async fn run() -> Result<(), finite_agentd::AgentdError> {
                     status.authorized_principals
                 );
             }
+            Ok(())
+        }
+        Command::SkillsSync {
+            tarball_url,
+            manifest_url,
+            tarball_sha256,
+        } => {
+            let request_id = format!(
+                "cli-skills-sync-{}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis())
+                    .unwrap_or(0),
+                std::process::id()
+            );
+            let result = finite_agentd::run_skills_sync_cli(
+                &config,
+                &request_id,
+                &tarball_url,
+                &manifest_url,
+                &tarball_sha256,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
     }

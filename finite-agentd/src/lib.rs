@@ -21,6 +21,7 @@ pub use daemon::{
     read_status, run_daemon,
 };
 pub use ledger::{CommandDecision, Ledger};
+pub use skills::run_skills_sync_cli;
 pub use supervisor::{ProcessStatus, SupervisorStatus};
 
 #[derive(Debug, Error)]

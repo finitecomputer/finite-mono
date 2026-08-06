@@ -11,13 +11,18 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use finitechat_proto::{
+    DeviceRef, RuntimeCommandJsonPayloadV1, RuntimeCommandPayloadKindV1, RuntimeCommandRequestV1,
+    RuntimeCommandTargetV1, RuntimeCommandTerminalStatusV1,
+};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command as TokioCommand;
 
 use crate::AgentdError;
-use crate::daemon::DaemonConfig;
+use crate::daemon::{DaemonConfig, failure_result, load_agent_identity, success_result};
+use crate::ledger::{CommandDecision, Ledger};
 
 pub(crate) const SKILLS_SYNC_SCHEMA: &str = "finite.agent.skills.sync.v1";
 
@@ -156,6 +161,90 @@ pub(crate) async fn sync_skills(
         // Staging is deliberately kept on failure for diagnosis.
         Err(error) => Err(error),
     }
+}
+
+/// One-shot operator/test entry: run exactly the daemon's `agent.skills.sync`
+/// command path — the same settings-from-env resolution, verification, apply
+/// step, and durable ledger recording — without a chat-channel sender.
+///
+/// The ledger is opened the same way `run_daemon` opens it (the agentd state
+/// dir's `agentd.sqlite3`), so a later daemon delivery reusing the request id
+/// replays the recorded result instead of re-executing.
+pub async fn run_skills_sync_cli(
+    config: &DaemonConfig,
+    request_id: &str,
+    tarball_url: &str,
+    manifest_url: &str,
+    tarball_sha256: &str,
+) -> Result<Value, AgentdError> {
+    let request = SkillsSyncRequest {
+        tarball_url: tarball_url.to_owned(),
+        manifest_url: manifest_url.to_owned(),
+        tarball_sha256: tarball_sha256.to_owned(),
+    };
+    let settings = SkillsSyncSettings::from_daemon_config(config);
+    std::fs::create_dir_all(config.state_dir())?;
+    let ledger = Ledger::open(config.state_dir().join("agentd.sqlite3"))?;
+    // In-guest the agent identity file always exists; the fallback keeps the
+    // ledger fingerprint stable for out-of-guest tests and dry runs.
+    let identity = load_agent_identity(&config.agent_home)
+        .unwrap_or_else(|_| DeviceRef::new("local-operator", "agentd-cli"));
+    let command_request = RuntimeCommandRequestV1 {
+        payload_kind: RuntimeCommandPayloadKindV1::Request,
+        request_id: request_id.to_owned(),
+        command: "agent.skills.sync".to_owned(),
+        target: RuntimeCommandTargetV1 {
+            account_id: identity.account_id.clone(),
+            device_id: Some(identity.device_id.clone()),
+        },
+        resource_key: None,
+        body: RuntimeCommandJsonPayloadV1 {
+            schema: SKILLS_SYNC_SCHEMA.to_owned(),
+            json_payload: serde_json::to_vec(&json!({
+                "tarballUrl": request.tarball_url,
+                "manifestUrl": request.manifest_url,
+                "tarballSha256": request.tarball_sha256,
+            }))?,
+        },
+    };
+
+    match ledger.begin_command(&command_request)? {
+        CommandDecision::Replay(result) => replayed_result_value(result),
+        CommandDecision::Execute | CommandDecision::Resume => {
+            match sync_skills(&settings, &request).await {
+                Ok(body) => {
+                    let result = success_result(&command_request, body.clone())?;
+                    ledger.finish_command(request_id, &result)?;
+                    Ok(body)
+                }
+                Err(error) => {
+                    let result = failure_result(&command_request, &error);
+                    ledger.finish_command(request_id, &result)?;
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+fn replayed_result_value(
+    result: finitechat_proto::RuntimeCommandResultV1,
+) -> Result<Value, AgentdError> {
+    if result.status == RuntimeCommandTerminalStatusV1::Succeeded {
+        let body = result
+            .body
+            .map(|body| serde_json::from_slice::<Value>(&body.json_payload))
+            .transpose()?
+            .unwrap_or(Value::Null);
+        return Ok(body);
+    }
+    let message = result
+        .error
+        .map(|error| error.message)
+        .unwrap_or_else(|| "the recorded command failed".to_owned());
+    Err(AgentdError::SkillsBundle(format!(
+        "replayed from the ledger: {message}"
+    )))
 }
 
 fn check_url_policy(url: &str, allow_insecure: bool) -> Result<(), AgentdError> {
@@ -531,6 +620,129 @@ mod tests {
         assert!(
             staging_root.join("skills-demo/tree").exists(),
             "the verified tree must remain for diagnosis"
+        );
+    }
+
+    fn daemon_config(agent_home: &Path, finite_cli: &Path) -> DaemonConfig {
+        DaemonConfig {
+            agent_home: agent_home.to_path_buf(),
+            hermes_home: agent_home.join("hermes-home"),
+            bridge_url: "http://127.0.0.1:1".to_owned(),
+            bridge_addr: "127.0.0.1:1".to_owned(),
+            finitechat_bin: PathBuf::from("/nonexistent"),
+            prepare_command: PathBuf::from("/nonexistent"),
+            hermes_command: PathBuf::from("/nonexistent"),
+            hermes_probe_python: PathBuf::from("python"),
+            hermes_probe_script: PathBuf::from("/nonexistent"),
+            health_python: PathBuf::from("python"),
+            health_script: PathBuf::from("/nonexistent"),
+            authorized_accounts: std::collections::BTreeSet::new(),
+            specialization_bundle: None,
+            release_public_key: Some(hex::encode(test_signing_key().verifying_key().to_bytes())),
+            allow_insecure_bundle_url: true,
+            finite_cli: finite_cli.to_path_buf(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cli_entry_runs_the_daemon_path_and_records_the_result_in_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let packed = packed_bundle(dir.path());
+        let base_url = serve_bytes(vec![
+            (
+                "/skills-demo.tar.gz".to_owned(),
+                std::fs::read(&packed.tarball_path).unwrap(),
+            ),
+            (
+                "/skills-demo.manifest.json".to_owned(),
+                std::fs::read(&packed.manifest_path).unwrap(),
+            ),
+        ])
+        .await;
+        let invocations = dir.path().join("cli-invocations");
+        let cli = write_fake_cli(
+            dir.path(),
+            &format!(
+                "printf 'run\\n' >> {}\nprintf '%s\\n' '{{\"applied\": true, \"skillCount\": 2, \"treeDigest\": \"ignored\"}}'",
+                invocations.display()
+            ),
+        );
+        let agent_home = dir.path().join("agent-home");
+        let config = daemon_config(&agent_home, &cli);
+
+        let first = run_skills_sync_cli(
+            &config,
+            "cli-request-1",
+            &format!("{base_url}/skills-demo.tar.gz"),
+            &format!("{base_url}/skills-demo.manifest.json"),
+            &packed.manifest.tarball_sha256,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first["applied"], json!(true));
+        assert_eq!(first["treeDigest"], json!(packed.manifest.tree_digest));
+        assert!(
+            agent_home.join("agentd/agentd.sqlite3").is_file(),
+            "the CLI must record through the daemon's own ledger file"
+        );
+
+        // The same request id replays the durable terminal result instead of
+        // re-fetching and re-applying — proof the exact daemon ledger path ran.
+        let replayed = run_skills_sync_cli(
+            &config,
+            "cli-request-1",
+            &format!("{base_url}/skills-demo.tar.gz"),
+            &format!("{base_url}/skills-demo.manifest.json"),
+            &packed.manifest.tarball_sha256,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed, first);
+        assert_eq!(
+            std::fs::read_to_string(&invocations)
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "a replayed request id must not run the finite CLI again"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cli_entry_records_failures_and_fails_closed_without_a_release_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = write_fake_cli(dir.path(), "exit 7");
+        let agent_home = dir.path().join("agent-home");
+        let mut config = daemon_config(&agent_home, &cli);
+        config.release_public_key = None;
+
+        let error = run_skills_sync_cli(
+            &config,
+            "cli-request-unkeyed",
+            "https://release.invalid/bundle.tar.gz",
+            "https://release.invalid/bundle.manifest.json",
+            &"a".repeat(64),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AgentdError::MissingReleaseKey));
+
+        // The failure is terminal in the ledger: the same request id replays
+        // the recorded failure without executing again.
+        let replayed = run_skills_sync_cli(
+            &config,
+            "cli-request-unkeyed",
+            "https://release.invalid/bundle.tar.gz",
+            "https://release.invalid/bundle.manifest.json",
+            &"a".repeat(64),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            replayed
+                .public_message()
+                .contains("replayed from the ledger")
         );
     }
 }
