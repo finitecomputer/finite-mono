@@ -35,4 +35,5 @@ tokio.workspace = true
 finitechat-hermes = { path = "../finitechat-hermes" }
 finitechat-mls = { path = "../finitechat-mls" }
 finitechat-server = { path = "../finitechat-server" }
+sha2.workspace = true
 tempfile.workspace = true
