@@ -4,6 +4,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
+async function waitForEventLoopState(condition, { timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return true;
+}
+
 function element(ownerDocument = null) {
   const attributes = new Map();
   return {
@@ -4695,9 +4704,11 @@ function brainNotificationBehaviorTestSeams(options = {}) {
     "The incomplete collaborator renders a repair action",
   );
   renderedRepairButton.click();
-  for (let attempt = 0; attempt < 20 && collaborationPanelPosts.length < 2; attempt += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+  assert.equal(
+    await waitForEventLoopState(() => collaborationPanelPosts.length >= 2),
+    true,
+    "Clicking the rendered Repair action should submit the desired state again",
+  );
   assert.equal(
     collaborationPanelPosts.length,
     2,
@@ -4715,14 +4726,13 @@ function brainNotificationBehaviorTestSeams(options = {}) {
     collaborationPanelPosts[1].body.accessChangeEvent.tags[2][1],
     "add-admin",
   );
-  for (
-    let attempt = 0;
-    attempt < 20 &&
-    collaborationPanelState.accessResult?.title !== "Admin access ready";
-    attempt += 1
-  ) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+  assert.equal(
+    await waitForEventLoopState(
+      () => collaborationPanelState.accessResult?.title === "Admin access ready"
+    ),
+    true,
+    "The collaboration panel should reach the Admin access ready state",
+  );
   assert.equal(collaborationPanelState.accessResult.title, "Admin access ready");
   assert.match(collaborationPanelState.accessResult.detail, /Folder access: 1\/1/);
   assert.equal(
@@ -4808,14 +4818,11 @@ function brainNotificationBehaviorTestSeams(options = {}) {
     };
   };
   const staleAdd = staleCollaborationPanel.seams.addBrainAdminFromPanel();
-  for (
-    let attempt = 0;
-    attempt < 20 && !staleSubmissionStarted;
-    attempt += 1
-  ) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.equal(staleSubmissionStarted, true);
+  assert.equal(
+    await waitForEventLoopState(() => staleSubmissionStarted),
+    true,
+    "stale submission should start",
+  );
   staleCollaborationState.activeBrainId = "replacement-brain";
   staleCollaborationState.sessionEpoch = 71;
   staleCollaborationState.accessResult = {
