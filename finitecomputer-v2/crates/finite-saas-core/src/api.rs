@@ -356,6 +356,8 @@ pub struct UpsertRuntimeArtifactRequest {
     pub base_image: Option<String>,
     #[serde(default)]
     pub recover_known_good_chat: bool,
+    #[serde(default)]
+    pub content_sha256: Option<String>,
     pub promoted: bool,
     pub now: Option<String>,
 }
@@ -1236,6 +1238,7 @@ async fn upsert_runtime_artifact(
                 state_schema_version: input.state_schema_version,
                 base_image: input.base_image,
                 recover_known_good_chat: input.recover_known_good_chat,
+                content_sha256: input.content_sha256,
                 promoted: input.promoted,
                 now: input.now,
             })

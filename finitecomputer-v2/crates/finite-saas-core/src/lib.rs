@@ -41,7 +41,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0015_runner_capacity_fences.sql"),
     "\n",
-    include_str!("../migrations/0016_runtime_cold_relocation.sql")
+    include_str!("../migrations/0016_runtime_cold_relocation.sql"),
+    "\n",
+    include_str!("../migrations/0017_release_channels.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -110,6 +112,19 @@ pub enum RuntimeSummaryStatus {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeArtifactKind {
     OciImage,
+    /// Managed-skills content bundle: an https tarball applied inside the
+    /// guest by `finite skills sync`. Never launchable compute.
+    SkillsBundle,
+    /// Runtime payload generation: an https tarball activated by the shell.
+    /// Never launchable compute. (Consumed from M3 onward.)
+    PayloadBundle,
+}
+
+impl RuntimeArtifactKind {
+    /// Bundle kinds are fetched-and-verified content, not runnable images.
+    pub fn is_bundle(self) -> bool {
+        matches!(self, Self::SkillsBundle | Self::PayloadBundle)
+    }
 }
 
 /// Customer-facing hosting promise. Provider placement remains a separate,
@@ -525,6 +540,14 @@ pub enum CoreError {
     MissingRuntimeArtifactVersionLabel,
     #[error("runtime artifact state schema version is required")]
     MissingRuntimeArtifactStateSchemaVersion,
+    #[error("runtime artifact content sha256 is required for bundle artifacts")]
+    MissingRuntimeArtifactContentSha256,
+    #[error("runtime artifact content sha256 must be 64 lowercase hex characters")]
+    InvalidRuntimeArtifactContentSha256,
+    #[error("bundle artifact reference must be an https URL")]
+    InvalidBundleArtifactReference,
+    #[error("release channel head artifact kind does not match the artifact")]
+    ReleaseChannelArtifactKindMismatch,
     #[error("runtime artifact was not found")]
     RuntimeArtifactNotFound,
     #[error("runtime artifact is not promoted")]
@@ -801,9 +824,69 @@ pub struct RuntimeArtifact {
     pub base_image: Option<String>,
     #[serde(default)]
     pub recover_known_good_chat: bool,
+    /// Sha256 of the bundle tarball for bundle kinds; None for OCI images,
+    /// whose digest lives in the immutable reference.
+    #[serde(default)]
+    pub content_sha256: Option<String>,
     pub created_at: String,
     pub promoted_at: Option<String>,
     pub retired_at: Option<String>,
+}
+
+/// A release channel names the head artifact agents subscribed to that
+/// channel should converge on, per artifact kind. Channels are a closed set;
+/// membership lives on the agent, never in this table.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseChannelName {
+    Stable,
+    Canary,
+}
+
+impl ReleaseChannelName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Canary => "canary",
+        }
+    }
+}
+
+impl std::str::FromStr for ReleaseChannelName {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "stable" => Ok(Self::Stable),
+            "canary" => Ok(Self::Canary),
+            other => Err(format!("invalid release channel {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseChannelHead {
+    pub channel: ReleaseChannelName,
+    pub artifact_kind: RuntimeArtifactKind,
+    pub artifact_id: String,
+    pub updated_at: String,
+}
+
+pub(crate) fn release_channel_key(
+    channel: ReleaseChannelName,
+    kind: RuntimeArtifactKind,
+) -> String {
+    format!("{}/{}", channel.as_str(), kind.as_str())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetReleaseChannelHeadInput {
+    pub channel: ReleaseChannelName,
+    pub artifact_kind: RuntimeArtifactKind,
+    pub artifact_id: String,
+    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1089,6 +1172,8 @@ pub struct UpsertRuntimeArtifactInput {
     pub base_image: Option<String>,
     #[serde(default)]
     pub recover_known_good_chat: bool,
+    #[serde(default)]
+    pub content_sha256: Option<String>,
     pub promoted: bool,
     pub now: Option<String>,
 }
@@ -1390,6 +1475,9 @@ pub struct BridgeCoreState {
     #[serde(default)]
     pub finite_private_notice_claims: BTreeSet<String>,
     pub customer_billing_accounts: BTreeMap<String, CustomerBillingAccount>,
+    /// Keyed by `"{channel}/{artifact_kind}"` (see [`release_channel_key`]).
+    #[serde(default)]
+    pub release_channel_heads: BTreeMap<String, ReleaseChannelHead>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -6347,6 +6435,8 @@ impl BridgeCoreState {
             .ok_or(CoreError::MissingRuntimeArtifactVersionLabel)?;
         let state_schema_version = trim_to_option(Some(&input.state_schema_version))
             .ok_or(CoreError::MissingRuntimeArtifactStateSchemaVersion)?;
+        let content_sha256 = trim_to_option(input.content_sha256.as_deref());
+        validate_runtime_artifact_content(input.kind, &reference, content_sha256.as_deref())?;
         let existing = self.runtime_artifacts.get(&id).cloned();
         let created_at = existing
             .as_ref()
@@ -6374,6 +6464,7 @@ impl BridgeCoreState {
             state_schema_version,
             base_image: trim_to_option(input.base_image.as_deref()),
             recover_known_good_chat: input.recover_known_good_chat,
+            content_sha256,
             created_at,
             promoted_at,
             retired_at: existing
@@ -6392,6 +6483,47 @@ impl BridgeCoreState {
         }
         self.runtime_artifacts.insert(id, artifact.clone());
         Ok(artifact)
+    }
+
+    pub fn set_release_channel_head(
+        &mut self,
+        input: SetReleaseChannelHeadInput,
+    ) -> CoreResult<ReleaseChannelHead> {
+        let now = input.now.unwrap_or(current_time_iso()?);
+        let artifact_id =
+            trim_to_option(Some(&input.artifact_id)).ok_or(CoreError::MissingRuntimeArtifactId)?;
+        let artifact = self
+            .runtime_artifacts
+            .get(&artifact_id)
+            .ok_or(CoreError::RuntimeArtifactNotFound)?;
+        if artifact.kind != input.artifact_kind {
+            return Err(CoreError::ReleaseChannelArtifactKindMismatch);
+        }
+        if artifact.promoted_at.is_none() {
+            return Err(CoreError::RuntimeArtifactNotPromoted);
+        }
+        if artifact.retired_at.is_some() {
+            return Err(CoreError::RuntimeArtifactRetired);
+        }
+        let head = ReleaseChannelHead {
+            channel: input.channel,
+            artifact_kind: input.artifact_kind,
+            artifact_id,
+            updated_at: now,
+        };
+        self.release_channel_heads
+            .insert(release_channel_key(input.channel, input.artifact_kind), head.clone());
+        Ok(head)
+    }
+
+    pub fn release_channel_head(
+        &self,
+        channel: ReleaseChannelName,
+        kind: RuntimeArtifactKind,
+    ) -> Option<ReleaseChannelHead> {
+        self.release_channel_heads
+            .get(&release_channel_key(channel, kind))
+            .cloned()
     }
 
     fn launchable_runtime_artifact(&self, id: &str) -> CoreResult<RuntimeArtifact> {
@@ -6654,6 +6786,8 @@ impl RuntimeArtifactKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OciImage => "oci_image",
+            Self::SkillsBundle => "skills_bundle",
+            Self::PayloadBundle => "payload_bundle",
         }
     }
 }
@@ -6772,6 +6906,8 @@ impl FinitePrivateSettlementKind {
 pub fn parse_runtime_artifact_kind(value: &str) -> Option<RuntimeArtifactKind> {
     match value {
         "oci_image" => Some(RuntimeArtifactKind::OciImage),
+        "skills_bundle" => Some(RuntimeArtifactKind::SkillsBundle),
+        "payload_bundle" => Some(RuntimeArtifactKind::PayloadBundle),
         _ => None,
     }
 }
@@ -7982,6 +8118,34 @@ pub(crate) fn runtime_artifact_material_matches(
         && existing.state_schema_version == candidate.state_schema_version
         && existing.base_image == candidate.base_image
         && existing.recover_known_good_chat == candidate.recover_known_good_chat
+        && existing.content_sha256 == candidate.content_sha256
+}
+
+/// Bundle artifacts must pin their content by sha256 and fetch over https;
+/// OCI images must not carry a content digest (theirs lives in the reference).
+pub(crate) fn validate_runtime_artifact_content(
+    kind: RuntimeArtifactKind,
+    reference: &str,
+    content_sha256: Option<&str>,
+) -> CoreResult<()> {
+    if kind.is_bundle() {
+        let digest = content_sha256.ok_or(CoreError::MissingRuntimeArtifactContentSha256)?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(CoreError::InvalidRuntimeArtifactContentSha256);
+        }
+        // https-only is enforced by the in-guest fetcher (dev harnesses serve
+        // bundles over local http); Core only pins the reference shape.
+        if !reference.starts_with("https://") && !reference.starts_with("http://") {
+            return Err(CoreError::InvalidBundleArtifactReference);
+        }
+    } else if content_sha256.is_some() {
+        return Err(CoreError::InvalidRuntimeArtifactContentSha256);
+    }
+    Ok(())
 }
 
 pub(crate) fn runtime_upgrade_prelease_rejection_is_terminal(error: &CoreError) -> bool {
@@ -9658,6 +9822,162 @@ mod tests {
         );
     }
 
+    fn skills_bundle_input(id: &str, digest: &str, promoted: bool) -> UpsertRuntimeArtifactInput {
+        UpsertRuntimeArtifactInput {
+            id: id.to_string(),
+            kind: RuntimeArtifactKind::SkillsBundle,
+            reference: format!("https://releases.finite.computer/skills/{id}.tar.zst"),
+            version_label: id.to_string(),
+            source_git_sha: Some("git-skills".to_string()),
+            finitec_version: None,
+            hermes_source_ref: None,
+            finite_platform_plugin_ref: None,
+            state_schema_version: "finite-skills-tree-v1".to_string(),
+            base_image: None,
+            recover_known_good_chat: false,
+            content_sha256: Some(digest.to_string()),
+            promoted,
+            now: Some(NOW.to_string()),
+        }
+    }
+
+    #[test]
+    fn bundle_artifacts_require_pinned_content_and_url_reference() {
+        let mut state = BridgeCoreState::default();
+        let digest = "c".repeat(64);
+
+        let mut missing = skills_bundle_input("finite-skills-v1", &digest, true);
+        missing.content_sha256 = None;
+        assert!(matches!(
+            state.upsert_runtime_artifact(missing).unwrap_err(),
+            CoreError::MissingRuntimeArtifactContentSha256
+        ));
+
+        let mut malformed = skills_bundle_input("finite-skills-v1", &digest, true);
+        malformed.content_sha256 = Some("C".repeat(64));
+        assert!(matches!(
+            state.upsert_runtime_artifact(malformed).unwrap_err(),
+            CoreError::InvalidRuntimeArtifactContentSha256
+        ));
+
+        let mut bad_reference = skills_bundle_input("finite-skills-v1", &digest, true);
+        bad_reference.reference = "ghcr.io/finite/skills@sha256:abc".to_string();
+        assert!(matches!(
+            state.upsert_runtime_artifact(bad_reference).unwrap_err(),
+            CoreError::InvalidBundleArtifactReference
+        ));
+
+        let mut image_with_digest = skills_bundle_input("finite-skills-v1", &digest, true);
+        image_with_digest.kind = RuntimeArtifactKind::OciImage;
+        image_with_digest.reference =
+            format!("ghcr.io/finite/runtime@sha256:{}", "d".repeat(64));
+        assert!(matches!(
+            state.upsert_runtime_artifact(image_with_digest).unwrap_err(),
+            CoreError::InvalidRuntimeArtifactContentSha256
+        ));
+
+        let stored = state
+            .upsert_runtime_artifact(skills_bundle_input("finite-skills-v1", &digest, true))
+            .unwrap();
+        assert_eq!(stored.content_sha256.as_deref(), Some(digest.as_str()));
+
+        // Bundles are release material: content mutation after promotion refuses.
+        let mut mutation = skills_bundle_input("finite-skills-v1", &"e".repeat(64), true);
+        mutation.now = Some(LATER.to_string());
+        assert!(matches!(
+            state.upsert_runtime_artifact(mutation).unwrap_err(),
+            CoreError::RuntimeArtifactImmutable
+        ));
+    }
+
+    #[test]
+    fn release_channel_heads_point_at_promoted_matching_artifacts() {
+        let mut state = BridgeCoreState::default();
+        let digest = "f".repeat(64);
+        state
+            .upsert_runtime_artifact(skills_bundle_input("finite-skills-v1", &digest, true))
+            .unwrap();
+        state
+            .upsert_runtime_artifact(skills_bundle_input("finite-skills-unpromoted", &digest, false))
+            .unwrap();
+
+        assert!(matches!(
+            state
+                .set_release_channel_head(SetReleaseChannelHeadInput {
+                    channel: ReleaseChannelName::Canary,
+                    artifact_kind: RuntimeArtifactKind::SkillsBundle,
+                    artifact_id: "missing".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .unwrap_err(),
+            CoreError::RuntimeArtifactNotFound
+        ));
+        assert!(matches!(
+            state
+                .set_release_channel_head(SetReleaseChannelHeadInput {
+                    channel: ReleaseChannelName::Canary,
+                    artifact_kind: RuntimeArtifactKind::PayloadBundle,
+                    artifact_id: "finite-skills-v1".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .unwrap_err(),
+            CoreError::ReleaseChannelArtifactKindMismatch
+        ));
+        assert!(matches!(
+            state
+                .set_release_channel_head(SetReleaseChannelHeadInput {
+                    channel: ReleaseChannelName::Canary,
+                    artifact_kind: RuntimeArtifactKind::SkillsBundle,
+                    artifact_id: "finite-skills-unpromoted".to_string(),
+                    now: Some(NOW.to_string()),
+                })
+                .unwrap_err(),
+            CoreError::RuntimeArtifactNotPromoted
+        ));
+
+        let head = state
+            .set_release_channel_head(SetReleaseChannelHeadInput {
+                channel: ReleaseChannelName::Canary,
+                artifact_kind: RuntimeArtifactKind::SkillsBundle,
+                artifact_id: "finite-skills-v1".to_string(),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        assert_eq!(head.artifact_id, "finite-skills-v1");
+        assert_eq!(
+            state
+                .release_channel_head(
+                    ReleaseChannelName::Canary,
+                    RuntimeArtifactKind::SkillsBundle
+                )
+                .unwrap()
+                .artifact_id,
+            "finite-skills-v1"
+        );
+        assert!(
+            state
+                .release_channel_head(
+                    ReleaseChannelName::Stable,
+                    RuntimeArtifactKind::SkillsBundle
+                )
+                .is_none()
+        );
+
+        // Repointing an existing head is a plain update, not an error.
+        state
+            .upsert_runtime_artifact(skills_bundle_input("finite-skills-v2", &"a".repeat(64), true))
+            .unwrap();
+        let repointed = state
+            .set_release_channel_head(SetReleaseChannelHeadInput {
+                channel: ReleaseChannelName::Canary,
+                artifact_kind: RuntimeArtifactKind::SkillsBundle,
+                artifact_id: "finite-skills-v2".to_string(),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        assert_eq!(repointed.artifact_id, "finite-skills-v2");
+    }
+
     #[test]
     fn promoted_or_runtime_referenced_artifact_material_is_immutable() {
         let mut state = BridgeCoreState::default();
@@ -9673,6 +9993,7 @@ mod tests {
             state_schema_version: "state-v1".to_string(),
             base_image: Some("base-v1".to_string()),
             recover_known_good_chat: false,
+            content_sha256: None,
             promoted: false,
             now: Some(NOW.to_string()),
         };
@@ -9759,6 +10080,7 @@ mod tests {
                 state_schema_version: "state-v1".to_string(),
                 base_image: Some("python:3.11-trixie".to_string()),
                 recover_known_good_chat: false,
+                content_sha256: None,
                 promoted: false,
                 now: Some(NOW.to_string()),
             })
@@ -13716,6 +14038,7 @@ mod tests {
                 state_schema_version: state_schema_version.to_string(),
                 base_image: Some("python:3.11-trixie".to_string()),
                 recover_known_good_chat: false,
+                content_sha256: None,
                 promoted: true,
                 now: Some(now.to_string()),
             })

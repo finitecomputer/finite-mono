@@ -27,6 +27,7 @@ use crate::{
     ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
     ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
+    ReleaseChannelHead, ReleaseChannelName, RuntimeArtifactKind, SetReleaseChannelHeadInput,
     ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
     RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
     RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
@@ -64,6 +65,7 @@ use crate::{
     runtime_spec_v1, runtime_upgrade_contact_endpoint,
     runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
     source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
+    validate_runtime_artifact_content,
     validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
     validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
     validate_runtime_spec_binding, validate_runtime_spec_environment,
@@ -546,6 +548,27 @@ impl CoreStore {
         match self {
             Self::Memory(store) => store.upsert_runtime_artifact(input).await,
             Self::Postgres(store) => store.upsert_runtime_artifact(input).await,
+        }
+    }
+
+    pub async fn set_release_channel_head(
+        &self,
+        input: SetReleaseChannelHeadInput,
+    ) -> CoreResult<ReleaseChannelHead> {
+        match self {
+            Self::Memory(store) => store.set_release_channel_head(input).await,
+            Self::Postgres(store) => store.set_release_channel_head(input).await,
+        }
+    }
+
+    pub async fn release_channel_head(
+        &self,
+        channel: ReleaseChannelName,
+        kind: RuntimeArtifactKind,
+    ) -> CoreResult<Option<ReleaseChannelHead>> {
+        match self {
+            Self::Memory(store) => store.release_channel_head(channel, kind).await,
+            Self::Postgres(store) => store.release_channel_head(channel, kind).await,
         }
     }
 
@@ -1244,6 +1267,23 @@ impl MemoryCoreStore {
     ) -> CoreResult<RuntimeArtifact> {
         let mut state = self.state.lock().await;
         state.upsert_runtime_artifact(input)
+    }
+
+    pub async fn set_release_channel_head(
+        &self,
+        input: SetReleaseChannelHeadInput,
+    ) -> CoreResult<ReleaseChannelHead> {
+        let mut state = self.state.lock().await;
+        state.set_release_channel_head(input)
+    }
+
+    pub async fn release_channel_head(
+        &self,
+        channel: ReleaseChannelName,
+        kind: RuntimeArtifactKind,
+    ) -> CoreResult<Option<ReleaseChannelHead>> {
+        let state = self.state.lock().await;
+        Ok(state.release_channel_head(channel, kind))
     }
 
     pub async fn approve_finite_private_grant(
@@ -2117,6 +2157,35 @@ impl PostgresCoreStore {
         let artifact = postgres_upsert_runtime_artifact(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(artifact)
+    }
+
+    pub async fn set_release_channel_head(
+        &self,
+        input: SetReleaseChannelHeadInput,
+    ) -> CoreResult<ReleaseChannelHead> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let head = postgres_set_release_channel_head(&*tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(head)
+    }
+
+    pub async fn release_channel_head(
+        &self,
+        channel: ReleaseChannelName,
+        kind: RuntimeArtifactKind,
+    ) -> CoreResult<Option<ReleaseChannelHead>> {
+        let client = self.connection().await?;
+        let row = client
+            .query_opt(
+                "SELECT channel, artifact_kind, artifact_id, updated_at::text
+                 FROM release_channel_heads
+                 WHERE channel = $1 AND artifact_kind = $2",
+                &[&channel.as_str(), &kind.as_str()],
+            )
+            .await
+            .map_err(store_error)?;
+        row.map(|row| release_channel_head_from_row(&row)).transpose()
     }
 
     pub async fn approve_finite_private_grant(
@@ -4626,6 +4695,7 @@ fn runtime_artifact_from_row(row: &Row) -> CoreResult<RuntimeArtifact> {
         state_schema_version: row.get("state_schema_version"),
         base_image: row.get("base_image"),
         recover_known_good_chat: row.get("recover_known_good_chat"),
+        content_sha256: row.get("content_sha256"),
         created_at: row.get("created_at"),
         promoted_at: row.get("promoted_at"),
         retired_at: row.get("retired_at"),
@@ -4848,7 +4918,7 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, content_sha256,
                     created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts WHERE id = $1",
             &[&artifact_id],
@@ -4867,7 +4937,7 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, content_sha256,
                     created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts
              WHERE promoted_at IS NOT NULL AND retired_at IS NULL AND kind = 'oci_image'
@@ -7973,6 +8043,73 @@ where
     })
 }
 
+fn release_channel_head_from_row(row: &Row) -> CoreResult<ReleaseChannelHead> {
+    let channel: String = row.get("channel");
+    let kind: String = row.get("artifact_kind");
+    Ok(ReleaseChannelHead {
+        channel: channel
+            .parse()
+            .map_err(|error: String| CoreError::Store(error))?,
+        artifact_kind: parse_runtime_artifact_kind(&kind)
+            .ok_or_else(|| CoreError::Store(format!("invalid runtime artifact kind {kind}")))?,
+        artifact_id: row.get("artifact_id"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+async fn postgres_set_release_channel_head<C>(
+    client: &C,
+    input: SetReleaseChannelHeadInput,
+) -> CoreResult<ReleaseChannelHead>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let artifact_id =
+        trim_to_option(Some(&input.artifact_id)).ok_or(CoreError::MissingRuntimeArtifactId)?;
+    let artifact = client
+        .query_opt(
+            "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
+                    hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
+                    base_image, recover_known_good_chat, content_sha256,
+                    created_at::text, promoted_at::text, retired_at::text
+             FROM runtime_artifacts WHERE id = $1 FOR SHARE",
+            &[&artifact_id],
+        )
+        .await
+        .map_err(store_error)?
+        .map(|row| runtime_artifact_from_row(&row))
+        .transpose()?
+        .ok_or(CoreError::RuntimeArtifactNotFound)?;
+    if artifact.kind != input.artifact_kind {
+        return Err(CoreError::ReleaseChannelArtifactKindMismatch);
+    }
+    if artifact.promoted_at.is_none() {
+        return Err(CoreError::RuntimeArtifactNotPromoted);
+    }
+    if artifact.retired_at.is_some() {
+        return Err(CoreError::RuntimeArtifactRetired);
+    }
+    let row = client
+        .query_one(
+            "INSERT INTO release_channel_heads (channel, artifact_kind, artifact_id, updated_at)
+             VALUES ($1, $2, $3, $4::text::timestamptz)
+             ON CONFLICT (channel, artifact_kind) DO UPDATE SET
+               artifact_id = EXCLUDED.artifact_id,
+               updated_at = EXCLUDED.updated_at
+             RETURNING channel, artifact_kind, artifact_id, updated_at::text",
+            &[
+                &input.channel.as_str(),
+                &input.artifact_kind.as_str(),
+                &artifact_id,
+                &now,
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+    release_channel_head_from_row(&row)
+}
+
 async fn postgres_upsert_runtime_artifact<C>(
     client: &C,
     input: UpsertRuntimeArtifactInput,
@@ -7988,13 +8125,15 @@ where
         .ok_or(CoreError::MissingRuntimeArtifactVersionLabel)?;
     let state_schema_version = trim_to_option(Some(&input.state_schema_version))
         .ok_or(CoreError::MissingRuntimeArtifactStateSchemaVersion)?;
+    let content_sha256 = trim_to_option(input.content_sha256.as_deref());
+    validate_runtime_artifact_content(input.kind, &reference, content_sha256.as_deref())?;
     // Lock the existing row (if any) so created_at/promoted_at/retired_at are
     // preserved deterministically under concurrent upserts.
     let existing = client
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, content_sha256,
                     created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts WHERE id = $1 FOR UPDATE",
             &[&id],
@@ -8030,6 +8169,7 @@ where
         state_schema_version,
         base_image: trim_to_option(input.base_image.as_deref()),
         recover_known_good_chat: input.recover_known_good_chat,
+        content_sha256,
         created_at,
         promoted_at,
         retired_at: existing_retired_at,
@@ -8056,11 +8196,12 @@ where
             "INSERT INTO runtime_artifacts (
                id, kind, reference, version_label, source_git_sha, finitec_version,
                hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-               base_image, recover_known_good_chat, created_at, promoted_at, retired_at
+               base_image, recover_known_good_chat, content_sha256, created_at,
+               promoted_at, retired_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                     $11, $12::text::timestamptz, $13::text::timestamptz,
-                     $14::text::timestamptz)
+                     $11, $12, $13::text::timestamptz, $14::text::timestamptz,
+                     $15::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                kind = EXCLUDED.kind,
                reference = EXCLUDED.reference,
@@ -8072,11 +8213,12 @@ where
                state_schema_version = EXCLUDED.state_schema_version,
                base_image = EXCLUDED.base_image,
                recover_known_good_chat = EXCLUDED.recover_known_good_chat,
+               content_sha256 = EXCLUDED.content_sha256,
                promoted_at = EXCLUDED.promoted_at,
                retired_at = EXCLUDED.retired_at
              RETURNING id, kind, reference, version_label, source_git_sha, finitec_version,
                        hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                       base_image, recover_known_good_chat,
+                       base_image, recover_known_good_chat, content_sha256,
                        created_at::text, promoted_at::text, retired_at::text",
             &[
                 &artifact.id,
@@ -8090,6 +8232,7 @@ where
                 &artifact.state_schema_version,
                 &artifact.base_image,
                 &artifact.recover_known_good_chat,
+                &artifact.content_sha256,
                 &artifact.created_at,
                 &artifact.promoted_at,
                 &artifact.retired_at,
@@ -10026,6 +10169,7 @@ mod tests {
                 state_schema_version: "state-v1".to_string(),
                 base_image: Some("python:3.11-trixie".to_string()),
                 recover_known_good_chat: false,
+                content_sha256: None,
                 promoted: true,
                 now: Some("2000-01-01T00:00:00Z".to_string()),
             })
@@ -10914,6 +11058,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -11791,6 +11936,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: Some("2026-05-28T12:00:00Z".to_string()),
                 })
@@ -12172,6 +12318,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -12480,6 +12627,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -12610,6 +12758,7 @@ mod tests {
                 state_schema_version: "state-v1".to_string(),
                 base_image: None,
                 recover_known_good_chat: false,
+                content_sha256: None,
                 promoted: true,
                 now: None,
             };
@@ -12760,6 +12909,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,
                     recover_known_good_chat: true,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -13832,6 +13982,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -14189,6 +14340,92 @@ mod tests {
     /// `billing_overview` is a READ: it must perform NO writes. We run it inside a
     /// genuinely read-only transaction and additionally assert the billing row's
     /// `updated_at` is byte-for-byte unchanged across the call.
+    #[tokio::test]
+    async fn postgres_release_channel_head_roundtrip_with_bundle_artifact() {
+        with_isolated_postgres(|store| async move {
+            let digest = "b".repeat(64);
+            let bundle = store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "finite-skills-2026-08-06.1".to_string(),
+                    kind: RuntimeArtifactKind::SkillsBundle,
+                    reference:
+                        "https://releases.finite.computer/skills/finite-skills-2026-08-06.1.tar.zst"
+                            .to_string(),
+                    version_label: "2026-08-06.1".to_string(),
+                    source_git_sha: Some("git-skills".to_string()),
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "finite-skills-tree-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    content_sha256: Some(digest.clone()),
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(bundle.content_sha256.as_deref(), Some(digest.as_str()));
+
+            assert!(
+                store
+                    .release_channel_head(
+                        ReleaseChannelName::Canary,
+                        RuntimeArtifactKind::SkillsBundle
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let head = store
+                .set_release_channel_head(SetReleaseChannelHeadInput {
+                    channel: ReleaseChannelName::Canary,
+                    artifact_kind: RuntimeArtifactKind::SkillsBundle,
+                    artifact_id: bundle.id.clone(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(head.artifact_id, bundle.id);
+            let read_back = store
+                .release_channel_head(
+                    ReleaseChannelName::Canary,
+                    RuntimeArtifactKind::SkillsBundle,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(read_back.artifact_id, bundle.id);
+            assert_eq!(read_back.artifact_kind, RuntimeArtifactKind::SkillsBundle);
+
+            // Kind mismatch and unknown artifacts refuse on the SQL path too.
+            assert!(matches!(
+                store
+                    .set_release_channel_head(SetReleaseChannelHeadInput {
+                        channel: ReleaseChannelName::Canary,
+                        artifact_kind: RuntimeArtifactKind::PayloadBundle,
+                        artifact_id: bundle.id.clone(),
+                        now: None,
+                    })
+                    .await
+                    .unwrap_err(),
+                CoreError::ReleaseChannelArtifactKindMismatch
+            ));
+
+            // The bundle never becomes launch material: the launch path's
+            // latest-artifact selection must still ignore it.
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let latest = select_latest_launchable_runtime_artifact(&raw).await.unwrap();
+            assert_eq!(latest.kind, RuntimeArtifactKind::OciImage);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn postgres_billing_overview_performs_no_writes() {
         with_isolated_postgres(|store| async move {
