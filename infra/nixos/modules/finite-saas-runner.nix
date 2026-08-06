@@ -121,6 +121,9 @@
 
       # Operator-created root:root 0600. Names and examples live in
       # infra/hosts/lat1/systemd/runner.env.example; values stay host-only.
+      # kata-runner-host.nix prepends the Nix-rendered shared non-secret
+      # defaults, so this file keeps credentials and bounded incident
+      # overrides.
       EnvironmentFile = [ "/etc/finite/runner.env" ];
       Environment = [
         "HOME=/var/lib/finite-saas-runner"

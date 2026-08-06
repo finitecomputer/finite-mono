@@ -25,9 +25,22 @@ in
     ./invariants.nix
     ./storage-health.nix
     ../../modules/finite-saas-runner.nix
+    ../../modules/kata-runner-host.nix
   ];
 
   networking.hostName = "finite-lat-3";
+
+  # Shared Kata Runner role (modules/kata-runner-host.nix); only genuine host
+  # differences are declared here. Core is remote, so sandboxes are reached
+  # through this host's private WireGuard overlay address.
+  finite.kataRunnerHost = {
+    coreUrl = "http://10.254.3.1:14200";
+    runnerId = "finite-kata-runner-3";
+    sourceHostId = "finite-lat-3";
+    workRoot = "/data/finite-saas-runner";
+    kataHostAddress = "10.254.3.2";
+    maxSandboxes = 32;
+  };
 
   assertions = [
     {

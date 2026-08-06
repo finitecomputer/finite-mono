@@ -10,6 +10,7 @@ in
     ./disko.nix
     ../../modules/finite-saas-core.nix
     ../../modules/finite-saas-runner.nix
+    ../../modules/kata-runner-host.nix
     ../../modules/finite-saas-phala-runner.nix
     ../../modules/finite-identity.nix
     ../../modules/finitechat-server.nix
@@ -25,6 +26,18 @@ in
   ];
 
   networking.hostName = "finite-lat-1";
+
+  # Shared Kata Runner role (modules/kata-runner-host.nix); only genuine host
+  # differences are declared here. Core and this Runner share the host, so the
+  # runner keeps its loopback sandbox address default.
+  finite.kataRunnerHost = {
+    coreUrl = "http://127.0.0.1:4200";
+    runnerId = "finite-kata-runner-1";
+    sourceHostId = "finite-lat-1";
+    workRoot = "/var/lib/finite-saas-runner";
+    kataHostAddress = null;
+    maxSandboxes = 12;
+  };
 
   # Reuse the existing finitecomputer rsync.net destination account, with a
   # repository dedicated to lat1 so encryption and retention are not coupled
