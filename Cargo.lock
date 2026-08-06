@@ -1040,8 +1040,11 @@ name = "finite-agentd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ed25519-dalek",
+ "finite-release",
  "finitechat-proto 0.1.0",
  "futures-util",
+ "hex",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1207,6 +1210,25 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "finite-release"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "clap",
+ "ed25519-dalek",
+ "flate2",
+ "getrandom 0.3.4",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "time",
 ]
 
 [[package]]

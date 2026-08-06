@@ -12,6 +12,7 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -39,11 +40,11 @@ def _testing() -> bool:
     return os.environ.get(TEST_MODE_ENV) == "1"
 
 
-def _paths() -> tuple[Path, Path]:
+def _paths(source_override: Path | None = None) -> tuple[Path, Path]:
     if _testing():
         source = Path(os.environ.get(TEST_SOURCE_ENV, DEFAULT_BUNDLED_SKILLS))
         agent_home = Path(os.environ.get(TEST_AGENT_HOME_ENV, DEFAULT_AGENT_HOME))
-        return source, agent_home
+        return source_override or source, agent_home
 
     test_overrides = (TEST_SOURCE_ENV, TEST_AGENT_HOME_ENV, TEST_FAILPOINT_ENV)
     leaked = [name for name in test_overrides if os.environ.get(name)]
@@ -51,7 +52,7 @@ def _paths() -> tuple[Path, Path]:
         raise SyncError(
             f"test-only skills sync overrides require {TEST_MODE_ENV}=1: {', '.join(leaked)}"
         )
-    return DEFAULT_BUNDLED_SKILLS, DEFAULT_AGENT_HOME
+    return source_override or DEFAULT_BUNDLED_SKILLS, DEFAULT_AGENT_HOME
 
 
 def _failpoint(name: str) -> None:
@@ -214,8 +215,8 @@ def _remove_staging(staging_root: Path) -> None:
         return
 
 
-def sync_skills() -> tuple[str, int]:
-    source, agent_home = _paths()
+def sync_skills(source_override: Path | None = None) -> tuple[str, int]:
+    source, agent_home = _paths(source_override)
     managed_root = agent_home / "managed-skills"
     managed_parent = managed_root / "finite"
     current = managed_parent / "current"
@@ -304,20 +305,45 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     skills = commands.add_parser("skills", help="manage Finite-managed skills")
     skills_commands = skills.add_subparsers(dest="skills_command", required=True)
-    _ = skills_commands.add_parser(
+    sync = skills_commands.add_parser(
         "sync", help="adopt the tested Finite Skills bundle in this runtime image"
+    )
+    _ = sync.add_argument(
+        "--source",
+        type=Path,
+        default=None,
+        help="adopt this already-verified skills tree instead of the bundled /runtime copy",
+    )
+    _ = sync.add_argument(
+        "--json",
+        action="store_true",
+        help="print a machine-readable JSON result on success",
     )
     return parser
 
 
 def main() -> int:
-    _ = _parser().parse_args()
+    args = _parser().parse_args()
+    source_override: Path | None = args.source
     try:
-        digest, skill_count = sync_skills()
+        digest, skill_count = sync_skills(source_override)
     except (OSError, SyncError) as exc:
         print(f"finite skills sync failed: {exc}", file=sys.stderr)
         return 1
-    print(f"Finite Skills synced from this Runtime image: {skill_count} skills (sha256:{digest}).")
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "applied": True,
+                    "skillCount": skill_count,
+                    "treeDigest": digest,
+                    "source": str(source_override) if source_override else "runtime-image",
+                }
+            )
+        )
+        return 0
+    origin = str(source_override) if source_override is not None else "this Runtime image"
+    print(f"Finite Skills synced from {origin}: {skill_count} skills (sha256:{digest}).")
     print("New skill names appear after Hermes /reload-skills; no Runtime reboot is needed.")
     return 0
 

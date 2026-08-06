@@ -2,6 +2,7 @@ mod config;
 mod connections;
 mod daemon;
 mod ledger;
+mod skills;
 mod supervisor;
 mod transport;
 
@@ -50,6 +51,10 @@ pub enum AgentdError {
     Supervisor(String),
     #[error("authorization failure")]
     Unauthorized,
+    #[error("release public key is not configured")]
+    MissingReleaseKey,
+    #[error("skills bundle rejected: {0}")]
+    SkillsBundle(String),
     #[error("unsupported command: {0}")]
     UnsupportedCommand(String),
     #[error("invalid command payload: {0}")]
@@ -60,6 +65,8 @@ impl AgentdError {
     pub fn public_code(&self) -> &'static str {
         match self {
             Self::Unauthorized => "unauthorized",
+            Self::MissingReleaseKey => "release_key_missing",
+            Self::SkillsBundle(_) => "skills_bundle_rejected",
             Self::UnsupportedCommand(_) => "unsupported_command",
             Self::InvalidPayload(_) => "invalid_payload",
             Self::ConflictingRequestId(_) => "conflicting_request_id",
@@ -77,12 +84,17 @@ impl AgentdError {
             Self::Unauthorized => {
                 "This Principal is not authorized to manage the agent.".to_owned()
             }
+            Self::MissingReleaseKey => {
+                "FINITE_RELEASE_PUBLIC_KEY is not configured; refusing to fetch or verify a skills bundle."
+                    .to_owned()
+            }
             Self::UnsupportedCommand(command) => format!("Command {command:?} is not supported."),
             Self::InvalidPayload(message)
             | Self::ConfigConflict(message)
             | Self::Config(message)
             | Self::Supervisor(message)
             | Self::Transport(message)
+            | Self::SkillsBundle(message)
             | Self::Ledger(message) => truncate(message, 512),
             Self::UnsupportedConfigPath(path) => {
                 format!("Configuration path {path:?} is not supported.")

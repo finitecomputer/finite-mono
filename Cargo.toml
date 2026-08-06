@@ -10,6 +10,7 @@ members = [
     "finite-brain/crates/finite-brain-store",
     "finite-identity",
     "finite-nostr",
+    "finite-release",
     "finitecomputer-v2/crates/finite-core",
     "finitecomputer-v2/crates/finite-private-limiter",
     "finitecomputer-v2/crates/finite-saas-core",
@@ -51,11 +52,13 @@ axum = "0.8"
 base64 = "0.22"
 bech32 = "0.11"
 clap = { version = "4", features = ["derive", "env"] }
+ed25519-dalek = "2"
 finite-brain-core = { path = "finite-brain/crates/finite-brain-core" }
 finite-brain-server = { path = "finite-brain/crates/finite-brain-server" }
 finite-brain-store = { path = "finite-brain/crates/finite-brain-store" }
 finite-identity = { path = "finite-identity" }
 finite-nostr = { path = "finite-nostr" }
+finite-release = { path = "finite-release" }
 finitechat-delivery = { path = "finitechat/crates/finitechat-delivery" }
 finitechat-transport = { path = "finitechat/crates/finitechat-transport" }
 flate2 = "1"

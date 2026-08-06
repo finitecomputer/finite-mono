@@ -34,6 +34,7 @@ Platform Channel:
 - `agent.hermes.restart`
 - `agent.chat.recover`
 - `agent.connections.status`
+- `agent.skills.sync`
 - `agent.inference.apply`
 - `agent.specialization.aeon.reconcile`
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
@@ -42,6 +43,23 @@ Platform Channel:
 - `agent.hermes.config.preview`
 - `agent.hermes.config.apply`
 - `agent.hermes.config.rollback`
+
+`agent.skills.sync` adopts a published managed-skills bundle
+(`finite_skills_bundle.v1`, packed and signed by the `finite-release` crate).
+Its typed payload carries the bundle's tarball URL, manifest URL, and expected
+tarball sha256. The daemon fetches both over https with bounded sizes (64 MiB
+tarball, 64 KiB manifest, 60 s timeout) into
+`/data/agent/agentd/staging/skills/<artifact_id>/`, verifies the tarball
+digest against both the command and the manifest, verifies the manifest's
+ed25519 signature against `FINITE_RELEASE_PUBLIC_KEY` (32-byte hex; when
+unset the command fails closed with `release_key_missing`), unpacks, and
+recomputes the tree digest. Only then does it run the in-image
+`finite skills sync --source <staged tree>` (path overridable with
+`FINITE_CLI_PATH`, default `/runtime/bin/finite`), which keeps the existing
+validate/lock/atomic-exchange/rollback guarantees. Staging is removed after a
+successful sync and kept for diagnosis on failure.
+`FINITE_ALLOW_INSECURE_BUNDLE_URL=1` admits plain-http bundle URLs for the
+local dev harness only; production bundles are always https.
 
 Specialization reconciliation owns only the `auxiliary.vision` Hermes config
 field. Its typed AEON desired state includes the worker endpoint, canonical

@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+ed25519-dalek.workspace = true
+finite-release.workspace = true
 finitechat-proto = { path = "../finitechat/crates/finitechat-proto" }
 futures-util.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
@@ -29,6 +31,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "sync"] }
 
 [dev-dependencies]
+hex.workspace = true
 tempfile.workspace = true
 
 [lints]

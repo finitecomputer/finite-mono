@@ -32,6 +32,10 @@ use crate::connections::{
     TelegramConnectRequest, TelegramHomeRequest,
 };
 use crate::ledger::{CommandDecision, Ledger, hex_digest};
+use crate::skills::{
+    ALLOW_INSECURE_BUNDLE_URL_ENV, DEFAULT_FINITE_CLI_PATH, FINITE_CLI_PATH_ENV,
+    RELEASE_PUBLIC_KEY_ENV, SKILLS_SYNC_SCHEMA, SkillsSyncRequest, SkillsSyncSettings, sync_skills,
+};
 use crate::supervisor::{ProcessSpec, SupervisorHandle, SupervisorStatus, start_supervisor};
 use crate::transport::BridgeClient;
 
@@ -84,6 +88,9 @@ pub struct DaemonConfig {
     pub health_script: PathBuf,
     pub authorized_accounts: BTreeSet<String>,
     pub specialization_bundle: Option<StartupSpecializationBundleConfig>,
+    pub release_public_key: Option<String>,
+    pub allow_insecure_bundle_url: bool,
+    pub finite_cli: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,10 +184,20 @@ impl DaemonConfig {
                     .ok()
                     .as_deref(),
             )?,
+            release_public_key: std::env::var(RELEASE_PUBLIC_KEY_ENV)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            allow_insecure_bundle_url: std::env::var(ALLOW_INSECURE_BUNDLE_URL_ENV)
+                .is_ok_and(|value| value == "1"),
+            finite_cli: PathBuf::from(
+                std::env::var(FINITE_CLI_PATH_ENV)
+                    .unwrap_or_else(|_| DEFAULT_FINITE_CLI_PATH.to_owned()),
+            ),
         })
     }
 
-    fn state_dir(&self) -> PathBuf {
+    pub(crate) fn state_dir(&self) -> PathBuf {
         self.agent_home.join("agentd")
     }
 
@@ -325,6 +342,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     wait_for_bridge(&bridge).await?;
     let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
     spawn_delivery_stream(bridge.clone(), delivery_tx);
+    let skills_sync = SkillsSyncSettings::from_daemon_config(&config);
     let executor = CommandExecutor {
         identity,
         ledger,
@@ -337,6 +355,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         supervisor: supervisor.clone(),
         startup_specialization_desired,
         verified_hermes_generation,
+        skills_sync,
     };
 
     let delivery_worker =
@@ -516,6 +535,7 @@ struct CommandExecutor {
     supervisor: SupervisorHandle,
     startup_specialization_desired: Option<AeonSpecializationDesiredStateV1>,
     verified_hermes_generation: Arc<AtomicU64>,
+    skills_sync: SkillsSyncSettings,
 }
 
 impl CommandExecutor {
@@ -653,6 +673,10 @@ impl CommandExecutor {
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(serde_json::to_value(self.connection_manager.status()?)?)
+            }
+            "agent.skills.sync" => {
+                let body = parse_body::<SkillsSyncRequest>(request, SKILLS_SYNC_SCHEMA)?;
+                sync_skills(&self.skills_sync, &body).await
             }
             "agent.inference.apply" => {
                 let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
