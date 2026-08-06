@@ -3010,6 +3010,12 @@ impl AppRuntimeState {
     }
 
     fn open_room(&mut self, room_id: String) -> Result<(), FiniteChatCoreError> {
+        if self.app.selected_room_id.as_deref() == Some(room_id.as_str()) {
+            // Re-opening the already-selected room is a read, not a selection
+            // change: keep the current topic/chat selection so hosted-device
+            // state reads cannot reset the chat out from under the user.
+            return Ok(());
+        }
         if self.room_is_connected(&room_id) {
             self.ensure_home_topic(&room_id)?;
         }
@@ -7198,10 +7204,22 @@ impl AppRuntimeState {
         let topic = self.app.topics.iter().find(|topic| {
             topic.room_id == room_id && topic.topic_id == topic_id && !topic.archived
         })?;
+        if let Some(active_chat_id) = topic.active_chat_id.as_deref() {
+            let active_is_archived = topic
+                .chats
+                .iter()
+                .any(|chat| chat.chat_id == active_chat_id && chat.archived);
+            if !active_is_archived {
+                return Some(active_chat_id.to_owned());
+            }
+        }
         topic
-            .active_chat_id
-            .clone()
-            .or_else(|| topic.chats.first().map(|chat| chat.chat_id.clone()))
+            .chats
+            .iter()
+            .filter(|chat| !chat.archived)
+            .max_by_key(|chat| chat.updated_seq)
+            .or_else(|| topic.chats.first())
+            .map(|chat| chat.chat_id.clone())
     }
 
     fn profile_chat_room_ids(&self, account_id: &str) -> Vec<String> {
@@ -13570,6 +13588,225 @@ mod tests {
                 .and_then(|topic| topic.chats.iter().find(|chat| chat.chat_id == chat_id))
                 .is_some_and(|chat| !chat.archived),
             "cold replay must recover the latest archive state without a live server"
+        );
+    }
+
+    #[test]
+    fn open_room_on_the_selected_room_preserves_topic_and_chat_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "alice-hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let created = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Selection room".to_owned(),
+            })
+            .unwrap();
+        let room_id = created.selected_room_id.unwrap();
+        let topic_state = alice
+            .dispatch_and_wait(AppAction::CreateTopic {
+                room_id: room_id.clone(),
+                title: "Build".to_owned(),
+            })
+            .unwrap();
+        let topic_id = topic_state.selected_topic_id.unwrap();
+        let first_chat_id = topic_state.selected_chat_id.unwrap();
+        let second_chat_id = alice
+            .dispatch_and_wait(AppAction::StartTopicChat {
+                room_id: room_id.clone(),
+                topic_id: topic_id.clone(),
+                reason: Some("second chat".to_owned()),
+            })
+            .unwrap()
+            .selected_chat_id
+            .unwrap();
+        assert_ne!(first_chat_id, second_chat_id);
+        // The topic's default chat is its active (most recently started) chat,
+        // so the first chat is a non-default selection that a reset would lose.
+        alice
+            .dispatch_and_wait(AppAction::OpenChat {
+                room_id: room_id.clone(),
+                topic_id: topic_id.clone(),
+                chat_id: first_chat_id.clone(),
+            })
+            .unwrap();
+
+        let reopened = alice
+            .dispatch_and_wait(AppAction::OpenRoom {
+                room_id: room_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(reopened.selected_room_id.as_deref(), Some(room_id.as_str()));
+        assert_eq!(
+            reopened.selected_topic_id.as_deref(),
+            Some(topic_id.as_str()),
+            "re-opening the already-selected room must not reset the topic"
+        );
+        assert_eq!(
+            reopened.selected_chat_id.as_deref(),
+            Some(first_chat_id.as_str()),
+            "re-opening the already-selected room must not reset the chat"
+        );
+    }
+
+    #[test]
+    fn open_room_on_a_different_room_still_resets_to_that_rooms_default_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "alice-hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let room_one = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "First room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        let room_two = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Second room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        assert_ne!(room_one, room_two);
+
+        let reopened = alice
+            .dispatch_and_wait(AppAction::OpenRoom {
+                room_id: room_one.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            reopened.selected_room_id.as_deref(),
+            Some(room_one.as_str())
+        );
+        assert_eq!(
+            reopened.selected_topic_id.as_deref(),
+            Some(HOME_TOPIC_ID),
+            "switching rooms must still reset to the room's Home topic"
+        );
+        assert_eq!(
+            reopened.selected_chat_id.as_deref(),
+            Some(HOME_CHAT_ID),
+            "switching rooms must still reset to the Home topic's default chat"
+        );
+    }
+
+    #[test]
+    fn open_room_default_chat_skips_an_archived_active_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "alice-hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let room_id = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Archived default room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        let archived_chat_id = alice
+            .dispatch_and_wait(AppAction::StartTopicChat {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                reason: Some("soon to be archived".to_owned()),
+            })
+            .unwrap()
+            .selected_chat_id
+            .unwrap();
+        alice
+            .dispatch_and_wait(AppAction::SetChatArchived {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: archived_chat_id.clone(),
+                archived: true,
+            })
+            .unwrap();
+        alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Elsewhere".to_owned(),
+            })
+            .unwrap();
+
+        let reopened = alice
+            .dispatch_and_wait(AppAction::OpenRoom {
+                room_id: room_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(reopened.selected_topic_id.as_deref(), Some(HOME_TOPIC_ID));
+        assert_eq!(
+            reopened.selected_chat_id.as_deref(),
+            Some(HOME_CHAT_ID),
+            "the default chat pick must skip the archived active chat when a \
+             non-archived chat exists"
+        );
+    }
+
+    #[test]
+    fn open_room_default_chat_keeps_an_archived_chat_when_every_chat_is_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let alice = FiniteChatRuntime::open(with_test_secret(OpenOptions {
+            data_dir: dir.path().join("alice").to_string_lossy().into_owned(),
+            server_url,
+            device_id: "alice-hosted-web".to_owned(),
+            account_secret_hex: None,
+            now_unix_seconds: Some(NOW),
+        }))
+        .unwrap();
+
+        let room_id = alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "All archived room".to_owned(),
+            })
+            .unwrap()
+            .selected_room_id
+            .unwrap();
+        alice
+            .dispatch_and_wait(AppAction::SetChatArchived {
+                room_id: room_id.clone(),
+                topic_id: HOME_TOPIC_ID.to_owned(),
+                chat_id: HOME_CHAT_ID.to_owned(),
+                archived: true,
+            })
+            .unwrap();
+        alice
+            .dispatch_and_wait(AppAction::CreateRoom {
+                display_name: "Elsewhere".to_owned(),
+            })
+            .unwrap();
+
+        let reopened = alice
+            .dispatch_and_wait(AppAction::OpenRoom {
+                room_id: room_id.clone(),
+            })
+            .unwrap();
+        assert_eq!(reopened.selected_topic_id.as_deref(), Some(HOME_TOPIC_ID));
+        assert_eq!(
+            reopened.selected_chat_id.as_deref(),
+            Some(HOME_CHAT_ID),
+            "an all-archived topic keeps its archived default chat"
         );
     }
 
