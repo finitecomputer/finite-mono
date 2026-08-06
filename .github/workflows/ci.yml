@@ -17,7 +17,7 @@ permissions:
 jobs:
   changes:
     name: Detect required CI harnesses
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     outputs:
       run_rust: ${{ steps.detect.outputs.run_rust }}
       run_dashboard: ${{ steps.detect.outputs.run_dashboard }}
@@ -111,7 +111,7 @@ jobs:
     name: Rust workspace
     needs: changes
     if: needs.changes.outputs.run_rust == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
@@ -142,7 +142,7 @@ jobs:
     name: Dashboard
     needs: changes
     if: needs.changes.outputs.run_dashboard == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     defaults:
       run:
         working-directory: finitecomputer-v2/apps/dashboard
@@ -229,7 +229,7 @@ jobs:
     name: finitechat Hermes bridge
     needs: changes
     if: needs.changes.outputs.run_hermes_bridge == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     defaults:
       run:
         working-directory: finitechat
@@ -279,7 +279,7 @@ jobs:
     name: Skills + search static checks (nix shell)
     needs: changes
     if: needs.changes.outputs.run_nix_checks == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
@@ -380,7 +380,7 @@ jobs:
     name: devfinity services-only smoke
     needs: changes
     if: needs.changes.outputs.run_devfinity_smoke == 'true'
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
@@ -463,7 +463,7 @@ jobs:
       - nix-service-packages
       - devfinity-smoke
       - brain-product-matrix
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
       RUN_RUST: ${{ needs.changes.outputs.run_rust }}
