@@ -908,6 +908,19 @@ final class RuntimeConfigTests: XCTestCase {
         )
     }
 
+    func testRuntimeDataStoreResetFailsClosedWhenTheStoreRootCannotBeResolved() throws {
+        let parentURL = try temporarySupportURL()
+        let invalidSupportURL = parentURL.appendingPathComponent("not-a-directory")
+        try Data("occupied".utf8).write(to: invalidSupportURL)
+
+        XCTAssertThrowsError(
+            try RuntimeDataStore.deleteDataDir(
+                deviceID: "ios-reset-failure",
+                applicationSupportURL: invalidSupportURL
+            )
+        )
+    }
+
     private func temporaryConfigURL() throws -> URL {
         try temporarySupportURL().appendingPathComponent("finitechat_config.json")
     }

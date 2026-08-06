@@ -377,7 +377,7 @@ function nonnegativeSafeInteger(value) {
 
 function retryableDashboardStatus(status) {
   return Number.isInteger(status)
-    && (status === 429 || (status >= 500 && status <= 599));
+    && (status === 404 || status === 429 || (status >= 500 && status <= 599));
 }
 
 module.exports = {
