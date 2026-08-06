@@ -63,6 +63,10 @@ commands against the owning source folder before relying on them.
 - [Artifact identity and manual drift audit](audits/artifact-identity-and-drift-2026-08-02.md):
   automatic package fingerprints, confirmed compatibility-record drift, and
   the boundary between intentional pins and redundant release bookkeeping.
+- [Identity and Agent Runtime rollout post-mortem](postmortems/identity-runtime-rollout-2026-08-01.md):
+  the successful Sites reconciliation and product rollout, CI and deployment
+  friction, unexplained lat1 power loss, difficult Kata lifecycle recovery,
+  and the resulting gate on opaque-provider Phala upgrades.
 
 ## Imported Orientation Docs
 
