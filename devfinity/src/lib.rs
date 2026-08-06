@@ -453,6 +453,38 @@ impl Stack {
     /// Apple Container stack. This never installs software and never invokes
     /// sudo. The official host DNS bridge remains an explicit developer choice;
     /// when it is absent we derive the vmnet gateway that Apple assigned.
+    /// The runner counts every container matching its owned name prefix —
+    /// running or stopped — against `FC_RUNNER_MAX_SANDBOXES` (1 here), and
+    /// reports the resulting `CapacityUnavailable` silently each cycle. A
+    /// leftover from an earlier run therefore stalls agent creation with no
+    /// error anywhere; fail fast with the container names instead.
+    fn ensure_runner_sandbox_slot_free(&self) -> Result<()> {
+        let prefix = format!("{}-", self.apple_container_name_prefix);
+        let listing = command_stdout(
+            Command::new("container").args(["list", "--all", "--quiet"]),
+            "list Apple Containers for the runner slot preflight",
+        )?;
+        let owned: Vec<String> = listing
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(&prefix))
+            .map(str::to_string)
+            .collect();
+        if !owned.is_empty() {
+            bail!(
+                "the Agent Runner's only sandbox slot is already occupied by leftover \
+                 container(s) [{}] from an earlier run; agent creation would stall \
+                 silently (the runner reports CapacityUnavailable without logging). \
+                 Free the slot with `container stop <name>` (if running) and \
+                 `container delete <name>` — durable /data directories are never \
+                 deleted with compute — or set DEVFINITY_APPLE_CONTAINER_NAME_PREFIX \
+                 to run under a different prefix.",
+                owned.join(", ")
+            );
+        }
+        Ok(())
+    }
+
     pub fn prepare_host_environment(&mut self, dry_run: bool) -> Result<()> {
         if !self.profile.includes_runtime() {
             if self.fresh_services_state {
@@ -502,6 +534,12 @@ impl Stack {
                 }
             }
             self.apple_host_access = detect_apple_host_access()?;
+            // Only when actually starting the stack: helper flows (e.g.
+            // publish-skills) prepare with dry_run against an already-up
+            // stack whose own agent container legitimately owns the slot.
+            if !dry_run {
+                self.ensure_runner_sandbox_slot_free()?;
+            }
         }
 
         if !dry_run {
