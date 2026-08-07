@@ -1,7 +1,7 @@
-# Retry-2 staging copy for the DeepSeek-V4-Flash-0731 measured release in
-# finitecomputer/confidential-kimi-k2-6. The image placeholder must be replaced
-# by the digest emitted from deepseek-v4-vllm-image.yml. Creating a measured
-# release and deploying it remain separate explicitly approved operations.
+# Retry-2 staging copy for the measured DeepSeek-V4-Flash-0731 release in
+# finitecomputer/confidential-kimi-k2-6. Scheduler limits were measured on an
+# isolated eight-H200 host on 2026-08-07. Creating a satellite release and
+# deploying it remain separate explicitly approved operations.
 cvm-version: 0.10.8
 cpus: 32
 memory: 524288
@@ -61,9 +61,9 @@ containers:
         "--max-model-len",
         "393216",
         "--max-num-seqs",
-        "64",
+        "128",
         "--max-num-batched-tokens",
-        "512",
+        "2048",
         "--gpu-memory-utilization",
         "0.95",
         "--no-enable-flashinfer-autotune",

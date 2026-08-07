@@ -35,6 +35,9 @@ now stages retry 2 as described in
 - eight-H200 data + expert parallelism, FP8 KV cache, 393,216-token service
   ceiling, DeepSeek V4 parsers, and both the canonical model name and retained
   `glm-5-2` request alias;
+- the isolated eight-H200 measurement winner, `--max-num-seqs 128` and
+  `--max-num-batched-tokens 2048`, with exact results and tradeoffs recorded in
+  [`2026-08-07-deepseek-v4-eight-h200-optimization.md`](../../../docs/research/2026-08-07-deepseek-v4-eight-h200-optimization.md);
 - target-only generation with DSpark excluded from retry 2; and
 - the current production limiter digest and public limiter/shim topology,
   keeping this a model-only change.
@@ -43,18 +46,17 @@ The retained `tinfoil-config.deepseek-v4-flash-0731-dspark-on.candidate.yml` is
 the first-attempt diagnostic artifact. It is intentionally excluded from the
 retry checker and must not be released for retry 2.
 
-The retry file retains the already measured Tinfoil MPK and deliberately
-contains `REPLACE_WITH_MEASURED_DEEPSEEK_V4_VLLM_IMAGE`. The prep contract
-accepts that explicit placeholder; the release-ready gate fails until the
-manual image workflow reports and pins an immutable digest:
+The retry file retains the already measured Tinfoil MPK and pins the measured
+runtime image by immutable digest. Both the prep and release-ready contracts
+must pass:
 
 ```bash
 just finite-private-deepseek-contract
 just finite-private-deepseek-release-contract
 ```
 
-Do not publish the image, copy the retry file to the satellite root, create a
-release, or relaunch the enclave merely because the prep contract passes.
+Do not copy the retry file to the satellite root, create a release, or relaunch
+the enclave merely because the repository contracts pass.
 
 ## Existing GLM/limiter candidate
 

@@ -41,7 +41,7 @@ Supporting evidence is recorded in
 | Runtime patch | Only upstream vLLM commit `77434861904a9f01ea4818fe9f0c7b2a5c05686e`, backported with exact pre/post source hashes |
 | Parallelism | DP8+EP, following Tinfoil's published eight-GPU DeepSeek V4 topology; no tensor parallelism |
 | Speculation | Off; no DSpark or MTP |
-| Scheduler ceiling | `max-num-seqs=64`, `max-num-batched-tokens=512` |
+| Scheduler ceiling | Measured 2026-08-07 winner: `max-num-seqs=128`, `max-num-batched-tokens=2048` |
 | Context | 393,216 service tokens |
 | Sampling for quality proof | `temperature=1.0`, `top_p=0.95`, explicit thinking high/max |
 | Default reasoning mode | vLLM `--default-chat-template-kwargs '{"enable_thinking":true}'`; request overrides remain authoritative |
@@ -49,12 +49,15 @@ Supporting evidence is recorded in
 
 The staged config is
 [`tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml`](../tinfoil/confidential-kimi-k2-6/tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml).
-The manual image workflow completed successfully as run `30975709857` from
-mono commit `878041d92c27188eac73d41156c2f1def355bea7`. It verified and pinned:
+The measured candidate now pins:
 
 ```text
-ghcr.io/finitecomputer/deepseek-v4-vllm:0.25.1-0731-reasoning.2@sha256:a9b1ac4832a397996857959e09bda85b4620fe21c23df955bb81e7f89a732075
+ghcr.io/finitecomputer/deepseek-v4-vllm:0.25.1-0731-reasoning.6@sha256:48716fa9c25605ab5fe00fd7eed4e792268aee6c9008616f7641d9bf622ff262
 ```
+
+The scheduler decision, baseline comparison, near-limit context proof, protocol
+gates, and million-token soak are recorded in
+[`docs/research/2026-08-07-deepseek-v4-eight-h200-optimization.md`](../../docs/research/2026-08-07-deepseek-v4-eight-h200-optimization.md).
 
 ## Preparation gates
 
@@ -71,28 +74,25 @@ python3 -m unittest \
 python3 scripts/check_finite_private_deepseek_candidate.py
 ```
 
-The prep contract must pass and the release-ready contract must fail only on
-the intentional unpublished-image placeholder.
+Both the prep and release-ready contracts must pass for the measured candidate.
 
-### 2. Publish the measured runtime image — separately authorized
+### 2. Verify the measured runtime image
 
-After review, dispatch `.github/workflows/deepseek-v4-vllm-image.yml` with a
-version such as `0.25.1-0731-reasoning.1`. The workflow must:
+The image is already published and digest-pinned. Its build workflow had to:
 
 - build only from the pinned official vLLM child digest;
 - reject a changed v0.25.1 Python source before patching;
 - apply the upstream 0731 prompt mapping and verify the resulting source hashes;
 - report vLLM package version `0.25.1`;
 - label the exact mono revision and upstream fix;
-- publish and report one immutable GHCR digest.
+- publish and report one immutable GHCR digest, which must equal the pin above.
 
-Do not use a floating vLLM nightly, `latest`, an unmeasured local image, or the
-old v0.26.0 image.
+Do not rebuild or substitute a floating vLLM nightly, `latest`, an unmeasured
+local image, or the old v0.26.0 image during promotion.
 
 ### 3. Pin and measure the satellite config — separately authorized
 
-Replace only `REPLACE_WITH_MEASURED_DEEPSEEK_V4_VLLM_IMAGE` with the workflow's
-exact `ghcr.io/finitecomputer/deepseek-v4-vllm:...@sha256:...` output. Then run:
+The candidate already contains the exact measured image reference. Run:
 
 ```bash
 python3 scripts/check_finite_private_deepseek_candidate.py --release-ready
