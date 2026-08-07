@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Rejected vLLM investigation harness retained for reproducibility. Stable
+# 0.26.0 and nightly c810e5ee9 both produced corrupt repeated token 1023 on
+# H200. Do not use this launcher for a release without a new correctness gate.
+
 : "${INKLING_MODEL_PATH:?set INKLING_MODEL_PATH to the mounted NVFP4 checkpoint}"
 
 INKLING_REPLICA_COUNT="${INKLING_REPLICA_COUNT:-4}"
@@ -9,6 +13,8 @@ INKLING_MAX_NUM_SEQS="${INKLING_MAX_NUM_SEQS:-}"
 INKLING_MAX_NUM_BATCHED_TOKENS="${INKLING_MAX_NUM_BATCHED_TOKENS:-}"
 INKLING_GPU_MEMORY_UTILIZATION="${INKLING_GPU_MEMORY_UTILIZATION:-0.80}"
 INKLING_SPECULATIVE_CONFIG="${INKLING_SPECULATIVE_CONFIG:-}"
+INKLING_MOE_BACKEND="${INKLING_MOE_BACKEND:-}"
+INKLING_ENFORCE_EAGER="${INKLING_ENFORCE_EAGER:-0}"
 
 if ((INKLING_REPLICA_COUNT < 1 || INKLING_REPLICA_COUNT > 4)); then
   echo "INKLING_REPLICA_COUNT must be between 1 and 4" >&2
@@ -57,6 +63,12 @@ start_replica() {
   fi
   if [[ -n "$INKLING_SPECULATIVE_CONFIG" ]]; then
     args+=(--speculative-config "$INKLING_SPECULATIVE_CONFIG")
+  fi
+  if [[ -n "$INKLING_MOE_BACKEND" ]]; then
+    args+=(--moe-backend "$INKLING_MOE_BACKEND")
+  fi
+  if [[ "$INKLING_ENFORCE_EAGER" == 1 ]]; then
+    args+=(--enforce-eager)
   fi
 
   CUDA_VISIBLE_DEVICES="$gpus" /usr/local/bin/vllm "${args[@]}" \

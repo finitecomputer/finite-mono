@@ -2,9 +2,11 @@
 
 Date: 2026-08-07
 
-Status: active isolated lab study. Production on `control.inf9.tinfoil.sh` was
-not changed. Tests use the disposable, debug-enabled `gpu-lab` container on
-`control.inf12.tinfoil.sh` with no production secrets or traffic.
+Status: isolated lab study complete but without a deployable winner. Production
+on `control.inf9.tinfoil.sh` was not changed. Tests used the disposable,
+debug-enabled `gpu-lab` container on `control.inf12.tinfoil.sh` with no
+production secrets or traffic. The host authorization expired before the final
+SGLang correctness test could run.
 
 ## Fixed identity and intended topology
 
@@ -14,19 +16,20 @@ not changed. Tests use the disposable, debug-enabled `gpu-lab` container on
 - Model size: about 160 GiB locally, including the optional MTP checkpoint.
 - Architecture: 276B total parameters, 12B active, native multimodal input,
   and a 1,048,576-token service context.
-- H200 numerical path: TP2 W4A16, with NVFP4 expert weights dequantized to
-  BF16 on the fly. This is the H200 path documented by the vLLM recipe, not
-  Blackwell-native W4A4.
-- Intended cluster topology: four independent TP2 replicas on GPU pairs
-  `0,1`, `2,3`, `4,5`, and `6,7`, behind the checked-in least-active streaming
-  router.
+- H200 numerical path: Marlin W4A16, with NVFP4 weights dequantized on Hopper
+  rather than using Blackwell-native W4A4.
+- Current candidate topology: one SGLang TP8 instance across all eight H200s.
+  This replaces the investigated four-TP2 vLLM topology because every vLLM
+  runtime tested failed output correctness.
 - Baseline speculation: disabled. The bundled MTP heads are tested only after
   target-only output passes protocol and quality gates.
 
-The executable configuration is preserved in
+The candidate executable configuration is preserved in
+[`inkling-small-sglang-launch.sh`](../../infra/tinfoil/confidential-kimi-k2-6/inkling-small-sglang-launch.sh).
+The rejected vLLM investigation harness remains in
 [`inkling-small-launch.sh`](../../infra/tinfoil/confidential-kimi-k2-6/inkling-small-launch.sh)
-and
-[`inkling-small-router.py`](../../infra/tinfoil/confidential-kimi-k2-6/inkling-small-router.py).
+and [`inkling-small-router.py`](../../infra/tinfoil/confidential-kimi-k2-6/inkling-small-router.py)
+for reproducibility only.
 The deployment-shaped placeholder is
 [`tinfoil-config.inkling-small-nvfp4.candidate.yml`](../../infra/tinfoil/confidential-kimi-k2-6/tinfoil-config.inkling-small-nvfp4.candidate.yml).
 
@@ -49,41 +52,73 @@ vLLM 0.26.0 into it exposed these dependency defects in order:
 
 The first three were sufficient to make the HTTP server healthy, but the raw
 token gate proved the runtime numerically invalid. No throughput result from
-that mixed image is accepted. The next lab step is the immutable official
-Inkling CUDA 13 image, amd64 manifest digest
-`sha256:9b001250ef36000b7075327656485a0dfc248e9bc69c855283a8f0690d9b26ba`.
-A production image must be rebuilt and pinned by Finite with a complete,
-internally consistent lock; it must not install packages at boot.
+that mixed image is accepted.
 
-## Launch shape
+Three clean image paths were then measured and preserved as immutable lab
+releases:
 
-Each replica uses:
+1. `v2026-08-07-gpu-lab-inkling-1`, the July 15 dedicated Inkling image at
+   amd64 digest `sha256:9b001250ef36000b7075327656485a0dfc248e9bc69c855283a8f0690d9b26ba`,
+   did not recognize the current Small checkpoint's quantization and aborted.
+2. `v2026-08-07-gpu-lab-inkling-2`, clean official vLLM 0.26.0 at digest
+   `sha256:770fe02d83d8a1b6034719273fc02d52d8d90cbb2b2e0392580c990c27ff4ae0`,
+   recognized `modelopt_fp4` but generated one varied token followed by token
+   ID 1023 repeatedly. Forcing eager execution produced the same corruption,
+   ruling out CUDA graph capture. The FlashInfer CUTLASS and CuteDSL MoE
+   alternatives rejected this checkpoint/backend combination rather than
+   running it incorrectly.
+3. `v2026-08-07-gpu-lab-inkling-3`, the then-current official vLLM nightly at
+   digest `sha256:6877023dee3a2456e00f468813607fd4ec21cd92c6386e5433e2f7422bf087a8`
+   (vLLM commit `c810e5ee9`), loaded successfully with Marlin but generated only
+   token ID 1023, rendered as repeated `they` text.
+
+These failures were reproduced with the exact checkpoint after all 21 tracked
+files and checksums passed verification. They are serving-runtime failures,
+not evidence of a damaged download. A healthy HTTP endpoint is therefore not
+an acceptable Inkling readiness gate.
+
+The official SGLang source contains a separately verified H200/NVFP4 recipe:
+TP8, FA4 attention, Marlin FP4 GEMM and MoE, unified radix cache, and 0.85 static
+memory fraction. Its CUDA 13 image was pinned to the linux/amd64 manifest
+`sha256:b90c0d760a65bc4dbbe4520bea966c437cc40391dcb7cca2a74922985dc1abeb`
+and measured as lab release `v2026-08-07-gpu-lab-inkling-4`. The temporary host
+authorization expired during deployment, before the model could be downloaded
+and the raw-output gate run. This is the correct first recipe for the next lab,
+but it is not a Finite-validated result yet.
+
+## Candidate SGLang launch shape
+
+The next correctness attempt must use one TP8 instance with:
 
 ```text
-VLLM_USE_V2_MODEL_RUNNER=1
-FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1
---tokenizer-mode inkling
+SGLANG_ENABLE_UNIFIED_RADIX_TREE=1
+--tp 8
+--quantization modelopt_fp4
+--attention-backend fa4
+--page-size 128
+--fp4-gemm-backend marlin
+--moe-runner-backend marlin
+--enable-torch-symm-mem
+--mamba-radix-cache-strategy extra_buffer
+--mem-fraction-static 0.85
+--swa-full-tokens-ratio 0.1
+--mamba-full-memory-ratio 0.1
+--enable-multimodal
 --reasoning-parser inkling
 --tool-call-parser inkling
---enable-auto-tool-choice
---tensor-parallel-size 2
---kernel-config.enable_flashinfer_autotune=False
---trust-remote-code
---max-model-len 1048576
---gpu-memory-utilization 0.80
---enable-prefix-caching
 ```
 
-The scheduler defaults observed in vLLM 0.26.0 were 256 sequences and 8,192
-batched tokens. These remain the initial candidate until correct output and a
-repeatable concurrency sweep are recorded.
+Do not add MTP or DSpark speculation to the first run. The official recipe notes
+that Inkling Small's MTP needs multi-layer EAGLE; an incomplete speculative
+configuration can itself generate garbage. On H200, do not use MXFP8 KV cache;
+the current official recipe limits that long-context option to Blackwell.
 
 ## Gates still required
 
 - normal chat content, separated reasoning, and structured automatic tool call;
 - raw token sanity check, including rejection of repeated-token collapse;
 - single-stream 1,024-token latency and output rate;
-- four-replica unique-prompt concurrency sweep;
+- TP8 unique-prompt concurrency sweep and scheduler-limit sweep;
 - near-limit context prefill;
 - post-soak protocol recheck and server-log error scan; and
 - optional MTP A/B only if target-only output is correct and acceptance plus a
@@ -93,6 +128,7 @@ Primary sources:
 
 - https://huggingface.co/thinkingmachines/Inkling-Small-NVFP4
 - https://recipes.vllm.ai/thinkingmachines/Inkling-Small
+- https://docs.sglang.io/cookbook/autoregressive/ThinkingMachines/Inkling-Small
 - https://thinkingmachines.ai/news/introducing-inkling/
 
 ## Production boundary

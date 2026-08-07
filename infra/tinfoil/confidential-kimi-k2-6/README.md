@@ -4,15 +4,19 @@
 
 The target-only
 `tinfoil-config.inkling-small-nvfp4.candidate.yml` preserves the pinned
-checkpoint and intended four-TP2, native-1M H200 topology. The checked-in
-launcher and router are the exact lab configuration. Current measurements,
-dependency failures, and remaining gates are recorded in
+checkpoint and the official SGLang one-TP8, native-1M H200 topology. The
+checked-in `inkling-small-sglang-launch.sh` is the exact upstream-verified
+baseline. The separate vLLM launcher and router are retained only as rejected
+diagnostic artifacts. Current measurements, dependency failures, and remaining
+gates are recorded in
 [`2026-08-07-inkling-small-eight-h200-serving.md`](../../../docs/research/2026-08-07-inkling-small-eight-h200-serving.md).
 
 The file deliberately retains model-MPK and Finite-image placeholders. The
-public limiter topology is preserved. Do not promote the mixed DeepSeek lab
-image: its HTTP server became healthy, but the raw-token gate proved corrupt
-Inkling output.
+public limiter topology is preserved. Do not promote any tested vLLM image:
+the mixed image, clean vLLM 0.26.0 image, and current nightly all became healthy
+but failed raw-token correctness. The SGLang recipe could not be run before the
+temporary host authorization expired, so the candidate is backed up but not
+deployment-approved.
 
 ## Laguna S 2.1 eight-H200 evidence
 

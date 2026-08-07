@@ -1,6 +1,8 @@
-# Evidence-backed Inkling Small candidate. This file is intentionally not
-# release-ready: modelwrap must emit the pinned model MPK and CI must publish a
-# reviewed Finite image containing the checked-in launcher and router.
+# Upstream-recipe Inkling Small candidate. This file is intentionally not
+# release-ready: the official SGLang H200 recipe was identified but the lab
+# allocation expired before its local correctness gate could run. Modelwrap
+# must emit the pinned MPK and CI must publish a reviewed Finite image containing
+# the checked-in SGLang launcher before a new isolated validation attempt.
 cvm-version: 0.10.8
 cpus: 32
 memory: 524288
@@ -20,15 +22,15 @@ networks:
 
 containers:
   - name: "inkling-small"
-    image: "REPLACE_WITH_DIGEST_PINNED_FINITE_INKLING_VLLM_IMAGE"
+    image: "REPLACE_WITH_DIGEST_PINNED_FINITE_INKLING_SGLANG_IMAGE"
+    entrypoint: ["/bin/bash", "/opt/finite/inkling-small-sglang-launch.sh"]
     runtime: nvidia
     gpus: all
     restart: always
     env:
       - INKLING_MODEL_PATH: "/tinfoil/mpk/mpk-REPLACE_WITH_INKLING_SMALL_ROOT"
-      - INKLING_REPLICA_COUNT: "4"
-      - INKLING_GPU_MEMORY_UTILIZATION: "0.80"
-      - INKLING_MAX_ACTIVE_PER_REPLICA: "256"
+      - INKLING_SERVED_MODEL_NAME: "glm-5-2"
+      - INKLING_MEM_FRACTION_STATIC: "0.85"
     tmpfs:
       /tmp: size=4g,mode=1777,exec
       /root: size=20g,mode=0700,exec
