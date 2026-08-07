@@ -1990,7 +1990,13 @@ JS
       && node - "$healthz_json" <<'JS' >/dev/null 2>&1
 const fs = require("node:fs");
 const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-if (health.payload_version !== "devfinity-v2" || health.agentd?.ok !== true) process.exit(1);
+// The flip engine records its outcome on its own gate-poll cadence; wait for
+// the settled record too, or the next assertion races a mid-write "in_progress".
+if (
+  health.payload_version !== "devfinity-v2" ||
+  health.agentd?.ok !== true ||
+  health.last_flip?.outcome !== "success"
+) process.exit(1);
 JS
     then
       break
@@ -2099,7 +2105,11 @@ SH
 const fs = require("node:fs");
 const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const bad = health.payload_generations?.bad || [];
+// Same settled-record rule as the convergence wait: the rollback must have
+// finished writing its outcome before downstream assertions read it.
 if (!bad.includes("devfinity-v3-broken")) process.exit(1);
+if (health.last_flip?.outcome === "in_progress") process.exit(1);
+if (health.payload_version !== "devfinity-v2" || health.agentd?.ok !== true) process.exit(1);
 JS
     then
       break
