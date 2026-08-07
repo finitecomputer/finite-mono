@@ -38,8 +38,9 @@ pub struct ShellRuntime {
     pub layout: Arc<DataLayout>,
     pub state: SharedState,
     supervisor: Arc<TokioMutex<Option<AgentdSupervisor>>>,
-    /// Serializes stage/flip/rollback; a flip in progress refuses another.
-    transition_gate: Arc<TokioMutex<()>>,
+    /// Serializes stage/flip/rollback across the socket verbs AND the
+    /// autonomous channel poller; a transition in progress refuses another.
+    pub(crate) transition_gate: Arc<TokioMutex<()>>,
 }
 
 impl ShellRuntime {
@@ -370,6 +371,24 @@ impl ShellRuntime {
         let gate = Arc::clone(&self.transition_gate)
             .try_lock_owned()
             .map_err(|_| ShellError::FlipInProgress)?;
+        let (from, to) = self.start_flip_locked(gate)?;
+        Ok(json!({
+            "ok": true,
+            "result": "flip_started",
+            "from": from,
+            "to": to,
+        }))
+    }
+
+    /// Start the flip to the staged generation while already holding the
+    /// transition gate — the one flip engine, shared by the socket verb and
+    /// the channel poller. Records `in_progress` before returning so callers
+    /// (and `ctl flip --wait`) always observe the transition, then runs it in
+    /// the background holding the gate.
+    pub(crate) fn start_flip_locked(
+        &self,
+        gate: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<(Option<String>, String), ShellError> {
         let staged = self
             .state
             .snapshot()
@@ -382,8 +401,6 @@ impl ShellRuntime {
             )));
         }
         let from = read_link_version(&self.layout.current_link());
-        // Record in_progress before answering so `ctl flip --wait` always
-        // observes the transition.
         self.begin_flip_record(&from, &to)?;
         let runtime = self.clone();
         let flip_to = to.clone();
@@ -391,12 +408,7 @@ impl ShellRuntime {
             let _gate = gate;
             runtime.run_transition(flip_to, TransitionKind::Flip).await;
         });
-        Ok(json!({
-            "ok": true,
-            "result": "flip_started",
-            "from": from,
-            "to": to,
-        }))
+        Ok((from, to))
     }
 
     async fn verb_rollback(&self) -> Result<Value, ShellError> {

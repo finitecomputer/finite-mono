@@ -20,6 +20,7 @@ pub mod control;
 pub mod fixup;
 pub mod generations;
 pub mod health;
+pub mod poll;
 pub mod shims;
 pub mod state;
 pub mod supervise;
@@ -36,10 +37,19 @@ pub const HEALTH_TIMEOUT_ENV: &str = "FINITE_SHELL_HEALTH_TIMEOUT_SECS";
 pub const HTTP_ADDR_ENV: &str = "FINITE_SHELL_HTTP_ADDR";
 pub const AGENTD_REQUIRED_ENV: &str = "FINITE_AGENTD_REQUIRED";
 pub const BOOT_INTENT_ENV: &str = "FINITE_AGENT_BOOT_INTENT_JSON";
+/// Autonomous channel convergence (M4): how often the shell polls the
+/// service directory for its channel's payload head. 0 disables the poller.
+pub const POLL_INTERVAL_ENV: &str = "FINITE_SHELL_POLL_INTERVAL_SECS";
+/// The same container-level env agentd already receives; the shell reads it
+/// for its own channel poll.
+pub const SERVICE_DIRECTORY_URL_ENV: &str = "FINITE_SERVICE_DIRECTORY_URL";
 /// Dev-harness overrides for the host-global paths (default
 /// `/usr/local/bin` and `/usr/local/bin/python3` in the container).
 pub const SHIM_DIR_ENV: &str = "FINITE_SHELL_SHIM_DIR";
 pub const SHELL_PYTHON_ENV: &str = "FINITE_SHELL_PYTHON";
+
+/// The channel an agent is on when `/data/shell/channel` was never written.
+pub const DEFAULT_CHANNEL: &str = "stable";
 
 /// Fetch bounds for `stage` from URLs (finite-release policy + limits).
 pub const STAGE_MANIFEST_CAP_BYTES: usize = 64 * 1024;
@@ -149,6 +159,12 @@ pub struct ShellSettings {
     pub crash_loop_restarts: usize,
     /// Poll interval for the flip health gate.
     pub health_gate_poll: Duration,
+    /// `FINITE_SHELL_POLL_INTERVAL_SECS`, default 900; zero disables the
+    /// autonomous channel poller.
+    pub poll_interval: Duration,
+    /// `FINITE_SERVICE_DIRECTORY_URL`: where the channel poller fetches the
+    /// signed service directory. Absent means the poller stays off.
+    pub service_directory_url: Option<String>,
 }
 
 impl ShellSettings {
@@ -174,6 +190,8 @@ impl ShellSettings {
             crash_loop_window: Duration::from_secs(600),
             crash_loop_restarts: 5,
             health_gate_poll: Duration::from_millis(200),
+            poll_interval: Duration::from_secs(900),
+            service_directory_url: None,
         }
     }
 
@@ -213,6 +231,11 @@ impl ShellSettings {
         settings.allow_insecure_bundle_url =
             std::env::var(finite_release::ALLOW_INSECURE_BUNDLE_URL_ENV)
                 .is_ok_and(|value| value == "1");
+        settings.poll_interval = seconds(POLL_INTERVAL_ENV, 900)?;
+        settings.service_directory_url = std::env::var(SERVICE_DIRECTORY_URL_ENV)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
         settings.agentd_required = truthy(std::env::var(AGENTD_REQUIRED_ENV).ok());
         settings.recovery_boot_intent_active =
             std::env::var(BOOT_INTENT_ENV).is_ok_and(|value| !value.is_empty());
@@ -283,6 +306,16 @@ impl DataLayout {
 
     pub fn channel_path(&self) -> PathBuf {
         self.shell_dir().join("channel")
+    }
+
+    /// The shell's release channel: the contents of `/data/shell/channel`,
+    /// defaulting to `"stable"` when the file is absent or empty.
+    pub fn channel_name(&self) -> String {
+        std::fs::read_to_string(self.channel_path())
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_CHANNEL.to_owned())
     }
 
     pub fn staging_dir(&self) -> PathBuf {

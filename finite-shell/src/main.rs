@@ -101,6 +101,7 @@ fn run() -> Result<i32, ShellError> {
             })?;
         tokio::spawn(shell.clone().serve_socket(socket));
         tokio::spawn(shell.clone().serve_http(http));
+        shell.spawn_channel_poller();
 
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

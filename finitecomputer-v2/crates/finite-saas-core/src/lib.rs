@@ -43,7 +43,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0016_runtime_cold_relocation.sql"),
     "\n",
-    include_str!("../migrations/0017_release_channels.sql")
+    include_str!("../migrations/0017_release_channels.sql"),
+    "\n",
+    include_str!("../migrations/0018_payload_telemetry.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -870,6 +872,11 @@ pub struct ReleaseChannelHead {
     pub channel: ReleaseChannelName,
     pub artifact_kind: RuntimeArtifactKind,
     pub artifact_id: String,
+    /// The artifact the channel pointed at before the current head. Agents
+    /// still running it are converged (N-1, the gen fence); a no-op repoint
+    /// to the same head leaves it unchanged.
+    #[serde(default)]
+    pub previous_artifact_id: Option<String>,
     pub updated_at: String,
 }
 
@@ -887,6 +894,140 @@ pub struct SetReleaseChannelHeadInput {
     pub artifact_kind: RuntimeArtifactKind,
     pub artifact_id: String,
     pub now: Option<String>,
+}
+
+/// What one Agent Runtime last reported running (payload-generations plan
+/// M4): the runner reads the shell's `/healthz` and forwards these; a
+/// pre-shell image reports nothing and every field stays absent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePayloadTelemetry {
+    pub payload_version_label: Option<String>,
+    pub shell_version: Option<String>,
+    pub release_channel: Option<String>,
+    pub reported_at: String,
+}
+
+/// The runner's wire request for `POST /api/core/v1/runtime-payload-reports`.
+/// The source host is taken from the runner credential, never from the body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimePayloadReportRequest {
+    pub source_machine_id: String,
+    #[serde(default)]
+    pub payload_version_label: Option<String>,
+    #[serde(default)]
+    pub shell_version: Option<String>,
+    #[serde(default)]
+    pub release_channel: Option<String>,
+    #[serde(default)]
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordRuntimePayloadReportInput {
+    pub source_host_id: String,
+    pub source_machine_id: String,
+    pub payload_version_label: Option<String>,
+    pub shell_version: Option<String>,
+    pub release_channel: Option<String>,
+    pub now: Option<String>,
+}
+
+/// One runtime's payload telemetry joined with its identity — the raw rows
+/// the convergence report and the report endpoint answer with. Field names
+/// are the fleet-view contract from the payload-generations plan
+/// (snake_case, deliberately).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePayloadStatus {
+    pub runtime_id: String,
+    pub project_id: String,
+    pub payload_version_label: Option<String>,
+    pub shell_version: Option<String>,
+    pub channel: Option<String>,
+    pub reported_at: Option<String>,
+}
+
+/// The gen fence verdict for one runtime.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PayloadConvergenceFence {
+    Converged,
+    Repair,
+    Unknown,
+}
+
+impl PayloadConvergenceFence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Converged => "converged",
+            Self::Repair => "repair",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// The gen fence rule (payload-generations plan M4), pure over reported
+/// telemetry and the channel's resolved head/previous version labels:
+///
+/// - no reported payload or channel (a pre-shell image) → `Unknown`, never
+///   flagged;
+/// - the reported channel has no resolvable payload head in Core → `Unknown`
+///   (there is nothing to converge on, so nothing to repair);
+/// - the reported payload matches the head's version label, or the previous
+///   head's (N-1, mid-rollout or one flip behind) → `Converged`;
+/// - anything else → `Repair`.
+pub fn payload_convergence_fence(
+    reported_payload_version: Option<&str>,
+    reported_channel: Option<&str>,
+    channel_head_version: Option<&str>,
+    channel_previous_version: Option<&str>,
+) -> PayloadConvergenceFence {
+    let (Some(payload_version), Some(_)) = (reported_payload_version, reported_channel) else {
+        return PayloadConvergenceFence::Unknown;
+    };
+    let Some(head_version) = channel_head_version else {
+        return PayloadConvergenceFence::Unknown;
+    };
+    if payload_version == head_version || channel_previous_version == Some(payload_version) {
+        PayloadConvergenceFence::Converged
+    } else {
+        PayloadConvergenceFence::Repair
+    }
+}
+
+/// One row of the fleet view: [`RuntimePayloadStatus`] plus the fence
+/// verdict.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PayloadConvergenceRuntime {
+    pub runtime_id: String,
+    pub project_id: String,
+    pub payload_version_label: Option<String>,
+    pub shell_version: Option<String>,
+    pub channel: Option<String>,
+    pub reported_at: Option<String>,
+    pub fence: PayloadConvergenceFence,
+}
+
+/// One channel head with its previous artifact, both resolved to version
+/// labels via `runtime_artifacts`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PayloadConvergenceChannelHead {
+    pub channel: String,
+    pub artifact_kind: String,
+    pub artifact_id: String,
+    pub version_label: Option<String>,
+    pub previous_artifact_id: Option<String>,
+    pub previous_version_label: Option<String>,
+    pub updated_at: String,
+}
+
+/// The fleet view: every runtime's payload telemetry with its fence verdict,
+/// plus every channel head with its previous artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PayloadConvergenceReport {
+    pub runtimes: Vec<PayloadConvergenceRuntime>,
+    pub channels: Vec<PayloadConvergenceChannelHead>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1478,6 +1619,11 @@ pub struct BridgeCoreState {
     /// Keyed by `"{channel}/{artifact_kind}"` (see [`release_channel_key`]).
     #[serde(default)]
     pub release_channel_heads: BTreeMap<String, ReleaseChannelHead>,
+    /// Keyed by agent runtime id: the payload generation each runtime last
+    /// reported running (shell `/healthz` → runner → Core). Postgres keeps
+    /// these as columns on `agent_runtimes` (migration 0018).
+    #[serde(default)]
+    pub runtime_payload_reports: BTreeMap<String, RuntimePayloadTelemetry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4615,6 +4761,7 @@ impl BridgeCoreState {
             self.agent_runtimes.remove(&runtime_id);
             self.runtime_relay_credentials.remove(&runtime_id);
             self.runtime_status_snapshots.remove(&runtime_id);
+            self.runtime_payload_reports.remove(&runtime_id);
             self.project_runtime_links
                 .retain(|_, link| link.agent_runtime_id != runtime_id);
         }
@@ -4680,6 +4827,7 @@ impl BridgeCoreState {
             self.agent_runtimes.remove(&runtime_id);
             self.runtime_relay_credentials.remove(&runtime_id);
             self.runtime_status_snapshots.remove(&runtime_id);
+            self.runtime_payload_reports.remove(&runtime_id);
             self.project_runtime_links
                 .retain(|_, link| link.agent_runtime_id != runtime_id);
         }
@@ -6505,10 +6653,23 @@ impl BridgeCoreState {
         if artifact.retired_at.is_some() {
             return Err(CoreError::RuntimeArtifactRetired);
         }
+        // A repoint remembers the outgoing head as `previous` (the gen
+        // fence's N-1); a no-op repoint to the same artifact changes nothing.
+        let previous_artifact_id = match self
+            .release_channel_heads
+            .get(&release_channel_key(input.channel, input.artifact_kind))
+        {
+            Some(existing) if existing.artifact_id == artifact_id => {
+                existing.previous_artifact_id.clone()
+            }
+            Some(existing) => Some(existing.artifact_id.clone()),
+            None => None,
+        };
         let head = ReleaseChannelHead {
             channel: input.channel,
             artifact_kind: input.artifact_kind,
             artifact_id,
+            previous_artifact_id,
             updated_at: now,
         };
         self.release_channel_heads.insert(
@@ -6532,6 +6693,63 @@ impl BridgeCoreState {
     /// key. The service directory endpoint joins these with their artifacts.
     pub fn list_release_channel_heads(&self) -> Vec<ReleaseChannelHead> {
         self.release_channel_heads.values().cloned().collect()
+    }
+
+    /// Record what a runtime last reported running (shell `/healthz` →
+    /// runner → Core). The runtime is addressed by its host-owned identity —
+    /// the runner credential's source host plus the machine id it launched —
+    /// because the runner never learns Core's runtime ids.
+    pub fn record_runtime_payload_report(
+        &mut self,
+        input: RecordRuntimePayloadReportInput,
+    ) -> CoreResult<RuntimePayloadStatus> {
+        let now = input.now.clone().unwrap_or(current_time_iso()?);
+        let runtime = self
+            .agent_runtimes
+            .values()
+            .find(|runtime| {
+                runtime.source_host_id == input.source_host_id
+                    && runtime.source_machine_id == input.source_machine_id
+            })
+            .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        let telemetry = RuntimePayloadTelemetry {
+            payload_version_label: trim_to_option(input.payload_version_label.as_deref()),
+            shell_version: trim_to_option(input.shell_version.as_deref()),
+            release_channel: trim_to_option(input.release_channel.as_deref()),
+            reported_at: now,
+        };
+        let status = RuntimePayloadStatus {
+            runtime_id: runtime.id.clone(),
+            project_id: runtime.project_id.clone(),
+            payload_version_label: telemetry.payload_version_label.clone(),
+            shell_version: telemetry.shell_version.clone(),
+            channel: telemetry.release_channel.clone(),
+            reported_at: Some(telemetry.reported_at.clone()),
+        };
+        self.runtime_payload_reports
+            .insert(status.runtime_id.clone(), telemetry);
+        Ok(status)
+    }
+
+    /// Every provisioned runtime's payload telemetry (absent fields for
+    /// runtimes that never reported — pre-shell images), ordered by runtime
+    /// id.
+    pub fn list_runtime_payload_statuses(&self) -> Vec<RuntimePayloadStatus> {
+        self.agent_runtimes
+            .values()
+            .map(|runtime| {
+                let report = self.runtime_payload_reports.get(&runtime.id);
+                RuntimePayloadStatus {
+                    runtime_id: runtime.id.clone(),
+                    project_id: runtime.project_id.clone(),
+                    payload_version_label: report
+                        .and_then(|report| report.payload_version_label.clone()),
+                    shell_version: report.and_then(|report| report.shell_version.clone()),
+                    channel: report.and_then(|report| report.release_channel.clone()),
+                    reported_at: report.map(|report| report.reported_at.clone()),
+                }
+            })
+            .collect()
     }
 
     fn launchable_runtime_artifact(&self, id: &str) -> CoreResult<RuntimeArtifact> {
@@ -10006,7 +10224,150 @@ mod tests {
             })
             .unwrap();
         assert_eq!(repointed.artifact_id, "finite-skills-v2");
-        assert_eq!(state.list_release_channel_heads(), vec![repointed]);
+        assert_eq!(
+            repointed.previous_artifact_id.as_deref(),
+            Some("finite-skills-v1"),
+            "a repoint remembers the outgoing head as previous (the gen fence's N-1)"
+        );
+        assert_eq!(state.list_release_channel_heads(), vec![repointed.clone()]);
+
+        // A no-op repoint to the same head leaves `previous` unchanged.
+        let noop = state
+            .set_release_channel_head(SetReleaseChannelHeadInput {
+                channel: ReleaseChannelName::Canary,
+                artifact_kind: RuntimeArtifactKind::SkillsBundle,
+                artifact_id: "finite-skills-v2".to_string(),
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        assert_eq!(
+            noop.previous_artifact_id.as_deref(),
+            Some("finite-skills-v1")
+        );
+    }
+
+    #[test]
+    fn the_gen_fence_flags_only_agents_behind_both_heads() {
+        use PayloadConvergenceFence::{Converged, Repair, Unknown};
+        // Pre-shell images report nothing: never flagged.
+        assert_eq!(payload_convergence_fence(None, None, None, None), Unknown);
+        assert_eq!(
+            payload_convergence_fence(Some("v2"), None, Some("v2"), None),
+            Unknown,
+            "a payload without a channel cannot be fenced"
+        );
+        assert_eq!(
+            payload_convergence_fence(None, Some("stable"), Some("v2"), None),
+            Unknown,
+            "a channel without a payload cannot be fenced"
+        );
+        // A channel Core has no payload head for gives nothing to converge on.
+        assert_eq!(
+            payload_convergence_fence(Some("v2"), Some("canary"), None, None),
+            Unknown
+        );
+        // On the head, or on the previous head (N-1): converged.
+        assert_eq!(
+            payload_convergence_fence(Some("v2"), Some("canary"), Some("v2"), None),
+            Converged
+        );
+        assert_eq!(
+            payload_convergence_fence(Some("v2"), Some("canary"), Some("v3"), Some("v2")),
+            Converged
+        );
+        // Anything else is a repair signal.
+        assert_eq!(
+            payload_convergence_fence(Some("v1"), Some("canary"), Some("v3"), Some("v2")),
+            Repair
+        );
+        assert_eq!(
+            payload_convergence_fence(Some("v1"), Some("canary"), Some("v2"), None),
+            Repair
+        );
+    }
+
+    #[test]
+    fn runtime_payload_reports_land_on_the_host_owned_runtime_identity() {
+        let mut state = BridgeCoreState::default();
+        state.agent_runtimes.insert(
+            "runtime-telemetry".to_string(),
+            AgentRuntime {
+                id: "runtime-telemetry".to_string(),
+                project_id: "project-telemetry".to_string(),
+                source_host_id: "host-telemetry".to_string(),
+                source_machine_id: "machine-telemetry".to_string(),
+                source_import_key: "host-telemetry/machine-telemetry".to_string(),
+                runtime_artifact_id: None,
+                state_schema_version: None,
+                placement: None,
+                provider_runtime_handle: None,
+                provider_runtime_handle_history: Vec::new(),
+                contact_endpoint: None,
+                runtime_capabilities: None,
+                host_facts: HostOwnedRuntimeFacts {
+                    display_name: "Telemetry Agent".to_string(),
+                    hostname: None,
+                    runtime_host: "host-telemetry".to_string(),
+                    runtime_status: RuntimeSummaryStatus::Online,
+                    active_inference_profile: None,
+                    hermes_available: Some(true),
+                    published_app_urls: Vec::new(),
+                },
+                created_at: NOW.to_string(),
+                updated_at: NOW.to_string(),
+            },
+        );
+
+        // An unknown machine (or the right machine on the wrong host) is a
+        // distinct not-found, never an upsert.
+        assert!(matches!(
+            state
+                .record_runtime_payload_report(RecordRuntimePayloadReportInput {
+                    source_host_id: "other-host".to_string(),
+                    source_machine_id: "machine-telemetry".to_string(),
+                    payload_version_label: Some("v2".to_string()),
+                    shell_version: Some("0.1.0".to_string()),
+                    release_channel: Some("canary".to_string()),
+                    now: Some(NOW.to_string()),
+                })
+                .unwrap_err(),
+            CoreError::ProjectRuntimeNotFound
+        ));
+
+        let status = state
+            .record_runtime_payload_report(RecordRuntimePayloadReportInput {
+                source_host_id: "host-telemetry".to_string(),
+                source_machine_id: "machine-telemetry".to_string(),
+                payload_version_label: Some(" v2 ".to_string()),
+                shell_version: Some("0.1.0".to_string()),
+                release_channel: Some("canary".to_string()),
+                now: Some(NOW.to_string()),
+            })
+            .unwrap();
+        assert_eq!(status.runtime_id, "runtime-telemetry");
+        assert_eq!(status.project_id, "project-telemetry");
+        assert_eq!(status.payload_version_label.as_deref(), Some("v2"));
+        assert_eq!(status.channel.as_deref(), Some("canary"));
+        assert_eq!(status.reported_at.as_deref(), Some(NOW));
+
+        // A pre-shell report (all nulls) overwrites with absent fields but
+        // keeps the reported_at freshness.
+        let status = state
+            .record_runtime_payload_report(RecordRuntimePayloadReportInput {
+                source_host_id: "host-telemetry".to_string(),
+                source_machine_id: "machine-telemetry".to_string(),
+                payload_version_label: None,
+                shell_version: None,
+                release_channel: None,
+                now: Some(LATER.to_string()),
+            })
+            .unwrap();
+        assert_eq!(status.payload_version_label, None);
+        assert_eq!(status.reported_at.as_deref(), Some(LATER));
+
+        let listed = state.list_runtime_payload_statuses();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0], status);
     }
 
     #[test]

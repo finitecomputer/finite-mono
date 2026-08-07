@@ -1333,6 +1333,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "finite-release",
+ "finite-service-directory",
  "futures-util",
  "hex",
  "reqwest",

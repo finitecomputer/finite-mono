@@ -148,6 +148,33 @@ registers a promoted `payload_bundle` Core artifact, points the canary
 channel at it, and prints the bundle JSON (including `payloadRootfs`, which
 the smoke copies to craft its broken payload).
 
+Autonomous convergence (the plan's M4 acceptance, "the local upgrade
+simulator") is a third focused variant. It moves the agent to canary with one
+`finite-shell ctl set-channel canary`, publishes `devfinity-v2`, and then
+drives NOTHING in-guest: the shell's channel poller must stage and flip on
+its own (asserted from the host via `/healthz`: `payload_version`,
+`last_poll`, `last_flip`, unchanged Agent Principal). It then asserts Core's
+fleet view — the runner forwards each runtime's `shell_version`,
+`payload_version`, and `channel` from `/healthz` to Core, and
+`cargo run -p finite-saas-core -- payload-convergence` must show the runtime
+fence `"converged"` — publishes a broken `devfinity-v3-broken`, waits for the
+unattended health-gate rollback + bad-listing, and finally proves the gen
+fence's N−1 rule for real: with v3-broken as the canary head and v2 as its
+recorded previous head, the runtime still fences `"converged"`:
+
+```sh
+DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE=1 \
+  FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=devfinity-payload-smoke-unused \
+  just dev saas-smoke
+```
+
+The poll cadence is variant-controlled: devfinity plumbs
+`FINITE_SHELL_POLL_INTERVAL_SECS` into agent containers from
+`DEVFINITY_SHELL_POLL_INTERVAL_SECS`, defaulting to `0` (poller off) for
+every other run — so the flip/skills variants' manual stage/flip can never
+race the poller — and to `5` when `DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE=1`.
+Production shells default to a 900-second jittered interval.
+
 The complete Greenfield Brain setup/deletion matrix is a separate disposable
 gate:
 

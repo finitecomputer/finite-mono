@@ -150,6 +150,11 @@ enum Command {
         #[arg(long)]
         kind: RuntimeArtifactKind,
     },
+    /// Fleet view of payload convergence: every runtime's reported payload
+    /// generation with its gen-fence verdict, plus channel heads with their
+    /// previous artifacts.
+    #[command(name = "payload-convergence")]
+    PayloadConvergence,
     /// Roll active, upgrade-capable Agent Runtimes to one explicit artifact.
     #[command(name = "runtime-artifact-rollout")]
     RuntimeArtifactRollout(RuntimeArtifactRolloutCliArgs),
@@ -542,6 +547,10 @@ async fn main() -> Result<()> {
             let store = postgres_store_from_env().await?;
             let head = store.release_channel_head(channel, kind).await?;
             print_json(&head)
+        }
+        Command::PayloadConvergence => {
+            let store = postgres_store_from_env().await?;
+            print_json(&store.payload_convergence_report().await?)
         }
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
         Command::RuntimeRetireExact(args) => runtime_retire_exact_command(args).await,

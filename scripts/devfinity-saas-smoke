@@ -1925,6 +1925,237 @@ JS
   echo "broken payload auto-rolled back to $seed_version and was bad-listed"
 }
 
+# M4 acceptance ("the local upgrade simulator", payload-generations plan):
+# with FINITE_SHELL_POLL_INTERVAL_SECS=5 in the container, the shell's own
+# channel poller must stage and flip to a published head with NO in-guest
+# driving after set-channel, a broken head must auto-roll back and be
+# bad-listed unattended, and Core's payload-convergence gen fence must keep
+# the runtime "converged" throughout (v2 is the previous head after the v3
+# repoint). Cheap smoke: no model turns.
+run_payload_autoconverge_smoke() {
+  local devfinity_state_root healthz_json publish_json convergence_json
+  local seed_version shell_version payload_rootfs npub_before npub_after broken_dir
+  local deadline
+
+  need cargo
+  need python3
+  devfinity_state_root="$(cd "$state_dir/../.." && pwd)"
+
+  # (a) The shell serves /healthz with generation telemetry; capture the seed
+  # and the identity baseline every later step must preserve.
+  healthz_json="$state_dir/saas-smoke-autoconverge-healthz.json"
+  curl -fsS --max-time 5 "$runtime_url/healthz" >"$healthz_json"
+  IFS=$'\t' read -r seed_version shell_version <<<"$(node - "$healthz_json" <<'JS'
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!health.shell_version || !health.payload_version) {
+  throw new Error(`healthz must carry shell_version and payload_version: ${JSON.stringify(health)}`);
+}
+process.stdout.write([health.payload_version, health.shell_version].join("\t"));
+JS
+)"
+  npub_before="$(runtime_agent_npub)"
+  echo "runtime healthy on seed payload $seed_version (shell $shell_version)"
+
+  # (b) Move the agent to canary. This is the LAST in-guest command: from
+  # here on the shell's poller does all the work.
+  runtime_exec "$container_machine_id" finite-shell ctl set-channel canary \
+    >"$state_dir/saas-smoke-autoconverge-set-channel.json"
+  echo "agent moved to the canary channel"
+
+  # (c) Publish v2 to canary from the host.
+  publish_json="$state_dir/saas-smoke-autoconverge-publish.json"
+  cargo run --quiet -p devfinity -- --state-dir "$devfinity_state_root" \
+    publish-payload --version-label devfinity-v2 >"$publish_json"
+  payload_rootfs="$(node - "$publish_json" <<'JS'
+const fs = require("node:fs");
+const publish = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+for (const field of ["artifactId", "tarballUrl", "manifestUrl", "tarballSha256", "payloadRootfs"]) {
+  if (!publish[field]) throw new Error(`publish-payload output is missing ${field}`);
+}
+if (publish.versionLabel !== "devfinity-v2") {
+  throw new Error(`publish-payload used label ${publish.versionLabel}, expected devfinity-v2`);
+}
+process.stdout.write(publish.payloadRootfs);
+JS
+)"
+  echo "published payload devfinity-v2 to the canary channel; waiting for autonomous convergence"
+
+  # (d) NO further driving: poll /healthz from the host until the poller has
+  # staged and flipped to devfinity-v2 on its own (503s mid-flip are
+  # expected; curl -f keeps polling through them).
+  deadline=$(( $(date +%s) + 180 ))
+  while true; do
+    if curl -fsS --max-time 5 "$runtime_url/healthz" >"$healthz_json" 2>/dev/null \
+      && node - "$healthz_json" <<'JS' >/dev/null 2>&1
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (health.payload_version !== "devfinity-v2" || health.agentd?.ok !== true) process.exit(1);
+JS
+    then
+      break
+    fi
+    if (( $(date +%s) >= deadline )); then
+      echo "runtime did not converge on devfinity-v2 unattended within 180s" >&2
+      return 1
+    fi
+    sleep 2
+  done
+  echo "runtime converged on devfinity-v2 unattended"
+
+  # (e) The flip was the poller's: last_poll names the head, last_flip
+  # succeeded, agentd's processes run, and the Agent Principal is unchanged.
+  node - "$healthz_json" <<'JS'
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (health.channel !== "canary") {
+  throw new Error(`channel should be canary: ${JSON.stringify(health.channel)}`);
+}
+if (health.last_flip?.outcome !== "success" || health.last_flip?.to !== "devfinity-v2") {
+  throw new Error(`last_flip should be a successful flip to devfinity-v2: ${JSON.stringify(health.last_flip)}`);
+}
+// The converging tick records flip_started; a later settled tick records
+// none with the head still in view. Either proves the poller drove it —
+// nothing else touched the guest after set-channel.
+if (!["flip_started", "none"].includes(health.last_poll?.action)
+  || health.last_poll?.head_version !== "devfinity-v2") {
+  throw new Error(`last_poll should reflect the autonomous flip: ${JSON.stringify(health.last_poll)}`);
+}
+if (health.agentd?.ok !== true) {
+  throw new Error(`agentd processes are not running after the autonomous flip: ${JSON.stringify(health.agentd)}`);
+}
+JS
+  npub_after="$(runtime_agent_npub)"
+  if [[ "$npub_after" != "$npub_before" ]]; then
+    echo "Agent Principal changed across the autonomous payload flip" >&2
+    return 1
+  fi
+  echo "autonomous flip preserved the Agent Principal and agentd processes"
+
+  # (f) Core's gen fence: the runner forwards /healthz telemetry, so
+  # payload-convergence must show this runtime on devfinity-v2, channel
+  # canary, fence converged (bounded by the runner's report interval).
+  convergence_json="$state_dir/saas-smoke-autoconverge-convergence.json"
+  deadline=$(( $(date +%s) + 120 ))
+  while true; do
+    if cargo run --quiet -p finite-saas-core -- payload-convergence >"$convergence_json" \
+      && node - "$convergence_json" "$machine_id" <<'JS' >/dev/null 2>&1
+const fs = require("node:fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const runtime = report.runtimes.find((row) => row.runtime_id === process.argv[3]);
+if (!runtime) process.exit(1);
+if (runtime.payload_version_label !== "devfinity-v2") process.exit(1);
+if (runtime.channel !== "canary") process.exit(1);
+if (runtime.fence !== "converged") process.exit(1);
+if (!runtime.shell_version || !runtime.reported_at) process.exit(1);
+JS
+    then
+      break
+    fi
+    if (( $(date +%s) >= deadline )); then
+      echo "Core payload-convergence did not show devfinity-v2 converged within 120s" >&2
+      cat "$convergence_json" >&2 || true
+      return 1
+    fi
+    sleep 5
+  done
+  echo "Core payload-convergence shows devfinity-v2 on canary with fence converged"
+
+  # (g) Publish a broken v3 (its finite-agentd exits 1) and again do NOT
+  # drive the guest: the poller must try it, fail the health gate, roll back,
+  # and bad-list it.
+  broken_dir="$state_dir/saas-smoke-autoconverge-broken"
+  rm -rf "$broken_dir"
+  mkdir -p "$broken_dir"
+  cp -a "$payload_rootfs/." "$broken_dir/"
+  cat >"$broken_dir/bin/finite-agentd" <<'SH'
+#!/bin/sh
+exit 1
+SH
+  chmod +x "$broken_dir/bin/finite-agentd"
+  cargo run --quiet -p devfinity -- --state-dir "$devfinity_state_root" \
+    publish-payload --source "$broken_dir" --version-label devfinity-v3-broken \
+    >"$state_dir/saas-smoke-autoconverge-broken-publish.json"
+  echo "published broken payload devfinity-v3-broken; waiting for autonomous rollback"
+
+  # (h) Wait for the bad-list entry (the health body is served even at 503,
+  # so read it without curl -f while the gate/rollback is in flight).
+  deadline=$(( $(date +%s) + 240 ))
+  while true; do
+    if curl -sS --max-time 5 "$runtime_url/healthz" >"$healthz_json" 2>/dev/null \
+      && node - "$healthz_json" <<'JS' >/dev/null 2>&1
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const bad = health.payload_generations?.bad || [];
+if (!bad.includes("devfinity-v3-broken")) process.exit(1);
+JS
+    then
+      break
+    fi
+    if (( $(date +%s) >= deadline )); then
+      echo "devfinity-v3-broken was not bad-listed within 240s" >&2
+      return 1
+    fi
+    sleep 2
+  done
+
+  # (i) Back on v2, healthy, identity unchanged; the failed flip is recorded.
+  wait_http "Agent Runtime after autonomous rollback" "$runtime_url/healthz" 180
+  curl -fsS --max-time 5 "$runtime_url/healthz" >"$healthz_json"
+  node - "$healthz_json" <<'JS'
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (health.payload_version !== "devfinity-v2") {
+  throw new Error(`autonomous rollback should land on devfinity-v2: ${health.payload_version}`);
+}
+if (health.agentd?.ok !== true) {
+  throw new Error(`agentd is not healthy after the autonomous rollback: ${JSON.stringify(health.agentd)}`);
+}
+if (health.last_flip?.outcome !== "rolled_back") {
+  throw new Error(`the broken flip should be recorded as rolled_back: ${JSON.stringify(health.last_flip)}`);
+}
+JS
+  npub_after="$(runtime_agent_npub)"
+  if [[ "$npub_after" != "$npub_before" ]]; then
+    echo "Agent Principal changed across the autonomous rollback" >&2
+    return 1
+  fi
+  echo "broken payload auto-rolled back to devfinity-v2, bad-listed, Agent Principal unchanged"
+
+  # (j) The gen fence for real: canary's head is now devfinity-v3-broken with
+  # devfinity-v2 as previous, so the runtime (still reporting v2) must stay
+  # fence "converged" — exactly the N-1 rule.
+  deadline=$(( $(date +%s) + 120 ))
+  while true; do
+    if cargo run --quiet -p finite-saas-core -- payload-convergence >"$convergence_json" \
+      && node - "$convergence_json" "$machine_id" <<'JS' >/dev/null 2>&1
+const fs = require("node:fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const runtime = report.runtimes.find((row) => row.runtime_id === process.argv[3]);
+if (!runtime) process.exit(1);
+if (runtime.payload_version_label !== "devfinity-v2") process.exit(1);
+if (runtime.fence !== "converged") process.exit(1);
+const canary = report.channels.find(
+  (head) => head.channel === "canary" && head.artifact_kind === "payload_bundle",
+);
+if (!canary) process.exit(1);
+if (canary.version_label !== "devfinity-v3-broken") process.exit(1);
+if (canary.previous_version_label !== "devfinity-v2") process.exit(1);
+JS
+    then
+      break
+    fi
+    if (( $(date +%s) >= deadline )); then
+      echo "gen fence did not keep devfinity-v2 converged as the previous head within 120s" >&2
+      cat "$convergence_json" >&2 || true
+      return 1
+    fi
+    sleep 5
+  done
+  rm -rf "$broken_dir"
+  echo "gen fence keeps devfinity-v2 converged as the previous head after the v3 repoint"
+}
+
 need curl
 need node
 need process-compose
@@ -1957,6 +2188,11 @@ if [[ "${DEVFINITY_SKILLS_SYNC_SMOKE:-0}" != "0" && "${DEVFINITY_SKILLS_SYNC_SMO
 fi
 if [[ "${DEVFINITY_PAYLOAD_FLIP_SMOKE:-0}" != "0" && "${DEVFINITY_PAYLOAD_FLIP_SMOKE:-0}" != "1" ]]; then
   echo "DEVFINITY_PAYLOAD_FLIP_SMOKE must be 0 or 1" >&2
+  exit 64
+fi
+if [[ "${DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE:-0}" != "0" \
+  && "${DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE:-0}" != "1" ]]; then
+  echo "DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE must be 0 or 1" >&2
   exit 64
 fi
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "0" \
@@ -2074,6 +2310,18 @@ if [[ "${DEVFINITY_PAYLOAD_FLIP_SMOKE:-0}" == "1" ]]; then
   # assertions the way the skills variant does.
   run_payload_flip_smoke
   echo "devfinity payload flip smoke passed"
+  echo "project_id=$project_id"
+  echo "runtime_id=$machine_id"
+  echo "source_machine_id=$container_machine_id"
+  exit 0
+fi
+if [[ "${DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE:-0}" == "1" ]]; then
+  # Focused variant, the M4 acceptance: after set-channel + publish, the
+  # shell's own poller converges the runtime with NO further driving, and
+  # Core's gen fence sees it. Skips the inference-heavy assertions the way
+  # the flip variant does.
+  run_payload_autoconverge_smoke
+  echo "devfinity payload autoconverge smoke passed"
   echo "project_id=$project_id"
   echo "runtime_id=$machine_id"
   echo "source_machine_id=$container_machine_id"

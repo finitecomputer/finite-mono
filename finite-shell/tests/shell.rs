@@ -11,9 +11,12 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 use serde_json::{Value, json};
 
+use finite_service_directory::{
+    ChannelBundleV1, PAYLOAD_BUNDLE_KIND, SERVICE_DIRECTORY_SCHEMA, ServiceDirectoryV1,
+};
 use finite_shell::control::{ShellRuntime, ctl_roundtrip};
 use finite_shell::generations::{StageRequest, read_link_version, stage_payload};
-use finite_shell::state::{FlipOutcome, FlipRecord, SharedState};
+use finite_shell::state::{FlipOutcome, FlipRecord, PollAction, SharedState};
 use finite_shell::{SHELL_VERSION, ShellError, ShellSettings, health};
 
 fn test_signing_key() -> SigningKey {
@@ -893,6 +896,364 @@ async fn every_verb_works_over_a_real_unix_socket() {
     let response = runtime.handle_request_line("not json at all").await;
     assert_eq!(response["error"]["code"], json!("invalid_request"));
 
+    runtime.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Autonomous channel polling (M4)
+// ---------------------------------------------------------------------------
+
+type SharedRoutes = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+/// Like `serve_bytes`, but the routes can be swapped between requests — the
+/// fixture directory server tests repoint mid-test.
+async fn serve_shared(routes: SharedRoutes) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let routes = std::sync::Arc::clone(&routes);
+            tokio::spawn(async move {
+                let mut buffer = vec![0_u8; 8192];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                let body = routes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(route, _)| *route == path)
+                    .map(|(_, body)| body.clone());
+                match body {
+                    Some(body) => {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes()).await;
+                        let _ = stream.write_all(&body).await;
+                    }
+                    None => {
+                        let _ = stream
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Point the fixture directory at `packed` as `channel`'s payload head (or at
+/// no head at all), serving the signed directory plus the bundle bytes.
+fn set_directory_head(
+    routes: &SharedRoutes,
+    base_url: &str,
+    channel: &str,
+    packed: Option<&finite_release::PayloadPackOutput>,
+) {
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut channels = std::collections::BTreeMap::new();
+    if let Some(packed) = packed {
+        let name = format!("{}.tar.gz", packed.manifest.version_label);
+        entries.push((format!("/{name}"), fs::read(&packed.tarball_path).unwrap()));
+        entries.push((
+            format!("/{name}.manifest.json"),
+            fs::read(&packed.manifest_path).unwrap(),
+        ));
+        channels.insert(
+            channel.to_owned(),
+            std::collections::BTreeMap::from([(
+                PAYLOAD_BUNDLE_KIND.to_owned(),
+                ChannelBundleV1 {
+                    artifact_id: packed.manifest.artifact_id.clone(),
+                    version_label: packed.manifest.version_label.clone(),
+                    tarball_url: format!("{base_url}/{name}"),
+                    manifest_url: format!("{base_url}/{name}.manifest.json"),
+                    tarball_sha256: packed.manifest.tarball_sha256.clone(),
+                },
+            )]),
+        );
+    }
+    let mut directory = ServiceDirectoryV1 {
+        schema: SERVICE_DIRECTORY_SCHEMA.to_owned(),
+        generated_at: "2026-08-06T00:00:00Z".to_owned(),
+        services: std::collections::BTreeMap::new(),
+        channels,
+        signature: String::new(),
+    };
+    directory.sign(&test_signing_key()).unwrap();
+    entries.push((
+        "/api/core/v1/service-directory".to_owned(),
+        serde_json::to_vec(&directory).unwrap(),
+    ));
+    *routes.lock().unwrap() = entries;
+}
+
+/// Boot a seeded v1 shell wired to a fixture directory server whose head
+/// starts as the seed itself (a converged fleet).
+async fn boot_with_directory(
+    root: &Path,
+    poll_interval: Duration,
+) -> (ShellSettings, ShellRuntime, SharedRoutes, String) {
+    let routes: SharedRoutes = SharedRoutes::default();
+    let base_url = serve_shared(std::sync::Arc::clone(&routes)).await;
+    let mut settings = test_settings(root);
+    settings.allow_insecure_bundle_url = true;
+    settings.poll_interval = poll_interval;
+    settings.service_directory_url = Some(format!("{base_url}/api/core/v1/service-directory"));
+    let packed = pack_payload(root, "v1", "one", false);
+    install_seed(&settings, &packed);
+    set_directory_head(&routes, &base_url, "stable", Some(&packed));
+    let runtime = ShellRuntime::boot(settings.clone()).await.unwrap();
+    (settings, runtime, routes, base_url)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_poller_stages_and_flips_to_a_new_head_unattended() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime, routes, base_url) =
+        boot_with_directory(root.path(), Duration::from_millis(150)).await;
+    wait_for_marker(&settings, "one").await;
+
+    // The agent is moved to canary, whose head is v2 — exactly the smoke's
+    // set-channel + publish sequence, with no further driving.
+    runtime
+        .handle_request_line(r#"{"verb":"set-channel","channel":"canary"}"#)
+        .await;
+    let packed_v2 = pack_payload(root.path(), "v2", "two", false);
+    set_directory_head(&routes, &base_url, "canary", Some(&packed_v2));
+    assert!(runtime.spawn_channel_poller());
+
+    let flip = wait_for_flip_outcome(&runtime.state, FlipOutcome::Success).await;
+    assert_eq!(flip.from.as_deref(), Some("v1"));
+    assert_eq!(flip.to, "v2");
+    wait_for_marker(&settings, "two").await;
+    let layout = settings.layout();
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v2")
+    );
+    assert_eq!(
+        read_link_version(&layout.previous_link()).as_deref(),
+        Some("v1")
+    );
+
+    // The tick that converged recorded flip_started; once converged the loop
+    // settles on action "none" with the head still in view.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(poll) = runtime.state.snapshot().last_poll
+                && poll.action == PollAction::None
+                && poll.head_version.as_deref() == Some("v2")
+            {
+                assert_eq!(poll.channel, "canary");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the poll loop never settled on the converged head");
+
+    // /healthz surfaces the channel and the last poll outcome.
+    let payload = health::runtime_health(&settings, &layout, &runtime.state.snapshot(), None);
+    assert_eq!(payload["channel"], json!("canary"));
+    assert_eq!(payload["last_poll"]["action"], json!("none"));
+    assert_eq!(payload["last_poll"]["head_version"], json!("v2"));
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_poller_leaves_bad_listed_and_min_shell_unsatisfied_heads_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime, routes, base_url) =
+        boot_with_directory(root.path(), Duration::ZERO).await;
+    wait_for_marker(&settings, "one").await;
+    let layout = settings.layout();
+
+    // A bad-listed head (a previous flip's health gate failed) is skipped —
+    // the loop must not fight the rollback machinery.
+    let packed_v2 = pack_payload(root.path(), "v2", "two", false);
+    set_directory_head(&routes, &base_url, "stable", Some(&packed_v2));
+    runtime
+        .state
+        .update(|state| {
+            state.bad.push(finite_shell::state::BadGeneration {
+                version_label: "v2".to_owned(),
+                reason: "health gate failed".to_owned(),
+                at: "2026-08-06T00:00:00Z".to_owned(),
+            })
+        })
+        .unwrap();
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::SkippedBad);
+    assert_eq!(record.head_version.as_deref(), Some("v2"));
+    assert_eq!(record.channel, "stable");
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v1")
+    );
+    assert!(runtime.state.snapshot().staged.is_none());
+
+    // A head requiring a newer shell is skipped with its own action.
+    let source = build_payload_source(root.path(), "future", false);
+    let future = finite_release::pack_payload_bundle(
+        &finite_release::PayloadPackRequest {
+            source: &source,
+            artifact_id: "payload-v-future",
+            version_label: "v-future",
+            min_shell_version: "99.0.0",
+            source_git_sha: None,
+            created_at: Some("2026-08-06T00:00:00Z"),
+            out_dir: &root.path().join("packed-v-future"),
+        },
+        &test_signing_key(),
+    )
+    .unwrap();
+    set_directory_head(&routes, &base_url, "stable", Some(&future));
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::SkippedMinShell);
+    assert_eq!(record.head_version.as_deref(), Some("v-future"));
+    assert!(!layout.generation_dir("v-future").exists());
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v1")
+    );
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_poller_no_ops_on_a_converged_or_headless_channel() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime, routes, base_url) =
+        boot_with_directory(root.path(), Duration::ZERO).await;
+    wait_for_marker(&settings, "one").await;
+
+    // Head == current: nothing to do.
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::None);
+    assert_eq!(record.head_version.as_deref(), Some("v1"));
+    assert_eq!(record.channel, "stable");
+
+    // A channel with no payload head: nothing to converge on.
+    set_directory_head(&routes, &base_url, "stable", None);
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::None);
+    assert_eq!(record.head_version, None);
+
+    // An unreachable directory is an error tick, and the state file records
+    // it atomically for /healthz.
+    *routes.lock().unwrap() = Vec::new();
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::Error);
+    let reloaded = SharedState::load(&settings.layout().state_path()).snapshot();
+    assert_eq!(reloaded.last_poll.unwrap().action, PollAction::Error);
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_poll_tick_concurrent_with_a_manual_flip_skips_instead_of_double_flipping() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime, routes, base_url) =
+        boot_with_directory(root.path(), Duration::ZERO).await;
+    wait_for_marker(&settings, "one").await;
+    let layout = settings.layout();
+
+    // v2's agentd sleeps before writing its ready files so the manual flip
+    // holds the transition gate for a deterministic window.
+    let source = build_payload_source(root.path(), "two", false);
+    let script_path = source.join("bin/finite-agentd");
+    let script = fs::read_to_string(&script_path).unwrap();
+    fs::write(
+        &script_path,
+        script.replacen("#!/bin/sh\n", "#!/bin/sh\nsleep 1\n", 1),
+    )
+    .unwrap();
+    let packed_v2 = finite_release::pack_payload_bundle(
+        &finite_release::PayloadPackRequest {
+            source: &source,
+            artifact_id: "payload-v2",
+            version_label: "v2",
+            min_shell_version: "0.1.0",
+            source_git_sha: None,
+            created_at: Some("2026-08-06T00:00:00Z"),
+            out_dir: &root.path().join("packed-v2-slow"),
+        },
+        &test_signing_key(),
+    )
+    .unwrap();
+    set_directory_head(&routes, &base_url, "stable", Some(&packed_v2));
+
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&packed_v2, false),
+    )
+    .await
+    .unwrap();
+    let response = runtime.handle_request_line(r#"{"verb":"flip"}"#).await;
+    assert_eq!(response["ok"], json!(true));
+
+    // A tick during the manual flip must neither deadlock nor start a second
+    // transition: it observes the gate and skips.
+    let record = tokio::time::timeout(Duration::from_secs(5), runtime.poll_channel_once())
+        .await
+        .expect("the poll tick must not deadlock against a manual flip");
+    assert_eq!(record.action, PollAction::None);
+    assert!(record.detail.unwrap().contains("in progress"));
+
+    let flip = wait_for_flip_outcome(&runtime.state, FlipOutcome::Success).await;
+    assert_eq!(flip.to, "v2");
+    wait_for_marker(&settings, "two").await;
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v2")
+    );
+    assert_eq!(
+        read_link_version(&layout.previous_link()).as_deref(),
+        Some("v1"),
+        "exactly one flip happened"
+    );
+
+    // The next tick sees the manual flip already converged on the head.
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::None);
+    assert_eq!(record.head_version.as_deref(), Some("v2"));
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interval_zero_or_a_missing_directory_url_disables_the_poller() {
+    let root = tempfile::tempdir().unwrap();
+    let (_, runtime, _routes, _base_url) = boot_with_directory(root.path(), Duration::ZERO).await;
+    assert!(!runtime.spawn_channel_poller(), "interval 0 disables");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(runtime.state.snapshot().last_poll.is_none());
+    runtime.shutdown().await;
+
+    let unwired_root = tempfile::tempdir().unwrap();
+    let settings = test_settings(unwired_root.path());
+    let packed = pack_payload(unwired_root.path(), "v1", "one", false);
+    install_seed(&settings, &packed);
+    let runtime = ShellRuntime::boot(settings).await.unwrap();
+    assert!(
+        !runtime.spawn_channel_poller(),
+        "no FINITE_SERVICE_DIRECTORY_URL disables"
+    );
     runtime.shutdown().await;
 }
 

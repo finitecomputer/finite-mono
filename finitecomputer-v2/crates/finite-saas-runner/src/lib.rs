@@ -7,9 +7,10 @@ use finite_saas_core::{
     RegisterAgentCreationRuntimeInput, RelayHeartbeat, RenewRuntimeControlRequestInput,
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePlacement,
-    RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
-    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePayloadReportRequest,
+    RuntimePayloadStatus, RuntimePlacement, RuntimeResourceClass, RuntimeRetirementSnapshotReceipt,
+    RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
+    api::RecordProviderOperationTransitionRequest,
     runtime_relay_token_hash as hash_runtime_relay_token,
 };
 #[cfg(test)]
@@ -366,6 +367,35 @@ pub struct AgentCreationRunner<Q, L, T> {
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
     agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
+    payload_telemetry: Option<PayloadTelemetryConfig>,
+}
+
+/// Payload generation telemetry (payload-generations plan M4): the runner is
+/// the only component that both reaches every owned runtime's `/contact`
+/// endpoint and holds a Core credential, so it forwards what each runtime's
+/// shell reports running. The registry of owned runtimes is a directory of
+/// small JSON files under the runner work root — `run_cycle` reconstructs
+/// the whole runner every cycle, so the registry must survive on disk.
+#[derive(Debug, Clone)]
+pub struct PayloadTelemetryConfig {
+    /// Where the per-runtime registry entries live
+    /// (`<work_root>/payload-telemetry`).
+    pub registry_dir: PathBuf,
+    /// Per-runtime minimum spacing between report attempts.
+    pub interval: Duration,
+    /// Bound on the `/contact` fetch.
+    pub http_timeout: Duration,
+}
+
+/// One owned runtime the runner reports payload telemetry for.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PayloadTelemetryEntry {
+    source_machine_id: String,
+    contact_endpoint: String,
+    /// Unix milliseconds of the last report attempt (success or not); the
+    /// throttle key.
+    #[serde(default)]
+    last_attempt_unix_ms: Option<u64>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -397,7 +427,15 @@ where
             runtime_environment: BTreeMap::new(),
             runtime_secret_environment: BTreeMap::new(),
             agent_identity_authority: None,
+            payload_telemetry: None,
         })
+    }
+
+    /// Enable payload telemetry forwarding (owned runtimes' shell `/healthz`
+    /// fields → Core) with the given registry directory and cadence.
+    pub fn with_payload_telemetry(mut self, config: Option<PayloadTelemetryConfig>) -> Self {
+        self.payload_telemetry = config;
+        self
     }
 
     pub fn with_runtime_ready_polling(mut self, timeout: Duration, interval: Duration) -> Self {
@@ -450,6 +488,9 @@ where
 
     pub fn run_once(&mut self) -> Result<RunOnceOutcome, RunnerError> {
         self.launcher.validate_ready()?;
+        // Best-effort, throttled per runtime: telemetry must never fail or
+        // slow the lease cycle beyond its own bounded HTTP timeouts.
+        self.forward_payload_telemetry();
         let lease_token = self.lease_tokens.next_lease_token()?;
         let source_host_id = self.launcher.source_host_id().map(str::to_string);
         let runtime_capabilities = self.launcher.runtime_capabilities();
@@ -591,10 +632,13 @@ where
                     Err(error) => Err(error),
                 };
                 match launch_result {
-                    Ok(completed) => Ok(RunOnceOutcome::Launched {
-                        request_id,
-                        runtime_id: completed.request.agent_runtime_id,
-                    }),
+                    Ok(completed) => {
+                        self.record_payload_telemetry_target(&facts);
+                        Ok(RunOnceOutcome::Launched {
+                            request_id,
+                            runtime_id: completed.request.agent_runtime_id,
+                        })
+                    }
                     Err(error) => {
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
@@ -640,6 +684,94 @@ where
                     request_id,
                     failure_message,
                 })
+            }
+        }
+    }
+
+    /// Remember a successfully launched runtime as a telemetry target. The
+    /// registry entry survives on disk because `run_cycle` rebuilds the
+    /// runner every cycle. Best-effort: a write failure loses telemetry, not
+    /// the launch.
+    fn record_payload_telemetry_target(&self, facts: &RuntimeLaunchFacts) {
+        let Some(config) = &self.payload_telemetry else {
+            return;
+        };
+        let Some(contact_endpoint) = facts.contact_endpoint.clone() else {
+            return;
+        };
+        let entry = PayloadTelemetryEntry {
+            source_machine_id: facts.source_machine_id.clone(),
+            contact_endpoint,
+            last_attempt_unix_ms: None,
+        };
+        if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry) {
+            eprintln!(
+                "warning: payload telemetry registration for {} failed: {error}",
+                facts.source_machine_id
+            );
+        }
+    }
+
+    /// Forward each due runtime's shell-reported payload fields to Core.
+    /// Reads `/contact` (the same health body as `/healthz`, served even at
+    /// 503 while a flip is in progress), tolerates pre-shell images by
+    /// reporting absent fields, and skips unreachable runtimes until their
+    /// next interval.
+    fn forward_payload_telemetry(&mut self) {
+        let Some(config) = self.payload_telemetry.clone() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&config.registry_dir) else {
+            return;
+        };
+        let now_ms = unix_millis_now();
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(mut entry) = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<PayloadTelemetryEntry>(&bytes).ok())
+            else {
+                continue;
+            };
+            if entry.last_attempt_unix_ms.is_some_and(|last| {
+                now_ms.saturating_sub(last) < config.interval.as_millis() as u64
+            }) {
+                continue;
+            }
+            entry.last_attempt_unix_ms = Some(now_ms);
+            if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry) {
+                eprintln!(
+                    "warning: payload telemetry entry for {} was not updated: {error}",
+                    entry.source_machine_id
+                );
+            }
+            let Some(health) =
+                fetch_runtime_health_json(&entry.contact_endpoint, config.http_timeout)
+            else {
+                // Unreachable this tick (stopped container, mid-restart):
+                // try again after the interval.
+                continue;
+            };
+            let field = |name: &str| {
+                health
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            };
+            let request = RuntimePayloadReportRequest {
+                source_machine_id: entry.source_machine_id.clone(),
+                payload_version_label: field("payload_version"),
+                shell_version: field("shell_version"),
+                release_channel: field("channel"),
+                now: None,
+            };
+            if let Err(error) = self.queue.report_runtime_payload(&request) {
+                eprintln!(
+                    "warning: payload telemetry report for {} failed: {error}",
+                    entry.source_machine_id
+                );
             }
         }
     }
@@ -1189,6 +1321,14 @@ pub trait AgentCreationQueue {
         request_id: &str,
         input: FailAgentCreationRequestInput,
     ) -> Result<AgentCreationRequest, RunnerError>;
+
+    /// Forward one runtime's shell-reported payload telemetry
+    /// (payload-generations plan M4). The source host is bound by the
+    /// runner credential on the Core side.
+    fn report_runtime_payload(
+        &mut self,
+        input: &RuntimePayloadReportRequest,
+    ) -> Result<(), RunnerError>;
 }
 
 pub trait ProviderOperationJournal {
@@ -2297,6 +2437,67 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             &format!("/api/core/v1/agent-creation-requests/{}/fail", request_id),
             &input,
         )
+    }
+
+    fn report_runtime_payload(
+        &mut self,
+        input: &RuntimePayloadReportRequest,
+    ) -> Result<(), RunnerError> {
+        let _: RuntimePayloadStatus =
+            self.post_json("/api/core/v1/runtime-payload-reports", input)?;
+        Ok(())
+    }
+}
+
+/// Atomically write one payload-telemetry registry entry
+/// (`<registry_dir>/<machine>.json`, tempfile + rename).
+fn write_payload_telemetry_entry(
+    registry_dir: &Path,
+    entry: &PayloadTelemetryEntry,
+) -> Result<(), RunnerError> {
+    if entry.source_machine_id.is_empty()
+        || !entry
+            .source_machine_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(RunnerError::RuntimeLaunch(format!(
+            "machine id {:?} is not a safe registry file name",
+            entry.source_machine_id
+        )));
+    }
+    std::fs::create_dir_all(registry_dir).map_err(|error| {
+        RunnerError::RuntimeLaunch(format!("payload telemetry registry is unusable: {error}"))
+    })?;
+    let path = registry_dir.join(format!("{}.json", entry.source_machine_id));
+    let temporary = registry_dir.join(format!(".{}.json.tmp", entry.source_machine_id));
+    let bytes = serde_json::to_vec_pretty(entry).map_err(|error| {
+        RunnerError::RuntimeLaunch(format!(
+            "payload telemetry entry is unserializable: {error}"
+        ))
+    })?;
+    std::fs::write(&temporary, bytes)
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .map_err(|error| {
+            RunnerError::RuntimeLaunch(format!("payload telemetry entry write failed: {error}"))
+        })
+}
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+/// GET a runtime health body. The shell serves the same JSON on `/contact`
+/// and `/healthz` with 200 when ready and 503 otherwise — both carry the
+/// generation fields, so a 503 body is still a valid report source.
+fn fetch_runtime_health_json(url: &str, timeout: Duration) -> Option<serde_json::Value> {
+    match ureq::get(url).timeout(timeout).call() {
+        Ok(response) => response.into_json().ok(),
+        Err(ureq::Error::Status(_, response)) => response.into_json().ok(),
+        Err(_) => None,
     }
 }
 
@@ -4750,6 +4951,150 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn payload_telemetry_registers_launches_and_forwards_healthz_fields() {
+        let work_root = tempfile::tempdir().unwrap();
+        let registry_dir = work_root.path().join("payload-telemetry");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // First telemetry pass: a shell-image health body (the shell
+            // serves the same JSON on /contact, 503 while flipping — still a
+            // valid source). Second pass: a pre-shell body without the
+            // generation fields.
+            let (mut first, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut first);
+            assert!(request.starts_with("GET /contact "));
+            write_http_json(
+                &mut first,
+                503,
+                &serde_json::json!({
+                    "ready": false,
+                    "payload_version": "devfinity-v2",
+                    "shell_version": "0.1.0",
+                    "channel": "canary",
+                })
+                .to_string(),
+            );
+            let (mut second, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut second);
+            assert!(request.starts_with("GET /contact "));
+            write_http_json(
+                &mut second,
+                200,
+                &serde_json::json!({ "ready": true }).to_string(),
+            );
+        });
+
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let machine_id = facts.source_machine_id.clone();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1", "lease-2", "lease-3", "lease-4"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_payload_telemetry(Some(PayloadTelemetryConfig {
+            registry_dir: registry_dir.clone(),
+            interval: Duration::ZERO,
+            http_timeout: Duration::from_secs(1),
+        }));
+
+        // The launch registers the runtime as a telemetry target on disk
+        // (run_cycle rebuilds the runner every cycle, so memory won't do).
+        let outcome = runner.run_once().unwrap();
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert!(registry_dir.join(format!("{machine_id}.json")).is_file());
+        assert!(runner.queue.payload_reports.is_empty());
+
+        // Next cycle forwards the shell fields; the one after tolerates a
+        // pre-shell body by reporting absent fields.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+        let report = &runner.queue.payload_reports[0];
+        assert_eq!(report.source_machine_id, machine_id);
+        assert_eq!(
+            report.payload_version_label.as_deref(),
+            Some("devfinity-v2")
+        );
+        assert_eq!(report.shell_version.as_deref(), Some("0.1.0"));
+        assert_eq!(report.release_channel.as_deref(), Some("canary"));
+
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 2);
+        let report = &runner.queue.payload_reports[1];
+        assert_eq!(report.payload_version_label, None);
+        assert_eq!(report.shell_version, None);
+        assert_eq!(report.release_channel, None);
+        server.join().unwrap();
+
+        // The stub is gone: an unreachable runtime is skipped, never an
+        // error, and never a report of stale data.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 2);
+    }
+
+    #[test]
+    fn payload_telemetry_is_throttled_per_runtime_and_off_without_config() {
+        let work_root = tempfile::tempdir().unwrap();
+        let registry_dir = work_root.path().join("payload-telemetry");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut only, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut only);
+            write_http_json(
+                &mut only,
+                200,
+                &serde_json::json!({ "ready": true, "payload_version": "v1" }).to_string(),
+            );
+        });
+
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(facts.clone()),
+            FixedLeaseTokens::new(["lease-1", "lease-2", "lease-3"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_payload_telemetry(Some(PayloadTelemetryConfig {
+            registry_dir: registry_dir.clone(),
+            interval: Duration::from_secs(3600),
+            http_timeout: Duration::from_secs(1),
+        }));
+        runner.run_once().unwrap();
+        runner.run_once().unwrap();
+        runner.run_once().unwrap();
+        assert_eq!(
+            runner.queue.payload_reports.len(),
+            1,
+            "one report inside the interval, however many cycles run"
+        );
+        server.join().unwrap();
+
+        // Without config (no work root / interval 0 upstream) nothing is
+        // registered or fetched.
+        let disabled_root = tempfile::tempdir().unwrap();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_456")),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1", "lease-2"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+        runner.run_once().unwrap();
+        runner.run_once().unwrap();
+        assert!(runner.queue.payload_reports.is_empty());
+        assert!(!disabled_root.path().join("payload-telemetry").exists());
+    }
+
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {
         stream
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -6008,6 +6353,7 @@ mod tests {
         heartbeat_checks: Vec<String>,
         completed: Vec<CompleteAgentCreationRequestInput>,
         failed: Vec<FailAgentCreationRequestInput>,
+        payload_reports: Vec<RuntimePayloadReportRequest>,
     }
 
     impl FakeQueue {
@@ -6032,6 +6378,7 @@ mod tests {
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                payload_reports: Vec::new(),
             }
         }
 
@@ -6056,6 +6403,7 @@ mod tests {
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                payload_reports: Vec::new(),
             }
         }
 
@@ -6080,6 +6428,7 @@ mod tests {
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                payload_reports: Vec::new(),
             }
         }
 
@@ -6234,6 +6583,14 @@ mod tests {
         ) -> Result<AgentCreationRequest, RunnerError> {
             self.failed.push(input);
             Ok(sample_lease("agent_request_123").request)
+        }
+
+        fn report_runtime_payload(
+            &mut self,
+            input: &RuntimePayloadReportRequest,
+        ) -> Result<(), RunnerError> {
+            self.payload_reports.push(input.clone());
+            Ok(())
         }
     }
 

@@ -7,8 +7,9 @@
 //! - the npub comes from the `/data` identity file
 //!   (`<agent home>/identity/identity.json`, the shared Finite identity),
 //!   not from shelling out to `finitechat auth status`;
-//! - the shell adds `shell_version`, `payload_version`,
-//!   `payload_generations`, `last_flip`, and `agentd_supervision`.
+//! - the shell adds `shell_version`, `payload_version`, `channel`,
+//!   `payload_generations`, `last_flip`, `last_poll`, and
+//!   `agentd_supervision`.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -435,6 +436,7 @@ pub fn runtime_health(
     let previous = generations::read_link_version(&layout.previous_link());
     payload["shell_version"] = Value::from(SHELL_VERSION);
     payload["payload_version"] = current.clone().map(Value::from).unwrap_or(Value::Null);
+    payload["channel"] = Value::from(layout.channel_name());
     payload["payload_generations"] = json!({
         "current": current,
         "previous": previous,
@@ -452,6 +454,11 @@ pub fn runtime_health(
         .last_flip
         .as_ref()
         .and_then(|flip| serde_json::to_value(flip).ok())
+        .unwrap_or(Value::Null);
+    payload["last_poll"] = shell_state
+        .last_poll
+        .as_ref()
+        .and_then(|poll| serde_json::to_value(poll).ok())
         .unwrap_or(Value::Null);
     payload["agentd_supervision"] = agentd_supervision
         .and_then(|status| serde_json::to_value(status).ok())

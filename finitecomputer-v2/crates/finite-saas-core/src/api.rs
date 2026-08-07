@@ -16,17 +16,19 @@ use crate::{
     FinitePrivateApiKey, FinitePrivateDailyResetResult, FinitePrivateGrant,
     FinitePrivateSettlementKind, FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
     ImportCandidateStatus, IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput,
-    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput, Project,
-    ProjectImportCandidate, ProviderOperationEnvelope, ProviderOperationTransition,
-    ProviderRuntimeHandleEnvelope, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
+    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput,
+    PayloadConvergenceReport, Project, ProjectImportCandidate, ProviderOperationEnvelope,
+    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
+    RecordProviderOperationTransitionInput, RecordRuntimePayloadReportInput,
     RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
     RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
     RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
-    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
+    RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePayloadReportRequest,
+    RuntimePayloadStatus, RuntimePlacement, RuntimeSummaryStatus,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, SyncStripeSubscriptionInput, UpsertRuntimeArtifactInput,
     UpsertSourceHostRelayEndpointInput, normalize_owner_email, normalize_runtime_contact_endpoint,
@@ -976,6 +978,10 @@ fn router_with_state_options(
             get(runtime_artifact).put(upsert_runtime_artifact),
         )
         .route(
+            "/api/core/v1/runtime-payload-reports",
+            post(report_runtime_payload),
+        )
+        .route(
             "/api/core/v1/finite-private/grants",
             post(approve_finite_private_grant),
         )
@@ -1028,6 +1034,10 @@ fn router_with_state_options(
             post(settle_finite_private_reservation),
         )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
+        .route(
+            "/api/core/v1/admin/runtime-payload-convergence",
+            get(admin_runtime_payload_convergence),
+        )
         .route(
             "/api/core/v1/admin/launch-code-batches",
             get(admin_list_launch_code_batches).post(admin_issue_launch_code_batch),
@@ -1432,6 +1442,31 @@ async fn runtime_artifact(
     Ok(Json(artifact))
 }
 
+/// The runner forwards what a runtime's shell `/healthz` reported running
+/// (payload-generations plan M4). The source host comes from the runner
+/// credential, never from the body, so a runner can only report for runtimes
+/// on its own host.
+async fn report_runtime_payload(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(input): Json<RuntimePayloadReportRequest>,
+) -> Result<Json<RuntimePayloadStatus>, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    Ok(Json(
+        state
+            .store
+            .record_runtime_payload_report(RecordRuntimePayloadReportInput {
+                source_host_id: credential.source_host_id,
+                source_machine_id: input.source_machine_id,
+                payload_version_label: input.payload_version_label,
+                shell_version: input.shell_version,
+                release_channel: input.release_channel,
+                now: input.now,
+            })
+            .await?,
+    ))
+}
+
 async fn upsert_runtime_artifact(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
@@ -1597,6 +1632,18 @@ async fn admin_runtimes(
 ) -> Result<Json<Vec<AdminRuntimeOverview>>, ApiError> {
     require_admin_identity(&state, &headers).await?;
     Ok(Json(state.store.admin_runtime_overviews().await?))
+}
+
+/// The gen-fence fleet view (payload-generations plan M4): every runtime's
+/// reported payload with its convergence verdict, plus channel heads with
+/// their previous artifacts. Same shape as the `payload-convergence` CLI
+/// verb.
+async fn admin_runtime_payload_convergence(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<PayloadConvergenceReport>, ApiError> {
+    require_admin_identity(&state, &headers).await?;
+    Ok(Json(state.store.payload_convergence_report().await?))
 }
 
 async fn admin_list_launch_code_batches(
@@ -3936,6 +3983,7 @@ mod tests {
             channel,
             artifact_kind: RuntimeArtifactKind::SkillsBundle,
             artifact_id: id.to_string(),
+            previous_artifact_id: None,
             updated_at: now.clone(),
         };
 

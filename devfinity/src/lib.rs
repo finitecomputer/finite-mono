@@ -355,6 +355,13 @@ pub struct Stack {
     /// Hex ed25519 release signing seed for the same run keypair; Core signs
     /// the service directory with it.
     release_signing_key: Option<String>,
+    /// `FINITE_SHELL_POLL_INTERVAL_SECS` for agent containers, controlled by
+    /// `DEVFINITY_SHELL_POLL_INTERVAL_SECS`. Defaults per smoke variant: "0"
+    /// (poller off) normally — so the flip/skills smokes' manual stage/flip
+    /// can never race the poller — and "5" when
+    /// `DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE=1` drives autonomous
+    /// convergence.
+    shell_poll_interval_secs: String,
 }
 
 #[derive(Debug, Clone)]
@@ -389,6 +396,23 @@ impl Stack {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "finite-devfinity".to_string());
+        let shell_poll_interval_secs = std::env::var("DEVFINITY_SHELL_POLL_INTERVAL_SECS")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                // Variant-controlled default: the autoconverge smoke needs a
+                // fast poller; every other variant keeps it off so manual
+                // stage/flip driving cannot race it.
+                if std::env::var("DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE").as_deref() == Ok("1") {
+                    "5".to_string()
+                } else {
+                    "0".to_string()
+                }
+            });
+        if shell_poll_interval_secs.parse::<u64>().is_err() {
+            bail!("DEVFINITY_SHELL_POLL_INTERVAL_SECS must be an integer seconds value");
+        }
         Ok(Self {
             repo_root,
             process_compose_file: run_dir.join("process-compose.yaml"),
@@ -427,6 +451,7 @@ impl Stack {
             apple_container_name_prefix,
             release_public_key: None,
             release_signing_key: None,
+            shell_poll_interval_secs,
         })
     }
 
@@ -1663,6 +1688,10 @@ wait "$postgres_pid"
             // only ships alongside it.
             environment["FINITE_SERVICE_DIRECTORY_URL"] =
                 serde_json::json!(self.service_directory_url());
+            // Autonomous channel convergence (M4): variant-controlled, off by
+            // default so manual stage/flip smokes never race the poller.
+            environment["FINITE_SHELL_POLL_INTERVAL_SECS"] =
+                serde_json::json!(self.shell_poll_interval_secs);
         }
         environment.to_string()
     }
@@ -4928,6 +4957,30 @@ mod tests {
                 value.contains(
                     "FINITE_SERVICE_DIRECTORY_URL\\\":\\\"http://host.container.internal:14200/api/core/v1/service-directory"
                 ),
+                "{env_name}: {value}"
+            );
+            // The shell's channel poller ships variant-controlled and stays
+            // off unless a variant turns it on (autoconverge smoke: 5).
+            assert!(
+                value.contains("FINITE_SHELL_POLL_INTERVAL_SECS\\\":\\\"0"),
+                "{env_name}: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_poll_interval_is_variant_controlled_in_the_runtime_env() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        stack.release_public_key = Some("ab".repeat(32));
+        stack.shell_poll_interval_secs = "5".to_string();
+        let yaml = stack.process_compose_yaml();
+        for env_name in ["FC_CORE_RUNTIME_ENV_JSON", "FC_RUNNER_RUNTIME_ENV_JSON"] {
+            let value = yaml
+                .lines()
+                .find(|line| line.contains(env_name))
+                .unwrap_or_else(|| panic!("{env_name} missing from generated yaml"));
+            assert!(
+                value.contains("FINITE_SHELL_POLL_INTERVAL_SECS\\\":\\\"5"),
                 "{env_name}: {value}"
             );
         }

@@ -79,6 +79,35 @@ pub struct CrashLoopRecord {
     pub recorded_at: String,
 }
 
+/// What one autonomous channel-poll tick decided (plan M4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PollAction {
+    /// Head is current, absent, or a transition was already in progress.
+    None,
+    /// The head was staged but its flip did not start.
+    Staged,
+    /// The head was (or already had been) staged and its flip was started.
+    FlipStarted,
+    /// The head is on the bad list (a previous flip's health gate failed).
+    SkippedBad,
+    /// The head's payload requires a newer shell.
+    SkippedMinShell,
+    Error,
+}
+
+/// The most recent channel-poll outcome, recorded per tick and surfaced in
+/// `/healthz`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PollRecord {
+    pub at: String,
+    pub channel: String,
+    pub head_version: Option<String>,
+    pub action: PollAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellState {
     pub schema: String,
@@ -92,6 +121,8 @@ pub struct ShellState {
     pub seed: Option<SeedRecord>,
     #[serde(default)]
     pub agentd_crash_loop: Option<CrashLoopRecord>,
+    #[serde(default)]
+    pub last_poll: Option<PollRecord>,
 }
 
 impl Default for ShellState {
@@ -103,6 +134,7 @@ impl Default for ShellState {
             last_flip: None,
             seed: None,
             agentd_crash_loop: None,
+            last_poll: None,
         }
     }
 }
