@@ -38,7 +38,7 @@ build it is not the promotion proof for the final digest.
 1. On the reviewed revision, dispatch **Agent Runtime Image**
    (`.github/workflows/runtime-image.yml`) with
    `version=<date-based, e.g. 2026-07-08.1>`. Hermes is repository-pinned to
-   `0.18.2`, the same version exercised by every smoke lane. For future
+   `0.20.0`, the same version exercised by every smoke lane. For future
    upgrades, move the reviewed pin in the image and all smoke lanes together;
    do not add a dispatch-time override.
 2. The publication workflow builds exactly once via
@@ -304,7 +304,7 @@ in `infra/tinfoil/README.md`.
 ## VERIFY
 
 1. Smoke evidence and the publication report name the same monorepo SHA,
-   Hermes `0.18.2`, Runtime image digest, CLIs, plugin, and bundled Finite
+   Hermes `0.20.0`, Runtime image digest, CLIs, plugin, and bundled Finite
    Skills source.
 2. After promotion: the next runner-launched Kata Runtime comes up ready within
    `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS` and runs the new image. TODO:

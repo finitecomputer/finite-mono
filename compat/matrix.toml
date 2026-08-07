@@ -37,7 +37,7 @@ image = "ghcr.io/finitecomputer/agent-runtime"
 deployed = ["2026-07-10.2", "2026-07-10.3", "2026-07-10.4", "2026-07-10.5", "2026-07-10.6", "2026-07-11.2", "2026-07-11.3", "2026-07-11.4", "2026-07-11.6", "2026-07-14.1", "2026-07-14.2", "2026-07-14.3", "2026-07-15.1", "2026-07-15.2", "2026-07-15.3", "2026-07-15.4", "2026-07-15.5", "2026-07-16.1", "2026-07-16.2", "2026-07-21.1", "2026-07-22.1"]
 digest = "sha256:1e87c7eef0251ee3823e8ed276fddca071e764ec661851042cf35be51eb62eea"
 source_commit = "af6aad4982267709f3f956e72afed6136d95592c"
-hermes = "0.18.2"
+hermes = "0.20.0"
 notes = "Kata launches the immutable digest through a promoted Core artifact. Existing agents can be rolled serially through Core's guarded same-volume upgrade path while preserving their Agent Principal and durable /data mount. 2026-07-22.1 makes an existing dashboard-entered OpenRouter key durable across Hermes restarts and removes it from generated config. Its exact image passed the build-once durable restart smoke. Waffle Prime then migrated its legacy key, kept the same container and /data mount, and returned two real OpenRouter replies across two Hermes-only restarts. It remains the sole acceptance target; the default for new launches and remaining fleet stay pinned pending owner acceptance."
 
 [servers]

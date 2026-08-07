@@ -234,7 +234,11 @@ jobs:
       run:
         working-directory: finitechat
     env:
-      FINITE_HERMES_AGENT_VERSION: "0.18.2"
+      FINITE_HERMES_AGENT_VERSION: "0.20.0"
+      # PyPI channel was retired upstream in v0.20.0; install from the pinned
+      # source tarball instead (same dist as the runtime image build).
+      FINITE_HERMES_AGENT_DIST_URL: "https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.8.3.tar.gz"
+      FINITE_HERMES_AGENT_DIST_SHA256: "370542c7219faba6300905c3b419e14e6508a31ac698a1a5174e0386990834be"
       # The hermes scripts resolve reports and built binaries relative to the
       # finitechat/ working directory (target/...); point cargo there too so
       # the two agree, exactly like the pre-mono repo layout.
@@ -258,7 +262,10 @@ jobs:
         run: scripts/hermes-sidecar-smoke.sh
 
       - name: Install Python tooling
-        run: python3 -m pip install basedpyright==1.39.8 "hermes-agent==${FINITE_HERMES_AGENT_VERSION}" ruff==0.15.17
+        run: |
+          curl -fsSLo /tmp/hermes-agent.tar.gz "$FINITE_HERMES_AGENT_DIST_URL"
+          echo "$FINITE_HERMES_AGENT_DIST_SHA256  /tmp/hermes-agent.tar.gz" | sha256sum --check -
+          HERMES_NIX_BUILD=1 python3 -m pip install basedpyright==1.39.8 "hermes-agent @ file:///tmp/hermes-agent.tar.gz" ruff==0.15.17
 
       - name: Ruff format
         run: ruff format --check .

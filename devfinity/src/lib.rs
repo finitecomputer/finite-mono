@@ -1771,7 +1771,7 @@ wait "$postgres_pid"
             "--reference \"$reference\" ",
             "--version-label devfinity-worktree ",
             "--state-schema-version runtime-state-v1 ",
-            "--hermes-source-ref hermes-agent==0.18.2 ",
+            "--hermes-source-ref hermes-agent==0.20.0 ",
             "--promoted"
         ));
         let _ = writeln!(yaml, "  {process}:");
