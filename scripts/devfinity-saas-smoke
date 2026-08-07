@@ -1997,6 +1997,18 @@ JS
     fi
     if (( $(date +%s) >= deadline )); then
       echo "runtime did not converge on devfinity-v2 unattended within 180s" >&2
+      # Diagnostics: the un-suppressed healthz body (503s included) carries
+      # last_poll/last_flip, and the shell env + state answer "did the poller
+      # even run, and against what".
+      echo "--- diagnostics: /healthz ---" >&2
+      curl -sS --max-time 5 "$runtime_url/healthz" >&2 || true
+      echo "" >&2
+      echo "--- diagnostics: shell env ---" >&2
+      runtime_exec "$container_machine_id" /bin/sh -c \
+        'tr "\0" "\n" < /proc/1/environ | grep -E "^FINITE" | sort' >&2 || true
+      echo "--- diagnostics: /data/shell/state.json ---" >&2
+      runtime_exec "$container_machine_id" /bin/sh -c \
+        'cat /data/shell/state.json' >&2 || true
       return 1
     fi
     sleep 2

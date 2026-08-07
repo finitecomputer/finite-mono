@@ -505,8 +505,17 @@ impl ShellRuntime {
         let from = flip.from.clone();
         let prior_previous = flip.prior_previous.clone();
 
-        // 1. Quiesce the running agentd (SIGTERM, bounded wait, SIGKILL).
+        // 1. Quiesce the running agentd (SIGTERM, bounded wait, SIGKILL —
+        //    the whole process group, so no old-generation straggler holds a
+        //    loopback port into the new generation's startup).
         self.stop_agentd().await?;
+
+        // The status/ready files belong to the processes that just died; the
+        // health gate must only ever see evidence written by the incoming
+        // generation. (An orphaned bridge once kept its ready file fresh and
+        // made a broken flip look healthy.)
+        let _ = std::fs::remove_file(self.layout.agentd_status_file());
+        let _ = std::fs::remove_file(self.layout.finitechat_ready_file());
 
         // 2. Retarget `previous` at the outgoing generation, then commit by
         //    swapping `current`. Both are atomic renames of tmp symlinks.
@@ -589,7 +598,8 @@ impl ShellRuntime {
                 .as_ref()
                 .is_some_and(|status| status.state == "running" && status.pid.is_some());
             let status_fresh = health::file_written_since(&self.layout.agentd_status_file(), since);
-            let ready_present = self.layout.finitechat_ready_file().exists();
+            let ready_present =
+                health::file_written_since(&self.layout.finitechat_ready_file(), since);
             if process_alive && status_fresh && ready_present {
                 return Ok(());
             }

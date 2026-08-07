@@ -249,20 +249,40 @@ fn spawn(spec: &AgentdSpec) -> Result<Child, ShellError> {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
+        // agentd leads its own process group so quiesce can signal the whole
+        // tree: gateway scripts fork background loops, and any straggler from
+        // the old generation would otherwise survive a flip holding loopback
+        // ports (observed: an orphaned finitechat bridge kept :37633, so the
+        // new generation's bridge exited at bind and the flip looked broken).
+        .process_group(0)
         .kill_on_drop(true);
     command.spawn().map_err(ShellError::from)
 }
 
+async fn signal_group(pid: u32, signal: &str) {
+    // `kill -- -<pgid>` signals the whole group; agentd is its group leader.
+    let _ = Command::new("kill")
+        .args([signal, "--", &format!("-{pid}")])
+        .status()
+        .await;
+}
+
 async fn terminate(child: &mut Child, quiesce: Duration) {
-    if let Some(pid) = child.id() {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .await;
+    let pid = child.id();
+    if let Some(pid) = pid {
+        signal_group(pid, "-TERM").await;
     }
     if tokio::time::timeout(quiesce, child.wait()).await.is_err() {
+        if let Some(pid) = pid {
+            signal_group(pid, "-KILL").await;
+        }
         let _ = child.kill().await;
         let _ = child.wait().await;
+    }
+    // The direct child is gone; sweep the group once more so no orphaned
+    // grandchild survives into the next generation.
+    if let Some(pid) = pid {
+        signal_group(pid, "-KILL").await;
     }
 }
 
