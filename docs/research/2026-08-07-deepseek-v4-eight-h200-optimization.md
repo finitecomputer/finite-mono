@@ -25,6 +25,11 @@ At 1,024 simultaneous 128-token reasoning requests, the winner produced
 8,373 output tokens/second with zero errors, versus 5,635 tokens/second for the
 baseline. P95 time to first token fell from 14.16 seconds to 4.05 seconds.
 
+A final single-session run generated exactly 1,024 high-reasoning tokens in
+18.694 seconds: 54.78 end-to-end output tok/s with 0.214-second TTFT. The
+original single-session baseline was 51.96 tok/s, so the concurrency winner did
+not trade away single-user speed.
+
 ## Fixed identity
 
 - Host allocation: eight NVIDIA H200 GPUs.
