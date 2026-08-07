@@ -1,0 +1,122 @@
+# Retry-2 staging copy for the measured DeepSeek-V4-Flash-0731 release in
+# finitecomputer/confidential-kimi-k2-6. Scheduler limits were measured on an
+# isolated eight-H200 host on 2026-08-07. Creating a satellite release and
+# deploying it remain separate explicitly approved operations.
+cvm-version: 0.10.8
+cpus: 32
+memory: 524288
+gpus: 8
+
+models:
+  - name: "deepseek-v4-flash-0731"
+    repo: "deepseek-ai/DeepSeek-V4-Flash-0731@7872f01b1d1fe23eabc4c98b48bffcef5a386062"
+    mpk: "9dd15749a2f9c554cefb41b9bb202c2994d64519b4efbd42af68b51e010d5e21_166898688000_8c68b40d-723e-50f0-b86b-4d3e05b5c113"
+
+networks:
+  model-net: {}
+  core-api:
+    egress: allowlist
+    allow:
+      - finite.computer
+
+containers:
+  - name: "deepseek-v4-flash-0731"
+    image: "ghcr.io/finitecomputer/deepseek-v4-vllm:0.25.1-0731-reasoning.6@sha256:48716fa9c25605ab5fe00fd7eed4e792268aee6c9008616f7641d9bf622ff262"
+    runtime: nvidia
+    gpus: all
+    restart: always
+    env:
+      - VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "0"
+      - PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+    command:
+      [
+        "--model",
+        "/tinfoil/mpk/mpk-9dd15749a2f9c554cefb41b9bb202c2994d64519b4efbd42af68b51e010d5e21",
+        "--trust-remote-code",
+        "--kv-cache-dtype",
+        "fp8",
+        "--block-size",
+        "256",
+        "--data-parallel-size",
+        "8",
+        "--enable-expert-parallel",
+        "--tokenizer-mode",
+        "deepseek_v4",
+        "--tool-call-parser",
+        "deepseek_v4",
+        "--enable-auto-tool-choice",
+        "--reasoning-parser",
+        "deepseek_v4",
+        "--default-chat-template-kwargs",
+        '{"enable_thinking":true}',
+        "--enable-prompt-tokens-details",
+        "--served-model-name",
+        "deepseek-v4-flash-0731",
+        "glm-5-2",
+        "--scheduling-policy",
+        "priority",
+        "--port",
+        "8001",
+        "--max-model-len",
+        "393216",
+        "--max-num-seqs",
+        "128",
+        "--max-num-batched-tokens",
+        "2048",
+        "--gpu-memory-utilization",
+        "0.95",
+        "--no-enable-flashinfer-autotune",
+        "--compilation-config",
+        '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}',
+      ]
+    tmpfs:
+      /tmp: size=512m,mode=1777,exec
+      /root: size=20g,mode=0700,exec
+    networks: [model-net]
+    secrets:
+      - VLLM_API_KEY
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+  - name: "finite-private-limiter"
+    # Current production limiter pin retained to keep this a model-only cutover.
+    image: "ghcr.io/finitecomputer/finite-private-limiter:2026-07-02.glm52.health.1@sha256:f977b238439ff4caa3f416bf1ec8f16ed383640d7417262d26ed4388c8624d5c"
+    restart: always
+    env:
+      - LISTEN_ADDR: "0.0.0.0:8002"
+      - FINITE_USAGE_API_URL: "https://finite.computer"
+      - UPSTREAM_BASE_URL: "http://deepseek-v4-flash-0731:8001"
+      # Canonical fallback for health/accounting records that omit a model.
+      # vLLM still serves glm-5-2 above for mixed-version clients.
+      - FINITE_PRIVATE_MODEL: "deepseek-v4-flash-0731"
+      - DASHBOARD_URL: "https://finite.computer/dashboard"
+      - READINESS_TIMEOUT_SECS: "5"
+      - FINITE_USAGE_API_TIMEOUT_SECS: "15"
+      - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: "120"
+      - UPSTREAM_BODY_TIMEOUT_SECS: "600"
+      - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: "600"
+    secrets:
+      - FINITE_USAGE_API_SERVICE_KEY
+      - VLLM_INTERNAL_API_KEY
+    networks: [model-net, core-api]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+shim:
+  upstream-container: finite-private-limiter
+  upstream-port: 8002
+  authenticated: false
+  paths:
+    - /v1/chat/completions
+    - /v1/responses
+    - /metrics
+    - /live
+    - /health
+    - /ready
