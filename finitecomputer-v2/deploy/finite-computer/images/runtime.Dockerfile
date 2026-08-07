@@ -85,7 +85,15 @@ RUN python -m venv /runtime/hermes-venv \
       "google-api-python-client==2.198.0" \
       "google-auth-oauthlib==1.4.0" \
       "google-auth-httplib2==0.4.0" \
-    && rm -f /tmp/hermes-agent.tar.gz \
+    && mkdir -p /tmp/hermes-dist \
+    && tar -xzf /tmp/hermes-agent.tar.gz -C /tmp/hermes-dist --strip-components=1 \
+    && cd /tmp/hermes-dist \
+    && find agent tools hermes_cli gateway tui_gateway cron acp_adapter plugins providers \
+        -type f ! -name "*.py" ! -name "*.pyc" ! -path "*/__pycache__/*" -print0 \
+        | tar --null -cf - --files-from - \
+        | tar -xf - -C /runtime/hermes-venv/lib/python3.13/site-packages/ \
+    && cd / \
+    && rm -rf /tmp/hermes-dist /tmp/hermes-agent.tar.gz \
     && ln -sf /runtime/hermes-venv/bin/hermes /usr/local/bin/hermes \
     && ln -sf /runtime/hermes-venv/bin/hermes-agent /usr/local/bin/hermes-agent \
     && ln -sf /runtime/hermes-venv/bin/hermes-acp /usr/local/bin/hermes-acp
