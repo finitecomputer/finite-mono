@@ -1,0 +1,41 @@
+# Disposable no-secrets GPU lab for a temporary Tinfoil debug host.
+#
+# This configuration intentionally omits the Tinfoil `models:` block so a new
+# host can boot before its durable model cache is populated. Public pinned
+# checkpoints may be downloaded into the ephemeral /models tmpfs over SSH.
+# It is debug-only evidence: do not attach production secrets or treat it as an
+# attested/production-ready model release.
+cvm-version: 0.10.8
+cpus: 32
+memory: 524288
+gpus: 8
+
+networks:
+  model-downloads:
+    egress: open
+
+containers:
+  - name: "gpu-lab"
+    image: "ghcr.io/finitecomputer/deepseek-v4-vllm:0.25.1-0731-reasoning.6@sha256:48716fa9c25605ab5fe00fd7eed4e792268aee6c9008616f7641d9bf622ff262"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["sleep infinity"]
+    runtime: nvidia
+    gpus: all
+    ipc: host
+    restart: always
+    networks: [model-downloads]
+    tmpfs:
+      /tmp: size=4g,mode=1777,exec
+      /root: size=16g,mode=0700,exec
+      # Large enough for either pinned candidate checkpoint, one at a time,
+      # while preserving host RAM for vLLM workers and NCCL bookkeeping.
+      /models: size=220g,mode=0755,exec
+
+shim:
+  upstream-container: gpu-lab
+  upstream-port: 8000
+  authenticated: false
+  paths:
+    - /health
+    - /v1/models
+    - /v1/chat/completions
