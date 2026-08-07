@@ -23,7 +23,17 @@ RUN cargo build --locked --release \
       --package finite-brain-cli
 
 FROM python:3.13-slim-trixie
-ARG HERMES_AGENT_VERSION=0.18.2
+ARG HERMES_AGENT_VERSION=0.20.0
+# Upstream retired the PyPI/brew channels in v0.20.0 (v2026.8.3); supported
+# channels are now the shell installer, Docker, and Nix. We install from the
+# immutable GitHub source tarball with a pinned sha256 instead. The source
+# build guard (setup.py) only permits wheel builds under HERMES_NIX_BUILD=1 —
+# we set it explicitly here; NOTE this means we do NOT get their Nix
+# derivation's extra hardening (notably the pinned SQLite WAL-reset-fix
+# shared library and Node 26 toolchain from their own Dockerfile). Those are
+# known gaps tracked on the bump PR, to close before the fleet rollout.
+ARG HERMES_AGENT_DIST_URL=https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.8.3.tar.gz
+ARG HERMES_AGENT_DIST_SHA256=370542c7219faba6300905c3b419e14e6508a31ac698a1a5174e0386990834be
 ARG FINITE_MONO_REV=unknown
 ARG GWS_VERSION=0.22.5
 ARG TARGETARCH
@@ -67,12 +77,15 @@ RUN set -eux; \
 
 RUN python -m venv /runtime/hermes-venv \
     && /runtime/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && test "${HERMES_AGENT_VERSION}" = "0.18.2" \
-    && /runtime/hermes-venv/bin/pip install --no-cache-dir \
-      "hermes-agent[messaging]==${HERMES_AGENT_VERSION}" \
+    && test "${HERMES_AGENT_VERSION}" = "0.20.0" \
+    && curl -fsSLo /tmp/hermes-agent.tar.gz "${HERMES_AGENT_DIST_URL}" \
+    && echo "${HERMES_AGENT_DIST_SHA256}  /tmp/hermes-agent.tar.gz" | sha256sum --check - \
+    && HERMES_NIX_BUILD=1 /runtime/hermes-venv/bin/pip install --no-cache-dir \
+      "hermes-agent[messaging] @ file:///tmp/hermes-agent.tar.gz" \
       "google-api-python-client==2.198.0" \
       "google-auth-oauthlib==1.4.0" \
       "google-auth-httplib2==0.4.0" \
+    && rm -f /tmp/hermes-agent.tar.gz \
     && ln -sf /runtime/hermes-venv/bin/hermes /usr/local/bin/hermes \
     && ln -sf /runtime/hermes-venv/bin/hermes-agent /usr/local/bin/hermes-agent \
     && ln -sf /runtime/hermes-venv/bin/hermes-acp /usr/local/bin/hermes-acp

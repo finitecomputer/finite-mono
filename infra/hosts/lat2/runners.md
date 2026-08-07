@@ -79,9 +79,11 @@ The destructive policy deliberately fails closed:
 
 - If any `/bin/Runner.Worker` process exists, all scratch and Docker cleanup is
   skipped. Disk watermarks are still checked and can fail the unit.
-- Only `brain-matrix-*` and `nix-packages-*` directories below a runner
-  `_work` tree are candidates. A checkout is removed only when nothing in its
-  tree has changed for 24 hours, well beyond either lane's 90-minute timeout.
+- Each self-hosted CI lane removes its exact per-attempt checkout after its
+  report upload. The root maintenance timer is the crash fallback: only
+  `brain-matrix-*` and `nix-packages-*` directories below a runner `_work`
+  tree are candidates, and it removes a checkout only when nothing in its tree
+  has changed for 3 hours, twice either lane's 90-minute timeout.
 - Docker removes only stopped containers older than 24 hours, images unused
   by any container and older than 7 days, and build cache unused for 24 hours
   while retaining 32 GB. Running containers are never eligible.
@@ -117,9 +119,10 @@ systemctl list-timers finite-lat2-runner-maintenance.timer
 
 New containerized self-hosted lanes must use a per-attempt checkout path such
 as `<lane>-${{ github.run_id }}-${{ github.run_attempt }}` and set each command's
-working directory to it. Never rely on a prior lane being able to clean or
-re-own its checkout; add a new explicit aged-name rule here when introducing a
-new checkout family.
+working directory to it. After uploading diagnostics, an `if: always()` step
+must validate and remove that exact checkout. Never rely on a later lane being
+able to clean or re-own it; add a new explicit aged-name rule here as the crash
+fallback when introducing a new checkout family.
 
 ## Bounded stale-listener restart
 

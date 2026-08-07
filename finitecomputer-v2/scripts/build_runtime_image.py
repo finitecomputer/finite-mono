@@ -16,7 +16,7 @@ from typing import Any
 
 MONOREPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_IMAGE_REF = "finitecomputer-v2-agent-runtime:local"
-DEFAULT_HERMES_AGENT_VERSION = "0.18.2"
+DEFAULT_HERMES_AGENT_VERSION = "0.20.0"
 DEFAULT_IMAGE_ENGINE = "docker"
 IMAGE_ENGINES = ("docker", "apple-container")
 

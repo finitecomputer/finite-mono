@@ -22,7 +22,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DURABLE_SMOKE_PATH = REPO_ROOT / "scripts" / "hermes-durable-home-docker-smoke.py"
 DEFAULT_IMAGE = "finite-agent-chat-interruption-smoke"
-EXPECTED_HERMES_VERSION = "0.18.2"
+EXPECTED_HERMES_VERSION = "0.20.0"
 DOCKER_HOST_ARGS = ["--add-host", "host.docker.internal:host-gateway"]
 
 spec = importlib.util.spec_from_file_location("hermes_durable_smoke", DURABLE_SMOKE_PATH)

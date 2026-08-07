@@ -6,7 +6,7 @@ set -euo pipefail
 # destructive policy can be exercised against synthetic directories in tests.
 runner_root="${FINITE_LAT2_RUNNER_ROOT:-/srv/github-runner}"
 disk_path="${FINITE_LAT2_DISK_PATH:-/}"
-scratch_minutes="${FINITE_LAT2_SCRATCH_MINUTES:-1440}"
+scratch_minutes="${FINITE_LAT2_SCRATCH_MINUTES:-180}"
 warn_percent="${FINITE_LAT2_DISK_WARN_PERCENT:-80}"
 critical_percent="${FINITE_LAT2_DISK_CRITICAL_PERCENT:-90}"
 
