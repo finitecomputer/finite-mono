@@ -41,6 +41,56 @@ process.exit(Array.isArray(response.brains) ? 0 : 1);
 JS
 }
 
+agent_brain_list_matches() {
+  local brain_list_json="$1"
+  local expected_kind="$2"
+  local expected_role="$3"
+  local expected_count="$4"
+  node - "$brain_list_json" "$expected_kind" "$expected_role" "$expected_count" <<'JS'
+const fs = require("node:fs");
+const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const [kind, role, countText] = process.argv.slice(3);
+const brains = response.brains || [];
+const count = Number(countText);
+if (brains.length !== count) {
+  throw new Error(`expected ${count} agent-visible Brains, received ${JSON.stringify(brains)}`);
+}
+if (brains.some((brain) => brain.kind !== kind || brain.role !== role)) {
+  throw new Error(`expected every Brain to be ${kind}/${role}, received ${JSON.stringify(brains)}`);
+}
+JS
+}
+
+wait_for_agent_brain_list() {
+  local expected_kind="$1"
+  local expected_role="$2"
+  local expected_count="$3"
+  local timeout_secs="${4:-120}"
+  local started
+  local poll_seconds="${DEVFINITY_BRAIN_READY_POLL_SECONDS:-2}"
+
+  # A healthy Brain server does not imply the Runtime supervisor has already
+  # re-discovered or re-synced the freshly-reset Brain set. Poll the
+  # agent-visible list until it converges instead of asserting once.
+  started="$(date +%s)"
+  while true; do
+    if runtime_exec "$container_machine_id" fbrain brain list --json \
+      >"$brains_json" 2>/dev/null \
+      && agent_brain_list_matches \
+        "$brains_json" "$expected_kind" "$expected_role" "$expected_count" 2>/dev/null; then
+      return 0
+    fi
+    if (( "$(date +%s)" - started >= timeout_secs )); then
+      echo "agent-visible Brain list did not converge to ${expected_count} ${expected_kind}/${expected_role} within ${timeout_secs}s" >&2
+      # Re-run the plain check once more so the failure stays informative.
+      agent_brain_list_matches \
+        "$brains_json" "$expected_kind" "$expected_role" "$expected_count"
+      return 1
+    fi
+    sleep "$poll_seconds"
+  done
+}
+
 print_brain_readiness_diagnostics() {
   local label="$1"
   local working_tree="${2:-}"
