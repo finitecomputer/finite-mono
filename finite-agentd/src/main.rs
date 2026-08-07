@@ -67,7 +67,13 @@ enum Command {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("finite-agentd: {}", error.public_message());
+        // The CLI runs locally with exec access; unlike chat-delivered command
+        // results, its stderr may carry the full error for diagnosability.
+        eprintln!(
+            "finite-agentd: {} [{}: {error:?}]",
+            error.public_message(),
+            error.public_code()
+        );
         std::process::exit(1);
     }
 }

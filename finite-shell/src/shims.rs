@@ -43,8 +43,19 @@ pub fn write_shims(
                     shim_path.display()
                 )));
             }
+            // One-shot invocations (`container exec finite-agentd ...`) do not
+            // inherit the env the shell gives its supervised child, so the
+            // shim must carry the payload root itself or payload-relative
+            // defaults fall back to paths that no longer exist in the image.
+            let payload_root = exec_bin_dir.parent().ok_or_else(|| {
+                ShellError::Contract(format!(
+                    "shim exec dir {} has no parent",
+                    exec_bin_dir.display()
+                ))
+            })?;
             let body = format!(
-                "#!/bin/sh\n{SHIM_MARKER}\nexec \"{}/{name}\" \"$@\"\n",
+                "#!/bin/sh\n{SHIM_MARKER}\nexport FINITE_PAYLOAD_ROOT=\"{}\"\nexec \"{}/{name}\" \"$@\"\n",
+                payload_root.display(),
                 exec_bin_dir.display()
             );
             let mut temporary = tempfile::NamedTempFile::new_in(shim_dir)?;
@@ -101,7 +112,7 @@ mod tests {
         let shim = fs::read_to_string(shim_dir.join("finite-agentd")).unwrap();
         assert_eq!(
             shim,
-            "#!/bin/sh\n# finite-shell shim\nexec \"/data/generations/current/bin/finite-agentd\" \"$@\"\n"
+            "#!/bin/sh\n# finite-shell shim\nexport FINITE_PAYLOAD_ROOT=\"/data/generations/current\"\nexec \"/data/generations/current/bin/finite-agentd\" \"$@\"\n"
         );
         let mode = fs::metadata(shim_dir.join("finite-agentd"))
             .unwrap()
