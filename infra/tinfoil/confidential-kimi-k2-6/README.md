@@ -1,5 +1,19 @@
 # Finite Private next measured config
 
+## Laguna S 2.1 eight-H200 evidence
+
+The target-only `tinfoil-config.laguna-s21-fp8.candidate.yml` preserves the
+four-TP2, DFlash-15, native-1M configuration measured on the isolated
+eight-H200 Tinfoil host on 2026-08-07. It deliberately contains model-MPK and
+image-digest placeholders and is not release-ready. Exact measurements,
+rejected configurations, tokenizer correction, and production gates are in
+[`2026-08-07-laguna-s21-eight-h200-serving.md`](../../../docs/research/2026-08-07-laguna-s21-eight-h200-serving.md).
+
+The public route remains limiter-owned; the internal Laguna router only fans
+authorized upstream requests across the four local vLLM replicas. Creating
+MPKs, publishing the image, replacing placeholders, releasing, or deploying
+remain separate explicitly approved operations.
+
 ## DeepSeek-V4-Flash-0731 preparation
 
 The first 2026-08-04 attempt is preserved on its original mono and satellite

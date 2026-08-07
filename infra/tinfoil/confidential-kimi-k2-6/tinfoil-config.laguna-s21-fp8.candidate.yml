@@ -1,0 +1,79 @@
+# Evidence-backed Laguna S 2.1 candidate. This file is intentionally not
+# release-ready: modelwrap must emit both MPKs after the tokenizer correction,
+# and CI must publish and report the immutable serving-image digest.
+cvm-version: 0.10.8
+cpus: 32
+memory: 524288
+gpus: 8
+
+models:
+  - name: "laguna-s-2.1-fp8"
+    repo: "poolside/Laguna-S-2.1-FP8@9e0b8ba630080b0e6f20a7b43294a9f2232fd247"
+    mpk: "REPLACE_WITH_TOKENIZER_CORRECTED_LAGUNA_TARGET_MPK"
+  - name: "laguna-s-2.1-dflash-fp8"
+    repo: "poolside/Laguna-S-2.1-DFlash-FP8@a16e2e9287093bf74d7ecd5b5bea732687e0268e"
+    mpk: "REPLACE_WITH_LAGUNA_DFLASH_MPK"
+
+networks:
+  model-net: {}
+  core-api:
+    egress: allowlist
+    allow:
+      - finite.computer
+
+containers:
+  - name: "laguna-s-2.1"
+    image: "REPLACE_WITH_DIGEST_PINNED_LAGUNA_S21_VLLM_IMAGE"
+    runtime: nvidia
+    gpus: all
+    restart: always
+    env:
+      - LAGUNA_MODEL_PATH: "/tinfoil/mpk/mpk-REPLACE_WITH_LAGUNA_TARGET_ROOT"
+      - LAGUNA_DRAFT_PATH: "/tinfoil/mpk/mpk-REPLACE_WITH_LAGUNA_DFLASH_ROOT"
+    tmpfs:
+      /tmp: size=4g,mode=1777,exec
+      /root: size=20g,mode=0700,exec
+    networks: [model-net]
+    secrets:
+      - VLLM_API_KEY
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+  - name: "finite-private-limiter"
+    image: "ghcr.io/finitecomputer/private-limiter@sha256:5d57ecf462fcb105eae2160dd01493efd825532fb61ee286098bdc1b485ec84b"
+    restart: always
+    env:
+      - LISTEN_ADDR: "0.0.0.0:8002"
+      - FINITE_USAGE_API_URL: "https://finite.computer"
+      - UPSTREAM_BASE_URL: "http://laguna-s-2.1:8000"
+      - FINITE_PRIVATE_MODEL: "glm-5-2"
+      - DASHBOARD_URL: "https://finite.computer/dashboard"
+      - READINESS_TIMEOUT_SECS: "5"
+      - FINITE_USAGE_API_TIMEOUT_SECS: "15"
+      - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: "240"
+      - UPSTREAM_BODY_TIMEOUT_SECS: "1200"
+      - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: "1200"
+    secrets:
+      - FINITE_USAGE_API_SERVICE_KEY
+      - VLLM_INTERNAL_API_KEY
+    networks: [model-net, core-api]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+shim:
+  upstream-container: finite-private-limiter
+  upstream-port: 8002
+  authenticated: false
+  paths:
+    - /v1/chat/completions
+    - /v1/responses
+    - /metrics
+    - /live
+    - /health
+    - /ready
