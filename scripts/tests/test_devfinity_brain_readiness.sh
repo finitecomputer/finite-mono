@@ -91,4 +91,35 @@ if (( runtime_exec_calls != 3 )); then
   exit 1
 fi
 
+# wait_for_agent_brain_list must poll until the agent-visible list converges;
+# a healthy Brain server does not imply the supervisor has re-synced yet.
+brains_json="$state_dir/agent-brains.json"
+runtime_exec_calls=0
+runtime_exec() {
+  runtime_exec_calls=$((runtime_exec_calls + 1))
+  if (( runtime_exec_calls < 3 )); then
+    printf '{"brains":[]}\n'
+  else
+    printf '{"brains":[{"brainId":"brain-1","kind":"personal","role":"personal_agent"}]}\n'
+  fi
+}
+wait_for_agent_brain_list personal personal_agent 1 5
+if (( runtime_exec_calls < 3 )); then
+  echo "convergence gate did not wait for the agent-visible Brain list" >&2
+  exit 1
+fi
+
+runtime_exec_calls=0
+runtime_exec() {
+  runtime_exec_calls=$((runtime_exec_calls + 1))
+  printf '{"brains":[]}\n'
+}
+if wait_for_agent_brain_list personal personal_agent 1 1 \
+  >"$test_root/list.stdout" 2>"$test_root/list.stderr"; then
+  echo "convergence gate unexpectedly accepted an empty Brain list" >&2
+  exit 1
+fi
+grep -Fq "did not converge to 1 personal/personal_agent within 1s" "$test_root/list.stderr"
+grep -Fq "expected 1 agent-visible Brains" "$test_root/list.stderr"
+
 echo "devfinity Brain readiness tests passed"
