@@ -23,10 +23,19 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod payload;
+
+pub use payload::{
+    PAYLOAD_BUNDLE_SCHEMA, PayloadBundleManifestV1, PayloadPackOutput, PayloadPackRequest,
+    ShellSemver, VerifiedPayloadBundle, compute_payload_tree_digest, pack_payload_bundle,
+    payload_canonical_signing_bytes, signature_for_payload_manifest, unpack_payload_tarball,
+    verify_payload_bundle, verify_payload_manifest_signature,
+};
+
 pub const SKILLS_BUNDLE_SCHEMA: &str = "finite_skills_bundle.v1";
 const TREE_DIGEST_DOMAIN: &[u8] = b"finite-skills-tree-v1\0";
-const SIGNATURE_PREFIX: &str = "ed25519:";
-const READ_CHUNK_BYTES: usize = 1024 * 1024;
+pub(crate) const SIGNATURE_PREFIX: &str = "ed25519:";
+pub(crate) const READ_CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum ReleaseError {

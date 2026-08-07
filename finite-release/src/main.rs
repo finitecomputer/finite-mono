@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use finite_release::{
-    PackRequest, ReleaseError, generate_signing_key, pack_skills_bundle, parse_signing_key_hex,
-    parse_verifying_key_hex, verify_document_signature, verify_skills_bundle,
+    PackRequest, PayloadPackRequest, ReleaseError, generate_signing_key, pack_payload_bundle,
+    pack_skills_bundle, parse_signing_key_hex, parse_verifying_key_hex, verify_document_signature,
+    verify_payload_bundle, verify_skills_bundle,
 };
 
 /// Schema of the signed Core service directory (`finite-service-directory`
@@ -46,6 +47,30 @@ enum Command {
         #[arg(long)]
         now: Option<String>,
     },
+    /// Pack a runtime payload tree into a deterministic tarball plus signed
+    /// manifest. Unlike skills bundles, payload trees may contain relative
+    /// in-tree symlinks (virtualenvs need them).
+    PackPayload {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        artifact_id: String,
+        #[arg(long)]
+        version_label: String,
+        /// Lowest finite-shell version (MAJOR.MINOR.PATCH) that may stage
+        /// this payload.
+        #[arg(long)]
+        min_shell_version: String,
+        #[arg(long)]
+        out_dir: PathBuf,
+        #[arg(long)]
+        source_git_sha: Option<String>,
+        #[arg(long)]
+        signing_key: PathBuf,
+        /// RFC 3339 creation instant; defaults to the current UTC time.
+        #[arg(long)]
+        now: Option<String>,
+    },
     /// Verify a signed service-directory JSON document's signature.
     VerifyDirectory {
         /// Path to the directory document JSON (e.g. a curl download).
@@ -54,6 +79,18 @@ enum Command {
         /// 32-byte hex public key, or a path to a file containing it.
         #[arg(long)]
         public_key: String,
+    },
+    /// Verify a packed payload bundle end to end.
+    VerifyPayload {
+        #[arg(long)]
+        tarball: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+        /// 32-byte hex public key, or a path to a file containing it.
+        #[arg(long)]
+        public_key: String,
+        #[arg(long)]
+        expected_tarball_sha256: Option<String>,
     },
     /// Verify a packed skills bundle end to end.
     VerifySkills {
@@ -110,6 +147,73 @@ fn run(args: Args) -> Result<(), ReleaseError> {
                         "tarball": packed.tarball_path,
                         "manifest": packed.manifest_path,
                     },
+                })
+            );
+            Ok(())
+        }
+        Command::PackPayload {
+            source,
+            artifact_id,
+            version_label,
+            min_shell_version,
+            out_dir,
+            source_git_sha,
+            signing_key,
+            now,
+        } => {
+            let signing_key = parse_signing_key_hex(&fs::read_to_string(&signing_key)?)?;
+            let packed = pack_payload_bundle(
+                &PayloadPackRequest {
+                    source: &source,
+                    artifact_id: &artifact_id,
+                    version_label: &version_label,
+                    min_shell_version: &min_shell_version,
+                    source_git_sha: source_git_sha.as_deref(),
+                    created_at: now.as_deref(),
+                    out_dir: &out_dir,
+                },
+                &signing_key,
+            )?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "artifactId": packed.manifest.artifact_id,
+                    "versionLabel": packed.manifest.version_label,
+                    "minShellVersion": packed.manifest.min_shell_version,
+                    "tarballSha256": packed.manifest.tarball_sha256,
+                    "treeDigest": packed.manifest.tree_digest,
+                    "paths": {
+                        "tarball": packed.tarball_path,
+                        "manifest": packed.manifest_path,
+                    },
+                })
+            );
+            Ok(())
+        }
+        Command::VerifyPayload {
+            tarball,
+            manifest,
+            public_key,
+            expected_tarball_sha256,
+        } => {
+            let public_key = load_public_key(&public_key)?;
+            let unpack_dir = tempfile::tempdir()?;
+            let verified = verify_payload_bundle(
+                &tarball,
+                &manifest,
+                &public_key,
+                expected_tarball_sha256.as_deref(),
+                &unpack_dir.path().join("tree"),
+            )?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "verified": true,
+                    "artifactId": verified.manifest.artifact_id,
+                    "versionLabel": verified.manifest.version_label,
+                    "minShellVersion": verified.manifest.min_shell_version,
+                    "tarballSha256": verified.manifest.tarball_sha256,
+                    "treeDigest": verified.manifest.tree_digest,
                 })
             );
             Ok(())

@@ -12,6 +12,7 @@ members = [
     "finite-nostr",
     "finite-release",
     "finite-service-directory",
+    "finite-shell",
     "finitecomputer-v2/crates/finite-core",
     "finitecomputer-v2/crates/finite-private-limiter",
     "finitecomputer-v2/crates/finite-saas-core",

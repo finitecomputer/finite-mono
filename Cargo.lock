@@ -1326,6 +1326,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "finite-shell"
+version = "0.1.0"
+dependencies = [
+ "bech32",
+ "clap",
+ "ed25519-dalek",
+ "finite-release",
+ "futures-util",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "finite-specialization-worker"
 version = "0.1.0"
 dependencies = [
