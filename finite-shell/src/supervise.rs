@@ -259,22 +259,24 @@ fn spawn(spec: &AgentdSpec) -> Result<Child, ShellError> {
     command.spawn().map_err(ShellError::from)
 }
 
-async fn signal_group(pid: u32, signal: &str) {
-    // `kill -- -<pgid>` signals the whole group; agentd is its group leader.
-    let _ = Command::new("kill")
-        .args([signal, "--", &format!("-{pid}")])
-        .status()
-        .await;
+fn signal_group(pid: u32, signal: rustix::process::Signal) {
+    // Signal agentd's whole process group (it is spawned as group leader).
+    // In-process syscall: the runtime image has no `kill` binary (only the
+    // sh builtin), so shelling out silently signalled nothing — which is how
+    // every generation's children were being orphaned across flips.
+    if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+        let _ = rustix::process::kill_process_group(pid, signal);
+    }
 }
 
 async fn terminate(child: &mut Child, quiesce: Duration) {
     let pid = child.id();
     if let Some(pid) = pid {
-        signal_group(pid, "-TERM").await;
+        signal_group(pid, rustix::process::Signal::TERM);
     }
     if tokio::time::timeout(quiesce, child.wait()).await.is_err() {
         if let Some(pid) = pid {
-            signal_group(pid, "-KILL").await;
+            signal_group(pid, rustix::process::Signal::KILL);
         }
         let _ = child.kill().await;
         let _ = child.wait().await;
@@ -282,7 +284,7 @@ async fn terminate(child: &mut Child, quiesce: Duration) {
     // The direct child is gone; sweep the group once more so no orphaned
     // grandchild survives into the next generation.
     if let Some(pid) = pid {
-        signal_group(pid, "-KILL").await;
+        signal_group(pid, rustix::process::Signal::KILL);
     }
 }
 

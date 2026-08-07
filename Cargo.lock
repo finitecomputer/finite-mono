@@ -1337,6 +1337,7 @@ dependencies = [
  "futures-util",
  "hex",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

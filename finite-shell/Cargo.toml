@@ -24,6 +24,7 @@ finite-service-directory.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
