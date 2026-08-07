@@ -5242,7 +5242,7 @@ mod tests {
     }
 
     #[test]
-    fn production_runtime_image_uses_data_mount_and_finitechat_entrypoint() {
+    fn production_runtime_image_uses_data_mount_and_finite_shell_entrypoint() {
         let dockerfile = read_repo_file("deploy/finite-computer/images/runtime.Dockerfile");
 
         assert!(dockerfile.contains("ENV FINITECHAT_HOME=/data/agent"));
@@ -5255,7 +5255,11 @@ mod tests {
         assert!(
             dockerfile.contains("ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer")
         );
-        assert!(dockerfile.contains("ENTRYPOINT [\"/opt/agent-entrypoint.sh\"]"));
+        // ADR 0006: finite-shell is PID 1 and everything else rides in the
+        // signed seed payload it verifies at boot.
+        assert!(dockerfile.contains("ENTRYPOINT [\"/usr/local/bin/finite-shell\", \"run\"]"));
+        assert!(dockerfile.contains("COPY seed-payload/payload.tar.gz /seed/payload.tar.gz"));
+        assert!(!dockerfile.contains("agent-entrypoint.sh"));
         assert!(!dockerfile.contains("finitechat-entrypoint.sh"));
         assert!(!dockerfile.contains("/finite-state"));
     }

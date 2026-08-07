@@ -1753,17 +1753,28 @@ wait "$postgres_pid"
         } else {
             "apple-container"
         };
+        // Agents must boot a verified seed payload: the image build packs and
+        // signs the seed with this run's release key (the same key agents get
+        // as FINITE_RELEASE_PUBLIC_KEY through the runtime env).
         let command = format!(
             concat!(
                 "exec python3 finitecomputer-v2/scripts/build_runtime_image.py ",
                 "--engine {} ",
                 "--image-ref {} ",
                 "--context-dir {} ",
+                "--seed-signing-key {} ",
                 "--report {}"
             ),
             engine,
             shell_quote(RUNTIME_IMAGE_REF),
             shell_quote(&context.display().to_string()),
+            shell_quote(
+                &self
+                    .release_keys_dir()
+                    .join("release.key")
+                    .display()
+                    .to_string()
+            ),
             shell_quote(&report.display().to_string()),
         );
         let _ = writeln!(yaml, "  {process}:");
@@ -3452,6 +3463,210 @@ wait "$postgres_pid"
         Ok(())
     }
 
+    /// Extract the payload rootfs from the runtime image build (or take an
+    /// explicit `--source` tree, e.g. a smoke-crafted broken payload), pack
+    /// and sign it with this run's release key, host it from the
+    /// `skills-releases` static server, register it as a promoted Core
+    /// `payload_bundle` artifact, and point the canary channel at it. Prints
+    /// one JSON object describing the published bundle to stdout.
+    pub fn publish_payload(
+        &self,
+        source: Option<&Path>,
+        version_label: Option<&str>,
+    ) -> Result<()> {
+        let release_public_key = self.ensure_release_keys()?;
+        let signing_key = self.release_keys_dir().join("release.key");
+        let releases_dir = self.skills_releases_dir();
+        fs::create_dir_all(&releases_dir)
+            .with_context(|| format!("failed to create {}", releases_dir.display()))?;
+
+        let source_tree = match source {
+            Some(path) => path.to_path_buf(),
+            None => self.emit_payload_rootfs()?,
+        };
+        if !source_tree.join("bin/finite-agentd").is_file() {
+            bail!(
+                "payload source {} does not contain bin/finite-agentd",
+                source_tree.display()
+            );
+        }
+        let min_shell_version = self.finite_shell_version()?;
+
+        // The default version label is content-addressed (no wall clock): a
+        // probe pack learns the tree digest, the real pack bakes the
+        // content-addressed identity into the manifest. An explicit label
+        // (smoke "v2"/"broken" publishes) skips the probe.
+        let version_label = match version_label {
+            Some(label) => label.to_owned(),
+            None => {
+                let probe_dir = tempfile::Builder::new()
+                    .prefix("payload-publish-probe-")
+                    .tempdir_in(&self.run_dir)
+                    .context("failed to create a payload publish probe directory")?;
+                let probe = self.pack_payload_bundle(
+                    &source_tree,
+                    "devfinity-payload-probe",
+                    "probe",
+                    &min_shell_version,
+                    &signing_key,
+                    probe_dir.path(),
+                )?;
+                let tree_digest = json_string_field(&probe, "treeDigest")?;
+                let content_prefix = tree_digest
+                    .get(..12)
+                    .context("finite-release reported a malformed treeDigest")?;
+                format!("devfinity-{content_prefix}")
+            }
+        };
+        let artifact_id = format!("finite-agent-payload-{version_label}");
+
+        let packed = self.pack_payload_bundle(
+            &source_tree,
+            &artifact_id,
+            &version_label,
+            &min_shell_version,
+            &signing_key,
+            &releases_dir,
+        )?;
+        let tarball_sha256 = json_string_field(&packed, "tarballSha256")?;
+        let tree_digest = json_string_field(&packed, "treeDigest")?;
+        let base_url = self.runtime_skills_releases_url();
+        let tarball_url = format!("{base_url}/{artifact_id}.tar.gz");
+        // Append convention: the manifest URL is the tarball URL plus
+        // `.manifest.json`, exactly as the service directory derives it.
+        let manifest_url = format!("{tarball_url}.manifest.json");
+
+        self.run_core_cli(
+            &[
+                "runtime-artifact-upsert",
+                "--artifact-id",
+                &artifact_id,
+                "--kind",
+                "payload_bundle",
+                "--reference",
+                &tarball_url,
+                "--version-label",
+                &version_label,
+                "--state-schema-version",
+                "finite-payload-tree-v1",
+                "--content-sha256",
+                &tarball_sha256,
+                "--promoted",
+            ],
+            "register the payload bundle as a promoted Core artifact",
+        )?;
+        self.run_core_cli(
+            &[
+                "release-channel-set",
+                "--channel",
+                "canary",
+                "--kind",
+                "payload_bundle",
+                "--artifact-id",
+                &artifact_id,
+            ],
+            "set the canary payload channel head",
+        )?;
+
+        println!(
+            "{}",
+            serde_json::json!({
+                "artifactId": artifact_id,
+                "versionLabel": version_label,
+                "minShellVersion": min_shell_version,
+                "tarballUrl": tarball_url,
+                "manifestUrl": manifest_url,
+                "tarballSha256": tarball_sha256,
+                "treeDigest": tree_digest,
+                "tarballPath": releases_dir.join(format!("{artifact_id}.tar.gz")),
+                "manifestPath": releases_dir.join(format!("{artifact_id}.tar.gz.manifest.json")),
+                "payloadRootfs": source_tree,
+                "releasePublicKey": release_public_key,
+            })
+        );
+        Ok(())
+    }
+
+    /// `build_runtime_image.py --emit-payload`: build only the payload stage
+    /// (warm cache after the stack's own image build) and copy the UNSIGNED
+    /// payload rootfs to `<run>/payload-publish/payload`.
+    fn emit_payload_rootfs(&self) -> Result<PathBuf> {
+        let emit_root = self.run_dir.join("payload-publish");
+        fs::create_dir_all(&emit_root)
+            .with_context(|| format!("failed to create {}", emit_root.display()))?;
+        let engine = if self.profile == StackProfile::DockerSaas {
+            "docker"
+        } else {
+            "apple-container"
+        };
+        command_stdout(
+            Command::new("python3")
+                .arg("finitecomputer-v2/scripts/build_runtime_image.py")
+                .args(["--engine", engine, "--image-ref", RUNTIME_IMAGE_REF])
+                .arg("--context-dir")
+                .arg(self.runtime_image_dir().join("context"))
+                .arg("--emit-payload")
+                .arg(&emit_root)
+                .current_dir(&self.repo_root),
+            "emit the payload rootfs from the runtime image build",
+        )?;
+        Ok(emit_root.join("payload"))
+    }
+
+    /// finite-shell's crate version: published payloads' `min_shell_version`.
+    fn finite_shell_version(&self) -> Result<String> {
+        let manifest_path = self.repo_root.join("finite-shell/Cargo.toml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        manifest
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "version").then(|| value.trim().trim_matches('"').to_owned())
+            })
+            .context("finite-shell/Cargo.toml has no version")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pack_payload_bundle(
+        &self,
+        source: &Path,
+        artifact_id: &str,
+        version_label: &str,
+        min_shell_version: &str,
+        signing_key: &Path,
+        out_dir: &Path,
+    ) -> Result<serde_json::Value> {
+        let stdout = command_stdout(
+            Command::new("cargo")
+                .args([
+                    "run",
+                    "--quiet",
+                    "-p",
+                    "finite-release",
+                    "--",
+                    "pack-payload",
+                ])
+                .arg("--source")
+                .arg(source)
+                .args([
+                    "--artifact-id",
+                    artifact_id,
+                    "--version-label",
+                    version_label,
+                    "--min-shell-version",
+                    min_shell_version,
+                ])
+                .arg("--signing-key")
+                .arg(signing_key)
+                .arg("--out-dir")
+                .arg(out_dir)
+                .current_dir(&self.repo_root),
+            "pack the payload bundle with finite-release",
+        )?;
+        parse_last_json_line(&stdout).context("finite-release pack-payload printed no JSON result")
+    }
+
     fn pack_skills_bundle(
         &self,
         source: &Path,
@@ -4949,6 +5164,9 @@ mod tests {
         assert!(yaml.contains("dashboard:"));
         assert!(yaml.contains("runtime-image:"));
         assert!(yaml.contains("--engine apple-container"));
+        // Agents must boot a verified seed payload signed with the run key.
+        assert!(yaml.contains("--seed-signing-key"));
+        assert!(yaml.contains("release-keys/release.key"));
         assert!(yaml.contains("apple-network-probe:"));
         assert!(yaml.contains("seq 1 120"));
         assert!(yaml.contains("runtime-artifact:"));

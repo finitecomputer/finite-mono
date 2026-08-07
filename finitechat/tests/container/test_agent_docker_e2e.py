@@ -360,10 +360,10 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
 
         prepared = script.index('if [[ "${1:-}" == "--prepare-only" ]]')
         health = script.index("python /opt/health_server.py &", prepared)
-        gateway = script.index("exec hermes gateway run --replace", health)
+        gateway = script.index('exec "$hermes_bin" gateway run --replace', health)
         self.assertLess(prepared, health)
         self.assertLess(health, gateway)
-        self.assertIn('"${FINITE_AGENTD_SUPERVISED:-0}" != "1"', script)
+        self.assertIn('"${FINITE_AGENTD_SUPERVISED:-0}" != "1" && -z "$payload_root"', script)
 
     def test_gateway_launcher_seeds_managed_skills_only_for_fresh_agents(self) -> None:
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")

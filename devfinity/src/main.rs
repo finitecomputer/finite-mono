@@ -48,6 +48,12 @@ enum Command {
     /// canary channel at it. Requires the devfinity stack to be running.
     #[command(name = "publish-skills")]
     PublishSkills(PublishSkillsArgs),
+    /// Extract the payload rootfs from the runtime image build (or an
+    /// explicit --source tree), pack + sign it with the run key, host and
+    /// register it as a Core payload_bundle, then point the canary channel at
+    /// it. Requires the devfinity stack to be running.
+    #[command(name = "publish-payload")]
+    PublishPayload(PublishPayloadArgs),
     /// Run the local read-only WorkOS fixture used by the dev stack.
     #[command(name = "workos-fixture")]
     WorkosFixture {
@@ -103,6 +109,19 @@ struct RunArgs {
 #[derive(Debug, Args)]
 struct PublishSkillsArgs {
     /// Skills tree to pack; defaults to the in-repo finite-skills/skills.
+    #[arg(long)]
+    source: Option<PathBuf>,
+
+    /// Operator-readable label; defaults to a content-addressed
+    /// devfinity-<digest prefix> label (no wall clock).
+    #[arg(long)]
+    version_label: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct PublishPayloadArgs {
+    /// Payload rootfs to pack; defaults to a fresh --emit-payload extraction
+    /// from the runtime image build.
     #[arg(long)]
     source: Option<PathBuf>,
 
@@ -178,6 +197,24 @@ fn run() -> anyhow::Result<ExitCode> {
             let mut stack = Stack::new(cli.state_dir)?.with_profile(profile);
             stack.prepare_host_environment(true)?;
             stack.publish_skills(args.source.as_deref(), args.version_label.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::PublishPayload(args) => {
+            // Same profile reuse as publish-skills: the bundle reference URL
+            // must be container-reachable the way the stack's services are.
+            let profile = match std::env::var("DEVFINITY_PROFILE") {
+                Ok(value) => StackProfile::from_name(value.trim())
+                    .with_context(|| format!("DEVFINITY_PROFILE has unknown profile {value:?}"))?,
+                Err(_) => StackProfile::AppleSaas,
+            };
+            if matches!(profile, StackProfile::TestInfrastructure) {
+                anyhow::bail!(
+                    "publish-payload is not available in the test-infrastructure profile"
+                );
+            }
+            let mut stack = Stack::new(cli.state_dir)?.with_profile(profile);
+            stack.prepare_host_environment(true)?;
+            stack.publish_payload(args.source.as_deref(), args.version_label.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
         Command::InferenceKey => {

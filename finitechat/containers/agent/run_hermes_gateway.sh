@@ -1,11 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Payload-relative resolution: under finite-shell, FINITE_PAYLOAD_ROOT names
+# the active generation's real root and every helper this script needs lives
+# inside it. The legacy absolute image paths remain the fallback so the
+# pre-shell image layout keeps working.
+payload_root="${FINITE_PAYLOAD_ROOT:-}"
+if [[ -n "$payload_root" ]]; then
+    default_finitechat_bin="${payload_root}/bin/finitechat"
+    default_bundled_skills_dir="${payload_root}/finite-skills"
+    default_config_reconciler="${payload_root}/opt/reconcile_hermes_config.py"
+    default_recover_chat_boot="${payload_root}/opt/recover_chat_boot.py"
+    # The venv python is the robust interpreter path: the shell's post-unpack
+    # fixup guarantees its shebang/symlink targets for this generation.
+    python_bin="${payload_root}/hermes-venv/bin/python"
+    hermes_bin="${payload_root}/hermes-venv/bin/hermes"
+else
+    default_finitechat_bin=/usr/local/bin/finitechat
+    default_bundled_skills_dir=/runtime/finite-skills
+    default_config_reconciler=/opt/reconcile_hermes_config.py
+    default_recover_chat_boot=/opt/recover_chat_boot.py
+    python_bin=python
+    hermes_bin=hermes
+fi
+
 agent_home="${FINITECHAT_HOME:-/data/agent}"
 hermes_home="${HERMES_HOME:-${agent_home}/hermes-home}"
 server_url="${FINITE_SERVER_URL:-${FINITECHAT_SERVER_URL:-}}"
 device_id="${FINITECHAT_HERMES_AGENT_DEVICE_ID:-agent}"
-finitechat_bin="${FINITECHAT_BIN:-/usr/local/bin/finitechat}"
+finitechat_bin="${FINITECHAT_BIN:-$default_finitechat_bin}"
 plugin_name="${FINITECHAT_HERMES_PLUGIN_NAME:-finitechat}"
 agent_name="${FINITECHAT_HERMES_AGENT_NAME:-${FINITE_AGENT_NAME:-${FINITECHAT_HERMES_ROOM_NAME:-Finite Agent}}}"
 agent_picture_url="${FINITECHAT_HERMES_AGENT_PICTURE_URL:-https://avatars.githubusercontent.com/u/274919006?v=4}"
@@ -38,9 +61,9 @@ poll_limit="${FINITECHAT_HERMES_POLL_LIMIT:-10}"
 title_generation_timeout_secs="${FINITECHAT_HERMES_TITLE_TIMEOUT_SECS:-2}"
 workspace="${FINITECHAT_WORKSPACE:-/workspace}"
 managed_skills_dir="${agent_home}/managed-skills/finite/current"
-bundled_skills_dir="${FINITE_BUNDLED_SKILLS_DIR:-/runtime/finite-skills}"
-config_reconciler="${FINITE_HERMES_CONFIG_RECONCILER:-/opt/reconcile_hermes_config.py}"
-recover_chat_boot="${FINITE_RECOVER_CHAT_BOOT:-/opt/recover_chat_boot.py}"
+bundled_skills_dir="${FINITE_BUNDLED_SKILLS_DIR:-$default_bundled_skills_dir}"
+config_reconciler="${FINITE_HERMES_CONFIG_RECONCILER:-$default_config_reconciler}"
+recover_chat_boot="${FINITE_RECOVER_CHAT_BOOT:-$default_recover_chat_boot}"
 
 export FINITECHAT_HOME="$agent_home"
 # Shared Finite identity on the durable mount (identity/identity.json).
@@ -86,12 +109,12 @@ run_with_config_environment() {
 
 run_config_reconciler() {
     run_with_config_environment \
-        python "$config_reconciler" --config "${hermes_home}/config.yaml"
+        "$python_bin" "$config_reconciler" --config "${hermes_home}/config.yaml"
 }
 
 run_recover_chat_boot() {
     run_with_config_environment \
-        python "$recover_chat_boot" --config "${hermes_home}/config.yaml"
+        "$python_bin" "$recover_chat_boot" --config "${hermes_home}/config.yaml"
 }
 
 recover_boot=0
@@ -176,11 +199,13 @@ if [[ "${1:-}" == "--prepare-only" ]]; then
     exit 0
 fi
 
-if [[ "${FINITE_AGENTD_SUPERVISED:-0}" != "1" ]]; then
+if [[ "${FINITE_AGENTD_SUPERVISED:-0}" != "1" && -z "$payload_root" ]]; then
+    # Legacy image only: with finite-shell, /healthz is served by the shell
+    # and the Python health server no longer exists in the payload.
     python /opt/health_server.py &
     health_pid="$!"
     trap 'kill "$health_pid" 2>/dev/null || true' EXIT
 fi
 
 echo "FINITE_AGENT_RUNTIME real_hermes_gateway=true hermes_home=${hermes_home} agent_home=${agent_home}"
-exec hermes gateway run --replace
+exec "$hermes_bin" gateway run --replace

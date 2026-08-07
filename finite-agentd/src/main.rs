@@ -36,6 +36,32 @@ enum Command {
         #[arg(long)]
         channel: Option<String>,
     },
+    /// Print the shell's payload-generation status (forwarded over the
+    /// finite-shell control socket).
+    #[command(name = "payload-status")]
+    PayloadStatus,
+    /// Stage a payload generation through the exact `agent.payload.stage`
+    /// command path. Either name the exact bundle (`--tarball-url` +
+    /// `--manifest-url` + `--tarball-sha256`) or resolve the channel's
+    /// `payload_bundle` head from the signed service directory (`--channel`).
+    /// Flip and rollback have no agentd CLI verbs: agentd dies mid-flip, so
+    /// use `finite-shell ctl flip --wait` / `ctl rollback --wait` directly.
+    #[command(name = "payload-stage")]
+    PayloadStage {
+        #[arg(long, conflicts_with = "channel", requires = "manifest_url")]
+        tarball_url: Option<String>,
+        #[arg(long, conflicts_with = "channel", requires = "tarball_sha256")]
+        manifest_url: Option<String>,
+        #[arg(long, conflicts_with = "channel", requires = "tarball_url")]
+        tarball_sha256: Option<String>,
+        /// Release channel (stable or canary) whose payload bundle head to
+        /// resolve from the service directory (fresh fetch, verified).
+        #[arg(long)]
+        channel: Option<String>,
+        /// Operator override: re-stage a bad-listed version.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -87,6 +113,41 @@ async fn run() -> Result<(), finite_agentd::AgentdError> {
                     manifest_url,
                     tarball_sha256,
                     channel,
+                },
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Command::PayloadStatus => {
+            let result = finite_agentd::run_payload_status_cli(&config).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Command::PayloadStage {
+            tarball_url,
+            manifest_url,
+            tarball_sha256,
+            channel,
+            force,
+        } => {
+            let request_id = format!(
+                "cli-payload-stage-{}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis())
+                    .unwrap_or(0),
+                std::process::id()
+            );
+            let result = finite_agentd::run_payload_stage_cli(
+                &config,
+                &request_id,
+                finite_agentd::PayloadStageRequest {
+                    tarball_url,
+                    manifest_url,
+                    tarball_sha256,
+                    channel,
+                    force,
                 },
             )
             .await?;

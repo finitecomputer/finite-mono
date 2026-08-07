@@ -19,14 +19,17 @@ PHALA_ADAPTER = Path("finitecomputer-v2/crates/finite-saas-runner/src/phala.rs")
 
 CANONICAL_DOCKERFILE_ANCHORS = (
     '"hermes-agent[messaging] @ file:///tmp/hermes-agent.tar.gz"',
-    "COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat",
-    "COPY finite-skills/skills /runtime/finite-skills",
-    "COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh",
+    "COPY finitechat/integrations/hermes/finitechat /payload/hermes-plugin/finitechat",
+    "COPY finite-skills/skills /payload/finite-skills",
+    "COPY finitechat/containers/agent/run_hermes_gateway.sh /payload/opt/run_hermes_gateway.sh",
+    "COPY --from=finite-rust-builder /build/target/release/finite-shell /usr/local/bin/finite-shell",
+    "COPY seed-payload/payload.tar.gz /seed/payload.tar.gz",
+    "COPY seed-payload/payload.tar.gz.manifest.json /seed/payload.tar.gz.manifest.json",
     "ENV FBRAIN_CONFIG_DIR=/data/agent/fbrain",
     "ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain",
     "ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer",
     "ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer",
-    'ENTRYPOINT ["/opt/agent-entrypoint.sh"]',
+    'ENTRYPOINT ["/usr/local/bin/finite-shell", "run"]',
 )
 
 CANONICAL_WORKFLOW_ANCHORS = (

@@ -35,6 +35,8 @@ Platform Channel:
 - `agent.chat.recover`
 - `agent.connections.status`
 - `agent.skills.sync`
+- `agent.payload.status`, `agent.payload.stage`, `agent.payload.flip`,
+  `agent.payload.rollback`, and `agent.payload.set-channel`
 - `agent.inference.apply`
 - `agent.specialization.aeon.reconcile`
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
@@ -87,6 +89,29 @@ same settings from the environment, runs the identical fetch/verify/apply
 code, records the command in the same durable ledger under a
 `cli-skills-sync-*` request id, prints the result JSON to stdout, and exits
 nonzero on failure.
+
+The `agent.payload.*` family is a thin typed forwarder to the finite-shell
+control socket (`FINITE_SHELL_SOCKET`, default `/data/shell/shell.sock`,
+line-delimited JSON). The daemon never stages, verifies, or flips a payload
+itself — the shell owns generations end to end. `agent.payload.stage` accepts
+either the explicit form (`tarballUrl` + `manifestUrl` + `tarballSha256`,
+optional `force`) or the channel form (`{"channel": "canary"}`), which freshly
+fetches and verifies the signed service directory, resolves the channel's
+`payload_bundle` head (`payload_channel_head_missing` when absent), and hands
+the shell explicit URLs — the shell re-verifies everything before unpacking.
+`agent.payload.flip` and `agent.payload.rollback` results are the shell's
+immediate `flip_started`/`rollback_started` acknowledgements; the ledger
+records the intent, and the outcome is visible through `agent.payload.status`
+(the `last_flip` record) once the new generation's agentd is serving.
+
+For in-guest smoke/exec parity the daemon also has one-shot CLI verbs
+`finite-agentd payload-status` (plain read-only forward) and `finite-agentd
+payload-stage [--channel <name> | --tarball-url <u> --manifest-url <u>
+--tarball-sha256 <hex>] [--force]` (recorded in the durable ledger under a
+`cli-payload-stage-*` request id, exactly like `skills-sync`). There are
+deliberately no agentd CLI verbs for flip or rollback: agentd is the process
+being replaced and dies mid-flip, so drive those with `finite-shell ctl flip
+--wait` / `finite-shell ctl rollback --wait` directly.
 
 Specialization reconciliation owns only the `auxiliary.vision` Hermes config
 field. Its typed AEON desired state includes the worker endpoint, canonical

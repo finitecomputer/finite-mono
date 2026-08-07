@@ -1656,11 +1656,13 @@ JS
 
   # The daemon's directory refresher caches the verified document on /data;
   # the read-only python accessor must surface the sites base URL from it.
+  # The accessor lives inside the active payload generation now (the image
+  # has no fixed /opt); the `current` symlink is the stable path.
   sites_port="${sites_api_url##*:}"
   directory_sites=""
   for attempt in $(seq 1 30); do
     if directory_sites="$(runtime_exec "$container_machine_id" \
-      python3 /opt/finite_service_directory.py sites 2>/dev/null)"; then
+      python3 /data/generations/current/opt/finite_service_directory.py sites 2>/dev/null)"; then
       break
     fi
     directory_sites=""
@@ -1696,6 +1698,233 @@ PY
   rm -rf "$skills_tmp" "$tampered_path"
 }
 
+# The M2 skills-channel assertion, once: publish a marker bundle and prove the
+# (possibly just-flipped) payload's agentd still resolves the canary channel
+# through the signed directory and applies it. No tamper/accessor re-checks.
+assert_skills_channel_sync_once() {
+  local devfinity_state_root skills_tmp publish_json sync_json artifact_id tree_digest
+  local marker_path=/data/agent/managed-skills/finite/current/devfinity-smoke-skill/SKILL.md
+
+  devfinity_state_root="$(cd "$state_dir/../.." && pwd)"
+  skills_tmp="$(mktemp -d "$state_dir/saas-smoke-payload-skills-src.XXXXXX")"
+  cp -R "$repo_root/finite-skills/skills/." "$skills_tmp/"
+  mkdir "$skills_tmp/devfinity-smoke-skill"
+  cat >"$skills_tmp/devfinity-smoke-skill/SKILL.md" <<'SKILL'
+---
+name: devfinity-smoke-skill
+description: Marker skill proving the flipped payload still syncs skills.
+---
+
+This marker skill exists only for the devfinity payload flip smoke.
+SKILL
+
+  publish_json="$state_dir/saas-smoke-payload-skills-publish.json"
+  cargo run --quiet -p devfinity -- --state-dir "$devfinity_state_root" \
+    publish-skills --source "$skills_tmp" >"$publish_json"
+  IFS=$'\t' read -r artifact_id tree_digest <<<"$(node - "$publish_json" <<'JS'
+const fs = require("node:fs");
+const publish = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+for (const field of ["artifactId", "treeDigest"]) {
+  if (!publish[field]) throw new Error(`publish-skills output is missing ${field}`);
+}
+process.stdout.write([publish.artifactId, publish.treeDigest].join("\t"));
+JS
+)"
+  sync_json="$state_dir/saas-smoke-payload-skills-sync.json"
+  runtime_exec "$container_machine_id" finite-agentd skills-sync \
+    --channel canary >"$sync_json"
+  node - "$sync_json" "$artifact_id" "$tree_digest" <<'JS'
+const fs = require("node:fs");
+const sync = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (sync.applied !== true || sync.channel !== "canary") {
+  throw new Error(`skills sync through the flipped payload failed: ${JSON.stringify(sync)}`);
+}
+if (sync.artifactId !== process.argv[3] || sync.treeDigest !== process.argv[4]) {
+  throw new Error(`skills sync applied an unexpected bundle: ${JSON.stringify(sync)}`);
+}
+JS
+  runtime_exec "$container_machine_id" test -f "$marker_path"
+  rm -rf "$skills_tmp"
+  echo "flipped payload's agentd synced the canary skills bundle"
+}
+
+# Payload generations end to end against the live runtime: seed telemetry,
+# channel-resolved stage, shell-driven flip with identity stability, explicit
+# rollback, and a broken payload auto-rolling back with the version
+# bad-listed. Cheap smoke: no model turns.
+run_payload_flip_smoke() {
+  local devfinity_state_root healthz_json publish_json stage_json status_json flip_json
+  local seed_version shell_version payload_rootfs npub_before npub_after broken_dir
+
+  need cargo
+  need python3
+  devfinity_state_root="$(cd "$state_dir/../.." && pwd)"
+
+  # (a) The shell serves /healthz with generation telemetry; capture the seed.
+  healthz_json="$state_dir/saas-smoke-payload-healthz.json"
+  curl -fsS --max-time 5 "$runtime_url/healthz" >"$healthz_json"
+  IFS=$'\t' read -r seed_version shell_version <<<"$(node - "$healthz_json" <<'JS'
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!health.shell_version || !health.payload_version) {
+  throw new Error(`healthz must carry shell_version and payload_version: ${JSON.stringify(health)}`);
+}
+process.stdout.write([health.payload_version, health.shell_version].join("\t"));
+JS
+)"
+  npub_before="$(runtime_agent_npub)"
+  echo "runtime healthy on seed payload $seed_version (shell $shell_version)"
+
+  # (b) Publish the same payload content under a new version to canary.
+  publish_json="$state_dir/saas-smoke-payload-publish.json"
+  cargo run --quiet -p devfinity -- --state-dir "$devfinity_state_root" \
+    publish-payload --version-label devfinity-v2 >"$publish_json"
+  payload_rootfs="$(node - "$publish_json" <<'JS'
+const fs = require("node:fs");
+const publish = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+for (const field of ["artifactId", "tarballUrl", "manifestUrl", "tarballSha256", "payloadRootfs"]) {
+  if (!publish[field]) throw new Error(`publish-payload output is missing ${field}`);
+}
+if (publish.versionLabel !== "devfinity-v2") {
+  throw new Error(`publish-payload used label ${publish.versionLabel}, expected devfinity-v2`);
+}
+process.stdout.write(publish.payloadRootfs);
+JS
+)"
+  echo "published payload devfinity-v2 to the canary channel"
+
+  # (c) The agent stages it through its own channel resolution.
+  stage_json="$state_dir/saas-smoke-payload-stage.json"
+  runtime_exec "$container_machine_id" finite-agentd payload-stage \
+    --channel canary >"$stage_json"
+  node - "$stage_json" <<'JS'
+const fs = require("node:fs");
+const staged = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (staged.result !== "staged" || staged.versionLabel !== "devfinity-v2" || staged.channel !== "canary") {
+  throw new Error(`payload stage did not resolve devfinity-v2 via canary: ${JSON.stringify(staged)}`);
+}
+JS
+  status_json="$state_dir/saas-smoke-payload-status.json"
+  runtime_exec "$container_machine_id" finite-agentd payload-status >"$status_json"
+  node - "$status_json" "$seed_version" <<'JS'
+const fs = require("node:fs");
+const status = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (status.current !== process.argv[3]) {
+  throw new Error(`current generation should still be the seed: ${JSON.stringify(status)}`);
+}
+if (status.state?.staged?.version_label !== "devfinity-v2") {
+  throw new Error(`devfinity-v2 is not staged: ${JSON.stringify(status)}`);
+}
+JS
+  echo "agent staged devfinity-v2 through the canary channel"
+
+  # (d) Flip with the shell; --wait exits 0 only when the flip succeeded.
+  runtime_exec "$container_machine_id" finite-shell ctl flip --wait \
+    >"$state_dir/saas-smoke-payload-flip.json"
+  echo "shell flipped to devfinity-v2"
+
+  # (e) New generation serving, same Agent Principal, agentd fully working.
+  wait_http "Agent Runtime after flip" "$runtime_url/healthz" 180
+  curl -fsS --max-time 5 "$runtime_url/healthz" >"$healthz_json"
+  node - "$healthz_json" <<'JS'
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (health.payload_version !== "devfinity-v2") {
+  throw new Error(`payload_version should be devfinity-v2: ${health.payload_version}`);
+}
+if (health.agentd?.ok !== true) {
+  throw new Error(`agentd is not healthy after the flip: ${JSON.stringify(health.agentd)}`);
+}
+if (health.last_flip?.outcome !== "success") {
+  throw new Error(`last_flip did not succeed: ${JSON.stringify(health.last_flip)}`);
+}
+JS
+  npub_after="$(runtime_agent_npub)"
+  if [[ "$npub_after" != "$npub_before" ]]; then
+    echo "Agent Principal changed across the payload flip" >&2
+    return 1
+  fi
+  assert_skills_channel_sync_once
+
+  # (f) Operator rollback returns to the seed and stays healthy.
+  runtime_exec "$container_machine_id" finite-shell ctl rollback --wait \
+    >"$state_dir/saas-smoke-payload-rollback.json"
+  wait_http "Agent Runtime after rollback" "$runtime_url/healthz" 180
+  curl -fsS --max-time 5 "$runtime_url/healthz" >"$healthz_json"
+  node - "$healthz_json" "$seed_version" <<'JS'
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (health.payload_version !== process.argv[3]) {
+  throw new Error(`rollback should return to ${process.argv[3]}: ${health.payload_version}`);
+}
+if (health.agentd?.ok !== true) {
+  throw new Error(`agentd is not healthy after the rollback: ${JSON.stringify(health.agentd)}`);
+}
+JS
+  echo "shell rolled back to seed payload $seed_version"
+
+  # (g) A broken payload (its finite-agentd exits 1) must fail the health
+  # gate, auto-roll back to the seed, and be bad-listed.
+  broken_dir="$state_dir/saas-smoke-broken-payload"
+  rm -rf "$broken_dir"
+  mkdir -p "$broken_dir"
+  cp -a "$payload_rootfs/." "$broken_dir/"
+  cat >"$broken_dir/bin/finite-agentd" <<'SH'
+#!/bin/sh
+exit 1
+SH
+  chmod +x "$broken_dir/bin/finite-agentd"
+  cargo run --quiet -p devfinity -- --state-dir "$devfinity_state_root" \
+    publish-payload --source "$broken_dir" --version-label devfinity-broken \
+    >"$state_dir/saas-smoke-payload-broken-publish.json"
+  runtime_exec "$container_machine_id" finite-agentd payload-stage \
+    --channel canary >"$stage_json"
+  node - "$stage_json" <<'JS'
+const fs = require("node:fs");
+const staged = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (staged.result !== "staged" || staged.versionLabel !== "devfinity-broken") {
+  throw new Error(`broken payload did not stage: ${JSON.stringify(staged)}`);
+}
+JS
+  flip_json="$state_dir/saas-smoke-payload-broken-flip.json"
+  if runtime_exec "$container_machine_id" finite-shell ctl flip --wait \
+    >"$flip_json" 2>&1; then
+    echo "a broken payload flip unexpectedly reported success" >&2
+    return 1
+  fi
+  wait_http "Agent Runtime after auto-rollback" "$runtime_url/healthz" 180
+  curl -fsS --max-time 5 "$runtime_url/healthz" >"$healthz_json"
+  node - "$healthz_json" "$seed_version" <<'JS'
+const fs = require("node:fs");
+const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (health.payload_version !== process.argv[3]) {
+  throw new Error(`auto-rollback should land on ${process.argv[3]}: ${health.payload_version}`);
+}
+if (health.agentd?.ok !== true) {
+  throw new Error(`agentd is not healthy after the auto-rollback: ${JSON.stringify(health.agentd)}`);
+}
+if (health.last_flip?.outcome !== "rolled_back") {
+  throw new Error(`broken flip should be recorded as rolled_back: ${JSON.stringify(health.last_flip)}`);
+}
+JS
+  runtime_exec "$container_machine_id" finite-agentd payload-status >"$status_json"
+  node - "$status_json" <<'JS'
+const fs = require("node:fs");
+const status = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const bad = (status.state?.bad || []).map((entry) => entry.version_label);
+if (!bad.includes("devfinity-broken")) {
+  throw new Error(`devfinity-broken is not bad-listed: ${JSON.stringify(status)}`);
+}
+JS
+  npub_after="$(runtime_agent_npub)"
+  if [[ "$npub_after" != "$npub_before" ]]; then
+    echo "Agent Principal changed across the broken-payload auto-rollback" >&2
+    return 1
+  fi
+  rm -rf "$broken_dir"
+  echo "broken payload auto-rolled back to $seed_version and was bad-listed"
+}
+
 need curl
 need node
 need process-compose
@@ -1724,6 +1953,10 @@ if [[ "${DEVFINITY_SITES_ONLY_SMOKE:-0}" != "0" && "${DEVFINITY_SITES_ONLY_SMOKE
 fi
 if [[ "${DEVFINITY_SKILLS_SYNC_SMOKE:-0}" != "0" && "${DEVFINITY_SKILLS_SYNC_SMOKE:-0}" != "1" ]]; then
   echo "DEVFINITY_SKILLS_SYNC_SMOKE must be 0 or 1" >&2
+  exit 64
+fi
+if [[ "${DEVFINITY_PAYLOAD_FLIP_SMOKE:-0}" != "0" && "${DEVFINITY_PAYLOAD_FLIP_SMOKE:-0}" != "1" ]]; then
+  echo "DEVFINITY_PAYLOAD_FLIP_SMOKE must be 0 or 1" >&2
   exit 64
 fi
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "0" \
@@ -1830,6 +2063,17 @@ if [[ "${DEVFINITY_SKILLS_SYNC_SMOKE:-0}" == "1" ]]; then
   # assertions the way DEVFINITY_BRAIN_ONLY_SMOKE does.
   run_skills_sync_smoke
   echo "devfinity skills sync smoke passed"
+  echo "project_id=$project_id"
+  echo "runtime_id=$machine_id"
+  echo "source_machine_id=$container_machine_id"
+  exit 0
+fi
+if [[ "${DEVFINITY_PAYLOAD_FLIP_SMOKE:-0}" == "1" ]]; then
+  # Focused variant: stage/flip/rollback the payload generation mechanism
+  # through the healthy runtime, then stop. It skips the inference-heavy
+  # assertions the way the skills variant does.
+  run_payload_flip_smoke
+  echo "devfinity payload flip smoke passed"
   echo "project_id=$project_id"
   echo "runtime_id=$machine_id"
   echo "source_machine_id=$container_machine_id"

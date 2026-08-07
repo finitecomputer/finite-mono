@@ -22,6 +22,8 @@ from pathlib import Path
 
 DEFAULT_BUNDLED_SKILLS = Path("/runtime/finite-skills")
 DEFAULT_AGENT_HOME = Path("/data/agent")
+BUNDLED_SKILLS_DIR_ENV = "FINITE_BUNDLED_SKILLS_DIR"
+PAYLOAD_ROOT_ENV = "FINITE_PAYLOAD_ROOT"
 REQUIRED_SKILLS = (
     Path("software-development/finitebrain/SKILL.md"),
     Path("software-development/finite-sites-publishing-finite/SKILL.md"),
@@ -40,9 +42,22 @@ def _testing() -> bool:
     return os.environ.get(TEST_MODE_ENV) == "1"
 
 
+def _bundled_skills_root() -> Path:
+    """The in-payload skills seed: explicit override, then the active payload
+    generation (`FINITE_PAYLOAD_ROOT`, set by finite-shell), then the legacy
+    fixed image path."""
+    override = os.environ.get(BUNDLED_SKILLS_DIR_ENV)
+    if override:
+        return Path(override)
+    payload_root = os.environ.get(PAYLOAD_ROOT_ENV)
+    if payload_root:
+        return Path(payload_root) / "finite-skills"
+    return DEFAULT_BUNDLED_SKILLS
+
+
 def _paths(source_override: Path | None = None) -> tuple[Path, Path]:
     if _testing():
-        source = Path(os.environ.get(TEST_SOURCE_ENV, DEFAULT_BUNDLED_SKILLS))
+        source = Path(os.environ.get(TEST_SOURCE_ENV) or _bundled_skills_root())
         agent_home = Path(os.environ.get(TEST_AGENT_HOME_ENV, DEFAULT_AGENT_HOME))
         return source_override or source, agent_home
 
@@ -52,7 +67,7 @@ def _paths(source_override: Path | None = None) -> tuple[Path, Path]:
         raise SyncError(
             f"test-only skills sync overrides require {TEST_MODE_ENV}=1: {', '.join(leaked)}"
         )
-    return source_override or DEFAULT_BUNDLED_SKILLS, DEFAULT_AGENT_HOME
+    return source_override or _bundled_skills_root(), DEFAULT_AGENT_HOME
 
 
 def _failpoint(name: str) -> None:

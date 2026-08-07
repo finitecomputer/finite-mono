@@ -276,14 +276,15 @@ class FiniteSkillsSyncTest(unittest.TestCase):
         dockerfile = RUNTIME_DOCKERFILE.read_text(encoding="utf-8")
         healthcheck = HEALTHCHECK.read_text(encoding="utf-8")
 
+        # The one finite utility ships inside the payload rootfs; finite-shell
+        # maintains its /usr/local/bin shim per generation, so the image must
+        # not bake a second fixed copy or symlink.
         self.assertIn(
-            "COPY finitechat/containers/agent/finite.py /runtime/bin/finite",
+            "COPY finitechat/containers/agent/finite.py /payload/bin/finite",
             dockerfile,
         )
-        self.assertIn(
-            "ln -sf /runtime/bin/finite /usr/local/bin/finite",
-            dockerfile,
-        )
+        self.assertNotIn("/runtime/bin/finite", dockerfile)
+        self.assertNotIn("ln -sf /runtime/bin/finite", dockerfile)
         self.assertNotIn("/runtime/bin/finite", healthcheck)
 
 

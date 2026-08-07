@@ -3,6 +3,7 @@ mod connections;
 mod daemon;
 mod directory;
 mod ledger;
+mod payload;
 mod skills;
 mod supervisor;
 mod transport;
@@ -18,10 +19,13 @@ pub use config::{
     redact_value,
 };
 pub use daemon::{
-    AgentdStatus, DaemonConfig, SpecializationBundleStatusV1, StartupSpecializationBundleConfig,
-    read_status, run_daemon,
+    AgentdStatus, DaemonConfig, HealthServerSpec, SpecializationBundleStatusV1,
+    StartupSpecializationBundleConfig, read_status, run_daemon,
 };
 pub use ledger::{CommandDecision, Ledger};
+pub use payload::{
+    PayloadSetChannelRequest, PayloadStageRequest, run_payload_stage_cli, run_payload_status_cli,
+};
 pub use skills::{SkillsSyncRequest, run_skills_sync_cli};
 pub use supervisor::{ProcessStatus, SupervisorStatus};
 
@@ -61,6 +65,12 @@ pub enum AgentdError {
     ServiceDirectory(String),
     #[error("release channel has no skills bundle head: {0}")]
     SkillsChannelHeadMissing(String),
+    #[error("release channel has no payload bundle head: {0}")]
+    PayloadChannelHeadMissing(String),
+    #[error("shell control socket unavailable: {0}")]
+    ShellUnavailable(String),
+    #[error("the shell rejected the request ({code}): {message}")]
+    ShellRejected { code: String, message: String },
     #[error("unsupported command: {0}")]
     UnsupportedCommand(String),
     #[error("invalid command payload: {0}")]
@@ -75,6 +85,9 @@ impl AgentdError {
             Self::SkillsBundle(_) => "skills_bundle_rejected",
             Self::ServiceDirectory(_) => "service_directory_unavailable",
             Self::SkillsChannelHeadMissing(_) => "skills_channel_head_missing",
+            Self::PayloadChannelHeadMissing(_) => "payload_channel_head_missing",
+            Self::ShellUnavailable(_) => "shell_unavailable",
+            Self::ShellRejected { .. } => "payload_shell_rejected",
             Self::UnsupportedCommand(_) => "unsupported_command",
             Self::InvalidPayload(_) => "invalid_payload",
             Self::ConflictingRequestId(_) => "conflicting_request_id",
@@ -100,6 +113,15 @@ impl AgentdError {
             Self::SkillsChannelHeadMissing(channel) => format!(
                 "The service directory advertises no skills_bundle head for channel {channel:?}."
             ),
+            Self::PayloadChannelHeadMissing(channel) => format!(
+                "The service directory advertises no payload_bundle head for channel {channel:?}."
+            ),
+            Self::ShellUnavailable(message) => {
+                format!("The finite-shell control socket is unavailable: {}", truncate(message, 512))
+            }
+            Self::ShellRejected { code, message } => {
+                format!("The shell rejected the request ({code}): {}", truncate(message, 512))
+            }
             Self::ServiceDirectory(message)
             | Self::InvalidPayload(message)
             | Self::ConfigConflict(message)

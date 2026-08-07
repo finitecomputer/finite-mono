@@ -42,6 +42,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default=os.environ.get("FINITE_DOCKER_IMAGE", DEFAULT_IMAGE))
     parser.add_argument(
+        "--payload-image",
+        default=os.environ.get("FINITE_DOCKER_PAYLOAD_IMAGE", ""),
+        help=(
+            "the finite-payload stage image (holds /payload/bin/finitechat); "
+            "one-shot user Device CLI containers run from it because the "
+            "shell image ships the CLI only inside its signed seed tarball"
+        ),
+    )
+    parser.add_argument(
         "--server-url",
         default=os.environ.get("FINITECHAT_DURABLE_DOCKER_SERVER_URL", DEFAULT_SERVER_URL),
     )
@@ -199,6 +208,12 @@ def start_agent_container(
     env: dict[str, str],
     docker_extra_args: list[str] | None = None,
 ) -> str:
+    release_public_key = env.get("FINITE_RELEASE_PUBLIC_KEY", "")
+    if not release_public_key:
+        raise SmokeFailure(
+            "FINITE_RELEASE_PUBLIC_KEY is required: finite-shell refuses to "
+            "unpack an unverifiable seed payload"
+        )
     docker_container_rm(container)
     command = [
         "docker",
@@ -212,13 +227,19 @@ def start_agent_container(
         "--env",
         f"FINITE_SERVER_URL={server_url}",
         "--env",
-        "FINITECHAT_HOME=/home/node/.finitechat/agent",
+        # finite-shell owns the durable layout: /home/node is this smoke's
+        # /data, so the agent home is <data>/agent by the shell's contract.
+        "FINITE_SHELL_DATA=/home/node",
+        "--env",
+        f"FINITE_RELEASE_PUBLIC_KEY={release_public_key}",
+        "--env",
+        "FINITECHAT_HOME=/home/node/agent",
         "--env",
         # Shared Finite identity on the same durable volume as the agent home
         # (overrides the image default of /data/agent).
-        "FINITE_HOME=/home/node/.finitechat/agent",
+        "FINITE_HOME=/home/node/agent",
         "--env",
-        "HERMES_HOME=/home/node/.hermes",
+        "HERMES_HOME=/home/node/agent/hermes-home",
         "--env",
         "FINITECHAT_WORKSPACE=/home/node/workspace",
         "--env",
@@ -254,7 +275,7 @@ def docker_agent_hermes(
             "finitechat",
             "hermes",
             "--home",
-            "/home/node/.finitechat/agent",
+            "/home/node/agent",
             *args,
         ],
         timeout=timeout,
@@ -273,7 +294,7 @@ def docker_agent_app_state(*, container: str, server_url: str) -> dict[str, Any]
             "finitechat",
             "app",
             "--data-dir",
-            "/home/node/.finitechat/agent",
+            "/home/node/agent",
             "--server",
             server_url,
             "--device-id",
@@ -294,6 +315,9 @@ def docker_user_app(
     timeout: float = 180,
     docker_extra_args: list[str] | None = None,
 ) -> dict[str, Any]:
+    # `image` here is the finite-payload stage image: the shell image ships
+    # finitechat only inside its signed seed tarball, so one-shot user Device
+    # containers exec the payload copy directly.
     return run_json(
         [
             "docker",
@@ -307,10 +331,9 @@ def docker_user_app(
             # the app data-dir. Keep both on the durable probe volume so every
             # one-shot CLI invocation is the same user Device.
             "FINITE_HOME=/data/user",
-            "--env",
-            "FINITE_AGENT_SUPERVISE=0",
+            "--entrypoint",
+            "/payload/bin/finitechat",
             image,
-            "finitechat",
             "app",
             "--data-dir",
             "/data/user",
@@ -514,6 +537,7 @@ def main() -> int:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     stop_script = report_path.parent / "stop.sh"
     env = os.environ.copy()
+    payload_image = args.payload_image
     started = time.monotonic()
     report: dict[str, Any] = {
         "status": "running",
@@ -525,10 +549,12 @@ def main() -> int:
             "image": args.image,
             "image_id": None,
             "image_metadata": None,
+            "payload_image": payload_image or None,
             "state_volume": home_volume,
             "state_mount": "/home/node",
-            "finitechat_home": "/home/node/.finitechat/agent",
-            "hermes_home": "/home/node/.hermes",
+            "shell_data": "/home/node",
+            "finitechat_home": "/home/node/agent",
+            "hermes_home": "/home/node/agent/hermes-home",
             "workspace": "/home/node/workspace",
             "restic_backend": None,
             "real_gateway_runtime": False,
@@ -564,6 +590,11 @@ def main() -> int:
                 "durable-home chat smoke requires a real inference credential; "
                 f"set one of {INFERENCE_CREDENTIAL_ENV_NAMES!r}"
             )
+        if not payload_image:
+            raise SmokeFailure(
+                "--payload-image (or FINITE_DOCKER_PAYLOAD_IMAGE) is required: "
+                "user Device CLI containers run from the finite-payload stage image"
+            )
         image_meta = docker_image_metadata(args.image)
         report["facts"]["image_id"] = image_meta["id"]
         report["facts"]["image_metadata"] = image_meta
@@ -595,7 +626,7 @@ def main() -> int:
         step("agent.ready", npub=health.get("npub"))
 
         welcome = create_welcome_room(
-            image=args.image,
+            image=payload_image,
             user_volume=user_volume,
             server_url=args.server_url,
             agent_account_id=agent_account_id,
@@ -608,7 +639,7 @@ def main() -> int:
         report["facts"]["room_status_before_restart"] = room_status
         step("welcome.before_restart", room_id=room_id)
         before_model = run_model_smoke(
-            image=args.image,
+            image=payload_image,
             user_volume=user_volume,
             server_url=args.server_url,
             room_id=room_id,
@@ -639,7 +670,7 @@ def main() -> int:
         step("agent.ready_after_restart", npub=restarted_health.get("npub"))
 
         after_model = run_model_smoke(
-            image=args.image,
+            image=payload_image,
             user_volume=user_volume,
             server_url=args.server_url,
             room_id=room_id,

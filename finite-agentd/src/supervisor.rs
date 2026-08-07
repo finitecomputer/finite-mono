@@ -111,21 +111,48 @@ impl SupervisorHandle {
 
 pub fn start_supervisor(
     sidecar: ProcessSpec,
-    health: ProcessSpec,
+    health: Option<ProcessSpec>,
     hermes: ProcessSpec,
 ) -> SupervisorHandle {
     let status = Arc::new(RwLock::new(SupervisorStatus::default()));
     let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
-    let (health_tx, health_rx) = mpsc::channel(4);
     let (hermes_tx, hermes_rx) = mpsc::channel(4);
+    let mut all_txs = vec![sidecar_tx, hermes_tx.clone()];
 
     tokio::spawn(supervise_process(sidecar, sidecar_rx, Arc::clone(&status)));
-    tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status)));
+    match health {
+        Some(health) => {
+            let (health_tx, health_rx) = mpsc::channel(4);
+            all_txs.push(health_tx);
+            tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status)));
+        }
+        None => {
+            // finite-shell serves /healthz itself. The status contract
+            // (health_server.py, the shell's replica, and the runner) still
+            // reads a `health` slot, so record the delegated endpoint as
+            // running without spawning a redundant process.
+            let status = Arc::clone(&status);
+            tokio::spawn(async move {
+                set_status(
+                    &status,
+                    "health",
+                    ProcessStatus {
+                        state: "running".to_owned(),
+                        pid: None,
+                        restart_count: 0,
+                        last_exit: None,
+                        updated_at_ms: now_ms(),
+                    },
+                )
+                .await;
+            });
+        }
+    }
     tokio::spawn(supervise_process(hermes, hermes_rx, Arc::clone(&status)));
 
     SupervisorHandle {
-        hermes_tx: hermes_tx.clone(),
-        all_txs: Arc::new(vec![sidecar_tx, health_tx, hermes_tx]),
+        hermes_tx,
+        all_txs: Arc::new(all_txs),
         status,
     }
 }
@@ -287,7 +314,7 @@ mod tests {
     async fn restart_hermes_waits_for_a_new_running_process() {
         let handle = start_supervisor(
             sleeping_process("sidecar"),
-            sleeping_process("health"),
+            Some(sleeping_process("health")),
             sleeping_process("hermes"),
         );
         let original_pid = wait_for_running(&handle, "hermes").await.pid.unwrap();
@@ -298,6 +325,21 @@ mod tests {
         assert_eq!(restarted.state, "running");
         assert_eq!(restarted.restart_count, 1);
         assert_ne!(restarted.pid, Some(original_pid));
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_delegated_health_slot_reports_running_without_a_process() {
+        let handle = start_supervisor(
+            sleeping_process("sidecar"),
+            None,
+            sleeping_process("hermes"),
+        );
+
+        let health = wait_for_running(&handle, "health").await;
+
+        assert_eq!(health.state, "running");
+        assert_eq!(health.pid, None, "no process backs the delegated endpoint");
         handle.shutdown().await;
     }
 

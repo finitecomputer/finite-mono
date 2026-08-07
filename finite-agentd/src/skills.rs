@@ -897,14 +897,14 @@ mod tests {
             hermes_command: PathBuf::from("/nonexistent"),
             hermes_probe_python: PathBuf::from("python"),
             hermes_probe_script: PathBuf::from("/nonexistent"),
-            health_python: PathBuf::from("python"),
-            health_script: PathBuf::from("/nonexistent"),
+            health_server: None,
             authorized_accounts: std::collections::BTreeSet::new(),
             specialization_bundle: None,
             release_public_key: Some(hex::encode(test_signing_key().verifying_key().to_bytes())),
             allow_insecure_bundle_url: true,
             finite_cli: finite_cli.to_path_buf(),
             service_directory_url: None,
+            shell_socket: PathBuf::from("/nonexistent"),
         }
     }
 

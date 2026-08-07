@@ -248,7 +248,16 @@ impl ShellRuntime {
         let path = self.layout.socket_path();
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        // virtiofs (the Apple Container /data bind) accepts the bind but
+        // rejects chmod on socket inodes with EINVAL. The 0700 shell
+        // directory is the effective protection there, so a failed tighten
+        // is reported, not fatal.
+        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+            eprintln!(
+                "finite-shell: control socket permissions were not tightened ({error}); relying on the 0700 {}",
+                self.layout.shell_dir().display()
+            );
+        }
         Ok(listener)
     }
 

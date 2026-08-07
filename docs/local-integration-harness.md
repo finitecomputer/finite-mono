@@ -121,6 +121,33 @@ tarball+manifest from the `skills-releases` static process, registers a
 promoted `skills_bundle` Core artifact, points the canary channel at it, and
 prints the bundle JSON.
 
+The payload-generation mechanism (finite-shell, ADR 0006) has its own focused
+variant, also without model turns. After the runtime is healthy on its seed
+generation it publishes the same payload content as `devfinity-v2` through
+`devfinity publish-payload`, stages it in-guest with `finite-agentd
+payload-stage --channel canary` (the agent resolves the `payload_bundle` head
+from the signed directory), flips with `finite-shell ctl flip --wait`,
+asserts the new `payload_version` with an unchanged Agent Principal and a
+fully working agentd (one skills-channel sync through the flipped payload),
+rolls back with `ctl rollback --wait`, and finally proves a broken payload
+(its `finite-agentd` exits 1) fails the health gate, auto-rolls back to the
+seed, and lands on the bad list:
+
+```sh
+DEVFINITY_PAYLOAD_FLIP_SMOKE=1 \
+  FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=devfinity-payload-smoke-unused \
+  just dev saas-smoke
+```
+
+`devfinity publish-payload [--source <dir>] [--version-label <v>]` also works
+standalone against a running stack: it extracts the UNSIGNED payload rootfs
+from the runtime image build (`build_runtime_image.py --emit-payload`, warm
+cache) or takes an explicit `--source` tree, packs and signs it with the
+run's release key, hosts it from the same `skills-releases` static process,
+registers a promoted `payload_bundle` Core artifact, points the canary
+channel at it, and prints the bundle JSON (including `payloadRootfs`, which
+the smoke copies to craft its broken payload).
+
 The complete Greenfield Brain setup/deletion matrix is a separate disposable
 gate:
 
