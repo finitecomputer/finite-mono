@@ -1,5 +1,19 @@
 # Finite Private next measured config
 
+## Inkling Small eight-H200 evidence
+
+The target-only
+`tinfoil-config.inkling-small-nvfp4.candidate.yml` preserves the pinned
+checkpoint and intended four-TP2, native-1M H200 topology. The checked-in
+launcher and router are the exact lab configuration. Current measurements,
+dependency failures, and remaining gates are recorded in
+[`2026-08-07-inkling-small-eight-h200-serving.md`](../../../docs/research/2026-08-07-inkling-small-eight-h200-serving.md).
+
+The file deliberately retains model-MPK and Finite-image placeholders. The
+public limiter topology is preserved. Do not promote the mixed DeepSeek lab
+image: its HTTP server became healthy, but the raw-token gate proved corrupt
+Inkling output.
+
 ## Laguna S 2.1 eight-H200 evidence
 
 The target-only `tinfoil-config.laguna-s21-fp8.candidate.yml` preserves the
