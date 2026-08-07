@@ -75,7 +75,7 @@ fn cmd_rejected_entry<W: Write>(args: &mut Vec<String>, output: &mut W) -> Resul
     write_pretty_json(output, &record)
 }
 
-fn split_capture(
+pub(crate) fn split_capture(
     capture: CapturedRoomLogFile,
 ) -> Result<
     (
