@@ -396,6 +396,13 @@ struct PayloadTelemetryEntry {
     /// throttle key.
     #[serde(default)]
     last_attempt_unix_ms: Option<u64>,
+    /// The Agent Principal this endpoint answered with on the first
+    /// successful read (trust-on-first-use, seconds after launch verified
+    /// the port). Host ports get reallocated across stops — the 2026-08-07
+    /// port-squat class — so every later read must present the same npub or
+    /// its report is dropped rather than attributed to this runtime.
+    #[serde(default)]
+    agent_npub: Option<String>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -703,6 +710,9 @@ where
             source_machine_id: facts.source_machine_id.clone(),
             contact_endpoint,
             last_attempt_unix_ms: None,
+            // Pinned on the first successful read, seconds from now while the
+            // launch-verified port is still certainly this runtime's.
+            agent_npub: None,
         };
         if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry) {
             eprintln!(
@@ -760,6 +770,46 @@ where
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string)
             };
+            // Identity gate: never attribute a response to this runtime
+            // unless it presents the pinned Agent Principal. Ports are
+            // reallocated across stops (the 2026-08-07 port-squat class);
+            // a squatter's health must not wear this agent's name in the
+            // fleet view. Dropped reports leave the runtime's telemetry
+            // stale, which the convergence fence surfaces as `stale`.
+            let observed_npub = field("agent_npub")
+                .or_else(|| field("npub"))
+                .filter(|value| value.starts_with("npub1"));
+            match (&entry.agent_npub, &observed_npub) {
+                (Some(pinned), Some(observed)) if pinned != observed => {
+                    eprintln!(
+                        "warning: payload telemetry identity mismatch for {}: \
+                         pinned {pinned} but {} answered with {observed} — \
+                         dropping report (possible port squat)",
+                        entry.source_machine_id, entry.contact_endpoint
+                    );
+                    continue;
+                }
+                (Some(_), None) => {
+                    eprintln!(
+                        "warning: payload telemetry response for {} carries no \
+                         Agent Principal; dropping report",
+                        entry.source_machine_id
+                    );
+                    continue;
+                }
+                (None, Some(observed)) => {
+                    entry.agent_npub = Some(observed.clone());
+                    if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry)
+                    {
+                        eprintln!(
+                            "warning: payload telemetry identity pin for {} was not \
+                             persisted: {error}",
+                            entry.source_machine_id
+                        );
+                    }
+                }
+                _ => {}
+            }
             let request = RuntimePayloadReportRequest {
                 source_machine_id: entry.source_machine_id.clone(),
                 payload_version_label: field("payload_version"),
@@ -5035,6 +5085,86 @@ mod tests {
         // error, and never a report of stale data.
         assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
         assert_eq!(runner.queue.payload_reports.len(), 2);
+    }
+
+    #[test]
+    fn payload_telemetry_pins_identity_and_drops_squatters() {
+        let work_root = tempfile::tempdir().unwrap();
+        let registry_dir = work_root.path().join("payload-telemetry");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let bodies = [
+                // 1: pins the Agent Principal (trust-on-first-use).
+                serde_json::json!({
+                    "agent_npub": "npub1owner", "payload_version": "v1", "channel": "canary",
+                }),
+                // 2: a different agent answering on the reallocated port —
+                // the 2026-08-07 port-squat class. Must be dropped.
+                serde_json::json!({
+                    "agent_npub": "npub1squatter", "payload_version": "v9", "channel": "stable",
+                }),
+                // 3: pinned entry, response with no principal at all: dropped.
+                serde_json::json!({ "payload_version": "v9" }),
+                // 4: the rightful owner again: reported.
+                serde_json::json!({
+                    "agent_npub": "npub1owner", "payload_version": "v2", "channel": "canary",
+                }),
+            ];
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_request(&mut stream);
+                write_http_json(&mut stream, 200, &body.to_string());
+            }
+        });
+
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let machine_id = facts.source_machine_id.clone();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1", "lease-2", "lease-3", "lease-4", "lease-5"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_payload_telemetry(Some(PayloadTelemetryConfig {
+            registry_dir: registry_dir.clone(),
+            interval: Duration::ZERO,
+            http_timeout: Duration::from_secs(1),
+        }));
+
+        assert!(matches!(
+            runner.run_once().unwrap(),
+            RunOnceOutcome::Launched { .. }
+        ));
+
+        // 1: first read pins the principal and reports.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+        let entry: PayloadTelemetryEntry = serde_json::from_slice(
+            &std::fs::read(registry_dir.join(format!("{machine_id}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry.agent_npub.as_deref(), Some("npub1owner"));
+
+        // 2 + 3: the squatter and the principal-less body are both dropped.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+
+        // 4: the rightful owner reports again.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 2);
+        assert_eq!(
+            runner.queue.payload_reports[1]
+                .payload_version_label
+                .as_deref(),
+            Some("v2")
+        );
+        server.join().unwrap();
     }
 
     #[test]

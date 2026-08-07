@@ -954,6 +954,12 @@ pub struct RuntimePayloadStatus {
 pub enum PayloadConvergenceFence {
     Converged,
     Repair,
+    /// The last report is older than [`PAYLOAD_REPORT_STALE_AFTER_SECONDS`].
+    /// A dead guest keeps its last-reported version forever; provider
+    /// metadata can say "healthy" while nothing inside is alive (the
+    /// 2026-08-07 zombie-VM class) — so an unwatched agent must never keep
+    /// reading as converged.
+    Stale,
     Unknown,
 }
 
@@ -962,6 +968,7 @@ impl PayloadConvergenceFence {
         match self {
             Self::Converged => "converged",
             Self::Repair => "repair",
+            Self::Stale => "stale",
             Self::Unknown => "unknown",
         }
     }
@@ -976,16 +983,23 @@ impl PayloadConvergenceFence {
 ///   (there is nothing to converge on, so nothing to repair);
 /// - the reported payload matches the head's version label, or the previous
 ///   head's (N-1, mid-rollout or one flip behind) → `Converged`;
+/// - a report older than the staleness threshold → `Stale` (data exists but
+///   nothing has confirmed this agent recently — presume unwatched/dead,
+///   never converged);
 /// - anything else → `Repair`.
 pub fn payload_convergence_fence(
     reported_payload_version: Option<&str>,
     reported_channel: Option<&str>,
     channel_head_version: Option<&str>,
     channel_previous_version: Option<&str>,
+    report_is_stale: bool,
 ) -> PayloadConvergenceFence {
     let (Some(payload_version), Some(_)) = (reported_payload_version, reported_channel) else {
         return PayloadConvergenceFence::Unknown;
     };
+    if report_is_stale {
+        return PayloadConvergenceFence::Stale;
+    }
     let Some(head_version) = channel_head_version else {
         return PayloadConvergenceFence::Unknown;
     };
@@ -994,6 +1008,24 @@ pub fn payload_convergence_fence(
     } else {
         PayloadConvergenceFence::Repair
     }
+}
+
+/// How old a payload report may be before the fence stops trusting it.
+/// Runners report every ~30s per runtime; 15 minutes tolerates halted
+/// runners and restarts without letting a dead guest wear "converged".
+pub const PAYLOAD_REPORT_STALE_AFTER_SECONDS: i64 = 900;
+
+/// True when `reported_at` (RFC3339) is absent-with-data or older than
+/// [`PAYLOAD_REPORT_STALE_AFTER_SECONDS`] relative to `now`. Unparseable
+/// timestamps are stale — never let bad data read as fresh.
+pub fn payload_report_is_stale(reported_at: Option<&str>, now: &str) -> bool {
+    let Some(reported_at) = reported_at else {
+        return true;
+    };
+    let (Ok(reported), Ok(now)) = (parse_time(reported_at), parse_time(now)) else {
+        return true;
+    };
+    (now - reported).whole_seconds() > PAYLOAD_REPORT_STALE_AFTER_SECONDS
 }
 
 /// One row of the fleet view: [`RuntimePayloadStatus`] plus the fence
@@ -10248,42 +10280,76 @@ mod tests {
 
     #[test]
     fn the_gen_fence_flags_only_agents_behind_both_heads() {
-        use PayloadConvergenceFence::{Converged, Repair, Unknown};
+        use PayloadConvergenceFence::{Converged, Repair, Stale, Unknown};
         // Pre-shell images report nothing: never flagged.
-        assert_eq!(payload_convergence_fence(None, None, None, None), Unknown);
         assert_eq!(
-            payload_convergence_fence(Some("v2"), None, Some("v2"), None),
+            payload_convergence_fence(None, None, None, None, false),
+            Unknown
+        );
+        assert_eq!(
+            payload_convergence_fence(Some("v2"), None, Some("v2"), None, false),
             Unknown,
             "a payload without a channel cannot be fenced"
         );
         assert_eq!(
-            payload_convergence_fence(None, Some("stable"), Some("v2"), None),
+            payload_convergence_fence(None, Some("stable"), Some("v2"), None, false),
             Unknown,
             "a channel without a payload cannot be fenced"
         );
         // A channel Core has no payload head for gives nothing to converge on.
         assert_eq!(
-            payload_convergence_fence(Some("v2"), Some("canary"), None, None),
+            payload_convergence_fence(Some("v2"), Some("canary"), None, None, false),
             Unknown
         );
         // On the head, or on the previous head (N-1): converged.
         assert_eq!(
-            payload_convergence_fence(Some("v2"), Some("canary"), Some("v2"), None),
+            payload_convergence_fence(Some("v2"), Some("canary"), Some("v2"), None, false),
             Converged
         );
         assert_eq!(
-            payload_convergence_fence(Some("v2"), Some("canary"), Some("v3"), Some("v2")),
+            payload_convergence_fence(Some("v2"), Some("canary"), Some("v3"), Some("v2"), false),
             Converged
         );
         // Anything else is a repair signal.
         assert_eq!(
-            payload_convergence_fence(Some("v1"), Some("canary"), Some("v3"), Some("v2")),
+            payload_convergence_fence(Some("v1"), Some("canary"), Some("v3"), Some("v2"), false),
             Repair
         );
         assert_eq!(
-            payload_convergence_fence(Some("v1"), Some("canary"), Some("v2"), None),
+            payload_convergence_fence(Some("v1"), Some("canary"), Some("v2"), None, false),
             Repair
         );
+
+        // Staleness beats every version verdict: a dead guest keeps its
+        // last-reported version forever, and provider metadata can claim
+        // "healthy" over a dead guest (the 2026-08-07 zombie-VM class).
+        assert_eq!(
+            payload_convergence_fence(Some("v2"), Some("canary"), Some("v2"), None, true),
+            Stale
+        );
+        assert_eq!(
+            payload_convergence_fence(Some("v1"), Some("canary"), Some("v2"), None, true),
+            Stale
+        );
+        // ...but absent data stays Unknown, stale or not (pre-shell images).
+        assert_eq!(
+            payload_convergence_fence(None, None, Some("v2"), None, true),
+            Unknown
+        );
+
+        assert!(payload_report_is_stale(None, "2026-08-07T12:00:00Z"));
+        assert!(payload_report_is_stale(
+            Some("not a timestamp"),
+            "2026-08-07T12:00:00Z"
+        ));
+        assert!(payload_report_is_stale(
+            Some("2026-08-07T11:00:00Z"),
+            "2026-08-07T12:00:00Z"
+        ));
+        assert!(!payload_report_is_stale(
+            Some("2026-08-07T11:59:00Z"),
+            "2026-08-07T12:00:00Z"
+        ));
     }
 
     #[test]

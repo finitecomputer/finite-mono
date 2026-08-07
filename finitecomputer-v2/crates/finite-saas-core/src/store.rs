@@ -59,7 +59,7 @@ use crate::{
     parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
     parse_runtime_control_request_status, parse_runtime_resource_class,
     parse_runtime_summary_status, parse_time, parse_user_link_status, payload_convergence_fence,
-    project_room_membership_id_for, project_runtime_link_id_for,
+    payload_report_is_stale, project_room_membership_id_for, project_runtime_link_id_for,
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
     runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_secret_references,
@@ -603,6 +603,7 @@ impl CoreStore {
     /// labels. Composed from store primitives so both backends share one
     /// assembly.
     pub async fn payload_convergence_report(&self) -> CoreResult<PayloadConvergenceReport> {
+        let now = current_time_iso()?;
         let statuses = self.list_runtime_payload_statuses().await?;
         let heads = self.list_release_channel_heads().await?;
         let mut channels = Vec::with_capacity(heads.len());
@@ -652,6 +653,7 @@ impl CoreStore {
                     status.channel.as_deref(),
                     head_version,
                     previous_version,
+                    payload_report_is_stale(status.reported_at.as_deref(), &now),
                 );
                 PayloadConvergenceRuntime {
                     runtime_id: status.runtime_id,
@@ -2333,7 +2335,7 @@ impl PostgresCoreStore {
                    payload_reported_at = $6::text::timestamptz
                  WHERE source_host_id = $1 AND source_machine_id = $2
                  RETURNING id, project_id, payload_version_label, shell_version,
-                           release_channel, payload_reported_at::text",
+                           release_channel, to_char(payload_reported_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS payload_reported_at",
                 &[
                     &input.source_host_id,
                     &input.source_machine_id,
@@ -2354,7 +2356,7 @@ impl PostgresCoreStore {
         let rows = client
             .query(
                 "SELECT id, project_id, payload_version_label, shell_version,
-                        release_channel, payload_reported_at::text
+                        release_channel, to_char(payload_reported_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS payload_reported_at
                  FROM agent_runtimes
                  ORDER BY id",
                 &[],

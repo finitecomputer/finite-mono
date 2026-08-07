@@ -213,3 +213,25 @@ Production/Kata adoption rollout; floor-version *enforcement* in services
 (directory advertises it; nothing refuses yet); bridge-in-agent
 (hosted-device single-user mode); full endpoint env-var migration; emergency
 repair agent; key rotation; user-hardware distribution of the shell image.
+
+## Follow-ups from the 2026-08-07 one-image rollout postmortem
+
+The four silent-failure classes map onto this architecture as follows: the
+port squat (Class 4) and poisoned-metadata/stop-path classes (1/3) cannot
+occur during payload flips (no provider surgery), and two hardening changes
+landed in this branch — telemetry reports are identity-gated against a pinned
+Agent Principal (a squatted port can never wear another agent's name in the
+fleet view), and the convergence fence reports `stale` when a runtime's last
+report is older than 15 minutes (a dead guest must never keep reading as
+converged). Two remain open as designed follow-ups:
+
+- **Gateway-freshness signal (Class 2, wedged-but-connected).** Process
+  liveness is not turn liveness. agentd should surface "last inbound message
+  vs last gateway activity" so the shell's healthz — and therefore the fleet
+  view — carries the wedge detector that today requires an SSH sweep.
+- **Provider liveness is telemetry, not provider metadata (Classes 1/3).**
+  The four-verb provider contract implicitly trusts the provider to notice
+  crashes; containerd's own records lied twice on 2026-08-07. The out-of-band
+  liveness definition is telemetry staleness, and any future automated
+  "restart presumed-dead compute" loop must fence duplicate writers first
+  (the 2026-08-01 lesson).
