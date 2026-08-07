@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MAINTENANCE = ROOT / "infra/hosts/lat2/runner-maintenance"
 RESTART = ROOT / "infra/hosts/lat2/restart-idle-runner"
 SERVICE = ROOT / "infra/hosts/lat2/systemd/finite-lat2-runner-maintenance.service"
+WORKFLOW = ROOT / ".github/workflows/ci.yml"
 
 
 class Lat2RunnerGuardrailTests(unittest.TestCase):
@@ -154,6 +155,20 @@ class Lat2RunnerGuardrailTests(unittest.TestCase):
         unit = SERVICE.read_text(encoding="utf-8")
         self.assertIn("User=root", unit)
         self.assertIn("ExecStart=/usr/local/sbin/finite-lat2-runner-maintenance", unit)
+
+    def test_default_scratch_grace_exceeds_job_timeout_without_one_day_burst(self) -> None:
+        maintenance = MAINTENANCE.read_text(encoding="utf-8")
+        self.assertIn('FINITE_LAT2_SCRATCH_MINUTES:-180', maintenance)
+
+    def test_self_hosted_jobs_remove_only_their_exact_checkouts(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("Remove Nix package checkout", workflow)
+        self.assertIn("Remove Brain matrix checkout", workflow)
+        self.assertEqual(workflow.count('if [[ "$CHECKOUT_PATH" != "$expected"'), 2)
+        self.assertEqual(
+            workflow.count('sudo -n find "$CHECKOUT_PATH" -xdev -depth -delete'),
+            2,
+        )
 
     def run_restart(self, **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(

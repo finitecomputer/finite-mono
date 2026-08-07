@@ -382,6 +382,20 @@ jobs:
           assert health["source_dirty"] is False, health
           assert "source_commit" not in health, health
           PY
+      - name: Remove Nix package checkout
+        if: always()
+        env:
+          CHECKOUT_PATH: ${{ github.workspace }}/nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          expected="$GITHUB_WORKSPACE/nix-packages-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ "$CHECKOUT_PATH" != "$expected" || "$CHECKOUT_PATH" == "$GITHUB_WORKSPACE" ]]; then
+            printf 'refusing unexpected checkout cleanup target: %s\n' "$CHECKOUT_PATH" >&2
+            exit 64
+          fi
+          if [[ -e "$CHECKOUT_PATH" ]]; then
+            sudo -n find "$CHECKOUT_PATH" -xdev -depth -delete
+          fi
 
   devfinity-smoke:
     name: devfinity services-only smoke
@@ -456,6 +470,20 @@ jobs:
           name: brain-product-matrix
           path: brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}/target/brain-product-matrix
           if-no-files-found: error
+      - name: Remove Brain matrix checkout
+        if: always()
+        env:
+          CHECKOUT_PATH: ${{ github.workspace }}/brain-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          expected="$GITHUB_WORKSPACE/brain-matrix-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ "$CHECKOUT_PATH" != "$expected" || "$CHECKOUT_PATH" == "$GITHUB_WORKSPACE" ]]; then
+            printf 'refusing unexpected checkout cleanup target: %s\n' "$CHECKOUT_PATH" >&2
+            exit 64
+          fi
+          if [[ -e "$CHECKOUT_PATH" ]]; then
+            sudo -n find "$CHECKOUT_PATH" -xdev -depth -delete
+          fi
 
   ci-gate:
     name: CI gate
