@@ -16,10 +16,9 @@ use finitechat_client::FiniteChatDeviceConfig;
 use finitechat_client::rejected_entry_diagnostic::{
     CapturedRoomLogFile, RejectedEntryDiagnosticRequest, run_rejected_entry_diagnostic,
 };
-use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 
 use crate::{CliError, reject_extra_args, required_option, take_option, take_positional};
-use crate::{parse_u64, write_pretty_json};
+use crate::{parse_account_secret, parse_u64, write_pretty_json};
 
 pub(crate) fn run<W: Write>(mut args: Vec<String>, output: &mut W) -> Result<(), CliError> {
     let Some(command) = take_positional(&mut args) else {
@@ -96,22 +95,6 @@ fn split_capture(
     };
     let target = rooms.remove(index);
     Ok((target, rooms))
-}
-
-fn parse_account_secret(hex: &str) -> Result<NostrSecretKey, CliError> {
-    let invalid = || {
-        CliError::Usage(
-            "--account-secret-hex must be 64 lowercase hex characters (32 bytes)".to_owned(),
-        )
-    };
-    if hex.len() != NOSTR_SECRET_KEY_BYTES * 2 {
-        return Err(invalid());
-    }
-    let mut bytes = [0u8; NOSTR_SECRET_KEY_BYTES];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).map_err(|_| invalid())?;
-    }
-    NostrSecretKey::from_bytes(bytes).map_err(|_| invalid())
 }
 
 pub(crate) fn usage() -> String {
