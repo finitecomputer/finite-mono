@@ -152,7 +152,7 @@ pub fn prune_generations(
 /// Refuse to stage unless `/data` has `2 × tarball size + 512 MiB` free —
 /// download + unpack both land on `/data`, and a full `/data` disables the
 /// staging mechanism a fix would ship through.
-fn ensure_disk_headroom(data_dir: &Path, tarball_bytes: u64) -> Result<(), ShellError> {
+pub(crate) fn ensure_disk_headroom(data_dir: &Path, tarball_bytes: u64) -> Result<(), ShellError> {
     let needed_bytes = tarball_bytes
         .saturating_mul(2)
         .saturating_add(STAGE_HEADROOM_BYTES);
@@ -526,4 +526,24 @@ async fn fetch_bounded(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Deterministic test of the headroom rule itself — no giant sparse file,
+    // whose set_len a size-limited CI tmpfs rejects (that fragility was the
+    // original failure). A tarball larger than any real disk must be refused
+    // against the current /data free space; a tiny one must pass.
+    #[test]
+    fn ensure_disk_headroom_refuses_a_tarball_larger_than_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        // 2 x (u64::MAX/2) saturates past any real f_bavail*f_frsize.
+        let error = ensure_disk_headroom(dir.path(), u64::MAX / 2).unwrap_err();
+        assert!(matches!(error, ShellError::InsufficientDisk { .. }));
+        assert_eq!(error.code(), "insufficient_disk");
+        // A few bytes always fits on a working temp filesystem.
+        ensure_disk_headroom(dir.path(), 4).unwrap();
+    }
 }

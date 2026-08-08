@@ -1930,36 +1930,11 @@ async fn boot_prunes_unreferenced_generations_and_sweeps_stale_temp() {
     rebooted.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn staging_refuses_without_disk_headroom_for_twice_the_tarball() {
-    let root = tempfile::tempdir().unwrap();
-    let (settings, runtime) = boot_seeded(root.path(), "v1", "one").await;
-    let layout = settings.layout();
-
-    // A sparse "tarball" so large that 2x it plus 512 MiB cannot fit: the
-    // stage must refuse with the distinct insufficient_disk error before any
-    // unpack work.
-    let packed = pack_payload(root.path(), "v2", "two", false);
-    let sparse = root.path().join("sparse.tar.gz");
-    let file = fs::File::create(&sparse).unwrap();
-    file.set_len(1 << 45).unwrap(); // 32 TiB
-    drop(file);
-    let request: StageRequest = serde_json::from_value(json!({
-        "tarballPath": sparse,
-        "manifestPath": packed.manifest_path,
-    }))
-    .unwrap();
-    let error = stage_payload(&settings, &layout, &runtime.state, &request)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(error, ShellError::InsufficientDisk { .. }),
-        "expected InsufficientDisk, got {error:?}"
-    );
-    assert_eq!(error.code(), "insufficient_disk");
-
-    runtime.shutdown().await;
-}
+// The disk-headroom rule is unit-tested deterministically in
+// generations.rs (ensure_disk_headroom_refuses_a_tarball_larger_than_the_disk).
+// The former integration test here faked a full disk with a 32 TiB sparse
+// file, whose set_len a size-limited CI tmpfs rejects — the fragility, not the
+// product code, was the failure.
 
 // ---------------------------------------------------------------------------
 // Shell-layer path containment
