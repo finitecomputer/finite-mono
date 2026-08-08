@@ -24,8 +24,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::{
-    READ_CHUNK_BYTES, ReleaseError, SIGNATURE_PREFIX, is_lower_hex_256, sha256_hex,
-    sha256_hex_of_file, signature_string, validate_artifact_id, verify_signature_string,
+    READ_CHUNK_BYTES, ReleaseError, SIGNATURE_PREFIX, check_key_id, is_lower_hex_256,
+    is_lower_hex_key_id, sha256_hex, sha256_hex_of_file, signature_string, validate_artifact_id,
+    verify_signature_string, verifying_key_id,
 };
 
 pub const PAYLOAD_BUNDLE_SCHEMA: &str = "finite_payload_bundle.v1";
@@ -34,6 +35,34 @@ const PAYLOAD_TREE_DIGEST_DOMAIN: &[u8] = b"finite-payload-tree-v1\0";
 /// never collide with a regular file whose bytes equal the link target.
 const PAYLOAD_ENTRY_KIND_FILE: u8 = b'F';
 const PAYLOAD_ENTRY_KIND_SYMLINK: u8 = b'L';
+
+/// Refuse a payload `version_label` that could not safely name a single
+/// directory under `/data/generations/`. Enforced at pack AND at verify (so
+/// an old bundle carrying an unsafe label fails verification), independently
+/// of the shell's own path-containment check: a signed label like `../agent`
+/// must never be able to escape the generations directory and delete durable
+/// state, even if one layer regresses.
+pub fn validate_version_label(label: &str) -> Result<(), ReleaseError> {
+    let chars_valid = label.len() <= 81
+        && label
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !chars_valid {
+        return Err(ReleaseError::InvalidManifest(format!(
+            "version_label {label:?} must match ^[A-Za-z0-9][A-Za-z0-9._-]{{0,80}}$"
+        )));
+    }
+    if matches!(label, "." | ".." | "current" | "previous") {
+        return Err(ReleaseError::InvalidManifest(format!(
+            "version_label {label:?} is a reserved name"
+        )));
+    }
+    Ok(())
+}
 
 /// A strict `MAJOR.MINOR.PATCH` version (no pre-release or build metadata),
 /// used for `min_shell_version` gating. Ordering is numeric per component.
@@ -94,6 +123,10 @@ pub struct PayloadBundleManifestV1 {
     pub tree_digest: String,
     pub tarball_sha256: String,
     pub created_at: String,
+    /// Short id of the signing key ([`crate::verifying_key_id`]);
+    /// verification refuses a manifest naming a different key than the one
+    /// provided.
+    pub key_id: String,
     /// `ed25519:<base64>` over [`payload_canonical_signing_bytes`].
     pub signature: String,
 }
@@ -114,11 +147,7 @@ impl PayloadBundleManifestV1 {
             )));
         }
         validate_artifact_id(&self.artifact_id)?;
-        if self.version_label.is_empty() {
-            return Err(ReleaseError::InvalidManifest(
-                "version_label must not be empty".to_owned(),
-            ));
-        }
+        validate_version_label(&self.version_label)?;
         ShellSemver::parse(&self.min_shell_version)?;
         for (field, value) in [
             ("tree_digest", &self.tree_digest),
@@ -129,6 +158,11 @@ impl PayloadBundleManifestV1 {
                     "{field} must be 64 lowercase hex characters"
                 )));
             }
+        }
+        if !is_lower_hex_key_id(&self.key_id) {
+            return Err(ReleaseError::InvalidManifest(
+                "key_id must be 16 lowercase hex characters".to_owned(),
+            ));
         }
         if !self.signature.starts_with(SIGNATURE_PREFIX) {
             return Err(ReleaseError::InvalidManifest(format!(
@@ -172,6 +206,7 @@ pub fn payload_canonical_signing_bytes(
         Value::from(manifest.tarball_sha256.as_str()),
     );
     fields.insert("created_at", Value::from(manifest.created_at.as_str()));
+    fields.insert("key_id", Value::from(manifest.key_id.as_str()));
     Ok(serde_json::to_vec(&fields)?)
 }
 
@@ -189,6 +224,7 @@ pub fn verify_payload_manifest_signature(
     manifest: &PayloadBundleManifestV1,
     public_key: &VerifyingKey,
 ) -> Result<(), ReleaseError> {
+    check_key_id(&manifest.key_id, public_key)?;
     verify_signature_string(
         &payload_canonical_signing_bytes(manifest)?,
         &manifest.signature,
@@ -401,11 +437,7 @@ pub fn pack_payload_bundle(
     signing_key: &SigningKey,
 ) -> Result<PayloadPackOutput, ReleaseError> {
     validate_artifact_id(request.artifact_id)?;
-    if request.version_label.is_empty() {
-        return Err(ReleaseError::InvalidManifest(
-            "version_label must not be empty".to_owned(),
-        ));
-    }
+    validate_version_label(request.version_label)?;
     ShellSemver::parse(request.min_shell_version)?;
     let created_at = match request.created_at {
         Some(value) => {
@@ -473,6 +505,7 @@ pub fn pack_payload_bundle(
         tree_digest,
         tarball_sha256,
         created_at,
+        key_id: verifying_key_id(&signing_key.verifying_key()),
         signature: String::new(),
     };
     manifest.signature = signature_for_payload_manifest(&manifest, signing_key)?;
@@ -497,18 +530,55 @@ pub fn pack_payload_bundle(
     })
 }
 
+/// The most unpacked bytes a payload bundle may expand to (4 GiB). A payload
+/// generation is ~0.5 GiB today; the cap bounds a compressed bundle that
+/// decompresses into a /data-filling bomb — a full /data disables the very
+/// staging mechanism a fix would ship through.
+pub const PAYLOAD_UNPACKED_CAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Unpack a payload tarball into `destination`, admitting regular files,
 /// directories, and relative in-tree symlinks with plain relative paths.
 /// Symlinks are recreated exactly; their targets are re-validated against the
-/// same lexical in-tree rule enforced at pack time.
+/// same lexical in-tree rule enforced at pack time. Refuses (and removes the
+/// partial `destination`) once cumulative unpacked bytes exceed
+/// [`PAYLOAD_UNPACKED_CAP_BYTES`].
 pub fn unpack_payload_tarball(tarball: &Path, destination: &Path) -> Result<(), ReleaseError> {
+    unpack_payload_tarball_with_cap(tarball, destination, PAYLOAD_UNPACKED_CAP_BYTES)
+}
+
+/// [`unpack_payload_tarball`] with an explicit unpacked-size cap (tests
+/// exercise the refusal without 4 GiB fixtures).
+pub fn unpack_payload_tarball_with_cap(
+    tarball: &Path,
+    destination: &Path,
+    unpacked_cap_bytes: u64,
+) -> Result<(), ReleaseError> {
+    let result = unpack_payload_tarball_inner(tarball, destination, unpacked_cap_bytes);
+    if result.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    result
+}
+
+fn unpack_payload_tarball_inner(
+    tarball: &Path,
+    destination: &Path,
+    unpacked_cap_bytes: u64,
+) -> Result<(), ReleaseError> {
     fs::create_dir_all(destination)?;
     let decoder = flate2::read::GzDecoder::new(File::open(tarball)?);
     let mut archive = tar::Archive::new(decoder);
+    let mut unpacked_bytes = 0_u64;
     for entry in archive.entries()? {
         let mut entry = entry?;
         let entry_type = entry.header().entry_type();
         let path = entry.path()?.into_owned();
+        unpacked_bytes = unpacked_bytes.saturating_add(entry.header().size().unwrap_or(0));
+        if unpacked_bytes > unpacked_cap_bytes {
+            return Err(ReleaseError::VerificationFailed(format!(
+                "payload unpacks past the {unpacked_cap_bytes}-byte cap"
+            )));
+        }
         if path
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
@@ -787,7 +857,109 @@ mod tests {
             &unpack.path().join("tree-two"),
         )
         .unwrap_err();
+        assert!(
+            matches!(error, ReleaseError::KeyIdMismatch { .. }),
+            "a wrong key is a diagnosable key_id mismatch naming both ids: {error}"
+        );
+    }
+
+    #[test]
+    fn unsafe_version_labels_are_refused_at_pack_and_at_verify() {
+        for label in [
+            "../agent",
+            "/abs",
+            "a/b",
+            "current",
+            "previous",
+            ".",
+            "..",
+            ".hidden",
+            "",
+            "label with spaces",
+        ] {
+            let out = tempfile::tempdir().unwrap();
+            let error = pack_payload_bundle(
+                &PayloadPackRequest {
+                    source: &fixture_tree(),
+                    artifact_id: "payload-test",
+                    version_label: label,
+                    min_shell_version: "0.1.0",
+                    source_git_sha: None,
+                    created_at: Some("2026-08-06T00:00:00Z"),
+                    out_dir: out.path(),
+                },
+                &test_signing_key(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, ReleaseError::InvalidManifest(_)),
+                "pack must refuse label {label:?}"
+            );
+        }
+
+        // An old/forged bundle carrying an unsafe label fails verification
+        // even with a valid signature over it: the structural gate runs on
+        // every manifest parse.
+        let out = tempfile::tempdir().unwrap();
+        let packed = pack_fixture(out.path());
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&packed.manifest_path).unwrap()).unwrap();
+        manifest["version_label"] = Value::from("../agent");
+        let mut fields: BTreeMap<String, Value> = serde_json::from_value(manifest.clone()).unwrap();
+        fields.remove("signature");
+        let resigned = signature_string(&serde_json::to_vec(&fields).unwrap(), &test_signing_key());
+        manifest["signature"] = Value::from(resigned);
+        fs::write(
+            &packed.manifest_path,
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let unpack = tempfile::tempdir().unwrap();
+        let error = verify_payload_bundle(
+            &packed.tarball_path,
+            &packed.manifest_path,
+            &test_signing_key().verifying_key(),
+            None,
+            &unpack.path().join("tree"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ReleaseError::InvalidManifest(_)));
+    }
+
+    #[test]
+    fn unpacking_refuses_bundles_past_the_unpacked_size_cap_and_cleans_up() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join("bin")).unwrap();
+        fs::write(source.path().join("bin/finite-agentd"), vec![0_u8; 4096]).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let packed = pack_payload_bundle(
+            &PayloadPackRequest {
+                source: source.path(),
+                artifact_id: "payload-big",
+                version_label: "vbig",
+                min_shell_version: "0.1.0",
+                source_git_sha: None,
+                created_at: Some("2026-08-06T00:00:00Z"),
+                out_dir: out.path(),
+            },
+            &test_signing_key(),
+        )
+        .unwrap();
+
+        let unpack = tempfile::tempdir().unwrap();
+        let destination = unpack.path().join("tree");
+        let error =
+            unpack_payload_tarball_with_cap(&packed.tarball_path, &destination, 1024).unwrap_err();
         assert!(matches!(error, ReleaseError::VerificationFailed(_)));
+        assert!(error.to_string().contains("cap"));
+        assert!(
+            !destination.exists(),
+            "a refused unpack must not leave partial bytes behind"
+        );
+
+        // Under the real (default) cap the same bundle unpacks fine.
+        unpack_payload_tarball(&packed.tarball_path, &destination).unwrap();
+        assert!(destination.join("bin/finite-agentd").is_file());
     }
 
     #[test]
@@ -813,6 +985,7 @@ mod tests {
 
     #[test]
     fn payload_canonical_signing_bytes_include_min_shell_version() {
+        let key_id = verifying_key_id(&test_signing_key().verifying_key());
         let manifest = PayloadBundleManifestV1 {
             schema: PAYLOAD_BUNDLE_SCHEMA.to_owned(),
             artifact_id: "payload-test".to_owned(),
@@ -822,11 +995,13 @@ mod tests {
             tree_digest: "1".repeat(64),
             tarball_sha256: "2".repeat(64),
             created_at: "2026-08-06T00:00:00Z".to_owned(),
+            key_id: key_id.clone(),
             signature: "ed25519:ignored".to_owned(),
         };
         let bytes = payload_canonical_signing_bytes(&manifest).unwrap();
         let expected = format!(
             "{{\"artifact_id\":\"payload-test\",\"created_at\":\"2026-08-06T00:00:00Z\",\
+             \"key_id\":\"{key_id}\",\
              \"min_shell_version\":\"0.1.0\",\"schema\":\"finite_payload_bundle.v1\",\
              \"source_git_sha\":null,\"tarball_sha256\":\"{}\",\"tree_digest\":\"{}\",\
              \"version_label\":\"v1\"}}",

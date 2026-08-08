@@ -118,6 +118,10 @@ pub struct DaemonConfig {
     pub service_directory_url: Option<String>,
     /// finite-shell's control socket, the transport for `agent.payload.*`.
     pub shell_socket: PathBuf,
+    /// The shell's per-boot control-socket token
+    /// (`FINITE_SHELL_CONTROL_TOKEN`), forwarded on every shell request and
+    /// scrubbed from every supervised child's environment.
+    pub shell_control_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,7 +257,28 @@ impl DaemonConfig {
             shell_socket: PathBuf::from(
                 std::env::var(SHELL_SOCKET_ENV).unwrap_or_else(|_| DEFAULT_SHELL_SOCKET.to_owned()),
             ),
-        })
+            shell_control_token: std::env::var(crate::payload::SHELL_CONTROL_TOKEN_ENV)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+        }
+        .with_token_file_fallback())
+    }
+
+    /// One-shot CLI invocations (`container exec finite-agentd payload-...`)
+    /// do not inherit the supervised daemon's environment; like
+    /// `finite-shell ctl`, they read the 0600 token file beside the shell
+    /// socket instead (they run as root via container exec).
+    fn with_token_file_fallback(mut self) -> Self {
+        if self.shell_control_token.is_none()
+            && let Some(dir) = self.shell_socket.parent()
+        {
+            self.shell_control_token = fs::read_to_string(dir.join("control-token"))
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+        }
+        self
     }
 
     pub(crate) fn state_dir(&self) -> PathBuf {
@@ -424,12 +449,23 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     let delivery_worker =
         run_delivery_loop(delivery_rx, |delivery| executor.handle_delivery(delivery));
     tokio::pin!(delivery_worker);
+    // SIGTERM takes the same graceful path as ctrl_c: finite-shell quiesces a
+    // flip by SIGTERM-ing agentd's process group, and the supervisor's
+    // TERM-then-KILL drain is what gives Hermes/bridge/finitechat their bounded
+    // window to finish mid-stream writes. (The group signal also reaches the
+    // children directly; the drain tolerates a child that has already exited —
+    // its `wait()` just returns immediately.)
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         result = &mut delivery_worker => {
             result
         }
         signal = tokio::signal::ctrl_c() => {
             signal?;
+            supervisor.shutdown().await;
+            Ok(())
+        }
+        _ = sigterm.recv() => {
             supervisor.shutdown().await;
             Ok(())
         }

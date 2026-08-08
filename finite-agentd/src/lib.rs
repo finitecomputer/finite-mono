@@ -63,6 +63,8 @@ pub enum AgentdError {
     SkillsBundle(String),
     #[error("service directory unavailable: {0}")]
     ServiceDirectory(String),
+    #[error("service directory replay refused: {0}")]
+    ServiceDirectoryReplayed(String),
     #[error("release channel has no skills bundle head: {0}")]
     SkillsChannelHeadMissing(String),
     #[error("release channel has no payload bundle head: {0}")]
@@ -84,6 +86,7 @@ impl AgentdError {
             Self::MissingReleaseKey => "release_key_missing",
             Self::SkillsBundle(_) => "skills_bundle_rejected",
             Self::ServiceDirectory(_) => "service_directory_unavailable",
+            Self::ServiceDirectoryReplayed(_) => "service_directory_replayed",
             Self::SkillsChannelHeadMissing(_) => "skills_channel_head_missing",
             Self::PayloadChannelHeadMissing(_) => "payload_channel_head_missing",
             Self::ShellUnavailable(_) => "shell_unavailable",
@@ -123,6 +126,7 @@ impl AgentdError {
                 format!("The shell rejected the request ({code}): {}", truncate(message, 512))
             }
             Self::ServiceDirectory(message)
+            | Self::ServiceDirectoryReplayed(message)
             | Self::InvalidPayload(message)
             | Self::ConfigConflict(message)
             | Self::Config(message)

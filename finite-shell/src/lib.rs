@@ -47,6 +47,14 @@ pub const SERVICE_DIRECTORY_URL_ENV: &str = "FINITE_SERVICE_DIRECTORY_URL";
 /// `/usr/local/bin` and `/usr/local/bin/python3` in the container).
 pub const SHIM_DIR_ENV: &str = "FINITE_SHELL_SHIM_DIR";
 pub const SHELL_PYTHON_ENV: &str = "FINITE_SHELL_PYTHON";
+/// How the shell hands its per-boot control-socket token to the one agentd it
+/// supervises. agentd forwards it on every socket request and scrubs it from
+/// every child it spawns.
+pub const CONTROL_TOKEN_ENV: &str = "FINITE_SHELL_CONTROL_TOKEN";
+
+/// Free space the stage path requires on `/data` beyond twice the tarball
+/// size (unpack + breathing room for state writes): 512 MiB.
+pub const STAGE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The channel an agent is on when `/data/shell/channel` was never written.
 pub const DEFAULT_CHANNEL: &str = "stable";
@@ -90,6 +98,18 @@ pub enum ShellError {
     Fetch(String),
     #[error("agentd supervision failed: {0}")]
     Supervisor(String),
+    #[error("request token is missing or wrong")]
+    Unauthorized,
+    #[error(
+        "insufficient disk on /data: staging needs {needed_bytes} bytes of headroom, \
+         {available_bytes} available"
+    )]
+    InsufficientDisk {
+        needed_bytes: u64,
+        available_bytes: u64,
+    },
+    #[error("version label {0:?} cannot safely name a generation directory")]
+    UnsafeVersionLabel(String),
 }
 
 impl ShellError {
@@ -113,6 +133,9 @@ impl ShellError {
             Self::Contract(_) => "payload_contract_violation",
             Self::Fetch(_) => "fetch_failed",
             Self::Supervisor(_) => "supervisor_failure",
+            Self::Unauthorized => "unauthorized",
+            Self::InsufficientDisk { .. } => "insufficient_disk",
+            Self::UnsafeVersionLabel(_) => "unsafe_version_label",
         }
     }
 }
@@ -302,6 +325,11 @@ impl DataLayout {
 
     pub fn socket_path(&self) -> PathBuf {
         self.shell_dir().join("shell.sock")
+    }
+
+    /// The per-boot control-socket token file (0600, root-owned).
+    pub fn control_token_path(&self) -> PathBuf {
+        self.shell_dir().join("control-token")
     }
 
     pub fn channel_path(&self) -> PathBuf {

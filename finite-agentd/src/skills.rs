@@ -22,7 +22,9 @@ use tokio::process::Command as TokioCommand;
 
 use crate::AgentdError;
 use crate::daemon::{DaemonConfig, failure_result, load_agent_identity, success_result};
-use crate::directory::{SERVICE_DIRECTORY_URL_ENV, fetch_verified_directory};
+use crate::directory::{
+    SERVICE_DIRECTORY_CACHE_FILE, SERVICE_DIRECTORY_URL_ENV, fetch_verified_directory_with_floor,
+};
 use crate::ledger::{CommandDecision, Ledger};
 
 pub(crate) const SKILLS_SYNC_SCHEMA: &str = "finite.agent.skills.sync.v1";
@@ -118,6 +120,9 @@ pub(crate) struct SkillsSyncSettings {
     /// Core's signed service directory endpoint; required for the channel
     /// form.
     pub service_directory_url: Option<String>,
+    /// The daemon's verified directory cache — the durable anti-replay floor
+    /// for channel resolution. `None` disables the floor (tests).
+    pub directory_cache: Option<PathBuf>,
 }
 
 impl SkillsSyncSettings {
@@ -128,12 +133,14 @@ impl SkillsSyncSettings {
             allow_insecure_url: config.allow_insecure_bundle_url,
             finite_cli: config.finite_cli.clone(),
             service_directory_url: config.service_directory_url.clone(),
+            directory_cache: Some(config.agent_home.join(SERVICE_DIRECTORY_CACHE_FILE)),
         }
     }
 }
 
 /// Resolve the channel's skills bundle through a fresh fetch-and-verify of
-/// the service directory (never the cache: sync acts on channel heads).
+/// the service directory (never a cache read: sync acts on channel heads; the
+/// cache only supplies the durable anti-replay floor).
 async fn resolve_channel_bundle(
     settings: &SkillsSyncSettings,
     public_key_hex: &str,
@@ -144,9 +151,13 @@ async fn resolve_channel_bundle(
             "{SERVICE_DIRECTORY_URL_ENV} is not configured; channel-based skills sync is unavailable"
         ))
     })?;
-    let directory =
-        fetch_verified_directory(directory_url, public_key_hex, settings.allow_insecure_url)
-            .await?;
+    let directory = fetch_verified_directory_with_floor(
+        directory_url,
+        public_key_hex,
+        settings.allow_insecure_url,
+        settings.directory_cache.as_deref(),
+    )
+    .await?;
     let bundle = directory
         .channel_bundle(channel, finite_service_directory::SKILLS_BUNDLE_KIND)
         .ok_or_else(|| AgentdError::SkillsChannelHeadMissing(channel.to_owned()))?;
@@ -459,6 +470,7 @@ mod tests {
             allow_insecure_url: true,
             finite_cli: finite_cli.to_path_buf(),
             service_directory_url: None,
+            directory_cache: None,
         }
     }
 
@@ -766,7 +778,9 @@ mod tests {
         }
         let mut directory = ServiceDirectoryV1 {
             schema: SERVICE_DIRECTORY_SCHEMA.to_owned(),
-            generated_at: "2026-08-06T00:00:00Z".to_owned(),
+            generated_at: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap(),
             services: BTreeMap::from([(
                 "sites".to_owned(),
                 ServiceEntryV1 {
@@ -775,6 +789,7 @@ mod tests {
                 },
             )]),
             channels,
+            key_id: String::new(),
             signature: String::new(),
         };
         directory.sign(&test_signing_key()).unwrap();
@@ -905,6 +920,7 @@ mod tests {
             finite_cli: finite_cli.to_path_buf(),
             service_directory_url: None,
             shell_socket: PathBuf::from("/nonexistent"),
+            shell_control_token: None,
         }
     }
 

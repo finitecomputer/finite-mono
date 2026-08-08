@@ -6,15 +6,17 @@
 //! moves the tree into place.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::state::{SharedState, StagedGeneration, now_rfc3339};
 use crate::{
-    DataLayout, SHELL_VERSION, STAGE_FETCH_TIMEOUT, STAGE_MANIFEST_CAP_BYTES,
+    DataLayout, SHELL_VERSION, STAGE_FETCH_TIMEOUT, STAGE_HEADROOM_BYTES, STAGE_MANIFEST_CAP_BYTES,
     STAGE_TARBALL_CAP_BYTES, ShellError, ShellSettings, fixup,
 };
 
@@ -25,6 +27,144 @@ pub const PAYLOAD_AGENTD_RELATIVE: &str = "bin/finite-agentd";
 pub fn read_link_version(link: &Path) -> Option<String> {
     let target = fs::read_link(link).ok()?;
     target.file_name()?.to_str().map(str::to_owned)
+}
+
+/// Refuse any version label that is not exactly one safe path component:
+/// non-empty, no separators, not `.`/`..`, not the reserved link names, no
+/// leading dot (dot-entries are shell staging temps). This is the shell's own
+/// containment layer, enforced before ANY filesystem operation derived from a
+/// label — independent of finite-release's manifest validation, so a signed
+/// label like `../agent` can never escape `/data/generations/` even if one
+/// layer regresses.
+pub fn validate_generation_name(version: &str) -> Result<(), ShellError> {
+    let unsafe_label = || ShellError::UnsafeVersionLabel(version.to_owned());
+    if version.is_empty() || version.len() > 81 || version.starts_with('.') {
+        return Err(unsafe_label());
+    }
+    if matches!(version, "current" | "previous") {
+        return Err(unsafe_label());
+    }
+    if !version
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(unsafe_label());
+    }
+    // Belt and braces: the string must parse as exactly one normal component.
+    let mut components = Path::new(version).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(unsafe_label()),
+    }
+}
+
+/// The one way to derive a generation directory from a version label for any
+/// filesystem operation: validates the label as a single safe component and
+/// proves canonical containment under `generations/` before returning the
+/// path.
+pub fn contained_generation_dir(layout: &DataLayout, version: &str) -> Result<PathBuf, ShellError> {
+    validate_generation_name(version)?;
+    let generations_dir = layout.generations_dir();
+    fs::create_dir_all(&generations_dir)?;
+    let canonical_parent = fs::canonicalize(&generations_dir)?;
+    let dir = canonical_parent.join(version);
+    // A single validated component cannot escape its parent; assert it
+    // anyway so a future refactor cannot silently weaken this.
+    if dir.parent() != Some(canonical_parent.as_path()) {
+        return Err(ShellError::UnsafeVersionLabel(version.to_owned()));
+    }
+    Ok(layout.generation_dir(version))
+}
+
+/// Remove stale staging debris under `generations/`: dot-prefixed entries
+/// (`.stage-tmp-*`, `.seed-tmp`, orphaned `.current.tmp.*` symlinks) are all
+/// shell temp artifacts; a crash mid-stage must not leak them forever. Runs
+/// at boot and before each stage.
+pub fn sweep_stale_temp(layout: &DataLayout) -> Result<(), ShellError> {
+    let staging_dir = layout.staging_dir();
+    if staging_dir.exists() {
+        let _ = fs::remove_dir_all(&staging_dir);
+    }
+    let generations_dir = layout.generations_dir();
+    if !generations_dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&generations_dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+/// Delete generation directories that are not current, previous, or staged.
+/// Bad-list entries keep their `state.json` records (the record is the
+/// memory) but lose their directories (the bytes are reclaimable). Runs at
+/// boot and after each successful flip's health gate.
+pub fn prune_generations(
+    layout: &DataLayout,
+    state: &SharedState,
+) -> Result<Vec<String>, ShellError> {
+    let generations_dir = layout.generations_dir();
+    if !generations_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut keep: Vec<String> = Vec::new();
+    keep.extend(read_link_version(&layout.current_link()));
+    keep.extend(read_link_version(&layout.previous_link()));
+    if let Some(staged) = state.snapshot().staged {
+        keep.push(staged.version_label);
+    }
+    let mut pruned = Vec::new();
+    for entry in fs::read_dir(&generations_dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        // Dot-entries belong to the temp sweep; the link names are never
+        // generation directories.
+        if name.starts_with('.') || matches!(name.as_str(), "current" | "previous") {
+            continue;
+        }
+        // Only prune real directories (the links are symlinks).
+        if entry.file_type()?.is_symlink() || !entry.path().is_dir() {
+            continue;
+        }
+        if keep.contains(&name) {
+            continue;
+        }
+        fs::remove_dir_all(entry.path())?;
+        pruned.push(name);
+    }
+    Ok(pruned)
+}
+
+/// Refuse to stage unless `/data` has `2 × tarball size + 512 MiB` free —
+/// download + unpack both land on `/data`, and a full `/data` disables the
+/// staging mechanism a fix would ship through.
+fn ensure_disk_headroom(data_dir: &Path, tarball_bytes: u64) -> Result<(), ShellError> {
+    let needed_bytes = tarball_bytes
+        .saturating_mul(2)
+        .saturating_add(STAGE_HEADROOM_BYTES);
+    let stats = rustix::fs::statvfs(data_dir).map_err(std::io::Error::from)?;
+    let available_bytes = stats.f_bavail.saturating_mul(stats.f_frsize);
+    if available_bytes < needed_bytes {
+        return Err(ShellError::InsufficientDisk {
+            needed_bytes,
+            available_bytes,
+        });
+    }
+    Ok(())
 }
 
 /// Atomically retarget `link` to the (relative) generation name `version`:
@@ -139,10 +279,9 @@ pub async fn stage_payload(
     let public_key = finite_release::parse_verifying_key_hex(public_key_hex)
         .map_err(|error| ShellError::Config(format!("release public key is invalid: {error}")))?;
 
+    // Hygiene first: a crash mid-stage must never accumulate debris.
+    sweep_stale_temp(layout)?;
     let staging_dir = layout.staging_dir();
-    if staging_dir.exists() {
-        fs::remove_dir_all(&staging_dir)?;
-    }
     fs::create_dir_all(&staging_dir)?;
 
     let (tarball_path, manifest_path, expected_sha256) = match source {
@@ -176,15 +315,34 @@ pub async fn stage_payload(
                 .map_err(|error| ShellError::Fetch(error.to_string()))?;
             let manifest_bytes =
                 fetch_bounded(&client, &manifest_url, STAGE_MANIFEST_CAP_BYTES, "manifest").await?;
-            let tarball_bytes =
-                fetch_bounded(&client, &tarball_url, STAGE_TARBALL_CAP_BYTES, "tarball").await?;
             let tarball_path = staging_dir.join("payload.tar.gz");
             let manifest_path = staging_dir.join("payload.tar.gz.manifest.json");
-            fs::write(&tarball_path, &tarball_bytes)?;
             fs::write(&manifest_path, &manifest_bytes)?;
+            // The tarball streams to a temp file on /data — never buffered in
+            // RAM — with its sha256 computed as the bytes arrive.
+            let streamed_sha256 = fetch_to_file(
+                &client,
+                &tarball_url,
+                STAGE_TARBALL_CAP_BYTES as u64,
+                &layout.data_dir,
+                &tarball_path,
+            )
+            .await?;
+            if streamed_sha256 != expected {
+                let _ = fs::remove_dir_all(&staging_dir);
+                return Err(ShellError::Release(
+                    finite_release::ReleaseError::VerificationFailed(format!(
+                        "tarball sha256 {streamed_sha256} does not match the expected {expected}"
+                    )),
+                ));
+            }
             (tarball_path, manifest_path, Some(expected))
         }
     };
+
+    // Disk preflight against the actual tarball size before any unpack work
+    // (the streaming fetch already preflighted against Content-Length).
+    ensure_disk_headroom(&layout.data_dir, fs::metadata(&tarball_path)?.len())?;
 
     // Structural manifest read first: the version gates run before the
     // (potentially large) unpack-and-digest work.
@@ -200,6 +358,9 @@ pub async fn stage_payload(
         });
     }
     let version = manifest.version_label.clone();
+    // Path containment: the shell's own layer, independent of the manifest
+    // validation that already refused unsafe labels above.
+    let final_dir = contained_generation_dir(layout, &version)?;
     let snapshot = state.snapshot();
     if snapshot.is_bad(&version) && !request.force {
         return Err(ShellError::VersionBad(version));
@@ -230,17 +391,27 @@ pub async fn stage_payload(
         }
     })
     .await
-    .map_err(|error| ShellError::Fetch(format!("verification task failed: {error}")))??;
+    .map_err(|error| ShellError::Fetch(format!("verification task failed: {error}")))
+    .and_then(|result| result.map_err(ShellError::from));
+    let verified = match verified {
+        Ok(verified) => verified,
+        Err(error) => {
+            // A refused bundle leaves no debris behind.
+            let _ = fs::remove_dir_all(&unpack_dir);
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(error);
+        }
+    };
     let manifest = verified.manifest;
 
     if !unpack_dir.join(PAYLOAD_AGENTD_RELATIVE).is_file() {
         fs::remove_dir_all(&unpack_dir)?;
+        let _ = fs::remove_dir_all(&staging_dir);
         return Err(ShellError::Contract(format!(
             "payload tree does not contain {PAYLOAD_AGENTD_RELATIVE}"
         )));
     }
 
-    let final_dir = layout.generation_dir(&version);
     fixup::apply_venv_fixup(&unpack_dir, &final_dir, &settings.shell_python)?;
     if final_dir.exists() {
         fs::remove_dir_all(&final_dir)?;
@@ -265,6 +436,57 @@ pub async fn stage_payload(
         state.staged = Some(record.clone());
     })?;
     Ok(record)
+}
+
+/// Stream a download to `destination` on `/data` (never buffered in RAM),
+/// hashing sha256 as bytes arrive. Preflights disk headroom against
+/// Content-Length when the server provides one, and enforces `cap` on the
+/// actual bytes. Returns the streamed content's sha256 hex.
+async fn fetch_to_file(
+    client: &reqwest::Client,
+    url: &str,
+    cap: u64,
+    data_dir: &Path,
+    destination: &Path,
+) -> Result<String, ShellError> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| ShellError::Fetch(format!("tarball fetch failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(ShellError::Fetch(format!(
+            "tarball fetch failed with {}",
+            response.status()
+        )));
+    }
+    if let Some(length) = response.content_length() {
+        if length > cap {
+            return Err(ShellError::Fetch(format!(
+                "tarball exceeds the {cap}-byte cap"
+            )));
+        }
+        ensure_disk_headroom(data_dir, length)?;
+    }
+    let mut file = fs::File::create(destination)?;
+    let mut digest = Sha256::new();
+    let mut written = 0_u64;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|error| ShellError::Fetch(format!("tarball fetch failed: {error}")))?;
+        written += chunk.len() as u64;
+        if written > cap {
+            let _ = fs::remove_file(destination);
+            return Err(ShellError::Fetch(format!(
+                "tarball exceeds the {cap}-byte cap"
+            )));
+        }
+        digest.update(&chunk);
+        file.write_all(&chunk)?;
+    }
+    file.sync_all()?;
+    Ok(hex::encode(digest.finalize()))
 }
 
 async fn fetch_bounded(

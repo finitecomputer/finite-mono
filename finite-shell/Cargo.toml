@@ -20,6 +20,7 @@ path = "src/main.rs"
 bech32.workspace = true
 clap.workspace = true
 finite-release.workspace = true
+getrandom.workspace = true
 finite-service-directory.workspace = true
 futures-util.workspace = true
 hex.workspace = true
@@ -27,6 +28,7 @@ reqwest = { workspace = true, features = ["stream"] }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true

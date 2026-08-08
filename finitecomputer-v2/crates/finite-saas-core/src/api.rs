@@ -1306,6 +1306,8 @@ async fn build_signed_service_directory(
         generated_at: crate::current_time_iso()?,
         services: state.service_directory.services.clone(),
         channels,
+        // Filled by sign() from the signing key.
+        key_id: String::new(),
         signature: String::new(),
     };
     directory.sign(signing_key).map_err(|error| {

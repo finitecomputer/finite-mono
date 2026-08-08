@@ -18,11 +18,21 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 pub const SERVICE_DIRECTORY_SCHEMA: &str = "finite_service_directory.v1";
 /// Channel-head kind keys, mirroring Core's bundle artifact kinds.
 pub const SKILLS_BUNDLE_KIND: &str = "skills_bundle";
 pub const PAYLOAD_BUNDLE_KIND: &str = "payload_bundle";
+
+/// Anti-replay bound: a directory whose `generated_at` is older than this is
+/// refused by [`fetch_and_verify`] and [`read_cache`]. Core regenerates the
+/// document per request, so a genuine document is always minutes old at most;
+/// only a replayed capture can be a day stale. 24h leaves generous room for
+/// caches and clock skew while bounding how far back a replay can drag a
+/// fleet.
+pub const DIRECTORY_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 const DEFAULT_FETCH_CAP_BYTES: usize = 64 * 1024;
 const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,6 +49,19 @@ pub enum DirectoryError {
     Fetch(String),
     #[error("service directory verification failed: {0}")]
     Verification(#[from] finite_release::ReleaseError),
+    #[error(
+        "service directory is expired: generated_at {generated_at} is older than the \
+         {max_age_secs}s max age"
+    )]
+    Expired {
+        generated_at: String,
+        max_age_secs: u64,
+    },
+    #[error(
+        "service directory replay refused: generated_at {generated_at} is older than the \
+         last-seen floor {floor}"
+    )]
+    Replayed { generated_at: String, floor: String },
 }
 
 /// One advertised service: where to reach it and, optionally, what client
@@ -81,6 +104,10 @@ pub struct ServiceDirectoryV1 {
     pub generated_at: String,
     pub services: BTreeMap<String, ServiceEntryV1>,
     pub channels: BTreeMap<String, BTreeMap<String, ChannelBundleV1>>,
+    /// Short id of the signing key ([`finite_release::verifying_key_id`]);
+    /// verification refuses a document naming a different key than the one
+    /// provided.
+    pub key_id: String,
     /// `ed25519:<base64>` over the canonical document minus this field
     /// (see [`finite_release::document_signing_bytes`]).
     pub signature: String,
@@ -101,25 +128,71 @@ impl ServiceDirectoryV1 {
                 "expected schema {SERVICE_DIRECTORY_SCHEMA:?}, found {schema:?}"
             )));
         }
+        check_document_key_id(&document, public_key)?;
         finite_release::verify_document_signature(&document, public_key)?;
         let directory: Self = serde_json::from_value(document)
             .map_err(|error| DirectoryError::InvalidDocument(error.to_string()))?;
         Ok(directory)
     }
 
-    /// Sign this document with the release key, replacing any existing
-    /// signature.
+    /// Sign this document with the release key, filling `key_id` from the key
+    /// and replacing any existing signature.
     pub fn sign(&mut self, signing_key: &SigningKey) -> Result<(), DirectoryError> {
+        self.key_id = finite_release::verifying_key_id(&signing_key.verifying_key());
         self.signature = String::new();
         let document = serde_json::to_value(&self)?;
         self.signature = finite_release::sign_document(&document, signing_key)?;
         Ok(())
     }
 
-    /// Verify this document's signature against the release public key.
+    /// Verify this document's signature (and its `key_id`) against the
+    /// release public key.
     pub fn verify_signature(&self, public_key: &VerifyingKey) -> Result<(), DirectoryError> {
         let document = serde_json::to_value(self)?;
+        check_document_key_id(&document, public_key)?;
         finite_release::verify_document_signature(&document, public_key)?;
+        Ok(())
+    }
+
+    /// This document's `generated_at` as a parsed instant.
+    pub fn generated_at_time(&self) -> Result<OffsetDateTime, DirectoryError> {
+        OffsetDateTime::parse(&self.generated_at, &Rfc3339).map_err(|error| {
+            DirectoryError::InvalidDocument(format!(
+                "generated_at {:?} is not RFC 3339: {error}",
+                self.generated_at
+            ))
+        })
+    }
+
+    /// Anti-replay max-age check: refuse a document generated more than
+    /// `max_age` before now (see [`DIRECTORY_MAX_AGE`]).
+    pub fn check_max_age(&self, max_age: Duration) -> Result<(), DirectoryError> {
+        let generated_at = self.generated_at_time()?;
+        if OffsetDateTime::now_utc() - generated_at > max_age {
+            return Err(DirectoryError::Expired {
+                generated_at: self.generated_at.clone(),
+                max_age_secs: max_age.as_secs(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Persisted-floor check: refuse a document strictly older than the
+    /// caller's durable last-seen `generated_at`. An equal timestamp is
+    /// accepted — Core idempotently re-serving the same document is not a
+    /// replay.
+    pub fn check_not_older_than(&self, floor: &str) -> Result<(), DirectoryError> {
+        let generated_at = self.generated_at_time()?;
+        let Ok(floor_time) = OffsetDateTime::parse(floor, &Rfc3339) else {
+            // An unparseable persisted floor never wedges convergence.
+            return Ok(());
+        };
+        if generated_at < floor_time {
+            return Err(DirectoryError::Replayed {
+                generated_at: self.generated_at.clone(),
+                floor: floor.to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -138,6 +211,31 @@ impl ServiceDirectoryV1 {
     }
 }
 
+/// Raw-document `key_id` check, shared by verify-before-parse and typed
+/// verification: a document naming a different key than the verification key
+/// is a diagnosable rotation failure, not an opaque bad signature.
+fn check_document_key_id(
+    document: &Value,
+    public_key: &VerifyingKey,
+) -> Result<(), DirectoryError> {
+    let document_key_id = document
+        .get("key_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            DirectoryError::InvalidDocument("document has no key_id field".to_owned())
+        })?;
+    let verification_key_id = finite_release::verifying_key_id(public_key);
+    if document_key_id != verification_key_id {
+        return Err(DirectoryError::Verification(
+            finite_release::ReleaseError::KeyIdMismatch {
+                document_key_id: document_key_id.to_owned(),
+                verification_key_id,
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// Bounds for [`fetch_and_verify`].
 #[derive(Debug, Clone)]
 pub struct FetchLimits {
@@ -147,6 +245,9 @@ pub struct FetchLimits {
     /// Dev-harness-only escape hatch admitting plain-http directory URLs
     /// (`FINITE_ALLOW_INSECURE_BUNDLE_URL=1`).
     pub allow_insecure_url: bool,
+    /// Anti-replay max age for the fetched document's `generated_at`
+    /// ([`DIRECTORY_MAX_AGE`] by default); `None` disables the check.
+    pub max_age: Option<Duration>,
 }
 
 impl Default for FetchLimits {
@@ -155,6 +256,7 @@ impl Default for FetchLimits {
             max_bytes: DEFAULT_FETCH_CAP_BYTES,
             timeout: DEFAULT_FETCH_TIMEOUT,
             allow_insecure_url: false,
+            max_age: Some(DIRECTORY_MAX_AGE),
         }
     }
 }
@@ -203,7 +305,11 @@ pub async fn fetch_and_verify(
         }
         bytes.extend_from_slice(&chunk);
     }
-    ServiceDirectoryV1::from_verified_json_bytes(&bytes, public_key)
+    let directory = ServiceDirectoryV1::from_verified_json_bytes(&bytes, public_key)?;
+    if let Some(max_age) = limits.max_age {
+        directory.check_max_age(max_age)?;
+    }
+    Ok(directory)
 }
 
 /// Atomically write the verified directory to `path` (tempfile + rename in
@@ -225,12 +331,16 @@ pub fn write_cache(directory: &ServiceDirectoryV1, path: &Path) -> Result<(), Di
 }
 
 /// Read a cached directory and re-verify its signature. The cache lives on
-/// shared `/data`, so it is never trusted without re-proving the signature.
+/// shared `/data`, so it is never trusted without re-proving the signature —
+/// nor without the [`DIRECTORY_MAX_AGE`] anti-replay check.
 pub fn read_cache(
     path: &Path,
     public_key: &VerifyingKey,
 ) -> Result<ServiceDirectoryV1, DirectoryError> {
-    ServiceDirectoryV1::from_verified_json_bytes(&std::fs::read(path)?, public_key)
+    let directory =
+        ServiceDirectoryV1::from_verified_json_bytes(&std::fs::read(path)?, public_key)?;
+    directory.check_max_age(DIRECTORY_MAX_AGE)?;
+    Ok(directory)
 }
 
 #[cfg(test)]
@@ -243,10 +353,18 @@ mod tests {
         SigningKey::from_bytes(&[11_u8; 32])
     }
 
+    fn now_rfc3339() -> String {
+        OffsetDateTime::now_utc().format(&Rfc3339).unwrap()
+    }
+
     fn signed_directory() -> ServiceDirectoryV1 {
+        signed_directory_generated_at(&now_rfc3339())
+    }
+
+    fn signed_directory_generated_at(generated_at: &str) -> ServiceDirectoryV1 {
         let mut directory = ServiceDirectoryV1 {
             schema: SERVICE_DIRECTORY_SCHEMA.to_owned(),
-            generated_at: "2026-08-06T00:00:00Z".to_owned(),
+            generated_at: generated_at.to_owned(),
             services: BTreeMap::from([
                 (
                     "sites".to_owned(),
@@ -282,6 +400,7 @@ mod tests {
                     },
                 )]),
             )]),
+            key_id: String::new(),
             signature: String::new(),
         };
         directory.sign(&test_signing_key()).unwrap();
@@ -469,6 +588,98 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(error, DirectoryError::Fetch(_)));
+    }
+
+    #[test]
+    fn a_document_naming_a_different_key_id_is_a_diagnosable_mismatch() {
+        let directory = signed_directory();
+        assert_eq!(
+            directory.key_id,
+            finite_release::verifying_key_id(&test_signing_key().verifying_key()),
+            "signing must fill key_id from the signing key"
+        );
+        let wrong_key = SigningKey::from_bytes(&[12_u8; 32]).verifying_key();
+        let error = directory.verify_signature(&wrong_key).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains(&directory.key_id)
+                && message.contains(&finite_release::verifying_key_id(&wrong_key)),
+            "the mismatch must name both key ids: {message}"
+        );
+
+        // A document with no key_id at all (a pre-key_id capture) is refused
+        // before any signature work.
+        let mut document = serde_json::to_value(&directory).unwrap();
+        document.as_object_mut().unwrap().remove("key_id");
+        let error = ServiceDirectoryV1::from_verified_json_bytes(
+            &serde_json::to_vec(&document).unwrap(),
+            &test_signing_key().verifying_key(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, DirectoryError::InvalidDocument(_)));
+    }
+
+    #[tokio::test]
+    async fn a_stale_directory_is_refused_by_fetch_and_by_cache_read() {
+        // Two days old: past the 24h max age even though the signature is
+        // perfectly valid — the replay window is bounded.
+        let stale_at = (OffsetDateTime::now_utc() - Duration::from_secs(48 * 60 * 60))
+            .format(&Rfc3339)
+            .unwrap();
+        let stale = signed_directory_generated_at(&stale_at);
+        let base_url = serve_bytes(serde_json::to_vec(&stale).unwrap()).await;
+        let limits = FetchLimits {
+            allow_insecure_url: true,
+            ..FetchLimits::default()
+        };
+        let error = fetch_and_verify(
+            &format!("{base_url}/api/core/v1/service-directory"),
+            &test_signing_key().verifying_key(),
+            &limits,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, DirectoryError::Expired { .. }));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("service-directory.json");
+        write_cache(&stale, &path).unwrap();
+        let error = read_cache(&path, &test_signing_key().verifying_key()).unwrap_err();
+        assert!(matches!(error, DirectoryError::Expired { .. }));
+
+        // Disabling the check (max_age: None) admits the same document.
+        let no_age = FetchLimits {
+            allow_insecure_url: true,
+            max_age: None,
+            ..FetchLimits::default()
+        };
+        fetch_and_verify(
+            &format!("{base_url}/api/core/v1/service-directory"),
+            &test_signing_key().verifying_key(),
+            &no_age,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn the_floor_check_refuses_older_and_admits_equal_and_newer_documents() {
+        let directory = signed_directory_generated_at("2026-08-08T12:00:00Z");
+        // Strictly newer floor: refused with a distinct replay error.
+        let error = directory
+            .check_not_older_than("2026-08-08T12:00:01Z")
+            .unwrap_err();
+        assert!(matches!(error, DirectoryError::Replayed { .. }));
+        // Equal: Core idempotently re-serving the same document is accepted.
+        directory
+            .check_not_older_than("2026-08-08T12:00:00Z")
+            .unwrap();
+        // Older floor: the document advances it.
+        directory
+            .check_not_older_than("2026-08-08T11:59:59Z")
+            .unwrap();
+        // An unparseable persisted floor never wedges convergence.
+        directory.check_not_older_than("not a timestamp").unwrap();
     }
 
     #[tokio::test]

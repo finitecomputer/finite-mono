@@ -27,6 +27,35 @@ fn public_key_hex() -> String {
     hex::encode(test_signing_key().verifying_key().to_bytes())
 }
 
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
+/// A live "agentd is running" supervision snapshot: since the fail-open fix,
+/// `ready: true` requires live supervision truth, not just fresh files.
+fn running_supervision() -> finite_shell::supervise::AgentdSupervisionStatus {
+    finite_shell::supervise::AgentdSupervisionStatus {
+        state: "running".to_owned(),
+        pid: Some(4242),
+        restart_count: 0,
+        last_exit: None,
+        crash_looping: false,
+        updated_at_ms: 0,
+    }
+}
+
+/// Send one verb through the runtime's dispatch with the boot token attached
+/// (the same framing `serve_socket` feeds it).
+async fn authed_request(runtime: &ShellRuntime, mut request: Value) -> Value {
+    request
+        .as_object_mut()
+        .expect("request is an object")
+        .insert("token".to_owned(), json!(runtime.control_token()));
+    runtime.handle_request_line(&request.to_string()).await
+}
+
 /// Build a stub payload source tree. The agentd script writes a
 /// generation-marker (so tests can prove which generation ran), the agentd
 /// status file, and the finitechat ready file, then sleeps.
@@ -361,10 +390,13 @@ async fn stage_refuses_tampered_bytes_wrong_keys_new_shells_and_bad_versions() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(
-        error,
-        ShellError::Release(finite_release::ReleaseError::VerificationFailed(_))
-    ));
+    assert!(
+        matches!(
+            error,
+            ShellError::Release(finite_release::ReleaseError::KeyIdMismatch { .. })
+        ),
+        "a wrong key is a diagnosable key_id mismatch: {error}"
+    );
 
     // min_shell_version newer than this shell: a distinct error.
     let source = build_payload_source(root.path(), "future", false);
@@ -563,7 +595,7 @@ async fn flip_succeeds_end_to_end_with_shims_and_venv_fixup() {
     .await
     .unwrap();
 
-    let response = runtime.handle_request_line(r#"{"verb":"flip"}"#).await;
+    let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
     assert_eq!(response["ok"], json!(true));
     assert_eq!(response["result"], json!("flip_started"));
     assert_eq!(response["from"], json!("v1"));
@@ -626,7 +658,7 @@ async fn a_failed_health_gate_rolls_back_automatically_and_bad_lists_the_version
     )
     .await
     .unwrap();
-    let response = runtime.handle_request_line(r#"{"verb":"flip"}"#).await;
+    let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
     assert_eq!(response["ok"], json!(true));
 
     let flip = wait_for_flip_outcome(&runtime.state, FlipOutcome::RolledBack).await;
@@ -673,11 +705,11 @@ async fn rollback_flips_back_to_previous_and_never_marks_bad() {
     )
     .await
     .unwrap();
-    runtime.handle_request_line(r#"{"verb":"flip"}"#).await;
+    authed_request(&runtime, json!({ "verb": "flip" })).await;
     wait_for_flip_outcome(&runtime.state, FlipOutcome::Success).await;
     wait_for_marker(&settings, "two").await;
 
-    let response = runtime.handle_request_line(r#"{"verb":"rollback"}"#).await;
+    let response = authed_request(&runtime, json!({ "verb": "rollback" })).await;
     assert_eq!(response["ok"], json!(true));
     assert_eq!(response["result"], json!("rollback_started"));
     assert_eq!(response["from"], json!("v2"));
@@ -698,7 +730,7 @@ async fn rollback_flips_back_to_previous_and_never_marks_bad() {
     assert!(state.bad.is_empty(), "rollback never marks versions bad");
 
     // Nothing staged: flip refuses distinctly.
-    let response = runtime.handle_request_line(r#"{"verb":"flip"}"#).await;
+    let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
     assert_eq!(response["ok"], json!(false));
     assert_eq!(response["error"]["code"], json!("nothing_staged"));
 
@@ -772,8 +804,11 @@ async fn boot_reconciles_an_interrupted_flip_from_the_symlinks() {
     let rebooted = ShellRuntime::boot(settings.clone()).await.unwrap();
     let state = rebooted.state.snapshot();
     let flip = state.last_flip.unwrap();
-    assert_eq!(flip.outcome, FlipOutcome::Interrupted);
-    assert!(flip.detail.unwrap().contains("the swap had committed"));
+    // The commit landed but the gate never resolved: boot reruns the gate
+    // against the adopted (healthy) generation and records the result
+    // honestly instead of leaving an ungated candidate marked "interrupted".
+    assert_eq!(flip.outcome, FlipOutcome::Success);
+    assert!(flip.detail.unwrap().contains("gate rerun at boot passed"));
     assert!(
         state.staged.is_none(),
         "a committed flip consumed the staged generation"
@@ -783,6 +818,70 @@ async fn boot_reconciles_an_interrupted_flip_from_the_symlinks() {
         Some("v2")
     );
     wait_for_marker(&settings, "two").await;
+    rebooted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_reruns_the_gate_for_a_committed_broken_flip_and_rolls_back() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut settings, _) = {
+        let settings = test_settings(root.path());
+        let packed = pack_payload(root.path(), "v1", "one", false);
+        install_seed(&settings, &packed);
+        (settings, ())
+    };
+    settings.health_timeout = Duration::from_millis(1500);
+    let runtime = ShellRuntime::boot(settings.clone()).await.unwrap();
+    let layout = settings.layout();
+    wait_for_marker(&settings, "one").await;
+    let broken = pack_payload(root.path(), "v2-broken", "broken", true);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&broken, false),
+    )
+    .await
+    .unwrap();
+    runtime.shutdown().await;
+
+    // Simulate a crash after the commit point of a flip to the broken
+    // candidate, before its health gate could resolve.
+    finite_shell::generations::set_link_version(&layout.previous_link(), "v1").unwrap();
+    finite_shell::generations::set_link_version(&layout.current_link(), "v2-broken").unwrap();
+    runtime
+        .state
+        .update(|state| {
+            state.last_flip = Some(FlipRecord {
+                from: Some("v1".to_owned()),
+                to: "v2-broken".to_owned(),
+                at: "2026-08-06T00:00:00Z".to_owned(),
+                outcome: FlipOutcome::InProgress,
+                prior_previous: None,
+                detail: None,
+            });
+        })
+        .unwrap();
+
+    let rebooted = ShellRuntime::boot(settings.clone()).await.unwrap();
+    let state = rebooted.state.snapshot();
+    let flip = state.last_flip.clone().unwrap();
+    assert_eq!(
+        flip.outcome,
+        FlipOutcome::RolledBack,
+        "the rerun gate must fail the broken candidate and restore v1: {:?}",
+        flip.detail
+    );
+    assert!(flip.detail.unwrap().contains("boot gate rerun failed"));
+    assert!(
+        state.is_bad("v2-broken"),
+        "the failed candidate lands on the bad list"
+    );
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v1")
+    );
+    wait_for_marker(&settings, "one").await;
     rebooted.shutdown().await;
 }
 
@@ -806,10 +905,48 @@ async fn every_verb_works_over_a_real_unix_socket() {
     assert_eq!(shell_dir_mode & 0o777, 0o700, "shell dir must be 0700");
     tokio::spawn(runtime.clone().serve_socket(listener));
 
-    let roundtrip = |request: Value| {
+    // The token file exists (0600) beside the socket and matches the
+    // runtime's token — `finite-shell ctl` reads it directly.
+    let token_path = layout.control_token_path();
+    let token_mode = fs::metadata(&token_path).unwrap().permissions().mode();
+    assert_eq!(token_mode & 0o777, 0o600, "token file must be 0600");
+    assert_eq!(
+        finite_shell::control::read_control_token_near(&socket_path).as_deref(),
+        Some(runtime.control_token()),
+        "ctl derives the token from the file beside the socket"
+    );
+
+    let token = runtime.control_token().to_owned();
+    let roundtrip = move |request: Value| {
         let socket_path = socket_path.clone();
+        let mut request = request;
+        request
+            .as_object_mut()
+            .unwrap()
+            .insert("token".to_owned(), json!(token.clone()));
         tokio::task::spawn_blocking(move || ctl_roundtrip(&socket_path, &request))
     };
+    let raw_roundtrip = {
+        let socket_path = layout.socket_path();
+        move |request: Value| {
+            let socket_path = socket_path.clone();
+            tokio::task::spawn_blocking(move || ctl_roundtrip(&socket_path, &request))
+        }
+    };
+
+    // No token / a wrong token: refused with the distinct unauthorized code,
+    // and no verb machinery runs.
+    let response = raw_roundtrip(json!({ "verb": "status" }))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["ok"], json!(false));
+    assert_eq!(response["error"]["code"], json!("unauthorized"));
+    let response = raw_roundtrip(json!({ "verb": "rollback", "token": "wrong" }))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["error"]["code"], json!("unauthorized"));
 
     // status
     let status = roundtrip(json!({ "verb": "status" }))
@@ -960,6 +1097,18 @@ fn set_directory_head(
     channel: &str,
     packed: Option<&finite_release::PayloadPackOutput>,
 ) {
+    set_directory_head_at(routes, base_url, channel, packed, &now_rfc3339());
+}
+
+/// [`set_directory_head`] with an explicit `generated_at` (the anti-replay
+/// tests need control over document age).
+fn set_directory_head_at(
+    routes: &SharedRoutes,
+    base_url: &str,
+    channel: &str,
+    packed: Option<&finite_release::PayloadPackOutput>,
+    generated_at: &str,
+) {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     let mut channels = std::collections::BTreeMap::new();
     if let Some(packed) = packed {
@@ -985,9 +1134,10 @@ fn set_directory_head(
     }
     let mut directory = ServiceDirectoryV1 {
         schema: SERVICE_DIRECTORY_SCHEMA.to_owned(),
-        generated_at: "2026-08-06T00:00:00Z".to_owned(),
+        generated_at: generated_at.to_owned(),
         services: std::collections::BTreeMap::new(),
         channels,
+        key_id: String::new(),
         signature: String::new(),
     };
     directory.sign(&test_signing_key()).unwrap();
@@ -1026,9 +1176,11 @@ async fn the_poller_stages_and_flips_to_a_new_head_unattended() {
 
     // The agent is moved to canary, whose head is v2 — exactly the smoke's
     // set-channel + publish sequence, with no further driving.
-    runtime
-        .handle_request_line(r#"{"verb":"set-channel","channel":"canary"}"#)
-        .await;
+    authed_request(
+        &runtime,
+        json!({ "verb": "set-channel", "channel": "canary" }),
+    )
+    .await;
     let packed_v2 = pack_payload(root.path(), "v2", "two", false);
     set_directory_head(&routes, &base_url, "canary", Some(&packed_v2));
     assert!(runtime.spawn_channel_poller());
@@ -1166,8 +1318,43 @@ async fn the_poller_no_ops_on_a_converged_or_headless_channel() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_poll_tick_concurrent_with_a_manual_flip_skips_instead_of_double_flipping() {
     let root = tempfile::tempdir().unwrap();
-    let (settings, runtime, routes, base_url) =
-        boot_with_directory(root.path(), Duration::ZERO).await;
+    // A bespoke v1 seed whose agentd drains slowly on TERM: the flip's
+    // quiesce then holds the transition gate (with `current` still v1) long
+    // enough for the concurrent tick to deterministically observe it.
+    let routes: SharedRoutes = SharedRoutes::default();
+    let base_url = serve_shared(std::sync::Arc::clone(&routes)).await;
+    let mut settings = test_settings(root.path());
+    settings.allow_insecure_bundle_url = true;
+    settings.poll_interval = Duration::ZERO;
+    settings.service_directory_url = Some(format!("{base_url}/api/core/v1/service-directory"));
+    let source_v1 = build_payload_source(root.path(), "one", false);
+    let script_v1 = source_v1.join("bin/finite-agentd");
+    let body_v1 = fs::read_to_string(&script_v1).unwrap();
+    fs::write(
+        &script_v1,
+        body_v1.replacen(
+            "exec sleep 300",
+            "trap 'sleep 1; exit 0' TERM\nsleep 300 & wait",
+            1,
+        ),
+    )
+    .unwrap();
+    let packed_v1 = finite_release::pack_payload_bundle(
+        &finite_release::PayloadPackRequest {
+            source: &source_v1,
+            artifact_id: "payload-v1",
+            version_label: "v1",
+            min_shell_version: "0.1.0",
+            source_git_sha: None,
+            created_at: Some("2026-08-06T00:00:00Z"),
+            out_dir: &root.path().join("packed-v1-slow-drain"),
+        },
+        &test_signing_key(),
+    )
+    .unwrap();
+    install_seed(&settings, &packed_v1);
+    set_directory_head(&routes, &base_url, "stable", Some(&packed_v1));
+    let runtime = ShellRuntime::boot(settings.clone()).await.unwrap();
     wait_for_marker(&settings, "one").await;
     let layout = settings.layout();
 
@@ -1204,7 +1391,7 @@ async fn a_poll_tick_concurrent_with_a_manual_flip_skips_instead_of_double_flipp
     )
     .await
     .unwrap();
-    let response = runtime.handle_request_line(r#"{"verb":"flip"}"#).await;
+    let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
     assert_eq!(response["ok"], json!(true));
 
     // A tick during the manual flip must neither deadlock nor start a second
@@ -1336,7 +1523,8 @@ fn healthz_replicates_health_server_py_fields_and_adds_shell_fields() {
         })
         .unwrap();
 
-    let payload = health::runtime_health(&settings, &layout, &state.snapshot(), None);
+    let supervision = running_supervision();
+    let payload = health::runtime_health(&settings, &layout, &state.snapshot(), Some(&supervision));
 
     // The exact existing field names from health_server.py's logic.
     assert_eq!(payload["ready"], json!(true));
@@ -1464,7 +1652,8 @@ fn healthz_degrades_exactly_like_health_server_py() {
         .to_string(),
     )
     .unwrap();
-    let payload = health::runtime_health(&settings, &layout, &state.snapshot(), None);
+    let supervision = running_supervision();
+    let payload = health::runtime_health(&settings, &layout, &state.snapshot(), Some(&supervision));
     let startup = &payload["startup"];
     assert_eq!(startup["ok"], json!(true));
     assert_eq!(startup["status"], json!("completed"));
@@ -1522,6 +1711,528 @@ async fn the_http_server_serves_healthz_with_the_python_content_type_contract() 
     assert_eq!(body["npub"], json!(VECTOR_NPUB));
     assert_eq!(body["payload_version"], json!("v1"));
     assert_eq!(body["agentd_supervision"]["state"], json!("running"));
+
+    runtime.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Live-supervision readiness (the fail-open fix)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_dead_agentd_fails_readiness_despite_fresh_looking_status_files() {
+    let root = tempfile::tempdir().unwrap();
+    let settings = test_settings(root.path());
+    let layout = settings.layout();
+    // Every file-derived signal looks healthy: identity, bridge, agentd
+    // status files are all present and fresh — exactly what a dead process
+    // leaves behind.
+    write_agent_fixture(&layout);
+    let state = SharedState::load(&layout.state_path());
+
+    // Dead agentd: the shell KNOWS this in memory, and it must win.
+    let mut dead = running_supervision();
+    dead.state = "exited".to_owned();
+    dead.pid = None;
+    let payload = health::runtime_health(&settings, &layout, &state.snapshot(), Some(&dead));
+    assert_eq!(payload["ready"], json!(false));
+    assert_eq!(payload["ready_reason"], json!("agentd_not_running"));
+    // The file-derived compat fields are untouched.
+    assert_eq!(payload["agentd"]["ok"], json!(true));
+    assert!(!health::runtime_ready(&payload));
+    let (status, _) = health::respond("/healthz", || payload.clone());
+    assert_eq!(status, 503, "a dead-agentd shell serves 503");
+
+    // Crash-looping agentd: distinct reason.
+    let mut looping = running_supervision();
+    looping.crash_looping = true;
+    let payload = health::runtime_health(&settings, &layout, &state.snapshot(), Some(&looping));
+    assert_eq!(payload["ready"], json!(false));
+    assert_eq!(payload["ready_reason"], json!("agentd_crash_looping"));
+
+    // No supervision at all (agentd slot empty mid-flip): not ready either.
+    let payload = health::runtime_health(&settings, &layout, &state.snapshot(), None);
+    assert_eq!(payload["ready"], json!(false));
+    assert_eq!(payload["ready_reason"], json!("agentd_not_running"));
+
+    // And a live one is ready again.
+    let supervision = running_supervision();
+    let payload = health::runtime_health(&settings, &layout, &state.snapshot(), Some(&supervision));
+    assert_eq!(payload["ready"], json!(true));
+    assert!(payload.get("ready_reason").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Graceful quiesce: the flip waits for the old generation's drain
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flip_lets_the_old_generation_drain_before_starting_the_new() {
+    let root = tempfile::tempdir().unwrap();
+    let settings = test_settings(root.path());
+    // v1's agentd supervises a fake child; both trap TERM. On quiesce the
+    // child writes its drain marker and exits cleanly, then agentd records
+    // its own drain — proving the shell's bounded quiesce window is real
+    // time to drain, not an instant kill.
+    let source_v1 = build_payload_source(root.path(), "one", false);
+    let script_v1 = source_v1.join("bin/finite-agentd");
+    let body_v1 = fs::read_to_string(&script_v1).unwrap();
+    fs::write(
+        &script_v1,
+        body_v1.replacen(
+            "exec sleep 300",
+            r#"(
+  trap 'echo child-drained > "$FINITECHAT_HOME/agentd/drain-marker"; exit 0' TERM
+  sleep 300 & wait
+) &
+child=$!
+trap 'wait "$child"; echo agentd-drained >> "$FINITECHAT_HOME/agentd/drain-marker"; exit 0' TERM
+wait "$child""#,
+            1,
+        ),
+    )
+    .unwrap();
+    let packed_v1 = finite_release::pack_payload_bundle(
+        &finite_release::PayloadPackRequest {
+            source: &source_v1,
+            artifact_id: "payload-v1",
+            version_label: "v1",
+            min_shell_version: "0.1.0",
+            source_git_sha: None,
+            created_at: Some("2026-08-06T00:00:00Z"),
+            out_dir: &root.path().join("packed-v1-draining"),
+        },
+        &test_signing_key(),
+    )
+    .unwrap();
+    install_seed(&settings, &packed_v1);
+    let runtime = ShellRuntime::boot(settings.clone()).await.unwrap();
+    wait_for_marker(&settings, "one").await;
+    let layout = settings.layout();
+
+    let packed_v2 = pack_payload(root.path(), "v2", "two", false);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&packed_v2, false),
+    )
+    .await
+    .unwrap();
+    let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
+    assert_eq!(response["ok"], json!(true));
+    wait_for_flip_outcome(&runtime.state, FlipOutcome::Success).await;
+    wait_for_marker(&settings, "two").await;
+
+    let drain = fs::read_to_string(settings.data_dir.join("agent/agentd/drain-marker"))
+        .expect("the drain marker must exist: the old generation got its TERM window");
+    assert_eq!(
+        drain, "child-drained\nagentd-drained\n",
+        "both the fake child and agentd drained cleanly before the flip proceeded"
+    );
+
+    runtime.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Disk hygiene: sweep, prune, headroom
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successful_flip_prunes_unreferenced_generations_but_keeps_their_bad_records() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime) = boot_seeded(root.path(), "v1", "one").await;
+    let layout = settings.layout();
+    wait_for_marker(&settings, "one").await;
+
+    // Debris: an unreferenced old generation, a bad-listed generation's
+    // directory, and stale staging temp.
+    fs::create_dir_all(layout.generation_dir("v0-old").join("bin")).unwrap();
+    fs::create_dir_all(layout.generation_dir("v0-bad").join("bin")).unwrap();
+    fs::create_dir_all(layout.generations_dir().join(".stage-tmp-junk")).unwrap();
+    runtime
+        .state
+        .update(|state| {
+            state.bad.push(finite_shell::state::BadGeneration {
+                version_label: "v0-bad".to_owned(),
+                reason: "health gate failed".to_owned(),
+                at: "2026-08-06T00:00:00Z".to_owned(),
+            })
+        })
+        .unwrap();
+
+    let packed = pack_payload(root.path(), "v2", "two", false);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&packed, false),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !layout.generations_dir().join(".stage-tmp-junk").exists(),
+        "staging sweeps stale temp dirs before it begins"
+    );
+    authed_request(&runtime, json!({ "verb": "flip" })).await;
+    wait_for_flip_outcome(&runtime.state, FlipOutcome::Success).await;
+
+    assert!(!layout.generation_dir("v0-old").exists(), "pruned");
+    assert!(
+        !layout.generation_dir("v0-bad").exists(),
+        "a bad generation's bytes are reclaimed"
+    );
+    let state = runtime.state.snapshot();
+    assert!(
+        state.is_bad("v0-bad"),
+        "the bad-list record is the memory and survives the prune"
+    );
+    assert!(layout.generation_dir("v1").is_dir(), "previous kept");
+    assert!(layout.generation_dir("v2").is_dir(), "current kept");
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_prunes_unreferenced_generations_and_sweeps_stale_temp() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime) = boot_seeded(root.path(), "v1", "one").await;
+    let layout = settings.layout();
+    runtime.shutdown().await;
+
+    fs::create_dir_all(layout.generation_dir("orphan").join("bin")).unwrap();
+    fs::create_dir_all(layout.generations_dir().join(".seed-tmp")).unwrap();
+    fs::create_dir_all(layout.staging_dir()).unwrap();
+    fs::write(layout.staging_dir().join("payload.tar.gz"), b"junk").unwrap();
+
+    let rebooted = ShellRuntime::boot(settings.clone()).await.unwrap();
+    assert!(!layout.generation_dir("orphan").exists(), "boot prunes");
+    assert!(
+        !layout.generations_dir().join(".seed-tmp").exists(),
+        "boot sweeps stale temp dirs"
+    );
+    assert!(
+        !layout.staging_dir().exists(),
+        "boot sweeps the staging dir"
+    );
+    assert!(layout.generation_dir("v1").is_dir(), "current survives");
+    rebooted.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn staging_refuses_without_disk_headroom_for_twice_the_tarball() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime) = boot_seeded(root.path(), "v1", "one").await;
+    let layout = settings.layout();
+
+    // A sparse "tarball" so large that 2x it plus 512 MiB cannot fit: the
+    // stage must refuse with the distinct insufficient_disk error before any
+    // unpack work.
+    let packed = pack_payload(root.path(), "v2", "two", false);
+    let sparse = root.path().join("sparse.tar.gz");
+    let file = fs::File::create(&sparse).unwrap();
+    file.set_len(1 << 45).unwrap(); // 32 TiB
+    drop(file);
+    let request: StageRequest = serde_json::from_value(json!({
+        "tarballPath": sparse,
+        "manifestPath": packed.manifest_path,
+    }))
+    .unwrap();
+    let error = stage_payload(&settings, &layout, &runtime.state, &request)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ShellError::InsufficientDisk { .. }),
+        "expected InsufficientDisk, got {error:?}"
+    );
+    assert_eq!(error.code(), "insufficient_disk");
+
+    runtime.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Shell-layer path containment
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_shell_refuses_version_labels_that_could_escape_generations() {
+    use finite_shell::generations::{contained_generation_dir, validate_generation_name};
+
+    let root = tempfile::tempdir().unwrap();
+    let (_settings, runtime) = boot_seeded(root.path(), "v1", "one").await;
+
+    for label in [
+        "../x", "/abs", "a/b", "current", "previous", ".", "..", ".hidden", "",
+    ] {
+        let error = validate_generation_name(label).unwrap_err();
+        assert!(
+            matches!(error, ShellError::UnsafeVersionLabel(_)),
+            "label {label:?} must be refused"
+        );
+        assert_eq!(error.code(), "unsafe_version_label");
+        assert!(
+            contained_generation_dir(&runtime.layout, label).is_err(),
+            "label {label:?} must never resolve to a directory"
+        );
+    }
+    validate_generation_name("v2.1_ok-label").unwrap();
+
+    // A tampered state.json naming an escaping staged label is refused by
+    // the flip engine before any filesystem operation.
+    runtime
+        .state
+        .update(|state| {
+            state.staged = Some(finite_shell::state::StagedGeneration {
+                version_label: "../agent".to_owned(),
+                artifact_id: "payload-evil".to_owned(),
+                tree_digest: "a".repeat(64),
+                tarball_sha256: "b".repeat(64),
+                min_shell_version: "0.1.0".to_owned(),
+                staged_at: "2026-08-06T00:00:00Z".to_owned(),
+            });
+        })
+        .unwrap();
+    let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
+    assert_eq!(response["ok"], json!(false));
+    assert_eq!(response["error"]["code"], json!("unsafe_version_label"));
+
+    runtime.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Honest flip journal: rolled_back means restored; failed_open means not
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_commit_failure_restores_the_previous_generation_and_records_rolled_back() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime) = boot_seeded(root.path(), "v1", "one").await;
+    let layout = settings.layout();
+    wait_for_marker(&settings, "one").await;
+
+    // v2 ships an extra binary whose shim collides with a foreign file: the
+    // transition errors AFTER the symlink commit (at shim rewrite), which
+    // previously got relabelled "rolled_back" without any restoration.
+    let source_v2 = build_payload_source(root.path(), "two", false);
+    fs::write(source_v2.join("bin/v2only"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(
+        source_v2.join("bin/v2only"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let packed_v2 = finite_release::pack_payload_bundle(
+        &finite_release::PayloadPackRequest {
+            source: &source_v2,
+            artifact_id: "payload-v2",
+            version_label: "v2",
+            min_shell_version: "0.1.0",
+            source_git_sha: None,
+            created_at: Some("2026-08-06T00:00:00Z"),
+            out_dir: &root.path().join("packed-v2-collide"),
+        },
+        &test_signing_key(),
+    )
+    .unwrap();
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&packed_v2, false),
+    )
+    .await
+    .unwrap();
+    fs::write(settings.shim_dir.join("v2only"), "foreign binary").unwrap();
+
+    let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
+    assert_eq!(response["ok"], json!(true));
+    let flip = wait_for_flip_outcome(&runtime.state, FlipOutcome::RolledBack).await;
+    assert!(flip.detail.unwrap().contains("transition failed"));
+
+    // rolled_back is honest: the symlinks are back and v1's agentd runs.
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v1")
+    );
+    wait_for_marker(&settings, "one").await;
+    assert!(
+        !runtime.state.snapshot().is_bad("v2"),
+        "only health-gate failures bad-list a version"
+    );
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_restoration_records_failed_open_and_healthz_surfaces_it() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime) = boot_seeded(root.path(), "v1", "one").await;
+    let layout = settings.layout();
+    wait_for_marker(&settings, "one").await;
+
+    let packed_v2 = pack_payload(root.path(), "v2", "two", false);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&packed_v2, false),
+    )
+    .await
+    .unwrap();
+    // Both generations ship `fbrain`; clobbering its shim with a foreign
+    // file makes the v2 shim write fail post-commit AND the v1 restoration
+    // fail the same way: restoration is genuinely impossible.
+    fs::write(settings.shim_dir.join("fbrain"), "foreign binary").unwrap();
+
+    let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
+    assert_eq!(response["ok"], json!(true));
+    let flip = wait_for_flip_outcome(&runtime.state, FlipOutcome::FailedOpen).await;
+    let detail = flip.detail.unwrap();
+    assert!(detail.contains("transition failed"));
+    assert!(detail.contains("restoration failed"));
+
+    // healthz surfaces the failed-open flip prominently: never ready, with
+    // the distinct reason, regardless of any other signal.
+    write_agent_fixture(&layout);
+    let supervision = running_supervision();
+    let payload = health::runtime_health(
+        &settings,
+        &layout,
+        &runtime.state.snapshot(),
+        Some(&supervision),
+    );
+    assert_eq!(payload["ready"], json!(false));
+    assert_eq!(payload["ready_reason"], json!("flip_failed_open"));
+    assert_eq!(payload["last_flip"]["outcome"], json!("failed_open"));
+    let (status, _) = health::respond("/healthz", || payload.clone());
+    assert_eq!(status, 503);
+
+    runtime.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Degraded boot healthz (bootstrap_failed instead of exiting PID 1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corrupt_seed_serves_bootstrap_failed_healthz_instead_of_exiting() {
+    use finite_shell::control::{BootHealth, boot_until_ready};
+
+    let root = tempfile::tempdir().unwrap();
+    let settings = test_settings(root.path());
+    let packed = pack_payload(root.path(), "v1", "one", false);
+    install_seed(&settings, &packed);
+    // Corrupt the seed tarball: first boot's verification fails
+    // deterministically, which used to exit PID 1 into a serve-nothing
+    // restart loop.
+    let seed_tarball = settings.seed_dir.join("payload.tar.gz");
+    let mut bytes = fs::read(&seed_tarball).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x01;
+    fs::write(&seed_tarball, bytes).unwrap();
+
+    let boot_health = BootHealth::new();
+    let boot_task = tokio::spawn(boot_until_ready(
+        settings.clone(),
+        boot_health.clone(),
+        Duration::from_millis(50),
+        Duration::from_millis(200),
+    ));
+
+    // The degraded body appears (and keeps being served while boot retries).
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if boot_health.health_body()["error"] == json!("bootstrap_failed") {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("boot failures must surface as bootstrap_failed");
+    let body = boot_health.health_body();
+    assert_eq!(body["ready"], json!(false));
+    assert_eq!(body["shell_version"], json!(SHELL_VERSION));
+    assert!(
+        body["detail"].as_str().unwrap().contains("verification"),
+        "the sanitized failure detail names the cause: {body}"
+    );
+
+    // Served over real HTTP exactly like the booted shell would serve it.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    {
+        let boot_health = boot_health.clone();
+        tokio::spawn(health::serve_http(listener, move || {
+            boot_health.health_body()
+        }));
+    }
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nhost: test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 503 "),
+        "a bootstrap-failed shell answers 503, not connection-refused: {response}"
+    );
+    assert!(response.contains("bootstrap_failed"));
+
+    boot_task.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Directory anti-replay: the poller's persisted floor
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_poller_refuses_replayed_directories_and_persists_the_floor() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime, routes, base_url) =
+        boot_with_directory(root.path(), Duration::ZERO).await;
+    wait_for_marker(&settings, "one").await;
+    // A same-label re-pack (distinct marker so the fixture tree does not
+    // collide with the seed's): only its version label matters here — the
+    // replayed documents below are refused before any staging.
+    let packed_v1 = pack_payload(root.path(), "v1", "one-replay", false);
+
+    // First tick accepts the fresh document and records the floor.
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::None);
+    let floor = runtime
+        .state
+        .snapshot()
+        .directory_floor
+        .expect("an accepted directory advances the durable floor");
+
+    // A replayed older (but validly signed) document is refused outright.
+    let older = (time::OffsetDateTime::now_utc() - Duration::from_secs(3600))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    set_directory_head_at(&routes, &base_url, "stable", Some(&packed_v1), &older);
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::Error);
+    assert!(
+        record.detail.unwrap().contains("replay refused"),
+        "the refusal is a distinct replay error"
+    );
+    assert_eq!(
+        runtime.state.snapshot().directory_floor.as_deref(),
+        Some(floor.as_str()),
+        "a refused replay must not move the floor"
+    );
+
+    // An equal-timestamp document (Core idempotently re-serving) is fine.
+    set_directory_head_at(&routes, &base_url, "stable", Some(&packed_v1), &floor);
+    let record = runtime.poll_channel_once().await;
+    assert_eq!(record.action, PollAction::None);
+
+    // The floor is durable: a fresh state load sees it.
+    let reloaded = SharedState::load(&settings.layout().state_path()).snapshot();
+    assert_eq!(reloaded.directory_floor.as_deref(), Some(floor.as_str()));
 
     runtime.shutdown().await;
 }

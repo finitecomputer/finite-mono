@@ -55,7 +55,7 @@ base64 = "0.22"
 bech32 = "0.11"
 clap = { version = "4", features = ["derive", "env"] }
 ed25519-dalek = "2"
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 finite-brain-core = { path = "finite-brain/crates/finite-brain-core" }
 finite-brain-server = { path = "finite-brain/crates/finite-brain-server" }
 finite-brain-store = { path = "finite-brain/crates/finite-brain-store" }

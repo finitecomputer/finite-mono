@@ -41,7 +41,13 @@ pub struct BadGeneration {
 pub enum FlipOutcome {
     InProgress,
     Success,
+    /// The transition failed and the previous generation was verifiably
+    /// restored (symlinks back, old agentd running again).
     RolledBack,
+    /// The transition failed AND restoration failed or could not be
+    /// verified: the machine may be running the unverified candidate or
+    /// nothing at all. Surfaced prominently in `/healthz` (ready:false).
+    FailedOpen,
     /// A flip was in progress when the shell died; boot reconciled from the
     /// symlinks.
     Interrupted,
@@ -123,6 +129,11 @@ pub struct ShellState {
     pub agentd_crash_loop: Option<CrashLoopRecord>,
     #[serde(default)]
     pub last_poll: Option<PollRecord>,
+    /// Anti-replay floor: the newest `generated_at` of any service directory
+    /// this shell has acted on. The poller refuses documents strictly older
+    /// than it (equal is fine — an idempotent re-serve is not a replay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_floor: Option<String>,
 }
 
 impl Default for ShellState {
@@ -135,6 +146,7 @@ impl Default for ShellState {
             seed: None,
             agentd_crash_loop: None,
             last_poll: None,
+            directory_floor: None,
         }
     }
 }

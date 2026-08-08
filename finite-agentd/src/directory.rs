@@ -6,8 +6,13 @@
 //! previous cache — a stale verified directory beats no directory. Readers of
 //! the cache (e.g. the Hermes plugin's Python accessor) get base URLs only;
 //! anything that acts on channel heads re-fetches and re-verifies.
+//!
+//! Anti-replay: the verified cache doubles as the daemon's durable
+//! `generated_at` floor. A fetched document strictly older than the cached
+//! one is refused (an old signed capture must never downgrade channel heads),
+//! and every accepted document advances the floor by replacing the cache.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use finite_service_directory::{FetchLimits, ServiceDirectoryV1};
@@ -28,9 +33,7 @@ pub(crate) async fn fetch_verified_directory(
     public_key_hex: &str,
     allow_insecure_url: bool,
 ) -> Result<ServiceDirectoryV1, AgentdError> {
-    let public_key = finite_release::parse_verifying_key_hex(public_key_hex).map_err(|error| {
-        AgentdError::Config(format!("{RELEASE_PUBLIC_KEY_ENV} is invalid: {error}"))
-    })?;
+    let public_key = parse_public_key(public_key_hex)?;
     let limits = FetchLimits {
         allow_insecure_url,
         ..FetchLimits::default()
@@ -38,6 +41,44 @@ pub(crate) async fn fetch_verified_directory(
     finite_service_directory::fetch_and_verify(url, &public_key, &limits)
         .await
         .map_err(|error| AgentdError::ServiceDirectory(error.to_string()))
+}
+
+fn parse_public_key(public_key_hex: &str) -> Result<ed25519_dalek::VerifyingKey, AgentdError> {
+    finite_release::parse_verifying_key_hex(public_key_hex).map_err(|error| {
+        AgentdError::Config(format!("{RELEASE_PUBLIC_KEY_ENV} is invalid: {error}"))
+    })
+}
+
+/// [`fetch_verified_directory`] plus the persisted monotonic floor: when a
+/// cache path is given, a fetched document older than the cached (verified)
+/// one is refused with a distinct replay error, and an accepted document
+/// replaces the cache so the floor survives restarts. An equal `generated_at`
+/// is accepted — Core idempotently re-serving the same document is not a
+/// replay.
+pub(crate) async fn fetch_verified_directory_with_floor(
+    url: &str,
+    public_key_hex: &str,
+    allow_insecure_url: bool,
+    cache_path: Option<&Path>,
+) -> Result<ServiceDirectoryV1, AgentdError> {
+    let directory = fetch_verified_directory(url, public_key_hex, allow_insecure_url).await?;
+    let Some(cache_path) = cache_path else {
+        return Ok(directory);
+    };
+    let public_key = parse_public_key(public_key_hex)?;
+    // An unreadable/stale/tampered cache yields no floor rather than wedging
+    // convergence; the max-age check bounds what a wiped floor can admit.
+    if let Ok(cached) = finite_service_directory::read_cache(cache_path, &public_key) {
+        directory
+            .check_not_older_than(&cached.generated_at)
+            .map_err(|error| AgentdError::ServiceDirectoryReplayed(error.to_string()))?;
+    }
+    if let Err(error) = finite_service_directory::write_cache(&directory, cache_path) {
+        eprintln!(
+            "finite-agentd: service directory cache write failed; the previous cache remains: {error}"
+        );
+    }
+    Ok(directory)
 }
 
 /// Start the daemon's periodic directory refresh when
@@ -59,22 +100,19 @@ pub(crate) fn spawn_directory_refresher(config: &DaemonConfig) {
     let allow_insecure_url = config.allow_insecure_bundle_url;
     tokio::spawn(async move {
         loop {
-            match fetch_verified_directory(&url, &public_key_hex, allow_insecure_url).await {
-                Ok(directory) => {
-                    if let Err(error) =
-                        finite_service_directory::write_cache(&directory, &cache_path)
-                    {
-                        eprintln!(
-                            "finite-agentd: service directory cache write failed; the previous cache remains: {error}"
-                        );
-                    }
-                }
-                Err(error) => {
-                    eprintln!(
-                        "finite-agentd: service directory refresh failed; the previous cache remains: {}",
-                        error.public_message()
-                    );
-                }
+            // The floor-checked fetch also advances the cache on acceptance.
+            if let Err(error) = fetch_verified_directory_with_floor(
+                &url,
+                &public_key_hex,
+                allow_insecure_url,
+                Some(&cache_path),
+            )
+            .await
+            {
+                eprintln!(
+                    "finite-agentd: service directory refresh failed; the previous cache remains: {}",
+                    error.public_message()
+                );
             }
             tokio::time::sleep(jittered_refresh_interval()).await;
         }

@@ -51,8 +51,48 @@ pub enum ReleaseError {
     InvalidKey(String),
     #[error("bundle verification failed: {0}")]
     VerificationFailed(String),
+    #[error(
+        "signature key_id mismatch: the document names key {document_key_id} but verification \
+         uses key {verification_key_id}"
+    )]
+    KeyIdMismatch {
+        document_key_id: String,
+        verification_key_id: String,
+    },
     #[error("URL refused by policy: {0}")]
     UrlPolicy(String),
+}
+
+/// The stable short identifier of a release verifying key: the first 16 hex
+/// characters of sha256 over the raw 32 key bytes. Derivable from the key
+/// alone — no registry needed — and carried in every signed manifest and
+/// directory document so a rotation failure names both keys instead of
+/// failing as an opaque bad signature.
+pub fn verifying_key_id(key: &VerifyingKey) -> String {
+    hex::encode(Sha256::digest(key.to_bytes()))[..16].to_owned()
+}
+
+pub(crate) fn is_lower_hex_key_id(value: &str) -> bool {
+    value.len() == 16
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// Refuse verification early when the signed material names a different key
+/// than the one provided — turning future rotation failures diagnosable.
+pub(crate) fn check_key_id(
+    document_key_id: &str,
+    public_key: &VerifyingKey,
+) -> Result<(), ReleaseError> {
+    let verification_key_id = verifying_key_id(public_key);
+    if document_key_id == verification_key_id {
+        return Ok(());
+    }
+    Err(ReleaseError::KeyIdMismatch {
+        document_key_id: document_key_id.to_owned(),
+        verification_key_id,
+    })
 }
 
 /// Dev-harness-only escape hatch admitting plain-http bundle/directory URLs.
@@ -81,6 +121,9 @@ pub struct SkillsBundleManifestV1 {
     pub tree_digest: String,
     pub tarball_sha256: String,
     pub created_at: String,
+    /// Short id of the signing key ([`verifying_key_id`]); verification
+    /// refuses a manifest naming a different key than the one provided.
+    pub key_id: String,
     /// `ed25519:<base64>` over [`canonical_signing_bytes`].
     pub signature: String,
 }
@@ -115,6 +158,11 @@ impl SkillsBundleManifestV1 {
                     "{field} must be 64 lowercase hex characters"
                 )));
             }
+        }
+        if !is_lower_hex_key_id(&self.key_id) {
+            return Err(ReleaseError::InvalidManifest(
+                "key_id must be 16 lowercase hex characters".to_owned(),
+            ));
         }
         if !self.signature.starts_with(SIGNATURE_PREFIX) {
             return Err(ReleaseError::InvalidManifest(format!(
@@ -218,6 +266,7 @@ pub fn canonical_signing_bytes(manifest: &SkillsBundleManifestV1) -> Result<Vec<
         Value::from(manifest.tarball_sha256.as_str()),
     );
     fields.insert("created_at", Value::from(manifest.created_at.as_str()));
+    fields.insert("key_id", Value::from(manifest.key_id.as_str()));
     Ok(serde_json::to_vec(&fields)?)
 }
 
@@ -377,6 +426,7 @@ pub fn verify_manifest_signature(
     manifest: &SkillsBundleManifestV1,
     public_key: &VerifyingKey,
 ) -> Result<(), ReleaseError> {
+    check_key_id(&manifest.key_id, public_key)?;
     verify_signature_string(
         &canonical_signing_bytes(manifest)?,
         &manifest.signature,
@@ -556,6 +606,7 @@ pub fn pack_skills_bundle(
         tree_digest,
         tarball_sha256,
         created_at,
+        key_id: verifying_key_id(&signing_key.verifying_key()),
         signature: String::new(),
     };
     manifest.signature = signature_for_manifest(&manifest, signing_key)?;
@@ -796,6 +847,7 @@ mod tests {
 
     #[test]
     fn canonical_signing_bytes_sort_keys_and_drop_the_signature() {
+        let key_id = verifying_key_id(&test_signing_key().verifying_key());
         let manifest = SkillsBundleManifestV1 {
             schema: SKILLS_BUNDLE_SCHEMA.to_owned(),
             artifact_id: "skills-test".to_owned(),
@@ -804,17 +856,55 @@ mod tests {
             tree_digest: "1".repeat(64),
             tarball_sha256: "2".repeat(64),
             created_at: "2026-08-06T00:00:00Z".to_owned(),
+            key_id: key_id.clone(),
             signature: "ed25519:ignored".to_owned(),
         };
         let bytes = canonical_signing_bytes(&manifest).unwrap();
         let expected = format!(
             "{{\"artifact_id\":\"skills-test\",\"created_at\":\"2026-08-06T00:00:00Z\",\
+             \"key_id\":\"{key_id}\",\
              \"schema\":\"finite_skills_bundle.v1\",\"source_git_sha\":null,\
              \"tarball_sha256\":\"{}\",\"tree_digest\":\"{}\",\"version_label\":\"v1\"}}",
             "2".repeat(64),
             "1".repeat(64)
         );
         assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_manifest_naming_a_different_key_id_fails_with_both_ids_named() {
+        let out = tempfile::tempdir().unwrap();
+        let packed = pack_fixture(out.path());
+        assert_eq!(
+            packed.manifest.key_id,
+            verifying_key_id(&test_signing_key().verifying_key()),
+            "packing must derive key_id from the signing key"
+        );
+
+        // Verifying against a different key is a distinct key_id mismatch —
+        // not an opaque bad signature — naming both ids.
+        let other_key = SigningKey::from_bytes(&[8_u8; 32]).verifying_key();
+        let error = verify_manifest_signature(&packed.manifest, &other_key).unwrap_err();
+        let ReleaseError::KeyIdMismatch {
+            document_key_id,
+            verification_key_id,
+        } = &error
+        else {
+            panic!("expected KeyIdMismatch, got {error:?}");
+        };
+        assert_eq!(*document_key_id, packed.manifest.key_id);
+        assert_eq!(*verification_key_id, verifying_key_id(&other_key));
+        assert!(error.to_string().contains(document_key_id.as_str()));
+        assert!(error.to_string().contains(verification_key_id.as_str()));
+
+        // A forged key_id (matching the verification key but not the actual
+        // signer) still fails: the field is covered by the signature.
+        let mut forged = packed.manifest.clone();
+        forged.key_id = verifying_key_id(&other_key);
+        assert!(matches!(
+            verify_manifest_signature(&forged, &other_key).unwrap_err(),
+            ReleaseError::VerificationFailed(_)
+        ));
     }
 
     #[test]

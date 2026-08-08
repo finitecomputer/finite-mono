@@ -7,8 +7,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
-use finite_shell::control::{ShellRuntime, ctl_roundtrip};
-use finite_shell::{SHELL_VERSION, ShellError, ShellSettings};
+use finite_shell::control::{BootHealth, boot_until_ready, ctl_roundtrip, read_control_token_near};
+use finite_shell::{SHELL_VERSION, ShellError, ShellSettings, health};
 
 #[derive(Debug, Parser)]
 #[command(name = "finite-shell", version = SHELL_VERSION)]
@@ -92,19 +92,42 @@ fn run() -> Result<i32, ShellError> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let shell = ShellRuntime::boot(settings.clone()).await?;
-        let socket = shell.bind_socket()?;
+        // The HTTP listener binds BEFORE boot: a boot failure (bad seed,
+        // missing release key, unwritable /data) must serve a diagnosable
+        // bootstrap_failed healthz and retry with bounded backoff instead of
+        // exiting PID 1 into a restart loop that serves nothing.
         let http = tokio::net::TcpListener::bind(&settings.http_addr)
             .await
             .map_err(|error| {
                 ShellError::Config(format!("cannot bind {}: {error}", settings.http_addr))
             })?;
-        tokio::spawn(shell.clone().serve_socket(socket));
-        tokio::spawn(shell.clone().serve_http(http));
-        shell.spawn_channel_poller();
+        let boot_health = BootHealth::new();
+        {
+            let boot_health = boot_health.clone();
+            tokio::spawn(health::serve_http(http, move || boot_health.health_body()));
+        }
 
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+        // Boot retries forever (5s..300s backoff), but PID 1 stays
+        // signal-responsive while it does.
+        let shell = tokio::select! {
+            shell = boot_until_ready(
+                settings.clone(),
+                boot_health.clone(),
+                Duration::from_secs(5),
+                Duration::from_secs(300),
+            ) => shell,
+            _ = sigterm.recv() => return Ok(0),
+            result = tokio::signal::ctrl_c() => { result?; return Ok(0); }
+        };
+
+        // The control socket binds only after a successful boot.
+        let socket = shell.bind_socket()?;
+        tokio::spawn(shell.clone().serve_socket(socket));
+        shell.spawn_channel_poller();
+
         tokio::select! {
             _ = sigterm.recv() => {}
             result = tokio::signal::ctrl_c() => { result?; }
@@ -164,7 +187,22 @@ fn ctl(socket: Option<PathBuf>, verb: CtlVerb) -> Result<i32, ShellError> {
         }
     };
 
-    let response = ctl_roundtrip(&socket, &request)?;
+    // The token handshake: prefer the environment (a shell-supervised
+    // caller), fall back to the 0600 token file beside the socket (ctl runs
+    // as root via container exec and reads it directly).
+    let token = std::env::var(finite_shell::CONTROL_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| read_control_token_near(&socket));
+    let with_token = |mut request: Value| {
+        if let (Some(token), Some(object)) = (&token, request.as_object_mut()) {
+            object.insert("token".to_owned(), Value::from(token.clone()));
+        }
+        request
+    };
+
+    let response = ctl_roundtrip(&socket, &with_token(request))?;
     println!("{response}");
     let ok = response.get("ok") == Some(&Value::Bool(true));
     if !ok {
@@ -177,7 +215,7 @@ fn ctl(socket: Option<PathBuf>, verb: CtlVerb) -> Result<i32, ShellError> {
     // Poll status until last_flip resolves.
     loop {
         std::thread::sleep(Duration::from_millis(500));
-        let status = ctl_roundtrip(&socket, &json!({ "verb": "status" }))?;
+        let status = ctl_roundtrip(&socket, &with_token(json!({ "verb": "status" })))?;
         let outcome = status
             .get("state")
             .and_then(|state| state.get("last_flip"))

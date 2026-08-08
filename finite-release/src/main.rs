@@ -227,6 +227,19 @@ fn run(args: Args) -> Result<(), ReleaseError> {
                     "expected schema {SERVICE_DIRECTORY_SCHEMA:?}, found {schema:?}"
                 )));
             }
+            let document_key_id = document
+                .get("key_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ReleaseError::InvalidManifest("document has no key_id field".to_owned())
+                })?;
+            let verification_key_id = finite_release::verifying_key_id(&public_key);
+            if document_key_id != verification_key_id {
+                return Err(ReleaseError::KeyIdMismatch {
+                    document_key_id: document_key_id.to_owned(),
+                    verification_key_id,
+                });
+            }
             verify_document_signature(&document, &public_key)?;
             let services: Vec<&str> = document
                 .get("services")
@@ -295,6 +308,7 @@ fn keygen(out_dir: &Path) -> Result<(), ReleaseError> {
         serde_json::json!({
             "signingKey": key_path,
             "publicKey": public_path,
+            "keyId": finite_release::verifying_key_id(&signing_key.verifying_key()),
         })
     );
     Ok(())

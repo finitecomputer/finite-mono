@@ -108,6 +108,22 @@ impl ShellRuntime {
                     );
                 }
             };
+        // Anti-replay floor: refuse a document strictly older than the
+        // newest one this shell has acted on (durable in state.json), then
+        // advance the floor. Equal is fine — an idempotent re-serve is not a
+        // replay.
+        if let Some(floor) = self.state.snapshot().directory_floor
+            && let Err(error) = directory.check_not_older_than(&floor)
+        {
+            return (
+                None,
+                PollAction::Error,
+                Some(format!("directory replay refused: {error}")),
+            );
+        }
+        let _ = self.state.update(|state| {
+            state.directory_floor = Some(directory.generated_at.clone());
+        });
         let Some(head) = directory.channel_bundle(channel, PAYLOAD_BUNDLE_KIND) else {
             return (
                 None,

@@ -24,11 +24,19 @@ use tokio::net::UnixStream;
 
 use crate::AgentdError;
 use crate::daemon::{DaemonConfig, failure_result, load_agent_identity, success_result};
-use crate::directory::{SERVICE_DIRECTORY_URL_ENV, fetch_verified_directory};
+use crate::directory::{
+    SERVICE_DIRECTORY_CACHE_FILE, SERVICE_DIRECTORY_URL_ENV, fetch_verified_directory_with_floor,
+};
 use crate::ledger::{CommandDecision, Ledger};
 
 pub(crate) const SHELL_SOCKET_ENV: &str = "FINITE_SHELL_SOCKET";
 pub(crate) const DEFAULT_SHELL_SOCKET: &str = "/data/shell/shell.sock";
+/// The shell's per-boot control-socket token, handed to its supervised agentd
+/// via the environment. The daemon forwards it on every shell request and
+/// scrubs it from every child it spawns (`supervisor::spawn_process`): the
+/// LLM-facing process tree must never inherit the credential that authorizes
+/// stage/flip/rollback.
+pub(crate) const SHELL_CONTROL_TOKEN_ENV: &str = "FINITE_SHELL_CONTROL_TOKEN";
 
 pub(crate) const PAYLOAD_STAGE_SCHEMA: &str = "finite.agent.payload.stage.v1";
 pub(crate) const PAYLOAD_SET_CHANNEL_SCHEMA: &str = "finite.agent.payload.set-channel.v1";
@@ -115,6 +123,13 @@ pub(crate) struct PayloadSettings {
     pub release_public_key: Option<String>,
     pub allow_insecure_url: bool,
     pub service_directory_url: Option<String>,
+    /// The daemon's verified directory cache — the durable anti-replay floor
+    /// for channel resolution. `None` disables the floor (tests).
+    pub directory_cache: Option<PathBuf>,
+    /// The shell's per-boot control token (`FINITE_SHELL_CONTROL_TOKEN`),
+    /// attached to every control-socket request. Absent requests are refused
+    /// by a token-enforcing shell.
+    pub control_token: Option<String>,
 }
 
 impl PayloadSettings {
@@ -124,13 +139,27 @@ impl PayloadSettings {
             release_public_key: config.release_public_key.clone(),
             allow_insecure_url: config.allow_insecure_bundle_url,
             service_directory_url: config.service_directory_url.clone(),
+            directory_cache: Some(config.agent_home.join(SERVICE_DIRECTORY_CACHE_FILE)),
+            control_token: config.shell_control_token.clone(),
         }
     }
 }
 
-/// One request/response roundtrip over the shell's control socket. Shell
-/// errors (`{"ok": false, "error": ...}`) become typed command failures.
-async fn shell_roundtrip(socket: &Path, request: &Value) -> Result<Value, AgentdError> {
+/// One request/response roundtrip over the shell's control socket. The
+/// shell's per-boot control token (received via `FINITE_SHELL_CONTROL_TOKEN`,
+/// never forwarded to supervised children) is attached to every request.
+/// Shell errors (`{"ok": false, "error": ...}`) become typed command
+/// failures.
+async fn shell_roundtrip(
+    settings: &PayloadSettings,
+    request: &Value,
+) -> Result<Value, AgentdError> {
+    let socket: &Path = &settings.shell_socket;
+    let mut request = request.clone();
+    if let (Some(token), Some(object)) = (&settings.control_token, request.as_object_mut()) {
+        object.insert("token".to_owned(), Value::from(token.clone()));
+    }
+    let request = &request;
     let stream = UnixStream::connect(socket).await.map_err(|error| {
         AgentdError::ShellUnavailable(format!(
             "shell control socket {} is unavailable: {error}",
@@ -196,9 +225,13 @@ async fn resolve_channel_payload(
             "{SERVICE_DIRECTORY_URL_ENV} is not configured; channel-based payload staging is unavailable"
         ))
     })?;
-    let directory =
-        fetch_verified_directory(directory_url, public_key_hex, settings.allow_insecure_url)
-            .await?;
+    let directory = fetch_verified_directory_with_floor(
+        directory_url,
+        public_key_hex,
+        settings.allow_insecure_url,
+        settings.directory_cache.as_deref(),
+    )
+    .await?;
     let bundle = directory
         .channel_bundle(channel, finite_service_directory::PAYLOAD_BUNDLE_KIND)
         .ok_or_else(|| AgentdError::PayloadChannelHeadMissing(channel.to_owned()))?;
@@ -210,7 +243,7 @@ async fn resolve_channel_payload(
 }
 
 pub(crate) async fn payload_status(settings: &PayloadSettings) -> Result<Value, AgentdError> {
-    let response = shell_roundtrip(&settings.shell_socket, &json!({ "verb": "status" })).await?;
+    let response = shell_roundtrip(settings, &json!({ "verb": "status" })).await?;
     Ok(response_body(response))
 }
 
@@ -234,7 +267,7 @@ pub(crate) async fn payload_stage(
     if request.force {
         stage["force"] = json!(true);
     }
-    let response = shell_roundtrip(&settings.shell_socket, &stage).await?;
+    let response = shell_roundtrip(settings, &stage).await?;
     let mut body = response_body(response);
     if let Some(channel) = channel {
         // Proof the bundle was resolved through the service directory, not
@@ -245,12 +278,12 @@ pub(crate) async fn payload_stage(
 }
 
 pub(crate) async fn payload_flip(settings: &PayloadSettings) -> Result<Value, AgentdError> {
-    let response = shell_roundtrip(&settings.shell_socket, &json!({ "verb": "flip" })).await?;
+    let response = shell_roundtrip(settings, &json!({ "verb": "flip" })).await?;
     Ok(response_body(response))
 }
 
 pub(crate) async fn payload_rollback(settings: &PayloadSettings) -> Result<Value, AgentdError> {
-    let response = shell_roundtrip(&settings.shell_socket, &json!({ "verb": "rollback" })).await?;
+    let response = shell_roundtrip(settings, &json!({ "verb": "rollback" })).await?;
     Ok(response_body(response))
 }
 
@@ -259,7 +292,7 @@ pub(crate) async fn payload_set_channel(
     request: &PayloadSetChannelRequest,
 ) -> Result<Value, AgentdError> {
     let response = shell_roundtrip(
-        &settings.shell_socket,
+        settings,
         &json!({ "verb": "set-channel", "channel": request.channel }),
     )
     .await?;
@@ -396,6 +429,8 @@ mod tests {
             release_public_key: Some(hex::encode(test_signing_key().verifying_key().to_bytes())),
             allow_insecure_url: true,
             service_directory_url: None,
+            directory_cache: None,
+            control_token: None,
         }
     }
 
@@ -614,7 +649,9 @@ mod tests {
         }
         let mut directory = ServiceDirectoryV1 {
             schema: SERVICE_DIRECTORY_SCHEMA.to_owned(),
-            generated_at: "2026-08-06T00:00:00Z".to_owned(),
+            generated_at: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap(),
             services: BTreeMap::from([(
                 "core".to_owned(),
                 ServiceEntryV1 {
@@ -623,6 +660,7 @@ mod tests {
                 },
             )]),
             channels,
+            key_id: String::new(),
             signature: String::new(),
         };
         directory.sign(&test_signing_key()).unwrap();
@@ -677,6 +715,133 @@ mod tests {
             })],
             "the shell must receive explicit URLs, never the channel name"
         );
+    }
+
+    #[tokio::test]
+    async fn a_configured_control_token_rides_on_every_shell_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (socket, received) = fake_shell_socket(
+            dir.path(),
+            vec![
+                json!({ "ok": true, "shellVersion": "0.1.0" }),
+                json!({ "ok": true, "result": "flip_started" }),
+            ],
+        );
+        let mut settings = settings(&socket);
+        settings.control_token = Some("boot-token".to_owned());
+
+        payload_status(&settings).await.unwrap();
+        payload_flip(&settings).await.unwrap();
+
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![
+                json!({ "verb": "status", "token": "boot-token" }),
+                json!({ "verb": "flip", "token": "boot-token" }),
+            ],
+            "every socket request must carry the shell's control token"
+        );
+    }
+
+    /// A signed directory with an explicit generated_at (the replay fixtures
+    /// need control over document age).
+    fn signed_directory_bytes_at(
+        payload_head: Option<(&str, &str)>,
+        generated_at: &str,
+    ) -> Vec<u8> {
+        let mut document: Value =
+            serde_json::from_slice(&signed_directory_bytes(payload_head)).unwrap();
+        document["generated_at"] = json!(generated_at);
+        let object = document.as_object_mut().unwrap();
+        object.remove("signature");
+        let signature =
+            finite_release::sign_document(&Value::Object(object.clone()), &test_signing_key())
+                .unwrap();
+        document["signature"] = json!(signature);
+        serde_json::to_vec(&document).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_replayed_older_directory_is_refused_by_the_persisted_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball_url = "http://release.local/finite-agent-payload-v2.tar.gz";
+        let tarball_sha256 = "b".repeat(64);
+        let now = time::OffsetDateTime::now_utc();
+        let fresh_at = now
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let older_at = (now - std::time::Duration::from_secs(3600))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+
+        // The durable floor: a previously accepted directory in the cache.
+        let cache_path = dir.path().join("service-directory.json");
+        let cached: finite_service_directory::ServiceDirectoryV1 = serde_json::from_slice(
+            &signed_directory_bytes_at(Some((tarball_url, &tarball_sha256)), &fresh_at),
+        )
+        .unwrap();
+        finite_service_directory::write_cache(&cached, &cache_path).unwrap();
+
+        // The server replays a signed capture from an hour before the floor.
+        let directory_base = serve_bytes(vec![(
+            "/api/core/v1/service-directory".to_owned(),
+            signed_directory_bytes_at(Some((tarball_url, &tarball_sha256)), &older_at),
+        )])
+        .await;
+        let (socket, received) = fake_shell_socket(dir.path(), Vec::new());
+        let mut settings = settings(&socket);
+        settings.service_directory_url =
+            Some(format!("{directory_base}/api/core/v1/service-directory"));
+        settings.directory_cache = Some(cache_path.clone());
+
+        let error = payload_stage(&settings, &channel_request("canary"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentdError::ServiceDirectoryReplayed(_)));
+        assert_eq!(error.public_code(), "service_directory_replayed");
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "a replayed directory must never reach the shell"
+        );
+
+        // The floor survives: the cache still carries the newer document.
+        let still_cached =
+            finite_service_directory::read_cache(&cache_path, &test_signing_key().verifying_key())
+                .unwrap();
+        assert_eq!(still_cached.generated_at, fresh_at);
+    }
+
+    #[tokio::test]
+    async fn an_equal_timestamp_directory_is_accepted_and_advances_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball_url = "http://release.local/finite-agent-payload-v2.tar.gz";
+        let tarball_sha256 = "b".repeat(64);
+        let now_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let bytes = signed_directory_bytes_at(Some((tarball_url, &tarball_sha256)), &now_at);
+
+        let cache_path = dir.path().join("service-directory.json");
+        let cached: finite_service_directory::ServiceDirectoryV1 =
+            serde_json::from_slice(&bytes).unwrap();
+        finite_service_directory::write_cache(&cached, &cache_path).unwrap();
+
+        let directory_base =
+            serve_bytes(vec![("/api/core/v1/service-directory".to_owned(), bytes)]).await;
+        let (socket, _received) = fake_shell_socket(
+            dir.path(),
+            vec![json!({ "ok": true, "result": "staged", "versionLabel": "v2" })],
+        );
+        let mut settings = settings(&socket);
+        settings.service_directory_url =
+            Some(format!("{directory_base}/api/core/v1/service-directory"));
+        settings.directory_cache = Some(cache_path);
+
+        // Core idempotently re-serving the same document is not a replay.
+        let result = payload_stage(&settings, &channel_request("canary"))
+            .await
+            .unwrap();
+        assert_eq!(result["result"], json!("staged"));
     }
 
     #[tokio::test]
@@ -740,6 +905,7 @@ mod tests {
             finite_cli: PathBuf::from("/nonexistent"),
             service_directory_url: None,
             shell_socket: shell_socket.to_path_buf(),
+            shell_control_token: None,
         }
     }
 

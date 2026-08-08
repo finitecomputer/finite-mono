@@ -414,6 +414,12 @@ fn startup_report(layout: &DataLayout, recovery_boot_intent_active: bool) -> Opt
 }
 
 /// `runtime_health()` + the shell's new fields.
+///
+/// Beyond the file-derived compat fields, readiness requires the LIVE
+/// supervision truth: files written by dead processes keep looking fresh,
+/// but the shell knows in memory whether agentd is actually running. A dead
+/// or crash-looping agentd forces `ready: false` with a distinct
+/// `ready_reason`, as does a flip whose restoration failed (`failed_open`).
 pub fn runtime_health(
     settings: &ShellSettings,
     layout: &DataLayout,
@@ -463,6 +469,35 @@ pub fn runtime_health(
     payload["agentd_supervision"] = agentd_supervision
         .and_then(|status| serde_json::to_value(status).ok())
         .unwrap_or(Value::Null);
+
+    // Live-supervision readiness gate: the file-derived fields above stay
+    // untouched (they are the compat contract), but `ready` must not be
+    // claimable by fresh-looking files a dead process left behind.
+    let mut deny_ready = |reason: &str| {
+        payload["ready"] = Value::from(false);
+        if payload.get("ready_reason").is_none() {
+            payload["ready_reason"] = Value::from(reason.to_owned());
+        }
+    };
+    // The most alarming condition wins the reason field: a flip that failed
+    // open means the machine may be running an unverified candidate.
+    if shell_state
+        .last_flip
+        .as_ref()
+        .is_some_and(|flip| flip.outcome == crate::state::FlipOutcome::FailedOpen)
+    {
+        deny_ready("flip_failed_open");
+    }
+    match agentd_supervision {
+        None => deny_ready("agentd_not_running"),
+        Some(supervision) => {
+            if supervision.crash_looping {
+                deny_ready("agentd_crash_looping");
+            } else if supervision.state != "running" {
+                deny_ready("agentd_not_running");
+            }
+        }
+    }
     payload
 }
 
@@ -493,22 +528,19 @@ pub fn respond(path: &str, body_for_health: impl FnOnce() -> Value) -> (u16, Val
     }
 }
 
-/// Serve HTTP on `listener` until the process exits. `snapshot` produces the
-/// current health inputs per request.
+/// Serve HTTP on `listener` until the process exits. `health_body` produces
+/// the current health body per request — the booted runtime's full body, or
+/// a degraded bootstrapping/bootstrap_failed shape before boot succeeds.
 pub async fn serve_http(
     listener: TcpListener,
-    settings: ShellSettings,
-    layout: DataLayout,
-    snapshot: impl Fn() -> (ShellState, Option<AgentdSupervisionStatus>) + Send + Sync + 'static,
+    health_body: impl Fn() -> Value + Send + Sync + 'static,
 ) {
-    let snapshot = std::sync::Arc::new(snapshot);
+    let health_body = std::sync::Arc::new(health_body);
     loop {
         let Ok((mut stream, _)) = listener.accept().await else {
             return;
         };
-        let settings = settings.clone();
-        let layout = layout.clone();
-        let snapshot = std::sync::Arc::clone(&snapshot);
+        let health_body = std::sync::Arc::clone(&health_body);
         tokio::spawn(async move {
             let mut buffer = vec![0_u8; 8192];
             let read = stream.read(&mut buffer).await.unwrap_or(0);
@@ -521,10 +553,7 @@ pub async fn serve_http(
                 .next()
                 .unwrap_or("/")
                 .to_owned();
-            let (status, payload) = respond(&path, || {
-                let (state, supervision) = snapshot();
-                runtime_health(&settings, &layout, &state, supervision.as_ref())
-            });
+            let (status, payload) = respond(&path, || health_body());
             // serde_json's default map is sorted, matching Python's
             // json.dumps(..., sort_keys=True).
             let body = payload.to_string();

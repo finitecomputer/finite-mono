@@ -268,6 +268,10 @@ fn spawn_process(spec: &ProcessSpec) -> Result<Child, AgentdError> {
     command
         .args(&spec.args)
         .envs(&spec.environment)
+        // The shell's control-socket token authorizes stage/flip/rollback;
+        // the daemon keeps it for its own forwarding but the (LLM-facing)
+        // supervised tree must never inherit it.
+        .env_remove(crate::payload::SHELL_CONTROL_TOKEN_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -276,11 +280,14 @@ fn spawn_process(spec: &ProcessSpec) -> Result<Child, AgentdError> {
 }
 
 async fn terminate_child(child: &mut Child) {
-    if let Some(pid) = child.id() {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .await;
+    // In-process syscall: the runtime image ships no `kill` binary (only the
+    // sh builtin), so shelling out silently signalled nothing — the child
+    // never saw SIGTERM and was SIGKILLed at the timeout, which is exactly
+    // the ungraceful-drain shape flips must avoid.
+    if let Some(pid) = child.id()
+        && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
+    {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
     }
     if tokio::time::timeout(Duration::from_secs(10), child.wait())
         .await
@@ -350,6 +357,83 @@ mod tests {
             args: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
             environment: BTreeMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_delivers_a_real_sigterm_that_children_can_trap_and_drain_on() {
+        // The graceful path agentd's own SIGTERM handler routes through:
+        // supervisor.shutdown() must deliver SIGTERM in-process (no `kill`
+        // binary exists in the runtime image) and give the child its bounded
+        // window to finish work before any SIGKILL.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("drained");
+        let script = dir.path().join("trapper.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntrap 'echo drained > {}; exit 0' TERM\nsleep 30 & wait\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let handle = start_supervisor(
+            ProcessSpec {
+                name: "finitechat",
+                program: script.clone(),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+            },
+            Some(sleeping_process("health")),
+            sleeping_process("hermes"),
+        );
+        wait_for_running(&handle, "finitechat").await;
+        // Let the script arm its trap before signalling.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        handle.shutdown().await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the child must observe SIGTERM and drain, not be SIGKILLed");
+    }
+
+    #[tokio::test]
+    async fn the_shell_control_token_is_scrubbed_from_supervised_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = dir.path().join("seen-token");
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            crate::payload::SHELL_CONTROL_TOKEN_ENV.to_owned(),
+            "secret-token".to_owned(),
+        );
+        let spec = ProcessSpec {
+            name: "probe",
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".to_owned(),
+                format!(
+                    "printf '%s' \"${{{}:-absent}}\" > {}",
+                    crate::payload::SHELL_CONTROL_TOKEN_ENV,
+                    seen.display()
+                ),
+            ],
+            environment,
+        };
+        let mut child = spawn_process(&spec).unwrap();
+        child.wait().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "absent",
+            "the control token must never reach a supervised child's environment"
+        );
     }
 
     async fn wait_for_running(handle: &SupervisorHandle, name: &str) -> ProcessStatus {
