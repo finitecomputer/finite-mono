@@ -41,6 +41,7 @@ not been exercised yet are marked `TODO:` with what must be learned.
 | [finite-private-limiter-mono-switch.md](finite-private-limiter-mono-switch.md) | Planned-downtime switch from the legacy limiter image to a mono-built limiter plus upstream GLM 5.2 v0.0.17 |
 | [finite-private-deepseek-v4-flash-0731-cutover.md](finite-private-deepseek-v4-flash-0731-cutover.md) | Planned one-hour Finite Private model cutover from GLM 5.2 to DeepSeek-V4-Flash-0731, including a pinned vLLM runtime, DSpark fallback, progressive concurrency through 256, and measured rollback |
 | [finite-private-deepseek-v4-flash-0731-retry-2.md](finite-private-deepseek-v4-flash-0731-retry-2.md) | Prepared second attempt using vLLM 0.25.1 plus the upstream 0731 reasoning fix, target-only DP8+EP, a 35-minute H200 soak, quality parity gates, and the measured GLM rollback |
+| [finite-private-deepseek-v4-flash-0731-scheduler-promotion.md](finite-private-deepseek-v4-flash-0731-scheduler-promotion.md) | Bounded promotion from the running DeepSeek 64/512 scheduler baseline to the isolated-lab 128/2048 winner, with exact identity, verification, and immediate DeepSeek rollback |
 | [phala-confidential-runner.md](phala-confidential-runner.md) | Dark, separately fenced Phala worker and API-only preflight/lifecycle/recovery/inventory/cost procedures; no CLI or delete path |
 | [break-glass.md](break-glass.md) | Getting on each box, logs, restarts (lat1 NixOS, lat2 runner, smoke rollback source, clawland legacy) |
 
