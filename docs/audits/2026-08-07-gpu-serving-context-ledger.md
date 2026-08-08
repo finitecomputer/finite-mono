@@ -9,7 +9,7 @@
 - Context branch: `context/gpu-lab-20260807-handoff`
 - Human owner: Austin
 - Started: 2026-08-07
-- Current status: review
+- Current status: complete
 
 ## Context frame
 
@@ -67,8 +67,10 @@
 
 ## PR and handoff
 
-- PR URL: pending
-- Commit SHA: pending
+- PR URL: https://github.com/finitecomputer/finite-mono/pull/461
+- Patch commits:
+  - `d100f053ec021a677f77e15b71633b766c1db399`
+  - `925e34a6882947581fa467237cfa838d4ec808a6`
 - Review notes: fixed stale GLM rollback/index language, compatibility-matrix
   release discipline, objective performance bounds, and full rollback gates.
 - Production/release handoff: follow the scheduler-promotion runbook only after
@@ -78,4 +80,4 @@
 
 ## Open gates
 
-- Complete fixed-point review, commit, push, and open the documentation-only PR.
+- None. Production/release work remains separately authorized and parked.
