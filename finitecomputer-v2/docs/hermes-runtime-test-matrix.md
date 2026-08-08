@@ -39,9 +39,11 @@ Every rung must exercise the same product shape:
   Product Release telemetry only; acknowledgements never become lifecycle,
   feature, credential, chat, or skills commands;
 - Hermes must be real, not an echo handler;
-- the Finite Private model at every rung is `glm-5-2`, served behind the
+- the canonical Finite Private model at every rung is
+  `deepseek-v4-flash-0731`, served behind the
   historical `https://kimi-k2-6.finite.containers.tinfoil.dev/v1` limiter URL
-  (docs/service-dependencies.md, Finite Private Routing Debt);
+  (`glm-5-2` remains a mixed-version compatibility alias; see
+  docs/service-dependencies.md, Finite Private Routing Debt);
 - acceptance is a human-usable conversation in the canonical BoxOne-derived
   dashboard UI. Automated rungs keep their normal test artifacts, while the
   blessed internal production canary does not require a bespoke evidence
@@ -258,7 +260,8 @@ Acceptance:
 - agent can save a memory, restart, and demonstrate that memory survived;
 - agent can publish a small site with `fsite`;
 - Finite Private request succeeds (runtime-scoped key provisioned by Core —
-  no operator key override — against the deployed limiter serving `glm-5-2`);
+  no operator key override — against the deployed limiter serving canonical
+  `deepseek-v4-flash-0731`);
 - Phala restart does not require re-pairing the user;
 - the unchanged fresh-agent skills seed, restart non-overwrite, and
   user-override suite passes; attestation identifies the canonical image and

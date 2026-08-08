@@ -59,10 +59,15 @@ CONTRACT: dict[str, Any] = {
     "runner": {
         "service": "finite-saas-runner.service",
         "timer": "finite-saas-runner.timer",
+        "shared_environment_file": "/etc/finite/runner-shared.env",
         "environment_file": "/etc/finite/runner.env",
         "namespace": "finite",
         "drain_variable": "FC_RUNNER_DRAIN",
         "artifact_variable": "FC_RUNNER_RUNTIME_ARTIFACT_ID",
+        "base_url_variable": "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
+        "model_variable": "FC_RUNNER_FINITE_PRIVATE_MODEL",
+        "expected_base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+        "expected_model": "deepseek-v4-flash-0731",
     },
     "recovery": {
         "snapshot_root": "/data/recovery-snapshots/hosted-web-chat",
@@ -488,14 +493,22 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
             raw["errors"].append(str(error))
 
     runner = CONTRACT["runner"]
-    try:
-        raw["runner_environment"] = read_environment_values(
-            Path(runner["environment_file"]),
-            {runner["drain_variable"], runner["artifact_variable"]},
-        )
-    except CollectionError as error:
-        raw["runner_environment"] = {}
-        raw["errors"].append(str(error))
+    runner_keys = {
+        runner["drain_variable"],
+        runner["artifact_variable"],
+        runner["base_url_variable"],
+        runner["model_variable"],
+    }
+    raw["runner_environment"] = {}
+    # Match systemd EnvironmentFile ordering: the operator file loads last and
+    # may deliberately override the Nix-rendered shared role.
+    for path_key in ("shared_environment_file", "environment_file"):
+        try:
+            raw["runner_environment"].update(
+                read_environment_values(Path(runner[path_key]), runner_keys)
+            )
+        except CollectionError as error:
+            raw["errors"].append(str(error))
     return raw
 
 
@@ -1039,7 +1052,33 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
         pin_status = "unknown"
     else:
         pin_status = "green" if pin == target_id else "red"
-    statuses.extend([timer_status, drain_status, pin_status])
+    finite_private_base_url = runner_env.get(runner_contract["base_url_variable"])
+    if finite_private_base_url is None:
+        finite_private_base_url_status = "unknown"
+    else:
+        finite_private_base_url_status = (
+            "green"
+            if finite_private_base_url == runner_contract["expected_base_url"]
+            else "red"
+        )
+    finite_private_model = runner_env.get(runner_contract["model_variable"])
+    if finite_private_model is None:
+        finite_private_model_status = "unknown"
+    else:
+        finite_private_model_status = (
+            "green"
+            if finite_private_model == runner_contract["expected_model"]
+            else "red"
+        )
+    statuses.extend(
+        [
+            timer_status,
+            drain_status,
+            pin_status,
+            finite_private_base_url_status,
+            finite_private_model_status,
+        ]
+    )
     runner = {
         "timer_unit": runner_contract["timer"],
         "timer_status": timer_status,
@@ -1048,6 +1087,10 @@ def build_host_health(raw: dict[str, Any] | None, target_id: str | None) -> dict
         "artifact_pin": pin,
         "target_artifact_id": target_id,
         "pin_status": pin_status,
+        "finite_private_base_url": finite_private_base_url,
+        "finite_private_base_url_status": finite_private_base_url_status,
+        "finite_private_model": finite_private_model,
+        "finite_private_model_status": finite_private_model_status,
     }
     return {
         "status": combine_status(statuses),
@@ -1359,6 +1402,12 @@ def render_human(report: dict[str, Any]) -> str:
             f"  runner: timer {badge(runner['timer_status'])}; drain={runner['drain'] or 'unknown'} "
             f"{badge(runner['drain_status'])}; pin={runner['artifact_pin'] or 'unknown'} "
             f"{badge(runner['pin_status'])}"
+        )
+        lines.append(
+            f"    Finite Private: model={runner['finite_private_model'] or 'unknown'} "
+            f"{badge(runner['finite_private_model_status'])}; "
+            f"route={runner['finite_private_base_url'] or 'unknown'} "
+            f"{badge(runner['finite_private_base_url_status'])}"
         )
     else:
         lines.append(f"  {health.get('error', 'unavailable')}")

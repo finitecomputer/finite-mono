@@ -36,6 +36,10 @@ PER_HOST_KEYS = {
 # The shared default whose hand-set drift halted a rollout; pinned by the
 # shared module and asserted here.
 SHARED_STOP_TIMEOUT = "180"
+CANONICAL_FINITE_PRIVATE_BASE_URL = (
+    "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+)
+CANONICAL_FINITE_PRIVATE_MODEL = "deepseek-v4-flash-0731"
 
 # systemd.services.finite-saas-runner.environment key that is legitimately
 # per-host (loopback Authority on the Core host, overlay proxy on a remote
@@ -79,6 +83,21 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
                 f"{host}: FC_RUNNER_KATA_STOP_TIMEOUT_SECS is "
                 f"{envs[host].get('FC_RUNNER_KATA_STOP_TIMEOUT_SECS')!r}, "
                 f"expected the shared {SHARED_STOP_TIMEOUT!r}"
+            )
+        if (
+            envs[host].get("FC_RUNNER_FINITE_PRIVATE_BASE_URL")
+            != CANONICAL_FINITE_PRIVATE_BASE_URL
+        ):
+            raise SystemExit(
+                f"{host}: Finite Private base URL is not the historical "
+                "compatibility route"
+            )
+        if (
+            envs[host].get("FC_RUNNER_FINITE_PRIVATE_MODEL")
+            != CANONICAL_FINITE_PRIVATE_MODEL
+        ):
+            raise SystemExit(
+                f"{host}: Finite Private model is not canonical DeepSeek"
             )
 
     for host in others:

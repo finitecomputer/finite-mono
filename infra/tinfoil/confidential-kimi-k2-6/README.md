@@ -1,4 +1,27 @@
-# Finite Private next measured config
+# Finite Private serving candidates
+
+## DeepSeek V4 Flash 0731 production candidate
+
+`tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml` preserves the
+best configuration measured on an isolated eight-H200 Tinfoil host on
+2026-08-07. It uses DP8+EP, FP8 KV cache, a 393,216-token service ceiling, and
+the measured scheduler winner of 128 sequences and 2,048 batched tokens.
+
+DeepSeek is the canonical model name. The served `glm-5-2` name remains only as
+a mixed-version compatibility alias. The current `kimi-k2-6` directory,
+container name, and generated hostname are historical infrastructure identities
+and must not be changed as part of the scheduler rollout.
+
+Exact performance, context, protocol, and soak evidence is recorded in
+[`2026-08-07-deepseek-v4-eight-h200-optimization.md`](../../../docs/research/2026-08-07-deepseek-v4-eight-h200-optimization.md).
+The guarded production procedure is in
+[`finite-private-deepseek-production-update.md`](../../runbooks/finite-private-deepseek-production-update.md).
+
+The candidate retains the measured Tinfoil MPK and immutable runtime image
+digest. Passing its repository contract does not authorize a satellite
+release, Tinfoil relaunch, container replacement, or DNS change.
+
+## Existing GLM/limiter candidate
 
 `tinfoil-config.candidate.yml` is the reviewed source for the next update to
 the public `finitecomputer/confidential-kimi-k2-6` satellite. It is staged in

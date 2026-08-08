@@ -84,6 +84,20 @@ class FiniteStatusTests(unittest.TestCase):
             self.assertIn(f"Lat1 Straggler Agent {index:02d}", output)
         for index in range(1, 22):
             self.assertIn(f"Lat3 Straggler Agent {index:02d}", output)
+        self.assertIn("model=deepseek-v4-flash-0731 [GREEN]", output)
+
+    def test_runner_glm_override_is_red(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["host_health"]["runner_environment"][
+            "FC_RUNNER_FINITE_PRIVATE_MODEL"
+        ] = "glm-5-2"
+        now = finite_status.parse_time(raw["now"])
+        self.assertIsNotNone(now)
+        report = finite_status.build_report(raw, now)
+        runner = report["sections"]["host_health"]["runner"]
+        self.assertEqual(runner["finite_private_model"], "glm-5-2")
+        self.assertEqual(runner["finite_private_model_status"], "red")
+        self.assertEqual(report["sections"]["host_health"]["status"], "red")
 
     def test_json_has_four_sections_and_red_exit(self) -> None:
         result = subprocess.run(

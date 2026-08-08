@@ -24,13 +24,17 @@ service into one repo.
 
 DeepSeek V4 Flash 0731 is currently deployed behind the historical
 `https://kimi-k2-6.finite.containers.tinfoil.dev/v1` limiter URL. Keep that URL
-as the runtime default until the limiter has a renamed DeepSeek route and the
-issued Finite Private token population has a recorded rollout. Do not "clean
-up" the URL name in v2 defaults as a cosmetic change.
+as the runtime default until the stable `inference.finite.computer` route is
+attached and the issued Finite Private Runtime population has a recorded
+rollout. The future container identity is `finite-private`, not another model
+name. Do not "clean up" the URL in v2 defaults as a cosmetic change.
 The domain name is historical only: the endpoint now serves model
 `deepseek-v4-flash-0731`, which is the runner's
 `DEFAULT_FINITE_PRIVATE_MODEL`. The server retains `glm-5-2` as a compatibility
 alias while older Agent Runtime images drain.
+
+The staged route/container procedure is
+[`infra/runbooks/finite-private-routing-migration.md`](../../infra/runbooks/finite-private-routing-migration.md).
 
 ## Core Continuity Boundary
 

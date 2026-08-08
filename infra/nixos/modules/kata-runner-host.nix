@@ -55,7 +55,9 @@ let
     FC_RUNNER_KATA_RETIREMENT_ENABLED = "false";
 
     FC_RUNNER_FINITE_PRIVATE_BASE_URL = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1";
-    FC_RUNNER_FINITE_PRIVATE_MODEL = "glm-5-2";
+    # The hostname is a historical compatibility route. DeepSeek is the
+    # product model; glm-5-2 remains a server-side mixed-version alias only.
+    FC_RUNNER_FINITE_PRIVATE_MODEL = "deepseek-v4-flash-0731";
 
     FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS = "300";
     FC_RUNNER_RUNTIME_READY_INTERVAL_MS = "2000";
