@@ -513,8 +513,18 @@ mod tests {
     /// supervised agentd's exit status stays with tokio's `Child::wait`.
     /// Linux-only: it relies on `PR_SET_CHILD_SUBREAPER` and `/proc` to
     /// stand in for being PID 1.
+    ///
+    /// `#[ignore]` because it mutates a process-GLOBAL attribute (the child
+    /// subreaper) and reaps arbitrary zombie children of the test process —
+    /// under cargo's default parallel execution it races sibling tests that
+    /// spawn their own children, stealing their exits. Run it in isolation:
+    /// `cargo test -p finite-shell -- --ignored --test-threads=1`. The
+    /// authoritative proof of the reaper is the brain-product-matrix (CI),
+    /// where finite-shell is the real PID 1 and the exact zombie-daemon
+    /// scenario this simulates occurs and passes.
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    #[ignore = "process-global subreaper; races parallel tests — see doc, proven by the matrix"]
     async fn an_adopted_zombie_is_reaped_but_the_supervised_agentd_is_not_stolen() {
         use rustix::process::{Pid, Signal, kill_process, test_kill_process};
 
