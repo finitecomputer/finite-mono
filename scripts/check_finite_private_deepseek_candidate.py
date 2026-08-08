@@ -21,7 +21,7 @@ VLLM_IMAGE_PATTERN = re.compile(
 )
 LIMITER_IMAGE = (
     'image: "ghcr.io/finitecomputer/finite-private-limiter:'
-    '2026-07-02.glm52.health.1@sha256:'
+    "2026-07-02.glm52.health.1@sha256:"
     'f977b238439ff4caa3f416bf1ec8f16ed383640d7417262d26ed4388c8624d5c"'
 )
 MPK_PATTERN = re.compile(
@@ -48,8 +48,7 @@ def _validate_one(text: str, *, release_ready: bool) -> list[str]:
         '"--tool-call-parser",\n        "deepseek_v4"',
         '"--enable-auto-tool-choice"',
         '"--reasoning-parser",\n        "deepseek_v4"',
-        '"--default-chat-template-kwargs",\n'
-        '        \'{"enable_thinking":true}\'',
+        '"--default-chat-template-kwargs",\n        \'{"enable_thinking":true}\'',
         '"--enable-prompt-tokens-details"',
         '"--max-model-len",\n        "393216"',
         '"--max-num-seqs",\n        "128"',
@@ -88,16 +87,21 @@ def _validate_one(text: str, *, release_ready: bool) -> list[str]:
         '"--speculative-config"',
         "dspark",
         "vllm/vllm-openai:v0.26.0",
+        'FINITE_PRIVATE_MODEL: "glm-5-2"',
     ):
         if forbidden in text:
-            violations.append(f"forbidden carried-forward or unsupported flag: {forbidden}")
+            violations.append(
+                f"forbidden carried-forward or unsupported flag: {forbidden}"
+            )
 
     has_measured_image = VLLM_IMAGE_PATTERN.search(text) is not None
     has_image_placeholder = VLLM_IMAGE_PLACEHOLDER in text
     if release_ready and not has_measured_image:
         violations.append("retry candidate lacks a measured DeepSeek vLLM image digest")
     elif not release_ready and not (has_measured_image or has_image_placeholder):
-        violations.append("retry candidate has neither a measured image nor the prep placeholder")
+        violations.append(
+            "retry candidate has neither a measured image nor the prep placeholder"
+        )
 
     mpk_match = MPK_PATTERN.search(text)
     model_path_match = re.search(r'"/tinfoil/mpk/mpk-([0-9a-f]{64})"', text)
@@ -107,11 +111,15 @@ def _validate_one(text: str, *, release_ready: bool) -> list[str]:
     )
     if mpk_match and model_path_match:
         if mpk_match.group("root") != model_path_match.group(1):
-            violations.append("model mount path does not match the modelwrap MPK root hash")
+            violations.append(
+                "model mount path does not match the modelwrap MPK root hash"
+            )
     elif release_ready:
         violations.append("Tinfoil modelwrap MPK/root hash is not release-ready")
     elif not has_placeholders:
-        violations.append("candidate has neither a valid modelwrap MPK nor both prep placeholders")
+        violations.append(
+            "candidate has neither a valid modelwrap MPK nor both prep placeholders"
+        )
 
     return violations
 

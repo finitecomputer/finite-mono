@@ -15,7 +15,7 @@ and must not be changed as part of the scheduler rollout.
 Exact performance, context, protocol, and soak evidence is recorded in
 [`2026-08-07-deepseek-v4-eight-h200-optimization.md`](../../../docs/research/2026-08-07-deepseek-v4-eight-h200-optimization.md).
 The guarded production procedure is in
-[`finite-private-deepseek-v4-flash-0731-retry-2.md`](../../runbooks/finite-private-deepseek-v4-flash-0731-retry-2.md).
+[`finite-private-deepseek-production-update.md`](../../runbooks/finite-private-deepseek-production-update.md).
 
 The candidate retains the measured Tinfoil MPK and immutable runtime image
 digest. Passing its repository contract does not authorize a satellite

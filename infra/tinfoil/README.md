@@ -9,11 +9,14 @@ multiple enclaves cannot share this repo.
 Mono's job is to produce and pin the satellites' inputs; the satellites' job
 is to be measurable.
 
+The current model/container/alias map and retired lab state are recorded in
+[`model-inventory.md`](model-inventory.md).
+
 ## The satellites
 
 | Repo | Enclave | Inputs pinned from mono |
 |---|---|---|
-| `finitecomputer/confidential-kimi-k2-6` | Finite Private inference (glm-5-2 vLLM, 8×GPU) + finite-private-limiter shim (:8002) | Legacy image today. The staged v0.0.17 + mono-limiter candidate is under `infra/tinfoil/confidential-kimi-k2-6/`; its limiter digest remains an intentional release blocker until built from the exact merged mono SHA. |
+| `finitecomputer/confidential-kimi-k2-6` | Finite Private inference (DeepSeek V4 Flash 0731, 8×H200) + finite-private-limiter shim (:8002) | The repo/container name is historical compatibility identity. Production serves canonical `deepseek-v4-flash-0731` plus the `glm-5-2` mixed-version alias. The measured 128/2048 scheduler candidate and guarded update runbook live under `infra/tinfoil/confidential-kimi-k2-6/`. |
 | `finitecomputer/finite-searxng-tinfoil` | Token-gated SearXNG | Config/proxy sources under `finite-search/tinfoil/searxng-public/` in this repo (that dir mirrors the satellite's content, including its release workflows). |
 | `finitecomputer/tinfoil-agent-runtime-canary` | Agent runtime canary | The same `ghcr.io/finitecomputer/agent-runtime@sha256:...` digest proved and published by the canonical mono workflows; no Hermes-only rebuild. |
 
