@@ -99,6 +99,82 @@ This does not pass or replace the canonical real-chat acceptance. It only
 skips the three inference reply assertions; the Hosted Web Device must still
 connect, and all Brain/Apple assertions still run.
 
+The skills release channel has its own focused variant that needs no model
+turns. After the runtime is healthy it publishes a signed skills bundle
+carrying a marker skill through `devfinity publish-skills`, drives the exact
+`agent.skills.sync` path in-guest with `finite-agentd skills-sync --channel
+canary` over `container exec` (the agent resolves the bundle itself from
+Core's signed service directory), asserts convergence plus the verified
+`/data/agent/service-directory.json` cache, and proves a tampered tarball is
+refused through the explicit-URL form with the applied baseline intact:
+
+```sh
+DEVFINITY_SKILLS_SYNC_SMOKE=1 \
+  FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=devfinity-skills-smoke-unused \
+  just dev saas-smoke
+```
+
+`devfinity publish-skills [--source <dir>] [--version-label <v>]` also works
+standalone against a running stack: it packs `finite-skills/skills` (or
+`--source`) with the run's release key from `<run>/release-keys/`, hosts the
+tarball+manifest from the `skills-releases` static process, registers a
+promoted `skills_bundle` Core artifact, points the canary channel at it, and
+prints the bundle JSON.
+
+The payload-generation mechanism (finite-shell, ADR 0006) has its own focused
+variant, also without model turns. After the runtime is healthy on its seed
+generation it publishes the same payload content as `devfinity-v2` through
+`devfinity publish-payload`, stages it in-guest with `finite-agentd
+payload-stage --channel canary` (the agent resolves the `payload_bundle` head
+from the signed directory), flips with `finite-shell ctl flip --wait`,
+asserts the new `payload_version` with an unchanged Agent Principal and a
+fully working agentd (one skills-channel sync through the flipped payload),
+rolls back with `ctl rollback --wait`, and finally proves a broken payload
+(its `finite-agentd` exits 1) fails the health gate, auto-rolls back to the
+seed, and lands on the bad list:
+
+```sh
+DEVFINITY_PAYLOAD_FLIP_SMOKE=1 \
+  FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=devfinity-payload-smoke-unused \
+  just dev saas-smoke
+```
+
+`devfinity publish-payload [--source <dir>] [--version-label <v>]` also works
+standalone against a running stack: it extracts the UNSIGNED payload rootfs
+from the runtime image build (`build_runtime_image.py --emit-payload`, warm
+cache) or takes an explicit `--source` tree, packs and signs it with the
+run's release key, hosts it from the same `skills-releases` static process,
+registers a promoted `payload_bundle` Core artifact, points the canary
+channel at it, and prints the bundle JSON (including `payloadRootfs`, which
+the smoke copies to craft its broken payload).
+
+Autonomous convergence (the plan's M4 acceptance, "the local upgrade
+simulator") is a third focused variant. It moves the agent to canary with one
+`finite-shell ctl set-channel canary`, publishes `devfinity-v2`, and then
+drives NOTHING in-guest: the shell's channel poller must stage and flip on
+its own (asserted from the host via `/healthz`: `payload_version`,
+`last_poll`, `last_flip`, unchanged Agent Principal). It then asserts Core's
+fleet view — the runner forwards each runtime's `shell_version`,
+`payload_version`, and `channel` from `/healthz` to Core, and
+`cargo run -p finite-saas-core -- payload-convergence` must show the runtime
+fence `"converged"` — publishes a broken `devfinity-v3-broken`, waits for the
+unattended health-gate rollback + bad-listing, and finally proves the gen
+fence's N−1 rule for real: with v3-broken as the canary head and v2 as its
+recorded previous head, the runtime still fences `"converged"`:
+
+```sh
+DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE=1 \
+  FC_RUNNER_FINITE_PRIVATE_API_KEY_OVERRIDE=devfinity-payload-smoke-unused \
+  just dev saas-smoke
+```
+
+The poll cadence is variant-controlled: devfinity plumbs
+`FINITE_SHELL_POLL_INTERVAL_SECS` into agent containers from
+`DEVFINITY_SHELL_POLL_INTERVAL_SECS`, defaulting to `0` (poller off) for
+every other run — so the flip/skills variants' manual stage/flip can never
+race the poller — and to `5` when `DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE=1`.
+Production shells default to a 900-second jittered interval.
+
 The complete Greenfield Brain setup/deletion matrix is a separate disposable
 gate:
 

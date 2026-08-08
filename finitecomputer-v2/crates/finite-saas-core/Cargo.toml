@@ -8,7 +8,10 @@ anyhow = "1.0"
 axum = "0.8"
 clap = { version = "4.5", features = ["derive"] }
 deadpool-postgres = "0.14"
+ed25519-dalek = { workspace = true }
 finite-core = { path = "../finite-core" }
+finite-release = { workspace = true }
+finite-service-directory = { workspace = true }
 futures-util = "0.3"
 getrandom = "0.2"
 jsonwebtoken = "9.3"

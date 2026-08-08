@@ -23,22 +23,24 @@ use crate::{
     FinitePrivateUsageDecision, FinitePrivateUsageNotice, FinitePrivateUsageStatus,
     HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, Project, ProjectImportCandidate, ProjectMembershipRole,
+    LinkVerifiedUserInput, PayloadConvergenceChannelHead, PayloadConvergenceReport,
+    PayloadConvergenceRuntime, Project, ProjectImportCandidate, ProjectMembershipRole,
     ProviderOperationEnvelope, ProviderOperationTransition, ProviderOperationTransitionRecord,
     ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
     ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
     ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
-    RegisterAgentCreationRuntimeInput, RelayEventsOutput, RelayHeartbeat,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RetryRuntimeControlRequestInput,
-    RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
-    RuntimeArtifact, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
+    RecordRuntimePayloadReportInput, RegisterAgentCreationRuntimeInput, RelayEventsOutput,
+    RelayHeartbeat, ReleaseChannelHead, ReleaseChannelName, RenewRuntimeControlRequestInput,
+    RequestAgentCreationInput, RequestAgentCreationResult, RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
+    RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeArtifactKind, RuntimeBootIntent,
+    RuntimeCapabilitiesEnvelope, RuntimeControlExpectedBinding, RuntimeControlKind,
+    RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePayloadStatus,
     RuntimePlacement, RuntimeRelayCredential, RuntimeRelocationEnvelope, RuntimeRelocationV1,
     RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
-    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus,
+    RuntimeSpecIdentity, RuntimeStatusSnapshot, RuntimeSummaryStatus, SetReleaseChannelHeadInput,
     SettleFinitePrivateReservationInput, SettleFinitePrivateReservationResult,
     SourceHostRelayEndpoint, StoreErrorDetail, SyncStripeSubscriptionInput,
     UnrecoverableRuntimeArchiveReceipt, UpsertRuntimeArtifactInput,
@@ -48,25 +50,26 @@ use crate::{
     finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
     merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
-    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
-    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_bad_versions,
+    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
+    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
     parse_finite_private_api_key_status, parse_finite_private_grant_status,
     parse_finite_private_reservation_status, parse_hosting_tier, parse_import_candidate_status,
     parse_runner_class, parse_runtime_artifact_kind, parse_runtime_control_kind,
     parse_runtime_control_request_status, parse_runtime_resource_class,
-    parse_runtime_summary_status, parse_time, parse_user_link_status,
-    project_room_membership_id_for, project_runtime_link_id_for,
+    parse_runtime_summary_status, parse_time, parse_user_link_status, payload_convergence_fence,
+    payload_report_is_stale, project_room_membership_id_for, project_runtime_link_id_for,
     provider_operation_allows_generic_failure, provider_operation_at_runtime_boundary,
     runtime_artifact_material_matches, runtime_artifact_reference_is_immutable_oci,
     runtime_operation_spec_v1, runtime_relay_token_hash, runtime_spec_secret_references,
     runtime_spec_v1, runtime_upgrade_contact_endpoint,
     runtime_upgrade_prelease_rejection_is_terminal, should_replace_stripe_subscription,
     source_import_key, trim_to_option, valid_agent_npub, valid_sha256_hex,
-    validate_runtime_capabilities_artifact_policy, validate_runtime_capabilities_policy,
-    validate_runtime_relocation_registration, validate_runtime_retirement_snapshot_receipt,
-    validate_runtime_spec_binding, validate_runtime_spec_environment,
+    validate_runtime_artifact_content, validate_runtime_capabilities_artifact_policy,
+    validate_runtime_capabilities_policy, validate_runtime_relocation_registration,
+    validate_runtime_retirement_snapshot_receipt, validate_runtime_spec_binding,
+    validate_runtime_spec_environment,
 };
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use serde::de::DeserializeOwned;
@@ -547,6 +550,125 @@ impl CoreStore {
             Self::Memory(store) => store.upsert_runtime_artifact(input).await,
             Self::Postgres(store) => store.upsert_runtime_artifact(input).await,
         }
+    }
+
+    pub async fn set_release_channel_head(
+        &self,
+        input: SetReleaseChannelHeadInput,
+    ) -> CoreResult<ReleaseChannelHead> {
+        match self {
+            Self::Memory(store) => store.set_release_channel_head(input).await,
+            Self::Postgres(store) => store.set_release_channel_head(input).await,
+        }
+    }
+
+    pub async fn release_channel_head(
+        &self,
+        channel: ReleaseChannelName,
+        kind: RuntimeArtifactKind,
+    ) -> CoreResult<Option<ReleaseChannelHead>> {
+        match self {
+            Self::Memory(store) => store.release_channel_head(channel, kind).await,
+            Self::Postgres(store) => store.release_channel_head(channel, kind).await,
+        }
+    }
+
+    pub async fn list_release_channel_heads(&self) -> CoreResult<Vec<ReleaseChannelHead>> {
+        match self {
+            Self::Memory(store) => store.list_release_channel_heads().await,
+            Self::Postgres(store) => store.list_release_channel_heads().await,
+        }
+    }
+
+    pub async fn record_runtime_payload_report(
+        &self,
+        input: RecordRuntimePayloadReportInput,
+    ) -> CoreResult<RuntimePayloadStatus> {
+        match self {
+            Self::Memory(store) => store.record_runtime_payload_report(input).await,
+            Self::Postgres(store) => store.record_runtime_payload_report(input).await,
+        }
+    }
+
+    pub async fn list_runtime_payload_statuses(&self) -> CoreResult<Vec<RuntimePayloadStatus>> {
+        match self {
+            Self::Memory(store) => store.list_runtime_payload_statuses().await,
+            Self::Postgres(store) => store.list_runtime_payload_statuses().await,
+        }
+    }
+
+    /// The fleet view behind `payload-convergence` (CLI) and the admin
+    /// endpoint: every runtime's reported payload with its gen-fence verdict,
+    /// against every channel head resolved (with its previous) to version
+    /// labels. Composed from store primitives so both backends share one
+    /// assembly.
+    pub async fn payload_convergence_report(&self) -> CoreResult<PayloadConvergenceReport> {
+        let now = current_time_iso()?;
+        let statuses = self.list_runtime_payload_statuses().await?;
+        let heads = self.list_release_channel_heads().await?;
+        let mut channels = Vec::with_capacity(heads.len());
+        // channel name -> (head version label, previous version label), for
+        // payload bundles only: the fence is about payload generations.
+        let mut payload_versions: BTreeMap<String, (Option<String>, Option<String>)> =
+            BTreeMap::new();
+        for head in heads {
+            let version_label = match self.runtime_artifact(&head.artifact_id).await? {
+                Some(artifact) => Some(artifact.version_label),
+                None => None,
+            };
+            let previous_version_label = match &head.previous_artifact_id {
+                Some(previous_id) => self
+                    .runtime_artifact(previous_id)
+                    .await?
+                    .map(|artifact| artifact.version_label),
+                None => None,
+            };
+            if head.artifact_kind == RuntimeArtifactKind::PayloadBundle {
+                payload_versions.insert(
+                    head.channel.as_str().to_owned(),
+                    (version_label.clone(), previous_version_label.clone()),
+                );
+            }
+            channels.push(PayloadConvergenceChannelHead {
+                channel: head.channel.as_str().to_owned(),
+                artifact_kind: head.artifact_kind.as_str().to_owned(),
+                artifact_id: head.artifact_id,
+                version_label,
+                previous_artifact_id: head.previous_artifact_id,
+                previous_version_label,
+                updated_at: head.updated_at,
+            });
+        }
+        let runtimes = statuses
+            .into_iter()
+            .map(|status| {
+                let (head_version, previous_version) = status
+                    .channel
+                    .as_deref()
+                    .and_then(|channel| payload_versions.get(channel))
+                    .map(|(head, previous)| (head.as_deref(), previous.as_deref()))
+                    .unwrap_or((None, None));
+                let fence = payload_convergence_fence(
+                    status.payload_version_label.as_deref(),
+                    status.channel.as_deref(),
+                    head_version,
+                    previous_version,
+                    payload_report_is_stale(status.reported_at.as_deref(), &now),
+                );
+                PayloadConvergenceRuntime {
+                    runtime_id: status.runtime_id,
+                    project_id: status.project_id,
+                    payload_version_label: status.payload_version_label,
+                    payload_digest: status.payload_digest,
+                    shell_version: status.shell_version,
+                    channel: status.channel,
+                    bad_versions: status.bad_versions,
+                    reported_at: status.reported_at,
+                    fence,
+                }
+            })
+            .collect();
+        Ok(PayloadConvergenceReport { runtimes, channels })
     }
 
     pub async fn approve_finite_private_grant(
@@ -1244,6 +1366,41 @@ impl MemoryCoreStore {
     ) -> CoreResult<RuntimeArtifact> {
         let mut state = self.state.lock().await;
         state.upsert_runtime_artifact(input)
+    }
+
+    pub async fn set_release_channel_head(
+        &self,
+        input: SetReleaseChannelHeadInput,
+    ) -> CoreResult<ReleaseChannelHead> {
+        let mut state = self.state.lock().await;
+        state.set_release_channel_head(input)
+    }
+
+    pub async fn release_channel_head(
+        &self,
+        channel: ReleaseChannelName,
+        kind: RuntimeArtifactKind,
+    ) -> CoreResult<Option<ReleaseChannelHead>> {
+        let state = self.state.lock().await;
+        Ok(state.release_channel_head(channel, kind))
+    }
+
+    pub async fn list_release_channel_heads(&self) -> CoreResult<Vec<ReleaseChannelHead>> {
+        let state = self.state.lock().await;
+        Ok(state.list_release_channel_heads())
+    }
+
+    pub async fn record_runtime_payload_report(
+        &self,
+        input: RecordRuntimePayloadReportInput,
+    ) -> CoreResult<RuntimePayloadStatus> {
+        let mut state = self.state.lock().await;
+        state.record_runtime_payload_report(input)
+    }
+
+    pub async fn list_runtime_payload_statuses(&self) -> CoreResult<Vec<RuntimePayloadStatus>> {
+        let state = self.state.lock().await;
+        Ok(state.list_runtime_payload_statuses())
     }
 
     pub async fn approve_finite_private_grant(
@@ -2117,6 +2274,104 @@ impl PostgresCoreStore {
         let artifact = postgres_upsert_runtime_artifact(&*tx, input).await?;
         tx.commit().await.map_err(store_error)?;
         Ok(artifact)
+    }
+
+    pub async fn set_release_channel_head(
+        &self,
+        input: SetReleaseChannelHeadInput,
+    ) -> CoreResult<ReleaseChannelHead> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let head = postgres_set_release_channel_head(&*tx, input).await?;
+        tx.commit().await.map_err(store_error)?;
+        Ok(head)
+    }
+
+    pub async fn release_channel_head(
+        &self,
+        channel: ReleaseChannelName,
+        kind: RuntimeArtifactKind,
+    ) -> CoreResult<Option<ReleaseChannelHead>> {
+        let client = self.connection().await?;
+        let row = client
+            .query_opt(
+                "SELECT channel, artifact_kind, artifact_id, previous_artifact_id,
+                        updated_at::text
+                 FROM release_channel_heads
+                 WHERE channel = $1 AND artifact_kind = $2",
+                &[&channel.as_str(), &kind.as_str()],
+            )
+            .await
+            .map_err(store_error)?;
+        row.map(|row| release_channel_head_from_row(&row))
+            .transpose()
+    }
+
+    pub async fn list_release_channel_heads(&self) -> CoreResult<Vec<ReleaseChannelHead>> {
+        let client = self.connection().await?;
+        let rows = client
+            .query(
+                "SELECT channel, artifact_kind, artifact_id, previous_artifact_id,
+                        updated_at::text
+                 FROM release_channel_heads
+                 ORDER BY channel, artifact_kind",
+                &[],
+            )
+            .await
+            .map_err(store_error)?;
+        rows.iter().map(release_channel_head_from_row).collect()
+    }
+
+    pub async fn record_runtime_payload_report(
+        &self,
+        input: RecordRuntimePayloadReportInput,
+    ) -> CoreResult<RuntimePayloadStatus> {
+        let now = input.now.clone().unwrap_or(current_time_iso()?);
+        let bad_versions =
+            normalize_bad_versions(input.bad_versions.clone()).map(serde_json::Value::from);
+        let client = self.connection().await?;
+        let row = client
+            .query_opt(
+                "UPDATE agent_runtimes SET
+                   payload_version_label = $3,
+                   payload_digest = $4,
+                   shell_version = $5,
+                   release_channel = $6,
+                   payload_bad_versions = $7,
+                   payload_reported_at = $8::text::timestamptz
+                 WHERE source_host_id = $1 AND source_machine_id = $2
+                 RETURNING id, project_id, payload_version_label, payload_digest, shell_version,
+                           release_channel, payload_bad_versions, to_char(payload_reported_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS payload_reported_at",
+                &[
+                    &input.source_host_id,
+                    &input.source_machine_id,
+                    &trim_to_option(input.payload_version_label.as_deref()),
+                    &trim_to_option(input.payload_digest.as_deref()),
+                    &trim_to_option(input.shell_version.as_deref()),
+                    &trim_to_option(input.release_channel.as_deref()),
+                    &bad_versions,
+                    &now,
+                ],
+            )
+            .await
+            .map_err(store_error)?
+            .ok_or(CoreError::ProjectRuntimeNotFound)?;
+        runtime_payload_status_from_row(&row)
+    }
+
+    pub async fn list_runtime_payload_statuses(&self) -> CoreResult<Vec<RuntimePayloadStatus>> {
+        let client = self.connection().await?;
+        let rows = client
+            .query(
+                "SELECT id, project_id, payload_version_label, payload_digest, shell_version,
+                        release_channel, payload_bad_versions, to_char(payload_reported_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS payload_reported_at
+                 FROM agent_runtimes
+                 ORDER BY id",
+                &[],
+            )
+            .await
+            .map_err(store_error)?;
+        rows.iter().map(runtime_payload_status_from_row).collect()
     }
 
     pub async fn approve_finite_private_grant(
@@ -4626,6 +4881,7 @@ fn runtime_artifact_from_row(row: &Row) -> CoreResult<RuntimeArtifact> {
         state_schema_version: row.get("state_schema_version"),
         base_image: row.get("base_image"),
         recover_known_good_chat: row.get("recover_known_good_chat"),
+        content_sha256: row.get("content_sha256"),
         created_at: row.get("created_at"),
         promoted_at: row.get("promoted_at"),
         retired_at: row.get("retired_at"),
@@ -4848,7 +5104,7 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, content_sha256,
                     created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts WHERE id = $1",
             &[&artifact_id],
@@ -4867,7 +5123,7 @@ where
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, content_sha256,
                     created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts
              WHERE promoted_at IS NOT NULL AND retired_at IS NULL AND kind = 'oci_image'
@@ -7973,6 +8229,107 @@ where
     })
 }
 
+fn release_channel_head_from_row(row: &Row) -> CoreResult<ReleaseChannelHead> {
+    let channel: String = row.get("channel");
+    let kind: String = row.get("artifact_kind");
+    Ok(ReleaseChannelHead {
+        channel: channel
+            .parse()
+            .map_err(|error: String| CoreError::Store(error))?,
+        artifact_kind: parse_runtime_artifact_kind(&kind)
+            .ok_or_else(|| CoreError::Store(format!("invalid runtime artifact kind {kind}")))?,
+        artifact_id: row.get("artifact_id"),
+        previous_artifact_id: row.get("previous_artifact_id"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+fn runtime_payload_status_from_row(row: &Row) -> CoreResult<RuntimePayloadStatus> {
+    let bad_versions: Option<serde_json::Value> = row.get("payload_bad_versions");
+    Ok(RuntimePayloadStatus {
+        runtime_id: row.get("id"),
+        project_id: row.get("project_id"),
+        payload_version_label: row.get("payload_version_label"),
+        payload_digest: row.get("payload_digest"),
+        shell_version: row.get("shell_version"),
+        channel: row.get("release_channel"),
+        bad_versions: bad_versions.map(|value| {
+            value
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }),
+        reported_at: row.get("payload_reported_at"),
+    })
+}
+
+async fn postgres_set_release_channel_head<C>(
+    client: &C,
+    input: SetReleaseChannelHeadInput,
+) -> CoreResult<ReleaseChannelHead>
+where
+    C: GenericClient + Sync,
+{
+    let now = input.now.unwrap_or(current_time_iso()?);
+    let artifact_id =
+        trim_to_option(Some(&input.artifact_id)).ok_or(CoreError::MissingRuntimeArtifactId)?;
+    let artifact = client
+        .query_opt(
+            "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
+                    hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
+                    base_image, recover_known_good_chat, content_sha256,
+                    created_at::text, promoted_at::text, retired_at::text
+             FROM runtime_artifacts WHERE id = $1 FOR SHARE",
+            &[&artifact_id],
+        )
+        .await
+        .map_err(store_error)?
+        .map(|row| runtime_artifact_from_row(&row))
+        .transpose()?
+        .ok_or(CoreError::RuntimeArtifactNotFound)?;
+    if artifact.kind != input.artifact_kind {
+        return Err(CoreError::ReleaseChannelArtifactKindMismatch);
+    }
+    if artifact.promoted_at.is_none() {
+        return Err(CoreError::RuntimeArtifactNotPromoted);
+    }
+    if artifact.retired_at.is_some() {
+        return Err(CoreError::RuntimeArtifactRetired);
+    }
+    // A repoint remembers the outgoing head as `previous` (the gen fence's
+    // N-1); a no-op repoint to the same artifact changes nothing.
+    let row = client
+        .query_one(
+            "INSERT INTO release_channel_heads (channel, artifact_kind, artifact_id, updated_at)
+             VALUES ($1, $2, $3, $4::text::timestamptz)
+             ON CONFLICT (channel, artifact_kind) DO UPDATE SET
+               previous_artifact_id = CASE
+                 WHEN release_channel_heads.artifact_id = EXCLUDED.artifact_id
+                 THEN release_channel_heads.previous_artifact_id
+                 ELSE release_channel_heads.artifact_id
+               END,
+               artifact_id = EXCLUDED.artifact_id,
+               updated_at = EXCLUDED.updated_at
+             RETURNING channel, artifact_kind, artifact_id, previous_artifact_id,
+                       updated_at::text",
+            &[
+                &input.channel.as_str(),
+                &input.artifact_kind.as_str(),
+                &artifact_id,
+                &now,
+            ],
+        )
+        .await
+        .map_err(store_error)?;
+    release_channel_head_from_row(&row)
+}
+
 async fn postgres_upsert_runtime_artifact<C>(
     client: &C,
     input: UpsertRuntimeArtifactInput,
@@ -7988,13 +8345,15 @@ where
         .ok_or(CoreError::MissingRuntimeArtifactVersionLabel)?;
     let state_schema_version = trim_to_option(Some(&input.state_schema_version))
         .ok_or(CoreError::MissingRuntimeArtifactStateSchemaVersion)?;
+    let content_sha256 = trim_to_option(input.content_sha256.as_deref());
+    validate_runtime_artifact_content(input.kind, &reference, content_sha256.as_deref())?;
     // Lock the existing row (if any) so created_at/promoted_at/retired_at are
     // preserved deterministically under concurrent upserts.
     let existing = client
         .query_opt(
             "SELECT id, kind, reference, version_label, source_git_sha, finitec_version,
                     hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                    base_image, recover_known_good_chat,
+                    base_image, recover_known_good_chat, content_sha256,
                     created_at::text, promoted_at::text, retired_at::text
              FROM runtime_artifacts WHERE id = $1 FOR UPDATE",
             &[&id],
@@ -8030,6 +8389,7 @@ where
         state_schema_version,
         base_image: trim_to_option(input.base_image.as_deref()),
         recover_known_good_chat: input.recover_known_good_chat,
+        content_sha256,
         created_at,
         promoted_at,
         retired_at: existing_retired_at,
@@ -8056,11 +8416,12 @@ where
             "INSERT INTO runtime_artifacts (
                id, kind, reference, version_label, source_git_sha, finitec_version,
                hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-               base_image, recover_known_good_chat, created_at, promoted_at, retired_at
+               base_image, recover_known_good_chat, content_sha256, created_at,
+               promoted_at, retired_at
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                     $11, $12::text::timestamptz, $13::text::timestamptz,
-                     $14::text::timestamptz)
+                     $11, $12, $13::text::timestamptz, $14::text::timestamptz,
+                     $15::text::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                kind = EXCLUDED.kind,
                reference = EXCLUDED.reference,
@@ -8072,11 +8433,12 @@ where
                state_schema_version = EXCLUDED.state_schema_version,
                base_image = EXCLUDED.base_image,
                recover_known_good_chat = EXCLUDED.recover_known_good_chat,
+               content_sha256 = EXCLUDED.content_sha256,
                promoted_at = EXCLUDED.promoted_at,
                retired_at = EXCLUDED.retired_at
              RETURNING id, kind, reference, version_label, source_git_sha, finitec_version,
                        hermes_source_ref, finite_platform_plugin_ref, state_schema_version,
-                       base_image, recover_known_good_chat,
+                       base_image, recover_known_good_chat, content_sha256,
                        created_at::text, promoted_at::text, retired_at::text",
             &[
                 &artifact.id,
@@ -8090,6 +8452,7 @@ where
                 &artifact.state_schema_version,
                 &artifact.base_image,
                 &artifact.recover_known_good_chat,
+                &artifact.content_sha256,
                 &artifact.created_at,
                 &artifact.promoted_at,
                 &artifact.retired_at,
@@ -10026,6 +10389,7 @@ mod tests {
                 state_schema_version: "state-v1".to_string(),
                 base_image: Some("python:3.11-trixie".to_string()),
                 recover_known_good_chat: false,
+                content_sha256: None,
                 promoted: true,
                 now: Some("2000-01-01T00:00:00Z".to_string()),
             })
@@ -10914,6 +11278,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -11791,6 +12156,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: Some("2026-05-28T12:00:00Z".to_string()),
                 })
@@ -12172,6 +12538,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -12480,6 +12847,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -12610,6 +12978,7 @@ mod tests {
                 state_schema_version: "state-v1".to_string(),
                 base_image: None,
                 recover_known_good_chat: false,
+                content_sha256: None,
                 promoted: true,
                 now: None,
             };
@@ -12760,6 +13129,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: None,
                     recover_known_good_chat: true,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -13832,6 +14202,7 @@ mod tests {
                     state_schema_version: "state-v1".to_string(),
                     base_image: Some("python:3.11-trixie".to_string()),
                     recover_known_good_chat: false,
+                    content_sha256: None,
                     promoted: true,
                     now: None,
                 })
@@ -14189,6 +14560,278 @@ mod tests {
     /// `billing_overview` is a READ: it must perform NO writes. We run it inside a
     /// genuinely read-only transaction and additionally assert the billing row's
     /// `updated_at` is byte-for-byte unchanged across the call.
+    #[tokio::test]
+    async fn postgres_release_channel_head_roundtrip_with_bundle_artifact() {
+        with_isolated_postgres(|store| async move {
+            let digest = "b".repeat(64);
+            let bundle = store
+                .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                    id: "finite-skills-2026-08-06.1".to_string(),
+                    kind: RuntimeArtifactKind::SkillsBundle,
+                    reference:
+                        "https://releases.finite.computer/skills/finite-skills-2026-08-06.1.tar.zst"
+                            .to_string(),
+                    version_label: "2026-08-06.1".to_string(),
+                    source_git_sha: Some("git-skills".to_string()),
+                    finitec_version: None,
+                    hermes_source_ref: None,
+                    finite_platform_plugin_ref: None,
+                    state_schema_version: "finite-skills-tree-v1".to_string(),
+                    base_image: None,
+                    recover_known_good_chat: false,
+                    content_sha256: Some(digest.clone()),
+                    promoted: true,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(bundle.content_sha256.as_deref(), Some(digest.as_str()));
+
+            assert!(
+                store
+                    .release_channel_head(
+                        ReleaseChannelName::Canary,
+                        RuntimeArtifactKind::SkillsBundle
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let head = store
+                .set_release_channel_head(SetReleaseChannelHeadInput {
+                    channel: ReleaseChannelName::Canary,
+                    artifact_kind: RuntimeArtifactKind::SkillsBundle,
+                    artifact_id: bundle.id.clone(),
+                    now: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(head.artifact_id, bundle.id);
+            let read_back = store
+                .release_channel_head(
+                    ReleaseChannelName::Canary,
+                    RuntimeArtifactKind::SkillsBundle,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(read_back.artifact_id, bundle.id);
+            assert_eq!(read_back.artifact_kind, RuntimeArtifactKind::SkillsBundle);
+            let listed = store.list_release_channel_heads().await.unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0], read_back);
+
+            // Kind mismatch and unknown artifacts refuse on the SQL path too.
+            assert!(matches!(
+                store
+                    .set_release_channel_head(SetReleaseChannelHeadInput {
+                        channel: ReleaseChannelName::Canary,
+                        artifact_kind: RuntimeArtifactKind::PayloadBundle,
+                        artifact_id: bundle.id.clone(),
+                        now: None,
+                    })
+                    .await
+                    .unwrap_err(),
+                CoreError::ReleaseChannelArtifactKindMismatch
+            ));
+
+            // The bundle never becomes launch material: the launch path's
+            // latest-artifact selection must still ignore it.
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let latest = select_latest_launchable_runtime_artifact(&raw)
+                .await
+                .unwrap();
+            assert_eq!(latest.kind, RuntimeArtifactKind::OciImage);
+            drop(raw);
+            connection.abort();
+        })
+        .await;
+    }
+
+    /// Payload telemetry + the gen fence on the SQL path (payload-generations
+    /// plan M4): repoints remember the previous head, runner reports land on
+    /// the host-owned runtime identity, and the convergence report resolves
+    /// version labels through `runtime_artifacts`.
+    #[tokio::test]
+    async fn postgres_payload_reports_previous_heads_and_the_convergence_report() {
+        with_isolated_postgres(|store| async move {
+            let payload_bundle = |id: &str, label: &str| UpsertRuntimeArtifactInput {
+                id: id.to_string(),
+                kind: RuntimeArtifactKind::PayloadBundle,
+                reference: format!("https://releases.finite.computer/payloads/{id}.tar.gz"),
+                version_label: label.to_string(),
+                source_git_sha: None,
+                finitec_version: None,
+                hermes_source_ref: None,
+                finite_platform_plugin_ref: None,
+                state_schema_version: "finite-payload-tree-v1".to_string(),
+                base_image: None,
+                recover_known_good_chat: false,
+                content_sha256: Some("c".repeat(64)),
+                promoted: true,
+                now: None,
+            };
+            for (id, label) in [("pv1", "v1"), ("pv2", "v2"), ("pv3", "v3")] {
+                store
+                    .upsert_runtime_artifact(payload_bundle(id, label))
+                    .await
+                    .unwrap();
+            }
+
+            // First head: no previous. Repoint: previous = the old head.
+            // No-op repoint: previous unchanged.
+            let set_head = |artifact_id: &str| {
+                let artifact_id = artifact_id.to_string();
+                let store = &store;
+                async move {
+                    store
+                        .set_release_channel_head(SetReleaseChannelHeadInput {
+                            channel: ReleaseChannelName::Canary,
+                            artifact_kind: RuntimeArtifactKind::PayloadBundle,
+                            artifact_id,
+                            now: None,
+                        })
+                        .await
+                        .unwrap()
+                }
+            };
+            assert_eq!(set_head("pv1").await.previous_artifact_id, None);
+            let repointed = set_head("pv2").await;
+            assert_eq!(repointed.previous_artifact_id.as_deref(), Some("pv1"));
+            let noop = set_head("pv2").await;
+            assert_eq!(noop.previous_artifact_id.as_deref(), Some("pv1"));
+
+            // A provisioned runtime the runner can report for.
+            let (raw, connection) = tokio_postgres::connect(&store.url, NoTls).await.unwrap();
+            let connection = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            raw.batch_execute(
+                r#"
+                INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+                VALUES ('fence-user', 'fence@finite.vip', 'linked', 'workos-fence', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+                VALUES ('fence-org', 'fence-user', 'Fence', 'grandfathered', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                INSERT INTO projects (id, customer_org_id, owner_user_id, display_name, created_at, updated_at)
+                VALUES ('fence-project', 'fence-org', 'fence-user', 'Fence', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+                INSERT INTO agent_runtimes (
+                  id, project_id, source_host_id, source_machine_id, source_import_key,
+                  host_facts, created_at, updated_at
+                ) VALUES (
+                  'fence-runtime', 'fence-project', 'fence-host', 'fence-machine',
+                  'fence-host/fence-machine', '{}'::jsonb,
+                  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                );
+                "#,
+            )
+            .await
+            .unwrap();
+            drop(raw);
+            connection.abort();
+
+            // The wrong host never matches another host's machine id.
+            assert!(matches!(
+                store
+                    .record_runtime_payload_report(RecordRuntimePayloadReportInput {
+                        source_host_id: "other-host".to_string(),
+                        source_machine_id: "fence-machine".to_string(),
+                        payload_version_label: Some("v2".to_string()),
+                        payload_digest: None,
+                        shell_version: Some("0.1.0".to_string()),
+                        release_channel: Some("canary".to_string()),
+                        bad_versions: None,
+                        now: None,
+                    })
+                    .await
+                    .unwrap_err(),
+                CoreError::ProjectRuntimeNotFound
+            ));
+
+            let report_payload = |label: Option<&str>| {
+                let label = label.map(str::to_string);
+                let store = &store;
+                async move {
+                    store
+                        .record_runtime_payload_report(RecordRuntimePayloadReportInput {
+                            source_host_id: "fence-host".to_string(),
+                            source_machine_id: "fence-machine".to_string(),
+                            payload_version_label: label.clone(),
+                            payload_digest: label
+                                .is_some()
+                                .then(|| format!(" {} ", "d".repeat(64))),
+                            shell_version: label.is_some().then(|| "0.1.0".to_string()),
+                            release_channel: label.is_some().then(|| "canary".to_string()),
+                            bad_versions: label
+                                .is_some()
+                                .then(|| vec![" v7-broken ".to_string(), " ".to_string()]),
+                            now: None,
+                        })
+                        .await
+                        .unwrap()
+                }
+            };
+
+            // On the head: converged. Digest and bad list roundtrip trimmed
+            // through the TEXT/JSONB columns.
+            let status = report_payload(Some("v2")).await;
+            assert_eq!(status.runtime_id, "fence-runtime");
+            assert_eq!(status.project_id, "fence-project");
+            assert_eq!(status.channel.as_deref(), Some("canary"));
+            assert_eq!(status.payload_digest, Some("d".repeat(64)));
+            assert_eq!(status.bad_versions, Some(vec!["v7-broken".to_string()]));
+            let report = store.payload_convergence_report().await.unwrap();
+            assert_eq!(report.runtimes.len(), 1);
+            assert_eq!(
+                report.runtimes[0].fence,
+                crate::PayloadConvergenceFence::Converged
+            );
+            assert_eq!(report.runtimes[0].payload_digest, Some("d".repeat(64)));
+            assert_eq!(
+                report.runtimes[0].bad_versions,
+                Some(vec!["v7-broken".to_string()])
+            );
+
+            // Head moves to v3: v2 is now the previous head — still converged
+            // (this is the mid-rollout / N-1 case the fence exists for).
+            set_head("pv3").await;
+            let report = store.payload_convergence_report().await.unwrap();
+            assert_eq!(
+                report.runtimes[0].fence,
+                crate::PayloadConvergenceFence::Converged
+            );
+            let canary = report
+                .channels
+                .iter()
+                .find(|head| head.channel == "canary" && head.artifact_kind == "payload_bundle")
+                .unwrap();
+            assert_eq!(canary.version_label.as_deref(), Some("v3"));
+            assert_eq!(canary.previous_artifact_id.as_deref(), Some("pv2"));
+            assert_eq!(canary.previous_version_label.as_deref(), Some("v2"));
+
+            // Behind both heads: repair. No telemetry at all: unknown.
+            report_payload(Some("v1")).await;
+            let report = store.payload_convergence_report().await.unwrap();
+            assert_eq!(
+                report.runtimes[0].fence,
+                crate::PayloadConvergenceFence::Repair
+            );
+            report_payload(None).await;
+            let report = store.payload_convergence_report().await.unwrap();
+            assert_eq!(
+                report.runtimes[0].fence,
+                crate::PayloadConvergenceFence::Unknown
+            );
+            assert_eq!(report.runtimes[0].payload_version_label, None);
+            assert_eq!(report.runtimes[0].payload_digest, None);
+            assert_eq!(report.runtimes[0].bad_versions, None);
+            assert!(report.runtimes[0].reported_at.is_some());
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn postgres_billing_overview_performs_no_writes() {
         with_isolated_postgres(|store| async move {

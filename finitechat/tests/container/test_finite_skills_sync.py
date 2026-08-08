@@ -50,7 +50,11 @@ def write_valid_bundle(root: Path, marker: str) -> None:
 
 
 def run_sync(
-    source: Path, agent_home: Path, *, failpoint: str | None = None
+    source: Path,
+    agent_home: Path,
+    *,
+    failpoint: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         **os.environ,
@@ -61,7 +65,7 @@ def run_sync(
     if failpoint is not None:
         env["FINITE_SKILLS_SYNC_TEST_FAILPOINT"] = failpoint
     return subprocess.run(
-        ["python3", str(FINITE), "skills", "sync"],
+        ["python3", str(FINITE), "skills", "sync", *(extra_args or [])],
         env=env,
         capture_output=True,
         text=True,
@@ -152,6 +156,81 @@ class FiniteSkillsSyncTest(unittest.TestCase):
                 ).read_text(encoding="utf-8"),
             )
 
+    def test_explicit_source_argument_wins_over_the_bundled_default(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            env_source = tmp / "env-source-must-not-be-used"
+            explicit_source = tmp / "explicit-source"
+            agent_home = tmp / "agent"
+            current = agent_home / "managed-skills/finite/current"
+            write_valid_bundle(explicit_source, "explicit-v3")
+
+            result = run_sync(env_source, agent_home, extra_args=["--source", str(explicit_source)])
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"Finite Skills synced from {explicit_source}", result.stdout)
+            self.assertIn(
+                "explicit-v3",
+                (
+                    current / "software-development/finite-sites-publishing-finite/SKILL.md"
+                ).read_text(encoding="utf-8"),
+            )
+
+    def test_explicit_source_json_reports_count_and_tree_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            explicit_source = tmp / "explicit-source"
+            agent_home = tmp / "agent"
+            write_valid_bundle(explicit_source, "explicit-json")
+
+            result = run_sync(
+                tmp / "unused-env-source",
+                agent_home,
+                extra_args=["--source", str(explicit_source), "--json"],
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIs(payload["applied"], True)
+            self.assertEqual(payload["skillCount"], 2)
+            self.assertEqual(payload["source"], str(explicit_source))
+            self.assertRegex(payload["treeDigest"], r"^[0-9a-f]{64}$")
+
+    @unittest.skipIf(
+        Path("/data/agent").exists() or os.geteuid() == 0,
+        "requires a host where /data/agent is absent and not creatable",
+    )
+    def test_explicit_source_does_not_require_the_test_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            explicit_source = tmp / "explicit-source"
+            write_valid_bundle(explicit_source, "explicit-prod")
+            env = {**os.environ}
+            for name in (
+                "FINITE_SKILLS_SYNC_TESTING",
+                "FINITE_SKILLS_SYNC_TEST_SOURCE",
+                "FINITE_SKILLS_SYNC_TEST_AGENT_HOME",
+                "FINITE_SKILLS_SYNC_TEST_FAILPOINT",
+            ):
+                _ = env.pop(name, None)
+
+            result = subprocess.run(
+                ["python3", str(FINITE), "skills", "sync", "--source", str(explicit_source)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            # Without the test agent home this fails at the real /data/agent
+            # boundary, not at the test-mode gate and not at the bundled
+            # /runtime default source.
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("test-only skills sync overrides require", result.stderr)
+            self.assertNotIn("bundled Finite Skills directory is unavailable", result.stderr)
+            self.assertIn("finite skills sync failed", result.stderr)
+
     def test_source_override_is_rejected_outside_explicit_test_mode(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             env = {
@@ -197,14 +276,15 @@ class FiniteSkillsSyncTest(unittest.TestCase):
         dockerfile = RUNTIME_DOCKERFILE.read_text(encoding="utf-8")
         healthcheck = HEALTHCHECK.read_text(encoding="utf-8")
 
+        # The one finite utility ships inside the payload rootfs; finite-shell
+        # maintains its /usr/local/bin shim per generation, so the image must
+        # not bake a second fixed copy or symlink.
         self.assertIn(
-            "COPY finitechat/containers/agent/finite.py /runtime/bin/finite",
+            "COPY finitechat/containers/agent/finite.py /payload/bin/finite",
             dockerfile,
         )
-        self.assertIn(
-            "ln -sf /runtime/bin/finite /usr/local/bin/finite",
-            dockerfile,
-        )
+        self.assertNotIn("/runtime/bin/finite", dockerfile)
+        self.assertNotIn("ln -sf /runtime/bin/finite", dockerfile)
         self.assertNotIn("/runtime/bin/finite", healthcheck)
 
 

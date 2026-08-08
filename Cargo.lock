@@ -1040,16 +1040,22 @@ name = "finite-agentd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ed25519-dalek",
+ "finite-release",
+ "finite-service-directory",
  "finitechat-proto 0.1.0",
  "futures-util",
+ "hex",
  "reqwest",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
 ]
 
@@ -1210,6 +1216,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "finite-release"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "clap",
+ "ed25519-dalek",
+ "flate2",
+ "getrandom 0.3.4",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "finite-saas-core"
 version = "0.1.0"
 dependencies = [
@@ -1218,7 +1243,10 @@ dependencies = [
  "base64",
  "clap",
  "deadpool-postgres",
+ "ed25519-dalek",
  "finite-core",
+ "finite-release",
+ "finite-service-directory",
  "futures-util",
  "getrandom 0.2.17",
  "jsonwebtoken",
@@ -1281,6 +1309,46 @@ dependencies = [
  "x25519-dalek",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "finite-service-directory"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "finite-release",
+ "futures-util",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+]
+
+[[package]]
+name = "finite-shell"
+version = "0.1.0"
+dependencies = [
+ "bech32",
+ "clap",
+ "ed25519-dalek",
+ "finite-release",
+ "finite-service-directory",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
 ]
 
 [[package]]

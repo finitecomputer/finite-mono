@@ -644,19 +644,27 @@ class RecoverChatBootTest(unittest.TestCase):
         self.assertFalse(any("install" in call for call in fixture.calls()))
 
     def test_canonical_and_standalone_images_package_recovery_boot(self) -> None:
-        dockerfiles = (
-            REPO_ROOT / "containers/agent/Dockerfile",
-            REPO_ROOT.parent / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile",
+        # The canonical runtime image packages recovery boot inside the
+        # payload rootfs (finite-shell generations); the standalone component
+        # fixture keeps the legacy fixed /opt path.
+        standalone = REPO_ROOT / "containers/agent/Dockerfile"
+        contents = standalone.read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY finitechat/containers/agent/recover_chat_boot.py /opt/recover_chat_boot.py",
+            contents,
         )
-        for dockerfile in dockerfiles:
-            with self.subTest(dockerfile=dockerfile):
-                contents = dockerfile.read_text(encoding="utf-8")
-                self.assertIn(
-                    "COPY finitechat/containers/agent/recover_chat_boot.py "
-                    "/opt/recover_chat_boot.py",
-                    contents,
-                )
-                self.assertGreaterEqual(contents.count("/opt/recover_chat_boot.py"), 2)
+        self.assertGreaterEqual(contents.count("/opt/recover_chat_boot.py"), 2)
+
+        canonical = (
+            REPO_ROOT.parent / "finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile"
+        )
+        contents = canonical.read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY finitechat/containers/agent/recover_chat_boot.py "
+            "/payload/opt/recover_chat_boot.py",
+            contents,
+        )
+        self.assertGreaterEqual(contents.count("/payload/opt/recover_chat_boot.py"), 2)
 
 
 if __name__ == "__main__":

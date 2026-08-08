@@ -8,11 +8,11 @@ use finite_saas_core::{
     AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, ApproveFinitePrivateGrantInput,
     CoreResult, ExistingHostProjectImport, FinitePrivateApiKey, FinitePrivateGrant,
     IssueFinitePrivateApiKeyInput, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, ResetFinitePrivateUsageWindowInput,
+    ReconcileExistingHostImportsReport, ReleaseChannelName, ResetFinitePrivateUsageWindowInput,
     RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput,
     RuntimeArtifact, RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimePlacement, RuntimeSummaryStatus, SourceHostRelayEndpoint, UpsertRuntimeArtifactInput,
-    UpsertSourceHostRelayEndpointInput,
+    RuntimePlacement, RuntimeSummaryStatus, SetReleaseChannelHeadInput, SourceHostRelayEndpoint,
+    UpsertRuntimeArtifactInput, UpsertSourceHostRelayEndpointInput,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -107,6 +107,10 @@ enum Command {
         /// Exact image implements recover-known-good-chat receiver semantics.
         #[arg(long, default_value_t = false)]
         recover_known_good_chat: bool,
+        /// Sha256 of the bundle tarball; required for bundle kinds, forbidden
+        /// for oci_image (whose digest lives in the reference).
+        #[arg(long)]
+        content_sha256: Option<String>,
         /// Store the artifact as promoted and launchable.
         #[arg(long, default_value_t = true)]
         promoted: bool,
@@ -117,6 +121,40 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Point a release channel at one promoted artifact of a given kind.
+    #[command(name = "release-channel-set")]
+    ReleaseChannelSet {
+        /// Channel name (stable or canary).
+        #[arg(long)]
+        channel: ReleaseChannelName,
+        /// Artifact kind the head is for.
+        #[arg(long)]
+        kind: RuntimeArtifactKind,
+        /// Promoted, unretired artifact id to point the channel at.
+        #[arg(long)]
+        artifact_id: String,
+        /// Optional RFC3339 timestamp for deterministic tests/operator dry runs.
+        #[arg(long)]
+        now: Option<String>,
+        /// Validate against an in-memory store without touching Postgres.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show a release channel head, or null if unset.
+    #[command(name = "release-channel-show")]
+    ReleaseChannelShow {
+        /// Channel name (stable or canary).
+        #[arg(long)]
+        channel: ReleaseChannelName,
+        /// Artifact kind to look up.
+        #[arg(long)]
+        kind: RuntimeArtifactKind,
+    },
+    /// Fleet view of payload convergence: every runtime's reported payload
+    /// generation with its gen-fence verdict, plus channel heads with their
+    /// previous artifacts.
+    #[command(name = "payload-convergence")]
+    PayloadConvergence,
     /// Roll active, upgrade-capable Agent Runtimes to one explicit artifact.
     #[command(name = "runtime-artifact-rollout")]
     RuntimeArtifactRollout(RuntimeArtifactRolloutCliArgs),
@@ -460,6 +498,7 @@ async fn main() -> Result<()> {
             hermes_source_ref,
             finite_platform_plugin_ref,
             recover_known_good_chat,
+            content_sha256,
             promoted,
             now,
             dry_run,
@@ -477,6 +516,7 @@ async fn main() -> Result<()> {
                     state_schema_version,
                     base_image,
                     recover_known_good_chat,
+                    content_sha256,
                     promoted,
                     now,
                 },
@@ -484,6 +524,33 @@ async fn main() -> Result<()> {
             )
             .await?;
             print_json(&artifact)
+        }
+        Command::ReleaseChannelSet {
+            channel,
+            kind,
+            artifact_id,
+            now,
+            dry_run,
+        } => {
+            let store = core_store_for_mode(ImportMode::from_dry_run(dry_run)).await?;
+            let head = store
+                .set_release_channel_head(SetReleaseChannelHeadInput {
+                    channel,
+                    artifact_kind: kind,
+                    artifact_id,
+                    now,
+                })
+                .await?;
+            print_json(&head)
+        }
+        Command::ReleaseChannelShow { channel, kind } => {
+            let store = postgres_store_from_env().await?;
+            let head = store.release_channel_head(channel, kind).await?;
+            print_json(&head)
+        }
+        Command::PayloadConvergence => {
+            let store = postgres_store_from_env().await?;
+            print_json(&store.payload_convergence_report().await?)
         }
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
         Command::RuntimeRetireExact(args) => runtime_retire_exact_command(args).await,

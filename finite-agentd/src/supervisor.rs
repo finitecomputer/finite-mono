@@ -111,21 +111,56 @@ impl SupervisorHandle {
 
 pub fn start_supervisor(
     sidecar: ProcessSpec,
-    health: ProcessSpec,
+    health: Option<ProcessSpec>,
     hermes: ProcessSpec,
+    brain_sync: Option<ProcessSpec>,
 ) -> SupervisorHandle {
     let status = Arc::new(RwLock::new(SupervisorStatus::default()));
     let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
-    let (health_tx, health_rx) = mpsc::channel(4);
     let (hermes_tx, hermes_rx) = mpsc::channel(4);
+    let mut all_txs = vec![sidecar_tx, hermes_tx.clone()];
 
     tokio::spawn(supervise_process(sidecar, sidecar_rx, Arc::clone(&status)));
-    tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status)));
+    // Best-effort slot: supervised (restart with backoff, SIGTERM drain on
+    // shutdown/flip) but deliberately outside the readiness contract.
+    if let Some(brain_sync) = brain_sync {
+        let (brain_tx, brain_rx) = mpsc::channel(4);
+        all_txs.push(brain_tx);
+        tokio::spawn(supervise_process(brain_sync, brain_rx, Arc::clone(&status)));
+    }
+    match health {
+        Some(health) => {
+            let (health_tx, health_rx) = mpsc::channel(4);
+            all_txs.push(health_tx);
+            tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status)));
+        }
+        None => {
+            // finite-shell serves /healthz itself. The status contract
+            // (health_server.py, the shell's replica, and the runner) still
+            // reads a `health` slot, so record the delegated endpoint as
+            // running without spawning a redundant process.
+            let status = Arc::clone(&status);
+            tokio::spawn(async move {
+                set_status(
+                    &status,
+                    "health",
+                    ProcessStatus {
+                        state: "running".to_owned(),
+                        pid: None,
+                        restart_count: 0,
+                        last_exit: None,
+                        updated_at_ms: now_ms(),
+                    },
+                )
+                .await;
+            });
+        }
+    }
     tokio::spawn(supervise_process(hermes, hermes_rx, Arc::clone(&status)));
 
     SupervisorHandle {
-        hermes_tx: hermes_tx.clone(),
-        all_txs: Arc::new(vec![sidecar_tx, health_tx, hermes_tx]),
+        hermes_tx,
+        all_txs: Arc::new(all_txs),
         status,
     }
 }
@@ -241,6 +276,10 @@ fn spawn_process(spec: &ProcessSpec) -> Result<Child, AgentdError> {
     command
         .args(&spec.args)
         .envs(&spec.environment)
+        // The shell's control-socket token authorizes stage/flip/rollback;
+        // the daemon keeps it for its own forwarding but the (LLM-facing)
+        // supervised tree must never inherit it.
+        .env_remove(crate::payload::SHELL_CONTROL_TOKEN_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -249,11 +288,14 @@ fn spawn_process(spec: &ProcessSpec) -> Result<Child, AgentdError> {
 }
 
 async fn terminate_child(child: &mut Child) {
-    if let Some(pid) = child.id() {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .await;
+    // In-process syscall: the runtime image ships no `kill` binary (only the
+    // sh builtin), so shelling out silently signalled nothing — the child
+    // never saw SIGTERM and was SIGKILLed at the timeout, which is exactly
+    // the ungraceful-drain shape flips must avoid.
+    if let Some(pid) = child.id()
+        && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
+    {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
     }
     if tokio::time::timeout(Duration::from_secs(10), child.wait())
         .await
@@ -287,8 +329,9 @@ mod tests {
     async fn restart_hermes_waits_for_a_new_running_process() {
         let handle = start_supervisor(
             sleeping_process("sidecar"),
-            sleeping_process("health"),
+            Some(sleeping_process("health")),
             sleeping_process("hermes"),
+            None,
         );
         let original_pid = wait_for_running(&handle, "hermes").await.pid.unwrap();
 
@@ -301,6 +344,55 @@ mod tests {
         handle.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn a_delegated_health_slot_reports_running_without_a_process() {
+        let handle = start_supervisor(
+            sleeping_process("sidecar"),
+            None,
+            sleeping_process("hermes"),
+            None,
+        );
+
+        let health = wait_for_running(&handle, "health").await;
+
+        assert_eq!(health.state, "running");
+        assert_eq!(health.pid, None, "no process backs the delegated endpoint");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_brain_sync_slot_is_supervised_and_stops_with_the_tree() {
+        // entrypoint.sh's old `fbrain daemon supervise` loop, now a
+        // supervised slot: it runs, restarts, and stops on shutdown like
+        // every other child — without joining the readiness contract.
+        let handle = start_supervisor(
+            sleeping_process("sidecar"),
+            Some(sleeping_process("health")),
+            sleeping_process("hermes"),
+            Some(sleeping_process("brain_sync")),
+        );
+        let brain = wait_for_running(&handle, "brain_sync").await;
+        assert!(brain.pid.is_some());
+
+        handle.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if handle
+                    .status()
+                    .await
+                    .processes
+                    .get("brain_sync")
+                    .is_some_and(|status| status.state == "stopped")
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("brain_sync must stop with the supervised tree");
+    }
+
     fn sleeping_process(name: &'static str) -> ProcessSpec {
         ProcessSpec {
             name,
@@ -308,6 +400,84 @@ mod tests {
             args: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
             environment: BTreeMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_delivers_a_real_sigterm_that_children_can_trap_and_drain_on() {
+        // The graceful path agentd's own SIGTERM handler routes through:
+        // supervisor.shutdown() must deliver SIGTERM in-process (no `kill`
+        // binary exists in the runtime image) and give the child its bounded
+        // window to finish work before any SIGKILL.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("drained");
+        let script = dir.path().join("trapper.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntrap 'echo drained > {}; exit 0' TERM\nsleep 30 & wait\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let handle = start_supervisor(
+            ProcessSpec {
+                name: "finitechat",
+                program: script.clone(),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+            },
+            Some(sleeping_process("health")),
+            sleeping_process("hermes"),
+            None,
+        );
+        wait_for_running(&handle, "finitechat").await;
+        // Let the script arm its trap before signalling.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        handle.shutdown().await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the child must observe SIGTERM and drain, not be SIGKILLed");
+    }
+
+    #[tokio::test]
+    async fn the_shell_control_token_is_scrubbed_from_supervised_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = dir.path().join("seen-token");
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            crate::payload::SHELL_CONTROL_TOKEN_ENV.to_owned(),
+            "secret-token".to_owned(),
+        );
+        let spec = ProcessSpec {
+            name: "probe",
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".to_owned(),
+                format!(
+                    "printf '%s' \"${{{}:-absent}}\" > {}",
+                    crate::payload::SHELL_CONTROL_TOKEN_ENV,
+                    seen.display()
+                ),
+            ],
+            environment,
+        };
+        let mut child = spawn_process(&spec).unwrap();
+        child.wait().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "absent",
+            "the control token must never reach a supervised child's environment"
+        );
     }
 
     async fn wait_for_running(handle: &SupervisorHandle, name: &str) -> ProcessStatus {

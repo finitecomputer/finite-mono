@@ -44,6 +44,16 @@ enum Command {
     /// Cache an existing Finite Private key read from stdin for local chat.
     #[command(name = "inference-key")]
     InferenceKey,
+    /// Pack, sign, host, and register the local skills bundle, then point the
+    /// canary channel at it. Requires the devfinity stack to be running.
+    #[command(name = "publish-skills")]
+    PublishSkills(PublishSkillsArgs),
+    /// Extract the payload rootfs from the runtime image build (or an
+    /// explicit --source tree), pack + sign it with the run key, host and
+    /// register it as a Core payload_bundle, then point the canary channel at
+    /// it. Requires the devfinity stack to be running.
+    #[command(name = "publish-payload")]
+    PublishPayload(PublishPayloadArgs),
     /// Run the local read-only WorkOS fixture used by the dev stack.
     #[command(name = "workos-fixture")]
     WorkosFixture {
@@ -94,6 +104,31 @@ struct RunArgs {
     /// Command and arguments to run after baseline infrastructure is ready.
     #[arg(last = true, required = true)]
     command: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct PublishSkillsArgs {
+    /// Skills tree to pack; defaults to the in-repo finite-skills/skills.
+    #[arg(long)]
+    source: Option<PathBuf>,
+
+    /// Operator-readable label; defaults to a content-addressed
+    /// devfinity-<digest prefix> label (no wall clock).
+    #[arg(long)]
+    version_label: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct PublishPayloadArgs {
+    /// Payload rootfs to pack; defaults to a fresh --emit-payload extraction
+    /// from the runtime image build.
+    #[arg(long)]
+    source: Option<PathBuf>,
+
+    /// Operator-readable label; defaults to a content-addressed
+    /// devfinity-<digest prefix> label (no wall clock).
+    #[arg(long)]
+    version_label: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -147,6 +182,41 @@ fn run() -> anyhow::Result<ExitCode> {
             stack.status()
         }
         Command::Cleanup => Stack::new(cli.state_dir)?.cleanup(),
+        Command::PublishSkills(args) => {
+            // Reuse the running stack's profile so the bundle reference URL is
+            // container-reachable exactly the way the stack's other services
+            // are; the stack exports DEVFINITY_PROFILE to wrapped commands.
+            let profile = match std::env::var("DEVFINITY_PROFILE") {
+                Ok(value) => StackProfile::from_name(value.trim())
+                    .with_context(|| format!("DEVFINITY_PROFILE has unknown profile {value:?}"))?,
+                Err(_) => StackProfile::AppleSaas,
+            };
+            if matches!(profile, StackProfile::TestInfrastructure) {
+                anyhow::bail!("publish-skills is not available in the test-infrastructure profile");
+            }
+            let mut stack = Stack::new(cli.state_dir)?.with_profile(profile);
+            stack.prepare_host_environment(true)?;
+            stack.publish_skills(args.source.as_deref(), args.version_label.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::PublishPayload(args) => {
+            // Same profile reuse as publish-skills: the bundle reference URL
+            // must be container-reachable the way the stack's services are.
+            let profile = match std::env::var("DEVFINITY_PROFILE") {
+                Ok(value) => StackProfile::from_name(value.trim())
+                    .with_context(|| format!("DEVFINITY_PROFILE has unknown profile {value:?}"))?,
+                Err(_) => StackProfile::AppleSaas,
+            };
+            if matches!(profile, StackProfile::TestInfrastructure) {
+                anyhow::bail!(
+                    "publish-payload is not available in the test-infrastructure profile"
+                );
+            }
+            let mut stack = Stack::new(cli.state_dir)?.with_profile(profile);
+            stack.prepare_host_environment(true)?;
+            stack.publish_payload(args.source.as_deref(), args.version_label.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::InferenceKey => {
             let mut input = String::new();
             std::io::stdin()

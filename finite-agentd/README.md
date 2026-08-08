@@ -34,6 +34,9 @@ Platform Channel:
 - `agent.hermes.restart`
 - `agent.chat.recover`
 - `agent.connections.status`
+- `agent.skills.sync`
+- `agent.payload.status`, `agent.payload.stage`, `agent.payload.flip`,
+  `agent.payload.rollback`, and `agent.payload.set-channel`
 - `agent.inference.apply`
 - `agent.specialization.aeon.reconcile`
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
@@ -42,6 +45,73 @@ Platform Channel:
 - `agent.hermes.config.preview`
 - `agent.hermes.config.apply`
 - `agent.hermes.config.rollback`
+
+`agent.skills.sync` adopts a published managed-skills bundle
+(`finite_skills_bundle.v1`, packed and signed by the `finite-release` crate).
+Its typed payload carries the bundle's tarball URL, manifest URL, and expected
+tarball sha256. The daemon fetches both over https with bounded sizes (64 MiB
+tarball, 64 KiB manifest, 60 s timeout) into
+`/data/agent/agentd/staging/skills/<artifact_id>/`, verifies the tarball
+digest against both the command and the manifest, verifies the manifest's
+ed25519 signature against `FINITE_RELEASE_PUBLIC_KEY` (32-byte hex; when
+unset the command fails closed with `release_key_missing`), unpacks, and
+recomputes the tree digest. Only then does it run the in-image
+`finite skills sync --source <staged tree>` (path overridable with
+`FINITE_CLI_PATH`, default `/runtime/bin/finite`), which keeps the existing
+validate/lock/atomic-exchange/rollback guarantees. Staging is removed after a
+successful sync and kept for diagnosis on failure.
+`FINITE_ALLOW_INSECURE_BUNDLE_URL=1` admits plain-http bundle URLs for the
+local dev harness only; production bundles are always https.
+
+`agent.skills.sync` also accepts a channel form, mutually exclusive with the
+explicit URL form: payload `{"channel": "canary"}` freshly fetches Core's
+signed service directory from `FINITE_SERVICE_DIRECTORY_URL`, verifies it
+against the same release public key, resolves the channel's `skills_bundle`
+head (a distinct `skills_channel_head_missing` failure when the channel has no
+head), and then runs the identical fetch/verify/apply path with the resolved
+tarball sha256 as the expectation. The success result carries `channel` as
+proof the bundle was resolved through the directory.
+
+When `FINITE_SERVICE_DIRECTORY_URL` is set, the daemon also fetches and
+verifies the directory on start and every 15 minutes (jittered ±20%),
+atomically caching it at `/data/agent/service-directory.json`. Refresh
+failures are logged and keep the previous cache. The
+`finitechat/containers/agent/finite_service_directory.py` accessor (staged at
+`/opt/finite_service_directory.py`) reads that verified cache read-only to
+expose service base URLs; it performs no crypto and no network I/O.
+
+The same path is reachable in-guest without a chat-channel sender through the
+one-shot CLI verb `finite-agentd skills-sync --tarball-url <u> --manifest-url
+<u> --tarball-sha256 <hex>`, or `finite-agentd skills-sync --channel canary`
+for the channel form (operator/test entry, used by the devfinity
+`DEVFINITY_SKILLS_SYNC_SMOKE` variant over `container exec`). It resolves the
+same settings from the environment, runs the identical fetch/verify/apply
+code, records the command in the same durable ledger under a
+`cli-skills-sync-*` request id, prints the result JSON to stdout, and exits
+nonzero on failure.
+
+The `agent.payload.*` family is a thin typed forwarder to the finite-shell
+control socket (`FINITE_SHELL_SOCKET`, default `/data/shell/shell.sock`,
+line-delimited JSON). The daemon never stages, verifies, or flips a payload
+itself — the shell owns generations end to end. `agent.payload.stage` accepts
+either the explicit form (`tarballUrl` + `manifestUrl` + `tarballSha256`,
+optional `force`) or the channel form (`{"channel": "canary"}`), which freshly
+fetches and verifies the signed service directory, resolves the channel's
+`payload_bundle` head (`payload_channel_head_missing` when absent), and hands
+the shell explicit URLs — the shell re-verifies everything before unpacking.
+`agent.payload.flip` and `agent.payload.rollback` results are the shell's
+immediate `flip_started`/`rollback_started` acknowledgements; the ledger
+records the intent, and the outcome is visible through `agent.payload.status`
+(the `last_flip` record) once the new generation's agentd is serving.
+
+For in-guest smoke/exec parity the daemon also has one-shot CLI verbs
+`finite-agentd payload-status` (plain read-only forward) and `finite-agentd
+payload-stage [--channel <name> | --tarball-url <u> --manifest-url <u>
+--tarball-sha256 <hex>] [--force]` (recorded in the durable ledger under a
+`cli-payload-stage-*` request id, exactly like `skills-sync`). There are
+deliberately no agentd CLI verbs for flip or rollback: agentd is the process
+being replaced and dies mid-flip, so drive those with `finite-shell ctl flip
+--wait` / `finite-shell ctl rollback --wait` directly.
 
 Specialization reconciliation owns only the `auxiliary.vision` Hermes config
 field. Its typed AEON desired state includes the worker endpoint, canonical
