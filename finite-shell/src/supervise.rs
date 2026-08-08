@@ -4,10 +4,10 @@
 //! in state.json and surfaced in `/healthz`, but the shell keeps trying.
 //! `stop()` is the flip's quiesce: SIGTERM, bounded wait, then SIGKILL.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -52,6 +52,92 @@ impl Default for AgentdSupervisionStatus {
             crash_looping: false,
             updated_at_ms: now_ms(),
         }
+    }
+}
+
+/// Children whose exit statuses belong to tokio's `Child::wait` (the
+/// supervised agentd). The PID 1 zombie reaper must never `waitpid` these.
+static SUPERVISED_CHILD_PIDS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+/// PID 1's init duty, which tokio's child machinery does not cover: children
+/// the shell adopts — a `container exec` session's backgrounded processes,
+/// double-forked daemons, and old-generation stragglers swept by
+/// [`terminate`]'s group KILL — are never `wait`ed on when they die, so they
+/// sit in the process table as zombies forever. A zombie still satisfies
+/// `kill -0`, so anything polling "is that pid gone yet" hangs (observed: a
+/// smoke's backgrounded `fbrain daemon supervise` stayed `kill -0`-alive
+/// after its SIGTERM because the dead process was never reaped). entrypoint.sh
+/// used to do this implicitly: bash as PID 1 reaps every adopted child.
+pub fn spawn_zombie_reaper() {
+    if !rustix::process::getpid().is_init() {
+        return;
+    }
+    tokio::spawn(async {
+        let Ok(mut sigchld) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())
+        else {
+            return;
+        };
+        loop {
+            sigchld.recv().await;
+            reap_adopted_zombies();
+        }
+    });
+}
+
+fn reap_adopted_zombies() {
+    // Holding the registry lock across the scan closes the race with
+    // [`spawn`]: a just-spawned agentd is registered before this reaper can
+    // observe it as a zombie.
+    let supervised = SUPERVISED_CHILD_PIDS.lock().expect("registry poisoned");
+    for pid in zombie_children_of_self() {
+        if supervised.contains(&pid) {
+            continue;
+        }
+        if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+            let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
+        }
+    }
+}
+
+fn zombie_children_of_self() -> Vec<u32> {
+    let own_pid = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut zombies = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // `/proc/<pid>/stat` is "pid (comm) state ppid ..." and comm may
+        // itself contain spaces or parentheses; parse after the last ')'.
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let (Some(state), Some(ppid)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if state == "Z" && ppid.parse() == Ok(own_pid) {
+            zombies.push(pid);
+        }
+    }
+    zombies
+}
+
+fn release_supervised_pid(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        SUPERVISED_CHILD_PIDS
+            .lock()
+            .expect("registry poisoned")
+            .remove(&pid);
     }
 }
 
@@ -154,13 +240,16 @@ async fn supervise(
             }
         };
         let started_at = Instant::now();
+        let child_pid = child.id();
         set_status(&status, |snapshot| {
             snapshot.state = "running".to_owned();
-            snapshot.pid = child.id();
+            snapshot.pid = child_pid;
         });
 
         tokio::select! {
             result = child.wait() => {
+                // tokio reaped the status; the pid may now be reused freely.
+                release_supervised_pid(child_pid);
                 let exit = result
                     .map(|exit_status| exit_status.to_string())
                     .unwrap_or_else(|error| error.to_string());
@@ -191,9 +280,11 @@ async fn supervise(
                     // All handles dropped: keep the child running until the
                     // process (PID 1) itself exits.
                     let _ = child.wait().await;
+                    release_supervised_pid(child_pid);
                     return;
                 };
                 terminate(&mut child, quiesce).await;
+                release_supervised_pid(child_pid);
                 set_status(&status, |snapshot| {
                     snapshot.state = "stopped".to_owned();
                     snapshot.pid = None;
@@ -256,7 +347,15 @@ fn spawn(spec: &AgentdSpec) -> Result<Child, ShellError> {
         // new generation's bridge exited at bind and the flip looked broken).
         .process_group(0)
         .kill_on_drop(true);
-    command.spawn().map_err(ShellError::from)
+    // Register under the reaper's lock BEFORE the child can be observed
+    // exiting: the PID 1 zombie reaper must not steal this exit status from
+    // tokio's `Child::wait`.
+    let mut supervised = SUPERVISED_CHILD_PIDS.lock().expect("registry poisoned");
+    let child = command.spawn().map_err(ShellError::from)?;
+    if let Some(pid) = child.id() {
+        supervised.insert(pid);
+    }
+    Ok(child)
 }
 
 fn signal_group(pid: u32, signal: rustix::process::Signal) {
@@ -407,6 +506,75 @@ mod tests {
         })
         .await;
         supervisor.stop(Duration::from_secs(1)).await.unwrap();
+    }
+
+    /// The PID 1 init duty: an adopted child's death must be reaped, not
+    /// left as a zombie that keeps satisfying `kill -0`, while the
+    /// supervised agentd's exit status stays with tokio's `Child::wait`.
+    /// Linux-only: it relies on `PR_SET_CHILD_SUBREAPER` and `/proc` to
+    /// stand in for being PID 1.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_adopted_zombie_is_reaped_but_the_supervised_agentd_is_not_stolen() {
+        use rustix::process::{Pid, Signal, kill_process, test_kill_process};
+
+        rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
+            .expect("become a subreaper");
+
+        // A supervised agentd stub, registered by spawn().
+        let dir = tempfile::tempdir().unwrap();
+        let spec = script_spec(dir.path(), "sleep 60 & wait");
+        let state = SharedState::load(&dir.path().join("state.json"));
+        let supervisor = start_agentd(spec, state);
+        wait_until(&supervisor, "running", |status| {
+            status.state == "running" && status.pid.is_some()
+        })
+        .await;
+
+        // An orphan: sh backgrounds a sleep and exits, so the sleep is
+        // adopted by this (subreaper) process — the shape of a `container
+        // exec` session's backgrounded daemon.
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 600 & echo $!"])
+            .output()
+            .expect("spawn the orphan factory");
+        let orphan_raw = String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .expect("orphan pid");
+        let orphan = Pid::from_raw(orphan_raw).expect("nonzero pid");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fs::read_to_string(format!("/proc/{orphan_raw}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, rest) = stat.rsplit_once(')')?;
+                Some(rest.split_whitespace().nth(1)? == std::process::id().to_string())
+            })
+            != Some(true)
+        {
+            assert!(Instant::now() < deadline, "orphan was never adopted");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        kill_process(orphan, Signal::TERM).expect("terminate the orphan");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            reap_adopted_zombies();
+            if test_kill_process(orphan).is_err() {
+                break; // Fully reaped: the pid no longer exists.
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the adopted zombie was never reaped"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // The supervised child was not stolen: a graceful stop still
+        // observes the real exit.
+        supervisor.stop(Duration::from_secs(5)).await.unwrap();
+        assert_eq!(supervisor.status().state, "stopped");
     }
 
     #[tokio::test]

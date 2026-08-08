@@ -2327,8 +2327,8 @@ impl PostgresCoreStore {
         input: RecordRuntimePayloadReportInput,
     ) -> CoreResult<RuntimePayloadStatus> {
         let now = input.now.clone().unwrap_or(current_time_iso()?);
-        let bad_versions = normalize_bad_versions(input.bad_versions.clone())
-            .map(serde_json::Value::from);
+        let bad_versions =
+            normalize_bad_versions(input.bad_versions.clone()).map(serde_json::Value::from);
         let client = self.connection().await?;
         let row = client
             .query_opt(

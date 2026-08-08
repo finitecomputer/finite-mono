@@ -92,6 +92,9 @@ fn run() -> Result<i32, ShellError> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        // PID 1 adopts every orphan in the container; reap them when they
+        // die, or they stay zombies that still satisfy `kill -0`.
+        finite_shell::supervise::spawn_zombie_reaper();
         // The HTTP listener binds BEFORE boot: a boot failure (bad seed,
         // missing release key, unwritable /data) must serve a diagnosable
         // bootstrap_failed healthz and retry with bounded backoff instead of
