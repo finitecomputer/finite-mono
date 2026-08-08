@@ -228,6 +228,11 @@ async fn seed_boot_unpacks_verifies_fixes_up_and_starts_agentd() {
     let seed = state.seed.expect("seed recorded in state.json");
     assert_eq!(seed.version_label, "v1");
     assert_eq!(seed.tree_digest.len(), 64);
+    assert_eq!(
+        state.current_digest.as_deref(),
+        Some(seed.tree_digest.as_str()),
+        "seeding must record the current generation's digest"
+    );
 
     // Fixup ran on the seeded generation.
     let generation = layout.generation_dir("v1");
@@ -613,7 +618,13 @@ async fn flip_succeeds_end_to_end_with_shims_and_venv_fixup() {
         read_link_version(&layout.previous_link()).as_deref(),
         Some("v1")
     );
-    assert!(runtime.state.snapshot().staged.is_none(), "staged consumed");
+    let state = runtime.state.snapshot();
+    assert!(state.staged.is_none(), "staged consumed");
+    assert_eq!(
+        state.current_digest.as_deref(),
+        Some(packed.manifest.tree_digest.as_str()),
+        "the flip must carry the staged digest into current_digest"
+    );
     wait_for_marker(&settings, "two").await;
 
     // The v2 venv was fixed up for v2's real location.
@@ -728,6 +739,10 @@ async fn rollback_flips_back_to_previous_and_never_marks_bad() {
     wait_for_marker(&settings, "one").await;
     let state = runtime.state.snapshot();
     assert!(state.bad.is_empty(), "rollback never marks versions bad");
+    assert_eq!(
+        state.current_digest, None,
+        "a rollback target has no digest on record; null, not a stale digest"
+    );
 
     // Nothing staged: flip refuses distinctly.
     let response = authed_request(&runtime, json!({ "verb": "flip" })).await;
@@ -1318,15 +1333,22 @@ async fn the_poller_no_ops_on_a_converged_or_headless_channel() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_poll_tick_concurrent_with_a_manual_flip_skips_instead_of_double_flipping() {
     let root = tempfile::tempdir().unwrap();
-    // A bespoke v1 seed whose agentd drains slowly on TERM: the flip's
-    // quiesce then holds the transition gate (with `current` still v1) long
-    // enough for the concurrent tick to deterministically observe it.
+    // A bespoke v1 seed whose agentd holds its TERM drain until the test
+    // deletes a sentinel file: the flip stays in its quiesce phase — gate
+    // held, `current` still v1 — for exactly as long as the concurrent tick
+    // needs to observe it. No timing window: the tick's verdict is asserted
+    // before the sentinel is released.
     let routes: SharedRoutes = SharedRoutes::default();
     let base_url = serve_shared(std::sync::Arc::clone(&routes)).await;
     let mut settings = test_settings(root.path());
     settings.allow_insecure_bundle_url = true;
     settings.poll_interval = Duration::ZERO;
     settings.service_directory_url = Some(format!("{base_url}/api/core/v1/service-directory"));
+    // Generous quiesce bound: the drain is released explicitly below, so the
+    // timeout only matters if the test itself is wedged.
+    settings.quiesce_timeout = Duration::from_secs(30);
+    let quiesce_hold = root.path().join("hold-v1-quiesce");
+    fs::write(&quiesce_hold, b"").unwrap();
     let source_v1 = build_payload_source(root.path(), "one", false);
     let script_v1 = source_v1.join("bin/finite-agentd");
     let body_v1 = fs::read_to_string(&script_v1).unwrap();
@@ -1334,7 +1356,10 @@ async fn a_poll_tick_concurrent_with_a_manual_flip_skips_instead_of_double_flipp
         &script_v1,
         body_v1.replacen(
             "exec sleep 300",
-            "trap 'sleep 1; exit 0' TERM\nsleep 300 & wait",
+            &format!(
+                "trap 'while [ -e {} ]; do sleep 0.05; done; exit 0' TERM\nsleep 300 & wait",
+                quiesce_hold.display()
+            ),
             1,
         ),
     )
@@ -1358,29 +1383,9 @@ async fn a_poll_tick_concurrent_with_a_manual_flip_skips_instead_of_double_flipp
     wait_for_marker(&settings, "one").await;
     let layout = settings.layout();
 
-    // v2's agentd sleeps before writing its ready files so the manual flip
-    // holds the transition gate for a deterministic window.
-    let source = build_payload_source(root.path(), "two", false);
-    let script_path = source.join("bin/finite-agentd");
-    let script = fs::read_to_string(&script_path).unwrap();
-    fs::write(
-        &script_path,
-        script.replacen("#!/bin/sh\n", "#!/bin/sh\nsleep 1\n", 1),
-    )
-    .unwrap();
-    let packed_v2 = finite_release::pack_payload_bundle(
-        &finite_release::PayloadPackRequest {
-            source: &source,
-            artifact_id: "payload-v2",
-            version_label: "v2",
-            min_shell_version: "0.1.0",
-            source_git_sha: None,
-            created_at: Some("2026-08-06T00:00:00Z"),
-            out_dir: &root.path().join("packed-v2-slow"),
-        },
-        &test_signing_key(),
-    )
-    .unwrap();
+    // v2 is an ordinary payload: the deterministic window comes entirely
+    // from v1's held quiesce above.
+    let packed_v2 = pack_payload(root.path(), "v2", "two", false);
     set_directory_head(&routes, &base_url, "stable", Some(&packed_v2));
 
     stage_payload(
@@ -1395,13 +1400,17 @@ async fn a_poll_tick_concurrent_with_a_manual_flip_skips_instead_of_double_flipp
     assert_eq!(response["ok"], json!(true));
 
     // A tick during the manual flip must neither deadlock nor start a second
-    // transition: it observes the gate and skips.
+    // transition: it observes the gate and skips. The flip is pinned in its
+    // quiesce phase until the sentinel below is removed, so this verdict
+    // cannot race the swap.
     let record = tokio::time::timeout(Duration::from_secs(5), runtime.poll_channel_once())
         .await
         .expect("the poll tick must not deadlock against a manual flip");
     assert_eq!(record.action, PollAction::None);
     assert!(record.detail.unwrap().contains("in progress"));
 
+    // Release v1's drain; the flip proceeds to completion.
+    fs::remove_file(&quiesce_hold).unwrap();
     let flip = wait_for_flip_outcome(&runtime.state, FlipOutcome::Success).await;
     assert_eq!(flip.to, "v2");
     wait_for_marker(&settings, "two").await;
@@ -1520,6 +1529,7 @@ fn healthz_replicates_health_server_py_fields_and_adds_shell_fields() {
                 prior_previous: None,
                 detail: None,
             });
+            shell_state.current_digest = Some("d".repeat(64));
         })
         .unwrap();
 
@@ -1550,6 +1560,7 @@ fn healthz_replicates_health_server_py_fields_and_adds_shell_fields() {
     // The new shell fields.
     assert_eq!(payload["shell_version"], json!(SHELL_VERSION));
     assert_eq!(payload["payload_version"], json!("v2"));
+    assert_eq!(payload["payload_digest"], json!("d".repeat(64)));
     assert_eq!(
         payload["payload_generations"],
         json!({ "current": "v2", "previous": "v1", "staged": null, "bad": ["v3"] })

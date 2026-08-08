@@ -122,6 +122,12 @@ pub struct DaemonConfig {
     /// (`FINITE_SHELL_CONTROL_TOKEN`), forwarded on every shell request and
     /// scrubbed from every supervised child's environment.
     pub shell_control_token: Option<String>,
+    /// The payload's `fbrain` binary, when the daemon owns the Brain sync
+    /// supervisor slot. The legacy image's entrypoint.sh runs the
+    /// `fbrain daemon supervise` restart loop itself; under finite-shell that
+    /// entrypoint is gone, so the daemon supervises it — payload-root-gated
+    /// so the legacy image never double-runs it.
+    pub brain_sync_bin: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +217,17 @@ impl DaemonConfig {
                 script: PathBuf::from("/opt/health_server.py"),
             }),
         };
+        // Brain sync supervision (entrypoint.sh's old duty): on by default in
+        // the shell-payload world, disabled by an explicitly falsy
+        // FINITE_BRAIN_SYNC_SUPERVISOR (the entrypoint's own toggle), and
+        // absent when the payload ships no fbrain.
+        let brain_sync_enabled = !std::env::var("FINITE_BRAIN_SYNC_SUPERVISOR")
+            .is_ok_and(|value| matches!(value.trim(), "0" | "false" | "no"));
+        let brain_sync_bin = payload_root
+            .as_ref()
+            .filter(|_| brain_sync_enabled)
+            .map(|root| root.join("bin/fbrain"))
+            .filter(|bin| bin.is_file());
         Ok(Self {
             agent_home,
             hermes_home,
@@ -261,6 +278,7 @@ impl DaemonConfig {
                 .ok()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
+            brain_sync_bin,
         }
         .with_token_file_fallback())
     }
@@ -402,6 +420,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         sidecar_spec(&config),
         health_spec(&config),
         hermes_spec(&config),
+        brain_sync_spec(&config),
     );
     let verified_hermes_generation = Arc::new(AtomicU64::new(UNVERIFIED_HERMES_GENERATION));
     spawn_startup_specialization_verifier(
@@ -1169,6 +1188,28 @@ fn health_spec(config: &DaemonConfig) -> Option<ProcessSpec> {
         name: "health",
         program: health.python.clone(),
         args: vec![health.script.display().to_string()],
+        environment: BTreeMap::new(),
+    })
+}
+
+/// The Brain sync supervisor (`fbrain daemon supervise`), entrypoint.sh's old
+/// restart loop moved into supervision: agent-side Working Tree edits only
+/// reach the Brain server through this process. Not part of the readiness
+/// contract (health checks the finitechat/health/hermes slots), so a
+/// crash-looping fbrain surfaces in status.json without flapping `ready`.
+fn brain_sync_spec(config: &DaemonConfig) -> Option<ProcessSpec> {
+    let program = config.brain_sync_bin.clone()?;
+    // entrypoint.sh created the tree root before its first supervise run.
+    if let Ok(root) = std::env::var("FBRAIN_WORKING_TREE_ROOT") {
+        let root = root.trim();
+        if !root.is_empty() {
+            let _ = fs::create_dir_all(root);
+        }
+    }
+    Some(ProcessSpec {
+        name: "brain_sync",
+        program,
+        args: vec!["daemon".to_owned(), "supervise".to_owned()],
         environment: BTreeMap::new(),
     })
 }

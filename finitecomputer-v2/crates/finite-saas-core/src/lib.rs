@@ -45,7 +45,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0017_release_channels.sql"),
     "\n",
-    include_str!("../migrations/0018_payload_telemetry.sql")
+    include_str!("../migrations/0018_payload_telemetry.sql"),
+    "\n",
+    include_str!("../migrations/0019_payload_digest_and_bad_list.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -902,8 +904,13 @@ pub struct SetReleaseChannelHeadInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimePayloadTelemetry {
     pub payload_version_label: Option<String>,
+    pub payload_digest: Option<String>,
     pub shell_version: Option<String>,
     pub release_channel: Option<String>,
+    /// Version labels this shell has bad-listed (failed a flip's health
+    /// gate). Evidence for the fleet view — deliberately not an auto-demotion
+    /// input; the fence still compares version labels only.
+    pub bad_versions: Option<Vec<String>>,
     pub reported_at: String,
 }
 
@@ -916,9 +923,13 @@ pub struct RuntimePayloadReportRequest {
     #[serde(default)]
     pub payload_version_label: Option<String>,
     #[serde(default)]
+    pub payload_digest: Option<String>,
+    #[serde(default)]
     pub shell_version: Option<String>,
     #[serde(default)]
     pub release_channel: Option<String>,
+    #[serde(default)]
+    pub bad_versions: Option<Vec<String>>,
     #[serde(default)]
     pub now: Option<String>,
 }
@@ -929,8 +940,10 @@ pub struct RecordRuntimePayloadReportInput {
     pub source_host_id: String,
     pub source_machine_id: String,
     pub payload_version_label: Option<String>,
+    pub payload_digest: Option<String>,
     pub shell_version: Option<String>,
     pub release_channel: Option<String>,
+    pub bad_versions: Option<Vec<String>>,
     pub now: Option<String>,
 }
 
@@ -943,8 +956,10 @@ pub struct RuntimePayloadStatus {
     pub runtime_id: String,
     pub project_id: String,
     pub payload_version_label: Option<String>,
+    pub payload_digest: Option<String>,
     pub shell_version: Option<String>,
     pub channel: Option<String>,
+    pub bad_versions: Option<Vec<String>>,
     pub reported_at: Option<String>,
 }
 
@@ -1035,8 +1050,13 @@ pub struct PayloadConvergenceRuntime {
     pub runtime_id: String,
     pub project_id: String,
     pub payload_version_label: Option<String>,
+    pub payload_digest: Option<String>,
     pub shell_version: Option<String>,
     pub channel: Option<String>,
+    /// Evidence, not an input to the fence: "3 agents refused v7" is
+    /// readable from the fleet view by counting occurrences here. No
+    /// auto-demotion, deliberately.
+    pub bad_versions: Option<Vec<String>>,
     pub reported_at: Option<String>,
     pub fence: PayloadConvergenceFence,
 }
@@ -6746,16 +6766,20 @@ impl BridgeCoreState {
             .ok_or(CoreError::ProjectRuntimeNotFound)?;
         let telemetry = RuntimePayloadTelemetry {
             payload_version_label: trim_to_option(input.payload_version_label.as_deref()),
+            payload_digest: trim_to_option(input.payload_digest.as_deref()),
             shell_version: trim_to_option(input.shell_version.as_deref()),
             release_channel: trim_to_option(input.release_channel.as_deref()),
+            bad_versions: normalize_bad_versions(input.bad_versions),
             reported_at: now,
         };
         let status = RuntimePayloadStatus {
             runtime_id: runtime.id.clone(),
             project_id: runtime.project_id.clone(),
             payload_version_label: telemetry.payload_version_label.clone(),
+            payload_digest: telemetry.payload_digest.clone(),
             shell_version: telemetry.shell_version.clone(),
             channel: telemetry.release_channel.clone(),
+            bad_versions: telemetry.bad_versions.clone(),
             reported_at: Some(telemetry.reported_at.clone()),
         };
         self.runtime_payload_reports
@@ -6776,8 +6800,10 @@ impl BridgeCoreState {
                     project_id: runtime.project_id.clone(),
                     payload_version_label: report
                         .and_then(|report| report.payload_version_label.clone()),
+                    payload_digest: report.and_then(|report| report.payload_digest.clone()),
                     shell_version: report.and_then(|report| report.shell_version.clone()),
                     channel: report.and_then(|report| report.release_channel.clone()),
+                    bad_versions: report.and_then(|report| report.bad_versions.clone()),
                     reported_at: report.map(|report| report.reported_at.clone()),
                 }
             })
@@ -7439,6 +7465,18 @@ fn trim_to_option(value: Option<&str>) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// Trim each reported bad-list label and drop empties. `Some(vec![])` stays
+/// `Some` — a shell reporting an empty bad list is real evidence, distinct
+/// from a pre-shell image that reported nothing.
+fn normalize_bad_versions(bad_versions: Option<Vec<String>>) -> Option<Vec<String>> {
+    bad_versions.map(|labels| {
+        labels
+            .iter()
+            .filter_map(|label| trim_to_option(Some(label)))
+            .collect()
+    })
 }
 
 const RUNTIME_SPEC_SERVICE_PORT: u16 = 8080;
@@ -10392,8 +10430,10 @@ mod tests {
                     source_host_id: "other-host".to_string(),
                     source_machine_id: "machine-telemetry".to_string(),
                     payload_version_label: Some("v2".to_string()),
+                    payload_digest: None,
                     shell_version: Some("0.1.0".to_string()),
                     release_channel: Some("canary".to_string()),
+                    bad_versions: None,
                     now: Some(NOW.to_string()),
                 })
                 .unwrap_err(),
@@ -10405,15 +10445,26 @@ mod tests {
                 source_host_id: "host-telemetry".to_string(),
                 source_machine_id: "machine-telemetry".to_string(),
                 payload_version_label: Some(" v2 ".to_string()),
+                payload_digest: Some(format!(" {} ", "d".repeat(64))),
                 shell_version: Some("0.1.0".to_string()),
                 release_channel: Some("canary".to_string()),
+                bad_versions: Some(vec![" v7 ".to_string(), "  ".to_string()]),
                 now: Some(NOW.to_string()),
             })
             .unwrap();
         assert_eq!(status.runtime_id, "runtime-telemetry");
         assert_eq!(status.project_id, "project-telemetry");
         assert_eq!(status.payload_version_label.as_deref(), Some("v2"));
+        assert_eq!(
+            status.payload_digest.as_deref(),
+            Some("d".repeat(64)).as_deref()
+        );
         assert_eq!(status.channel.as_deref(), Some("canary"));
+        assert_eq!(
+            status.bad_versions,
+            Some(vec!["v7".to_string()]),
+            "bad-list labels are trimmed and empties dropped"
+        );
         assert_eq!(status.reported_at.as_deref(), Some(NOW));
 
         // A pre-shell report (all nulls) overwrites with absent fields but
@@ -10423,12 +10474,16 @@ mod tests {
                 source_host_id: "host-telemetry".to_string(),
                 source_machine_id: "machine-telemetry".to_string(),
                 payload_version_label: None,
+                payload_digest: None,
                 shell_version: None,
                 release_channel: None,
+                bad_versions: None,
                 now: Some(LATER.to_string()),
             })
             .unwrap();
         assert_eq!(status.payload_version_label, None);
+        assert_eq!(status.payload_digest, None);
+        assert_eq!(status.bad_versions, None);
         assert_eq!(status.reported_at.as_deref(), Some(LATER));
 
         let listed = state.list_runtime_payload_statuses();

@@ -442,6 +442,14 @@ pub fn runtime_health(
     let previous = generations::read_link_version(&layout.previous_link());
     payload["shell_version"] = Value::from(SHELL_VERSION);
     payload["payload_version"] = current.clone().map(Value::from).unwrap_or(Value::Null);
+    // The verified tree digest of the current generation (recorded at
+    // seed/flip time): immutable artifact evidence next to the mutable
+    // version label, null when no verified digest is on record.
+    payload["payload_digest"] = shell_state
+        .current_digest
+        .clone()
+        .map(Value::from)
+        .unwrap_or(Value::Null);
     payload["channel"] = Value::from(layout.channel_name());
     payload["payload_generations"] = json!({
         "current": current,

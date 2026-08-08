@@ -56,9 +56,7 @@ class FiniteServiceDirectoryAccessorTest(unittest.TestCase):
                     "core": "http://192.168.64.1:4200",
                 },
             )
-            self.assertEqual(
-                module.service_base_url("sites", cache), "http://192.168.64.1:18789"
-            )
+            self.assertEqual(module.service_base_url("sites", cache), "http://192.168.64.1:18789")
             with self.assertRaises(module.ServiceDirectoryError):
                 module.service_base_url("brain", cache)
 

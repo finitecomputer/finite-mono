@@ -50,9 +50,9 @@ use crate::{
     finite_private_api_key_id_for, finite_private_grant_id_for_user,
     generate_finite_private_api_key, hash_finite_private_api_key, merge_provider_runtime_handle,
     merge_runtime_capabilities, new_agent_creation_request_id, new_agent_runtime_id,
-    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_id_part,
-    normalize_idempotency_key, normalize_owner_email, normalize_profile_picture_url,
-    normalize_runtime_contact_endpoint, normalize_source_host_id,
+    new_customer_org_id, new_self_service_project_id, new_user_id, normalize_bad_versions,
+    normalize_id_part, normalize_idempotency_key, normalize_owner_email,
+    normalize_profile_picture_url, normalize_runtime_contact_endpoint, normalize_source_host_id,
     parse_agent_creation_request_status, parse_billing_class, parse_billing_subscription_status,
     parse_finite_private_api_key_status, parse_finite_private_grant_status,
     parse_finite_private_reservation_status, parse_hosting_tier, parse_import_candidate_status,
@@ -659,8 +659,10 @@ impl CoreStore {
                     runtime_id: status.runtime_id,
                     project_id: status.project_id,
                     payload_version_label: status.payload_version_label,
+                    payload_digest: status.payload_digest,
                     shell_version: status.shell_version,
                     channel: status.channel,
+                    bad_versions: status.bad_versions,
                     reported_at: status.reported_at,
                     fence,
                 }
@@ -2325,23 +2327,29 @@ impl PostgresCoreStore {
         input: RecordRuntimePayloadReportInput,
     ) -> CoreResult<RuntimePayloadStatus> {
         let now = input.now.clone().unwrap_or(current_time_iso()?);
+        let bad_versions = normalize_bad_versions(input.bad_versions.clone())
+            .map(serde_json::Value::from);
         let client = self.connection().await?;
         let row = client
             .query_opt(
                 "UPDATE agent_runtimes SET
                    payload_version_label = $3,
-                   shell_version = $4,
-                   release_channel = $5,
-                   payload_reported_at = $6::text::timestamptz
+                   payload_digest = $4,
+                   shell_version = $5,
+                   release_channel = $6,
+                   payload_bad_versions = $7,
+                   payload_reported_at = $8::text::timestamptz
                  WHERE source_host_id = $1 AND source_machine_id = $2
-                 RETURNING id, project_id, payload_version_label, shell_version,
-                           release_channel, to_char(payload_reported_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS payload_reported_at",
+                 RETURNING id, project_id, payload_version_label, payload_digest, shell_version,
+                           release_channel, payload_bad_versions, to_char(payload_reported_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS payload_reported_at",
                 &[
                     &input.source_host_id,
                     &input.source_machine_id,
                     &trim_to_option(input.payload_version_label.as_deref()),
+                    &trim_to_option(input.payload_digest.as_deref()),
                     &trim_to_option(input.shell_version.as_deref()),
                     &trim_to_option(input.release_channel.as_deref()),
+                    &bad_versions,
                     &now,
                 ],
             )
@@ -2355,8 +2363,8 @@ impl PostgresCoreStore {
         let client = self.connection().await?;
         let rows = client
             .query(
-                "SELECT id, project_id, payload_version_label, shell_version,
-                        release_channel, to_char(payload_reported_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS payload_reported_at
+                "SELECT id, project_id, payload_version_label, payload_digest, shell_version,
+                        release_channel, payload_bad_versions, to_char(payload_reported_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS payload_reported_at
                  FROM agent_runtimes
                  ORDER BY id",
                 &[],
@@ -8237,12 +8245,26 @@ fn release_channel_head_from_row(row: &Row) -> CoreResult<ReleaseChannelHead> {
 }
 
 fn runtime_payload_status_from_row(row: &Row) -> CoreResult<RuntimePayloadStatus> {
+    let bad_versions: Option<serde_json::Value> = row.get("payload_bad_versions");
     Ok(RuntimePayloadStatus {
         runtime_id: row.get("id"),
         project_id: row.get("project_id"),
         payload_version_label: row.get("payload_version_label"),
+        payload_digest: row.get("payload_digest"),
         shell_version: row.get("shell_version"),
         channel: row.get("release_channel"),
+        bad_versions: bad_versions.map(|value| {
+            value
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }),
         reported_at: row.get("payload_reported_at"),
     })
 }
@@ -14717,8 +14739,10 @@ mod tests {
                         source_host_id: "other-host".to_string(),
                         source_machine_id: "fence-machine".to_string(),
                         payload_version_label: Some("v2".to_string()),
+                        payload_digest: None,
                         shell_version: Some("0.1.0".to_string()),
                         release_channel: Some("canary".to_string()),
+                        bad_versions: None,
                         now: None,
                     })
                     .await
@@ -14735,8 +14759,14 @@ mod tests {
                             source_host_id: "fence-host".to_string(),
                             source_machine_id: "fence-machine".to_string(),
                             payload_version_label: label.clone(),
+                            payload_digest: label
+                                .is_some()
+                                .then(|| format!(" {} ", "d".repeat(64))),
                             shell_version: label.is_some().then(|| "0.1.0".to_string()),
                             release_channel: label.is_some().then(|| "canary".to_string()),
+                            bad_versions: label
+                                .is_some()
+                                .then(|| vec![" v7-broken ".to_string(), " ".to_string()]),
                             now: None,
                         })
                         .await
@@ -14744,16 +14774,24 @@ mod tests {
                 }
             };
 
-            // On the head: converged.
+            // On the head: converged. Digest and bad list roundtrip trimmed
+            // through the TEXT/JSONB columns.
             let status = report_payload(Some("v2")).await;
             assert_eq!(status.runtime_id, "fence-runtime");
             assert_eq!(status.project_id, "fence-project");
             assert_eq!(status.channel.as_deref(), Some("canary"));
+            assert_eq!(status.payload_digest, Some("d".repeat(64)));
+            assert_eq!(status.bad_versions, Some(vec!["v7-broken".to_string()]));
             let report = store.payload_convergence_report().await.unwrap();
             assert_eq!(report.runtimes.len(), 1);
             assert_eq!(
                 report.runtimes[0].fence,
                 crate::PayloadConvergenceFence::Converged
+            );
+            assert_eq!(report.runtimes[0].payload_digest, Some("d".repeat(64)));
+            assert_eq!(
+                report.runtimes[0].bad_versions,
+                Some(vec!["v7-broken".to_string()])
             );
 
             // Head moves to v3: v2 is now the previous head — still converged
@@ -14787,6 +14825,8 @@ mod tests {
                 crate::PayloadConvergenceFence::Unknown
             );
             assert_eq!(report.runtimes[0].payload_version_label, None);
+            assert_eq!(report.runtimes[0].payload_digest, None);
+            assert_eq!(report.runtimes[0].bad_versions, None);
             assert!(report.runtimes[0].reported_at.is_some());
         })
         .await;

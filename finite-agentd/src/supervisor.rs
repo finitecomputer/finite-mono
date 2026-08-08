@@ -113,6 +113,7 @@ pub fn start_supervisor(
     sidecar: ProcessSpec,
     health: Option<ProcessSpec>,
     hermes: ProcessSpec,
+    brain_sync: Option<ProcessSpec>,
 ) -> SupervisorHandle {
     let status = Arc::new(RwLock::new(SupervisorStatus::default()));
     let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
@@ -120,6 +121,13 @@ pub fn start_supervisor(
     let mut all_txs = vec![sidecar_tx, hermes_tx.clone()];
 
     tokio::spawn(supervise_process(sidecar, sidecar_rx, Arc::clone(&status)));
+    // Best-effort slot: supervised (restart with backoff, SIGTERM drain on
+    // shutdown/flip) but deliberately outside the readiness contract.
+    if let Some(brain_sync) = brain_sync {
+        let (brain_tx, brain_rx) = mpsc::channel(4);
+        all_txs.push(brain_tx);
+        tokio::spawn(supervise_process(brain_sync, brain_rx, Arc::clone(&status)));
+    }
     match health {
         Some(health) => {
             let (health_tx, health_rx) = mpsc::channel(4);
@@ -323,6 +331,7 @@ mod tests {
             sleeping_process("sidecar"),
             Some(sleeping_process("health")),
             sleeping_process("hermes"),
+            None,
         );
         let original_pid = wait_for_running(&handle, "hermes").await.pid.unwrap();
 
@@ -341,6 +350,7 @@ mod tests {
             sleeping_process("sidecar"),
             None,
             sleeping_process("hermes"),
+            None,
         );
 
         let health = wait_for_running(&handle, "health").await;
@@ -348,6 +358,39 @@ mod tests {
         assert_eq!(health.state, "running");
         assert_eq!(health.pid, None, "no process backs the delegated endpoint");
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_brain_sync_slot_is_supervised_and_stops_with_the_tree() {
+        // entrypoint.sh's old `fbrain daemon supervise` loop, now a
+        // supervised slot: it runs, restarts, and stops on shutdown like
+        // every other child — without joining the readiness contract.
+        let handle = start_supervisor(
+            sleeping_process("sidecar"),
+            Some(sleeping_process("health")),
+            sleeping_process("hermes"),
+            Some(sleeping_process("brain_sync")),
+        );
+        let brain = wait_for_running(&handle, "brain_sync").await;
+        assert!(brain.pid.is_some());
+
+        handle.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if handle
+                    .status()
+                    .await
+                    .processes
+                    .get("brain_sync")
+                    .is_some_and(|status| status.state == "stopped")
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("brain_sync must stop with the supervised tree");
     }
 
     fn sleeping_process(name: &'static str) -> ProcessSpec {
@@ -389,6 +432,7 @@ mod tests {
             },
             Some(sleeping_process("health")),
             sleeping_process("hermes"),
+            None,
         );
         wait_for_running(&handle, "finitechat").await;
         // Let the script arm its trap before signalling.

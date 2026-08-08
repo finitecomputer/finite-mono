@@ -921,6 +921,7 @@ mod tests {
             service_directory_url: None,
             shell_socket: PathBuf::from("/nonexistent"),
             shell_control_token: None,
+            brain_sync_bin: None,
         }
     }
 

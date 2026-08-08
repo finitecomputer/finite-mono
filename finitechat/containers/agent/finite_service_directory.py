@@ -33,9 +33,7 @@ def _load(path: Path) -> dict:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
-        raise ServiceDirectoryError(
-            f"service directory cache is missing: {path}"
-        ) from error
+        raise ServiceDirectoryError(f"service directory cache is missing: {path}") from error
     except (OSError, json.JSONDecodeError) as error:
         raise ServiceDirectoryError(
             f"service directory cache is unreadable: {path}: {error}"
@@ -57,9 +55,7 @@ def service_base_urls(path: Path | str | None = None) -> dict[str, str]:
     for name, entry in services.items():
         base_url = entry.get("base_url") if isinstance(entry, dict) else None
         if not isinstance(base_url, str) or not base_url:
-            raise ServiceDirectoryError(
-                f"service directory entry {name!r} has no base_url"
-            )
+            raise ServiceDirectoryError(f"service directory entry {name!r} has no base_url")
         urls[name] = base_url
     return urls
 
@@ -70,9 +66,7 @@ def service_base_url(name: str, path: Path | str | None = None) -> str:
     try:
         return urls[name]
     except KeyError as error:
-        raise ServiceDirectoryError(
-            f"service directory does not advertise {name!r}"
-        ) from error
+        raise ServiceDirectoryError(f"service directory does not advertise {name!r}") from error
 
 
 def main(argv: list[str]) -> int:

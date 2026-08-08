@@ -176,6 +176,7 @@ impl ShellRuntime {
                 tree_digest: manifest.tree_digest.clone(),
                 recorded_at: now_rfc3339(),
             });
+            state.current_digest = Some(manifest.tree_digest.clone());
         })?;
         Ok(())
     }
@@ -211,14 +212,18 @@ impl ShellRuntime {
             }
             if committed {
                 // The swap was the commit point; the staged generation was
-                // consumed.
-                if state
+                // consumed. Its digest is the only record of what `current`
+                // now points at; without it (e.g. an interrupted rollback)
+                // the digest is honestly unknown.
+                let staged_digest = state
                     .staged
                     .as_ref()
-                    .is_some_and(|staged| staged.version_label == flip.to)
-                {
+                    .filter(|staged| staged.version_label == flip.to)
+                    .map(|staged| staged.tree_digest.clone());
+                if staged_digest.is_some() {
                     state.staged = None;
                 }
+                state.current_digest = staged_digest;
             }
         })?;
         Ok(committed.then_some(flip))
@@ -250,6 +255,10 @@ impl ShellRuntime {
                 match self.restore_previous(flip).await {
                     Ok(()) => {
                         self.state.update(|state| {
+                            // `current` was retargeted at the restored
+                            // generation; no verified digest for it is on
+                            // record.
+                            state.current_digest = None;
                             if !state.is_bad(&flip.to) {
                                 state.bad.push(BadGeneration {
                                     version_label: flip.to.clone(),
@@ -266,6 +275,7 @@ impl ShellRuntime {
                     }
                     Err(restore_error) => {
                         self.state.update(|state| {
+                            state.current_digest = None;
                             if let Some(record) = state.last_flip.as_mut() {
                                 record.outcome = FlipOutcome::FailedOpen;
                                 record.detail = Some(format!(
@@ -759,13 +769,24 @@ impl ShellRuntime {
             .map_err(at(TransitionProgress::OldStopped))?;
         self.state
             .update(|state| {
-                if kind == TransitionKind::Flip
-                    && state
+                if kind == TransitionKind::Flip {
+                    // The staged record carries the verified digest of what
+                    // `current` now points at; consume it into
+                    // `current_digest` so the evidence survives the flip.
+                    let staged_digest = state
                         .staged
                         .as_ref()
-                        .is_some_and(|staged| staged.version_label == to)
-                {
-                    state.staged = None;
+                        .filter(|staged| staged.version_label == to)
+                        .map(|staged| staged.tree_digest.clone());
+                    if staged_digest.is_some() {
+                        state.staged = None;
+                    }
+                    state.current_digest = staged_digest;
+                } else {
+                    // A rollback retargets `current` at a generation whose
+                    // digest the journal never recorded: serve null, never a
+                    // stale digest.
+                    state.current_digest = None;
                 }
             })
             .map_err(at(TransitionProgress::Committed))?;
@@ -803,6 +824,10 @@ impl ShellRuntime {
                 let restored = self.restore_previous(&flip).await;
                 self.state
                     .update(|state| {
+                        // Whatever `current` points at now (restored old
+                        // generation, or worse on a failed restoration), no
+                        // verified digest for it is on record.
+                        state.current_digest = None;
                         if kind == TransitionKind::Flip && !state.is_bad(to) {
                             state.bad.push(BadGeneration {
                                 version_label: to.to_owned(),

@@ -134,6 +134,13 @@ pub struct ShellState {
     /// than it (equal is fine — an idempotent re-serve is not a replay).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_floor: Option<String>,
+    /// The verified tree digest of the generation `current` points at,
+    /// recorded at seed time and at every flip commit (from the staged
+    /// record). Cleared when a transition retargets `current` at a
+    /// generation whose digest is not on record (rollback/restore journal
+    /// only labels): absent evidence is served as null, never guessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_digest: Option<String>,
 }
 
 impl Default for ShellState {
@@ -147,6 +154,7 @@ impl Default for ShellState {
             agentd_crash_loop: None,
             last_poll: None,
             directory_floor: None,
+            current_digest: None,
         }
     }
 }

@@ -69,7 +69,11 @@ jobs:
             exit 1
           fi
           umask 077
-          SIGNING_KEY_FILE="$(mktemp)"
+          # Key material lives in a trap-cleaned tempdir so no failure point in
+          # this step can leave it behind on the self-hosted runner.
+          SIGNING_KEY_DIR="$(mktemp -d)"
+          trap 'rm -rf "$SIGNING_KEY_DIR"' EXIT
+          SIGNING_KEY_FILE="$SIGNING_KEY_DIR/seed-signing.key"
           printf '%s\n' "$FINITE_RELEASE_SIGNING_KEY" > "$SIGNING_KEY_FILE"
           finitecomputer-v2/scripts/build_runtime_image.py \
             --image-ref "$VERSION_REF" \
@@ -78,7 +82,9 @@ jobs:
             --seed-signing-key "$SIGNING_KEY_FILE" \
             --seed-version-label "$VERSION" \
             --report finitecomputer-v2/runtime-image-report.json
-          rm -f "$SIGNING_KEY_FILE"
+          # Drop the key as soon as signing is done; the trap remains as the
+          # backstop for every earlier failure point.
+          rm -rf "$SIGNING_KEY_DIR"
 
           LOCAL_IMAGE_ID="$(docker image inspect "$VERSION_REF" --format '{{.Id}}')"
           test -n "$LOCAL_IMAGE_ID"

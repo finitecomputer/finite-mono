@@ -810,11 +810,27 @@ where
                 }
                 _ => {}
             }
+            // The shell's bad list rides along as evidence for the fleet
+            // view ("N agents refused vX"). Absent for pre-shell images,
+            // whose /healthz has no payload_generations object.
+            let bad_versions = health
+                .get("payload_generations")
+                .and_then(|generations| generations.get("bad"))
+                .and_then(serde_json::Value::as_array)
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                });
             let request = RuntimePayloadReportRequest {
                 source_machine_id: entry.source_machine_id.clone(),
                 payload_version_label: field("payload_version"),
+                payload_digest: field("payload_digest"),
                 shell_version: field("shell_version"),
                 release_channel: field("channel"),
+                bad_versions,
                 now: None,
             };
             if let Err(error) = self.queue.report_runtime_payload(&request) {
@@ -5021,8 +5037,15 @@ mod tests {
                 &serde_json::json!({
                     "ready": false,
                     "payload_version": "devfinity-v2",
+                    "payload_digest": "d".repeat(64),
                     "shell_version": "0.1.0",
                     "channel": "canary",
+                    "payload_generations": {
+                        "current": "devfinity-v2",
+                        "previous": "devfinity-v1",
+                        "staged": null,
+                        "bad": ["devfinity-v3-broken"],
+                    },
                 })
                 .to_string(),
             );
@@ -5070,15 +5093,25 @@ mod tests {
             report.payload_version_label.as_deref(),
             Some("devfinity-v2")
         );
+        assert_eq!(report.payload_digest, Some("d".repeat(64)));
         assert_eq!(report.shell_version.as_deref(), Some("0.1.0"));
         assert_eq!(report.release_channel.as_deref(), Some("canary"));
+        assert_eq!(
+            report.bad_versions,
+            Some(vec!["devfinity-v3-broken".to_string()])
+        );
 
         assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
         assert_eq!(runner.queue.payload_reports.len(), 2);
         let report = &runner.queue.payload_reports[1];
         assert_eq!(report.payload_version_label, None);
+        assert_eq!(report.payload_digest, None);
         assert_eq!(report.shell_version, None);
         assert_eq!(report.release_channel, None);
+        assert_eq!(
+            report.bad_versions, None,
+            "a pre-shell body has no payload_generations; absent, not empty"
+        );
         server.join().unwrap();
 
         // The stub is gone: an unreachable runtime is skipped, never an

@@ -906,6 +906,7 @@ mod tests {
             service_directory_url: None,
             shell_socket: shell_socket.to_path_buf(),
             shell_control_token: None,
+            brain_sync_bin: None,
         }
     }
 

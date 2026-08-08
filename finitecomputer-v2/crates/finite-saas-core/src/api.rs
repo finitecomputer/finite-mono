@@ -1461,8 +1461,10 @@ async fn report_runtime_payload(
                 source_host_id: credential.source_host_id,
                 source_machine_id: input.source_machine_id,
                 payload_version_label: input.payload_version_label,
+                payload_digest: input.payload_digest,
                 shell_version: input.shell_version,
                 release_channel: input.release_channel,
+                bad_versions: input.bad_versions,
                 now: input.now,
             })
             .await?,

@@ -235,3 +235,41 @@ converged). Two remain open as designed follow-ups:
   liveness definition is telemetry staleness, and any future automated
   "restart presumed-dead compute" loop must fence duplicate writers first
   (the 2026-08-01 lesson).
+
+## Scope, honestly stated (post-review framing, 2026-08-08)
+
+This project is **payload convergence**, not "no more rollouts." Routine
+runtime releases stop requiring provider surgery; shell-image, OS, provider,
+and disaster-recovery rollouts remain, and the probe/stop-path machinery
+stays funded as shell-update infrastructure. Coverage against the 2026-08-07
+failure classes:
+
+| Failure class | Effect of this architecture |
+|---|---|
+| Zombie VM (Class 1) | Not repaired (shell dies with the guest); detected via telemetry staleness → `stale` fence |
+| Wedged-but-connected gateway (Class 2) | Not yet detected; gateway-freshness signal is the top follow-up |
+| Poisoned containerd record (Class 3) | Avoided during payload releases; still gates provider verbs |
+| Port squat (Class 4) | Structurally eliminated for updates; telemetry identity-pinned |
+
+## Gates for the transition rollout (must hold before "one last rollout")
+
+1. **Recovery Set with proven empty-target restore.** The transition is the
+   moment of maximum danger — every agent re-imaged; its failure story must
+   not be manual forensics. (Also the Aug-1 postmortem's standing follow-up.)
+2. **Autonomy ships off.** Transition with poll interval 0 fleet-wide;
+   manual channel-driven flips first; enable polling cohort by cohort.
+3. **Fault-injection suite in finite-shell tests**: power loss at each
+   journal boundary, full disk, directory replay, corrupt state, rollback
+   failure (several landed with the hardening batch; complete the set).
+4. **Release data-contract policy**: expand/contract migrations with an
+   N/N−1 compatibility window (the gen fence defines the window); no
+   irreversible remote effects before stable promotion. Checklist, not
+   machinery.
+5. **Key ceremony** (separate artifact/directory keys, offline root,
+   revocation path) before any non-Finite-operated fleet; `key_id` landed
+   now so rotation is diagnosable.
+
+Deliberately deferred as premature at current fleet scale: progressive-wave
+promotion, automatic head demotion (the fleet view's bad-list visibility +
+a human is today's circuit breaker), non-root payload processes, external
+user-journey sentinels as product.
