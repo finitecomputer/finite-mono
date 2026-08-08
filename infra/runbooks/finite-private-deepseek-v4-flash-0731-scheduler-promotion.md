@@ -52,18 +52,31 @@ Do not reconstruct it manually from this abbreviated diff.
    infra/runbooks/finite-private-ops.sh quality-canary
    ```
 
-4. Confirm every successful canary has a distinct Core reservation, every
+4. Capture three identical one-way and 32-way performance baselines through
+   the real limiter/accounting path:
+
+   ```bash
+   for run_number in 1 2 3; do
+     infra/runbooks/finite-private-ops.sh load-canary 1
+     infra/runbooks/finite-private-ops.sh load-canary 32
+   done
+   ```
+
+   Record the median aggregate generation rate and median p95 completion
+   latency at each concurrency. These are tonight's objective current-load
+   comparison, not the isolated lab numbers.
+5. Confirm every successful canary has a distinct Core reservation, every
    reservation settles, and no synthetic reservation remains `reserved`.
-5. Run both repository contracts:
+6. Run both repository contracts:
 
    ```bash
    python3 scripts/check_finite_private_deepseek_candidate.py
    python3 scripts/check_finite_private_deepseek_candidate.py --release-ready
    ```
 
-6. Confirm no checkpoint, MPK, image, limiter, secret name, route, parser,
+7. Confirm no checkpoint, MPK, image, limiter, secret name, route, parser,
    context, or numerical-format diff accompanies the scheduler change.
-7. Confirm an operator has approved the maintenance window, accepted the
+8. Confirm an operator has approved the maintenance window, accepted the
    interruption, and named the exact new measured release tag. Preparation or
    a passing test does not supply that authority.
 
@@ -72,6 +85,11 @@ Do not reconstruct it manually from this abbreviated diff.
 This phase may run only with separate authorization to publish a satellite
 release. Copy the candidate into the satellite repo without changing its
 structure, commit it, and publish one new immutable Tinfoil release.
+
+The same reviewed promotion change must add or update the Finite Private field
+in `compat/matrix.toml`, recording the checkpoint revision, MPK root, runtime
+image digest, measured Tinfoil tag/hash, host, and 128/2048 scheduler identity.
+Do not publish first and leave the compatibility inventory for a later patch.
 
 Before production relaunch:
 
@@ -120,9 +138,14 @@ After readiness:
 5. After the sweep, require a clean single-request canary, clean 32-way load
    canary, deep health, no stuck reservations, and no worker restart, OOM,
    CUDA error, traceback, or limiter error.
-6. Observe the exact target for at least 35 minutes. Repeat deep health,
+6. Repeat the one-way and 32-way load canaries three times each. At both
+   concurrencies, the candidate median aggregate generation rate must be at
+   least 90% of the pre-relaunch median and its median p95 completion latency
+   must be no more than 125% of the pre-relaunch median. Any worse result is a
+   defined current-load regression and triggers rollback.
+7. Observe the exact target for at least 35 minutes. Repeat deep health,
    authenticated canary, settlement inspection, and error-log scan at the end.
-7. Run `scripts/finite-status` again and retain the output together with the
+8. Run `scripts/finite-status` again and retain the output together with the
    exact running tag and hash.
 
 ## VERIFY
@@ -136,8 +159,8 @@ The promotion passes only when all of the following are true:
 - every canary reservation settles with plausible token accounting;
 - the guarded load sweep recovers cleanly after every attempted tier;
 - the 35-minute observation has no crash, OOM, corruption, or error-log match;
-- single-user behavior is not materially worse than the measured 54.78 tok/s,
-  0.214-second-TTFT lab result under a comparable request; and
+- the repeated one-way and 32-way comparisons pass the 90%-throughput and
+  125%-latency bounds above; and
 - the before/after status evidence contains no red platform result.
 
 The 8,373 aggregate tok/s result is a lab reference, not a production pass
@@ -148,7 +171,8 @@ different; correctness and clean recovery remain authoritative.
 
 Rollback immediately on identity drift, corrupt output, protocol/auth/
 accounting failure, worker restart/OOM, deep-health failure, failure to recover
-within two minutes after a load tier, or a material current-load regression.
+within two minutes after a load tier, or failure of the numeric current-load
+bounds above.
 
 The immediate rollback is the exact currently running DeepSeek baseline:
 
@@ -158,11 +182,18 @@ export FINITE_PRIVATE_RELAUNCH_APPROVED="$ROLLBACK_TAG"
 infra/runbooks/finite-private-ops.sh relaunch "$ROLLBACK_TAG"
 infra/runbooks/finite-private-ops.sh wait-ready
 infra/runbooks/finite-private-ops.sh gate
+infra/runbooks/finite-private-ops.sh stream-canary
+infra/runbooks/finite-private-ops.sh responses-canary
+infra/runbooks/finite-private-ops.sh repeated-id-canary
+infra/runbooks/finite-private-ops.sh quality-canary
+infra/runbooks/finite-private-ops.sh load-canary 1
+infra/runbooks/finite-private-ops.sh load-canary 32
 scripts/finite-status
 ```
 
 After rollback, confirm the parsed scheduler values returned to 64/512 and
-repeat settlement inspection. Do not improvise a third configuration during
-the window. If the exact baseline cannot recover, stop and use the separately
-reviewed historical GLM recovery boundary from the retry-2 runbook; that is an
-incident escalation, not the normal rollback for this scheduler promotion.
+repeat settlement inspection after the complete protocol and bounded-load
+recovery set above. Do not improvise a third configuration during the window.
+If the exact baseline cannot recover, stop and use the separately reviewed
+historical GLM recovery boundary from the retry-2 runbook; that is an incident
+escalation, not the normal rollback for this scheduler promotion.

@@ -29,6 +29,7 @@
   historical preparation evidence while pointing current operations away from
   stale GLM-era status.
 - `infra/runbooks/README.md`: owns runbook discovery.
+- `infra/tinfoil/README.md`: owns the current satellite/enclave map.
 - This packet and its ledger: own the context-loop evidence and parked work.
 
 ## Guardrails
@@ -44,8 +45,8 @@
 - Links: passed; every relative target exists.
 - Paths: passed; referenced reports, candidate, helper, and status command exist.
 - Commands: passed; helper syntax and prep/release-ready contracts passed.
-- Contradictions: passed; historical cutover context is separated from current
-  scheduler-promotion state.
+- Contradictions: passed; historical cutover context and the Tinfoil index are
+  separated from current scheduler-promotion state.
 - Documentation-only scope: passed; only Markdown files changed.
 
 ## Parked work

@@ -62,13 +62,15 @@
 | Links | passed | All relative Markdown targets exist |
 | Paths | passed | Model reports, candidate, helper, and status command verified |
 | Commands | passed | Helper syntax and both candidate contracts passed |
-| Contradictions | passed | Historical retry-2 status now points to the current scheduler handoff |
+| Contradictions | passed | Retry-2 and Tinfoil index now distinguish historical GLM cutover from current DeepSeek promotion |
 | Docs-only scope | passed | Only Markdown files changed |
 
 ## PR and handoff
 
 - PR URL: pending
 - Commit SHA: pending
+- Review notes: fixed stale GLM rollback/index language, compatibility-matrix
+  release discipline, objective performance bounds, and full rollback gates.
 - Production/release handoff: follow the scheduler-promotion runbook only after
   an exact measured tag and fresh explicit rollout approval exist.
 - Human-owned follow-up: approve or decline the exact measured release and

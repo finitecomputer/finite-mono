@@ -8,6 +8,10 @@ Status: historical preparation and initial-cutover evidence. As observed on
 Nothing in either runbook authorizes image publication, satellite release,
 Tinfoil relaunch, or product-default change.
 
+The GLM rollback sections below describe the original GLM-to-DeepSeek cutover.
+They are not the rollback procedure for a scheduler-only update on an already
+running DeepSeek service.
+
 ## Why this is a new attempt
 
 The first attempt proved that Finite wrapped the exact official checkpoint and
@@ -48,7 +52,7 @@ Supporting evidence is recorded in
 | Context | 393,216 service tokens |
 | Sampling for quality proof | `temperature=1.0`, `top_p=0.95`, explicit thinking high/max |
 | Default reasoning mode | vLLM `--default-chat-template-kwargs '{"enable_thinking":true}'`; request overrides remain authoritative |
-| Rollback | Exact measured GLM tag above remains the only rollback authority |
+| Rollback | Historical first-cutover boundary: the exact measured GLM tag above; the scheduler promotion has a separate DeepSeek-baseline rollback |
 
 The staged config is
 [`tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml`](../tinfoil/confidential-kimi-k2-6/tinfoil-config.deepseek-v4-flash-0731-dspark-off.candidate.yml).
@@ -208,13 +212,14 @@ Keep retry 2 only if all of the following are true:
 5. output quality is comparable to the hosted 0731 reference on the fixed set;
 6. the operator explicitly accepts the measured throughput result.
 
-Only after that decision should the separate Finite Runtime/default-model
-changes be merged or deployed so `/new` identifies DeepSeek. Until then GLM is
-the product and rollback authority.
+For the original cutover, only after that decision could the separate Finite
+Runtime/default-model changes be merged or deployed so `/new` identified
+DeepSeek. Until that decision, GLM was the product and rollback authority.
 
-## Rollback
+## Historical first-cutover rollback
 
-Rollback is a guarded relaunch to exactly
+This section does not apply to the later scheduler-only promotion. For the
+original cutover, rollback was a guarded relaunch to exactly
 `v2026-07-02-glm-5-2-limiter-routing-1`, followed by status, live/deep health,
 invalid-key rejection, chat, streaming, Responses, a real Hermes turn, the
 32-way bounded check, and Core settlement verification. Do not change DNS,
