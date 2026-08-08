@@ -1,9 +1,12 @@
 # Finite Private: DeepSeek-V4-Flash-0731 retry 2
 
-Status: preparation only. Production remains on measured GLM 5.2 release
-`v2026-07-02-glm-5-2-limiter-routing-1`. Nothing in this runbook authorizes an
-image publication, satellite release, Tinfoil relaunch, or product-default
-change.
+Status: historical preparation and initial-cutover evidence. As observed on
+2026-08-08, production is already on DeepSeek release
+`v2026-08-05-deepseek-v4-flash-0731-retry-2-3`. For the measured 64/512 to
+128/2048 scheduler update, use
+[`finite-private-deepseek-v4-flash-0731-scheduler-promotion.md`](finite-private-deepseek-v4-flash-0731-scheduler-promotion.md).
+Nothing in either runbook authorizes image publication, satellite release,
+Tinfoil relaunch, or product-default change.
 
 ## Why this is a new attempt
 
