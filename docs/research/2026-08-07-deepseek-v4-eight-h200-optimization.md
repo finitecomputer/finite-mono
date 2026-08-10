@@ -211,7 +211,7 @@ readiness.
 No production container, release, route, secret, limiter, product default, or
 persisted chat state was changed. Promotion still requires explicit operator
 authorization and every gate in
-[`finite-private-deepseek-v4-flash-0731-retry-2.md`](../../infra/runbooks/finite-private-deepseek-v4-flash-0731-retry-2.md),
+[`finite-private-deepseek-production-update.md`](../../infra/runbooks/finite-private-deepseek-production-update.md),
 including the 35-minute stability interval, real Finite route/settlement proof,
 hosted-reference quality comparison, mixed protocol canaries, measured release
 identity, and exact GLM rollback authority.

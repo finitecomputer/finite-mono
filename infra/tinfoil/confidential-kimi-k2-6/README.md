@@ -21,13 +21,13 @@ The candidate retains the measured Tinfoil MPK and immutable runtime image
 digest. Passing its repository contract does not authorize a satellite
 release, Tinfoil relaunch, container replacement, or DNS change.
 
-## Existing GLM/limiter candidate
+## Archived GLM candidate (recovery evidence only)
 
-`tinfoil-config.candidate.yml` is the reviewed source for the next update to
-the public `finitecomputer/confidential-kimi-k2-6` satellite. It is staged in
-mono so the product, limiter, and enclave changes can be reviewed together.
-Tinfoil still requires the released `tinfoil-config.yml` at the satellite repo
-root.
+`tinfoil-config.candidate.yml` preserves the older reviewed GLM configuration
+for rollback analysis and historical comparison. It is not the next production
+candidate and must not be copied to the public
+`finitecomputer/confidential-kimi-k2-6` satellite or released. The DeepSeek
+candidate above is the only production-update source in this directory.
 
 The candidate follows upstream
 [`tinfoilsh/confidential-glm5-2` v0.0.17](https://github.com/tinfoilsh/confidential-glm5-2/releases/tag/v0.0.17),
@@ -62,6 +62,7 @@ The limiter is pinned to mono image `2026-07-21.1`, digest
 `sha256:5d57ecf462fcb105eae2160dd01493efd825532fb61ee286098bdc1b485ec84b`,
 from source `cafe85246bce88201c23a46ec7b33c8e28cc25e4`. CI verified the OCI
 revision label, and an independent exact-digest pull passed `/live` with the
-expected Finite configuration. Do not copy the candidate to the satellite,
-create a measured release, or relaunch the enclave without explicit approval
-for the downtime operation.
+expected Finite configuration. This archived file is retained only as recovery
+evidence. Do not copy it to the satellite, create a release from it, or relaunch
+the enclave from it. Delete it once the stable Finite Private route is complete
+and the exact GLM rollback evidence is preserved outside this deploy directory.

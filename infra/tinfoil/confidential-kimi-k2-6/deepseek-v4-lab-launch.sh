@@ -29,6 +29,7 @@ exec /usr/local/bin/vllm serve "${MODEL_PATH}" \
     --enable-auto-tool-choice \
     --reasoning-parser deepseek_v4 \
     --default-chat-template-kwargs '{"enable_thinking":true}' \
+    --enable-prompt-tokens-details \
     --scheduling-policy priority \
     --max-model-len 393216 \
     --max-num-seqs "${MAX_NUM_SEQS}" \

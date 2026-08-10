@@ -52,35 +52,48 @@ enablement and the allowed suffix remain explicit prerequisites.
 5. Obtain separate approvals for DNS verification, the custom-domain relaunch,
    the Runtime population rollout, and the final container replacement.
 
-## PHASE 1 — introduce the stable route
+## STEPS
 
-1. Register and verify `inference.finite.computer` using the exact TXT and
+All three phases below are TODO because no custom domain was registered as of
+the last read-only inventory and this migration has not been exercised.
+
+### TODO: Phase 1 — introduce the stable route
+
+1. TODO: Register and verify `inference.finite.computer` using the exact TXT and
    CNAME values returned by Tinfoil. Keep Cloudflare proxying disabled for the
    verification records if Cloudflare owns the zone.
-2. Relaunch the existing `kimi-k2-6` container at the exact already-running
+2. TODO: Relaunch the existing `kimi-k2-6` container at the exact already-running
    tag with the verified custom domain and all three existing secret names.
-3. Prove attestation, health, authentication, inference, accounting, and the
+3. TODO: Prove attestation, health, authentication, inference, accounting, and the
    old generated route. Both routes must work before changing any reader.
 
-## PHASE 2 — migrate readers
+### TODO: Phase 2 — migrate readers
 
-1. Change the repository base-URL constant to the stable custom route and
+1. TODO: Change the repository base-URL constant to the stable custom route and
    publish one canonical Runtime image.
-2. Deploy the Runner configuration with the same route for new leases.
-3. Roll existing Runtimes through the normal explicit artifact rollout.
-4. Require every active Runtime to report the stable route and canonical
+2. TODO: Deploy the Runner configuration with the same route for new leases.
+3. TODO: Roll existing Runtimes through the normal explicit artifact rollout.
+4. TODO: Require every active Runtime to report the stable route and canonical
    DeepSeek model. Preserve user-owned custom providers and mixed-version GLM
    requests.
-5. Hold at least one normal observation window with zero reads of the old
+5. TODO: Hold at least one normal observation window with zero reads of the old
    generated hostname.
 
-## PHASE 3 — replace the container identity
+### TODO: Phase 3 — replace the container identity
 
-Only after phase 2 is complete, create `finite-private` with `--replace` using
+TODO: Only after phase 2 is complete, create `finite-private` with `--replace` using
 the exact approved release, host, custom domain, variable set, and secret-name
 set. Expect eight-GPU downtime. Verify the new container UUID/name, stable
 custom route, attestation, full protocol/accounting gates, bounded load, and
 fleet status.
+
+## VERIFY
+
+The migration is complete only when `scripts/finite-status --json` is green,
+the stable route passes attestation/auth/inference/accounting checks, every
+active Runtime reader has converged, the old generated route has zero reads for
+the approved observation window, and the old route remains available through
+the rollback boundary. Retain the status outputs and reader inventory.
 
 ## ROLLBACK
 

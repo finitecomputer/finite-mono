@@ -10,8 +10,8 @@ re-run the canonical fleet status and Tinfoil read-only status before acting.
 | `kimi-k2-6` | Historical Tinfoil container, satellite repo, and generated hostname | Still the production infrastructure route; it does not identify the current model |
 | GLM 5.2 | Mixed-version API alias `glm-5-2` and older recovery evidence | Not the canonical product model |
 | Kimi K2 | Previously served model that gave the container its name | Not current production |
-| Laguna S2.1 | Isolated eight-H200 lab candidate | Never production; recipe/evidence preserved on GPU-lab PR #461 |
-| Inkling Small | Isolated eight-H200 lab candidate | Never production; recipe/evidence preserved on GPU-lab PR #461 |
+| Laguna S2.1 | Isolated eight-H200 lab candidate | Never production; recipe/evidence preserved on historical [GPU-lab PR #461](https://github.com/finitecomputer/finite-mono/pull/461) |
+| Inkling Small | Isolated eight-H200 lab candidate | Never production; recipe/evidence preserved on historical [GPU-lab PR #461](https://github.com/finitecomputer/finite-mono/pull/461) |
 
 ## Current production identity
 

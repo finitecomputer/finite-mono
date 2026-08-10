@@ -1,4 +1,4 @@
-# Retry-2 staging copy for the measured DeepSeek-V4-Flash-0731 release in
+# Production scheduler staging copy for the measured DeepSeek-V4-Flash-0731 release in
 # finitecomputer/confidential-kimi-k2-6. Scheduler limits were measured on an
 # isolated eight-H200 host on 2026-08-07. Creating a satellite release and
 # deploying it remain separate explicitly approved operations.

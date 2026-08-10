@@ -15,7 +15,7 @@ READY_TIMEOUT_SECS="${FINITE_PRIVATE_READY_TIMEOUT_SECS:-4200}"
 LOAD_MAX_FIRST_BYTE_SECS="${FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS:-90}"
 LOAD_CONCURRENCY="${FINITE_PRIVATE_LOAD_CONCURRENCY:-32}"
 LOAD_MAX_TOKENS="${FINITE_PRIVATE_LOAD_MAX_TOKENS:-64}"
-LOAD_SWEEP_APPROVAL="1,4,8,16,32,64,128,256"
+LOAD_SWEEP_APPROVAL="1,4,8,16,32,64,128,256,512,1024"
 
 usage() {
   cat >&2 <<'EOF'
@@ -30,7 +30,7 @@ Read-only commands:
   responses-canary    Run an authenticated non-streaming /v1/responses canary.
   repeated-id-canary  Send two calls with one caller x-request-id.
   load-canary [N]     Run N concurrent streaming calls and report latency/throughput.
-  load-sweep          Run the guarded 1,4,8,16,32,64,128,256 maintenance sweep.
+  load-sweep          Run the guarded 1,4,8,16,32,64,128,256,512,1024 maintenance sweep.
   negative-canary     Confirm an invalid Finite key is rejected.
   gate                Run status, live, health, negative-canary, and canary.
   wait-ready          Poll status and deep health until ready.
@@ -49,7 +49,7 @@ Environment:
   FINITE_PRIVATE_LOAD_MAX_FIRST_BYTE_SECS default: 90
   FINITE_PRIVATE_LOAD_CONCURRENCY        default: 32
   FINITE_PRIVATE_LOAD_MAX_TOKENS         default: 64
-  FINITE_PRIVATE_LOAD_SWEEP_APPROVED     must equal 1,4,8,16,32,64,128,256 for N > 32 or load-sweep
+  FINITE_PRIVATE_LOAD_SWEEP_APPROVED     must equal 1,4,8,16,32,64,128,256,512,1024 for N > 32 or load-sweep
   FINITE_PRIVATE_RELAUNCH_APPROVED     must equal the exact TAG for relaunch
 EOF
 }
@@ -411,31 +411,26 @@ load_sweep() {
   require_load_sweep_approval
   local tier
   local failed_tier=""
-  for tier in 1 4 8 16 32 64 128 256; do
+  for tier in 1 4 8 16 32 64 128 256 512 1024; do
     echo "=== Finite Private concurrency tier $tier ==="
     if ! load_canary "$tier"; then
       failed_tier="$tier"
       echo "stopping sweep at failed tier $tier" >&2
       break
     fi
-    if ! health >/dev/null; then
+    if ! wait_load_recovery || ! load_canary 1 || ! health >/dev/null; then
       failed_tier="$tier"
-      echo "stopping sweep because health failed after tier $tier" >&2
+      echo "stopping sweep because the clean single-request proof failed after tier $tier" >&2
       break
     fi
   done
 
-  echo "=== Finite Private post-sweep recovery proof ==="
-  wait_load_recovery
-  load_canary 1
-  load_canary 32
-  health >/dev/null
-
   if [ -n "$failed_tier" ]; then
-    echo "sweep stopped at tier $failed_tier; use the previous clean tier as limit evidence" >&2
+    wait_load_recovery || true
+    echo "sweep stopped at tier $failed_tier; no further inference requests were issued after failure" >&2
     return 1
   fi
-  echo "Finite Private concurrency sweep passed through 256"
+  echo "Finite Private concurrency sweep passed through 1024"
 }
 
 negative_canary() {

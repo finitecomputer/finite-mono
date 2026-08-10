@@ -97,10 +97,10 @@ def _validate_one(text: str, *, release_ready: bool) -> list[str]:
     has_measured_image = VLLM_IMAGE_PATTERN.search(text) is not None
     has_image_placeholder = VLLM_IMAGE_PLACEHOLDER in text
     if release_ready and not has_measured_image:
-        violations.append("retry candidate lacks a measured DeepSeek vLLM image digest")
+        violations.append("DeepSeek candidate lacks a measured vLLM image digest")
     elif not release_ready and not (has_measured_image or has_image_placeholder):
         violations.append(
-            "retry candidate has neither a measured image nor the prep placeholder"
+            "DeepSeek candidate has neither a measured image nor the prep placeholder"
         )
 
     mpk_match = MPK_PATTERN.search(text)

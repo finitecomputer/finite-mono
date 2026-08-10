@@ -73,10 +73,23 @@ Runtime that explicitly sends `glm-5-2` remains compatible.
 7. Record an exact new satellite commit, release tag, deployment artifact,
    Tinfoil hash, and candidate SHA-256 in `compat/matrix.toml` in the same
    reviewed promotion change.
-8. Obtain explicit approval for the exact measured tag and the eight-GPU
+8. On an isolated evaluation target running the exact release candidate, run a
+   fixed, version-controlled prompt corpus against both the candidate and the
+   hosted DeepSeek reference with identical request parameters. Retain the
+   corpus revision, sanitized raw outputs, response metadata, and blinded
+   review report. A reviewer must explicitly record that no material
+   correctness, instruction-following, reasoning, or tool-calling regression
+   was found; any material regression or unresolved disagreement stops the
+   rollout.
+9. Obtain explicit approval for the exact measured tag and the eight-GPU
    maintenance interruption. Passing tests is not rollout authority.
 
-## STEPS
+## STEPS — TODO
+
+TODO: This exact production promotion has not yet been exercised. During the
+approved window, record the release identity, operator, timestamps, every gate
+result, and any Tinfoil behavior that differs from this procedure; update the
+runbook before a later reuse.
 
 After the exact release has been independently measured and approved:
 
@@ -95,10 +108,11 @@ Then:
 2. Require `/live`, `/health`, invalid-key rejection, ordinary chat,
    streaming, Responses API, high/max reasoning, tool parsing, and Core
    settlement to pass.
-3. Sweep concurrency progressively through 1, 4, 8, 16, 32, 64, 128, and
-   256. Stop on the first failure and require a clean single request after each
-   tier. The 1,024-concurrency lab result is evidence, not a production sweep
-   target.
+3. Before admitting normal traffic, sweep concurrency progressively through 1,
+   4, 8, 16, 32, 64, 128, 256, 512, and 1,024 to warm all measured request
+   shapes and DP ranks. Stop on the first failure and require a clean single
+   request after each successful tier. Never issue a larger tier or recovery
+   load after a failed request tier.
 4. Repeat the one-way and 32-way baselines three times. Candidate median
    throughput must be at least 90% of the pre-update median and median p95
    completion latency no more than 125% of the pre-update median.

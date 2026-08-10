@@ -113,12 +113,15 @@ class FinitePrivateOpsLoadTests(unittest.TestCase):
     def test_load_sweep_stops_at_first_failed_tier(self) -> None:
         MockFinitePrivateHandler.fail_request_two = True
         self.environment["FINITE_PRIVATE_LOAD_SWEEP_APPROVED"] = (
-            "1,4,8,16,32,64,128,256"
+            "1,4,8,16,32,64,128,256,512,1024"
         )
         result = self.run_ops("load-sweep")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("stopping sweep at failed tier 4", result.stderr)
         self.assertNotIn("concurrency tier 8", result.stdout)
+        self.assertIn(
+            "no further inference requests were issued after failure", result.stderr
+        )
 
 
 if __name__ == "__main__":
