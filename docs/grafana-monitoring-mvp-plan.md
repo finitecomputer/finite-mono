@@ -65,26 +65,33 @@ Done when:
 
 ### 3. Export Internal Health Metrics
 
-- [ ] Decide whether the exporter reads `finite-healthcheck` journal state or
-  `finite-status --json`.
-- [ ] Export aggregate health:
+- [x] Publish metrics directly from `finite-healthcheck`; keep its journal as
+  the matching evidence source consumed by `finite-status --json`.
+- [x] Export aggregate health:
 
   ```text
   finite_healthcheck_success{host="finite-lat-1"} 1
   ```
 
-- [ ] Export per-service health:
+- [x] Export per-service health:
 
   ```text
   finite_service_health_status{host="finite-lat-1",service="finitechat-server"} 1
   ```
 
-- [ ] Include the same internal service list as
+- [x] Include the same internal service list as
   `infra/nixos/modules/monitoring.nix`.
-- [ ] Add a contract test or static check if new repo code owns these metric
+- [x] Add a contract test or static check if new repo code owns these metric
   names.
-- [ ] Verify no metric labels contain secrets, tokens, customer ids, or private
+- [x] Limit Alloy remote write to the MVP health, scrape, and freshness metric
+  families.
+- [x] Record the host-only Grafana Cloud remote-write credential names and
+  bootstrap file without secret values.
+- [x] Verify no metric labels contain secrets, tokens, customer ids, or private
   user data.
+- [ ] Install the Grafana Cloud `metrics:write` credential file on
+  `finite-lat-1` and deploy the evaluated NixOS closure.
+- [ ] Verify the current aggregate and per-service metrics in Grafana Cloud.
 
 Done when:
 
@@ -169,3 +176,19 @@ Do not start these until the MVP above is complete:
 - Incident workflow automation.
 - Automated remediation.
 - Deep per-Agent lifecycle dashboards.
+
+## Final Authorization Todos
+
+These actions change production systems or managed-service state and require
+explicit authorization before execution:
+
+- [ ] Authorize creating a stack-scoped Grafana Cloud access-policy token with
+  only `metrics:write` permission.
+- [ ] Authorize installing the root-owned, mode `0600`
+  `/etc/finite/grafana-cloud-metrics.env` credential file on `finite-lat-1`.
+- [ ] Authorize deploying the reviewed monitoring and version-metric NixOS
+  changes to `finite-lat-1`.
+- [ ] Authorize creating or updating the `Finite Production MVP` dashboard and
+  saving its managed Grafana Cloud configuration.
+- [ ] Authorize rolling `finite-lat-1` back to its previous NixOS generation if
+  post-deploy health checks fail.

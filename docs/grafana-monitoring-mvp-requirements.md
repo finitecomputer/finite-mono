@@ -30,8 +30,8 @@ The MVP includes:
 - One Grafana dashboard.
 - One Prometheus-compatible metrics store.
 - Uptime checks for the main public production surfaces.
-- Internal health status derived from `finite-healthcheck` or
-  `finite-status --json`.
+- Internal health status published directly by `finite-healthcheck`, using the
+  same probe contract that `finite-status --json` reports.
 - Software version and artifact metrics for production architecture
   components.
 
@@ -171,8 +171,17 @@ finite_service_health_status{host="finite-lat-1",service="finitechat-server"} 1
 ```
 
 Internal service health must be sourced from the existing
-`finite-healthcheck`/`finite-status` path. The first dashboard should show the
-same service list as `infra/nixos/modules/monitoring.nix`.
+`finite-healthcheck`/`finite-status` path. `finite-healthcheck` should publish
+the metrics atomically through node-exporter's textfile collector; it must not
+introduce a second probe loop. The first dashboard should show the same service
+list as `infra/nixos/modules/monitoring.nix`.
+
+Grafana Alloy should scrape the loopback-only node exporter once per minute and
+send the retained health metrics through standard Prometheus `remote_write`.
+For this MVP, retain only the two `finite_*` health families plus `up`,
+`node_textfile_scrape_error`, and `node_textfile_mtime_seconds`. The latter two
+make collector failure and stale health output visible without adding another
+custom metric.
 
 ## Dashboard Requirements
 
@@ -210,8 +219,8 @@ The MVP is done when:
 ## Implementation Order
 
 1. Add external uptime checks for the minimum public targets.
-2. Export `finite-healthcheck` or `finite-status --json` health into
-   Prometheus-compatible metrics.
+2. Export `finite-healthcheck` health through node exporter and standard
+   Prometheus `remote_write`.
 3. Export component version and runtime artifact metrics.
 4. Create the Grafana dashboard.
 5. Record the exact managed-service settings or checked-in config needed to
