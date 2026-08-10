@@ -9,7 +9,7 @@
 - Feature branch: `codex/finite-brain-invite-prototype-parity`
 - Human owner: Austin
 - Started: 2026-08-10
-- Current status: implementation verified and reviewed; publication in progress
+- Current status: implementation verified, reviewed, and published for review
 - Skill setup status: present (`AGENTS.md`, `docs/agents/issue-tracker.md`,
   `docs/agents/triage-labels.md`, and `docs/agents/domain.md`)
 
@@ -43,7 +43,7 @@ cohort lane.
   `019fd8fe-28f0-7023-b954-3ab426582c2f`
 - Review packets: final Standards and Spec axes reported no actionable findings
 - Local CodeRabbit report: four passes; all findings resolved and final pass clean
-- PR URL: pending
+- PR URL: https://github.com/finitecomputer/finite-mono/pull/465
 
 ## Contract Snapshot
 
@@ -145,7 +145,7 @@ pull request.
 
 | Issue | Fixed point | Worker session | Commit | Review result | Checks |
 | --- | --- | --- | --- | --- | --- |
-| #442/#443/#446/#449/#450 frontend tracer | `0903b4267efbd53c8eafad65ea42958f860ebc0c` | current delegated Codex task | pending publication commit | accepted; no actionable Standards or Spec findings | JS client suite, static verifier shell, Rust server suite, clippy, fmt, app build, and desktop/mobile browser checks pass |
+| #442/#443/#446/#449/#450 frontend tracer | `0903b4267efbd53c8eafad65ea42958f860ebc0c` | current delegated Codex task | `e33401b8` | accepted; no actionable Standards or Spec findings | JS client suite, static verifier shell, Rust server suite, clippy, fmt, app build, and desktop/mobile browser checks pass |
 
 ## Verification
 

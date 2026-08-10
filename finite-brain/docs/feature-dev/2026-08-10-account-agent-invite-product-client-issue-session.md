@@ -5,8 +5,8 @@
 - Issue: frontend tracer across #442, #443, #446, #449, and #450
 - Fixed point before session: `0903b4267efbd53c8eafad65ea42958f860ebc0c`
 - Worker session: current delegated Codex task
-- Commit: pending
-- Status: implemented, verified, and reviewed; publication in progress
+- Commit: `e33401b8`
+- Status: implemented, verified, reviewed, and published in PR #465
 
 ## Inputs
 
