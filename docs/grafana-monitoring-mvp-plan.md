@@ -40,23 +40,28 @@ Done when:
 
 ### 2. Add Public Uptime Checks
 
-- [ ] Add check for `https://finite.computer`.
-- [ ] Add check for `https://chat.finite.computer`.
-- [ ] Add check for `https://brain.finite.computer`.
-- [ ] Add check for one representative `https://*.finite.chat` route.
-- [ ] Add check for one representative `https://*.docs.finite.chat` route.
-- [ ] Run all checks from one public probe location every five minutes.
-- [ ] Validate only the expected successful HTTP status.
-- [ ] Store the resolved uptime target list and expected statuses in the
+- [x] Add check for `https://finite.computer`.
+- [x] Add check for `https://chat.finite.computer/health`.
+- [x] Add check for `https://brain.finite.computer/health`.
+- [x] Add check for `https://finitechat-native-mockup.finite.chat/`.
+- [x] Add routing check for `https://uptime-probe.docs.finite.chat/`, expecting
+  the unknown-document `404` response until a stable public document exists.
+- [x] Run implemented checks from one public probe location every five minutes.
+- [x] Validate implemented checks against the expected HTTP status.
+- [x] Store the resolved uptime target list and expected statuses in the
   repository.
-- [ ] Verify each check emits `probe_success`.
-- [ ] Verify each check emits response duration.
-- [ ] Verify each check records HTTP status code or equivalent result detail.
+- [x] Record all implemented check settings in
+  `infra/monitoring/grafana-cloud/public-uptime-checks.json`.
+- [x] Verify the `finite.computer` check emits `probe_success`, response
+  duration, and HTTP status code.
+- [x] Verify each remaining check emits `probe_success`, response duration, and
+  HTTP status code.
 
 Done when:
 
 - All minimum public targets are visible as time-series data.
-- At least one hour of probe history is visible before dashboard work starts.
+- Checks continue accumulating history for at least one hour before dashboard
+  work starts.
 
 ### 3. Export Internal Health Metrics
 

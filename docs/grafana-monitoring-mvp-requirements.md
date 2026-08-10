@@ -63,7 +63,7 @@ basic HTTP checks for the MVP:
 
 - one public probe location;
 - one check every five minutes per target;
-- successful HTTP status validation;
+- expected HTTP status validation;
 - standard `probe_*` metrics for dashboard queries.
 
 Do not use browser checks, scripted checks, private probes, or Synthetic
@@ -140,22 +140,28 @@ Public endpoint checks should emit standard blackbox or synthetic monitoring
 metrics:
 
 ```text
-probe_success{target="https://finite.computer"} 1
-probe_duration_seconds{target="https://finite.computer"} 0.123
-probe_http_status_code{target="https://finite.computer"} 200
+probe_success{job="finite.computer",instance="https://finite.computer",probe="NorthVirginia"} 1
+probe_duration_seconds{job="finite.computer",instance="https://finite.computer",probe="NorthVirginia"} 0.123
+probe_http_status_code{job="finite.computer",instance="https://finite.computer",probe="NorthVirginia"} 200
 ```
 
 Minimum public targets:
 
 - `https://finite.computer`
-- `https://chat.finite.computer`
-- `https://brain.finite.computer`
-- one representative `https://*.finite.chat` route
-- one representative `https://*.docs.finite.chat` route
+- `https://chat.finite.computer/health`
+- `https://brain.finite.computer/health`
+- `https://finitechat-native-mockup.finite.chat/`
+- `https://uptime-probe.docs.finite.chat/`
 
 Each target must be checked from one public probe location every five minutes.
-The check only needs to validate that the endpoint returns its expected
-successful HTTP status.
+The check only needs to validate that the endpoint returns its expected HTTP
+status. The first four targets expect `200`.
+
+No stable public document output currently exists for the `*.docs.finite.chat`
+surface. The reserved `uptime-probe.docs.finite.chat` target expects `404` to
+verify wildcard DNS, TLS, edge routing, and the Finite Sites unknown-document
+handler without creating product content for monitoring. Replace it with a
+stable public document target expecting `200` when one exists.
 
 Internal health should be represented separately:
 
