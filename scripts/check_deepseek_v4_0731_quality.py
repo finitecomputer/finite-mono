@@ -77,6 +77,10 @@ CASES = (
     ),
 )
 
+HOSTED_ENDPOINT_HOST = "api.deepseek.com"
+HOSTED_MODEL = "deepseek-v4-flash"
+SELF_HOSTED_MODEL = "deepseek-v4-flash-0731"
+
 
 def _post_json(
     endpoint: str,
@@ -205,6 +209,38 @@ def run(
     return results
 
 
+def _identity_violations(
+    *,
+    endpoint: str,
+    model: str,
+    lane: str,
+    results: list[dict[str, Any]],
+) -> list[str]:
+    parsed_endpoint = urllib.parse.urlsplit(endpoint)
+    violations: list[str] = []
+    expected_model = HOSTED_MODEL if lane == "deepseek-hosted" else SELF_HOSTED_MODEL
+    if model != expected_model:
+        violations.append(f"{lane} requested model must be {expected_model}")
+    if lane == "deepseek-hosted" and (
+        parsed_endpoint.scheme != "https"
+        or parsed_endpoint.hostname != HOSTED_ENDPOINT_HOST
+        or parsed_endpoint.username is not None
+        or parsed_endpoint.password is not None
+    ):
+        violations.append(
+            f"hosted reference endpoint must be https://{HOSTED_ENDPOINT_HOST}"
+        )
+    if not results:
+        violations.append("quality report has no results")
+    for result in results:
+        if result.get("response_model") != expected_model:
+            violations.append(
+                f"{result.get('effort')}/{result.get('case')} returned model "
+                f"{result.get('response_model')!r}, expected {expected_model!r}"
+            )
+    return violations
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -240,6 +276,12 @@ def main() -> int:
         efforts=efforts,
         timeout_seconds=arguments.timeout_seconds,
     )
+    identity_violations = _identity_violations(
+        endpoint=arguments.endpoint,
+        model=arguments.model,
+        lane=arguments.lane,
+        results=results,
+    )
     report = {
         "schema": "finite-deepseek-quality-v1",
         "lane": arguments.lane,
@@ -247,10 +289,17 @@ def main() -> int:
         "model": arguments.model,
         "passed": sum(bool(item["passed"]) for item in results),
         "total": len(results),
+        "identity_violations": identity_violations,
         "results": results,
     }
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report["passed"] == report["total"] else 1
+    return (
+        0
+        if report["total"] > 0
+        and report["passed"] == report["total"]
+        and not identity_violations
+        else 1
+    )
 
 
 if __name__ == "__main__":

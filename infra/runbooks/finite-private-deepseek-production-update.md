@@ -84,8 +84,6 @@ Runtime that explicitly sends `glm-5-2` remains compatible.
    ```bash
    export TARGET_TAG='REPLACE_WITH_EXACT_MEASURED_TAG'
    export CANDIDATE_ENDPOINT='REPLACE_WITH_ISOLATED_CANDIDATE_BASE_URL'
-   export DEEPSEEK_HOSTED_ENDPOINT='REPLACE_WITH_HOSTED_REFERENCE_BASE_URL'
-   export DEEPSEEK_HOSTED_MODEL='REPLACE_WITH_HOSTED_REFERENCE_MODEL'
    QUALITY_DIR=".local-state/deepseek-quality/$TARGET_TAG"
    mkdir -p "$QUALITY_DIR"
    chmod 700 "$QUALITY_DIR"
@@ -97,8 +95,8 @@ Runtime that explicitly sends `glm-5-2` remains compatible.
      > "$QUALITY_DIR/candidate.json"
 
    python3 scripts/check_deepseek_v4_0731_quality.py \
-     --endpoint "$DEEPSEEK_HOSTED_ENDPOINT/v1" \
-     --model "$DEEPSEEK_HOSTED_MODEL" \
+     --endpoint https://api.deepseek.com/v1 \
+     --model deepseek-v4-flash \
      --api-key-env DEEPSEEK_HOSTED_API_KEY \
      --lane deepseek-hosted \
      > "$QUALITY_DIR/hosted-reference.json"

@@ -4,7 +4,13 @@ import json
 import unittest
 from unittest import mock
 
-from scripts.check_deepseek_v4_0731_quality import CASES, _payload, _score, main
+from scripts.check_deepseek_v4_0731_quality import (
+    CASES,
+    _identity_violations,
+    _payload,
+    _score,
+    main,
+)
 
 
 class DeepSeekV40731QualityTests(unittest.TestCase):
@@ -96,25 +102,56 @@ class DeepSeekV40731QualityTests(unittest.TestCase):
         passed, _, _ = _score(case, response)
         self.assertTrue(passed)
 
-    @mock.patch("scripts.check_deepseek_v4_0731_quality.run", return_value=[])
+    @mock.patch(
+        "scripts.check_deepseek_v4_0731_quality.run",
+        return_value=[
+            {
+                "case": "arithmetic",
+                "effort": "high",
+                "passed": True,
+                "response_model": "deepseek-v4-flash",
+            }
+        ],
+    )
     @mock.patch.dict("os.environ", {"QUALITY_TEST_KEY": "secret"})
     def test_report_records_host_and_schema_but_not_key(self, _run: mock.Mock) -> None:
         arguments = [
             "quality",
             "--endpoint",
-            "https://reference.example/v1",
+            "https://api.deepseek.com/v1",
             "--model",
             "deepseek-v4-flash",
             "--api-key-env",
             "QUALITY_TEST_KEY",
+            "--lane",
+            "deepseek-hosted",
         ]
         with mock.patch("sys.argv", arguments), mock.patch("builtins.print") as output:
             self.assertEqual(main(), 0)
 
         report = json.loads(output.call_args.args[0])
         self.assertEqual(report["schema"], "finite-deepseek-quality-v1")
-        self.assertEqual(report["endpoint_host"], "reference.example")
+        self.assertEqual(report["endpoint_host"], "api.deepseek.com")
+        self.assertEqual(report["identity_violations"], [])
         self.assertNotIn("secret", output.call_args.args[0])
+
+    def test_hosted_identity_rejects_wrong_endpoint_or_returned_model(self) -> None:
+        violations = _identity_violations(
+            endpoint="https://example.com/v1",
+            model="deepseek-v4-flash",
+            lane="deepseek-hosted",
+            results=[
+                {
+                    "case": "logic",
+                    "effort": "high",
+                    "passed": True,
+                    "response_model": "some-other-model",
+                }
+            ],
+        )
+
+        self.assertTrue(any("api.deepseek.com" in item for item in violations))
+        self.assertTrue(any("some-other-model" in item for item in violations))
 
 
 if __name__ == "__main__":
