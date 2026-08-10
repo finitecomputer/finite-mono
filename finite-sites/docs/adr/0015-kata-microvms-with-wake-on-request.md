@@ -1,7 +1,7 @@
 # Tier 2 Isolation: Kata microVMs + Wake-On-Request Supervisor
 
 App sites run as **Kata Containers microVMs** (containerd + the
-`io.containerd.kata.v2` runtime, Cloud Hypervisor VMM), managed by a thin
+`io.containerd.kata-clh.v2` runtime, Cloud Hypervisor VMM), managed by a thin
 **Supervisor** in finitesitesd that wakes apps on the first request and
 stops them when idle. This supersedes ADR-0014's systemd DynamicUser
 sandbox: isolation moves from kernel-level to hardware-level, and idle
@@ -43,11 +43,18 @@ suspend/resume model, minus the snapshot tier (a future optimization).
   isolation; `DisabledRunner`, `SystemdAppRunner` (ADR-0014, retained),
   and `KataAppRunner` implement it. Selected with `--app-runner`.
 - KataAppRunner drives `sudo nerdctl` (CNI bridge setup needs
-  CAP_NET_ADMIN). A public runtime image is chosen per start command
+  CAP_NET_ADMIN). Production supplies exact operator-owned sudo and immutable
+  Nix-store nerdctl and CNI plugin paths; sudoers authorizes only that nerdctl
+  executable. The CNI path is an explicit nerdctl flag because sudo resets the
+  daemon environment. A public runtime image is chosen per start command
   (node/bun/uv) so no image build is needed — the only daemons are
   containerd and the Kata shim. Bundle is bind-mounted read-only; the
   app's `$DATA_DIR` is a host directory surviving stop/start; the proxy
   forwards to the microVM's bridge IP.
+- The `kata-clh` shim reads an independent 1-vCPU/512-MiB configuration. Hosted
+  Agent Runtimes on the same host use the generic Kata QEMU shim and retain
+  their 4-vCPU/8-GiB profile. Sharing containerd does not merge the two guest
+  resource envelopes.
 - The Supervisor tracks per-app last-access in unix seconds (so reaping is
   unit-tested with an injected clock), wakes on request, and a 60s reaper
   task stops idle apps.

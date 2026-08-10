@@ -1,38 +1,28 @@
 # finitesitesd — Finite Sites registry, publishing API, Git smart HTTP, and
 # site serving for *.finite.chat / *.docs.finite.chat on 127.0.0.1:8787.
-# Ported from lat2's finite-saas-sites.service (byte-identical flags except
-# --app-runner, see below). Data: /var/lib/finite-sites (restored from lat2
-# at cutover).
-#
-# ############################################################################
-# ## KATA ISOLATION TODO                                                    ##
-# ##                                                                        ##
-# ## lat2 ran `--app-runner kata`: tier-2 tenant apps as Kata Containers    ##
-# ## 3.31.0 microVMs on cloud-hypervisor ([hypervisor.clh] in               ##
-# ## /etc/kata-containers/configuration.toml), driven via `sudo nerdctl`    ##
-# ## (2.3.1) + containerd, with a systemd drop-in                           ##
-# ## (finite-saas-sites-kata.conf) relaxing NoNewPrivileges/ProtectSystem   ##
-# ## so the daemon could spawn sudo-nerdctl, plus a sudoers file gating     ##
-# ## finite-sites to nerdctl alone (all captured in                         ##
-# ## infra/hosts/lat2/systemd/).                                            ##
-# ##                                                                        ##
-# ## This module deliberately ships WITHOUT Kata (--app-runner none): per   ##
-# ## single-server-plan.md, Kata must not block the cutover. That means     ##
-# ## tier-2 apps DO NOT RUN until this is resolved — static sites, the      ##
-# ## registry, publishing, and git all work. WEAKENED-ISOLATION/FEATURE     ##
-# ## GAP, explicit and tracked.                                             ##
-# ##                                                                        ##
-# ## TODO(kata): pick one and implement:                                    ##
-# ##   Plan A — package kata-runtime 3.31.x + cloud-hypervisor + containerd ##
-# ##            + nerdctl on NixOS and port the lat2 drop-in/sudoers        ##
-# ##            (restores exact parity).                                    ##
-# ##   Plan B — microvm.nix (nix-native microVMs; needs a finitesitesd      ##
-# ##            app-runner backend).                                        ##
-# ##   Interim, if tier-2 apps are needed before A/B: --app-runner systemd  ##
-# ##   + the finite-app@.service template + polkit rule from                ##
-# ##   infra/hosts/lat2/systemd/ (process isolation only).                  ##
-# ############################################################################
-{ finitePackages, pkgs, ... }:
+# Data: /var/lib/finite-sites (restored from lat2 at cutover and included in
+# the coordinated v3 Recovery Set).
+{
+  config,
+  finitePackages,
+  kataPackages,
+  pkgs,
+  ...
+}:
+let
+  # Agent Runtimes share this host but use the QEMU Kata profile patched to
+  # 4 vCPU / 8 GiB. Stateful App Outputs select the kata-clh shim alias and
+  # therefore this independent small-guest profile. Do not collapse the two:
+  # doing so makes every tiny app consume an Agent-sized VM envelope.
+  appKataConfiguration = pkgs.runCommand "kata-configuration-clh-finite-app.toml" { } ''
+    sed -e 's/^default_vcpus = .*/default_vcpus = 1/' \
+        -e 's/^default_memory = .*/default_memory = 512/' \
+        ${kataPackages.kata-runtime}/share/defaults/kata-containers/configuration-clh.toml \
+        > "$out"
+    grep -q '^default_vcpus = 1$' "$out"
+    grep -q '^default_memory = 512$' "$out"
+  '';
+in
 {
   users.users.finite-sites = {
     isSystemUser = true;
@@ -40,10 +30,46 @@
   };
   users.groups.finite-sites = { };
 
+  assertions = [
+    {
+      assertion = config.virtualisation.containerd.enable;
+      message = "Finite Sites Kata apps require the shared containerd host runtime";
+    }
+    {
+      assertion = config.security.sudo.enable;
+      message = "Finite Sites Kata apps require the narrow nerdctl sudo rule";
+    }
+  ];
+
+  # containerd discovers containerd-shim-kata-clh-v2 from the Kata package
+  # already placed on its PATH by finite-saas-runner.nix. The shim alias reads
+  # this VMM-specific file instead of the Agent Runtime configuration.toml.
+  environment.etc."kata-containers/configuration-clh.toml".source = appKataConfiguration;
+
+  # Keep the daemon unprivileged. The one root path is the exact immutable
+  # nerdctl wrapper passed in ExecStart; all argv is daemon-constructed and
+  # tenant code remains one shell argument inside its Kata guest.
+  security.sudo.extraRules = [
+    {
+      users = [ "finite-sites" ];
+      runAs = "root";
+      commands = [
+        {
+          command = "${kataPackages.nerdctl}/bin/nerdctl";
+          options = [ "NOPASSWD" ];
+        }
+      ];
+    }
+  ];
+
   systemd.services.finite-saas-sites = {
     description = "Finite Sites (registry, publishing API, site serving)";
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" ];
+    requires = [ "containerd.service" ];
+    after = [
+      "network-online.target"
+      "containerd.service"
+    ];
     wantedBy = [ "multi-user.target" ];
 
     # finitesitesd deliberately delegates bare-repository setup and smart
@@ -59,7 +85,6 @@
       LimitNOFILE = 65536;
       User = "finite-sites";
       Group = "finite-sites";
-      # Same flags as lat2 except --app-runner (see KATA ISOLATION TODO).
       # `--mailer` is required; omitting it is an error, not an implicit DevMailer.
       ExecStart = ''
         ${finitePackages.finitesitesd}/bin/finitesitesd serve \
@@ -73,7 +98,10 @@
           --site-port none \
           --mailer resend \
           --mail-from "Finite Sites <links@finite.chat>" \
-          --app-runner none
+          --app-runner kata \
+          --app-sudo-path /run/wrappers/bin/sudo \
+          --app-nerdctl-path ${kataPackages.nerdctl}/bin/nerdctl \
+          --app-cni-path ${kataPackages.cni-plugins}/bin
       '';
       # Operator-created, root:root 0600. systemd reads EnvironmentFile before
       # starting the service under the finite-sites account.
@@ -89,13 +117,15 @@
       ];
       Restart = "on-failure";
       RestartSec = 2;
-      # Full lat2 hardening applies — no kata drop-in to relax it.
       StateDirectory = "finite-sites";
-      ProtectSystem = "strict";
-      ReadWritePaths = [ "/var/lib/finite-sites" ];
-      ProtectHome = true;
-      PrivateTmp = true;
-      NoNewPrivileges = true;
+      # sudo nerdctl must reach rootful containerd and CNI. Tenant isolation
+      # is the Kata microVM boundary; technical-debt ledger item 10 records
+      # this deliberate daemon-side hardening tradeoff and its delete condition.
+      ProtectSystem = false;
+      ReadWritePaths = [ ];
+      ProtectHome = false;
+      PrivateTmp = false;
+      NoNewPrivileges = false;
       ProtectKernelTunables = true;
       ProtectControlGroups = true;
       RestrictSUIDSGID = true;

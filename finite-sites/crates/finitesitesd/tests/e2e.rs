@@ -206,6 +206,9 @@ impl TestServer {
             mail_provider: None,
             mail_from: None,
             app_runner_kind: finitesitesd::AppRunnerKind::Disabled,
+            app_sudo_path: PathBuf::from("sudo"),
+            app_nerdctl_path: PathBuf::from("nerdctl"),
+            app_cni_path: PathBuf::from("/opt/cni/bin"),
             idle_timeout_seconds: 900,
         };
         let api_url = options.api_url.clone();

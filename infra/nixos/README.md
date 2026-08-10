@@ -261,9 +261,12 @@ by-id), gateways/resolvers, root ssh key, dashboard image digest. Still open:
   degraded rebuild before a separately authorized lat1 reprovision.
 - **Runner fast-follow** — Kata is the production adapter; Phala must pass the
   same provider-neutral contract before it is enabled.
-- **KATA ISOLATION** (`modules/finitesitesd.nix`): sites run
-  `--app-runner none` — tier-2 `app` sites lack microVM isolation until Kata
-  (or microvm.nix) is ported.
+- **Sites App Outputs** (`modules/finitesitesd.nix`): stateful apps use the
+  existing Kata runner with a dedicated Cloud Hypervisor profile (1 vCPU,
+  512 MiB). This is separate from the QEMU 4-vCPU/8-GiB profile used by hosted
+  Agent Runtimes on the same containerd host. Production activation must follow
+  `runbooks/deploy-sites.md`, including the coordinated v3 snapshot and a
+  named disposable state-survival canary.
 - **firecrawl API** (:3002) down — searxng works; crawl/scrape degraded.
 - Dead-man's-switch ping (`modules/monitoring.nix`); finite-search image
   digest pins (`modules/finite-search.nix`).
