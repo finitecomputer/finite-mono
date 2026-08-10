@@ -238,6 +238,36 @@ fn spawn_requester_authorities(
     let identity_url = format!("http://{}", identity.local_addr().unwrap());
     let identity_agent = managed_agent_npub.clone();
     let identity_owner = requester_npub.clone();
+    let paul_keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000005").unwrap();
+    let waffle_keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000006").unwrap();
+    let biscuit_keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000007").unwrap();
+    let paul_npub = NostrPublicKey::from_protocol(paul_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let waffle_npub = NostrPublicKey::from_protocol(waffle_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let biscuit_npub = NostrPublicKey::from_protocol(biscuit_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let ready_human_keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000008").unwrap();
+    let jam_keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000009").unwrap();
+    let toast_keys =
+        Keys::parse("000000000000000000000000000000000000000000000000000000000000000a").unwrap();
+    let ready_human_npub = NostrPublicKey::from_protocol(ready_human_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let jam_npub = NostrPublicKey::from_protocol(jam_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let toast_npub = NostrPublicKey::from_protocol(toast_keys.public_key())
+        .to_npub()
+        .unwrap();
     serve(identity, move |request| {
         match request
             .lines()
@@ -259,6 +289,79 @@ fn spawn_requester_authorities(
                     "userNpub": identity_owner,
                 }),
             ),
+            "/api/v1/operator/brain/participant-resolution"
+                if request.contains("paul@finite.vip") =>
+            {
+                (
+                    200,
+                    json!({
+                        "human": {
+                            "relationship": "human",
+                            "name": "Paul",
+                            "nip05": "paul@finite.vip",
+                            "npub": paul_npub,
+                        },
+                        "agents": [{
+                            "relationship": "account_agent",
+                            "name": "Waffle",
+                            "nip05": "waffle@finite.vip",
+                            "npub": waffle_npub,
+                        }, {
+                            "relationship": "account_agent",
+                            "name": "Biscuit",
+                            "nip05": "biscuit@finite.vip",
+                            "npub": biscuit_npub,
+                        }],
+                    }),
+                )
+            }
+            "/api/v1/operator/brain/participant-resolution"
+                if request.contains("ready@finite.vip") =>
+            {
+                (
+                    200,
+                    json!({
+                        "human": {
+                            "relationship": "human",
+                            "name": "Ready",
+                            "nip05": "ready@finite.vip",
+                            "npub": ready_human_npub,
+                        },
+                        "agents": [{
+                            "relationship": "account_agent",
+                            "name": "Jam",
+                            "nip05": "jam@finite.vip",
+                            "npub": jam_npub,
+                        }, {
+                            "relationship": "account_agent",
+                            "name": "Toast",
+                            "nip05": "toast@finite.vip",
+                            "npub": toast_npub,
+                        }],
+                    }),
+                )
+            }
+            "/api/v1/operator/brain/participant-resolution"
+                if request.contains("owner@example.com") =>
+            {
+                (
+                    200,
+                    json!({
+                        "human": {
+                            "relationship": "human",
+                            "name": "Owner",
+                            "nip05": "owner@example.com",
+                            "npub": identity_owner,
+                        },
+                        "agents": [{
+                            "relationship": "account_agent",
+                            "name": "Alpha",
+                            "nip05": "alpha@finite.vip",
+                            "npub": identity_agent,
+                        }],
+                    }),
+                )
+            }
             _ => (404, json!({ "error": "not_found" })),
         }
     });
@@ -281,10 +384,875 @@ fn spawn_requester_authorities(
                     "status": "active",
                 }),
             ),
+            "/api/core/v1/brain/account-agent-roster" if request.contains("paul@finite.vip") => (
+                200,
+                json!({
+                    "accountId": "process-paul",
+                    "humanMailbox": "paul@finite.vip",
+                    "rosterRevision": 12,
+                    "agents": [{
+                        "displayName": "Waffle",
+                        "managedAgentNip05": "waffle@finite.vip",
+                        "principalBindingReference": "project-waffle",
+                        "lifecycleState": "stopped",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }, {
+                        "displayName": "Biscuit",
+                        "managedAgentNip05": "biscuit@finite.vip",
+                        "principalBindingReference": "project-biscuit",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }, {
+                        "displayName": "Crumpet",
+                        "managedAgentNip05": "crumpet@finite.vip",
+                        "principalBindingReference": "project-crumpet",
+                        "lifecycleState": "creating",
+                        "eligible": false,
+                        "exclusionReason": "identity_provisioning_incomplete",
+                    }],
+                }),
+            ),
+            "/api/core/v1/brain/account-agent-roster" if request.contains("ready@finite.vip") => (
+                200,
+                json!({
+                    "accountId": "process-ready",
+                    "humanMailbox": "ready@finite.vip",
+                    "rosterRevision": 14,
+                    "agents": [{
+                        "displayName": "Jam",
+                        "managedAgentNip05": "jam@finite.vip",
+                        "principalBindingReference": "project-jam",
+                        "lifecycleState": "stopped",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }, {
+                        "displayName": "Toast",
+                        "managedAgentNip05": "toast@finite.vip",
+                        "principalBindingReference": "project-toast",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }],
+                }),
+            ),
+            "/api/core/v1/brain/account-agent-roster" if request.contains("owner@example.com") => (
+                200,
+                json!({
+                    "accountId": "process-owner",
+                    "humanMailbox": "owner@example.com",
+                    "rosterRevision": 16,
+                    "agents": [{
+                        "displayName": "Alpha",
+                        "managedAgentNip05": "alpha@finite.vip",
+                        "principalBindingReference": "project-alpha",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }],
+                }),
+            ),
             _ => (404, json!({ "error": "not_found" })),
         }
     });
     (identity_url, core_url)
+}
+
+#[test]
+fn invitation_preview_resolves_a_mailbox_to_the_human_and_eligible_account_agents_without_mutation()
+{
+    let scratch = TempDir::new().unwrap();
+    let owner_home = scratch.path().join("owner-home");
+    fs::create_dir_all(&owner_home).unwrap();
+    let owner_secret = scratch.path().join("owner-secret");
+    fs::write(
+        &owner_secret,
+        "0000000000000000000000000000000000000000000000000000000000000001\n",
+    )
+    .unwrap();
+    let imported = run(
+        &owner_home,
+        &owner_home,
+        &[
+            "auth",
+            "import",
+            "--file",
+            owner_secret.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(imported.status.success());
+    let signer = run(
+        &owner_home,
+        &owner_home,
+        &["signer", "public-key", "--json"],
+    );
+    let signer: Value = serde_json::from_slice(&signer.stdout).unwrap();
+    let owner_npub = signer["npub"].as_str().unwrap();
+    let personal_agent_keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000004").unwrap();
+    let personal_agent_npub = NostrPublicKey::from_protocol(personal_agent_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let (server_url, shutdown, server_thread) = spawn_real_brain_server(
+        &personal_agent_npub,
+        &personal_agent_npub,
+        owner_npub,
+        owner_npub,
+    );
+    let server_now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    let run_server = |args: &[&str]| {
+        command(&owner_home, &owner_home)
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .env("FBRAIN_NOW", &server_now)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let folder = run_server(&[
+        "folder",
+        "create",
+        "General",
+        "--brain",
+        "personal-a",
+        "--access",
+        "restricted",
+        "--json",
+    ]);
+    assert!(
+        folder.status.success(),
+        "{}",
+        String::from_utf8_lossy(&folder.stderr)
+    );
+    let before = run_server(&["invite", "brain", "list", "--brain", "personal-a", "--json"]);
+    assert!(before.status.success());
+    let before: Value = serde_json::from_slice(&before.stdout).unwrap();
+
+    let preview = run_server(&[
+        "invite",
+        "brain",
+        "preview",
+        "paul@finite.vip",
+        "--brain",
+        "personal-a",
+        "--folder",
+        "general",
+        "--json",
+    ]);
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(preview["targetEmail"], "paul@finite.vip");
+    assert_eq!(preview["scope"]["kind"], "brain");
+    assert_eq!(preview["scope"]["brainId"], "personal-a");
+    assert_eq!(preview["rosterRevision"], 12);
+    assert_eq!(preview["participants"].as_array().unwrap().len(), 3);
+    assert_eq!(preview["participants"][0]["relationship"], "human");
+    assert_eq!(preview["participants"][0]["name"], "Paul");
+    assert_eq!(preview["participants"][1]["relationship"], "account_agent");
+    assert_eq!(preview["participants"][1]["name"], "Waffle");
+    assert_eq!(preview["participants"][2]["name"], "Biscuit");
+    assert_eq!(preview["excluded"][0]["name"], "Crumpet");
+    assert_eq!(
+        preview["excluded"][0]["reason"],
+        "identity_provisioning_incomplete"
+    );
+    assert_eq!(preview["capacity"]["fits"], true);
+    assert_eq!(preview["keyVersions"][0]["folderId"], "general");
+    assert_eq!(preview["keyVersions"][0]["keyVersion"], 1);
+    for participant in preview["participants"].as_array().unwrap() {
+        assert!(participant["npub"].as_str().unwrap().starts_with("npub1"));
+    }
+
+    let after = run_server(&["invite", "brain", "list", "--brain", "personal-a", "--json"]);
+    assert!(after.status.success());
+    let after: Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert_eq!(after, before, "preview must not create an invitation");
+
+    let blocked = run_server(&[
+        "invite",
+        "brain",
+        "create",
+        "paul@finite.vip",
+        "--brain",
+        "personal-a",
+        "--folder",
+        "general",
+        "--json",
+    ]);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("Crumpet"));
+    let still_empty = run_server(&["invite", "brain", "list", "--brain", "personal-a", "--json"]);
+    let still_empty: Value = serde_json::from_slice(&still_empty.stdout).unwrap();
+    assert_eq!(
+        still_empty, before,
+        "a reduced set requires explicit approval"
+    );
+
+    let approved = run_server(&[
+        "invite",
+        "brain",
+        "create",
+        "paul@finite.vip",
+        "--brain",
+        "personal-a",
+        "--folder",
+        "general",
+        "--approve-reduced",
+        "--json",
+    ]);
+    assert!(
+        approved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    let approved: Value = serde_json::from_slice(&approved.stdout).unwrap();
+    assert_eq!(approved["participants"].as_array().unwrap().len(), 3);
+    assert_eq!(approved["excluded"][0]["name"], "Crumpet");
+    assert_eq!(
+        approved["excluded"][0]["reason"],
+        "identity_provisioning_incomplete"
+    );
+
+    let granted = run_server(&[
+        "admin",
+        "folder-access",
+        "grant",
+        "--target",
+        "paul@finite.vip",
+        "--brain",
+        "personal-a",
+        "--folder",
+        "general",
+        "--approve-reduced",
+        "--json",
+    ]);
+    assert!(
+        granted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&granted.stderr)
+    );
+    let granted: Value = serde_json::from_slice(&granted.stdout).unwrap();
+    assert_eq!(granted["outcome"], "granted");
+    assert_eq!(granted["participants"].as_array().unwrap().len(), 3);
+    let expected = granted["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|participant| participant["npub"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = granted["metadata"]["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|folder| folder["id"] == "general")
+        .unwrap()["accessUserIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|participant| participant.as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(expected.is_subset(&actual));
+    let targeted_agent = granted["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|participant| participant["relationship"] == "account_agent")
+        .nth(1)
+        .unwrap()["npub"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let targeted = run_server(&[
+        "admin",
+        "folder-access",
+        "revoke",
+        "--target",
+        &targeted_agent,
+        "--brain",
+        "personal-a",
+        "--folder",
+        "general",
+        "--json",
+    ]);
+    assert!(
+        targeted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&targeted.stderr)
+    );
+    let targeted_receipt: Value = serde_json::from_slice(&targeted.stdout).unwrap();
+    assert_eq!(targeted_receipt["newKeyVersion"], 2);
+    let metadata = run_server(&["brain", "metadata", "--brain", "personal-a", "--json"]);
+    assert!(metadata.status.success());
+    let targeted: Value = serde_json::from_slice(&metadata.stdout).unwrap();
+    let projected_agent = targeted["accountAccessCohorts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|cohort| cohort["participants"].as_array().unwrap())
+        .find(|participant| participant["npub"] == targeted_agent)
+        .expect("targeted account Agent remains explainable after reload");
+    assert_eq!(projected_agent["relationship"], "account_agent");
+    assert_eq!(projected_agent["excludedFolderIds"][0], "general");
+    assert!(
+        !targeted["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|folder| folder["id"] == "general")
+            .unwrap()["accessUserIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|participant| participant == &targeted_agent)
+    );
+    let independently_authorized = granted["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|participant| participant["relationship"] == "account_agent")
+        .unwrap()["npub"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let direct = run_server(&[
+        "admin",
+        "folder-access",
+        "grant",
+        "--target",
+        &independently_authorized,
+        "--brain",
+        "personal-a",
+        "--folder",
+        "general",
+        "--json",
+    ]);
+    assert!(
+        direct.status.success(),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+
+    let revoked = run_server(&[
+        "admin",
+        "folder-access",
+        "revoke",
+        "--target",
+        "paul@finite.vip",
+        "--brain",
+        "personal-a",
+        "--folder",
+        "general",
+        "--json",
+    ]);
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    let revoked: Value = serde_json::from_slice(&revoked.stdout).unwrap();
+    assert_eq!(revoked["newKeyVersion"], 3);
+    assert_eq!(
+        revoked["removedParticipantNpubs"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        revoked["independentlyRetainedNpubs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        revoked["independentlyRetainedNpubs"][0],
+        independently_authorized
+    );
+    let access_after = revoked["metadata"]["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|folder| folder["id"] == "general")
+        .unwrap()["accessUserIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(access_after.contains(independently_authorized.as_str()));
+    assert_eq!(access_after.len(), 1);
+
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+#[test]
+fn ready_mailbox_invitation_accepts_the_human_and_two_agents_with_independent_keys() {
+    let scratch = TempDir::new().unwrap();
+    let identities = [
+        ("owner", "01"),
+        ("human", "08"),
+        ("jam", "09"),
+        ("toast", "0a"),
+    ];
+    let mut homes = std::collections::BTreeMap::new();
+    let mut npubs = std::collections::BTreeMap::new();
+    for (name, suffix) in identities {
+        let home = scratch.path().join(format!("{name}-home"));
+        fs::create_dir_all(&home).unwrap();
+        let secret = scratch.path().join(format!("{name}-secret"));
+        fs::write(&secret, format!("{}{}\n", "0".repeat(62), suffix)).unwrap();
+        let imported = run(
+            &home,
+            &home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        let signer = run(&home, &home, &["signer", "public-key", "--json"]);
+        let signer: Value = serde_json::from_slice(&signer.stdout).unwrap();
+        npubs.insert(name, signer["npub"].as_str().unwrap().to_owned());
+        homes.insert(name, home);
+    }
+    let personal_agent_keys =
+        Keys::parse("0000000000000000000000000000000000000000000000000000000000000004").unwrap();
+    let personal_agent_npub = NostrPublicKey::from_protocol(personal_agent_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let owner_npub = npubs["owner"].clone();
+    let (server_url, shutdown, server_thread) = spawn_real_brain_server(
+        &personal_agent_npub,
+        &personal_agent_npub,
+        &owner_npub,
+        &owner_npub,
+    );
+    let server_now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    let run_server = |home: &Path, cwd: &Path, args: &[&str]| {
+        command(home, cwd)
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .env("FBRAIN_NOW", &server_now)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let owner_home = &homes["owner"];
+    let folder = run_server(
+        owner_home,
+        owner_home,
+        &[
+            "folder",
+            "create",
+            "General",
+            "--brain",
+            "personal-a",
+            "--access",
+            "restricted",
+            "--json",
+        ],
+    );
+    assert!(
+        folder.status.success(),
+        "{}",
+        String::from_utf8_lossy(&folder.stderr)
+    );
+    let other_folder = run_server(
+        owner_home,
+        owner_home,
+        &[
+            "folder",
+            "create",
+            "Other",
+            "--brain",
+            "personal-a",
+            "--access",
+            "restricted",
+            "--json",
+        ],
+    );
+    assert!(other_folder.status.success());
+    let owner_tree = scratch.path().join("owner-tree");
+    let opened = run_server(
+        owner_home,
+        owner_home,
+        &["open", "personal-a", owner_tree.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    fs::write(
+        owner_tree.join("General/cohort.md"),
+        "# Cohort\n\nReadable with three independent recipient keys.\n",
+    )
+    .unwrap();
+    fs::write(
+        owner_tree.join("Other/private.md"),
+        "# Other\n\nThis Folder is outside the Folder invitation.\n",
+    )
+    .unwrap();
+    let synced = run_server(owner_home, &owner_tree, &["sync", "now", "--json"]);
+    assert!(
+        synced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&synced.stderr)
+    );
+
+    let created = run_server(
+        owner_home,
+        &owner_tree,
+        &[
+            "invite",
+            "brain",
+            "create",
+            "ready@finite.vip",
+            "--brain",
+            "personal-a",
+            "--folder",
+            "general",
+            "--json",
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let created: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(created["targetKind"], "account_cohort");
+    assert_eq!(created["status"], "pending");
+    assert_eq!(created["deliveryStatus"], "sent");
+    assert_eq!(created["participants"].as_array().unwrap().len(), 3);
+    assert_eq!(created["participants"][1]["name"], "Jam");
+    assert_eq!(created["participants"][2]["name"], "Toast");
+
+    let retried = run_server(
+        owner_home,
+        &owner_tree,
+        &[
+            "invite",
+            "brain",
+            "create",
+            "ready@finite.vip",
+            "--brain",
+            "personal-a",
+            "--folder",
+            "general",
+            "--json",
+        ],
+    );
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
+    assert_eq!(retried["id"], created["id"]);
+    assert_eq!(retried["inviteCode"], created["inviteCode"]);
+    assert_eq!(retried["deliveryStatus"], "sent");
+
+    for name in ["human", "jam", "toast"] {
+        let inbox = run_server(
+            &homes[name],
+            &homes[name],
+            &["invite", "inbox", "list", "--json"],
+        );
+        assert!(
+            inbox.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&inbox.stderr)
+        );
+        let inbox: Value = serde_json::from_slice(&inbox.stdout).unwrap();
+        assert_eq!(inbox["invitations"].as_array().unwrap().len(), 1);
+        assert_eq!(inbox["invitations"][0]["invitation"]["id"], created["id"]);
+    }
+    let inviter_inbox = run_server(
+        owner_home,
+        owner_home,
+        &["invite", "inbox", "list", "--json"],
+    );
+    assert!(inviter_inbox.status.success());
+    let inviter_inbox: Value = serde_json::from_slice(&inviter_inbox.stdout).unwrap();
+    assert!(inviter_inbox["invitations"].as_array().unwrap().is_empty());
+
+    let hidden = run_server(
+        &homes["jam"],
+        &homes["jam"],
+        &[
+            "invite",
+            "inbox",
+            "hide",
+            created["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(hidden.status.success());
+    let human_inbox = run_server(
+        &homes["human"],
+        &homes["human"],
+        &["invite", "inbox", "list", "--json"],
+    );
+    let human_inbox: Value = serde_json::from_slice(&human_inbox.stdout).unwrap();
+    assert!(human_inbox["invitations"].as_array().unwrap().is_empty());
+    let restored = run_server(
+        &homes["human"],
+        &homes["human"],
+        &[
+            "invite",
+            "inbox",
+            "restore",
+            created["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(restored.status.success());
+
+    let folder_created = run_server(
+        owner_home,
+        &owner_tree,
+        &[
+            "invite",
+            "folder",
+            "create",
+            "ready@finite.vip",
+            "--brain",
+            "personal-a",
+            "--folder",
+            "general",
+            "--json",
+        ],
+    );
+    assert!(
+        folder_created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&folder_created.stderr)
+    );
+    let folder_created: Value = serde_json::from_slice(&folder_created.stdout).unwrap();
+    assert_eq!(folder_created["folderOnly"], true);
+    assert_eq!(
+        folder_created["participants"].as_array().unwrap().len(),
+        3,
+        "{folder_created}"
+    );
+    assert_ne!(folder_created["id"], created["id"]);
+    let folder_accepted = run_server(
+        &homes["toast"],
+        &homes["toast"],
+        &[
+            "invite",
+            "brain",
+            "accept",
+            folder_created["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        folder_accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&folder_accepted.stderr)
+    );
+    let folder_accepted: Value = serde_json::from_slice(&folder_accepted.stdout).unwrap();
+    assert_eq!(
+        folder_accepted["participants"].as_array().unwrap().len(),
+        3,
+        "{folder_accepted}"
+    );
+    for name in ["human", "jam", "toast"] {
+        let guest_metadata = run_server(
+            &homes[name],
+            &homes[name],
+            &["brain", "metadata", "--brain", "personal-a", "--json"],
+        );
+        assert!(guest_metadata.status.success());
+        let guest_metadata: Value = serde_json::from_slice(&guest_metadata.stdout).unwrap();
+        let npub = &npubs[name];
+        assert!(
+            !guest_metadata["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member == npub)
+        );
+        assert!(
+            guest_metadata["guests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|guest| guest == npub),
+            "missing {npub} from {guest_metadata}"
+        );
+    }
+    for name in ["human", "jam", "toast"] {
+        let tree = scratch.path().join(format!("{name}-guest-tree"));
+        let opened = run_server(
+            &homes[name],
+            &homes[name],
+            &["open", "personal-a", tree.to_str().unwrap(), "--json"],
+        );
+        assert!(opened.status.success());
+        let synced = run_server(&homes[name], &tree, &["sync", "now", "--json"]);
+        assert!(synced.status.success());
+        assert!(tree.join("General/cohort.md").exists());
+        assert!(!tree.join("Other/private.md").exists());
+    }
+
+    let accepted = run_server(
+        &homes["jam"],
+        &homes["jam"],
+        &[
+            "invite",
+            "brain",
+            "accept",
+            created["id"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let accepted: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(accepted["status"], "accepted");
+    assert_eq!(accepted["claimedByNpub"], npubs["jam"]);
+
+    for name in ["human", "jam", "toast"] {
+        let tree = scratch.path().join(format!("{name}-tree"));
+        let opened = run_server(
+            &homes[name],
+            &homes[name],
+            &["open", "personal-a", tree.to_str().unwrap(), "--json"],
+        );
+        assert!(
+            opened.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+        let synced = run_server(&homes[name], &tree, &["sync", "now", "--json"]);
+        assert!(
+            synced.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&synced.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(tree.join("General/cohort.md")).unwrap(),
+            "# Cohort\n\nReadable with three independent recipient keys.\n"
+        );
+    }
+
+    let listed = run_server(
+        owner_home,
+        owner_home,
+        &["invite", "brain", "list", "--brain", "personal-a", "--json"],
+    );
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["invitations"].as_array().unwrap().len(), 1);
+
+    let revoked_agent = run_server(
+        owner_home,
+        owner_home,
+        &[
+            "admin",
+            "folder-access",
+            "revoke",
+            "--target",
+            npubs["jam"].as_str(),
+            "--brain",
+            "personal-a",
+            "--folder",
+            "general",
+            "--json",
+        ],
+    );
+    assert!(
+        revoked_agent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked_agent.stderr)
+    );
+    let revoked_agent: Value = serde_json::from_slice(&revoked_agent.stdout).unwrap();
+    assert_eq!(revoked_agent["state"], "complete");
+    let owner_metadata = run_server(
+        owner_home,
+        owner_home,
+        &["brain", "metadata", "--brain", "personal-a", "--json"],
+    );
+    assert!(owner_metadata.status.success());
+    let owner_metadata: Value = serde_json::from_slice(&owner_metadata.stdout).unwrap();
+    assert!(
+        owner_metadata["accountAccessCohorts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|cohort| cohort["participants"].as_array().unwrap())
+            .any(|participant| {
+                participant["npub"] == npubs["jam"]
+                    && participant["excludedFolderIds"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|folder| folder == "general")
+            })
+    );
+
+    fs::write(
+        owner_tree.join("General/after-revocation.md"),
+        "# After revocation\n\nOnly the remaining cohort can decrypt this key version.\n",
+    )
+    .unwrap();
+    let synced = run_server(owner_home, &owner_tree, &["sync", "now", "--json"]);
+    assert!(synced.status.success());
+
+    for name in ["human", "toast"] {
+        let tree = scratch.path().join(format!("{name}-tree"));
+        let synced = run_server(&homes[name], &tree, &["sync", "now", "--json"]);
+        assert!(synced.status.success());
+        assert!(tree.join("General/after-revocation.md").exists());
+    }
+
+    let jam_metadata = run_server(
+        &homes["jam"],
+        &homes["jam"],
+        &["brain", "metadata", "--brain", "personal-a", "--json"],
+    );
+    assert!(jam_metadata.status.success());
+    let jam_metadata: Value = serde_json::from_slice(&jam_metadata.stdout).unwrap();
+    assert!(
+        jam_metadata["accountAccessCohorts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|cohort| cohort["participants"].as_array().unwrap())
+            .any(|participant| {
+                participant["npub"] == npubs["jam"]
+                    && participant["excludedFolderIds"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|folder| folder == "general")
+            })
+    );
+    let jam_tree = scratch.path().join("jam-tree");
+    let jam_sync = run_server(&homes["jam"], &jam_tree, &["sync", "now", "--json"]);
+    assert!(jam_sync.status.success());
+    assert!(!jam_tree.join("General/after-revocation.md").exists());
+
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
 }
 
 fn spawn_brain_updates_404_proxy(
@@ -1233,9 +2201,22 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     assert_eq!(created["brainId"], "acme");
     assert_eq!(created["name"], "Acme");
     assert!(created["folders"].as_array().unwrap().is_empty());
-    let admins = created["admins"].as_array().unwrap();
-    assert!(admins.iter().any(|admin| admin == &owner_npub));
-    assert!(admins.iter().any(|admin| admin == &requester_npub));
+    assert_eq!(created["admins"], json!([requester_npub]));
+    assert!(
+        created["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|member| member == &owner_npub)
+    );
+    assert!(
+        created["humanAnchoredAgentAuthorities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|authority| authority["agentNpub"] == owner_npub
+                && authority["humanNpub"] == requester_npub)
+    );
     let duplicate_brain = run(
         &home_a,
         &home_a,

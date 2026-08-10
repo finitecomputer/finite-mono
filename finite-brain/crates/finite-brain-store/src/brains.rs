@@ -29,6 +29,58 @@ impl BrainStore {
         created_at: &str,
         identity_aliases: &[IdentityAlias],
     ) -> Result<(), StoreError> {
+        self.create_personal_brain_bootstrap_with_identities_and_cohort(
+            output,
+            grants,
+            agent_npub,
+            created_by_npub,
+            created_at,
+            identity_aliases,
+            None,
+        )
+    }
+
+    /// Atomically create the Personal Brain with the complete current account
+    /// agent set while retaining the first agent as the legacy singular view.
+    pub fn create_personal_brain_cohort_bootstrap_with_identities(
+        &mut self,
+        output: &BootstrapOutput,
+        grants: &[FolderKeyGrantMetadata],
+        created_by_npub: &UserId,
+        created_at: &str,
+        identity_aliases: &[IdentityAlias],
+        cohort: &BootstrapAccountCohort,
+    ) -> Result<(), StoreError> {
+        let primary_agent = cohort
+            .participants
+            .iter()
+            .find(|participant| participant.relationship == "account_agent")
+            .ok_or_else(|| StoreError::BrokenInvariant {
+                reason: "Personal Brain cohort bootstrap requires at least one ready agent"
+                    .to_owned(),
+            })?;
+        self.create_personal_brain_bootstrap_with_identities_and_cohort(
+            output,
+            grants,
+            &primary_agent.npub,
+            created_by_npub,
+            created_at,
+            identity_aliases,
+            Some(cohort),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_personal_brain_bootstrap_with_identities_and_cohort(
+        &mut self,
+        output: &BootstrapOutput,
+        grants: &[FolderKeyGrantMetadata],
+        agent_npub: &UserId,
+        created_by_npub: &UserId,
+        created_at: &str,
+        identity_aliases: &[IdentityAlias],
+        cohort: Option<&BootstrapAccountCohort>,
+    ) -> Result<(), StoreError> {
         validate_bootstrap_output(output)?;
         validate_required_grants(&output.brain, &output.required_key_grants, grants)?;
         if output.brain.kind != BrainKind::Personal {
@@ -54,7 +106,7 @@ impl BrainStore {
                 reason: "Personal Agent bootstrap actor must be the owner or agent".to_owned(),
             });
         }
-        if !identity_aliases.is_empty() {
+        if !identity_aliases.is_empty() && cohort.is_none() {
             let alias_npubs = identity_aliases
                 .iter()
                 .map(|alias| alias.npub.clone())
@@ -151,6 +203,41 @@ impl BrainStore {
                 created_at,
             ],
         )?;
+        if let Some(cohort) = cohort {
+            insert_bootstrap_account_cohort(
+                &tx,
+                &output.brain,
+                cohort,
+                "personal_bootstrap",
+                created_at,
+            )?;
+            for participant in cohort
+                .participants
+                .iter()
+                .filter(|participant| participant.relationship == "account_agent")
+            {
+                tx.execute(
+                    r#"
+                    INSERT INTO personal_brain_agents (
+                        brain_id, agent_npub, agent_nip05, display_name, status,
+                        roster_revision, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, 'ready', ?5, ?6, ?6)
+                    "#,
+                    params![
+                        output.brain.id.as_str(),
+                        participant.npub.as_str(),
+                        participant.nip05,
+                        participant.name,
+                        i64::try_from(cohort.roster_revision).map_err(|_| {
+                            StoreError::BrokenInvariant {
+                                reason: "roster revision exceeds SQLite integer range".to_owned(),
+                            }
+                        })?,
+                        created_at,
+                    ],
+                )?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -169,6 +256,42 @@ impl BrainStore {
         output: &BootstrapOutput,
         grants: &[FolderKeyGrantMetadata],
         identity_aliases: &[IdentityAlias],
+    ) -> Result<(), StoreError> {
+        self.create_brain_bootstrap_with_identities_and_cohort(
+            output,
+            grants,
+            identity_aliases,
+            None,
+            &current_timestamp(),
+        )
+    }
+
+    /// Atomically bootstrap an Organization Brain with one human admin and
+    /// every current eligible account agent as a non-admin Member.
+    pub fn create_organization_brain_cohort_bootstrap_with_identities(
+        &mut self,
+        output: &BootstrapOutput,
+        grants: &[FolderKeyGrantMetadata],
+        identity_aliases: &[IdentityAlias],
+        cohort: &BootstrapAccountCohort,
+        created_at: &str,
+    ) -> Result<(), StoreError> {
+        self.create_brain_bootstrap_with_identities_and_cohort(
+            output,
+            grants,
+            identity_aliases,
+            Some(cohort),
+            created_at,
+        )
+    }
+
+    fn create_brain_bootstrap_with_identities_and_cohort(
+        &mut self,
+        output: &BootstrapOutput,
+        grants: &[FolderKeyGrantMetadata],
+        identity_aliases: &[IdentityAlias],
+        cohort: Option<&BootstrapAccountCohort>,
+        created_at: &str,
     ) -> Result<(), StoreError> {
         if output.brain.folders.len() > MAX_BOOTSTRAP_FOLDERS {
             return Err(StoreError::CapacityExceeded {
@@ -233,6 +356,15 @@ impl BrainStore {
         for alias in identity_aliases {
             upsert_identity_alias(&tx, alias)?;
         }
+        if let Some(cohort) = cohort {
+            insert_bootstrap_account_cohort(
+                &tx,
+                &output.brain,
+                cohort,
+                "organization_bootstrap",
+                created_at,
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -245,7 +377,7 @@ impl BrainStore {
                 SELECT v.id, v.kind, v.name,
                        CASE
                            WHEN v.owner_user_id = ?1 THEN 'owner'
-                           WHEN pa.agent_npub = ?1 THEN 'personal_agent'
+                           WHEN pa.agent_npub = ?1 OR pba.agent_npub = ?1 THEN 'personal_agent'
                            WHEN va.user_id IS NOT NULL THEN 'admin'
                            WHEN vm.user_id IS NOT NULL THEN 'member'
                            ELSE 'guest'
@@ -256,10 +388,27 @@ impl BrainStore {
                   ON va.brain_id = v.id AND va.user_id = ?1
                 LEFT JOIN personal_agents pa
                   ON pa.brain_id = v.id AND pa.agent_npub = ?1 AND pa.status = 'active'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM account_access_cohort_exclusions exclusion
+                     JOIN account_access_cohorts cohort ON cohort.id = exclusion.cohort_id
+                     WHERE cohort.brain_id = v.id
+                       AND exclusion.participant_npub = ?1
+                       AND exclusion.folder_id = '' AND exclusion.active = 1
+                 )
+                LEFT JOIN personal_brain_agents pba
+                  ON pba.brain_id = v.id AND pba.agent_npub = ?1 AND pba.status = 'ready'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM account_access_cohort_exclusions exclusion
+                     JOIN account_access_cohorts cohort ON cohort.id = exclusion.cohort_id
+                     WHERE cohort.brain_id = v.id
+                       AND exclusion.participant_npub = ?1
+                       AND exclusion.folder_id = '' AND exclusion.active = 1
+                 )
                 LEFT JOIN brain_members vm
                   ON vm.brain_id = v.id AND vm.user_id = ?1
                 WHERE v.owner_user_id = ?1
                    OR pa.agent_npub = ?1
+                   OR pba.agent_npub = ?1
                    OR vm.user_id IS NOT NULL
                    OR EXISTS (
                        SELECT 1
@@ -447,6 +596,135 @@ impl BrainStore {
         )?;
         Ok(())
     }
+}
+
+fn insert_bootstrap_account_cohort(
+    tx: &Transaction<'_>,
+    brain: &Brain,
+    cohort: &BootstrapAccountCohort,
+    provenance_kind: &str,
+    created_at: &str,
+) -> Result<(), StoreError> {
+    let human = cohort
+        .participants
+        .iter()
+        .filter(|participant| participant.relationship == "human")
+        .collect::<Vec<_>>();
+    let participant_npubs = cohort
+        .participants
+        .iter()
+        .map(|participant| participant.npub.clone())
+        .collect::<BTreeSet<_>>();
+    if human.len() != 1
+        || participant_npubs.len() != cohort.participants.len()
+        || cohort.account_id.trim().is_empty()
+        || !human[0]
+            .nip05
+            .trim()
+            .eq_ignore_ascii_case(cohort.human_email.trim())
+    {
+        return Err(StoreError::BrokenInvariant {
+            reason: "bootstrap account cohort is incomplete or ambiguous".to_owned(),
+        });
+    }
+    match brain.kind {
+        BrainKind::Personal if brain.owner_user_id.as_ref() != Some(&human[0].npub) => {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Personal Brain cohort human must be the owner".to_owned(),
+            });
+        }
+        BrainKind::Organization
+            if !brain.admins.contains(&human[0].npub)
+                || brain.admins.len() != 1
+                || cohort.participants.iter().any(|participant| {
+                    !brain
+                        .members
+                        .iter()
+                        .any(|member| member.user_id == participant.npub)
+                }) =>
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Organization cohort bootstrap requires one human admin and all participants as members"
+                    .to_owned(),
+            });
+        }
+        _ => {}
+    }
+    let cohort_id = format!("cohort-{}-bootstrap", brain.id);
+    tx.execute(
+        r#"
+        INSERT INTO account_access_cohorts (
+            id, brain_id, account_id, human_npub, human_email, scope_kind, folder_id,
+            provenance_kind, provenance_id, roster_revision, status,
+            created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 'brain', NULL, ?6, ?7, ?8, 'active', ?9, ?9)
+        "#,
+        params![
+            cohort_id,
+            brain.id.as_str(),
+            cohort.account_id,
+            human[0].npub.as_str(),
+            cohort.human_email,
+            provenance_kind,
+            format!("bootstrap-{}", brain.id),
+            i64::try_from(cohort.roster_revision).map_err(|_| StoreError::BrokenInvariant {
+                reason: "roster revision exceeds SQLite integer range".to_owned(),
+            })?,
+            created_at,
+        ],
+    )?;
+    for participant in &cohort.participants {
+        tx.execute(
+            r#"
+            INSERT INTO account_access_cohort_participants (
+                cohort_id, participant_npub, relationship, nip05, display_name,
+                status, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)
+            "#,
+            params![
+                cohort_id,
+                participant.npub.as_str(),
+                participant.relationship,
+                participant.nip05,
+                participant.name,
+                created_at,
+            ],
+        )?;
+        if participant.relationship == "account_agent" {
+            tx.execute(
+                r#"
+                INSERT INTO human_anchored_agent_authorities (
+                    cohort_id, brain_id, human_npub, agent_npub, status,
+                    created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5)
+                "#,
+                params![
+                    cohort_id,
+                    brain.id.as_str(),
+                    human[0].npub.as_str(),
+                    participant.npub.as_str(),
+                    created_at,
+                ],
+            )?;
+        }
+    }
+    tx.execute(
+        r#"
+        INSERT INTO account_access_cohort_audit (
+            id, cohort_id, action, actor_npub, anchoring_human_npub,
+            detail_json, occurred_at
+        ) VALUES (?1, ?2, 'bootstrap_committed', ?3, ?4, ?5, ?6)
+        "#,
+        params![
+            format!("audit-{cohort_id}-bootstrap"),
+            cohort_id,
+            human[0].npub.as_str(),
+            human[0].npub.as_str(),
+            serde_json::json!({ "participantCount": cohort.participants.len() }).to_string(),
+            created_at,
+        ],
+    )?;
+    Ok(())
 }
 
 fn equivalent_bootstrap_brain(existing: &Brain, requested: &Brain) -> bool {

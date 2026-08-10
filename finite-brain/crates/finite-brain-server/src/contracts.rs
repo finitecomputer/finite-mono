@@ -47,6 +47,14 @@ pub struct BrainMetadataResponse {
     pub name: String,
     pub owner_user_id: Option<String>,
     pub personal_agent: Option<PersonalAgentResponse>,
+    #[serde(default)]
+    pub personal_brain_agents: Vec<PersonalBrainAgentResponse>,
+    #[serde(default)]
+    pub human_anchored_agent_authorities: Vec<HumanAnchoredAgentAuthorityResponse>,
+    /// Durable account-cohort provenance. Clients use this to label included
+    /// agents and route human-cohort versus targeted-agent changes correctly.
+    #[serde(default)]
+    pub account_access_cohorts: Vec<AccountAccessCohortResponse>,
     pub members: Vec<String>,
     #[serde(default)]
     pub guests: Vec<String>,
@@ -81,6 +89,58 @@ pub struct PersonalAgentResponse {
     pub created_by_npub: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One entry in the additive complete Personal Brain Agent Set.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalBrainAgentResponse {
+    pub agent_npub: String,
+    pub agent_nip05: String,
+    pub display_name: String,
+    pub status: String,
+    pub roster_revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
+}
+
+/// Explicit routine authority; this never represents ownership, recovery, or
+/// whole-Brain destructive authority.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanAnchoredAgentAuthorityResponse {
+    pub agent_npub: String,
+    pub human_npub: String,
+    pub scope: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountAccessCohortResponse {
+    pub cohort_id: String,
+    pub human_npub: String,
+    pub human_email: String,
+    pub scope_kind: String,
+    pub folder_id: Option<String>,
+    pub provenance_kind: String,
+    pub status: String,
+    pub participants: Vec<AccountAccessCohortParticipantResponse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountAccessCohortParticipantResponse {
+    pub npub: String,
+    pub relationship: String,
+    pub nip05: String,
+    pub display_name: String,
+    pub status: String,
+    pub exclusion_reason: Option<String>,
+    #[serde(default)]
+    pub brain_access_excluded: bool,
+    #[serde(default)]
+    pub excluded_folder_ids: Vec<String>,
 }
 
 /// Display metadata for one canonical Nostr identity.
@@ -414,6 +474,138 @@ pub struct RemoveMemberRequest {
     pub mount_rotations: Vec<MemberMountRotationRequest>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPermanentAgentDepartureRequest {
+    pub human_email: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermanentAgentDepartureFolderResponse {
+    pub folder_id: String,
+    pub current_key_version: u32,
+    pub new_key_version: u32,
+    pub required_recipient_npubs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPermanentAgentDepartureResponse {
+    pub plan_id: String,
+    pub fact_id: String,
+    pub account_id: String,
+    pub human_email: String,
+    pub agent_nip05: String,
+    pub agent_npub: String,
+    pub departure_kind: String,
+    pub occurred_at: String,
+    pub folders: Vec<PermanentAgentDepartureFolderResponse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPermanentAgentDepartureRequest {
+    pub human_email: String,
+    pub plan_id: String,
+    pub rotations: Vec<MemberFolderRotationRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPermanentAgentDepartureResponse {
+    pub fact_id: String,
+    pub agent_npub: String,
+    pub outcome: String,
+    pub rotated_folder_ids: Vec<String>,
+    pub metadata: BrainMetadataResponse,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPersonalAgentBrainAccessRequest {
+    pub operation: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPersonalAgentBrainAccessResponse {
+    pub plan_id: String,
+    pub brain_id: String,
+    pub human_email: String,
+    pub target_agent_npub: String,
+    pub operation: String,
+    pub folders: Vec<PermanentAgentDepartureFolderResponse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestrictPersonalAgentBrainAccessRequest {
+    pub plan_id: String,
+    pub rotations: Vec<MemberFolderRotationRequest>,
+    pub access_change_event: serde_json::Value,
+    pub authenticated_human_intent: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePersonalAgentBrainAccessRequest {
+    pub plan_id: String,
+    pub participant_grants: Vec<CreateBrainFolderKeyGrantRequest>,
+    pub access_change_event: serde_json::Value,
+    pub authenticated_human_intent: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalAgentBrainAccessResponse {
+    pub outcome: String,
+    pub target_agent_npub: String,
+    pub operation: String,
+    pub affected_folder_ids: Vec<String>,
+    pub metadata: BrainMetadataResponse,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewAccountCohortReconciliationRequest {
+    pub human_email: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitAccountCohortReconciliationRequest {
+    pub human_email: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    pub plan_id: String,
+    pub participant_grants: Vec<CreateBrainFolderKeyGrantRequest>,
+    pub access_change_event: serde_json::Value,
+    pub backup_reference: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitAccountCohortReconciliationResponse {
+    pub outcome: String,
+    pub plan: finite_brain_store::AccountCohortReconciliationPlan,
+    pub rollback_boundary: String,
+    pub metadata: BrainMetadataResponse,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertPendingInvitationRequest {
+    pub plan_id: String,
+    pub participant_grants: Vec<CreateBrainFolderKeyGrantRequest>,
+    #[serde(default)]
+    pub approved_exclusions: Vec<String>,
+    pub backup_reference: String,
+}
+
 /// Create Folder request.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -443,6 +635,10 @@ pub struct FinishFolderSetupRequest {
 pub struct GrantFolderAccessRequest {
     pub grant: FolderKeyGrantRequest,
     pub access_change_event: serde_json::Value,
+    /// Short-lived human-signed authorization required only when one Personal
+    /// Brain Agent restores another Personal Brain Agent's Folder access.
+    #[serde(default)]
+    pub authenticated_human_intent: Option<serde_json::Value>,
 }
 
 /// Result of granting one identity the current Folder Key.
@@ -576,6 +772,10 @@ pub struct RemoveFolderAccessRequest {
     pub grants: Vec<FolderKeyGrantRequest>,
     pub reencrypted_records: Vec<RotationObjectRequest>,
     pub access_change_event: serde_json::Value,
+    /// Short-lived human-signed authorization required only when one Personal
+    /// Brain Agent restricts another Personal Brain Agent's Folder access.
+    #[serde(default)]
+    pub authenticated_human_intent: Option<serde_json::Value>,
 }
 
 /// Create Brain Invitation request.
@@ -602,6 +802,189 @@ pub struct CreateBrainInvitationRequest {
     pub bootstrap_wrapped_event_json: Option<String>,
     #[serde(default)]
     pub bootstrap_authorization_event_json: Option<String>,
+    /// Immutable account-cohort preflight plan being committed.
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// One encrypted current Folder Key Grant per participant and Folder.
+    #[serde(default)]
+    pub participant_grants: Vec<CreateBrainFolderKeyGrantRequest>,
+    /// Exact preflight exclusions explicitly approved by the inviter.
+    /// Empty means no reduced participant set was authorized.
+    #[serde(default)]
+    pub approved_exclusions: Vec<String>,
+}
+
+/// Read-only plan for an account-cohort invitation.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewBrainInvitationRequest {
+    pub target_email: String,
+    #[serde(default)]
+    pub folder_only: bool,
+    #[serde(default)]
+    pub initial_folder_access: Vec<String>,
+    pub expires_at: String,
+}
+
+/// Resource scope cryptographically bound into an invitation plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPlanScopeResponse {
+    pub kind: String,
+    pub brain_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
+}
+
+/// One resolved principal in an account access cohort plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPlanParticipantResponse {
+    pub relationship: String,
+    pub name: String,
+    pub nip05: String,
+    pub npub: String,
+    pub ready: bool,
+}
+
+/// One authoritative roster entry omitted from the proposed participant set.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPlanExclusionResponse {
+    pub name: String,
+    pub nip05: String,
+    pub reason: String,
+}
+
+/// Current Folder Key version bound into a client-owned grant plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPlanKeyVersionResponse {
+    pub folder_id: String,
+    pub key_version: u32,
+}
+
+/// Capacity consequence of committing an invitation plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationPlanCapacityResponse {
+    pub fits: bool,
+    pub resulting_members: usize,
+    pub maximum_members: usize,
+}
+
+/// Stable, mutation-free account-cohort invitation preview.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewBrainInvitationResponse {
+    pub plan_id: String,
+    pub target_email: String,
+    pub scope: InvitationPlanScopeResponse,
+    pub roster_revision: u64,
+    pub participants: Vec<InvitationPlanParticipantResponse>,
+    pub excluded: Vec<InvitationPlanExclusionResponse>,
+    pub key_versions: Vec<InvitationPlanKeyVersionResponse>,
+    pub capacity: InvitationPlanCapacityResponse,
+    pub expires_at: String,
+}
+
+/// Remove-only acceptance narrowing. The supplied principals must exactly
+/// match the server's current permanent-departure proposal.
+#[derive(Debug, Clone, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptAccountCohortInvitationRequest {
+    #[serde(default)]
+    pub removed_participants: Vec<String>,
+}
+
+/// Commit a current preflight as direct restricted-Folder access for the
+/// addressed human and every included account agent.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantAccountCohortFolderAccessRequest {
+    pub target_email: String,
+    pub expires_at: String,
+    pub plan_id: String,
+    #[serde(default)]
+    pub approved_exclusions: Vec<String>,
+    pub participant_grants: Vec<CreateBrainFolderKeyGrantRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+/// Participant-aware receipt for direct mailbox-addressed Folder access.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantAccountCohortFolderAccessResponse {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub target_email: String,
+    pub outcome: String,
+    pub participants: Vec<InvitationPlanParticipantResponse>,
+    pub excluded: Vec<InvitationPlanExclusionResponse>,
+    pub metadata: BrainMetadataResponse,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewAccountCohortFolderRemovalRequest {
+    pub target_email: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewAccountCohortFolderRemovalResponse {
+    pub plan_id: String,
+    pub brain_id: String,
+    pub folder_id: String,
+    pub target_email: String,
+    pub participants: Vec<InvitationPlanParticipantResponse>,
+    pub removed_participant_npubs: Vec<String>,
+    pub independently_retained_npubs: Vec<String>,
+    pub required_recipient_npubs: Vec<String>,
+    pub current_key_version: u32,
+    pub new_key_version: u32,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveAccountCohortFolderAccessRequest {
+    pub target_email: String,
+    pub plan_id: String,
+    pub new_key_version: u32,
+    pub grants: Vec<FolderKeyGrantRequest>,
+    pub reencrypted_records: Vec<RotationObjectRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveAccountCohortFolderAccessResponse {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub target_email: String,
+    pub removed_participant_npubs: Vec<String>,
+    pub independently_retained_npubs: Vec<String>,
+    pub new_key_version: u32,
+    pub metadata: BrainMetadataResponse,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalBrainAgentAdmissionResponse {
+    pub plan_id: String,
+    pub brain_id: String,
+    pub human_email: String,
+    pub roster_revision: u64,
+    pub status: String,
+    pub agents: Vec<InvitationPlanParticipantResponse>,
+    pub key_versions: Vec<InvitationPlanKeyVersionResponse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitPersonalBrainAgentAdmissionsRequest {
+    pub plan_id: String,
+    pub participant_grants: Vec<CreateBrainFolderKeyGrantRequest>,
 }
 
 /// One Folder included in an Email Invite Bootstrap scope.
@@ -630,6 +1013,12 @@ pub struct BrainInvitationResponse {
     pub folder_only: bool,
     pub claimed_by_npub: Option<String>,
     pub identities: Vec<IdentityResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<InvitationPlanParticipantResponse>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<InvitationPlanExclusionResponse>,
     pub status: String,
     pub invite_code: String,
     pub accept_path: String,
@@ -642,6 +1031,33 @@ pub struct BrainInvitationResponse {
     pub updated_at: String,
     pub accepted_at: Option<String>,
     pub duplicate_accept: bool,
+}
+
+/// One shared Account Invitation Inbox item.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountInvitationInboxItemResponse {
+    pub invitation: BrainInvitationResponse,
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountInvitationInboxResponse {
+    pub invitations: Vec<AccountInvitationInboxItemResponse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAccountInvitationVisibilityRequest {
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountInvitationsQuery {
+    #[serde(default)]
+    pub(crate) include_hidden: bool,
 }
 
 /// Claim an Email Invite Bootstrap into npub-bound Brain access.

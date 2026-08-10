@@ -1,5 +1,13 @@
 # Personal Agent And Direct Deletion
 
+> Partially superseded 2026-08-07 by
+> [Account-Agent Access Cohorts And Multi-Agent Personal Brains](account-agent-access-cohorts-spec.md)
+> and ADR-0045. The exactly-one Personal Agent slot, replacement ceremony, and
+> singular bootstrap rules no longer apply; a Personal Brain now tracks its
+> owner's live Personal Brain Agent Set. The empty-Brain, distinct-key, full
+> operational access, and direct-deletion decisions remain in force for every
+> ready Personal Brain Agent.
+
 ## Problem Statement
 
 FiniteBrain currently exposes a product model that no longer matches how

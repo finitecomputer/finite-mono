@@ -90,6 +90,7 @@ impl BrainStore {
                 .personal_agent
                 .as_ref()
                 .map(|relationship| &relationship.agent_npub),
+            has_brain_operational_authority(&source, &grant.issuer_npub),
         )?;
         if grant.folder_id != *source_folder_id
             || grant.key_version != source_folder.current_key_version
@@ -320,6 +321,7 @@ impl BrainStore {
                 .personal_agent
                 .as_ref()
                 .map(|relationship| &relationship.agent_npub),
+            has_brain_operational_authority(&source, &invitation.folder_key_grant.issuer_npub),
         )?;
         if invitation.folder_key_grant.key_version != source_folder.current_key_version {
             return Err(StoreError::BrokenInvariant {

@@ -29,6 +29,7 @@ type CurrentBrainAccount = {
 
 type VerifiedBrainSessionProof = {
   workosUserId: string;
+  verifiedEmail: string;
   emailVerified: true;
 };
 
@@ -50,17 +51,25 @@ export function brainIdentityRequestHash(bodyText: string) {
 export function issueBrainSessionProof(
   secret: string,
   workosUserId: string,
+  verifiedEmail: string,
   requestHash: string,
   nowUnixSeconds = Math.floor(Date.now() / 1000),
   nonce = randomUUID(),
 ) {
-  if (!secret || !workosUserId || !/^[0-9a-f]{64}$/u.test(requestHash)) {
+  if (
+    !secret ||
+    !workosUserId ||
+    !verifiedEmail ||
+    !verifiedEmail.includes("@") ||
+    !/^[0-9a-f]{64}$/u.test(requestHash)
+  ) {
     throw new Error("Brain session proof inputs are required.");
   }
   const claims = Buffer.from(
     JSON.stringify({
       version: BRAIN_SESSION_PROOF_VERSION,
       workosUserId,
+      verifiedEmail: verifiedEmail.toLowerCase(),
       requestHash,
       expiresAt: nowUnixSeconds + BRAIN_SESSION_PROOF_TTL_SECONDS,
       nonce,
@@ -90,6 +99,8 @@ export function verifyBrainSessionProof(
       value.version !== BRAIN_SESSION_PROOF_VERSION ||
       typeof value.workosUserId !== "string" ||
       !value.workosUserId ||
+      typeof value.verifiedEmail !== "string" ||
+      !value.verifiedEmail.includes("@") ||
       value.requestHash !== requestHash ||
       typeof value.expiresAt !== "number" ||
       !Number.isSafeInteger(value.expiresAt) ||
@@ -99,7 +110,11 @@ export function verifyBrainSessionProof(
     ) {
       return null;
     }
-    return { workosUserId: value.workosUserId, emailVerified: true };
+    return {
+      workosUserId: value.workosUserId,
+      verifiedEmail: value.verifiedEmail.toLowerCase(),
+      emailVerified: true,
+    };
   } catch {
     return null;
   }

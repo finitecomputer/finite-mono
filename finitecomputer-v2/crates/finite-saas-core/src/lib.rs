@@ -41,7 +41,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0015_runner_capacity_fences.sql"),
     "\n",
-    include_str!("../migrations/0016_runtime_cold_relocation.sql")
+    include_str!("../migrations/0016_runtime_cold_relocation.sql"),
+    "\n",
+    include_str!("../migrations/0017_brain_agent_departure_facts.sql")
 );
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
@@ -755,6 +757,51 @@ pub struct BrainAgentAccount {
     pub status: String,
 }
 
+/// Brain-facing authoritative account ownership and agent-eligibility roster.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAccountAgentRoster {
+    pub account_id: String,
+    pub human_mailbox: String,
+    pub roster_revision: u64,
+    pub agents: Vec<BrainAccountAgentRosterEntry>,
+}
+
+/// One account-owned hosted agent, including ineligible lifecycle states so
+/// Brain can explain exclusions without inferring them from runtime health.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAccountAgentRosterEntry {
+    pub display_name: String,
+    pub managed_agent_nip05: String,
+    pub principal_binding_reference: String,
+    pub lifecycle_state: String,
+    pub eligible: bool,
+    pub exclusion_reason: Option<String>,
+}
+
+/// A replayable, permanent account-Agent lifecycle fact. Brain treats these
+/// facts as revocation inputs; temporary Runtime state is intentionally absent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainPermanentAgentDepartureFact {
+    pub fact_id: String,
+    pub account_id: String,
+    pub human_mailbox: String,
+    pub managed_agent_nip05: String,
+    pub principal_binding_reference: String,
+    pub departure_kind: String,
+    pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainPermanentAgentDepartureFacts {
+    pub account_id: String,
+    pub human_mailbox: String,
+    pub facts: Vec<BrainPermanentAgentDepartureFact>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntime {
     pub id: String,
@@ -1379,6 +1426,8 @@ pub struct BridgeCoreState {
     pub runtime_control_requests: BTreeMap<String, RuntimeControlRequest>,
     #[serde(default)]
     pub runtime_retirement_snapshots: BTreeMap<String, RuntimeRetirementSnapshot>,
+    #[serde(default)]
+    pub brain_agent_departure_facts: BTreeMap<String, BrainPermanentAgentDepartureFact>,
     pub source_host_relays: BTreeMap<String, SourceHostRelayEndpoint>,
     pub finite_private_limit_profiles: BTreeMap<String, FinitePrivateLimitProfile>,
     pub finite_private_grants: BTreeMap<String, FinitePrivateGrant>,
@@ -3944,6 +3993,11 @@ impl BridgeCoreState {
             creation.updated_at = now.clone();
         }
         if request.kind == RuntimeControlKind::Destroy {
+            if let Some(fact) = self.brain_departure_fact_for_destroy(&request, &now) {
+                self.brain_agent_departure_facts
+                    .entry(fact.fact_id.clone())
+                    .or_insert(fact);
+            }
             self.offboard_destroyed_runtime(&request);
         }
         Ok(request)
@@ -5304,6 +5358,26 @@ impl BridgeCoreState {
             "finite_private.runtime.destroy_revoke_keys",
             None,
         );
+    }
+
+    fn brain_departure_fact_for_destroy(
+        &self,
+        request: &RuntimeControlRequest,
+        occurred_at: &str,
+    ) -> Option<BrainPermanentAgentDepartureFact> {
+        let project = self.projects.get(&request.project_id)?;
+        let managed_agent_nip05 = project.agent_email.clone()?;
+        let owner = self.users.get(&project.owner_user_id)?;
+        let account_id = owner.workos_user_id.clone()?;
+        Some(BrainPermanentAgentDepartureFact {
+            fact_id: format!("agent-departure-{}", request.id),
+            account_id,
+            human_mailbox: owner.email.clone(),
+            managed_agent_nip05,
+            principal_binding_reference: project.id.clone(),
+            departure_kind: "retired".to_owned(),
+            occurred_at: occurred_at.to_owned(),
+        })
     }
 
     fn offboard_runtime(
@@ -9941,7 +10015,6 @@ mod tests {
             "2026-05-25T13:02:00Z",
         );
         let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
-
         let restart = state
             .request_runtime_restart(RequestRuntimeRestartInput {
                 verified_email: "new@finite.vip".to_string(),
@@ -10341,6 +10414,7 @@ mod tests {
             "2026-05-25T13:02:00Z",
         );
         let project_id = state.agent_runtimes[&runtime_id].project_id.clone();
+        let managed_agent_nip05 = state.projects[&project_id].agent_email.clone().unwrap();
         state
             .agent_runtimes
             .get_mut(&runtime_id)
@@ -10411,6 +10485,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(bare, CoreError::RuntimeRetirementSnapshotMismatch));
         assert!(state.runtime_retirement_snapshots.is_empty());
+        assert!(state.brain_agent_departure_facts.is_empty());
         assert!(state.active_runtime_for_project(&project_id).is_some());
 
         state
@@ -10467,6 +10542,18 @@ mod tests {
             receipt
         );
         assert!(state.active_runtime_for_project(&project_id).is_none());
+        let departure = state
+            .brain_agent_departure_facts
+            .values()
+            .next()
+            .expect("verified retirement emits one replayable Brain fact");
+        assert_eq!(departure.fact_id, format!("agent-departure-{}", request.id));
+        assert_eq!(departure.account_id, "user_workos_new");
+        assert_eq!(departure.human_mailbox, "new@finite.vip");
+        assert_eq!(departure.managed_agent_nip05, managed_agent_nip05);
+        assert_eq!(departure.principal_binding_reference, project_id);
+        assert_eq!(departure.departure_kind, "retired");
+        assert_eq!(departure.occurred_at, "2026-05-25T13:05:00Z");
         assert_eq!(
             state
                 .visible_projects_for_user(&completed.requested_by_user_id)
@@ -10478,6 +10565,7 @@ mod tests {
             .complete_runtime_control_request(completion)
             .expect("identical completion replay is idempotent");
         assert_eq!(replay.id, request.id);
+        assert_eq!(state.brain_agent_departure_facts.len(), 1);
         let mut conflicting = receipt;
         conflicting.zip_sha256 = "c".repeat(64);
         let conflict = state

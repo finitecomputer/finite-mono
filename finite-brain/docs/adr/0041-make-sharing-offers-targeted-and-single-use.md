@@ -2,6 +2,10 @@
 
 Status: accepted
 
+Amended 2026-08-07 by ADR-0045: an offer remains targeted to one human-facing
+email and single-use, but that email may authorize one fixed Invitation
+Participant Set rather than exactly one cryptographic principal.
+
 Every Brain Invitation and Folder Invitation will be addressed to exactly one
 email or concrete Member Identity and will be consumable exactly once by that
 recipient. FiniteBrain will not provide reusable or unscoped public invitation

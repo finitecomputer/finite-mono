@@ -1,7 +1,8 @@
 # Offer Atomic Agent Pairing In User-Created Organization Brains
 
-Status: accepted 2026-07-21. Extends ADR-0025's Organization Brain bootstrap
-model and supersedes its exclusion of automatic Product Client agent pairing.
+Status: superseded 2026-08-07 by ADR-0045. Extended ADR-0025's Organization
+Brain bootstrap model and superseded its exclusion of automatic Product Client
+agent pairing.
 
 When a human creates an Organization Brain in the Product Client, the creation
 flow visibly offers to add the currently selected, identity-resolved agent as

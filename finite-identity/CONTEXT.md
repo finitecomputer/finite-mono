@@ -32,6 +32,14 @@ _Avoid_: external handle, external nostr address
 The public `.well-known/nostr.json` HTTP endpoint for the Finite VIP Domain. In v1, the Identity Authority owns the response for this endpoint.
 _Avoid_: static nostr file, nostr profile endpoint
 
+**Identity API Origin**:
+The canonical public and signing origin of the Identity Authority. It is
+`https://identity.finite.vip`. This is distinct from the NIP-05 Endpoint:
+because Finite VIP Mailbox Addresses and NIP-05 Names use `finite.vip`, public
+NIP-05 discovery is served at `https://finite.vip/.well-known/nostr.json` by the
+same Identity Authority and durable identity database.
+_Avoid_: identity.finite.chat, NIP-05 domain
+
 **Identity Recovery**:
 The explicit process for restoring control of a Native Principal or moving its product authority to a replacement key without orphaning user data.
 _Avoid_: reset, relink, silent reassignment
@@ -92,6 +100,15 @@ _Avoid_: email link, account link, agent identity binding
 **Principal Resolution**:
 The Finite Identity answer to "who does this email, NIP-05 name, npub, or caller prove as right now?" Principal Resolution lets products attach permissions to stable product concepts while delegating identity proof and email-to-native links to Finite Identity.
 _Avoid_: user lookup, account lookup, auth mapping
+
+**Participant Principal Resolution**:
+The Principal Resolution of one human Finite VIP Mailbox Address and a
+Core-supplied set of Managed Agent NIP-05 Names into separate User and Agent
+Native Principals for a product operation. Finite Identity proves each public
+binding but does not enumerate account ownership, merge the identities, or
+issue the product grant. A Managed Agent NIP-05 is never treated as a Mailbox
+Address or passed to an email-delivery surface.
+_Avoid_: Account Agent Lookup, Shared Principal, Cohort Grant
 
 **Product Grant**:
 A product-owned permission record that names a Principal or Invited Email exactly as the product user granted it. Finite Identity does not own Product Grants; it only resolves whether a caller satisfies them.
@@ -177,12 +194,18 @@ _Avoid_: email service, notification service
   agent. Finite Identity binds that agent's Managed Agent NIP-05 to its Agent
   Principal Key, while each product owns any access role granted because of the
   account-agent association.
+- **Participant Principal Resolution** combines public identity facts for a
+  human and Core-enumerated agents without making Finite Identity authoritative
+  for the Account Agent Roster or FiniteBrain's Account Access Cohort.
 - A human's Finite Chat identity lives separately from every agent **Finite
   Home** and may be generated or imported by the human.
 - **Account Auth** is outside Finite Identity; proving a dashboard session does
   not reveal, replace, or silently mint a **Local Identity Key**.
 - The **Identity Authority** stores public resolution/binding state and never a
   **Local Identity Key** secret.
+- The **Identity API Origin** and **NIP-05 Endpoint** are two public routes to
+  one Identity Authority and one durable identity database; they are not
+  separate identity authorities or sources of truth.
 - A **Product Grant** may name an email or Native Principal, but an agent does
   not satisfy a human email grant merely because the agent belongs to that
   human's Project.

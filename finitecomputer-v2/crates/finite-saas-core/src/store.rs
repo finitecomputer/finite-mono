@@ -12,8 +12,10 @@ use crate::{
     AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
     AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput,
     ArchiveImportedProjectInput, BillingClass, BillingOverview, BillingSubscriptionStatus,
-    BrainAgentAccount, BridgeCoreState, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
-    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    BrainAccountAgentRoster, BrainAccountAgentRosterEntry, BrainAgentAccount,
+    BrainPermanentAgentDepartureFact, BrainPermanentAgentDepartureFacts, BridgeCoreState,
+    CORE_SCHEMA_SQL, CancelAgentCreationRequestInput, ClaimProjectImportsInput,
+    ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
     CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
     CustomerOrganization, ExistingHostProjectImport, FINITE_PRIVATE_SECRET_REFERENCE,
     FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent,
@@ -77,6 +79,33 @@ use time::Duration;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::Mutex;
 use tokio_postgres::{GenericClient, NoTls, Row};
+
+fn roster_lifecycle(
+    status: Option<AgentCreationRequestStatus>,
+) -> (&'static str, bool, Option<&'static str>) {
+    match status {
+        None | Some(AgentCreationRequestStatus::Running) => ("active", true, None),
+        Some(AgentCreationRequestStatus::Requested) => {
+            ("creating", false, Some("identity_provisioning_incomplete"))
+        }
+        Some(AgentCreationRequestStatus::Launching) => {
+            ("launching", false, Some("identity_provisioning_incomplete"))
+        }
+        Some(AgentCreationRequestStatus::Failed) => {
+            ("failed", false, Some("identity_provisioning_failed"))
+        }
+        Some(AgentCreationRequestStatus::Cancelled) => {
+            ("cancelled", false, Some("agent_creation_cancelled"))
+        }
+    }
+}
+
+fn roster_revision_from_timestamp(value: &str) -> u64 {
+    parse_time(value)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.unix_timestamp_nanos()).ok())
+        .unwrap_or_default()
+}
 use tracing::Instrument;
 
 const DEFAULT_POSTGRES_POOL_SIZE: usize = 8;
@@ -491,6 +520,26 @@ impl CoreStore {
         match self {
             Self::Memory(store) => store.brain_agent_account(managed_agent_email).await,
             Self::Postgres(store) => store.brain_agent_account(managed_agent_email).await,
+        }
+    }
+
+    pub async fn brain_account_agent_roster(
+        &self,
+        verified_email: &str,
+    ) -> CoreResult<Option<BrainAccountAgentRoster>> {
+        match self {
+            Self::Memory(store) => store.brain_account_agent_roster(verified_email).await,
+            Self::Postgres(store) => store.brain_account_agent_roster(verified_email).await,
+        }
+    }
+
+    pub async fn brain_permanent_agent_departures(
+        &self,
+        verified_email: &str,
+    ) -> CoreResult<Option<BrainPermanentAgentDepartureFacts>> {
+        match self {
+            Self::Memory(store) => store.brain_permanent_agent_departures(verified_email).await,
+            Self::Postgres(store) => store.brain_permanent_agent_departures(verified_email).await,
         }
     }
 
@@ -1203,6 +1252,85 @@ impl MemoryCoreStore {
             managed_agent_email: email,
             verified_email: user.email.clone(),
             status: "active".to_owned(),
+        }))
+    }
+
+    pub async fn brain_account_agent_roster(
+        &self,
+        verified_email: &str,
+    ) -> CoreResult<Option<BrainAccountAgentRoster>> {
+        let email = verified_email.trim().to_ascii_lowercase();
+        let state = self.state.lock().await;
+        let Some(user) = state.users.values().find(|user| user.email == email) else {
+            return Ok(None);
+        };
+        let Some(account_id) = user.workos_user_id.clone() else {
+            return Ok(None);
+        };
+        let mut revision = roster_revision_from_timestamp(&user.updated_at);
+        let mut agents = state
+            .projects
+            .values()
+            .filter(|project| project.owner_user_id == user.id)
+            .filter_map(|project| {
+                let managed_agent_nip05 = project.agent_email.clone()?;
+                revision = revision.max(roster_revision_from_timestamp(&project.updated_at));
+                let request = state
+                    .agent_creation_requests
+                    .values()
+                    .filter(|request| request.project_id == project.id)
+                    .max_by(|left, right| left.updated_at.cmp(&right.updated_at));
+                if let Some(request) = request {
+                    revision = revision.max(roster_revision_from_timestamp(&request.updated_at));
+                }
+                let (lifecycle_state, eligible, exclusion_reason) =
+                    roster_lifecycle(request.map(|request| request.status));
+                Some(BrainAccountAgentRosterEntry {
+                    display_name: project.display_name.clone(),
+                    managed_agent_nip05,
+                    principal_binding_reference: project.id.clone(),
+                    lifecycle_state: lifecycle_state.to_owned(),
+                    eligible,
+                    exclusion_reason: exclusion_reason.map(str::to_owned),
+                })
+            })
+            .collect::<Vec<_>>();
+        agents.sort_by(|left, right| left.managed_agent_nip05.cmp(&right.managed_agent_nip05));
+        Ok(Some(BrainAccountAgentRoster {
+            account_id,
+            human_mailbox: email,
+            roster_revision: revision,
+            agents,
+        }))
+    }
+
+    pub async fn brain_permanent_agent_departures(
+        &self,
+        verified_email: &str,
+    ) -> CoreResult<Option<BrainPermanentAgentDepartureFacts>> {
+        let email = verified_email.trim().to_ascii_lowercase();
+        let state = self.state.lock().await;
+        let Some(user) = state.users.values().find(|user| user.email == email) else {
+            return Ok(None);
+        };
+        let Some(account_id) = user.workos_user_id.clone() else {
+            return Ok(None);
+        };
+        let mut facts = state
+            .brain_agent_departure_facts
+            .values()
+            .filter(|fact| fact.account_id == account_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        facts.sort_by(|left, right| {
+            left.occurred_at
+                .cmp(&right.occurred_at)
+                .then_with(|| left.fact_id.cmp(&right.fact_id))
+        });
+        Ok(Some(BrainPermanentAgentDepartureFacts {
+            account_id,
+            human_mailbox: email,
+            facts,
         }))
     }
 
@@ -2072,6 +2200,124 @@ impl PostgresCoreStore {
                 })
             })
             .transpose()
+    }
+
+    pub async fn brain_account_agent_roster(
+        &self,
+        verified_email: &str,
+    ) -> CoreResult<Option<BrainAccountAgentRoster>> {
+        let email = verified_email.trim().to_ascii_lowercase();
+        let client = self.connection().await?;
+        let Some(user) = client
+            .query_opt(
+                "SELECT id, workos_user_id, normalized_email, updated_at::text
+                 FROM users
+                 WHERE normalized_email = $1 AND workos_user_id IS NOT NULL",
+                &[&email],
+            )
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        let user_id: String = user.get("id");
+        let mut revision = roster_revision_from_timestamp(&user.get::<_, String>("updated_at"));
+        let rows = client
+            .query(
+                "SELECT p.id, p.display_name, p.agent_email, p.updated_at::text AS project_updated_at,
+                        latest.status AS creation_status,
+                        latest.updated_at::text AS creation_updated_at
+                 FROM projects p
+                 LEFT JOIN LATERAL (
+                     SELECT status, updated_at
+                     FROM agent_creation_requests
+                     WHERE project_id = p.id
+                     ORDER BY updated_at DESC, id DESC
+                     LIMIT 1
+                 ) latest ON TRUE
+                 WHERE p.owner_user_id = $1 AND p.agent_email IS NOT NULL
+                 ORDER BY p.agent_email",
+                &[&user_id],
+            )
+            .await
+            .map_err(store_error)?;
+        let mut agents = Vec::with_capacity(rows.len());
+        for row in rows {
+            revision = revision.max(roster_revision_from_timestamp(
+                &row.get::<_, String>("project_updated_at"),
+            ));
+            let status = row
+                .get::<_, Option<String>>("creation_status")
+                .as_deref()
+                .and_then(parse_agent_creation_request_status);
+            if let Some(updated_at) = row.get::<_, Option<String>>("creation_updated_at") {
+                revision = revision.max(roster_revision_from_timestamp(&updated_at));
+            }
+            let (lifecycle_state, eligible, exclusion_reason) = roster_lifecycle(status);
+            agents.push(BrainAccountAgentRosterEntry {
+                display_name: row.get("display_name"),
+                managed_agent_nip05: row.get("agent_email"),
+                principal_binding_reference: row.get("id"),
+                lifecycle_state: lifecycle_state.to_owned(),
+                eligible,
+                exclusion_reason: exclusion_reason.map(str::to_owned),
+            });
+        }
+        Ok(Some(BrainAccountAgentRoster {
+            account_id: user.get("workos_user_id"),
+            human_mailbox: user.get("normalized_email"),
+            roster_revision: revision,
+            agents,
+        }))
+    }
+
+    pub async fn brain_permanent_agent_departures(
+        &self,
+        verified_email: &str,
+    ) -> CoreResult<Option<BrainPermanentAgentDepartureFacts>> {
+        let email = verified_email.trim().to_ascii_lowercase();
+        let client = self.connection().await?;
+        let Some(user) = client
+            .query_opt(
+                "SELECT workos_user_id, normalized_email
+                 FROM users
+                 WHERE normalized_email = $1 AND workos_user_id IS NOT NULL",
+                &[&email],
+            )
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        let account_id: String = user.get("workos_user_id");
+        let rows = client
+            .query(
+                "SELECT fact_id, account_id, human_mailbox, managed_agent_nip05,
+                        principal_binding_reference, departure_kind, occurred_at::text
+                 FROM brain_agent_departure_facts
+                 WHERE account_id = $1
+                 ORDER BY occurred_at, fact_id",
+                &[&account_id],
+            )
+            .await
+            .map_err(store_error)?;
+        let facts = rows
+            .into_iter()
+            .map(|row| BrainPermanentAgentDepartureFact {
+                fact_id: row.get("fact_id"),
+                account_id: row.get("account_id"),
+                human_mailbox: row.get("human_mailbox"),
+                managed_agent_nip05: row.get("managed_agent_nip05"),
+                principal_binding_reference: row.get("principal_binding_reference"),
+                departure_kind: row.get("departure_kind"),
+                occurred_at: row.get("occurred_at"),
+            })
+            .collect();
+        Ok(Some(BrainPermanentAgentDepartureFacts {
+            account_id,
+            human_mailbox: user.get("normalized_email"),
+            facts,
+        }))
     }
 
     pub async fn agent_creation_requests_for_workos_user(
@@ -7610,9 +7856,43 @@ where
             .map_err(store_error)?;
     }
     if destroy {
+        postgres_emit_retired_agent_departure_fact(client, &request, &now).await?;
         postgres_offboard_destroyed_runtime(client, &request, &now).await?;
     }
     Ok(request)
+}
+
+async fn postgres_emit_retired_agent_departure_fact<C>(
+    client: &C,
+    request: &RuntimeControlRequest,
+    occurred_at: &str,
+) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    client
+        .execute(
+            r#"
+            INSERT INTO brain_agent_departure_facts (
+                fact_id, account_id, human_mailbox, managed_agent_nip05,
+                principal_binding_reference, departure_kind, occurred_at,
+                source_operation_id
+            )
+            SELECT 'agent-departure-' || $1, users.workos_user_id,
+                   users.normalized_email, projects.agent_email, projects.id,
+                   'retired', $2::text::timestamptz, $1
+            FROM projects
+            JOIN users ON users.id = projects.owner_user_id
+            WHERE projects.id = $3
+              AND projects.agent_email IS NOT NULL
+              AND users.workos_user_id IS NOT NULL
+            ON CONFLICT (source_operation_id) DO NOTHING
+            "#,
+            &[&request.id, &occurred_at, &request.project_id],
+        )
+        .await
+        .map_err(store_error)?;
+    Ok(())
 }
 
 async fn postgres_fail_runtime_control_request<C>(

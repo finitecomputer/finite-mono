@@ -60,6 +60,10 @@ struct RequesterContext {
     platform: String,
     requesting_user_id: String,
     expires_at_unix: u64,
+    /// Optional human-signed Nostr event transported only for the matching
+    /// authenticated turn. Brain remains the authority that verifies it.
+    #[serde(default)]
+    authenticated_human_intent: Option<serde_json::Value>,
 }
 
 pub(crate) fn resolve(env: &CliEnvironment) -> Result<BrainCreationAuthority, String> {
@@ -78,6 +82,44 @@ fn resolve_at(
     if !environment.is_finite_runtime() {
         return Ok(BrainCreationAuthority::DirectHuman);
     }
+    let context = live_context_at(environment, finite_root, now)?;
+    let requester = NostrPublicKey::parse(&context.requesting_user_id)
+        .and_then(|key| key.to_npub())
+        .map_err(|_| missing_context())?;
+    Ok(BrainCreationAuthority::AuthenticatedRequester(requester))
+}
+
+/// Load the action-specific human signature supplied by the current Finite
+/// Chat turn. This is transport only: the server verifies signer, scope,
+/// freshness, and replay resistance before changing access.
+pub(crate) fn required_authenticated_human_intent(
+    env: &CliEnvironment,
+) -> Result<serde_json::Value, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_owned())?
+        .as_secs();
+    required_authenticated_human_intent_at(&SessionEnvironment::current(), &finite_root(env), now)
+}
+
+fn required_authenticated_human_intent_at(
+    environment: &SessionEnvironment,
+    finite_root: &Path,
+    now: u64,
+) -> Result<serde_json::Value, String> {
+    if !environment.is_finite_runtime() {
+        return Err(missing_human_intent());
+    }
+    live_context_at(environment, finite_root, now)?
+        .authenticated_human_intent
+        .ok_or_else(missing_human_intent)
+}
+
+fn live_context_at(
+    environment: &SessionEnvironment,
+    finite_root: &Path,
+    now: u64,
+) -> Result<RequesterContext, String> {
     let session_key = environment
         .session_key
         .as_deref()
@@ -114,14 +156,16 @@ fn resolve_at(
         }
         return Err(missing_context());
     }
-    let requester = NostrPublicKey::parse(user_id)
-        .and_then(|key| key.to_npub())
-        .map_err(|_| missing_context())?;
-    Ok(BrainCreationAuthority::AuthenticatedRequester(requester))
+    Ok(context)
 }
 
 fn missing_context() -> String {
     "authenticated Finite Chat requester context is unavailable; retry from the authenticated chat turn"
+        .to_owned()
+}
+
+fn missing_human_intent() -> String {
+    "Authenticated Human Intent is unavailable; ask from the authenticated Finite Chat turn and retry immediately"
         .to_owned()
 }
 
@@ -154,7 +198,13 @@ mod tests {
         }
     }
 
-    fn write_context(root: &Path, session_key: &str, user_id: &str, expires_at: u64) {
+    fn write_context(
+        root: &Path,
+        session_key: &str,
+        user_id: &str,
+        expires_at: u64,
+        authenticated_human_intent: Option<serde_json::Value>,
+    ) {
         let path = requester_context_path(root, session_key);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -165,6 +215,7 @@ mod tests {
                 "platform": "finitechat",
                 "requesting_user_id": user_id,
                 "expires_at_unix": expires_at,
+                "authenticated_human_intent": authenticated_human_intent,
             })
             .to_string(),
         )
@@ -185,11 +236,33 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let environment = environment("finitechat", "session-a", ALICE);
         assert!(resolve_at(&environment, root.path(), 100).is_err());
-        write_context(root.path(), "session-a", ALICE, 101);
+        write_context(root.path(), "session-a", ALICE, 101, None);
         assert!(matches!(
             resolve_at(&environment, root.path(), 100).unwrap(),
             BrainCreationAuthority::AuthenticatedRequester(_)
         ));
         assert!(resolve_at(&environment, root.path(), 101).is_err());
+    }
+
+    #[test]
+    fn peer_agent_intent_requires_the_matching_live_authenticated_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let environment = environment("finitechat", "session-a", ALICE);
+        assert!(required_authenticated_human_intent_at(&environment, root.path(), 100).is_err());
+        let event = serde_json::json!({ "kind": 30078, "sig": "human-signed" });
+        write_context(root.path(), "session-a", ALICE, 101, Some(event.clone()));
+        assert_eq!(
+            required_authenticated_human_intent_at(&environment, root.path(), 100).unwrap(),
+            event
+        );
+        assert!(required_authenticated_human_intent_at(&environment, root.path(), 101).is_err());
+        assert!(
+            required_authenticated_human_intent_at(
+                &SessionEnvironment::default(),
+                root.path(),
+                100,
+            )
+            .is_err()
+        );
     }
 }

@@ -8,22 +8,23 @@ use crate::{
     AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
     AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
     AdminRuntimeUpgradeInput, AgentCreationConfiguration, AgentCreationLease, AgentCreationRequest,
-    AgentRuntime, BillingOverview, BillingSubscriptionStatus, BrainAgentAccount,
-    CancelAgentCreationRequestInput, ClaimProjectImportsInput, ClaimProjectImportsResult,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError,
-    CustomerBillingAccount, ExistingHostProjectImport, FailAgentCreationRequestInput,
-    FailRuntimeControlRequestInput, FinitePrivateAdminAuditEvent, FinitePrivateAdminState,
-    FinitePrivateApiKey, FinitePrivateDailyResetResult, FinitePrivateGrant,
-    FinitePrivateSettlementKind, FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier,
-    ImportCandidateStatus, IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput,
-    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput, Project,
-    ProjectImportCandidate, ProviderOperationEnvelope, ProviderOperationTransition,
-    ProviderRuntimeHandleEnvelope, ProvisionFinitePrivateRuntimeKeyInput,
-    ProvisionFinitePrivateRuntimeKeyResult, ReconcileExistingHostImportsOptions,
-    ReconcileExistingHostImportsReport, RecordProviderOperationTransitionInput,
-    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    AgentRuntime, BillingOverview, BillingSubscriptionStatus, BrainAccountAgentRoster,
+    BrainAgentAccount, BrainPermanentAgentDepartureFacts, CancelAgentCreationRequestInput,
+    ClaimProjectImportsInput, ClaimProjectImportsResult, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CustomerBillingAccount,
+    ExistingHostProjectImport, FailAgentCreationRequestInput, FailRuntimeControlRequestInput,
+    FinitePrivateAdminAuditEvent, FinitePrivateAdminState, FinitePrivateApiKey,
+    FinitePrivateDailyResetResult, FinitePrivateGrant, FinitePrivateSettlementKind,
+    FinitePrivateUsageDecision, FinitePrivateUsageStatus, HostingTier, ImportCandidateStatus,
+    IssueFinitePrivateApiKeyInput, LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput,
+    LinkStripeCustomerInput, LinkVerifiedUserInput, Project, ProjectImportCandidate,
+    ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
+    ReconcileExistingHostImportsOptions, ReconcileExistingHostImportsReport,
+    RecordProviderOperationTransitionInput, RegisterAgentCreationRuntimeInput,
+    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
     RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
     RotateFinitePrivateApiKeyInput, RunnerLeaseCapacity, RuntimeArtifact, RuntimeArtifactKind,
     RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1, RuntimePlacement, RuntimeSummaryStatus,
@@ -332,6 +333,18 @@ pub struct CancelAgentCreationRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BrainAgentAccountRequest {
     pub managed_agent_email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainAccountAgentRosterRequest {
+    pub verified_email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainPermanentAgentDeparturesRequest {
+    pub verified_email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -841,6 +854,14 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
             post(brain_agent_account),
         )
         .route(
+            "/api/core/v1/brain/account-agent-roster",
+            post(brain_account_agent_roster),
+        )
+        .route(
+            "/api/core/v1/brain/permanent-agent-departures",
+            post(brain_permanent_agent_departures),
+        )
+        .route(
             "/api/core/v1/import-candidates/reconcile",
             post(reconcile_import_candidates),
         )
@@ -1143,6 +1164,38 @@ async fn brain_agent_account(
         .await?
         .ok_or_else(|| ApiError::not_found("active account-agent association not found"))?;
     Ok(Json(binding))
+}
+
+async fn brain_account_agent_roster(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(request): Json<BrainAccountAgentRosterRequest>,
+) -> Result<Json<BrainAccountAgentRoster>, ApiError> {
+    require_service_auth(&state, &headers)?;
+    let email = normalize_owner_email(Some(&request.verified_email))
+        .ok_or_else(|| ApiError::bad_request("invalid verified human email"))?;
+    let roster = state
+        .store
+        .brain_account_agent_roster(&email)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account agent roster not found"))?;
+    Ok(Json(roster))
+}
+
+async fn brain_permanent_agent_departures(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(request): Json<BrainPermanentAgentDeparturesRequest>,
+) -> Result<Json<BrainPermanentAgentDepartureFacts>, ApiError> {
+    require_service_auth(&state, &headers)?;
+    let email = normalize_owner_email(Some(&request.verified_email))
+        .ok_or_else(|| ApiError::bad_request("invalid verified human email"))?;
+    let facts = state
+        .store
+        .brain_permanent_agent_departures(&email)
+        .await?
+        .ok_or_else(|| ApiError::not_found("account agent departure facts not found"))?;
+    Ok(Json(facts))
 }
 
 async fn reconcile_import_candidates(
@@ -4841,6 +4894,62 @@ mod tests {
         assert_eq!(binding["managedAgentEmail"], agent_email);
         assert_eq!(binding["status"], "active");
 
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/core/v1/brain/account-agent-roster")
+                    .header("authorization", "Bearer core-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "verifiedEmail": "new@finite.vip" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let roster: BrainAccountAgentRoster = serde_json::from_slice(&body).unwrap();
+        assert_eq!(roster.account_id, "user_workos_new");
+        assert_eq!(roster.human_mailbox, "new@finite.vip");
+        assert!(roster.roster_revision > 0);
+        assert_eq!(roster.agents.len(), 1);
+        assert_eq!(roster.agents[0].display_name, "Oslo Agent");
+        assert_eq!(roster.agents[0].managed_agent_nip05, agent_email);
+        assert_eq!(roster.agents[0].lifecycle_state, "creating");
+        assert!(!roster.agents[0].eligible);
+        assert_eq!(
+            roster.agents[0].exclusion_reason.as_deref(),
+            Some("identity_provisioning_incomplete")
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/core/v1/brain/permanent-agent-departures")
+                    .header("authorization", "Bearer core-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "verifiedEmail": "new@finite.vip" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let departures: BrainPermanentAgentDepartureFacts = serde_json::from_slice(&body).unwrap();
+        assert_eq!(departures.account_id, "user_workos_new");
+        assert!(departures.facts.is_empty());
+
         assert!(result.project.import_candidate_id.is_none());
         assert!(result.request.agent_runtime_id.is_none());
         assert_eq!(result.request.runner_class, RunnerClass::Kata);
@@ -5369,6 +5478,31 @@ mod tests {
                 .as_deref(),
             Some("https://oslo-agent.example.test/contact")
         );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/core/v1/brain/account-agent-roster")
+                    .header("authorization", "Bearer core-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "verifiedEmail": "new@finite.vip" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let roster: BrainAccountAgentRoster = serde_json::from_slice(&body).unwrap();
+        assert_eq!(roster.agents.len(), 1);
+        assert_eq!(roster.agents[0].lifecycle_state, "active");
+        assert!(roster.agents[0].eligible);
+        assert!(roster.agents[0].exclusion_reason.is_none());
 
         let response = app
             .oneshot(

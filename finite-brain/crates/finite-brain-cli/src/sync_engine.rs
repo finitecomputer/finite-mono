@@ -339,13 +339,33 @@ pub(crate) fn prepare_folder_access_removal(
     folder_id: &str,
     target_npub: &str,
 ) -> Result<serde_json::Value, CliError> {
-    prepare_folder_access_removals(
+    prepare_folder_access_removals_inner(
         env,
         args,
         metadata,
         brain_id,
         folder_id,
         &BTreeSet::from([target_npub.to_owned()]),
+        false,
+    )
+}
+
+pub(crate) fn prepare_targeted_folder_access_removal(
+    env: &CliEnvironment,
+    args: &[String],
+    metadata: &BrainMetadataView,
+    brain_id: &str,
+    folder_id: &str,
+    target_npub: &str,
+) -> Result<serde_json::Value, CliError> {
+    prepare_folder_access_removals_inner(
+        env,
+        args,
+        metadata,
+        brain_id,
+        folder_id,
+        &BTreeSet::from([target_npub.to_owned()]),
+        true,
     )
 }
 
@@ -356,6 +376,26 @@ pub(crate) fn prepare_folder_access_removals(
     brain_id: &str,
     folder_id: &str,
     target_npubs: &BTreeSet<String>,
+) -> Result<serde_json::Value, CliError> {
+    prepare_folder_access_removals_inner(
+        env,
+        args,
+        metadata,
+        brain_id,
+        folder_id,
+        target_npubs,
+        false,
+    )
+}
+
+fn prepare_folder_access_removals_inner(
+    env: &CliEnvironment,
+    args: &[String],
+    metadata: &BrainMetadataView,
+    brain_id: &str,
+    folder_id: &str,
+    target_npubs: &BTreeSet<String>,
+    suppress_targeted_cohort_authority: bool,
 ) -> Result<serde_json::Value, CliError> {
     if target_npubs.is_empty() {
         return Err(CliError::InvalidInput(
@@ -402,8 +442,33 @@ pub(crate) fn prepare_folder_access_removals(
         .filter(|recipient| !target_npubs.contains(*recipient))
         .cloned()
         .collect::<Vec<_>>();
-    let remaining_recipients =
+    let mut remaining_recipients =
         folder_required_recipients(metadata, &folder.access, &remaining_access_user_ids)?;
+    // A cohort agent can be an effective recipient through Human-Anchored
+    // Agent Authority even when it has no direct Folder access row. A targeted
+    // cohort removal creates the durable exclusion that suppresses that
+    // derived access, so omit those targets after policy expansion. Preserve
+    // a legacy Personal Agent or another independently derived recipient when
+    // a Mount relationship alone is being removed.
+    if suppress_targeted_cohort_authority {
+        let cohort_agent_targets = metadata
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && (cohort.scope_kind == "brain"
+                        || cohort.folder_id.as_deref() == Some(folder_id))
+            })
+            .flat_map(|cohort| &cohort.participants)
+            .filter(|participant| {
+                participant.relationship == "account_agent"
+                    && participant.status == "active"
+                    && target_npubs.contains(&participant.npub)
+            })
+            .map(|participant| participant.npub.as_str())
+            .collect::<BTreeSet<_>>();
+        remaining_recipients.retain(|recipient| !cohort_agent_targets.contains(recipient.as_str()));
+    }
     if remaining_recipients.is_empty() {
         return Err(CliError::InvalidInput(
             "cannot revoke Folder access without at least one remaining authorized identity"

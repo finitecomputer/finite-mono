@@ -47,6 +47,7 @@ test("hostedDeviceHeaders binds the internal call to the verified WorkOS user", 
   );
   assert.equal(headers.get("authorization"), "Bearer secret");
   assert.equal(headers.get("x-finite-workos-user-id"), "user_paul");
+  assert.equal(headers.get("x-finite-workos-email"), "paul@finite.vip");
 });
 
 test("hosted text dispatch carries the Sites assertion only in trusted headers", async (context) => {
@@ -175,6 +176,7 @@ test("Brain identity operations use the narrow WorkOS-bound custody endpoint", a
   assert.equal(observedUrl, "https://device.internal/v1/brain/identity-provider");
   assert.equal(observedHeaders.get("authorization"), "Bearer internal-token");
   assert.equal(observedHeaders.get("x-finite-workos-user-id"), "user_paul");
+  assert.equal(observedHeaders.get("x-finite-workos-email"), "paul@finite.vip");
   assert.equal(
     observedHeaders.get("x-finite-brain-public-origin"),
     "https://finite.computer"

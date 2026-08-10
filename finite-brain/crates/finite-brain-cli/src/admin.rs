@@ -222,7 +222,7 @@ pub(crate) fn folder_required_recipients(
         .transpose()
         .map_err(|error| CliError::InvalidInput(error.to_string()))?;
 
-    required_folder_key_recipients(FolderKeyRecipientPolicy {
+    let mut recipients = required_folder_key_recipients(FolderKeyRecipientPolicy {
         brain_kind,
         folder_access,
         owner_user_id: owner.as_ref(),
@@ -231,13 +231,34 @@ pub(crate) fn folder_required_recipients(
         explicit_access_user_ids: &explicit_access_user_ids,
         personal_agent_npub: personal_agent.as_ref(),
     })
-    .map(|recipients| {
-        recipients
-            .into_iter()
-            .map(|user| user.to_string())
-            .collect()
-    })
-    .map_err(|error| CliError::InvalidInput(error.to_string()))
+    .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    for agent in metadata
+        .personal_brain_agents
+        .iter()
+        .filter(|agent| agent.status == "ready")
+    {
+        recipients.insert(
+            UserId::new(agent.agent_npub.clone())
+                .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+        );
+    }
+    for authority in &metadata.human_anchored_agent_authorities {
+        if authority.status == "active"
+            && authority.scope == "routine_administration"
+            && recipients
+                .iter()
+                .any(|recipient| recipient.as_str() == authority.human_npub)
+        {
+            recipients.insert(
+                UserId::new(authority.agent_npub.clone())
+                    .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+            );
+        }
+    }
+    Ok(recipients
+        .into_iter()
+        .map(|user| user.to_string())
+        .collect())
 }
 
 pub(crate) fn folder_key_grant_request(

@@ -2,10 +2,14 @@
 
 Status: accepted 2026-07-16.
 
+Amended 2026-08-07 by ADR-0045: every ready Personal Brain Agent may exercise
+the same direct-deletion authority previously assigned to the singular Personal
+Agent.
+
 FiniteBrain Folder deletion is a direct hard-delete operation; the product has
-no intermediate Trash or restore lifecycle. In a Personal Brain, the owner may
-hard-delete any Folder and a **Personal Agent** may hard-delete any Folder under
-its full operational Brain access. In an Organization Brain, any Brain admin
+no intermediate Trash or restore lifecycle. In a Personal Brain, the owner and
+every ready **Personal Brain Agent** may hard-delete any Folder under their full
+operational Brain access. In an Organization Brain, any Brain admin
 may hard-delete a Folder, including an admin Member Identity controlled by an
 agent; ordinary members may not. Direct deletion must not claim erasure from
 backups, snapshots, retained client plaintext, or storage history.
@@ -21,7 +25,7 @@ content, but cannot permanently delete a Page, Asset, other content item, or
 Folder.
 
 In a Personal Brain, direct deletion of both individual content and whole
-Folders is limited to the owner and Personal Agent. Other collaborators with
+Folders is limited to the owner and ready Personal Brain Agent Set. Other collaborators with
 write access may create and edit content inside their granted Folder scope but
 cannot permanently delete content or Folders.
 
@@ -36,11 +40,12 @@ deleted subtree, including invitations, share links, Folder Access, Folder Key
 Grants, delegated scope entries, mounts, and working-tree sync. If any required
 cleanup fails, the live subtree and all of its relationships remain intact.
 
-Adding a Personal Agent is the owner's standing full-trust authorization. A
-Personal Agent's valid signed direct-deletion request therefore requires no
-additional human approval ticket; removing that Personal Agent ends its future
-authority. Brain still binds deletion to the exact Folder and expected current
-state so a stale or ambiguous request fails without mutation.
+Adding an agent to the Personal Brain Agent Set is the owner's standing
+full-trust authorization. A ready Personal Brain Agent's valid signed
+direct-deletion request therefore requires no additional human approval ticket;
+removing that agent ends its future authority. Brain still binds deletion to
+the exact Folder and expected current state so a stale or ambiguous request
+fails without mutation.
 
 The human Product Client presents one confirmation before direct Folder
 deletion. It names the Folder, reports the number of nested Folders and content

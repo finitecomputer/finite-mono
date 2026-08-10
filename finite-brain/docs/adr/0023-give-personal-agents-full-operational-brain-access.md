@@ -1,6 +1,6 @@
 # Give Personal Agents Full Operational Brain Access
 
-Status: accepted 2026-07-16. Supersedes ADR-0020.
+Status: superseded 2026-08-07 by ADR-0045. Superseded ADR-0020.
 
 A Personal Agent is fully trusted to operate on behalf of the user across every
 current and future Folder in the user's Personal Brain. It may read, write,

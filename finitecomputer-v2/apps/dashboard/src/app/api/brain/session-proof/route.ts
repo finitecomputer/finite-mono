@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     );
   }
   const account = await getAccountAuthContext();
-  if (!account.workosUserId || !account.emailVerified) {
+  if (!account.workosUserId || !account.email || !account.emailVerified) {
     return Response.json(
       { error: "Sign in and open Brain again." },
       { status: 401, headers: NO_STORE_HEADERS },
@@ -50,6 +50,7 @@ export async function POST(request: Request) {
         proof: issueBrainSessionProof(
           config.apiToken,
           account.workosUserId,
+          account.email,
           value.requestHash,
         ),
       },

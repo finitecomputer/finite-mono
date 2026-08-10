@@ -110,6 +110,21 @@ _Avoid_: Account Auth, Agent Principal Key, Device key
 The Nostr key owned by one Agent Runtime and shared by its Finite Chat, Finite Sites, and Finite Brain tools through that runtime's Finite Home.
 _Avoid_: User Nostr Identity, Account Auth, shared fleet key
 
+**Account Agent Roster**:
+The Core-owned, authoritative set of successfully identity-provisioned Agent
+Runtimes owned by one Account Auth identity that have not permanently departed.
+It includes stopped, restarting, relocated, and temporarily unhealthy runtimes;
+runtime health does not change ownership. Products may use these facts to
+create their own product-scoped access, but the roster grants none by itself.
+_Avoid_: Online Agents, Brain Members, Product Delegation
+
+**Permanent Agent Departure Fact**:
+The Core-owned fact that an agent has been permanently unlinked, retired, or
+deleted from its account rather than temporarily stopped or unavailable.
+Products consume this fact to revoke product-owned authority; Core never
+deletes or rewrites product data as a side effect.
+_Avoid_: Runtime Offline, Stop Event, Product Revocation
+
 **Email Access Delegation**:
 A revocable product-owned authorization connecting one verified email Principal to one Agent Principal inside exactly one Finite product.
 _Avoid_: Principal Link, Google account sharing, agent impersonation
@@ -235,6 +250,9 @@ _Avoid_: Purge User Data, subscription cancellation, provider destroy
   image, and upgrade never flows through **Purge User Data** or Runtime destroy.
 - A **Runner** hosts one or more **Agent Runtimes**.
 - **Core** is the source of truth for desired **Agent Runtime** lifecycle state.
+- **Core** is the source of truth for the **Account Agent Roster** and
+  **Permanent Agent Departure Facts**. FiniteBrain owns any Account Access
+  Cohort, authority, Folder Key Grant, or revocation created from those facts.
 - A **Finite Private Runaway Guard** limits pathological continuous inference;
   it does not represent customer billing or a dollar-denominated budget.
 - A **Launch Code Batch** contains an explicit number of **Launch Codes** and can expire or be revoked before every code is redeemed.

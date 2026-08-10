@@ -20,24 +20,28 @@ use axum::{Json, Router};
 use finite_brain_core::FolderRole;
 use finite_brain_core::{
     AdminAccessAction, AdminAccessChangePayload, AdminAccessChangeValidation,
-    BootstrapSmokeSummary, BrainId, BrainKind, CoreError, CryptoRecordError, DisplayName,
-    EmailInviteScopeError, EmailInviteScopeFolder, Folder, FolderAccessMode, FolderId,
-    FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
-    FolderRotationFanout, FolderRotationOperation, ObjectId, RequiredFolderKeyGrant,
-    RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
-    bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
-    bootstrap_personal_brain, derive_email_invite_scope, validate_admin_access_change_event,
-    validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
+    BRAIN_CAPACITY_ENVELOPE, BootstrapSmokeSummary, BrainId, BrainKind, CoreError,
+    CryptoRecordError, DisplayName, EmailInviteScopeError, EmailInviteScopeFolder, Folder,
+    FolderAccessMode, FolderId, FolderObjectOperation, FolderObjectRevisionPayload,
+    FolderObjectTombstonePayload, FolderRotationFanout, FolderRotationOperation, ObjectId,
+    RequiredFolderKeyGrant, RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
+    bootstrap_organization_brain, bootstrap_organization_brain_with_account_cohort,
+    bootstrap_organization_brain_with_requester, bootstrap_personal_brain,
+    derive_email_invite_scope, validate_admin_access_change_event, validate_folder_rotation_fanout,
+    validate_revision_event, validate_tombstone_event,
 };
 use finite_brain_store::{
-    BrainInvitationTargetKind, BrainStore, ControlSyncRecord, EmailInviteBootstrapScopeFolder,
-    EncryptedBrainExport, FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord,
-    FolderObjectTombstoneSyncRecord, GrantFolderAccessOutcome, IdentityAlias, LinkStatus,
-    MountedFolderProjection, MountedFolderState, PersonalAgentFolderRotation,
-    SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
-    StoredBrainInvitation, StoredShareLink, StoredSharedFolderConnection,
-    StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
-    VisibleBrainRole,
+    AccountCohortFolderRemovalPlan, AccountCohortReconciliationPlan,
+    ApplyPermanentAgentDepartureOutcome, AuthenticatedHumanIntentRecord, BootstrapAccountCohort,
+    BrainInvitationTargetKind, BrainStore, CommitAccountCohortReconciliationOutcome,
+    ControlSyncRecord, EmailInviteBootstrapScopeFolder, EncryptedBrainExport,
+    FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord, FolderObjectTombstoneSyncRecord,
+    GrantAccountCohortFolderAccessOutcome, GrantFolderAccessOutcome, IdentityAlias, LinkStatus,
+    MemberFolderRotation, MountedFolderProjection, MountedFolderState, PermanentAgentDeparturePlan,
+    PersonalAgentBrainAccessPlan, PersonalBrainAgentAdmissionPlan, SharedFolderConnectionStatus,
+    SharedFolderDirection, StoreError, StoredBrain, StoredBrainInvitation, StoredCohortParticipant,
+    StoredShareLink, StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord,
+    SyncRecordInput, SyncRecordType, VisibleBrain, VisibleBrainRole,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -210,9 +214,66 @@ struct IdentityUserResolutionResponse {
     user_npub: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CoreAccountAgentRosterResponse {
+    account_id: String,
+    human_mailbox: String,
+    roster_revision: u64,
+    agents: Vec<CoreAccountAgentRosterEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CoreAccountAgentRosterEntry {
+    display_name: String,
+    managed_agent_nip05: String,
+    principal_binding_reference: String,
+    lifecycle_state: String,
+    eligible: bool,
+    #[serde(default)]
+    exclusion_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CorePermanentAgentDepartureFactsResponse {
+    account_id: String,
+    human_mailbox: String,
+    facts: Vec<CorePermanentAgentDepartureFactResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CorePermanentAgentDepartureFactResponse {
+    fact_id: String,
+    account_id: String,
+    human_mailbox: String,
+    managed_agent_nip05: String,
+    principal_binding_reference: String,
+    departure_kind: String,
+    occurred_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IdentityCohortParticipantResolutionResponse {
+    human: IdentityCohortParticipant,
+    agents: Vec<IdentityCohortParticipant>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IdentityCohortParticipant {
+    relationship: String,
+    name: String,
+    nip05: String,
+    npub: String,
+}
+
 /// Server-visible Brain invitation email payload.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BrainInviteEmail {
+    /// Stable provider idempotency key for exact retries.
+    pub idempotency_key: String,
     /// Recipient email address.
     pub to: String,
     /// Email subject.
@@ -701,6 +762,15 @@ fn normal_signed_api_router() -> Router<ServerState> {
             get(folder_access_handler),
         )
         .route(
+            "/brains/{brain_id}/folders/{folder_id}/account-access",
+            post(grant_account_cohort_folder_access_handler)
+                .delete(remove_account_cohort_folder_access_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/account-access/removal-preflight",
+            post(preview_account_cohort_folder_removal_handler),
+        )
+        .route(
             "/brains/{brain_id}/export",
             get(encrypted_brain_export_handler),
         )
@@ -714,6 +784,36 @@ fn normal_signed_api_router() -> Router<ServerState> {
             axum::routing::put(replace_personal_agent_handler),
         )
         .route(
+            "/brains/{brain_id}/personal-agent-admissions",
+            post(prepare_personal_brain_agent_admissions_handler)
+                .put(commit_personal_brain_agent_admissions_handler),
+        )
+        .route(
+            "/brains/{brain_id}/permanent-agent-departures/{fact_id}/preflight",
+            post(preview_permanent_agent_departure_handler),
+        )
+        .route(
+            "/brains/{brain_id}/permanent-agent-departures/{fact_id}",
+            post(apply_permanent_agent_departure_handler),
+        )
+        .route(
+            "/brains/{brain_id}/personal-agent-access/{target_npub}/preflight",
+            post(preview_personal_agent_brain_access_handler),
+        )
+        .route(
+            "/brains/{brain_id}/personal-agent-access/{target_npub}",
+            axum::routing::put(restore_personal_agent_brain_access_handler)
+                .delete(restrict_personal_agent_brain_access_handler),
+        )
+        .route(
+            "/brains/{brain_id}/cohort-reconciliation/preflight",
+            post(preview_account_cohort_reconciliation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/cohort-reconciliation",
+            axum::routing::put(commit_account_cohort_reconciliation_handler),
+        )
+        .route(
             "/brains/{brain_id}/collaborators/ensure-admin",
             post(ensure_organization_admin_handler)
                 .layer(DefaultBodyLimit::max(MAX_COLLABORATION_REQUEST_BODY_BYTES)),
@@ -721,6 +821,26 @@ fn normal_signed_api_router() -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/invitations",
             get(list_brain_invitations_handler).post(create_brain_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/invitations/preflight",
+            post(preview_brain_invitation_handler),
+        )
+        .route(
+            "/brains/{brain_id}/invitations/{invitation_id}/cohort-conversion/preflight",
+            post(preview_pending_invitation_conversion_handler),
+        )
+        .route(
+            "/brains/{brain_id}/invitations/{invitation_id}/cohort-conversion",
+            axum::routing::put(convert_pending_invitation_handler),
+        )
+        .route(
+            "/account-invitations",
+            get(list_account_invitations_handler),
+        )
+        .route(
+            "/account-invitations/{invitation_id}/visibility",
+            axum::routing::put(set_account_invitation_visibility_handler),
         )
         .route(
             "/brain-invitation-links/{invite_code}",
@@ -960,80 +1080,6 @@ fn record_resolved_identity(
         npub: resolved.npub.clone(),
         response: identity_response_from_resolved(resolved, alias.nip05_verified_at),
     })
-}
-
-async fn resolve_managed_agent_email(
-    state: &ServerState,
-    email: &str,
-    expected_owner_npub: &UserId,
-) -> Result<ResolvedIdentity, ApiError> {
-    let managed_agent_email = canonical_email(email)?;
-    let resolved = resolve_identity_input(state, &managed_agent_email).await?;
-    let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Managed Agent resolution is not configured",
-        )
-    })?;
-    let agent: IdentityAgentResolutionResponse = post_authority_json(
-        &format!(
-            "{}/api/v1/operator/brain/agent-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "agentNpub": resolved.npub }),
-        "Finite Identity Managed Agent resolution",
-    )
-    .await?;
-    if agent.agent_npub != resolved.npub
-        || canonical_email(&agent.managed_agent_email)? != managed_agent_email
-    {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "Finite Identity returned a mismatched Managed Agent",
-        ));
-    }
-    let account: CoreAgentAccountResponse = post_authority_json(
-        &format!(
-            "{}/api/core/v1/brain/agent-account",
-            authorities.core_base_url
-        ),
-        "Authorization",
-        &format!("Bearer {}", authorities.core_token),
-        &serde_json::json!({ "managedAgentEmail": managed_agent_email }),
-        "Finite Core Managed Agent resolution",
-    )
-    .await?;
-    if account.status != "active"
-        || canonical_email(&account.managed_agent_email)? != managed_agent_email
-        || account.workos_user_id.trim().is_empty()
-    {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "Finite Core returned an inactive or mismatched Managed Agent",
-        ));
-    }
-    let owner: IdentityUserResolutionResponse = post_authority_json(
-        &format!(
-            "{}/api/v1/operator/brain/user-resolution",
-            authorities.identity_base_url
-        ),
-        "X-Finite-Operator-Token",
-        &authorities.identity_token,
-        &serde_json::json!({ "workosUserId": account.workos_user_id }),
-        "Finite Identity Managed Agent owner resolution",
-    )
-    .await?;
-    if owner.workos_user_id != account.workos_user_id
-        || UserId::new(owner.user_npub)? != *expected_owner_npub
-    {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "Managed Agent does not belong to the Personal Brain owner's account",
-        ));
-    }
-    Ok(resolved)
 }
 
 async fn resolve_account_agent_principals(
@@ -1438,6 +1484,16 @@ fn finite_vip_email(value: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn reject_legacy_finite_vip_principal_write(target: &str) -> Result<(), ApiError> {
+    if finite_vip_email(target) {
+        return Err(ApiError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            "Finite VIP mailbox access now includes the human and their ready account agents; update the client and use the account-cohort write flow, or use an explicit raw npub for intentionally narrow access",
+        ));
+    }
+    Ok(())
+}
+
 fn canonical_email(value: &str) -> Result<String, ApiError> {
     let value = value.trim().to_ascii_lowercase();
     let Some((local, domain)) = value.split_once('@') else {
@@ -1488,18 +1544,24 @@ fn text_response(text: String) -> Response {
 
 fn invite_email_payload(
     state: &ServerState,
+    invitation_id: &str,
     invited_email: &str,
     invite_code: &str,
     folder_only: bool,
+    included_agent_count: Option<usize>,
 ) -> BrainInviteEmail {
     let instructions_path = public_invite_instructions_path(invite_code);
     let instructions_url = absolute_public_url(state, &instructions_path);
     let invitation_kind = if folder_only { "Folder" } else { "Brain" };
+    let cohort_copy = included_agent_count
+        .map(|count| format!("\n\nYour {count} account agent(s) are included."))
+        .unwrap_or_default();
     BrainInviteEmail {
+        idempotency_key: format!("brain-invitation:{invitation_id}"),
         to: invited_email.to_owned(),
         subject: format!("{invitation_kind} invitation"),
         text: format!(
-            "You have a {invitation_kind} invitation.\n\n\
+            "You have a {invitation_kind} invitation.{cohort_copy}\n\n\
              Start with the public agent instructions:\n{instructions_url}\n\n\
              Invite code: {invite_code}\n\n\
              This email intentionally does not include an Invite Secret or a full fragment URL. \
@@ -1519,18 +1581,50 @@ fn deliver_email_invitation(
     let Some(mailer) = state.invite_mailer.as_ref() else {
         return Ok(Some("not_configured".to_owned()));
     };
+    let included_agent_count = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        let count = store
+            .load_cohort_invitation_plan(&invitation.id)?
+            .map(|plan| {
+                plan.participants
+                    .iter()
+                    .filter(|participant| participant.relationship == "account_agent")
+                    .count()
+            });
+        let now = server_timestamp(state);
+        if !store.begin_brain_invitation_email_delivery(&invitation.id, &now)? {
+            return Ok(Some("sent".to_owned()));
+        }
+        count
+    };
     let email = invite_email_payload(
         state,
+        &invitation.id,
         invited_email,
         &invitation.invite_code,
         invitation.folder_only,
+        included_agent_count,
     );
-    mailer(&email).map_err(|error| {
-        ApiError::new(
+    if let Err(error) = mailer(&email) {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        store.finish_brain_invitation_email_delivery(
+            &invitation.id,
+            false,
+            &server_timestamp(state),
+        )?;
+        return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
             format!("Brain invite email delivery failed: {error}"),
-        )
-    })?;
+        ));
+    }
+    {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        store.finish_brain_invitation_email_delivery(
+            &invitation.id,
+            true,
+            &server_timestamp(state),
+        )?;
+    }
     Ok(Some("sent".to_owned()))
 }
 
@@ -1546,6 +1640,7 @@ fn resend_invite_mailer(api_key: String, from: String) -> BrainInviteMailer {
         ureq::post("https://api.resend.com/emails")
             .set("Authorization", &format!("Bearer {api_key}"))
             .set("Content-Type", "application/json")
+            .set("Idempotency-Key", &email.idempotency_key)
             .send_string(&body)
             .map_err(|error| format!("Resend request failed: {error}"))?;
         Ok(())
@@ -2045,6 +2140,29 @@ fn enrich_brain_invitation_identities(
     if let Some(invite_unwrap_npub) = &response.invite_unwrap_npub {
         npubs.push(invite_unwrap_npub.clone());
     }
+    if let Some(plan) = store.load_cohort_invitation_plan(&response.id)? {
+        response.plan_id = Some(plan.plan_id);
+        response.participants = plan
+            .participants
+            .into_iter()
+            .map(|participant| {
+                npubs.push(participant.npub.to_string());
+                InvitationPlanParticipantResponse {
+                    relationship: participant.relationship,
+                    name: participant.name,
+                    nip05: participant.nip05,
+                    npub: participant.npub.to_string(),
+                    ready: true,
+                }
+            })
+            .collect();
+        response.excluded = serde_json::from_str(&plan.exclusions_json).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stored cohort invitation exclusions are invalid",
+            )
+        })?;
+    }
     response.identities = known_identity_responses(store, npubs)?;
     Ok(())
 }
@@ -2147,6 +2265,149 @@ fn validate_admin_access_change_value(
     };
     let payload = validate_admin_access_change_event(&event, &expected)?;
     Ok((event, payload))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuthenticatedHumanIntentPayload {
+    version: String,
+    brain_id: String,
+    human_npub: String,
+    acting_agent_npub: String,
+    target_agent_npub: String,
+    operation: String,
+    scope_kind: String,
+    folder_id: Option<String>,
+    nonce: String,
+    expires_at: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_authenticated_human_intent_value(
+    value: serde_json::Value,
+    stored: &StoredBrain,
+    brain_id: &BrainId,
+    acting_agent_npub: &UserId,
+    target_agent_npub: &UserId,
+    operation: &str,
+    folder_id: Option<&FolderId>,
+    now_unix_seconds: u64,
+) -> Result<AuthenticatedHumanIntentRecord, ApiError> {
+    let owner = stored
+        .brain
+        .owner_user_id
+        .as_ref()
+        .filter(|_| stored.brain.kind == BrainKind::Personal)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Authenticated Human Intent applies only to Personal Brain peer Agents",
+            )
+        })?;
+    let event = event_from_value(value)?;
+    if event.kind.as_u16() != APP_SPECIFIC_KIND {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Authenticated Human Intent event must be kind {APP_SPECIFIC_KIND}"),
+        ));
+    }
+    verify_event_integrity(&event).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Authenticated Human Intent event failed verification: {error}"),
+        )
+    })?;
+    let signer = UserId::new(
+        NostrPublicKey::from_protocol(event.pubkey)
+            .to_npub()
+            .map_err(nostr_identity_error)?,
+    )?;
+    if signer != *owner {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Authenticated Human Intent must be signed by the Personal Brain owner",
+        ));
+    }
+    let payload: AuthenticatedHumanIntentPayload =
+        serde_json::from_str(&event.content).map_err(|_| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Authenticated Human Intent content did not parse",
+            )
+        })?;
+    let expected_scope = if folder_id.is_some() {
+        "folder"
+    } else {
+        "brain"
+    };
+    let expected_folder = folder_id.map(FolderId::as_str);
+    if payload.version != "finite-brain-authenticated-human-intent-v1"
+        || payload.brain_id != brain_id.as_str()
+        || payload.human_npub != owner.as_str()
+        || payload.acting_agent_npub != acting_agent_npub.as_str()
+        || payload.target_agent_npub != target_agent_npub.as_str()
+        || payload.operation != operation
+        || payload.scope_kind != expected_scope
+        || payload.folder_id.as_deref() != expected_folder
+        || payload.nonce.len() != 32
+        || !payload.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Authenticated Human Intent does not match the exact peer Agent change",
+        ));
+    }
+    let expires_at = OffsetDateTime::parse(&payload.expires_at, &Rfc3339).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Authenticated Human Intent expiresAt must be RFC 3339",
+        )
+    })?;
+    let expires_at_unix = expires_at.unix_timestamp();
+    let created_at_unix = i64::try_from(event.created_at.as_secs()).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Authenticated Human Intent created_at is outside the supported range",
+        )
+    })?;
+    let now_unix = i64::try_from(now_unix_seconds).unwrap_or(i64::MAX);
+    const MAX_INTENT_LIFETIME_SECONDS: i64 = 10 * 60;
+    const MAX_CLOCK_SKEW_SECONDS: i64 = 60;
+    if created_at_unix > now_unix.saturating_add(MAX_CLOCK_SKEW_SECONDS)
+        || expires_at_unix <= now_unix
+        || expires_at_unix <= created_at_unix
+        || expires_at_unix.saturating_sub(created_at_unix) > MAX_INTENT_LIFETIME_SECONDS
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Authenticated Human Intent is expired or outside its allowed freshness window",
+        ));
+    }
+    Ok(AuthenticatedHumanIntentRecord {
+        event_id: event.id.to_hex(),
+        human_npub: owner.clone(),
+        acting_agent_npub: acting_agent_npub.clone(),
+        target_agent_npub: target_agent_npub.clone(),
+        operation: operation.to_owned(),
+        scope_kind: expected_scope.to_owned(),
+        folder_id: folder_id.cloned(),
+        event_json: event.as_json(),
+        consumed_at: format_unix_timestamp(now_unix_seconds)
+            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
+    })
+}
+
+fn personal_peer_agent_change(stored: &StoredBrain, actor: &UserId, target: &UserId) -> bool {
+    stored.brain.kind == BrainKind::Personal
+        && actor != target
+        && stored
+            .personal_brain_agents
+            .iter()
+            .any(|agent| agent.status == "ready" && agent.agent_npub == *actor)
+        && stored
+            .personal_brain_agents
+            .iter()
+            .any(|agent| agent.status == "ready" && agent.agent_npub == *target)
 }
 
 fn run_as_admin<F>(
@@ -2388,6 +2649,16 @@ fn expected_created_at(event: &Event) -> Result<String, ApiError> {
 }
 
 fn ensure_brain_admin(stored: &StoredBrain, actor_npub: &str) -> Result<(), ApiError> {
+    if stored
+        .account_agent_exclusions
+        .iter()
+        .any(|(agent, scope)| agent.as_str() == actor_npub && scope.is_empty())
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "peer Agent Brain access is restricted",
+        ));
+    }
     if stored.brain.kind == BrainKind::Personal
         && stored
             .brain
@@ -2405,12 +2676,26 @@ fn ensure_brain_admin(stored: &StoredBrain, actor_npub: &str) -> Result<(), ApiE
     {
         return Ok(());
     }
+    if stored.brain.kind == BrainKind::Personal
+        && stored
+            .human_anchored_agent_authorities
+            .iter()
+            .any(|(agent, human)| {
+                agent.as_str() == actor_npub && stored.brain.owner_user_id.as_ref() == Some(human)
+            })
+    {
+        return Ok(());
+    }
     let is_admin = stored
         .brain
         .admins
         .iter()
         .any(|admin| admin.as_str() == actor_npub);
-    if is_admin {
+    let is_human_anchored_agent = stored
+        .human_anchored_agent_authorities
+        .iter()
+        .any(|(agent, human)| agent.as_str() == actor_npub && stored.brain.admins.contains(human));
+    if is_admin || is_human_anchored_agent {
         Ok(())
     } else {
         Err(ApiError::new(
@@ -2495,17 +2780,37 @@ fn folder_visible(stored: &StoredBrain, folder_id: &FolderId, actor_npub: &str) 
         .iter()
         .any(|admin| admin.as_str() == actor_npub);
     let is_personal_agent = stored
-        .personal_agent
-        .as_ref()
-        .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub);
+        .personal_brain_agents
+        .iter()
+        .any(|agent| agent.status == "ready" && agent.agent_npub.as_str() == actor_npub)
+        || stored
+            .personal_agent
+            .as_ref()
+            .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub);
     let is_member = stored
         .brain
         .members
         .iter()
         .any(|member| member.user_id.as_str() == actor_npub);
+    let cohort_agent_excluded = stored
+        .account_agent_exclusions
+        .iter()
+        .any(|(agent, scope)| {
+            agent.as_str() == actor_npub && (scope.is_empty() || scope == folder_id.as_str())
+        });
 
+    if let Some(human) = stored
+        .human_anchored_agent_authorities
+        .iter()
+        .find_map(|(agent, human)| (agent.as_str() == actor_npub).then_some(human))
+    {
+        if cohort_agent_excluded {
+            return false;
+        }
+        return folder_visible(stored, folder_id, human.as_str());
+    }
     if is_personal_agent {
-        return true;
+        return !cohort_agent_excluded;
     }
     if stored
         .folder_access
@@ -2535,9 +2840,26 @@ fn record_visible(stored: &StoredBrain, record: &StoredSyncRecord, actor_npub: &
         .iter()
         .any(|admin| admin.as_str() == actor_npub);
     let is_personal_agent = stored
-        .personal_agent
-        .as_ref()
-        .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub);
+        .personal_brain_agents
+        .iter()
+        .any(|agent| agent.status == "ready" && agent.agent_npub.as_str() == actor_npub)
+        || stored
+            .personal_agent
+            .as_ref()
+            .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub);
+    let is_human_anchored_agent =
+        stored
+            .human_anchored_agent_authorities
+            .iter()
+            .any(|(agent, human)| {
+                agent.as_str() == actor_npub
+                    && (stored.brain.owner_user_id.as_ref() == Some(human)
+                        || stored.brain.admins.contains(human))
+            });
+    let whole_brain_excluded = stored
+        .account_agent_exclusions
+        .iter()
+        .any(|(agent, scope)| agent.as_str() == actor_npub && scope.is_empty());
     match record.record_type {
         SyncRecordType::FolderObjectRevision | SyncRecordType::FolderObjectTombstone => record
             .folder_id
@@ -2547,16 +2869,18 @@ fn record_visible(stored: &StoredBrain, record: &StoredSyncRecord, actor_npub: &
             is_admin || grant_payload_recipient(&record.payload_json).as_deref() == Some(actor_npub)
         }
         SyncRecordType::BrainAdminAccessChange => {
-            is_owner
-                || is_admin
-                || is_personal_agent
-                || (is_folder_subtree_tombstone(&record.payload_json)
-                    && stored
-                        .folder_deletion_audience
-                        .get(&record.record_event_id)
-                        .is_some_and(|audience| {
-                            audience.iter().any(|reader| reader.as_str() == actor_npub)
-                        }))
+            !whole_brain_excluded
+                && (is_owner
+                    || is_admin
+                    || is_personal_agent
+                    || is_human_anchored_agent
+                    || (is_folder_subtree_tombstone(&record.payload_json)
+                        && stored
+                            .folder_deletion_audience
+                            .get(&record.record_event_id)
+                            .is_some_and(|audience| {
+                                audience.iter().any(|reader| reader.as_str() == actor_npub)
+                            })))
         }
     }
 }
@@ -2662,6 +2986,16 @@ fn folder_mount_id(
 }
 
 fn ensure_metadata_visible(stored: &StoredBrain, actor_npub: &str) -> Result<(), ApiError> {
+    if stored
+        .account_agent_exclusions
+        .iter()
+        .any(|(agent, scope)| agent.as_str() == actor_npub && scope.is_empty())
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "brain access required",
+        ));
+    }
     match stored.brain.kind {
         BrainKind::Personal => {
             let is_owner = stored
@@ -2678,10 +3012,13 @@ fn ensure_metadata_visible(stored: &StoredBrain, actor_npub: &str) -> Result<(),
                     .folders
                     .iter()
                     .any(|folder| folder_visible(stored, &folder.id, actor_npub));
-            let is_personal_agent = stored
-                .personal_agent
-                .as_ref()
-                .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub);
+            let is_personal_agent =
+                stored.personal_brain_agents.iter().any(|agent| {
+                    agent.status == "ready" && agent.agent_npub.as_str() == actor_npub
+                }) || stored
+                    .personal_agent
+                    .as_ref()
+                    .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub);
             let is_member = stored
                 .brain
                 .members
@@ -3731,11 +4068,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_created_organization_brain_atomically_adds_selected_agent_admin_by_email() {
+    async fn user_created_organization_brain_bootstraps_the_same_current_account_cohort() {
         let owner_keys = Keys::generate();
         let agent_keys = Keys::generate();
+        let sibling_agent_keys = Keys::generate();
         let owner_npub = npub(&owner_keys);
         let agent_npub = npub(&agent_keys);
+        let sibling_agent_npub = npub(&sibling_agent_keys);
         let agent_key = NostrPublicKey::from_protocol(agent_keys.public_key());
         let identifier = Nip05Identifier::parse("cheater@finite.vip").unwrap();
         let document =
@@ -3762,16 +4101,64 @@ mod tests {
                     "userNpub": owner_npub,
                 }),
             ),
+            (
+                200,
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human",
+                        "name": "Owner",
+                        "nip05": "owner@finite.vip",
+                        "npub": owner_npub,
+                    },
+                    "agents": [{
+                        "relationship": "account_agent",
+                        "name": "Cheater",
+                        "nip05": "cheater@finite.vip",
+                        "npub": agent_npub,
+                    }, {
+                        "relationship": "account_agent",
+                        "name": "Sibling",
+                        "nip05": "sibling@finite.vip",
+                        "npub": sibling_agent_npub,
+                    }],
+                }),
+            ),
         ]);
-        let (core_url, core_server) = spawn_json_authority(vec![(
-            "/api/core/v1/brain/agent-account",
-            serde_json::json!({
-                "workosUserId": "user_workos_owner",
-                "managedAgentEmail": "cheater@finite.vip",
-                "verifiedEmail": "owner@finite.computer",
-                "status": "active",
-            }),
-        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![
+            (
+                "/api/core/v1/brain/agent-account",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "managedAgentEmail": "cheater@finite.vip",
+                    "verifiedEmail": "owner@finite.vip",
+                    "status": "active",
+                }),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": "owner@finite.vip",
+                    "rosterRevision": 8,
+                    "agents": [{
+                        "displayName": "Cheater",
+                        "managedAgentNip05": "cheater@finite.vip",
+                        "principalBindingReference": "project-cheater",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }, {
+                        "displayName": "Sibling",
+                        "managedAgentNip05": "sibling@finite.vip",
+                        "principalBindingReference": "project-sibling",
+                        "lifecycleState": "stopped",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }],
+                }),
+            ),
+        ]);
         let state = test_state()
             .with_nip05_fixture(identifier.well_known_request().url, document)
             .with_agent_bootstrap_authorities(
@@ -3802,28 +4189,100 @@ mod tests {
         assert_eq!(created.status(), StatusCode::OK);
         let created: BrainMetadataResponse = read_json(created).await;
         assert!(created.folders.is_empty());
-        assert_eq!(created.members.len(), 2);
-        assert_eq!(created.admins.len(), 2);
-        assert!(created.admins.contains(&owner_npub));
-        assert!(created.admins.contains(&agent_npub));
+        assert_eq!(created.members.len(), 3);
+        assert_eq!(created.admins, vec![owner_npub.clone()]);
+        assert!(!created.admins.contains(&agent_npub));
+        assert!(created.members.contains(&sibling_agent_npub));
+        assert!(created.human_anchored_agent_authorities.iter().any(
+            |authority| authority.agent_npub == agent_npub
+                && authority.human_npub == owner_npub
+                && authority.scope == "routine_administration"
+                && authority.status == "active"
+        ));
         assert!(created.identities.iter().any(|identity| {
             identity.npub == agent_npub && identity.nip05.as_deref() == Some("cheater@finite.vip")
         }));
 
-        let agent_brains =
-            authed_request(router, &agent_keys, "GET", "/v1/brains", None, TEST_NOW + 1).await;
+        let agent_brains = authed_request(
+            router.clone(),
+            &agent_keys,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW + 1,
+        )
+        .await;
         let agent_brains: VisibleBrainsResponse = read_json(agent_brains).await;
         assert_eq!(agent_brains.brains.len(), 1);
-        assert_eq!(agent_brains.brains[0].role, "admin");
+        assert_eq!(agent_brains.brains[0].role, "member");
+
+        let removal_body = serde_json::json!({
+            "rotations": [],
+            "mountRotations": [],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "acme",
+                "targeted-agent-revocation",
+                AdminAccessAction::RemoveMember,
+                None,
+                Some(agent_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        let removed = authed_request(
+            router,
+            &owner_keys,
+            "DELETE",
+            &format!("/v1/admin/brains/acme/members/{agent_npub}"),
+            Some(removal_body),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::OK);
+        let removed: BrainMetadataResponse = read_json(removed).await;
+        assert!(!removed.members.contains(&agent_npub));
+        assert!(removed.members.contains(&sibling_agent_npub));
+        assert!(
+            removed
+                .human_anchored_agent_authorities
+                .iter()
+                .all(|authority| authority.agent_npub != agent_npub)
+        );
         identity_server.join().unwrap();
         core_server.join().unwrap();
+    }
+
+    #[test]
+    fn acceptance_narrowing_requires_the_exact_permanent_departure_set() {
+        let departed = UserId::new(npub(&Keys::generate())).unwrap();
+        let unapproved = UserId::new(npub(&Keys::generate())).unwrap();
+        let departures =
+            BTreeMap::from([(departed.clone(), "permanent_agent_departure".to_owned())]);
+
+        validate_acceptance_narrowing(&[departed.to_string()], &departures)
+            .expect("the exact remove-only proposal should be accepted");
+
+        let missing = validate_acceptance_narrowing(&[], &departures)
+            .expect_err("a known permanent departure requires explicit narrowing");
+        assert_eq!(missing.status, StatusCode::CONFLICT);
+        assert!(missing.message.contains(departed.as_str()));
+
+        let expanded = validate_acceptance_narrowing(
+            &[departed.to_string(), unapproved.to_string()],
+            &departures,
+        )
+        .expect_err("acceptance cannot remove an unapproved principal");
+        assert_eq!(expanded.status, StatusCode::CONFLICT);
     }
 
     #[tokio::test]
     async fn agent_created_organization_brain_includes_authenticated_requester() {
         let agent_keys = Keys::generate();
+        let sibling_agent_keys = Keys::generate();
         let requester_keys = Keys::generate();
         let agent_npub = npub(&agent_keys);
+        let sibling_agent_npub = npub(&sibling_agent_keys);
         let requester_npub = npub(&requester_keys);
         let body = serde_json::json!({
             "brainId": "acme",
@@ -3849,20 +4308,90 @@ mod tests {
                             "userNpub": requester_npub,
                         }),
                     ),
+                    (
+                        "/api/v1/operator/brain/agent-resolution",
+                        serde_json::json!({
+                            "agentNpub": agent_npub,
+                            "managedAgentEmail": "agent@finite.vip",
+                        }),
+                    ),
+                    (
+                        "/api/v1/operator/brain/user-resolution",
+                        serde_json::json!({
+                            "workosUserId": "user_workos_owner",
+                            "userNpub": requester_npub,
+                        }),
+                    ),
+                    (
+                        "/api/v1/operator/brain/participant-resolution",
+                        serde_json::json!({
+                            "human": {
+                                "relationship": "human",
+                                "name": "Owner",
+                                "nip05": "owner@finite.vip",
+                                "npub": requester_npub,
+                            },
+                            "agents": [{
+                                "relationship": "account_agent",
+                                "name": "Agent",
+                                "nip05": "agent@finite.vip",
+                                "npub": agent_npub,
+                            }, {
+                                "relationship": "account_agent",
+                                "name": "Sibling",
+                                "nip05": "sibling@finite.vip",
+                                "npub": sibling_agent_npub,
+                            }],
+                        }),
+                    ),
                 ]
             })
             .collect();
         let core_responses = (0..2)
-            .map(|_| {
-                (
-                    "/api/core/v1/brain/agent-account",
-                    serde_json::json!({
-                        "workosUserId": "user_workos_owner",
-                        "managedAgentEmail": "agent@finite.vip",
-                        "verifiedEmail": "owner@finite.computer",
-                        "status": "active",
-                    }),
-                )
+            .flat_map(|_| {
+                [
+                    (
+                        "/api/core/v1/brain/agent-account",
+                        serde_json::json!({
+                            "workosUserId": "user_workos_owner",
+                            "managedAgentEmail": "agent@finite.vip",
+                            "verifiedEmail": "owner@finite.vip",
+                            "status": "active",
+                        }),
+                    ),
+                    (
+                        "/api/core/v1/brain/agent-account",
+                        serde_json::json!({
+                            "workosUserId": "user_workos_owner",
+                            "managedAgentEmail": "agent@finite.vip",
+                            "verifiedEmail": "owner@finite.vip",
+                            "status": "active",
+                        }),
+                    ),
+                    (
+                        "/api/core/v1/brain/account-agent-roster",
+                        serde_json::json!({
+                            "accountId": "user_workos_owner",
+                            "humanMailbox": "owner@finite.vip",
+                            "rosterRevision": 7,
+                            "agents": [{
+                                "displayName": "Agent",
+                                "managedAgentNip05": "agent@finite.vip",
+                                "principalBindingReference": "project-agent",
+                                "lifecycleState": "active",
+                                "eligible": true,
+                                "exclusionReason": null,
+                            }, {
+                                "displayName": "Sibling",
+                                "managedAgentNip05": "sibling@finite.vip",
+                                "principalBindingReference": "project-sibling",
+                                "lifecycleState": "stopped",
+                                "eligible": true,
+                                "exclusionReason": null,
+                            }],
+                        }),
+                    ),
+                ]
             })
             .collect();
         let (identity_url, identity_server) = spawn_json_authority(identity_responses);
@@ -3887,20 +4416,20 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let metadata: BrainMetadataResponse = read_json(response).await;
-        assert_eq!(metadata.members.len(), 2);
-        assert_eq!(metadata.admins.len(), 2);
+        assert_eq!(metadata.members.len(), 3);
+        assert_eq!(metadata.admins, vec![requester_npub.clone()]);
         assert!(metadata.folders.is_empty());
         assert_eq!(metadata.grant_count, 0);
         assert!(metadata.members.contains(&agent_npub));
+        assert!(metadata.members.contains(&sibling_agent_npub));
         assert!(metadata.members.contains(&requester_npub));
-        assert!(metadata.admins.contains(&agent_npub));
-        assert!(metadata.admins.contains(&requester_npub));
+        assert!(!metadata.admins.contains(&agent_npub));
 
         let retry = post_brain(
             router.clone(),
             &agent_keys,
             &body,
-            TEST_NOW + 1,
+            TEST_NOW + 2,
             None,
             None,
             None,
@@ -3912,8 +4441,32 @@ mod tests {
         assert_eq!(retried.members, metadata.members);
         assert_eq!(retried.admins, metadata.admins);
 
+        let added_member = npub(&Keys::generate());
+        let add_member_body = serde_json::json!({
+            "accessChangeEvent": admin_event(
+                &agent_keys,
+                "acme",
+                "agent-delegated-add-member",
+                AdminAccessAction::AddMember,
+                None,
+                Some(&added_member),
+                None,
+            ),
+        })
+        .to_string();
+        let delegated = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            &format!("/v1/admin/brains/acme/members/{added_member}"),
+            Some(add_member_body),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(delegated.status(), StatusCode::OK);
+
         let requester_metadata =
-            get_metadata(router.clone(), &requester_keys, "acme", TEST_NOW + 2).await;
+            get_metadata(router.clone(), &requester_keys, "acme", TEST_NOW + 4).await;
         assert_eq!(requester_metadata.status(), StatusCode::OK);
         let requester_brains = authed_request(
             router.clone(),
@@ -4108,7 +4661,7 @@ mod tests {
         })
         .to_string();
         let (state, identity_server, core_server) =
-            test_state_with_agent_owner(&agent_npub, &requester_npub);
+            test_state_with_agent_owner_and_cohort(&agent_npub, &requester_npub);
         let router = router_with_state(state);
 
         let response = post_brain(
@@ -4285,9 +4838,20 @@ mod tests {
     async fn owner_creates_empty_personal_brain_by_verified_agent_npub_with_email_aliases() {
         let owner_keys = Keys::generate();
         let agent_keys = Keys::generate();
+        let sibling_agent_keys = Keys::generate();
+        let new_agent_keys = Keys::generate();
         let owner_npub = npub(&owner_keys);
         let agent_npub = npub(&agent_keys);
-        let owner_email = "owner@finite.computer";
+        let sibling_agent_npub = npub(&sibling_agent_keys);
+        let new_agent_npub = npub(&new_agent_keys);
+        let new_agent_identifier = Nip05Identifier::parse("new-agent@finite.vip").unwrap();
+        let new_agent_document = serde_json::json!({
+            "names": {
+                "new-agent": NostrPublicKey::from_protocol(new_agent_keys.public_key()).to_hex()
+            }
+        })
+        .to_string();
+        let owner_email = "owner@finite.vip";
         let agent_email = "cheater@finite.vip";
         let (identity_url, identity_server) = spawn_json_authority(vec![
             (
@@ -4304,22 +4868,254 @@ mod tests {
                     "userNpub": owner_npub,
                 }),
             ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human",
+                        "name": "Owner",
+                        "nip05": owner_email,
+                        "npub": owner_npub,
+                    },
+                    "agents": [{
+                        "relationship": "account_agent",
+                        "name": "Cheater",
+                        "nip05": agent_email,
+                        "npub": agent_npub,
+                    }, {
+                        "relationship": "account_agent",
+                        "name": "Sibling",
+                        "nip05": "sibling@finite.vip",
+                        "npub": sibling_agent_npub,
+                    }],
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human", "name": "Owner",
+                        "nip05": owner_email, "npub": owner_npub,
+                    },
+                    "agents": [{
+                        "relationship": "account_agent", "name": "Cheater",
+                        "nip05": agent_email, "npub": agent_npub,
+                    }, {
+                        "relationship": "account_agent", "name": "Sibling",
+                        "nip05": "sibling@finite.vip", "npub": sibling_agent_npub,
+                    }],
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human", "name": "Owner",
+                        "nip05": owner_email, "npub": owner_npub,
+                    },
+                    "agents": [{
+                        "relationship": "account_agent", "name": "Cheater",
+                        "nip05": agent_email, "npub": agent_npub,
+                    }, {
+                        "relationship": "account_agent", "name": "Sibling",
+                        "nip05": "sibling@finite.vip", "npub": sibling_agent_npub,
+                    }],
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human", "name": "Owner",
+                        "nip05": owner_email, "npub": owner_npub,
+                    },
+                    "agents": [{
+                        "relationship": "account_agent", "name": "Cheater",
+                        "nip05": agent_email, "npub": agent_npub,
+                    }, {
+                        "relationship": "account_agent", "name": "Sibling",
+                        "nip05": "sibling@finite.vip", "npub": sibling_agent_npub,
+                    }, {
+                        "relationship": "account_agent", "name": "New Agent",
+                        "nip05": "new-agent@finite.vip", "npub": new_agent_npub,
+                    }],
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human", "name": "Owner",
+                        "nip05": owner_email, "npub": owner_npub,
+                    },
+                    "agents": [{
+                        "relationship": "account_agent", "name": "Cheater",
+                        "nip05": agent_email, "npub": agent_npub,
+                    }, {
+                        "relationship": "account_agent", "name": "Sibling",
+                        "nip05": "sibling@finite.vip", "npub": sibling_agent_npub,
+                    }, {
+                        "relationship": "account_agent", "name": "New Agent",
+                        "nip05": "new-agent@finite.vip", "npub": new_agent_npub,
+                    }],
+                }),
+            ),
         ]);
-        let (core_url, core_server) = spawn_json_authority(vec![(
-            "/api/core/v1/brain/agent-account",
-            serde_json::json!({
-                "workosUserId": "user_workos_owner",
-                "managedAgentEmail": agent_email,
-                "verifiedEmail": owner_email,
-                "status": "active",
-            }),
-        )]);
-        let router = router_with_state(test_state().with_agent_bootstrap_authorities(
-            core_url,
-            "core-token",
-            identity_url,
-            "identity-token",
-        ));
+        let (core_url, core_server) = spawn_json_authority(vec![
+            (
+                "/api/core/v1/brain/agent-account",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "managedAgentEmail": agent_email,
+                    "verifiedEmail": owner_email,
+                    "status": "active",
+                }),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "rosterRevision": 9,
+                    "agents": [{
+                        "displayName": "Cheater", "managedAgentNip05": agent_email,
+                        "principalBindingReference": "project-cheater",
+                        "lifecycleState": "active", "eligible": true, "exclusionReason": null,
+                    }, {
+                        "displayName": "Sibling", "managedAgentNip05": "sibling@finite.vip",
+                        "principalBindingReference": "project-sibling",
+                        "lifecycleState": "stopped", "eligible": true, "exclusionReason": null,
+                    }],
+                }),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "rosterRevision": 9,
+                    "agents": [{
+                        "displayName": "Cheater", "managedAgentNip05": agent_email,
+                        "principalBindingReference": "project-cheater",
+                        "lifecycleState": "active", "eligible": true, "exclusionReason": null,
+                    }, {
+                        "displayName": "Sibling", "managedAgentNip05": "sibling@finite.vip",
+                        "principalBindingReference": "project-sibling",
+                        "lifecycleState": "stopped", "eligible": true, "exclusionReason": null,
+                    }],
+                }),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "rosterRevision": 9,
+                    "agents": [{
+                        "displayName": "Cheater",
+                        "managedAgentNip05": agent_email,
+                        "principalBindingReference": "project-cheater",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }, {
+                        "displayName": "Sibling",
+                        "managedAgentNip05": "sibling@finite.vip",
+                        "principalBindingReference": "project-sibling",
+                        "lifecycleState": "stopped",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }],
+                }),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "rosterRevision": 10,
+                    "agents": [{
+                        "displayName": "Cheater", "managedAgentNip05": agent_email,
+                        "principalBindingReference": "project-cheater",
+                        "lifecycleState": "active", "eligible": true, "exclusionReason": null,
+                    }, {
+                        "displayName": "Sibling", "managedAgentNip05": "sibling@finite.vip",
+                        "principalBindingReference": "project-sibling",
+                        "lifecycleState": "stopped", "eligible": true, "exclusionReason": null,
+                    }, {
+                        "displayName": "New Agent", "managedAgentNip05": "new-agent@finite.vip",
+                        "principalBindingReference": "project-new-agent",
+                        "lifecycleState": "active", "eligible": true, "exclusionReason": null,
+                    }],
+                }),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "rosterRevision": 10,
+                    "agents": [{
+                        "displayName": "Cheater", "managedAgentNip05": agent_email,
+                        "principalBindingReference": "project-cheater",
+                        "lifecycleState": "active", "eligible": true, "exclusionReason": null,
+                    }, {
+                        "displayName": "Sibling", "managedAgentNip05": "sibling@finite.vip",
+                        "principalBindingReference": "project-sibling",
+                        "lifecycleState": "stopped", "eligible": true, "exclusionReason": null,
+                    }, {
+                        "displayName": "New Agent", "managedAgentNip05": "new-agent@finite.vip",
+                        "principalBindingReference": "project-new-agent",
+                        "lifecycleState": "active", "eligible": true, "exclusionReason": null,
+                    }],
+                }),
+            ),
+            (
+                "/api/core/v1/brain/permanent-agent-departures",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "facts": [{
+                        "factId": "departure-new-agent",
+                        "accountId": "user_workos_owner",
+                        "humanMailbox": owner_email,
+                        "managedAgentNip05": "new-agent@finite.vip",
+                        "principalBindingReference": "project-new-agent",
+                        "departureKind": "retired",
+                        "occurredAt": "2026-08-10T12:00:00Z",
+                    }],
+                }),
+            ),
+            (
+                "/api/core/v1/brain/permanent-agent-departures",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "facts": [{
+                        "factId": "departure-new-agent",
+                        "accountId": "user_workos_owner",
+                        "humanMailbox": owner_email,
+                        "managedAgentNip05": "new-agent@finite.vip",
+                        "principalBindingReference": "project-new-agent",
+                        "departureKind": "retired",
+                        "occurredAt": "2026-08-10T12:00:00Z",
+                    }],
+                }),
+            ),
+        ]);
+        let router = router_with_state(
+            test_state()
+                .with_nip05_fixture(
+                    new_agent_identifier.well_known_request().url,
+                    new_agent_document,
+                )
+                .with_agent_bootstrap_authorities(
+                    core_url,
+                    "core-token",
+                    identity_url,
+                    "identity-token",
+                ),
+        );
         let body = serde_json::json!({
             "brainId": "personal",
             "kind": "personal",
@@ -4344,6 +5140,13 @@ mod tests {
         assert_eq!(created.owner_user_id.as_deref(), Some(owner_npub.as_str()));
         assert!(created.folders.is_empty());
         assert_eq!(created.grant_count, 0);
+        assert_eq!(created.personal_brain_agents.len(), 2);
+        assert!(
+            created
+                .personal_brain_agents
+                .iter()
+                .all(|agent| agent.status == "ready")
+        );
         assert_eq!(
             created
                 .personal_agent
@@ -4366,6 +5169,662 @@ mod tests {
         assert_eq!(agent_brains.brains.len(), 1);
         assert_eq!(agent_brains.brains[0].brain_id, "personal");
         assert_eq!(agent_brains.brains[0].role, "personal_agent");
+        let sibling_brains = authed_request(
+            router.clone(),
+            &sibling_agent_keys,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        let sibling_brains: VisibleBrainsResponse = read_json(sibling_brains).await;
+        assert_eq!(sibling_brains.brains[0].role, "personal_agent");
+        let create_folder_body = serde_json::json!({
+            "folderId": "all-agents",
+            "name": "All agents",
+            "role": "folder",
+            "access": "owner",
+            "parentFolderId": null,
+            "path": "all-agents",
+            "accessUserIds": [],
+            "grants": [
+                folder_key_grant_value("grant-all-owner", 1, owner_npub.as_str()),
+                folder_key_grant_value("grant-all-agent", 1, agent_npub.as_str()),
+                folder_key_grant_value("grant-all-sibling", 1, sibling_agent_npub.as_str()),
+            ],
+            "accessChangeEvent": admin_event(
+                &sibling_agent_keys,
+                "personal",
+                "create-all-agents",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("all-agents"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let folder = authed_request(
+            router.clone(),
+            &sibling_agent_keys,
+            "POST",
+            "/v1/brains/personal/folders",
+            Some(create_folder_body),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(folder.status(), StatusCode::OK);
+        let after_folder: BrainMetadataResponse = read_json(folder).await;
+        assert_eq!(after_folder.folders[0].current_key_version, 1);
+        assert_eq!(after_folder.grant_count, 3);
+
+        let peer_restriction_without_human_intent = authed_request(
+            router.clone(),
+            &agent_keys,
+            "DELETE",
+            &format!("/v1/admin/brains/personal/folders/all-agents/access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "newKeyVersion": 2,
+                    "grants": [
+                        folder_key_grant_value("peer-restrict-owner", 2, owner_npub.as_str()),
+                        folder_key_grant_value("peer-restrict-actor", 2, agent_npub.as_str()),
+                    ],
+                    "reencryptedRecords": [],
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "peer-restrict-without-human",
+                        AdminAccessAction::RemoveFolderAccess,
+                        Some("all-agents"),
+                        Some(sibling_agent_npub.as_str()),
+                        Some(2),
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 20,
+        )
+        .await;
+        assert_error(
+            peer_restriction_without_human_intent,
+            StatusCode::FORBIDDEN,
+            "requires Authenticated Human Intent",
+        )
+        .await;
+
+        let mismatched_intent = authenticated_human_intent_event(
+            &owner_keys,
+            "personal",
+            &agent_npub,
+            &new_agent_npub,
+            "restrict",
+            Some("all-agents"),
+            "00000000000000000000000000000001",
+            TEST_NOW + 600,
+        );
+        let mismatched_restriction = authed_request(
+            router.clone(),
+            &agent_keys,
+            "DELETE",
+            &format!("/v1/admin/brains/personal/folders/all-agents/access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "newKeyVersion": 2,
+                    "grants": [
+                        folder_key_grant_value("peer-restrict-owner", 2, owner_npub.as_str()),
+                        folder_key_grant_value("peer-restrict-actor", 2, agent_npub.as_str()),
+                    ],
+                    "reencryptedRecords": [],
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "peer-restrict-mismatch",
+                        AdminAccessAction::RemoveFolderAccess,
+                        Some("all-agents"),
+                        Some(sibling_agent_npub.as_str()),
+                        Some(2),
+                    ),
+                    "authenticatedHumanIntent": mismatched_intent,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 21,
+        )
+        .await;
+        assert_error(
+            mismatched_restriction,
+            StatusCode::BAD_REQUEST,
+            "does not match the exact peer Agent change",
+        )
+        .await;
+
+        let first_restrict_intent = authenticated_human_intent_event(
+            &owner_keys,
+            "personal",
+            &agent_npub,
+            &sibling_agent_npub,
+            "restrict",
+            Some("all-agents"),
+            "00000000000000000000000000000002",
+            TEST_NOW + 600,
+        );
+        let restricted = authed_request(
+            router.clone(),
+            &agent_keys,
+            "DELETE",
+            &format!("/v1/admin/brains/personal/folders/all-agents/access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "newKeyVersion": 2,
+                    "grants": [
+                        folder_key_grant_value("peer-restrict-owner", 2, owner_npub.as_str()),
+                        folder_key_grant_value("peer-restrict-actor", 2, agent_npub.as_str()),
+                    ],
+                    "reencryptedRecords": [],
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "peer-restrict-valid",
+                        AdminAccessAction::RemoveFolderAccess,
+                        Some("all-agents"),
+                        Some(sibling_agent_npub.as_str()),
+                        Some(2),
+                    ),
+                    "authenticatedHumanIntent": first_restrict_intent,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 22,
+        )
+        .await;
+        assert_eq!(restricted.status(), StatusCode::OK);
+        let restricted: BrainMetadataResponse = read_json(restricted).await;
+        assert_eq!(restricted.folders[0].current_key_version, 2);
+        let sibling_provenance = restricted
+            .account_access_cohorts
+            .iter()
+            .flat_map(|cohort| &cohort.participants)
+            .find(|participant| participant.npub == sibling_agent_npub)
+            .unwrap();
+        assert_eq!(sibling_provenance.excluded_folder_ids, vec!["all-agents"]);
+
+        let first_restore_intent = authenticated_human_intent_event(
+            &owner_keys,
+            "personal",
+            &agent_npub,
+            &sibling_agent_npub,
+            "restore",
+            Some("all-agents"),
+            "00000000000000000000000000000003",
+            TEST_NOW + 600,
+        );
+        let restored = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            &format!("/v1/admin/brains/personal/folders/all-agents/access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "grant": folder_key_grant_value(
+                        "peer-restore-sibling-v2",
+                        2,
+                        sibling_agent_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "peer-restore-valid",
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("all-agents"),
+                        Some(sibling_agent_npub.as_str()),
+                        Some(2),
+                    ),
+                    "authenticatedHumanIntent": first_restore_intent.clone(),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 23,
+        )
+        .await;
+        assert_eq!(restored.status(), StatusCode::OK);
+        let restored: GrantFolderAccessResponse = read_json(restored).await;
+        assert_eq!(restored.outcome, GrantFolderAccessResponseOutcome::Granted);
+        let sibling_provenance = restored
+            .metadata
+            .account_access_cohorts
+            .iter()
+            .flat_map(|cohort| &cohort.participants)
+            .find(|participant| participant.npub == sibling_agent_npub)
+            .unwrap();
+        assert!(sibling_provenance.excluded_folder_ids.is_empty());
+
+        let second_restrict_intent = authenticated_human_intent_event(
+            &owner_keys,
+            "personal",
+            &agent_npub,
+            &sibling_agent_npub,
+            "restrict",
+            Some("all-agents"),
+            "00000000000000000000000000000004",
+            TEST_NOW + 600,
+        );
+        let restricted_again = authed_request(
+            router.clone(),
+            &agent_keys,
+            "DELETE",
+            &format!("/v1/admin/brains/personal/folders/all-agents/access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "newKeyVersion": 3,
+                    "grants": [
+                        folder_key_grant_value("peer-restrict-owner-v3", 3, owner_npub.as_str()),
+                        folder_key_grant_value("peer-restrict-actor-v3", 3, agent_npub.as_str()),
+                    ],
+                    "reencryptedRecords": [],
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "peer-restrict-valid-v3",
+                        AdminAccessAction::RemoveFolderAccess,
+                        Some("all-agents"),
+                        Some(sibling_agent_npub.as_str()),
+                        Some(3),
+                    ),
+                    "authenticatedHumanIntent": second_restrict_intent,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 24,
+        )
+        .await;
+        assert_eq!(restricted_again.status(), StatusCode::OK);
+
+        let replayed_restore = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            &format!("/v1/admin/brains/personal/folders/all-agents/access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "grant": folder_key_grant_value(
+                        "peer-restore-sibling-v3-replay",
+                        3,
+                        sibling_agent_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "peer-restore-replay",
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("all-agents"),
+                        Some(sibling_agent_npub.as_str()),
+                        Some(3),
+                    ),
+                    "authenticatedHumanIntent": first_restore_intent,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 25,
+        )
+        .await;
+        assert_error(
+            replayed_restore,
+            StatusCode::BAD_REQUEST,
+            "Authenticated Human Intent was already consumed",
+        )
+        .await;
+
+        let final_restore_intent = authenticated_human_intent_event(
+            &owner_keys,
+            "personal",
+            &agent_npub,
+            &sibling_agent_npub,
+            "restore",
+            Some("all-agents"),
+            "00000000000000000000000000000005",
+            TEST_NOW + 600,
+        );
+        let restored_again = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            &format!("/v1/admin/brains/personal/folders/all-agents/access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "grant": folder_key_grant_value(
+                        "peer-restore-sibling-v3",
+                        3,
+                        sibling_agent_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "peer-restore-valid-v3",
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("all-agents"),
+                        Some(sibling_agent_npub.as_str()),
+                        Some(3),
+                    ),
+                    "authenticatedHumanIntent": final_restore_intent,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 26,
+        )
+        .await;
+        assert_eq!(restored_again.status(), StatusCode::OK);
+
+        let brain_restrict_preview = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            &format!("/v1/brains/personal/personal-agent-access/{sibling_agent_npub}/preflight"),
+            Some(serde_json::json!({ "operation": "restrict" }).to_string()),
+            TEST_NOW + 27,
+        )
+        .await;
+        assert_eq!(brain_restrict_preview.status(), StatusCode::OK);
+        let brain_restrict_preview: PreviewPersonalAgentBrainAccessResponse =
+            read_json(brain_restrict_preview).await;
+        assert_eq!(brain_restrict_preview.folders[0].new_key_version, 4);
+        let brain_restrict_intent = authenticated_human_intent_event(
+            &owner_keys,
+            "personal",
+            &agent_npub,
+            &sibling_agent_npub,
+            "restrict",
+            None,
+            "00000000000000000000000000000006",
+            TEST_NOW + 600,
+        );
+        let brain_restricted = authed_request(
+            router.clone(),
+            &agent_keys,
+            "DELETE",
+            &format!("/v1/brains/personal/personal-agent-access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "planId": brain_restrict_preview.plan_id,
+                    "rotations": [{
+                        "folderId": "all-agents",
+                        "newKeyVersion": 4,
+                        "grants": [
+                            folder_key_grant_value("brain-restrict-owner-v4", 4, owner_npub.as_str()),
+                            folder_key_grant_value("brain-restrict-actor-v4", 4, agent_npub.as_str()),
+                        ],
+                        "reencryptedRecords": [],
+                    }],
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "brain-restrict-valid",
+                        AdminAccessAction::RestrictPersonalAgent,
+                        None,
+                        Some(sibling_agent_npub.as_str()),
+                        None,
+                    ),
+                    "authenticatedHumanIntent": brain_restrict_intent,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 28,
+        )
+        .await;
+        assert_eq!(brain_restricted.status(), StatusCode::OK);
+        let brain_restricted: PersonalAgentBrainAccessResponse = read_json(brain_restricted).await;
+        let sibling_provenance = brain_restricted
+            .metadata
+            .account_access_cohorts
+            .iter()
+            .flat_map(|cohort| &cohort.participants)
+            .find(|participant| participant.npub == sibling_agent_npub)
+            .unwrap();
+        assert!(sibling_provenance.brain_access_excluded);
+        let restricted_brains = authed_request(
+            router.clone(),
+            &sibling_agent_keys,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW + 29,
+        )
+        .await;
+        let restricted_brains: VisibleBrainsResponse = read_json(restricted_brains).await;
+        assert!(restricted_brains.brains.is_empty());
+
+        let brain_restore_preview = authed_request(
+            router.clone(),
+            &agent_keys,
+            "POST",
+            &format!("/v1/brains/personal/personal-agent-access/{sibling_agent_npub}/preflight"),
+            Some(serde_json::json!({ "operation": "restore" }).to_string()),
+            TEST_NOW + 30,
+        )
+        .await;
+        assert_eq!(brain_restore_preview.status(), StatusCode::OK);
+        let brain_restore_preview: PreviewPersonalAgentBrainAccessResponse =
+            read_json(brain_restore_preview).await;
+        assert_eq!(brain_restore_preview.folders[0].current_key_version, 4);
+        let brain_restore_intent = authenticated_human_intent_event(
+            &owner_keys,
+            "personal",
+            &agent_npub,
+            &sibling_agent_npub,
+            "restore",
+            None,
+            "00000000000000000000000000000007",
+            TEST_NOW + 600,
+        );
+        let brain_restored = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            &format!("/v1/brains/personal/personal-agent-access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "planId": brain_restore_preview.plan_id,
+                    "participantGrants": [{
+                        "folderId": "all-agents",
+                        "grant": folder_key_grant_value(
+                            "brain-restore-sibling-v4",
+                            4,
+                            sibling_agent_npub.as_str(),
+                        ),
+                    }],
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "brain-restore-valid",
+                        AdminAccessAction::RestorePersonalAgent,
+                        None,
+                        Some(sibling_agent_npub.as_str()),
+                        None,
+                    ),
+                    "authenticatedHumanIntent": brain_restore_intent,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 31,
+        )
+        .await;
+        assert_eq!(brain_restored.status(), StatusCode::OK);
+        let brain_restored: PersonalAgentBrainAccessResponse = read_json(brain_restored).await;
+        assert!(
+            !brain_restored
+                .metadata
+                .account_access_cohorts
+                .iter()
+                .flat_map(|cohort| &cohort.participants)
+                .find(|participant| participant.npub == sibling_agent_npub)
+                .unwrap()
+                .brain_access_excluded
+        );
+        let restored_brains = authed_request(
+            router.clone(),
+            &sibling_agent_keys,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW + 32,
+        )
+        .await;
+        let restored_brains: VisibleBrainsResponse = read_json(restored_brains).await;
+        assert_eq!(restored_brains.brains[0].role, "personal_agent");
+
+        let prepared = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/v1/brains/personal/personal-agent-admissions",
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(prepared.status(), StatusCode::OK);
+        let prepared: PersonalBrainAgentAdmissionResponse = read_json(prepared).await;
+        assert_eq!(prepared.status, "setting_up");
+        assert_eq!(prepared.agents.len(), 1);
+        assert_eq!(prepared.agents[0].npub, new_agent_npub);
+        assert_eq!(prepared.key_versions.len(), 1);
+
+        let committed = authed_request(
+            router.clone(),
+            &owner_keys,
+            "PUT",
+            "/v1/brains/personal/personal-agent-admissions",
+            Some(
+                serde_json::json!({
+                    "planId": prepared.plan_id,
+                    "participantGrants": [{
+                        "folderId": "all-agents",
+                        "grant": folder_key_grant_value(
+                            "grant-all-new-agent",
+                            4,
+                            new_agent_npub.as_str(),
+                        ),
+                    }],
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(committed.status(), StatusCode::OK);
+        let committed: PersonalBrainAgentAdmissionResponse = read_json(committed).await;
+        assert_eq!(committed.status, "ready");
+        let new_agent_brains = authed_request(
+            router.clone(),
+            &new_agent_keys,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW + 6,
+        )
+        .await;
+        let new_agent_brains: VisibleBrainsResponse = read_json(new_agent_brains).await;
+        assert_eq!(new_agent_brains.brains[0].role, "personal_agent");
+
+        let preflight = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/v1/brains/personal/permanent-agent-departures/departure-new-agent/preflight",
+            Some(serde_json::json!({ "humanEmail": owner_email }).to_string()),
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(preflight.status(), StatusCode::OK);
+        let preflight: PreviewPermanentAgentDepartureResponse = read_json(preflight).await;
+        assert_eq!(preflight.agent_npub, new_agent_npub);
+        assert_eq!(preflight.folders.len(), 1);
+        assert_eq!(preflight.folders[0].new_key_version, 5);
+        let remaining = preflight.folders[0]
+            .required_recipient_npubs
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            remaining,
+            BTreeSet::from([
+                owner_npub.clone(),
+                agent_npub.clone(),
+                sibling_agent_npub.clone(),
+            ])
+        );
+        let departure_body = serde_json::json!({
+            "humanEmail": owner_email,
+            "planId": preflight.plan_id,
+            "rotations": [{
+                "folderId": "all-agents",
+                "newKeyVersion": 5,
+                "grants": remaining.iter().enumerate().map(|(index, recipient)| {
+                    folder_key_grant_value(&format!("departure-grant-{index}"), 5, recipient)
+                }).collect::<Vec<_>>(),
+                "reencryptedRecords": [],
+            }],
+            "accessChangeEvent": admin_event(
+                &owner_keys,
+                "personal",
+                "departure-new-agent-access",
+                AdminAccessAction::RemoveMember,
+                None,
+                Some(new_agent_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        let departed = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/v1/brains/personal/permanent-agent-departures/departure-new-agent",
+            Some(departure_body.clone()),
+            TEST_NOW + 8,
+        )
+        .await;
+        assert_eq!(departed.status(), StatusCode::OK);
+        let departed: ApplyPermanentAgentDepartureResponse = read_json(departed).await;
+        assert_eq!(departed.outcome, "applied");
+        assert_eq!(departed.rotated_folder_ids, vec!["all-agents"]);
+        assert!(
+            departed
+                .metadata
+                .personal_brain_agents
+                .iter()
+                .any(|agent| agent.agent_npub == new_agent_npub && agent.status == "revoked")
+        );
+        assert!(
+            departed
+                .metadata
+                .personal_brain_agents
+                .iter()
+                .filter(|agent| agent.agent_npub != new_agent_npub)
+                .all(|agent| agent.status == "ready")
+        );
+        let replay = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            "/v1/brains/personal/permanent-agent-departures/departure-new-agent",
+            Some(departure_body),
+            TEST_NOW + 9,
+        )
+        .await;
+        let replay: ApplyPermanentAgentDepartureResponse = read_json(replay).await;
+        assert_eq!(replay.outcome, "already_applied");
+        assert_eq!(replay.rotated_folder_ids, vec!["all-agents"]);
+        let departed_agent_brains = authed_request(
+            router.clone(),
+            &new_agent_keys,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW + 10,
+        )
+        .await;
+        let departed_agent_brains: VisibleBrainsResponse = read_json(departed_agent_brains).await;
+        assert!(departed_agent_brains.brains.is_empty());
         assert!(
             created
                 .identities
@@ -4377,6 +5836,639 @@ mod tests {
                 .identities
                 .iter()
                 .any(|identity| { identity.npub == agent_npub && identity.display == agent_email })
+        );
+        identity_server.join().unwrap();
+        core_server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconciliation_dry_run_is_stable_and_commit_is_atomic_and_idempotent() {
+        let admin_keys = Keys::generate();
+        let human_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let admin_npub = npub(&admin_keys);
+        let human_npub = npub(&human_keys);
+        let agent_npub = npub(&agent_keys);
+        let human_email = "paul@finite.vip";
+        let identifier = Nip05Identifier::parse(human_email).unwrap();
+        let nip05_document = serde_json::json!({
+            "names": {
+                "paul": NostrPublicKey::from_protocol(human_keys.public_key()).to_hex()
+            }
+        })
+        .to_string();
+        let participant_response = serde_json::json!({
+            "human": {
+                "relationship": "human",
+                "name": "Paul",
+                "nip05": human_email,
+                "npub": human_npub,
+            },
+            "agents": [{
+                "relationship": "account_agent",
+                "name": "Waffle",
+                "nip05": "waffle@finite.vip",
+                "npub": agent_npub,
+            }],
+        });
+        let roster_response = serde_json::json!({
+            "accountId": "user_workos_paul",
+            "humanMailbox": human_email,
+            "rosterRevision": 7,
+            "agents": [{
+                "displayName": "Waffle",
+                "managedAgentNip05": "waffle@finite.vip",
+                "principalBindingReference": "project-waffle",
+                "lifecycleState": "stopped",
+                "eligible": true,
+                "exclusionReason": null,
+            }],
+        });
+        let (identity_url, identity_server) = spawn_json_authority(vec![
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                participant_response.clone(),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                participant_response.clone(),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                participant_response.clone(),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                participant_response.clone(),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                participant_response.clone(),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                participant_response.clone(),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                participant_response.clone(),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                participant_response,
+            ),
+        ]);
+        let (core_url, core_server) = spawn_json_authority(vec![
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                roster_response.clone(),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                roster_response.clone(),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                roster_response.clone(),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                roster_response.clone(),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                roster_response.clone(),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                roster_response.clone(),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                roster_response.clone(),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                roster_response.clone(),
+            ),
+            ("/api/core/v1/brain/account-agent-roster", roster_response),
+        ]);
+        let state = test_state()
+            .with_nip05_fixture(identifier.well_known_request().url, nip05_document)
+            .with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            );
+        let legacy_output =
+            bootstrap_organization_brain("legacy-org", "Legacy Org", &admin_npub).unwrap();
+        state
+            .store
+            .lock()
+            .unwrap()
+            .create_brain_bootstrap(&legacy_output, &[])
+            .unwrap();
+        let guest_output =
+            bootstrap_organization_brain("legacy-guest", "Legacy Guest", &admin_npub).unwrap();
+        state
+            .store
+            .lock()
+            .unwrap()
+            .create_brain_bootstrap(&guest_output, &[])
+            .unwrap();
+        let router = router_with_state(state.clone());
+        let member_added = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            &format!("/v1/admin/brains/legacy-org/members/{human_npub}"),
+            Some(
+                serde_json::json!({
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "legacy-org",
+                        "legacy-human-member",
+                        AdminAccessAction::AddMember,
+                        None,
+                        Some(human_npub.as_str()),
+                        None,
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 1,
+        )
+        .await;
+        assert_eq!(member_added.status(), StatusCode::OK);
+        let folder_created = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/legacy-org/folders",
+            Some(
+                serde_json::json!({
+                    "folderId": "general",
+                    "name": "General",
+                    "role": "folder",
+                    "access": "all_members",
+                    "parentFolderId": null,
+                    "path": "general",
+                    "accessUserIds": [],
+                    "grants": [
+                        folder_key_grant_value("legacy-admin-grant", 1, admin_npub.as_str()),
+                        folder_key_grant_value("legacy-human-grant", 1, human_npub.as_str()),
+                    ],
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "legacy-org",
+                        "legacy-folder",
+                        AdminAccessAction::SetFolderAccessMode,
+                        Some("general"),
+                        None,
+                        Some(1),
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(folder_created.status(), StatusCode::OK);
+
+        let preflight_body = serde_json::json!({ "humanEmail": human_email }).to_string();
+        let first = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/legacy-org/cohort-reconciliation/preflight",
+            Some(preflight_body.clone()),
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: AccountCohortReconciliationPlan = read_json(first).await;
+        assert_eq!(first.scope_kind, "brain");
+        assert_eq!(first.participants.len(), 2);
+        assert_eq!(
+            first.folders[0].missing_grant_recipient_npubs,
+            vec![UserId::new(agent_npub.clone()).unwrap()]
+        );
+        assert!(first.blocker.is_none());
+        let before = state
+            .store
+            .lock()
+            .unwrap()
+            .load_brain(&BrainId::new("legacy-org").unwrap())
+            .unwrap();
+        assert!(before.account_access_cohorts.is_empty());
+        let second = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/legacy-org/cohort-reconciliation/preflight",
+            Some(preflight_body),
+            TEST_NOW + 4,
+        )
+        .await;
+        let second: AccountCohortReconciliationPlan = read_json(second).await;
+        assert_eq!(first, second);
+
+        let rejected_incomplete_commit = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            "/v1/brains/legacy-org/cohort-reconciliation",
+            Some(
+                serde_json::json!({
+                    "humanEmail": human_email,
+                    "planId": first.operation_id,
+                    "participantGrants": [],
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "legacy-org",
+                        "reject-incomplete-reconciliation",
+                        AdminAccessAction::ReconcileAccountCohort,
+                        None,
+                        Some(human_npub.as_str()),
+                        None,
+                    ),
+                    "backupReference": "snapshot:synthetic-before-rejected-reconciliation",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_error(
+            rejected_incomplete_commit,
+            StatusCode::BAD_REQUEST,
+            "exactly match",
+        )
+        .await;
+        let after_rejected = state
+            .store
+            .lock()
+            .unwrap()
+            .load_brain(&BrainId::new("legacy-org").unwrap())
+            .unwrap();
+        assert!(after_rejected.account_access_cohorts.is_empty());
+        assert!(
+            !after_rejected
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == agent_npub)
+        );
+
+        let commit_body = serde_json::json!({
+            "humanEmail": human_email,
+            "planId": first.operation_id,
+            "participantGrants": [{
+                "folderId": "general",
+                "grant": folder_key_grant_value("reconcile-agent-grant", 1, agent_npub.as_str()),
+            }],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "legacy-org",
+                "reconcile-paul",
+                AdminAccessAction::ReconcileAccountCohort,
+                None,
+                Some(human_npub.as_str()),
+                None,
+            ),
+            "backupReference": "snapshot:synthetic-before-reconciliation",
+        })
+        .to_string();
+        let committed = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            "/v1/brains/legacy-org/cohort-reconciliation",
+            Some(commit_body.clone()),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(committed.status(), StatusCode::OK);
+        let committed: CommitAccountCohortReconciliationResponse = read_json(committed).await;
+        assert_eq!(committed.outcome, "committed");
+        assert!(committed.metadata.members.contains(&agent_npub));
+        assert!(
+            committed
+                .metadata
+                .human_anchored_agent_authorities
+                .iter()
+                .any(|authority| authority.agent_npub == agent_npub
+                    && authority.human_npub == human_npub)
+        );
+        assert_eq!(committed.metadata.account_access_cohorts.len(), 1);
+        let replay = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            "/v1/brains/legacy-org/cohort-reconciliation",
+            Some(commit_body),
+            TEST_NOW + 6,
+        )
+        .await;
+        let replay: CommitAccountCohortReconciliationResponse = read_json(replay).await;
+        assert_eq!(replay.outcome, "already_committed");
+        assert_eq!(replay.plan, committed.plan);
+
+        let create_private_folder = serde_json::json!({
+            "folderId": "private",
+            "name": "Private",
+            "role": "folder",
+            "access": "restricted",
+            "parentFolderId": null,
+            "path": "Private",
+            "accessUserIds": [],
+            "grants": [folder_key_grant_value(
+                "legacy-guest-private-admin-v1",
+                1,
+                admin_npub.as_str(),
+            )],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "legacy-guest",
+                "create-private-folder",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("private"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let create_private = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/legacy-guest/folders",
+            Some(create_private_folder),
+            TEST_NOW + 7,
+        )
+        .await;
+        if create_private.status() != StatusCode::OK {
+            let error: ApiErrorBody = read_json(create_private).await;
+            panic!("legacy guest Folder create failed: {}", error.error);
+        }
+        let grant_guest_human = serde_json::json!({
+            "targetNpub": human_npub,
+            "grant": folder_key_grant_value(
+                "legacy-guest-private-human-v1",
+                1,
+                human_npub.as_str(),
+            ),
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "legacy-guest",
+                "grant-private-human",
+                AdminAccessAction::GrantFolderAccess,
+                Some("private"),
+                Some(human_npub.as_str()),
+                Some(1),
+            ),
+        })
+        .to_string();
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "PUT",
+                &format!("/v1/admin/brains/legacy-guest/folders/private/access/{human_npub}"),
+                Some(grant_guest_human),
+                TEST_NOW + 8,
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+
+        let guest_preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/legacy-guest/cohort-reconciliation/preflight",
+            Some(
+                serde_json::json!({
+                    "humanEmail": human_email,
+                    "folderId": "private",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 9,
+        )
+        .await;
+        assert_eq!(guest_preflight.status(), StatusCode::OK);
+        let guest_plan: AccountCohortReconciliationPlan = read_json(guest_preflight).await;
+        assert_eq!(guest_plan.scope_kind, "folder");
+        assert_eq!(guest_plan.folders.len(), 1);
+        assert_eq!(guest_plan.folders[0].folder_id.as_str(), "private");
+        assert_eq!(
+            guest_plan.folders[0].missing_grant_recipient_npubs,
+            vec![UserId::new(agent_npub.clone()).unwrap()]
+        );
+        assert!(guest_plan.expected_member_additions.is_empty());
+
+        let guest_commit = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            "/v1/brains/legacy-guest/cohort-reconciliation",
+            Some(
+                serde_json::json!({
+                    "humanEmail": human_email,
+                    "folderId": "private",
+                    "planId": guest_plan.operation_id,
+                    "participantGrants": [{
+                        "folderId": "private",
+                        "grant": folder_key_grant_value(
+                            "legacy-guest-private-agent-v1",
+                            1,
+                            agent_npub.as_str(),
+                        ),
+                    }],
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "legacy-guest",
+                        "reconcile-private-paul",
+                        AdminAccessAction::ReconcileAccountCohort,
+                        Some("private"),
+                        Some(human_npub.as_str()),
+                        None,
+                    ),
+                    "backupReference": "snapshot:synthetic-before-guest-reconciliation",
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 10,
+        )
+        .await;
+        assert_eq!(guest_commit.status(), StatusCode::OK);
+        let guest_commit: CommitAccountCohortReconciliationResponse = read_json(guest_commit).await;
+        assert!(!guest_commit.metadata.members.contains(&human_npub));
+        assert!(!guest_commit.metadata.members.contains(&agent_npub));
+        let private = guest_commit
+            .metadata
+            .folders
+            .iter()
+            .find(|folder| folder.id.as_str() == "private")
+            .unwrap();
+        assert!(private.access_user_ids.contains(&human_npub));
+        assert!(private.access_user_ids.contains(&agent_npub));
+        assert!(
+            guest_commit
+                .metadata
+                .human_anchored_agent_authorities
+                .iter()
+                .any(|authority| authority.agent_npub == agent_npub
+                    && authority.human_npub == human_npub)
+        );
+        assert_eq!(guest_commit.metadata.account_access_cohorts.len(), 1);
+        assert_eq!(
+            guest_commit.metadata.account_access_cohorts[0].scope_kind,
+            "folder"
+        );
+
+        let private_folder = FolderId::new("private").unwrap();
+        let legacy_invitation = state
+            .store
+            .lock()
+            .unwrap()
+            .create_email_brain_invitation(
+                &BrainId::new("legacy-guest").unwrap(),
+                "legacy-finite-vip-invitation",
+                human_email,
+                &UserId::new(human_npub.clone()).unwrap(),
+                "legacy-bootstrap-payload-hash",
+                "{\"kind\":1059}",
+                "{\"kind\":30078}",
+                "legacy-finite-vip-invite-code-0001",
+                "/v1/brain-invitation-links/legacy-finite-vip-invite-code-0001/accept",
+                std::slice::from_ref(&private_folder),
+                false,
+                &UserId::new(admin_npub.clone()).unwrap(),
+                "2026-08-17T12:00:00Z",
+                "2026-08-10T12:00:00Z",
+            )
+            .unwrap();
+        let blocked_legacy_accept = authed_request(
+            router.clone(),
+            &human_keys,
+            "POST",
+            "/v1/brain-invitation-links/legacy-finite-vip-invite-code-0001/accept",
+            None,
+            TEST_NOW + 11,
+        )
+        .await;
+        assert_error(
+            blocked_legacy_accept,
+            StatusCode::UPGRADE_REQUIRED,
+            "must be converted",
+        )
+        .await;
+
+        let conversion_preflight = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/legacy-guest/invitations/legacy-finite-vip-invitation/cohort-conversion/preflight",
+            None,
+            TEST_NOW + 12,
+        )
+        .await;
+        assert_eq!(conversion_preflight.status(), StatusCode::OK);
+        let conversion_preflight: PreviewBrainInvitationResponse =
+            read_json(conversion_preflight).await;
+        assert_eq!(conversion_preflight.target_email, human_email);
+        assert_eq!(conversion_preflight.scope.kind, "brain");
+        assert_eq!(conversion_preflight.participants.len(), 2);
+        assert_eq!(conversion_preflight.key_versions.len(), 1);
+
+        let conversion_body = serde_json::json!({
+            "planId": conversion_preflight.plan_id,
+            "participantGrants": [
+                {
+                    "folderId": "private",
+                    "grant": folder_key_grant_value(
+                        "converted-invitation-human-v1",
+                        1,
+                        human_npub.as_str(),
+                    ),
+                },
+                {
+                    "folderId": "private",
+                    "grant": folder_key_grant_value(
+                        "converted-invitation-agent-v1",
+                        1,
+                        agent_npub.as_str(),
+                    ),
+                }
+            ],
+            "approvedExclusions": [],
+            "backupReference": "snapshot:synthetic-before-invitation-conversion",
+        })
+        .to_string();
+        let converted = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            "/v1/brains/legacy-guest/invitations/legacy-finite-vip-invitation/cohort-conversion",
+            Some(conversion_body.clone()),
+            TEST_NOW + 13,
+        )
+        .await;
+        assert_eq!(converted.status(), StatusCode::OK);
+        let converted: BrainInvitationResponse = read_json(converted).await;
+        assert_eq!(converted.id, legacy_invitation.id);
+        assert_eq!(converted.invite_code, legacy_invitation.invite_code);
+        assert_eq!(converted.expires_at, legacy_invitation.expires_at);
+        assert_eq!(converted.target_kind, "account_cohort");
+        assert_eq!(converted.participants.len(), 2);
+        let conversion_retry = authed_request(
+            router.clone(),
+            &admin_keys,
+            "PUT",
+            "/v1/brains/legacy-guest/invitations/legacy-finite-vip-invitation/cohort-conversion",
+            Some(conversion_body),
+            TEST_NOW + 14,
+        )
+        .await;
+        assert_eq!(conversion_retry.status(), StatusCode::OK);
+        let conversion_retry: BrainInvitationResponse = read_json(conversion_retry).await;
+        assert_eq!(conversion_retry.id, converted.id);
+
+        let accepted = authed_request(
+            router,
+            &agent_keys,
+            "POST",
+            "/v1/brain-invitation-links/legacy-finite-vip-invite-code-0001/accept",
+            None,
+            TEST_NOW + 15,
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let accepted: BrainInvitationResponse = read_json(accepted).await;
+        assert_eq!(accepted.status, "accepted");
+        let accepted_state = state
+            .store
+            .lock()
+            .unwrap()
+            .load_brain(&BrainId::new("legacy-guest").unwrap())
+            .unwrap();
+        assert!(
+            accepted_state
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == human_npub)
+        );
+        assert!(
+            accepted_state
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id.as_str() == agent_npub)
         );
         identity_server.join().unwrap();
         core_server.join().unwrap();
@@ -4982,361 +7074,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owner_replaces_personal_agent_by_managed_email_with_durable_rotation_records() {
+    async fn mixed_version_reads_remain_available_but_legacy_access_writes_require_update() {
         let owner_keys = Keys::generate();
-        let owner_npub = npub(&owner_keys);
-        let old_agent_keys = Keys::generate();
-        let old_agent_npub = npub(&old_agent_keys);
-        let collaborator_keys = Keys::generate();
-        let collaborator_npub = npub(&collaborator_keys);
-        let replacement_keys = Keys::generate();
-        let replacement_key = NostrPublicKey::from_protocol(replacement_keys.public_key());
-        let replacement_npub = replacement_key.to_npub().unwrap();
-        let identifier = Nip05Identifier::parse("replacement@finite.vip").unwrap();
-        let document =
-            serde_json::json!({ "names": { "replacement": replacement_key.to_hex() } }).to_string();
-        let agent_resolution = serde_json::json!({
-            "agentNpub": replacement_npub,
-            "managedAgentEmail": "replacement@finite.vip",
-        });
-        let account_resolution = serde_json::json!({
-            "workosUserId": "user_workos_replacement_owner",
-            "managedAgentEmail": "replacement@finite.vip",
-            "status": "active",
-        });
-        let owner_resolution = serde_json::json!({
-            "workosUserId": "user_workos_replacement_owner",
-            "userNpub": owner_npub,
-        });
-        let (identity_url, identity_server) = spawn_json_authority(vec![
-            (
-                "/api/v1/operator/brain/agent-resolution",
-                agent_resolution.clone(),
-            ),
-            (
-                "/api/v1/operator/brain/user-resolution",
-                owner_resolution.clone(),
-            ),
-            ("/api/v1/operator/brain/agent-resolution", agent_resolution),
-            ("/api/v1/operator/brain/user-resolution", owner_resolution),
-        ]);
-        let (core_url, core_server) = spawn_json_authority(vec![
-            (
-                "/api/core/v1/brain/agent-account",
-                account_resolution.clone(),
-            ),
-            ("/api/core/v1/brain/agent-account", account_resolution),
-        ]);
-        let state = personal_test_state(&owner_keys, &old_agent_keys)
-            .with_nip05_fixture(identifier.well_known_request().url, document)
-            .with_agent_bootstrap_authorities(
-                core_url,
-                "core-token",
-                identity_url,
-                "identity-token",
-            );
-        let router = router_with_state(state.clone());
+        let agent_keys = Keys::generate();
+        let state = personal_test_state(&owner_keys, &agent_keys);
+        let router = router_with_state(state);
 
-        let create_folder = serde_json::json!({
-            "folderId": "personal-notes",
-            "name": "Personal notes",
-            "role": "folder",
-            "access": "restricted",
-            "parentFolderId": null,
-            "path": "personal-notes",
-            "accessUserIds": [],
-            "grants": [
-                folder_key_grant_value("grant-personal-notes-owner-v1", 1, owner_npub.as_str()),
-                folder_key_grant_value("grant-personal-notes-agent-v1", 1, old_agent_npub.as_str()),
-            ],
-            "accessChangeEvent": admin_event(
-                &owner_keys,
-                "personal",
-                "create-personal-notes",
-                AdminAccessAction::SetFolderAccessMode,
-                Some("personal-notes"),
-                None,
-                Some(1),
-            ),
-        })
-        .to_string();
-        assert_eq!(
-            authed_request(
-                router.clone(),
-                &owner_keys,
-                "POST",
-                "/v1/brains/personal/folders",
-                Some(create_folder),
-                TEST_NOW + 1,
-            )
-            .await
-            .status(),
-            StatusCode::OK
-        );
-
-        let grant_collaborator = serde_json::json!({
-            "targetNpub": collaborator_npub,
-            "grant": folder_key_grant_value(
-                "grant-personal-notes-collaborator-v1",
-                1,
-                collaborator_npub.as_str(),
-            ),
-            "accessChangeEvent": admin_event(
-                &owner_keys,
-                "personal",
-                "grant-personal-notes-collaborator",
-                AdminAccessAction::GrantFolderAccess,
-                Some("personal-notes"),
-                Some(collaborator_npub.as_str()),
-                Some(1),
-            ),
-        })
-        .to_string();
-        assert_eq!(
-            authed_request(
-                router.clone(),
-                &owner_keys,
-                "PUT",
-                &format!(
-                    "/v1/admin/brains/personal/folders/personal-notes/access/{collaborator_npub}"
-                ),
-                Some(grant_collaborator),
-                TEST_NOW + 1,
-            )
-            .await
-            .status(),
-            StatusCode::OK
-        );
-
-        let replace_body = serde_json::json!({
-            "agentEmail": "replacement@finite.vip",
-            "rotations": [{
-                "folderId": "personal-notes",
-                "newKeyVersion": 2,
-                "grants": [
-                    folder_key_grant_value("grant-personal-notes-owner-v2", 2, owner_npub.as_str()),
-                    folder_key_grant_value("grant-personal-notes-agent-v2", 2, replacement_npub.as_str()),
-                    folder_key_grant_value("grant-personal-notes-collaborator-v2", 2, collaborator_npub.as_str()),
-                ],
-                "reencryptedRecords": [],
-                "accessChangeEvent": admin_event(
-                    &owner_keys,
-                    "personal",
-                    "replace-personal-notes-agent",
-                    AdminAccessAction::RotateFolderKey,
-                    Some("personal-notes"),
-                    Some(replacement_npub.as_str()),
-                    Some(2),
-                ),
-            }],
-        })
-        .to_string();
-        let replaced = authed_request(
+        let list = authed_request(
             router.clone(),
             &owner_keys,
-            "PUT",
-            "/v1/brains/personal/personal-agent",
-            Some(replace_body),
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+
+        let metadata = authed_request(
+            router.clone(),
+            &agent_keys,
+            "GET",
+            "/v1/brains/personal/access",
+            None,
             TEST_NOW + 1,
         )
         .await;
-        assert_eq!(replaced.status(), StatusCode::OK);
-        let replaced: BrainMetadataResponse = read_json(replaced).await;
-        assert_eq!(
-            replaced
-                .personal_agent
-                .as_ref()
-                .map(|relationship| relationship.agent_npub.as_str()),
-            Some(replacement_npub.as_str())
-        );
+        assert_eq!(metadata.status(), StatusCode::OK);
 
-        let old_agent_brains = authed_request(
-            router.clone(),
-            &old_agent_keys,
-            "GET",
-            "/v1/brains",
-            None,
-            TEST_NOW + 2,
-        )
-        .await;
-        assert_eq!(old_agent_brains.status(), StatusCode::OK);
-        let old_agent_brains: VisibleBrainsResponse = read_json(old_agent_brains).await;
-        assert!(old_agent_brains.brains.is_empty());
-
-        let replacement_brains = authed_request(
-            router.clone(),
-            &replacement_keys,
-            "GET",
-            "/v1/brains",
-            None,
-            TEST_NOW + 2,
-        )
-        .await;
-        assert_eq!(replacement_brains.status(), StatusCode::OK);
-        let replacement_brains: VisibleBrainsResponse = read_json(replacement_brains).await;
-        assert_eq!(replacement_brains.brains.len(), 1);
-        assert_eq!(replacement_brains.brains[0].role, "personal_agent");
-
-        let replacement_sync = authed_request(
-            router.clone(),
-            &replacement_keys,
-            "GET",
-            "/v1/brains/personal/sync/bootstrap",
-            None,
-            TEST_NOW + 3,
-        )
-        .await;
-        assert_eq!(replacement_sync.status(), StatusCode::OK);
-        let replacement_sync: SyncBootstrapResponse = read_json(replacement_sync).await;
-        assert!(replacement_sync.control_records.iter().any(|record| {
-            record.folder_id.as_deref() == Some("personal-notes")
-                && record.record_type == "folder_key_grant"
-                && record.payload_json.contains("\"keyVersion\":2")
-        }));
-        assert!(replacement_sync.control_records.iter().any(|record| {
-            record.folder_id.as_deref() == Some("personal-notes")
-                && record.record_type == "brain_admin_access_change"
-                && record.payload_json.contains("replace-personal-notes-agent")
-        }));
-
-        let remove_body = serde_json::json!({
-            "agentEmail": null,
-            "rotations": [{
-                "folderId": "personal-notes",
-                "newKeyVersion": 3,
-                "grants": [
-                    folder_key_grant_value("grant-personal-notes-owner-v3", 3, owner_npub.as_str()),
-                    folder_key_grant_value("grant-personal-notes-collaborator-v3", 3, collaborator_npub.as_str()),
-                ],
-                "reencryptedRecords": [],
-                "accessChangeEvent": admin_event(
-                    &owner_keys,
-                    "personal",
-                    "remove-personal-notes-agent",
-                    AdminAccessAction::RotateFolderKey,
-                    Some("personal-notes"),
-                    None,
-                    Some(3),
-                ),
-            }],
-        })
-        .to_string();
-        let removed = authed_request(
+        let singular = authed_request(
             router.clone(),
             &owner_keys,
             "PUT",
             "/v1/brains/personal/personal-agent",
-            Some(remove_body),
-            TEST_NOW + 3,
+            Some("{}".to_owned()),
+            TEST_NOW + 2,
         )
         .await;
-        assert_eq!(removed.status(), StatusCode::OK);
-        let removed: BrainMetadataResponse = read_json(removed).await;
-        assert!(removed.personal_agent.is_none());
-
-        let reassign_body = serde_json::json!({
-            "agentEmail": "replacement@finite.vip",
-            "rotations": [{
-                "folderId": "personal-notes",
-                "newKeyVersion": 4,
-                "grants": [
-                    folder_key_grant_value("grant-personal-notes-owner-v4", 4, owner_npub.as_str()),
-                    folder_key_grant_value("grant-personal-notes-agent-v4", 4, replacement_npub.as_str()),
-                    folder_key_grant_value("grant-personal-notes-collaborator-v4", 4, collaborator_npub.as_str()),
-                ],
-                "reencryptedRecords": [],
-                "accessChangeEvent": admin_event(
-                    &owner_keys,
-                    "personal",
-                    "reassign-personal-notes-agent",
-                    AdminAccessAction::RotateFolderKey,
-                    Some("personal-notes"),
-                    Some(replacement_npub.as_str()),
-                    Some(4),
-                ),
-            }],
-        })
-        .to_string();
-        let reassigned = authed_request(
-            router,
-            &owner_keys,
-            "PUT",
-            "/v1/brains/personal/personal-agent",
-            Some(reassign_body),
-            TEST_NOW + 4,
+        assert_error(
+            singular,
+            StatusCode::UPGRADE_REQUIRED,
+            "singular Personal Agent replace/vacate workflow has been removed",
         )
         .await;
-        assert_eq!(reassigned.status(), StatusCode::OK);
-        let reassigned: BrainMetadataResponse = read_json(reassigned).await;
-        assert_eq!(
-            reassigned
-                .personal_agent
-                .as_ref()
-                .map(|relationship| relationship.agent_npub.as_str()),
-            Some(replacement_npub.as_str())
-        );
-        identity_server.join().unwrap();
-        core_server.join().unwrap();
-    }
 
-    #[tokio::test]
-    async fn managed_agent_replacement_requires_the_brain_owners_core_account() {
-        let brain_owner = Keys::generate();
-        let different_owner = Keys::generate();
-        let replacement = Keys::generate();
-        let replacement_key = NostrPublicKey::from_protocol(replacement.public_key());
-        let replacement_npub = replacement_key.to_npub().unwrap();
-        let identifier = Nip05Identifier::parse("replacement@finite.vip").unwrap();
-        let document =
-            serde_json::json!({ "names": { "replacement": replacement_key.to_hex() } }).to_string();
-        let (identity_url, identity_server) = spawn_json_authority(vec![
-            (
-                "/api/v1/operator/brain/agent-resolution",
-                serde_json::json!({
-                    "agentNpub": replacement_npub,
-                    "managedAgentEmail": "replacement@finite.vip",
-                }),
-            ),
-            (
-                "/api/v1/operator/brain/user-resolution",
-                serde_json::json!({
-                    "workosUserId": "user_workos_different_owner",
-                    "userNpub": npub(&different_owner),
-                }),
-            ),
-        ]);
-        let (core_url, core_server) = spawn_json_authority(vec![(
-            "/api/core/v1/brain/agent-account",
-            serde_json::json!({
-                "workosUserId": "user_workos_different_owner",
-                "managedAgentEmail": "replacement@finite.vip",
-                "status": "active",
-            }),
-        )]);
-        let state = personal_test_state(&brain_owner, &Keys::generate())
-            .with_nip05_fixture(identifier.well_known_request().url, document)
-            .with_agent_bootstrap_authorities(
-                core_url,
-                "core-token",
-                identity_url,
-                "identity-token",
-            );
-
-        let error = resolve_managed_agent_email(
-            &state,
-            "replacement@finite.vip",
-            &UserId::new(npub(&brain_owner)).unwrap(),
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.status, StatusCode::FORBIDDEN);
-        assert_eq!(
-            error.message,
-            "Managed Agent does not belong to the Personal Brain owner's account"
-        );
-        identity_server.join().unwrap();
-        core_server.join().unwrap();
+        for path in [
+            "/v1/admin/brains/personal/members/paul@finite.vip",
+            "/v1/admin/brains/personal/folders/root/access/paul@finite.vip",
+        ] {
+            let response = authed_request(
+                router.clone(),
+                &owner_keys,
+                "PUT",
+                path,
+                Some("{}".to_owned()),
+                TEST_NOW + 3,
+            )
+            .await;
+            assert_error(
+                response,
+                StatusCode::UPGRADE_REQUIRED,
+                "use the account-cohort write flow",
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
@@ -5369,11 +7170,43 @@ mod tests {
                     "userNpub": npub(&owner_keys),
                 }),
             ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human",
+                        "name": "Owner",
+                        "nip05": "owner@finite.computer",
+                        "npub": npub(&owner_keys),
+                    },
+                    "agents": [{
+                        "relationship": "account_agent",
+                        "name": "Cheater",
+                        "nip05": "cheater@finite.vip",
+                        "npub": agent_npub,
+                    }],
+                }),
+            ),
         ]);
-        let (core_url, core_server) = spawn_json_authority(vec![(
-            "/api/core/v1/brain/agent-account",
-            account_resolution,
-        )]);
+        let (core_url, core_server) = spawn_json_authority(vec![
+            ("/api/core/v1/brain/agent-account", account_resolution),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": "owner@finite.computer",
+                    "rosterRevision": 1,
+                    "agents": [{
+                        "displayName": "Cheater",
+                        "managedAgentNip05": "cheater@finite.vip",
+                        "principalBindingReference": "project-cheater",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }],
+                }),
+            ),
+        ]);
         let state = test_state()
             .with_nip05_fixture(identifier.well_known_request().url, document)
             .with_agent_bootstrap_authorities(
@@ -6086,6 +7919,28 @@ mod tests {
                 }),
             ),
             (
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human",
+                        "name": "Owner",
+                        "nip05": owner_email,
+                        "npub": owner_npub,
+                    },
+                    "agents": [{
+                        "relationship": "account_agent",
+                        "name": "Cheater",
+                        "nip05": agent_email,
+                        "npub": agent_npub,
+                    }, {
+                        "relationship": "account_agent",
+                        "name": "Other",
+                        "nip05": competing_agent_email,
+                        "npub": competing_agent_npub,
+                    }],
+                }),
+            ),
+            (
                 "/api/v1/operator/brain/agent-resolution",
                 serde_json::json!({
                     "agentNpub": agent_npub,
@@ -6122,6 +7977,29 @@ mod tests {
                     "managedAgentEmail": agent_email,
                     "verifiedEmail": owner_email,
                     "status": "active",
+                }),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "rosterRevision": 2,
+                    "agents": [{
+                        "displayName": "Cheater",
+                        "managedAgentNip05": agent_email,
+                        "principalBindingReference": "project-cheater",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }, {
+                        "displayName": "Other",
+                        "managedAgentNip05": competing_agent_email,
+                        "principalBindingReference": "project-other",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }],
                 }),
             ),
             (
@@ -6213,12 +8091,10 @@ mod tests {
             TEST_NOW + 1,
         )
         .await;
-        assert_error(
-            competing,
-            StatusCode::BAD_REQUEST,
-            "personal brain already has a different personal agent",
-        )
-        .await;
+        assert_eq!(competing.status(), StatusCode::OK);
+        let competing: BootstrapPersonalBrainForAgentResponse = read_json(competing).await;
+        assert_eq!(competing.brain.brain_id, response.brain.brain_id);
+        assert_eq!(competing.brain.personal_brain_agents.len(), 2);
 
         let owner_brains =
             authed_request(router, &owner_keys, "GET", "/v1/brains", None, TEST_NOW + 1).await;
@@ -6352,8 +8228,8 @@ mod tests {
         .await;
         assert_error(
             personal,
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Personal Agent rotation exceeds Folder rotations limit: 101 supplied, maximum 100",
+            StatusCode::UPGRADE_REQUIRED,
+            "singular Personal Agent replace/vacate workflow has been removed",
         )
         .await;
 
@@ -9794,10 +11670,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn brain_invitation_routing_keeps_active_finite_vip_nip05_on_npub_path() {
+    async fn brain_invitation_routing_requires_cohort_preflight_for_finite_vip_nip05() {
         let admin_keys = Keys::generate();
         let target_keys = Keys::generate();
-        let target_npub = npub(&target_keys);
         let target_hex = NostrPublicKey::from_protocol(target_keys.public_key()).to_hex();
         let identifier = Nip05Identifier::parse("alice@finite.vip").unwrap();
         let document = serde_json::json!({
@@ -9836,11 +11711,12 @@ mod tests {
             TEST_NOW,
         )
         .await;
-        assert_eq!(create.status(), StatusCode::OK);
-        let invitation: BrainInvitationResponse = read_json(create).await;
-        assert_eq!(invitation.target_kind, "npub");
-        assert_eq!(invitation.user_id.as_deref(), Some(target_npub.as_str()));
-        assert_eq!(invitation.invited_email, None);
+        assert_error(
+            create,
+            StatusCode::UPGRADE_REQUIRED,
+            "update the client and run invitation preflight",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -10599,6 +12475,109 @@ mod tests {
         )
     }
 
+    fn test_state_with_agent_owner_and_cohort(
+        agent_npub: &str,
+        owner_npub: &str,
+    ) -> (
+        ServerState,
+        std::thread::JoinHandle<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (identity_url, identity_server) = spawn_json_authority(vec![
+            (
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_npub,
+                    "managedAgentEmail": "agent@finite.vip",
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "userNpub": owner_npub,
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/agent-resolution",
+                serde_json::json!({
+                    "agentNpub": agent_npub,
+                    "managedAgentEmail": "agent@finite.vip",
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/user-resolution",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "userNpub": owner_npub,
+                }),
+            ),
+            (
+                "/api/v1/operator/brain/participant-resolution",
+                serde_json::json!({
+                    "human": {
+                        "relationship": "human",
+                        "name": "Owner",
+                        "nip05": "owner@finite.computer",
+                        "npub": owner_npub,
+                    },
+                    "agents": [{
+                        "relationship": "account_agent",
+                        "name": "Agent",
+                        "nip05": "agent@finite.vip",
+                        "npub": agent_npub,
+                    }],
+                }),
+            ),
+        ]);
+        let (core_url, core_server) = spawn_json_authority(vec![
+            (
+                "/api/core/v1/brain/agent-account",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "managedAgentEmail": "agent@finite.vip",
+                    "verifiedEmail": "owner@finite.computer",
+                    "status": "active",
+                }),
+            ),
+            (
+                "/api/core/v1/brain/agent-account",
+                serde_json::json!({
+                    "workosUserId": "user_workos_owner",
+                    "managedAgentEmail": "agent@finite.vip",
+                    "verifiedEmail": "owner@finite.computer",
+                    "status": "active",
+                }),
+            ),
+            (
+                "/api/core/v1/brain/account-agent-roster",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": "owner@finite.computer",
+                    "rosterRevision": 1,
+                    "agents": [{
+                        "displayName": "Agent",
+                        "managedAgentNip05": "agent@finite.vip",
+                        "principalBindingReference": "project-agent",
+                        "lifecycleState": "active",
+                        "eligible": true,
+                        "exclusionReason": null,
+                    }],
+                }),
+            ),
+        ]);
+        (
+            test_state().with_agent_bootstrap_authorities(
+                core_url,
+                "core-token",
+                identity_url,
+                "identity-token",
+            ),
+            identity_server,
+            core_server,
+        )
+    }
+
     fn spawn_json_authority(
         responses: Vec<(&'static str, serde_json::Value)>,
     ) -> (String, std::thread::JoinHandle<()>) {
@@ -11266,6 +13245,43 @@ mod tests {
             keys,
             payload.canonical_json(),
             admin_access_change_tags(&expected),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authenticated_human_intent_event(
+        owner_keys: &Keys,
+        brain_id: &str,
+        acting_agent_npub: &str,
+        target_agent_npub: &str,
+        operation: &str,
+        folder_id: Option<&str>,
+        nonce: &str,
+        expires_at_unix: u64,
+    ) -> Event {
+        sign_app_event(
+            owner_keys,
+            serde_json::json!({
+                "version": "finite-brain-authenticated-human-intent-v1",
+                "brainId": brain_id,
+                "humanNpub": npub(owner_keys),
+                "actingAgentNpub": acting_agent_npub,
+                "targetAgentNpub": target_agent_npub,
+                "operation": operation,
+                "scopeKind": if folder_id.is_some() { "folder" } else { "brain" },
+                "folderId": folder_id,
+                "nonce": nonce,
+                "expiresAt": format_unix_timestamp(expires_at_unix).unwrap(),
+            })
+            .to_string(),
+            vec![
+                vec![
+                    "d".to_owned(),
+                    format!("finite-brain-authenticated-human-intent:{brain_id}:{nonce}"),
+                ],
+                vec!["brain".to_owned(), brain_id.to_owned()],
+                vec!["operation".to_owned(), operation.to_owned()],
+            ],
         )
     }
 

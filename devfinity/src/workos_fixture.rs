@@ -29,7 +29,7 @@ use std::{
 pub const CLIENT_ID: &str = "client_devfinity";
 pub const OPERATOR_ORG_ID: &str = "org_devfinity_operator";
 pub const CUSTOMER_SUBJECT: &str = "user_devfinity";
-pub const CUSTOMER_EMAIL: &str = "devfinity@finite.computer";
+pub const CUSTOMER_EMAIL: &str = "devfinity@finite.vip";
 pub const OPERATOR_SUBJECT: &str = "user_devfinity_operator";
 pub const OPERATOR_EMAIL: &str = "operator@finite.computer";
 const KEY_ID: &str = "devfinity-local-rsa-1";

@@ -1,5 +1,12 @@
 # Agent-Created Organization Brain Requester Bootstrap
 
+> Partially superseded 2026-08-07 by
+> [Account-Agent Access Cohorts And Multi-Agent Personal Brains](account-agent-access-cohorts-spec.md)
+> and ADR-0045. Bootstrap still derives the human requester from authenticated
+> context and remains atomic, but the resulting Brain now has one human admin
+> plus a snapshot of that human's eligible account agents as non-admin Members
+> with human-anchored authority. The acting agent is not an independent admin.
+
 ## Problem Statement
 
 When an authenticated human asks their agent to create an Organization Brain,

@@ -179,12 +179,14 @@ test("Brain session proofs are short-lived and bound to one exact provider reque
   const proof = issueBrainSessionProof(
     "hosted-secret",
     "user_paul",
+    "Paul@Finite.VIP",
     requestHash,
     1_000,
     "00000000-0000-4000-8000-000000000002",
   );
   assert.deepEqual(verifyBrainSessionProof(proof, "hosted-secret", requestHash, 1_001), {
     workosUserId: "user_paul",
+    verifiedEmail: "paul@finite.vip",
     emailVerified: true,
   });
   assert.equal(

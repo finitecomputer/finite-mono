@@ -154,7 +154,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|reconcile-personal-agents|reconcile-cohort|convert-invitation|apply-agent-departure|restrict-agent|restore-agent|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke"
     )?;
     Ok(())
 }
@@ -894,20 +894,27 @@ fn daemon_supervise<W: Write>(
         reason: "startup_catch_up".to_owned(),
         transport_epoch: 0,
     }));
+    let _ = sender.send(Ok(BrainUpdateNotification {
+        brain_id: String::new(),
+        latest_sequence: 0,
+        reason: "personal_agent_reconcile".to_owned(),
+        transport_epoch: 0,
+    }));
 
     let stream_env = env.clone();
     let notifications_unsupported = Arc::new(AtomicBool::new(false));
     let stream_notifications_unsupported = Arc::clone(&notifications_unsupported);
+    let stream_sender = sender.clone();
     std::thread::spawn(move || {
         let mut retry_delay = Duration::from_secs(1);
         let mut unsupported_announced = false;
         loop {
             let mut stream_connected = false;
-            match read_brain_update_stream(&stream_env, &sender, &mut stream_connected) {
+            match read_brain_update_stream(&stream_env, &stream_sender, &mut stream_connected) {
                 Err(CliError::Unsupported(_)) => {
                     stream_notifications_unsupported.store(true, Ordering::SeqCst);
                     if !unsupported_announced {
-                        let _ = sender.send(Ok(BrainUpdateNotification {
+                        let _ = stream_sender.send(Ok(BrainUpdateNotification {
                             brain_id: String::new(),
                             latest_sequence: 0,
                             reason: "notifications_unsupported".to_owned(),
@@ -922,7 +929,7 @@ fn daemon_supervise<W: Write>(
                 }
                 Err(error) => {
                     unsupported_announced = false;
-                    let _ = sender.send(Err(error.to_string()));
+                    let _ = stream_sender.send(Err(error.to_string()));
                     if stream_connected {
                         retry_delay = Duration::from_secs(1);
                     }
@@ -935,6 +942,29 @@ fn daemon_supervise<W: Write>(
                     retry_delay = Duration::from_secs(1);
                     std::thread::sleep(retry_delay);
                 }
+            }
+        }
+    });
+
+    // Account-agent roster convergence is deliberately independent of Chat
+    // and normal sync availability. Existing ready Personal Brain readers
+    // periodically prepare grants for newly eligible sibling agents; any
+    // Brain-specific blocker is recorded by that Brain worker and never stops
+    // the Runtime supervisor.
+    let admission_sender = sender.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(300));
+            if admission_sender
+                .send(Ok(BrainUpdateNotification {
+                    brain_id: String::new(),
+                    latest_sequence: 0,
+                    reason: "personal_agent_reconcile".to_owned(),
+                    transport_epoch: 0,
+                }))
+                .is_err()
+            {
+                break;
             }
         }
     });
@@ -1295,6 +1325,19 @@ fn run_brain_sync_worker(
     tree_env.cwd = path;
     run_coalesced_notification_queue_until_cancelled(receiver, &cancelled, |notification| {
         let result = retry_transient_notification_work(&cancelled, || {
+            if notification.reason == "personal_agent_reconcile"
+                && let Err(error) = background_reconcile_personal_brain_agents(&tree_env, &brain_id)
+            {
+                let message = error.to_string();
+                mutate_agent_state(&tree_env, |state, now| {
+                    state.add_activity(
+                        now,
+                        "personal_agent.admission_blocked",
+                        format!("Personal Brain Agent access is still setting up: {message}"),
+                    );
+                    Ok(())
+                })?;
+            }
             let paused_for_access =
                 read_agent_state(&tree_env.cwd)?.sync.status == "paused-access-revoked";
             if paused_for_access && notification.reason == "local_updated" {
@@ -1321,6 +1364,24 @@ fn run_brain_sync_worker(
         persist_brain_worker_outcome(&tree_env, &notification, &transport_epoch, &result);
         let _ = result_sender.send((brain_id.clone(), result));
     });
+}
+
+fn background_reconcile_personal_brain_agents(
+    env: &CliEnvironment,
+    brain_id: &str,
+) -> Result<(), CliError> {
+    let metadata = signed_json_request(
+        env,
+        &[],
+        "GET",
+        &format!("/v1/brains/{brain_id}/metadata"),
+        None,
+    )?;
+    if metadata["kind"] != "personal" {
+        return Ok(());
+    }
+    let mut sink = std::io::sink();
+    reconcile_personal_brain_agents(&mut sink, false, env, &[], brain_id)
 }
 
 fn retry_transient_notification_work<T>(
@@ -2361,9 +2422,28 @@ fn access_revoke<W: Write>(
         .or_else(|| current_folder_id(env).ok())
         .ok_or(CliError::MissingArgument("--folder"))?;
     let target_input = required_option_or_positional(args, "--target", 1, "target")?;
+    if invite_finite_vip_email(&target_input) {
+        return revoke_account_cohort_folder_access(
+            output,
+            json,
+            env,
+            args,
+            &brain_id,
+            &folder_id,
+            &target_input,
+        );
+    }
     let target = resolve_identity_npub(env, args, &target_input)?;
     let metadata = fetch_brain_metadata(env, args, &brain_id)?;
-    let body = prepare_folder_access_removal(env, args, &metadata, &brain_id, &folder_id, &target)?;
+    let actor_npub = load_signer(env)?.npub;
+    let mut body = prepare_targeted_folder_access_removal(
+        env, args, &metadata, &brain_id, &folder_id, &target,
+    )?;
+    if is_personal_peer_agent_change(&metadata, &actor_npub, &target) {
+        body["authenticatedHumanIntent"] =
+            requester_context::required_authenticated_human_intent(env)
+                .map_err(CliError::InvalidInput)?;
+    }
     let new_key_version = body["newKeyVersion"].as_u64().ok_or_else(|| {
         CliError::InvalidInput("prepared rotation omitted key version".to_owned())
     })?;
@@ -2403,6 +2483,99 @@ fn access_revoke<W: Write>(
         )?;
         Ok(())
     }
+}
+
+fn revoke_account_cohort_folder_access<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    folder_id: &str,
+    raw_target: &str,
+) -> Result<(), CliError> {
+    let target_email = canonical_invite_email(raw_target)?;
+    let preflight_route =
+        format!("/v1/brains/{brain_id}/folders/{folder_id}/account-access/removal-preflight");
+    let preview = signed_json_request(
+        env,
+        args,
+        "POST",
+        &preflight_route,
+        Some(serde_json::json!({ "targetEmail": target_email })),
+    )?;
+    let removed = preview["removedParticipantNpubs"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("removal preflight is invalid".to_owned()))?
+        .iter()
+        .map(|npub| {
+            npub.as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| CliError::InvalidInput("removal participant is invalid".to_owned()))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if removed.is_empty() {
+        return Err(CliError::InvalidInput(
+            "the mailbox has no effective cohort-derived access to revoke".to_owned(),
+        ));
+    }
+    let metadata = fetch_brain_metadata(env, args, brain_id)?;
+    let mut body =
+        prepare_folder_access_removals(env, args, &metadata, brain_id, folder_id, &removed)?;
+    let expected_recipients = preview["requiredRecipientNpubs"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("removal recipients are invalid".to_owned()))?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let prepared_recipients = body["grants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|grant| grant["recipientNpub"].as_str())
+        .collect::<BTreeSet<_>>();
+    if prepared_recipients != expected_recipients {
+        return Err(CliError::InvalidInput(
+            "Folder access changed while preparing the mailbox rotation; retry".to_owned(),
+        ));
+    }
+    let human_npub = preview["participants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|participant| participant["relationship"] == "human")
+        .and_then(|participant| participant["npub"].as_str())
+        .ok_or_else(|| CliError::InvalidInput("removal human is missing".to_owned()))?;
+    let new_key_version = preview["newKeyVersion"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| CliError::InvalidInput("removal key version is invalid".to_owned()))?;
+    body["targetEmail"] = serde_json::Value::String(target_email.clone());
+    body["planId"] = preview["planId"].clone();
+    body["accessChangeEvent"] = admin_access_change_event(
+        env,
+        brain_id,
+        AdminAccessAction::RemoveFolderAccess,
+        Some(folder_id),
+        Some(human_npub),
+        Some(new_key_version),
+    )?;
+    let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/account-access");
+    let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
+    if json {
+        return write_json(output, &response);
+    }
+    let removed_count = response["removedParticipantNpubs"]
+        .as_array()
+        .map_or(0, Vec::len);
+    let retained_count = response["independentlyRetainedNpubs"]
+        .as_array()
+        .map_or(0, Vec::len);
+    writeln!(
+        output,
+        "Revoked {target_email} cohort access to {folder_id} for {removed_count} identities; {retained_count} independently authorized identities kept access."
+    )?;
+    Ok(())
 }
 
 fn fetch_brain_metadata_for_command(
@@ -2510,6 +2683,39 @@ fn brain<W: Write>(
             )?;
             write_command_response(output, json, &response)
         }
+        "reconcile-personal-agents" => {
+            let brain_id = command_brain_id(args, env)?;
+            reconcile_personal_brain_agents(output, json, env, args, &brain_id)
+        }
+        "reconcile-cohort" => {
+            let brain_id = command_brain_id(args, env)?;
+            reconcile_account_cohort(output, json, env, args, &brain_id)
+        }
+        "convert-invitation" => {
+            let brain_id = command_brain_id(args, env)?;
+            convert_pending_invitation(output, json, env, args, &brain_id)
+        }
+        "apply-agent-departure" => {
+            let brain_id = command_brain_id(args, env)?;
+            apply_permanent_agent_departure(output, json, env, args, &brain_id)
+        }
+        "restrict-agent" | "restore-agent" => {
+            let brain_id = command_brain_id(args, env)?;
+            let target = required_option_or_positional(args, "--target", 1, "target-agent")?;
+            change_personal_agent_brain_access(
+                output,
+                json,
+                env,
+                args,
+                &brain_id,
+                &target,
+                if args[0] == "restrict-agent" {
+                    "restrict"
+                } else {
+                    "restore"
+                },
+            )
+        }
         "create" => {
             let values = positional_values(args);
             if args.iter().any(|argument| {
@@ -2609,6 +2815,623 @@ fn brain<W: Write>(
         }
         other => Err(CliError::InvalidCommand(format!("brain {other}"))),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn change_personal_agent_brain_access<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    raw_target: &str,
+    operation: &str,
+) -> Result<(), CliError> {
+    let target = resolve_identity_npub(env, args, raw_target)?;
+    let route = format!("/v1/brains/{brain_id}/personal-agent-access/{target}");
+    let preview = signed_json_request(
+        env,
+        args,
+        "POST",
+        &format!("{route}/preflight"),
+        Some(serde_json::json!({ "operation": operation })),
+    )?;
+    let folders = preview["folders"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("peer Agent access plan is invalid".to_owned()))?;
+    let authenticated_human_intent = requester_context::required_authenticated_human_intent(env)
+        .map_err(CliError::InvalidInput)?;
+    let auth = load_signer(env)?;
+    let metadata = fetch_brain_metadata(env, args, brain_id)?;
+    let access_change_event = admin_access_change_event(
+        env,
+        brain_id,
+        if operation == "restrict" {
+            AdminAccessAction::RestrictPersonalAgent
+        } else {
+            AdminAccessAction::RestorePersonalAgent
+        },
+        None,
+        Some(&target),
+        None,
+    )?;
+    let response = if operation == "restrict" {
+        let post_restriction = metadata_after_principal_departure(&metadata, &target);
+        let mut rotations = Vec::with_capacity(folders.len());
+        for folder in folders {
+            let folder_id = required_json_string(folder, "folderId")?;
+            let expected_version = folder["newKeyVersion"]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    CliError::InvalidInput("peer Agent rotation version is invalid".to_owned())
+                })?;
+            let prepared = prepare_folder_access_removal(
+                env,
+                args,
+                &post_restriction,
+                brain_id,
+                &folder_id,
+                &target,
+            )?;
+            if prepared["newKeyVersion"] != expected_version {
+                return Err(CliError::InvalidInput(
+                    "peer Agent restriction changed while preparing; retry".to_owned(),
+                ));
+            }
+            let expected_recipients = folder["requiredRecipientNpubs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<BTreeSet<_>>();
+            let provided_recipients = prepared["grants"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|grant| grant["recipientNpub"].as_str())
+                .collect::<BTreeSet<_>>();
+            if expected_recipients != provided_recipients {
+                return Err(CliError::InvalidInput(
+                    "peer Agent restriction recipients changed while preparing; retry".to_owned(),
+                ));
+            }
+            rotations.push(serde_json::json!({
+                "folderId": folder_id,
+                "newKeyVersion": expected_version,
+                "grants": prepared["grants"],
+                "reencryptedRecords": prepared["reencryptedRecords"],
+            }));
+        }
+        signed_json_request(
+            env,
+            args,
+            "DELETE",
+            &route,
+            Some(serde_json::json!({
+                "planId": preview["planId"],
+                "rotations": rotations,
+                "accessChangeEvent": access_change_event,
+                "authenticatedHumanIntent": authenticated_human_intent,
+            })),
+        )?
+    } else {
+        let session_keys = (!folders.is_empty())
+            .then(|| open_brain_session_folder_keys(env, args, brain_id))
+            .transpose()?;
+        let mut participant_grants = Vec::with_capacity(folders.len());
+        for folder in folders {
+            let folder_id = required_json_string(folder, "folderId")?;
+            let key_version = folder["currentKeyVersion"]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    CliError::InvalidInput("peer Agent grant version is invalid".to_owned())
+                })?;
+            let folder_key = opened_folder_key(
+                session_keys.as_ref().ok_or_else(|| {
+                    CliError::InvalidInput("Personal Brain Folder keys are unavailable".to_owned())
+                })?,
+                brain_id,
+                &folder_id,
+                key_version,
+            )?;
+            participant_grants.push(serde_json::json!({
+                "folderId": folder_id,
+                "grant": folder_key_grant_request(
+                    &auth,
+                    brain_id,
+                    &folder_id,
+                    key_version,
+                    &target,
+                    &folder_key,
+                    env,
+                )?,
+            }));
+        }
+        signed_json_request(
+            env,
+            args,
+            "PUT",
+            &route,
+            Some(serde_json::json!({
+                "planId": preview["planId"],
+                "participantGrants": participant_grants,
+                "accessChangeEvent": access_change_event,
+                "authenticatedHumanIntent": authenticated_human_intent,
+            })),
+        )?
+    };
+    if json {
+        write_json(output, &response)
+    } else {
+        let affected = response["affectedFolderIds"].as_array().map_or(0, Vec::len);
+        writeln!(
+            output,
+            "{} {} across {} Personal Brain Folder(s).",
+            if operation == "restrict" {
+                "Restricted"
+            } else {
+                "Restored"
+            },
+            target,
+            affected,
+        )?;
+        Ok(())
+    }
+}
+
+fn reconcile_account_cohort<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+) -> Result<(), CliError> {
+    let human_email =
+        option_value(args, "--human-email").ok_or(CliError::MissingArgument("--human-email"))?;
+    let folder_id = option_value(args, "--folder");
+    let route = format!("/v1/brains/{brain_id}/cohort-reconciliation");
+    let preview = signed_json_request(
+        env,
+        args,
+        "POST",
+        &format!("{route}/preflight"),
+        Some(serde_json::json!({
+            "humanEmail": human_email,
+            "folderId": folder_id,
+        })),
+    )?;
+    if !args.iter().any(|argument| argument == "--commit") {
+        if json {
+            return write_json(output, &preview);
+        }
+        let scope = if let Some(folder) = preview["folderId"].as_str() {
+            format!("Folder {folder}")
+        } else {
+            "Brain".to_owned()
+        };
+        let participants = preview["participants"].as_array().map_or(0, Vec::len);
+        let missing = preview["folders"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|folder| folder["missingGrantRecipientNpubs"].as_array())
+            .map(Vec::len)
+            .sum::<usize>();
+        if let Some(blocker) = preview["blocker"].as_str() {
+            writeln!(
+                output,
+                "Reconciliation dry run blocked for {scope}: {blocker} ({participants} participants, {missing} missing grants)."
+            )?;
+        } else {
+            writeln!(
+                output,
+                "Reconciliation dry run ready for {scope}: {participants} participants, {missing} missing grants. No state changed."
+            )?;
+        }
+        return Ok(());
+    }
+    if let Some(blocker) = preview["blocker"].as_str() {
+        return Err(CliError::InvalidInput(format!(
+            "reconciliation is blocked: {blocker}"
+        )));
+    }
+    let backup_reference = option_value(args, "--backup-reference")
+        .ok_or(CliError::MissingArgument("--backup-reference"))?;
+    let folders = preview["folders"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("reconciliation plan is invalid".to_owned()))?;
+    let session_keys = (!folders.is_empty())
+        .then(|| open_brain_session_folder_keys(env, args, brain_id))
+        .transpose()?;
+    let auth = load_signer(env)?;
+    let mut participant_grants = Vec::new();
+    for folder in folders {
+        let planned_folder_id = required_json_string(folder, "folderId")?;
+        let key_version = folder["keyVersion"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                CliError::InvalidInput("reconciliation key version is invalid".to_owned())
+            })?;
+        let recipients = folder["missingGrantRecipientNpubs"]
+            .as_array()
+            .ok_or_else(|| {
+                CliError::InvalidInput("reconciliation missing-grant set is invalid".to_owned())
+            })?;
+        if recipients.is_empty() {
+            continue;
+        }
+        let folder_key = opened_folder_key(
+            session_keys.as_ref().ok_or_else(|| {
+                CliError::InvalidInput("reconciliation Folder keys are unavailable".to_owned())
+            })?,
+            brain_id,
+            &planned_folder_id,
+            key_version,
+        )?;
+        for recipient in recipients {
+            let recipient = recipient.as_str().ok_or_else(|| {
+                CliError::InvalidInput("reconciliation recipient is invalid".to_owned())
+            })?;
+            participant_grants.push(serde_json::json!({
+                "folderId": planned_folder_id,
+                "grant": folder_key_grant_request(
+                    &auth,
+                    brain_id,
+                    &planned_folder_id,
+                    key_version,
+                    recipient,
+                    &folder_key,
+                    env,
+                )?,
+            }));
+        }
+    }
+    let human_npub = preview["humanNpub"].as_str().ok_or_else(|| {
+        CliError::InvalidInput("reconciliation human identity is invalid".to_owned())
+    })?;
+    let access_change_event = admin_access_change_event(
+        env,
+        brain_id,
+        AdminAccessAction::ReconcileAccountCohort,
+        folder_id.as_deref(),
+        Some(human_npub),
+        None,
+    )?;
+    let response = signed_json_request(
+        env,
+        args,
+        "PUT",
+        &route,
+        Some(serde_json::json!({
+            "humanEmail": human_email,
+            "folderId": folder_id,
+            "planId": preview["operationId"],
+            "participantGrants": participant_grants,
+            "accessChangeEvent": access_change_event,
+            "backupReference": backup_reference,
+        })),
+    )?;
+    if json {
+        write_json(output, &response)
+    } else {
+        writeln!(
+            output,
+            "Reconciliation {} for {}. Rollback boundary: {}.",
+            response["outcome"].as_str().unwrap_or("completed"),
+            human_email,
+            response["rollbackBoundary"]
+                .as_str()
+                .unwrap_or("declared backup"),
+        )?;
+        Ok(())
+    }
+}
+
+fn convert_pending_invitation<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+) -> Result<(), CliError> {
+    let invitation_id = option_value(args, "--invitation")
+        .or_else(|| positional_values(args).get(1).cloned())
+        .ok_or(CliError::MissingArgument("--invitation"))?;
+    let backup_reference = option_value(args, "--backup-reference")
+        .ok_or(CliError::MissingArgument("--backup-reference"))?;
+    let route = format!("/v1/brains/{brain_id}/invitations/{invitation_id}/cohort-conversion");
+    let preview = signed_json_request(env, args, "POST", &format!("{route}/preflight"), None)?;
+    if !preview["capacity"]["fits"].as_bool().unwrap_or(false) {
+        return Err(CliError::InvalidInput(
+            "the pending invitation cannot be converted because the full account cohort exceeds Brain capacity"
+                .to_owned(),
+        ));
+    }
+    let excluded = preview["excluded"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("conversion exclusions are invalid".to_owned()))?;
+    if !excluded.is_empty() && !args.iter().any(|argument| argument == "--approve-reduced") {
+        let names = excluded
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CliError::InvalidInput(format!(
+            "{names} cannot receive this invitation; retry with --approve-reduced to convert it for the human and remaining agents"
+        )));
+    }
+    let participants = preview["participants"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("conversion participants are invalid".to_owned()))?;
+    let key_versions = preview["keyVersions"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("conversion Folder keys are invalid".to_owned()))?;
+    let session_keys = (!key_versions.is_empty())
+        .then(|| open_brain_session_folder_keys(env, args, brain_id))
+        .transpose()?;
+    let auth = load_signer(env)?;
+    let mut participant_grants = Vec::new();
+    for key in key_versions {
+        let folder_id = required_json_string(key, "folderId")?;
+        let key_version = key["keyVersion"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                CliError::InvalidInput("conversion Folder key version is invalid".to_owned())
+            })?;
+        let folder_key = opened_folder_key(
+            session_keys.as_ref().ok_or_else(|| {
+                CliError::InvalidInput(
+                    "conversion is blocked because a current Folder key is unavailable".to_owned(),
+                )
+            })?,
+            brain_id,
+            &folder_id,
+            key_version,
+        )?;
+        for participant in participants {
+            let recipient = participant["npub"].as_str().ok_or_else(|| {
+                CliError::InvalidInput("conversion participant identity is invalid".to_owned())
+            })?;
+            let mut grant = folder_key_grant_request(
+                &auth,
+                brain_id,
+                &folder_id,
+                key_version,
+                recipient,
+                &folder_key,
+                env,
+            )?;
+            grant["id"] = serde_json::Value::String(deterministic_id(
+                "grant",
+                &[
+                    brain_id,
+                    &folder_id,
+                    &key_version.to_string(),
+                    recipient,
+                    preview["planId"].as_str().ok_or_else(|| {
+                        CliError::InvalidInput("conversion plan id is invalid".to_owned())
+                    })?,
+                ],
+            ));
+            participant_grants.push(serde_json::json!({
+                "folderId": folder_id,
+                "grant": grant,
+            }));
+        }
+    }
+    let response = signed_json_request(
+        env,
+        args,
+        "PUT",
+        &route,
+        Some(serde_json::json!({
+            "planId": preview["planId"],
+            "participantGrants": participant_grants,
+            "approvedExclusions": excluded
+                .iter()
+                .filter_map(|item| item["nip05"].as_str())
+                .collect::<Vec<_>>(),
+            "backupReference": backup_reference,
+        })),
+    )?;
+    if json {
+        write_json(output, &response)
+    } else {
+        let agents = response["participants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|participant| participant["relationship"] == "account_agent")
+            .count();
+        writeln!(
+            output,
+            "Converted invitation {invitation_id} in place for the human and {agents} agent(s). No email was sent."
+        )?;
+        Ok(())
+    }
+}
+
+fn reconcile_personal_brain_agents<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+) -> Result<(), CliError> {
+    let route = format!("/v1/brains/{brain_id}/personal-agent-admissions");
+    let preview = signed_json_request(env, args, "POST", &route, None)?;
+    let agents = preview["agents"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("Personal Agent plan is invalid".to_owned()))?;
+    if agents.is_empty() {
+        if json {
+            return write_json(output, &preview);
+        }
+        writeln!(output, "Personal Brain agents are ready.")?;
+        return Ok(());
+    }
+    let key_versions = preview["keyVersions"].as_array().ok_or_else(|| {
+        CliError::InvalidInput("Personal Agent Folder plan is invalid".to_owned())
+    })?;
+    let session_keys = (!key_versions.is_empty())
+        .then(|| open_brain_session_folder_keys(env, args, brain_id))
+        .transpose()?;
+    let auth = load_signer(env)?;
+    let mut participant_grants = Vec::new();
+    for key in key_versions {
+        let folder_id = key["folderId"]
+            .as_str()
+            .ok_or_else(|| CliError::InvalidInput("admission Folder is invalid".to_owned()))?;
+        let key_version = key["keyVersion"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| CliError::InvalidInput("admission key version is invalid".to_owned()))?;
+        let folder_key = opened_folder_key(
+            session_keys.as_ref().ok_or_else(|| {
+                CliError::InvalidInput("Personal Agent Folder keys are unavailable".to_owned())
+            })?,
+            brain_id,
+            folder_id,
+            key_version,
+        )?;
+        for agent in agents {
+            let recipient = agent["npub"].as_str().ok_or_else(|| {
+                CliError::InvalidInput("Personal Agent identity is invalid".to_owned())
+            })?;
+            participant_grants.push(serde_json::json!({
+                "folderId": folder_id,
+                "grant": folder_key_grant_request(
+                    &auth,
+                    brain_id,
+                    folder_id,
+                    key_version,
+                    recipient,
+                    &folder_key,
+                    env,
+                )?,
+            }));
+        }
+    }
+    let response = signed_json_request(
+        env,
+        args,
+        "PUT",
+        &route,
+        Some(serde_json::json!({
+            "planId": preview["planId"],
+            "participantGrants": participant_grants,
+        })),
+    )?;
+    if json {
+        return write_json(output, &response);
+    }
+    let names = response["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|agent| agent["name"].as_str())
+        .collect::<Vec<_>>();
+    writeln!(
+        output,
+        "Connected {} Personal Brain agent(s): {}.",
+        names.len(),
+        names.join(", ")
+    )?;
+    Ok(())
+}
+
+fn apply_permanent_agent_departure<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+) -> Result<(), CliError> {
+    let fact_id = option_value(args, "--fact")
+        .or_else(|| positional_values(args).get(1).cloned())
+        .ok_or(CliError::MissingArgument("--fact"))?;
+    let human_email =
+        option_value(args, "--human-email").ok_or(CliError::MissingArgument("--human-email"))?;
+    let base_route = format!("/v1/brains/{brain_id}/permanent-agent-departures/{fact_id}");
+    let preview = signed_json_request(
+        env,
+        args,
+        "POST",
+        &format!("{base_route}/preflight"),
+        Some(serde_json::json!({ "humanEmail": human_email })),
+    )?;
+    let target = preview["agentNpub"]
+        .as_str()
+        .ok_or_else(|| CliError::InvalidInput("departure plan omitted Agent npub".to_owned()))?
+        .to_owned();
+    let metadata = fetch_brain_metadata(env, args, brain_id)?;
+    let post = metadata_after_principal_departure(&metadata, &target);
+    let folders = preview["folders"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("departure plan omitted Folders".to_owned()))?;
+    let mut rotations = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let folder_id = required_json_string(folder, "folderId")?;
+        let prepared =
+            prepare_folder_access_removal(env, args, &post, brain_id, &folder_id, &target)?;
+        let expected = folder["requiredRecipientNpubs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<BTreeSet<_>>();
+        let provided = prepared["grants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|grant| grant["recipientNpub"].as_str())
+            .collect::<BTreeSet<_>>();
+        if expected != provided || prepared["newKeyVersion"] != folder["newKeyVersion"] {
+            return Err(CliError::InvalidInput(
+                "Brain access changed while preparing departure rotations; retry".to_owned(),
+            ));
+        }
+        rotations.push(serde_json::json!({
+            "folderId": folder_id,
+            "newKeyVersion": prepared["newKeyVersion"],
+            "grants": prepared["grants"],
+            "reencryptedRecords": prepared["reencryptedRecords"],
+        }));
+    }
+    let event = admin_access_change_event(
+        env,
+        brain_id,
+        AdminAccessAction::RemoveMember,
+        None,
+        Some(&target),
+        None,
+    )?;
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &base_route,
+        Some(serde_json::json!({
+            "humanEmail": human_email,
+            "planId": preview["planId"],
+            "rotations": rotations,
+            "accessChangeEvent": event,
+        })),
+    )?;
+    if json {
+        return write_json(output, &response);
+    }
+    writeln!(
+        output,
+        "Applied permanent departure for {} across {} Folder(s).",
+        preview["agentNip05"].as_str().unwrap_or(&target),
+        response["rotatedFolderIds"].as_array().map_or(0, Vec::len)
+    )?;
+    Ok(())
 }
 
 fn folder<W: Write>(
@@ -3387,6 +4210,17 @@ fn admin_operation<W: Write>(
             let folder_id =
                 option_value(args, "--folder").ok_or(CliError::MissingArgument("--folder"))?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
+            if invite_finite_vip_email(&raw_target) {
+                return grant_account_cohort_folder_access(
+                    output,
+                    json,
+                    env,
+                    args,
+                    &brain_id,
+                    &folder_id,
+                    &raw_target,
+                );
+            }
             let target = resolve_identity_npub(env, args, &raw_target)?;
             let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let key_version = metadata
@@ -3416,10 +4250,17 @@ fn admin_operation<W: Write>(
                 env,
             )?;
             let route = format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/access/{target}");
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "grant": grant,
                 "accessChangeEvent": event
             });
+            if is_personal_peer_agent_change(&metadata, &auth.npub, &target)
+                && has_personal_agent_folder_exclusion(&metadata, &target, &folder_id)
+            {
+                body["authenticatedHumanIntent"] =
+                    requester_context::required_authenticated_human_intent(env)
+                        .map_err(CliError::InvalidInput)?;
+            }
             let response = signed_json_request(env, args, "PUT", &route, Some(body))?;
             if !json && response["outcome"] == "alreadyHasAccess" {
                 writeln!(output, "This person already has access.")?;
@@ -3434,10 +4275,192 @@ fn admin_operation<W: Write>(
     }
 }
 
+fn grant_account_cohort_folder_access<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    folder_id: &str,
+    raw_target: &str,
+) -> Result<(), CliError> {
+    let target_email = canonical_invite_email(raw_target)?;
+    let expires_at = invitation_expires_at(env, args)?;
+    let preview = signed_json_request(
+        env,
+        args,
+        "POST",
+        &format!("/v1/brains/{brain_id}/invitations/preflight"),
+        Some(serde_json::json!({
+            "targetEmail": target_email,
+            "folderOnly": true,
+            "initialFolderAccess": [folder_id],
+            "expiresAt": expires_at,
+        })),
+    )?;
+    let excluded = preview["excluded"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("preflight exclusions are invalid".to_owned()))?;
+    if !excluded.is_empty() && !args.iter().any(|arg| arg == "--approve-reduced") {
+        let names = excluded
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CliError::InvalidInput(format!(
+            "{names} cannot receive this access yet; retry with --approve-reduced to grant the human and remaining agents"
+        )));
+    }
+    let key_version = preview["keyVersions"][0]["keyVersion"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| CliError::InvalidInput("preflight key version is invalid".to_owned()))?;
+    let session_keys = open_brain_session_folder_keys(env, args, brain_id)?;
+    let folder_key = opened_folder_key(&session_keys, brain_id, folder_id, key_version)?;
+    let auth = load_signer(env)?;
+    let participants = preview["participants"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("preflight participants are invalid".to_owned()))?;
+    let participant_grants = participants
+        .iter()
+        .map(|participant| {
+            let recipient = participant["npub"].as_str().ok_or_else(|| {
+                CliError::InvalidInput("preflight participant identity is invalid".to_owned())
+            })?;
+            Ok(serde_json::json!({
+                "folderId": folder_id,
+                "grant": folder_key_grant_request(
+                    &auth,
+                    brain_id,
+                    folder_id,
+                    key_version,
+                    recipient,
+                    &folder_key,
+                    env,
+                )?,
+            }))
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    let human_npub = participants
+        .iter()
+        .find(|participant| participant["relationship"] == "human")
+        .and_then(|participant| participant["npub"].as_str())
+        .ok_or_else(|| CliError::InvalidInput("preflight human is missing".to_owned()))?;
+    let access_change_event = admin_access_change_event(
+        env,
+        brain_id,
+        AdminAccessAction::GrantFolderAccess,
+        Some(folder_id),
+        Some(human_npub),
+        Some(key_version),
+    )?;
+    let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/account-access");
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &route,
+        Some(serde_json::json!({
+            "targetEmail": target_email,
+            "expiresAt": expires_at,
+            "planId": preview["planId"],
+            "approvedExclusions": excluded
+                .iter()
+                .filter_map(|item| item["nip05"].as_str())
+                .collect::<Vec<_>>(),
+            "participantGrants": participant_grants,
+            "accessChangeEvent": access_change_event,
+        })),
+    )?;
+    if json {
+        return write_json(output, &response);
+    }
+    let agent_names = response["participants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|participant| participant["relationship"] == "account_agent")
+        .filter_map(|participant| participant["name"].as_str())
+        .collect::<Vec<_>>();
+    if agent_names.is_empty() {
+        writeln!(output, "Granted {target_email} access to {folder_id}.")?;
+    } else {
+        writeln!(
+            output,
+            "Granted {target_email} and {} of their agents access to {folder_id}: {}.",
+            agent_names.len(),
+            agent_names.join(", ")
+        )?;
+    }
+    Ok(())
+}
+
 fn metadata_after_member_removal(metadata: &BrainMetadataView, target: &str) -> BrainMetadataView {
     let mut updated = metadata.clone();
     updated.members.retain(|member| member != target);
     updated
+}
+
+fn metadata_after_principal_departure(
+    metadata: &BrainMetadataView,
+    target: &str,
+) -> BrainMetadataView {
+    let mut updated = metadata.clone();
+    updated.members.retain(|member| member != target);
+    updated.admins.retain(|admin| admin != target);
+    updated.guests.retain(|guest| guest != target);
+    if updated
+        .personal_agent
+        .as_ref()
+        .is_some_and(|agent| agent.agent_npub == target)
+    {
+        updated.personal_agent = None;
+    }
+    updated
+        .personal_brain_agents
+        .retain(|agent| agent.agent_npub != target);
+    updated
+        .human_anchored_agent_authorities
+        .retain(|authority| authority.agent_npub != target);
+    for folder in &mut updated.folders {
+        folder.access_user_ids.retain(|user| user != target);
+    }
+    updated
+}
+
+fn is_personal_peer_agent_change(
+    metadata: &BrainMetadataView,
+    actor_npub: &str,
+    target_npub: &str,
+) -> bool {
+    metadata.kind == "personal"
+        && actor_npub != target_npub
+        && metadata
+            .personal_brain_agents
+            .iter()
+            .any(|agent| agent.status == "ready" && agent.agent_npub == actor_npub)
+        && metadata
+            .personal_brain_agents
+            .iter()
+            .any(|agent| agent.status == "ready" && agent.agent_npub == target_npub)
+}
+
+fn has_personal_agent_folder_exclusion(
+    metadata: &BrainMetadataView,
+    target_npub: &str,
+    folder_id: &str,
+) -> bool {
+    metadata.account_access_cohorts.iter().any(|cohort| {
+        cohort.status == "active"
+            && cohort.participants.iter().any(|participant| {
+                participant.relationship == "account_agent"
+                    && participant.npub == target_npub
+                    && participant
+                        .excluded_folder_ids
+                        .iter()
+                        .any(|excluded| excluded == folder_id)
+            })
+    })
 }
 
 fn admin<W: Write>(
@@ -3587,8 +4610,75 @@ fn invite<W: Write>(
     match args.first().map(String::as_str) {
         Some("brain") => brain_invites(&args[1..], env, json, output),
         Some("folder") => folder_invites(&args[1..], env, json, output),
+        Some("inbox") => invitation_inbox(&args[1..], env, json, output),
         Some(other) => Err(CliError::InvalidCommand(format!("invite {other}"))),
         None => Err(CliError::MissingArgument("invite kind")),
+    }
+}
+
+fn invitation_inbox<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let route = if args.iter().any(|arg| arg == "--include-hidden") {
+                "/v1/account-invitations?includeHidden=true"
+            } else {
+                "/v1/account-invitations"
+            };
+            let response = signed_json_request(env, args, "GET", route, None)?;
+            if json {
+                return write_json(output, &response);
+            }
+            let invitations = response["invitations"].as_array().ok_or_else(|| {
+                CliError::InvalidInput("invitation inbox response is invalid".to_owned())
+            })?;
+            if invitations.is_empty() {
+                writeln!(output, "No pending invitations.")?;
+                return Ok(());
+            }
+            for item in invitations {
+                let invitation = &item["invitation"];
+                let id = invitation["id"].as_str().unwrap_or("unknown");
+                let kind = if invitation["folderOnly"].as_bool().unwrap_or(false) {
+                    "Folder"
+                } else {
+                    "Brain"
+                };
+                let agent_count = invitation["participants"]
+                    .as_array()
+                    .map(|participants| {
+                        participants
+                            .iter()
+                            .filter(|participant| participant["relationship"] == "account_agent")
+                            .count()
+                    })
+                    .unwrap_or(0);
+                writeln!(
+                    output,
+                    "{kind} invitation {id} includes you and {agent_count} of your agents."
+                )?;
+            }
+            Ok(())
+        }
+        Some("hide" | "restore") => {
+            let hidden = args[0] == "hide";
+            let invitation_id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
+            let route = format!("/v1/account-invitations/{invitation_id}/visibility");
+            let response = signed_json_request(
+                env,
+                args,
+                "PUT",
+                &route,
+                Some(serde_json::json!({ "hidden": hidden })),
+            )?;
+            write_command_response(output, json, &response)
+        }
+        Some(other) => Err(CliError::InvalidCommand(format!("invite inbox {other}"))),
+        None => Err(CliError::MissingArgument("invite inbox command")),
     }
 }
 
@@ -3599,6 +4689,48 @@ fn brain_invites<W: Write>(
     output: &mut W,
 ) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
+        Some("preview") => {
+            let brain_id = command_brain_id(args, env)?;
+            let target_email = required_option_or_positional(args, "--target", 1, "target-email")?;
+            if !invite_finite_vip_email(&target_email) {
+                return Err(CliError::InvalidInput(
+                    "invitation preview requires a finite.vip mailbox".to_owned(),
+                ));
+            }
+            let expires_at = invitation_expires_at(env, args)?;
+            let folders = option_values(args, "--folder");
+            let route = format!("/v1/brains/{brain_id}/invitations/preflight");
+            let response = signed_json_request(
+                env,
+                args,
+                "POST",
+                &route,
+                Some(serde_json::json!({
+                    "targetEmail": target_email,
+                    "folderOnly": false,
+                    "initialFolderAccess": folders,
+                    "expiresAt": expires_at,
+                })),
+            )?;
+            if json {
+                writeln!(output, "{}", serde_json::to_string_pretty(&response)?)?;
+                return Ok(());
+            }
+            let human = response
+                .get("participants")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|participants| participants.first())
+                .and_then(|participant| participant.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(target_email.as_str());
+            let agents = response
+                .get("participants")
+                .and_then(serde_json::Value::as_array)
+                .map(|participants| participants.len().saturating_sub(1))
+                .unwrap_or(0);
+            writeln!(output, "Will invite {human} and {agents} of their agents.")?;
+            Ok(())
+        }
         Some("create") => {
             let brain_id = command_brain_id(args, env)?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
@@ -3620,31 +4752,18 @@ fn brain_invites<W: Write>(
                     &expires_at,
                 )
             } else if invite_finite_vip_email(&raw_target) {
-                match resolve_identity_npub(env, args, &raw_target) {
-                    Ok(target) => write_npub_invite_create(
-                        output,
-                        json,
-                        env,
-                        args,
-                        &route,
-                        &target,
-                        &folders,
-                        &expires_at,
-                    ),
-                    Err(CliError::HttpStatus { status: 404, .. }) => write_email_invite_create(
-                        output,
-                        json,
-                        env,
-                        args,
-                        &route,
-                        &brain_id,
-                        &raw_target,
-                        &folders,
-                        &expires_at,
-                        false,
-                    ),
-                    Err(error) => Err(error),
-                }
+                write_account_cohort_invite_create(
+                    output,
+                    json,
+                    env,
+                    args,
+                    &route,
+                    &brain_id,
+                    &raw_target,
+                    &folders,
+                    &expires_at,
+                    false,
+                )
             } else if invite_email_like(&raw_target) {
                 write_email_invite_create(
                     output,
@@ -3687,7 +4806,13 @@ fn brain_invites<W: Write>(
         Some("accept") => {
             let id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
             let route = format!("/v1/invitations/{id}/accept");
-            let response = signed_json_request(env, args, "POST", &route, None)?;
+            let removed_participants = option_values(args, "--remove-agent");
+            let body = (!removed_participants.is_empty()).then(|| {
+                serde_json::json!({
+                    "removedParticipants": removed_participants,
+                })
+            });
+            let response = signed_json_request(env, args, "POST", &route, body)?;
             write_command_response(output, json, &response)
         }
         Some("revoke") => {
@@ -3902,15 +5027,22 @@ fn folder_invites<W: Write>(
                 .ok_or(CliError::MissingArgument("--folder"))?;
             let raw_target = required_option_or_positional(args, "--target", 1, "target")?;
             let expires_at = invitation_expires_at(env, args)?;
-            let resolved_target = if invite_finite_vip_email(&raw_target) {
-                match resolve_identity_npub(env, args, &raw_target) {
-                    Ok(target) => Some(target),
-                    Err(CliError::HttpStatus { status: 404, .. }) => None,
-                    Err(error) => return Err(error),
-                }
-            } else {
-                None
-            };
+            if invite_finite_vip_email(&raw_target) {
+                let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations");
+                return write_account_cohort_invite_create(
+                    output,
+                    json,
+                    env,
+                    args,
+                    &route,
+                    &brain_id,
+                    &raw_target,
+                    std::slice::from_ref(&folder_id),
+                    &expires_at,
+                    true,
+                );
+            }
+            let resolved_target: Option<String> = None;
             if invite_email_like(&raw_target) && resolved_target.is_none() {
                 let route = format!("/v1/brains/{brain_id}/folders/{folder_id}/invitations");
                 return write_email_invite_create(
@@ -3989,7 +5121,13 @@ fn folder_invites<W: Write>(
         Some("accept") => {
             let id = required_option_or_positional(args, "--id", 1, "invitation-id")?;
             let route = format!("/v1/invitations/{id}/accept");
-            let response = signed_json_request(env, args, "POST", &route, None)?;
+            let removed_participants = option_values(args, "--remove-agent");
+            let body = (!removed_participants.is_empty()).then(|| {
+                serde_json::json!({
+                    "removedParticipants": removed_participants,
+                })
+            });
+            let response = signed_json_request(env, args, "POST", &route, body)?;
             write_command_response(output, json, &response)
         }
         Some("claim") => claim_email_folder_invitation(args, env, json, output),
@@ -4062,6 +5200,155 @@ fn write_npub_invite_create<W: Write>(
     });
     let response = signed_json_request(env, args, "POST", route, Some(body))?;
     write_command_response(output, json, &response)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_account_cohort_invite_create<W: Write>(
+    output: &mut W,
+    json: bool,
+    env: &CliEnvironment,
+    args: &[String],
+    route: &str,
+    brain_id: &str,
+    raw_target: &str,
+    folders: &[String],
+    expires_at: &str,
+    folder_only: bool,
+) -> Result<(), CliError> {
+    let target_email = canonical_invite_email(raw_target)?;
+    let preflight_route = format!("/v1/brains/{brain_id}/invitations/preflight");
+    let preview = signed_json_request(
+        env,
+        args,
+        "POST",
+        &preflight_route,
+        Some(serde_json::json!({
+            "targetEmail": target_email,
+            "folderOnly": folder_only,
+            "initialFolderAccess": folders,
+            "expiresAt": expires_at,
+        })),
+    )?;
+    if !preview["capacity"]["fits"].as_bool().unwrap_or(false) {
+        return Err(CliError::InvalidInput(
+            "the full account cohort does not fit in this Brain".to_owned(),
+        ));
+    }
+    if let Some(blocked) = preview["excluded"]
+        .as_array()
+        .filter(|items| !items.is_empty())
+    {
+        let names = blocked
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !args.iter().any(|arg| arg == "--approve-reduced") {
+            return Err(CliError::InvalidInput(format!(
+                "{names} cannot receive this access yet; send again with --approve-reduced to invite the human and remaining agents"
+            )));
+        }
+    }
+    let participants = preview["participants"]
+        .as_array()
+        .ok_or_else(|| CliError::InvalidInput("preflight omitted participants".to_owned()))?;
+    let key_versions = preview["keyVersions"].as_array().ok_or_else(|| {
+        CliError::InvalidInput("preflight omitted Folder key versions".to_owned())
+    })?;
+    let auth = load_signer(env)?;
+    let session_keys = (!key_versions.is_empty())
+        .then(|| open_brain_session_folder_keys(env, args, brain_id))
+        .transpose()?;
+    let mut participant_grants = Vec::new();
+    for key in key_versions {
+        let folder_id = key["folderId"]
+            .as_str()
+            .ok_or_else(|| CliError::InvalidInput("preflight Folder id is invalid".to_owned()))?;
+        let key_version = key["keyVersion"].as_u64().ok_or_else(|| {
+            CliError::InvalidInput("preflight Folder key version is invalid".to_owned())
+        })?;
+        let key_version = u32::try_from(key_version).map_err(|_| {
+            CliError::InvalidInput("preflight Folder key version is too large".to_owned())
+        })?;
+        let folder_key = opened_folder_key(
+            session_keys.as_ref().ok_or_else(|| {
+                CliError::InvalidInput("preflight key plan is incomplete".to_owned())
+            })?,
+            brain_id,
+            folder_id,
+            key_version,
+        )?;
+        for participant in participants {
+            let recipient = participant["npub"].as_str().ok_or_else(|| {
+                CliError::InvalidInput("preflight participant identity is invalid".to_owned())
+            })?;
+            let mut grant = folder_key_grant_request(
+                &auth,
+                brain_id,
+                folder_id,
+                key_version,
+                recipient,
+                &folder_key,
+                env,
+            )?;
+            grant["id"] = serde_json::Value::String(deterministic_id(
+                "grant",
+                &[
+                    brain_id,
+                    folder_id,
+                    &key_version.to_string(),
+                    recipient,
+                    preview["planId"].as_str().ok_or_else(|| {
+                        CliError::InvalidInput("preflight plan id is invalid".to_owned())
+                    })?,
+                ],
+            ));
+            participant_grants.push(serde_json::json!({
+                "folderId": folder_id,
+                "grant": grant,
+            }));
+        }
+    }
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        route,
+        Some(serde_json::json!({
+            "target": target_email,
+            "initialFolderAccess": folders,
+            "expiresAt": expires_at,
+            "folderOnly": folder_only,
+            "planId": preview["planId"],
+            "participantGrants": participant_grants,
+            "approvedExclusions": preview["excluded"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|excluded| excluded["nip05"].as_str())
+                .collect::<Vec<_>>(),
+        })),
+    )?;
+    if json {
+        return write_json(output, &response);
+    }
+    let agent_names = response["participants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|participant| participant["relationship"] == "account_agent")
+        .filter_map(|participant| participant["name"].as_str())
+        .collect::<Vec<_>>();
+    match agent_names.as_slice() {
+        [] => writeln!(output, "Invited {target_email}."),
+        names => writeln!(
+            output,
+            "Invited {target_email} and {} of their agents: {}.",
+            names.len(),
+            names.join(", ")
+        ),
+    }?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8432,6 +9719,8 @@ mod tests {
                 "accept",
                 "--id",
                 "invitation-4f82a37c1b82bcdd54973c466cdde914",
+                "--remove-agent",
+                "npub1departedagent",
                 "--server",
                 &server_url,
                 "--json",
@@ -8447,6 +9736,10 @@ mod tests {
         assert!(requests[0].0.starts_with(
             "POST /v1/invitations/invitation-4f82a37c1b82bcdd54973c466cdde914/accept"
         ));
+        assert_eq!(
+            serde_json::from_str::<Value>(&requests[0].1).unwrap(),
+            serde_json::json!({ "removedParticipants": ["npub1departedagent"] })
+        );
     }
 
     #[test]
@@ -12227,6 +13520,9 @@ mod tests {
             name: "Org".to_owned(),
             owner_user_id: None,
             personal_agent: None,
+            personal_brain_agents: Vec::new(),
+            human_anchored_agent_authorities: Vec::new(),
+            account_access_cohorts: Vec::new(),
             members: vec!["npub-member".to_owned()],
             guests: Vec::new(),
             admins: vec!["npub-admin".to_owned()],
@@ -12253,6 +13549,12 @@ mod tests {
             personal_agent: Some(PersonalAgentView {
                 agent_npub: "npub-agent".to_owned(),
             }),
+            personal_brain_agents: vec![PersonalBrainAgentView {
+                agent_npub: "npub-second-agent".to_owned(),
+                status: "ready".to_owned(),
+            }],
+            human_anchored_agent_authorities: Vec::new(),
+            account_access_cohorts: Vec::new(),
             members: Vec::new(),
             guests: Vec::new(),
             admins: Vec::new(),
@@ -12262,7 +13564,11 @@ mod tests {
         };
         assert_eq!(
             folder_required_recipients(&personal_metadata, "restricted", &[]).unwrap(),
-            vec!["npub-agent".to_owned(), "npub-owner".to_owned()]
+            vec![
+                "npub-agent".to_owned(),
+                "npub-owner".to_owned(),
+                "npub-second-agent".to_owned(),
+            ]
         );
     }
 
@@ -12274,6 +13580,9 @@ mod tests {
             name: "Org".to_owned(),
             owner_user_id: None,
             personal_agent: None,
+            personal_brain_agents: Vec::new(),
+            human_anchored_agent_authorities: Vec::new(),
+            account_access_cohorts: Vec::new(),
             members: vec!["npub-admin".to_owned(), "npub-removed".to_owned()],
             guests: Vec::new(),
             admins: vec!["npub-admin".to_owned()],

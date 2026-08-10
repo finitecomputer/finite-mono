@@ -11,6 +11,762 @@ const BRAIN_INVITATION_SELECT: &str = r#"
 "#;
 
 impl BrainStore {
+    /// Persist one immutable account-cohort invitation and all encrypted grants
+    /// needed to make its approved participants readable at acceptance time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_account_cohort_invitation(
+        &mut self,
+        brain_id: &BrainId,
+        id: &str,
+        plan_id: &str,
+        account_id: &str,
+        human_email: &str,
+        roster_revision: u64,
+        participants: &[StoredCohortParticipant],
+        exclusions_json: &str,
+        key_versions_json: &str,
+        folder_only: bool,
+        initial_folder_access: &[FolderId],
+        grants: &[FolderKeyGrantMetadata],
+        control_records: &[SyncRecordInput],
+        invite_code: &str,
+        accept_path: &str,
+        created_by_npub: &UserId,
+        expires_at: &str,
+        created_at: &str,
+    ) -> Result<StoredBrainInvitation, StoreError> {
+        if let Some(existing_id) = self
+            .conn
+            .query_row(
+                "SELECT invitation_id FROM cohort_invitation_plans WHERE plan_id = ?1",
+                params![plan_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return self.load_brain_invitation(&existing_id);
+        }
+        let stored = self.load_brain(brain_id)?;
+        if !has_brain_operational_authority(&stored, created_by_npub) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "account-cohort invitations require Brain operational authority".to_owned(),
+            });
+        }
+        validate_link_id("brain_invitation_id", id)?;
+        validate_link_id("invite_code", invite_code)?;
+        validate_required_text("plan_id", plan_id)?;
+        validate_required_text("account_id", account_id)?;
+        validate_bounded_offer_expiry(expires_at, created_at)?;
+        let human_email = canonical_invited_email(human_email)?;
+        let human = participants
+            .iter()
+            .filter(|participant| participant.relationship == "human")
+            .collect::<Vec<_>>();
+        if human.len() != 1
+            || participants.is_empty()
+            || human[0].nip05.trim().to_ascii_lowercase() != human_email
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "cohort invitation requires one matching human participant".to_owned(),
+            });
+        }
+        let participant_npubs = participants
+            .iter()
+            .map(|participant| participant.npub.clone())
+            .collect::<BTreeSet<_>>();
+        if participant_npubs.len() != participants.len()
+            || participants.iter().any(|participant| {
+                !matches!(participant.relationship.as_str(), "human" | "account_agent")
+                    || participant.name.trim().is_empty()
+                    || participant.nip05.trim().is_empty()
+            })
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "cohort invitation participants are invalid or duplicated".to_owned(),
+            });
+        }
+        if !folder_only
+            && stored
+                .brain
+                .members
+                .len()
+                .saturating_add(participants.len())
+                > BRAIN_CAPACITY_ENVELOPE.members
+        {
+            return Err(StoreError::CapacityExceeded {
+                limit: "brain_members".to_owned(),
+                max: BRAIN_CAPACITY_ENVELOPE.members,
+                current: stored
+                    .brain
+                    .members
+                    .len()
+                    .saturating_add(participants.len()),
+            });
+        }
+        let scope = email_bootstrap_scope(&stored.brain, initial_folder_access, folder_only)?;
+        let required = scope
+            .iter()
+            .flat_map(|folder| {
+                participants.iter().map(move |participant| {
+                    (
+                        folder.folder_id.clone(),
+                        folder.key_version,
+                        participant.npub.clone(),
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        let provided = grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.folder_id.clone(),
+                    grant.key_version,
+                    grant.recipient_npub.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        if provided != required || grants.len() != required.len() {
+            return Err(StoreError::BrokenInvariant {
+                reason: "cohort invitation grants must exactly cover every participant and Folder"
+                    .to_owned(),
+            });
+        }
+        for grant in grants {
+            validate_grant_metadata(grant)?;
+            validate_grant_issuer(
+                &stored.brain,
+                grant,
+                stored
+                    .personal_agent
+                    .as_ref()
+                    .map(|relationship| &relationship.agent_npub),
+                has_brain_operational_authority(&stored, &grant.issuer_npub),
+            )?;
+            if grant.issuer_npub != *created_by_npub {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "cohort invitation grant issuer must be the invitation actor"
+                        .to_owned(),
+                });
+            }
+        }
+        validate_folder_key_grant_control_records(grants, control_records)?;
+        let participants_json =
+            serde_json::to_string(participants).map_err(|error| StoreError::BrokenInvariant {
+                reason: format!("cohort participants did not serialize: {error}"),
+            })?;
+        serde_json::from_str::<serde_json::Value>(exclusions_json).map_err(|_| {
+            StoreError::BrokenInvariant {
+                reason: "cohort exclusions must be JSON".to_owned(),
+            }
+        })?;
+        serde_json::from_str::<serde_json::Value>(key_versions_json).map_err(|_| {
+            StoreError::BrokenInvariant {
+                reason: "cohort key versions must be JSON".to_owned(),
+            }
+        })?;
+        let initial_folder_access_json = folder_id_vec_json(initial_folder_access)?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO brain_invitations (
+                id, brain_id, user_id, target_kind, invited_email, status,
+                invite_code, accept_path, initial_folder_access_json,
+                created_by_npub, expires_at, created_at, updated_at, folder_only,
+                bootstrap_scope_json
+            ) VALUES (
+                ?1, ?2, ?3, 'account_cohort', ?4, 'pending',
+                ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, '[]'
+            )
+            "#,
+            params![
+                id,
+                brain_id.as_str(),
+                human[0].npub.as_str(),
+                human_email,
+                invite_code,
+                accept_path,
+                initial_folder_access_json,
+                created_by_npub.as_str(),
+                expires_at,
+                created_at,
+                i64::from(folder_only),
+            ],
+        )
+        .map_err(map_insert_error("brain_invitation_id", id))?;
+        tx.execute(
+            r#"
+            INSERT INTO cohort_invitation_plans (
+                invitation_id, plan_id, account_id, human_email, roster_revision,
+                scope_kind, folder_id, participants_json, exclusions_json,
+                key_versions_json, actor_npub, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "#,
+            params![
+                id,
+                plan_id,
+                account_id,
+                human_email,
+                i64::try_from(roster_revision).map_err(|_| StoreError::BrokenInvariant {
+                    reason: "roster revision exceeds SQLite integer range".to_owned(),
+                })?,
+                if folder_only { "folder" } else { "brain" },
+                folder_only.then(|| initial_folder_access[0].as_str()),
+                participants_json,
+                exclusions_json,
+                key_versions_json,
+                created_by_npub.as_str(),
+                created_at,
+            ],
+        )?;
+        for (grant, record) in grants.iter().zip(control_records) {
+            let SyncRecordInput::Control(record) = record else {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "cohort invitation grants require control sync records".to_owned(),
+                });
+            };
+            tx.execute(
+                r#"
+                INSERT INTO cohort_invitation_grants (
+                    invitation_id, grant_id, folder_id, key_version, issuer_npub,
+                    recipient_npub, format, wrapped_event_json, created_at,
+                    record_event_id, record_payload_json, record_event_kind
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "#,
+                params![
+                    id,
+                    grant.id,
+                    grant.folder_id.as_str(),
+                    i64::from(grant.key_version),
+                    grant.issuer_npub.as_str(),
+                    grant.recipient_npub.as_str(),
+                    grant.format,
+                    grant.wrapped_event_json,
+                    grant.created_at,
+                    record.record_event_id,
+                    record.payload_json,
+                    i64::from(record.record_event_kind),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        self.load_brain_invitation(id)
+    }
+
+    /// Convert one pending internal-beta Finite VIP mailbox bootstrap into a
+    /// fixed, key-complete account-cohort invitation without changing its
+    /// delivery identity, scope, expiry, or notification receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn convert_pending_email_invitation_to_account_cohort(
+        &mut self,
+        brain_id: &BrainId,
+        invitation_id: &str,
+        plan_id: &str,
+        account_id: &str,
+        human_email: &str,
+        roster_revision: u64,
+        participants: &[StoredCohortParticipant],
+        exclusions_json: &str,
+        key_versions_json: &str,
+        grants: &[FolderKeyGrantMetadata],
+        control_records: &[SyncRecordInput],
+        actor: &UserId,
+        backup_reference: &str,
+        converted_at: &str,
+    ) -> Result<StoredBrainInvitation, StoreError> {
+        validate_link_id("brain_invitation_id", invitation_id)?;
+        validate_required_text("plan_id", plan_id)?;
+        validate_required_text("account_id", account_id)?;
+        validate_required_text("backup_reference", backup_reference)?;
+        validate_link_timestamp("convertedAt", converted_at)?;
+        if let Some(existing_invitation_id) = self
+            .conn
+            .query_row(
+                "SELECT invitation_id FROM invitation_cohort_conversion_receipts WHERE plan_id = ?1",
+                params![plan_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            if existing_invitation_id == invitation_id {
+                return self.load_brain_invitation(invitation_id);
+            }
+            return Err(StoreError::BrokenInvariant {
+                reason: "invitation conversion plan belongs to another invitation".to_owned(),
+            });
+        }
+        let invitation = self.load_brain_invitation(invitation_id)?;
+        if invitation.brain_id != *brain_id
+            || invitation.status != LinkStatus::Pending
+            || invitation.target_kind != BrainInvitationTargetKind::EmailBootstrap
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "invitation is not a pending mailbox bootstrap eligible for conversion"
+                    .to_owned(),
+            });
+        }
+        let human_email = canonical_invited_email(human_email)?;
+        if invitation.invited_email.as_deref() != Some(human_email.as_str()) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "conversion mailbox does not match the pending invitation".to_owned(),
+            });
+        }
+        let stored = self.load_brain(brain_id)?;
+        if !has_brain_operational_authority(&stored, actor) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "invitation conversion requires Brain operational authority".to_owned(),
+            });
+        }
+        let human = participants
+            .iter()
+            .filter(|participant| participant.relationship == "human")
+            .collect::<Vec<_>>();
+        if human.len() != 1
+            || participants.is_empty()
+            || human[0].nip05.trim().to_ascii_lowercase() != human_email
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "converted invitation requires one matching human participant".to_owned(),
+            });
+        }
+        let participant_npubs = participants
+            .iter()
+            .map(|participant| participant.npub.clone())
+            .collect::<BTreeSet<_>>();
+        if participant_npubs.len() != participants.len()
+            || participants.iter().any(|participant| {
+                !matches!(participant.relationship.as_str(), "human" | "account_agent")
+                    || participant.name.trim().is_empty()
+                    || participant.nip05.trim().is_empty()
+            })
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "converted invitation participants are invalid or duplicated".to_owned(),
+            });
+        }
+        if !invitation.folder_only
+            && stored
+                .brain
+                .members
+                .len()
+                .saturating_add(participants.len())
+                > BRAIN_CAPACITY_ENVELOPE.members
+        {
+            return Err(StoreError::CapacityExceeded {
+                limit: "brain_members".to_owned(),
+                max: BRAIN_CAPACITY_ENVELOPE.members,
+                current: stored
+                    .brain
+                    .members
+                    .len()
+                    .saturating_add(participants.len()),
+            });
+        }
+        let scope = email_bootstrap_scope(
+            &stored.brain,
+            &invitation.initial_folder_access,
+            invitation.folder_only,
+        )?;
+        let required = scope
+            .iter()
+            .flat_map(|folder| {
+                participants.iter().map(move |participant| {
+                    (
+                        folder.folder_id.clone(),
+                        folder.key_version,
+                        participant.npub.clone(),
+                    )
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        let provided = grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.folder_id.clone(),
+                    grant.key_version,
+                    grant.recipient_npub.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        if provided != required || grants.len() != required.len() {
+            return Err(StoreError::BrokenInvariant {
+                reason:
+                    "converted invitation grants must exactly cover every participant and Folder"
+                        .to_owned(),
+            });
+        }
+        for grant in grants {
+            validate_grant_metadata(grant)?;
+            validate_grant_issuer(
+                &stored.brain,
+                grant,
+                stored
+                    .personal_agent
+                    .as_ref()
+                    .map(|relationship| &relationship.agent_npub),
+                has_brain_operational_authority(&stored, &grant.issuer_npub),
+            )?;
+            if grant.issuer_npub != *actor {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "converted invitation grant issuer must be the conversion actor"
+                        .to_owned(),
+                });
+            }
+        }
+        validate_folder_key_grant_control_records(grants, control_records)?;
+        let participants_json =
+            serde_json::to_string(participants).map_err(|error| StoreError::BrokenInvariant {
+                reason: format!("cohort participants did not serialize: {error}"),
+            })?;
+        serde_json::from_str::<serde_json::Value>(exclusions_json).map_err(|_| {
+            StoreError::BrokenInvariant {
+                reason: "cohort exclusions must be JSON".to_owned(),
+            }
+        })?;
+        serde_json::from_str::<serde_json::Value>(key_versions_json).map_err(|_| {
+            StoreError::BrokenInvariant {
+                reason: "cohort key versions must be JSON".to_owned(),
+            }
+        })?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            r#"
+            UPDATE brain_invitations
+            SET target_kind = 'account_cohort', user_id = ?2,
+                bootstrap_wrapped_event_json = NULL, updated_at = ?3
+            WHERE id = ?1 AND brain_id = ?4
+              AND target_kind = 'email_bootstrap' AND status = 'pending'
+            "#,
+            params![
+                invitation_id,
+                human[0].npub.as_str(),
+                converted_at,
+                brain_id.as_str(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::BrokenInvariant {
+                reason: "pending invitation changed before conversion commit".to_owned(),
+            });
+        }
+        tx.execute(
+            r#"
+            INSERT INTO cohort_invitation_plans (
+                invitation_id, plan_id, account_id, human_email, roster_revision,
+                scope_kind, folder_id, participants_json, exclusions_json,
+                key_versions_json, actor_npub, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "#,
+            params![
+                invitation_id,
+                plan_id,
+                account_id,
+                human_email,
+                i64::try_from(roster_revision).map_err(|_| StoreError::BrokenInvariant {
+                    reason: "roster revision exceeds SQLite integer range".to_owned(),
+                })?,
+                if invitation.folder_only {
+                    "folder"
+                } else {
+                    "brain"
+                },
+                invitation
+                    .folder_only
+                    .then(|| invitation.initial_folder_access[0].as_str()),
+                participants_json,
+                exclusions_json,
+                key_versions_json,
+                actor.as_str(),
+                converted_at,
+            ],
+        )?;
+        for (grant, record) in grants.iter().zip(control_records) {
+            let SyncRecordInput::Control(record) = record else {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "converted invitation grants require control sync records".to_owned(),
+                });
+            };
+            tx.execute(
+                r#"
+                INSERT INTO cohort_invitation_grants (
+                    invitation_id, grant_id, folder_id, key_version, issuer_npub,
+                    recipient_npub, format, wrapped_event_json, created_at,
+                    record_event_id, record_payload_json, record_event_kind
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "#,
+                params![
+                    invitation_id,
+                    grant.id,
+                    grant.folder_id.as_str(),
+                    i64::from(grant.key_version),
+                    grant.issuer_npub.as_str(),
+                    grant.recipient_npub.as_str(),
+                    grant.format,
+                    grant.wrapped_event_json,
+                    grant.created_at,
+                    record.record_event_id,
+                    record.payload_json,
+                    i64::from(record.record_event_kind),
+                ],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO invitation_cohort_conversion_receipts (
+                invitation_id, plan_id, backup_reference, converted_by_npub, converted_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                invitation_id,
+                plan_id,
+                backup_reference,
+                actor.as_str(),
+                converted_at,
+            ],
+        )?;
+        tx.commit()?;
+        self.load_brain_invitation(invitation_id)
+    }
+
+    pub fn load_cohort_invitation_plan(
+        &self,
+        invitation_id: &str,
+    ) -> Result<Option<StoredCohortInvitationPlan>, StoreError> {
+        self.conn
+            .query_row(
+                r#"
+                SELECT invitation_id, plan_id, account_id, human_email, roster_revision,
+                       scope_kind, folder_id, participants_json, exclusions_json,
+                       key_versions_json, actor_npub, created_at
+                FROM cohort_invitation_plans
+                WHERE invitation_id = ?1
+                "#,
+                params![invitation_id],
+                |row| {
+                    let participants_json: String = row.get("participants_json")?;
+                    let participants =
+                        serde_json::from_str(&participants_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                participants_json.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?;
+                    let roster_revision = row.get::<_, i64>("roster_revision")?;
+                    Ok(StoredCohortInvitationPlan {
+                        invitation_id: row.get("invitation_id")?,
+                        plan_id: row.get("plan_id")?,
+                        account_id: row.get("account_id")?,
+                        human_email: row.get("human_email")?,
+                        roster_revision: u64::try_from(roster_revision).map_err(|_| {
+                            rusqlite::Error::IntegralValueOutOfRange(4, roster_revision)
+                        })?,
+                        scope_kind: row.get("scope_kind")?,
+                        folder_id: row
+                            .get::<_, Option<String>>("folder_id")?
+                            .map(FolderId::new)
+                            .transpose()
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    6,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?,
+                        participants,
+                        exclusions_json: row.get("exclusions_json")?,
+                        key_versions_json: row.get("key_versions_json")?,
+                        actor_npub: UserId::new(row.get::<_, String>("actor_npub")?).map_err(
+                            |error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    10,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            },
+                        )?,
+                        created_at: row.get("created_at")?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Atomically claim the right to deliver one invitation email. Successful
+    /// and in-flight claims deduplicate exact retries.
+    pub fn begin_brain_invitation_email_delivery(
+        &mut self,
+        invitation_id: &str,
+        attempted_at: &str,
+    ) -> Result<bool, StoreError> {
+        validate_link_timestamp("attemptedAt", attempted_at)?;
+        self.load_brain_invitation(invitation_id)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status = tx
+            .query_row(
+                "SELECT status FROM brain_invitation_email_deliveries WHERE invitation_id = ?1",
+                params![invitation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let should_send = match status.as_deref() {
+            Some("sent" | "sending") => false,
+            Some("failed") => {
+                tx.execute(
+                    "UPDATE brain_invitation_email_deliveries
+                     SET status = 'sending', attempted_at = ?2, delivered_at = NULL, error = NULL
+                     WHERE invitation_id = ?1",
+                    params![invitation_id, attempted_at],
+                )?;
+                true
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO brain_invitation_email_deliveries
+                     (invitation_id, status, attempted_at)
+                     VALUES (?1, 'sending', ?2)",
+                    params![invitation_id, attempted_at],
+                )?;
+                true
+            }
+            Some(_) => {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "unknown invitation email delivery state".to_owned(),
+                });
+            }
+        };
+        tx.commit()?;
+        Ok(should_send)
+    }
+
+    pub fn finish_brain_invitation_email_delivery(
+        &mut self,
+        invitation_id: &str,
+        delivered: bool,
+        completed_at: &str,
+    ) -> Result<(), StoreError> {
+        validate_link_timestamp("completedAt", completed_at)?;
+        let changed = self.conn.execute(
+            "UPDATE brain_invitation_email_deliveries
+             SET status = ?2,
+                 delivered_at = CASE WHEN ?3 THEN ?4 ELSE NULL END,
+                 error = CASE WHEN ?3 THEN NULL ELSE 'delivery_failed' END
+             WHERE invitation_id = ?1 AND status = 'sending'",
+            params![
+                invitation_id,
+                if delivered { "sent" } else { "failed" },
+                delivered,
+                completed_at,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::BrokenInvariant {
+                reason: "invitation email delivery was not in flight".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Return the one shared pending-invitation view for an included human or
+    /// Agent Principal. Visibility is account view state, not invitation state.
+    pub fn list_account_invitations(
+        &self,
+        actor: &UserId,
+        include_hidden: bool,
+    ) -> Result<Vec<(StoredBrainInvitation, bool)>, StoreError> {
+        let mut statement = self.conn.prepare(&format!(
+            r#"
+            {BRAIN_INVITATION_SELECT}
+            WHERE id IN (
+                SELECT plans.invitation_id
+                FROM cohort_invitation_plans plans,
+                     json_each(plans.participants_json) participant
+                WHERE json_extract(participant.value, '$.npub') = ?1
+                  AND (?2 = 1 OR NOT EXISTS (
+                      SELECT 1 FROM account_invitation_dismissals dismissals
+                      WHERE dismissals.invitation_id = plans.invitation_id
+                        AND dismissals.account_id = plans.account_id
+                        AND dismissals.hidden = 1
+                  ))
+            )
+              AND status = 'pending'
+            ORDER BY created_at DESC, id DESC
+            LIMIT {MAX_LINK_LIST_ROWS}
+            "#
+        ))?;
+        let invitations = statement
+            .query_map(params![actor.as_str(), i64::from(include_hidden)], |row| {
+                brain_invitation_from_row(row)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        invitations
+            .into_iter()
+            .map(|invitation| {
+                let hidden = self.conn.query_row(
+                    r#"
+                    SELECT COALESCE((
+                        SELECT dismissals.hidden
+                        FROM account_invitation_dismissals dismissals
+                        JOIN cohort_invitation_plans plans
+                          ON plans.invitation_id = dismissals.invitation_id
+                         AND plans.account_id = dismissals.account_id
+                        WHERE dismissals.invitation_id = ?1
+                    ), 0)
+                    "#,
+                    params![invitation.id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                Ok((invitation, hidden))
+            })
+            .collect()
+    }
+
+    pub fn set_account_invitation_hidden(
+        &mut self,
+        invitation_id: &str,
+        actor: &UserId,
+        hidden: bool,
+        updated_at: &str,
+    ) -> Result<(), StoreError> {
+        validate_link_timestamp("updatedAt", updated_at)?;
+        let plan = self.load_cohort_invitation_plan(invitation_id)?.ok_or(
+            StoreError::UnavailableLink {
+                kind: "account invitation",
+            },
+        )?;
+        if !plan
+            .participants
+            .iter()
+            .any(|participant| participant.npub == *actor)
+        {
+            return Err(StoreError::UnavailableLink {
+                kind: "account invitation",
+            });
+        }
+        let invitation = self.load_brain_invitation(invitation_id)?;
+        if invitation.status != LinkStatus::Pending {
+            return Err(StoreError::UnavailableLink {
+                kind: "account invitation",
+            });
+        }
+        self.conn.execute(
+            r#"
+            INSERT INTO account_invitation_dismissals
+                (invitation_id, account_id, hidden, updated_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(invitation_id, account_id) DO UPDATE SET
+                hidden = excluded.hidden,
+                updated_at = excluded.updated_at
+            "#,
+            params![invitation_id, plan.account_id, hidden, updated_at],
+        )?;
+        Ok(())
+    }
+
     /// Create one npub-bound singleton Brain Invitation.
     #[allow(clippy::too_many_arguments)]
     pub fn create_brain_invitation(
@@ -272,7 +1028,26 @@ impl BrainStore {
             .ok_or(StoreError::UnavailableLink {
                 kind: "brain invitation",
             })?;
-        ensure_invitation_available(&invitation, user_id, now)?;
+        if invitation.target_kind == BrainInvitationTargetKind::AccountCohort {
+            let plan = self
+                .load_cohort_invitation_plan(&invitation.id)?
+                .ok_or_else(|| StoreError::BrokenInvariant {
+                    reason: "account cohort invitation is missing its plan".to_owned(),
+                })?;
+            if invitation.status != LinkStatus::Pending
+                || timestamp_expired(&invitation.expires_at, now)
+                || !plan
+                    .participants
+                    .iter()
+                    .any(|participant| participant.npub == *user_id)
+            {
+                return Err(StoreError::UnavailableLink {
+                    kind: "brain invitation",
+                });
+            }
+        } else {
+            ensure_invitation_available(&invitation, user_id, now)?;
+        }
         Ok(invitation)
     }
 
@@ -389,6 +1164,365 @@ impl BrainStore {
         let mut invitation = self.load_brain_invitation(&invitation.id)?;
         invitation.duplicate_accept = already_member;
         Ok(invitation)
+    }
+
+    /// Accept one fixed account-level invitation as any included principal.
+    /// Membership/access, encrypted grants, cohort provenance, delegated
+    /// authority, audit, and invitation consumption commit together.
+    pub fn accept_account_cohort_invitation_by_code(
+        &mut self,
+        invite_code: &str,
+        actor: &UserId,
+        removed_participants: &BTreeMap<UserId, String>,
+        now: &str,
+    ) -> Result<StoredBrainInvitation, StoreError> {
+        let mut invitation = self
+            .conn
+            .query_row(
+                &format!("{BRAIN_INVITATION_SELECT} WHERE invite_code = ?1"),
+                params![invite_code],
+                brain_invitation_from_row,
+            )
+            .optional()?
+            .ok_or(StoreError::UnavailableLink {
+                kind: "account cohort invitation",
+            })?;
+        if invitation.target_kind != BrainInvitationTargetKind::AccountCohort {
+            return Err(StoreError::UnavailableLink {
+                kind: "account cohort invitation",
+            });
+        }
+        let plan = self
+            .load_cohort_invitation_plan(&invitation.id)?
+            .ok_or_else(|| StoreError::BrokenInvariant {
+                reason: "account cohort invitation is missing its immutable plan".to_owned(),
+            })?;
+        if !plan
+            .participants
+            .iter()
+            .any(|participant| participant.npub == *actor)
+        {
+            return Err(StoreError::UnavailableLink {
+                kind: "account cohort invitation",
+            });
+        }
+        if removed_participants.keys().any(|removed| {
+            !plan.participants.iter().any(|participant| {
+                participant.relationship == "account_agent" && participant.npub == *removed
+            })
+        }) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "acceptance narrowing may only remove approved account agents".to_owned(),
+            });
+        }
+        if invitation.status == LinkStatus::Accepted {
+            invitation.duplicate_accept = true;
+            return Ok(invitation);
+        }
+        if invitation.status != LinkStatus::Pending
+            || timestamp_expired(&invitation.expires_at, now)
+        {
+            return Err(StoreError::UnavailableLink {
+                kind: "account cohort invitation",
+            });
+        }
+        let stored = self.load_brain(&invitation.brain_id)?;
+        let rows = self
+            .conn
+            .prepare(
+                r#"
+                SELECT grant_id, folder_id, key_version, issuer_npub, recipient_npub,
+                       format, wrapped_event_json, created_at, record_event_id,
+                       record_payload_json, record_event_kind
+                FROM cohort_invitation_grants
+                WHERE invitation_id = ?1
+                ORDER BY folder_id, recipient_npub
+                "#,
+            )?
+            .query_map(params![invitation.id], |row| {
+                let folder_id =
+                    FolderId::new(row.get::<_, String>("folder_id")?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                let key_version = row.get::<_, i64>("key_version")?;
+                let issuer_npub =
+                    UserId::new(row.get::<_, String>("issuer_npub")?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                let recipient_npub =
+                    UserId::new(row.get::<_, String>("recipient_npub")?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                let created_at: String = row.get("created_at")?;
+                let grant = FolderKeyGrantMetadata {
+                    id: row.get("grant_id")?,
+                    folder_id: folder_id.clone(),
+                    key_version: u32::try_from(key_version)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, key_version))?,
+                    issuer_npub: issuer_npub.clone(),
+                    recipient_npub,
+                    format: row.get("format")?,
+                    wrapped_event_json: row.get("wrapped_event_json")?,
+                    access_change_event_json: None,
+                    created_at: created_at.clone(),
+                };
+                let record_kind = row.get::<_, i64>("record_event_kind")?;
+                let record = SyncRecordInput::Control(ControlSyncRecord {
+                    record_event_id: row.get("record_event_id")?,
+                    record_type: SyncRecordType::FolderKeyGrant,
+                    folder_id: Some(folder_id),
+                    actor_npub: issuer_npub,
+                    client_created_at: created_at,
+                    payload_json: row.get("record_payload_json")?,
+                    record_event_kind: u16::try_from(record_kind)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(10, record_kind))?,
+                });
+                Ok((grant, record))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let (grants, control_records): (Vec<_>, Vec<_>) = rows
+            .into_iter()
+            .filter(|(grant, _)| !removed_participants.contains_key(&grant.recipient_npub))
+            .unzip();
+        let current_versions = stored
+            .brain
+            .folders
+            .iter()
+            .map(|folder| (folder.id.clone(), folder.current_key_version))
+            .collect::<BTreeMap<_, _>>();
+        if grants
+            .iter()
+            .any(|grant| current_versions.get(&grant.folder_id).copied() != Some(grant.key_version))
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "account cohort invitation plan is stale for current Folder Key versions"
+                    .to_owned(),
+            });
+        }
+        validate_folder_key_grant_control_records(&grants, &control_records)?;
+        let human = plan
+            .participants
+            .iter()
+            .find(|participant| participant.relationship == "human")
+            .ok_or_else(|| StoreError::BrokenInvariant {
+                reason: "account cohort plan has no human participant".to_owned(),
+            })?;
+        let cohort_id = format!("cohort-{}", invitation.id);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            r#"
+            INSERT INTO account_access_cohorts (
+                id, brain_id, account_id, human_npub, human_email, scope_kind, folder_id,
+                provenance_kind, provenance_id, roster_revision, status,
+                created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'invitation', ?8, ?9, 'active', ?10, ?10)
+            "#,
+            params![
+                cohort_id,
+                invitation.brain_id.as_str(),
+                plan.account_id,
+                human.npub.as_str(),
+                plan.human_email,
+                plan.scope_kind,
+                plan.folder_id.as_ref().map(FolderId::as_str),
+                invitation.id,
+                i64::try_from(plan.roster_revision).map_err(|_| {
+                    StoreError::BrokenInvariant {
+                        reason: "roster revision exceeds SQLite integer range".to_owned(),
+                    }
+                })?,
+                now,
+            ],
+        )?;
+        for participant in &plan.participants {
+            if let Some(reason) = removed_participants.get(&participant.npub) {
+                tx.execute(
+                    r#"
+                    INSERT INTO account_access_cohort_participants (
+                        cohort_id, participant_npub, relationship, nip05, display_name,
+                        status, exclusion_reason, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, 'excluded', ?6, ?7, ?7)
+                    "#,
+                    params![
+                        cohort_id,
+                        participant.npub.as_str(),
+                        participant.relationship,
+                        participant.nip05,
+                        participant.name,
+                        reason,
+                        now,
+                    ],
+                )?;
+                tx.execute(
+                    r#"
+                    INSERT INTO account_access_cohort_exclusions (
+                        cohort_id, participant_npub, folder_id, reason, active,
+                        created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+                    "#,
+                    params![
+                        cohort_id,
+                        participant.npub.as_str(),
+                        plan.folder_id.as_ref().map_or("", FolderId::as_str),
+                        reason,
+                        now,
+                    ],
+                )?;
+                continue;
+            }
+            if invitation.folder_only {
+                let folder_id =
+                    plan.folder_id
+                        .as_ref()
+                        .ok_or_else(|| StoreError::BrokenInvariant {
+                            reason: "Folder cohort invitation has no Folder".to_owned(),
+                        })?;
+                insert_folder_access_if_missing(
+                    &tx,
+                    &invitation.brain_id,
+                    folder_id,
+                    &participant.npub,
+                )?;
+                insert_folder_access_source(
+                    &tx,
+                    &invitation.brain_id,
+                    folder_id,
+                    &participant.npub,
+                    "invitation",
+                    &invitation.id,
+                    now,
+                )?;
+            } else {
+                insert_member_if_missing(&tx, &invitation.brain_id, &participant.npub)?;
+                for folder_id in &invitation.initial_folder_access {
+                    insert_folder_access_if_missing(
+                        &tx,
+                        &invitation.brain_id,
+                        folder_id,
+                        &participant.npub,
+                    )?;
+                    insert_folder_access_source(
+                        &tx,
+                        &invitation.brain_id,
+                        folder_id,
+                        &participant.npub,
+                        "invitation",
+                        &invitation.id,
+                        now,
+                    )?;
+                }
+            }
+            tx.execute(
+                r#"
+                INSERT INTO account_access_cohort_participants (
+                    cohort_id, participant_npub, relationship, nip05, display_name,
+                    status, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)
+                "#,
+                params![
+                    cohort_id,
+                    participant.npub.as_str(),
+                    participant.relationship,
+                    participant.nip05,
+                    participant.name,
+                    now,
+                ],
+            )?;
+            if !invitation.folder_only && participant.relationship == "account_agent" {
+                tx.execute(
+                    r#"
+                    INSERT INTO human_anchored_agent_authorities (
+                        cohort_id, brain_id, human_npub, agent_npub, status,
+                        created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5)
+                    "#,
+                    params![
+                        cohort_id,
+                        invitation.brain_id.as_str(),
+                        human.npub.as_str(),
+                        participant.npub.as_str(),
+                        now,
+                    ],
+                )?;
+            }
+        }
+        for (grant, record) in grants.iter().zip(&control_records) {
+            let current_grant_exists = tx.query_row(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM folder_key_grants
+                    WHERE brain_id = ?1 AND folder_id = ?2 AND key_version = ?3
+                      AND recipient_npub = ?4
+                )
+                "#,
+                params![
+                    invitation.brain_id.as_str(),
+                    grant.folder_id.as_str(),
+                    i64::from(grant.key_version),
+                    grant.recipient_npub.as_str(),
+                ],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !current_grant_exists {
+                insert_grant(&tx, &invitation.brain_id, grant)?;
+                sync_records::append_sync_records(
+                    &tx,
+                    &invitation.brain_id,
+                    std::slice::from_ref(record),
+                )?;
+            }
+        }
+        tx.execute(
+            r#"
+            INSERT INTO account_access_cohort_audit (
+                id, cohort_id, action, actor_npub, anchoring_human_npub,
+                detail_json, occurred_at
+            ) VALUES (?1, ?2, 'invitation_accepted', ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                format!("audit-{}-accepted", invitation.id),
+                cohort_id,
+                actor.as_str(),
+                human.npub.as_str(),
+                serde_json::json!({
+                    "invitationId": invitation.id,
+                    "participantCount": plan.participants.len() - removed_participants.len(),
+                    "removedParticipants": removed_participants.iter().map(|(npub, reason)| {
+                        serde_json::json!({ "npub": npub, "reason": reason })
+                    }).collect::<Vec<_>>(),
+                })
+                .to_string(),
+                now,
+            ],
+        )?;
+        tx.execute(
+            r#"
+            UPDATE brain_invitations
+            SET status = 'accepted', claimed_by_npub = ?3,
+                updated_at = ?4, accepted_at = ?4
+            WHERE brain_id = ?1 AND id = ?2 AND status = 'pending'
+            "#,
+            params![
+                invitation.brain_id.as_str(),
+                invitation.id,
+                actor.as_str(),
+                now,
+            ],
+        )?;
+        tx.commit()?;
+        self.load_brain_invitation(&invitation.id)
     }
 
     /// Test-only claim helper that synthesizes the signed-record metadata boundary.
@@ -581,6 +1715,7 @@ impl BrainStore {
                 .personal_agent
                 .as_ref()
                 .map(|relationship| &relationship.agent_npub),
+            has_brain_operational_authority(&stored, &grant.issuer_npub),
         )?;
         if grant.folder_id != *folder_id
             || grant.key_version != folder.current_key_version
@@ -759,6 +1894,7 @@ impl BrainStore {
                 .personal_agent
                 .as_ref()
                 .map(|relationship| &relationship.agent_npub),
+            has_brain_operational_authority(&stored, &share_link.folder_key_grant.issuer_npub),
         )?;
         if share_link.folder_key_grant.key_version != folder.current_key_version {
             return Err(StoreError::BrokenInvariant {

@@ -59,6 +59,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const WORKOS_USER_HEADER: &str = "x-finite-workos-user-id";
+pub const WORKOS_EMAIL_HEADER: &str = "x-finite-workos-email";
 pub const REQUESTER_EMAIL_HEADER: &str = "x-finite-requester-email";
 pub const SITES_REQUESTER_ASSERTION_HEADER: &str = "x-finite-sites-requester-assertion";
 const CREATED_BY: &str = concat!("finitechat-hosted-device/", env!("CARGO_PKG_VERSION"));
@@ -197,11 +198,32 @@ impl HostedDeviceState {
     }
 
     fn runtime_for(&self, user_id: &str) -> Result<Arc<FiniteChatRuntime>, HostedDeviceError> {
+        self.runtime_for_account(user_id, None)
+    }
+
+    fn runtime_for_account(
+        &self,
+        user_id: &str,
+        verified_email: Option<&str>,
+    ) -> Result<Arc<FiniteChatRuntime>, HostedDeviceError> {
         let mut runtimes = self
             .runtimes
             .lock()
             .map_err(|_| HostedDeviceError::LockPoisoned)?;
         if let Some(runtime) = runtimes.get(user_id) {
+            if let (Some(authority), Some(verified_email)) =
+                (&self.identity_authority, verified_email)
+            {
+                let identity_paths =
+                    IdentityPaths::with_finite_home(self.user_root(user_id).join("finite-home"));
+                let identity = FiniteIdentity::load(&identity_paths)?;
+                register_hosted_user_principal(
+                    authority,
+                    user_id,
+                    &identity.npub(),
+                    Some(verified_email),
+                )?;
+            }
             return Ok(Arc::clone(runtime));
         }
 
@@ -228,7 +250,7 @@ impl HostedDeviceState {
             now_unix_seconds: None,
         })?;
         if let Some(authority) = &self.identity_authority {
-            register_hosted_user_principal(authority, user_id, &identity.npub())?;
+            register_hosted_user_principal(authority, user_id, &identity.npub(), verified_email)?;
         }
         runtimes.insert(user_id.to_owned(), Arc::clone(&runtime));
         Ok(runtime)
@@ -239,6 +261,7 @@ fn register_hosted_user_principal(
     authority: &HostedIdentityAuthorityConfig,
     workos_user_id: &str,
     user_npub: &str,
+    verified_email: Option<&str>,
 ) -> Result<(), HostedDeviceError> {
     let base_url = authority.base_url.trim().trim_end_matches('/');
     let operator_token = authority.operator_token.trim();
@@ -250,6 +273,7 @@ fn register_hosted_user_principal(
     let body = serde_json::json!({
         "workosUserId": workos_user_id,
         "userNpub": user_npub,
+        "verifiedEmail": verified_email,
     })
     .to_string();
     ureq::post(&format!(
@@ -2203,7 +2227,8 @@ async fn app_state(
     headers: HeaderMap,
 ) -> Result<Json<AppState>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
-    let runtime = state.runtime_for(&user_id)?;
+    let verified_email = verified_account_email(&headers)?;
+    let runtime = state.runtime_for_account(&user_id, verified_email.as_deref())?;
     Ok(Json(redacted_state(runtime.state()?)))
 }
 
@@ -2341,6 +2366,7 @@ async fn execute_brain_identity_provider_operation(
     Json(request): Json<BrainIdentityProviderRequest>,
 ) -> Result<Json<Value>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
+    let verified_email = verified_account_email(&headers)?;
     let official_origin = headers
         .get(BRAIN_PUBLIC_ORIGIN_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -2360,6 +2386,15 @@ async fn execute_brain_identity_provider_operation(
 
     let response = tokio::task::spawn_blocking(move || -> Result<_, HostedDeviceError> {
         let keys = brain_user_keys_if_setup(&state, &user_id)?;
+        if let (Some(authority), Some(verified_email)) =
+            (&state.identity_authority, verified_email.as_deref())
+        {
+            let public_key = NostrPublicKey::from_protocol(keys.public_key());
+            let npub = public_key.to_npub().map_err(|error| {
+                HostedDeviceError::InvalidBrainIdentityProvider(error.to_string())
+            })?;
+            register_hosted_user_principal(authority, &user_id, &npub, Some(verified_email))?;
+        }
         match request.operation.as_str() {
             "identifyMember" => {
                 let public_key = NostrPublicKey::from_protocol(keys.public_key());
@@ -3472,8 +3507,9 @@ async fn dispatch_action(
     Json(action): Json<AppAction>,
 ) -> Result<Json<AppState>, HostedDeviceError> {
     let user_id = authorized_user(&state, &headers)?;
+    let verified_email = verified_account_email(&headers)?;
     let requester_context = requester_context_from_headers(&headers)?;
-    let runtime = state.runtime_for(&user_id)?;
+    let runtime = state.runtime_for_account(&user_id, verified_email.as_deref())?;
     let next = tokio::task::spawn_blocking(move || match requester_context {
         Some((email, assertion)) => {
             runtime.dispatch_and_wait_with_requester_context(action, email, assertion)
@@ -4061,6 +4097,24 @@ fn authorized_user(
         return Err(HostedDeviceError::InvalidUser);
     }
     Ok(user_id.to_owned())
+}
+
+fn verified_account_email(headers: &HeaderMap) -> Result<Option<String>, HostedDeviceError> {
+    let Some(email) = headers.get(WORKOS_EMAIL_HEADER) else {
+        return Ok(None);
+    };
+    let email = email
+        .to_str()
+        .map_err(|_| HostedDeviceError::InvalidUser)?
+        .trim();
+    if email.is_empty()
+        || email.len() > 320
+        || !email.contains('@')
+        || email.chars().any(char::is_control)
+    {
+        return Err(HostedDeviceError::InvalidUser);
+    }
+    Ok(Some(email.to_ascii_lowercase()))
 }
 
 fn requester_context_from_headers(

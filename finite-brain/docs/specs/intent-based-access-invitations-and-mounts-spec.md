@@ -1,5 +1,13 @@
 # Intent-Based FiniteBrain Access, Invitations, And Mounts
 
+> Amended 2026-08-07 by
+> [Account-Agent Access Cohorts And Multi-Agent Personal Brains](account-agent-access-cohorts-spec.md)
+> and ADR-0045. Email-addressed invitations and later access changes now resolve
+> to a fixed human-plus-agent participant set, and Personal Brain governance
+> uses the live Personal Brain Agent Set. The remaining command, Member/Guest,
+> Folder Access Readiness, and Mount decisions in this specification remain in
+> force.
+
 ## Problem Statement
 
 FiniteBrain exposes the same authorization concepts through overlapping CLI

@@ -9,10 +9,11 @@ use finitechat_core::nip_ab::{
 use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions, npub_from_account_id};
 use finitechat_hosted_device::{
     HostedDeviceConfig, HostedIdentityAuthorityConfig, MAX_HOSTED_ATTACHMENT_BYTES,
-    MAX_HOSTED_ATTACHMENTS_PER_MESSAGE, MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_USER_HEADER, app,
-    app_with_final_agent_binding_persist_failures, app_with_fixed_device_link_now,
-    app_with_fixed_device_link_now_and_lock_hook, app_with_identity_authority,
-    app_with_profile_bootstrap_room_create_failures, app_with_profile_bootstrap_submit_failures,
+    MAX_HOSTED_ATTACHMENTS_PER_MESSAGE, MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_EMAIL_HEADER,
+    WORKOS_USER_HEADER, app, app_with_final_agent_binding_persist_failures,
+    app_with_fixed_device_link_now, app_with_fixed_device_link_now_and_lock_hook,
+    app_with_identity_authority, app_with_profile_bootstrap_room_create_failures,
+    app_with_profile_bootstrap_submit_failures,
 };
 use finitechat_http::{
     CreatePairingSessionRequest, GetPairingSessionRequest, HttpPairingSessionRecord,
@@ -85,7 +86,7 @@ async fn initial_hosted_chat_setup_registers_the_users_public_identity() {
         },
     );
 
-    let user_state = state_for(hosted, "user_paul").await;
+    let user_state = state_for_with_email(hosted, "user_paul", "paul@finite.vip").await;
     let expected_npub = npub_from_account_id(
         user_state["identity"]["account_id"]
             .as_str()
@@ -98,6 +99,7 @@ async fn initial_hosted_chat_setup_registers_the_users_public_identity() {
         Some(&serde_json::json!({
             "workosUserId": "user_paul",
             "userNpub": expected_npub,
+            "verifiedEmail": "paul@finite.vip",
         }))
     );
     authority_task.abort();
@@ -2821,6 +2823,23 @@ fn test_app(root: &TempDir) -> axum::Router {
 
 async fn state_for(app: axum::Router, user_id: &str) -> Value {
     let response = state_response_for(app, user_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn state_for_with_email(app: axum::Router, user_id: &str, email: &str) -> Value {
+    let response = app
+        .oneshot(
+            Request::get("/v1/app/state")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header(WORKOS_USER_HEADER, user_id)
+                .header(WORKOS_EMAIL_HEADER, email)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()

@@ -1,6 +1,6 @@
 # Atomically Add Requesters To Agent-Created Organization Brains
 
-Status: accepted 2026-07-17.
+Status: superseded 2026-08-07 by ADR-0045.
 
 When an authenticated human directly asks an agent to create an Organization
 Brain, the acting Agent Principal and the requesting User Nostr Identity become

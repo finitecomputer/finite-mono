@@ -425,6 +425,12 @@ pub(crate) struct BrainMetadataView {
     pub(crate) owner_user_id: Option<String>,
     #[serde(default)]
     pub(crate) personal_agent: Option<PersonalAgentView>,
+    #[serde(default)]
+    pub(crate) personal_brain_agents: Vec<PersonalBrainAgentView>,
+    #[serde(default)]
+    pub(crate) human_anchored_agent_authorities: Vec<HumanAnchoredAgentAuthorityView>,
+    #[serde(default)]
+    pub(crate) account_access_cohorts: Vec<AccountAccessCohortView>,
     pub(crate) members: Vec<String>,
     #[serde(default)]
     pub(crate) guests: Vec<String>,
@@ -440,6 +446,50 @@ pub(crate) struct BrainMetadataView {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PersonalAgentView {
     pub(crate) agent_npub: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersonalBrainAgentView {
+    pub(crate) agent_npub: String,
+    pub(crate) status: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HumanAnchoredAgentAuthorityView {
+    pub(crate) agent_npub: String,
+    pub(crate) human_npub: String,
+    pub(crate) scope: String,
+    pub(crate) status: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountAccessCohortView {
+    pub(crate) cohort_id: String,
+    pub(crate) human_npub: String,
+    pub(crate) human_email: String,
+    pub(crate) scope_kind: String,
+    pub(crate) folder_id: Option<String>,
+    pub(crate) provenance_kind: String,
+    pub(crate) status: String,
+    pub(crate) participants: Vec<AccountAccessCohortParticipantView>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountAccessCohortParticipantView {
+    pub(crate) npub: String,
+    pub(crate) relationship: String,
+    pub(crate) nip05: String,
+    pub(crate) display_name: String,
+    pub(crate) status: String,
+    pub(crate) exclusion_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) brain_access_excluded: bool,
+    #[serde(default)]
+    pub(crate) excluded_folder_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]

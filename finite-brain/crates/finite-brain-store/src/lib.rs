@@ -14,10 +14,12 @@ use finite_brain_core::{
     required_folder_key_recipients, validate_folder_rotation_fanout,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 mod brains;
+mod cohorts;
 mod folder_access;
 mod folder_deletion;
 mod links;
@@ -180,6 +182,9 @@ pub struct StoredBrain {
     pub brain: Brain,
     /// The one active Personal Agent relationship, when occupied.
     pub personal_agent: Option<PersonalAgent>,
+    /// Complete additive Personal Brain Agent Set. `personal_agent` remains the
+    /// legacy singular compatibility projection until cutover.
+    pub personal_brain_agents: Vec<StoredPersonalBrainAgent>,
     /// Explicit Guest access by Folder id, independent of native access mode.
     pub folder_access: BTreeMap<FolderId, BTreeSet<UserId>>,
     /// Stored Folder Key Grant metadata.
@@ -188,6 +193,192 @@ pub struct StoredBrain {
     pub setup_incomplete_folder_ids: BTreeSet<FolderId>,
     /// Exact pre-deletion readers allowed to observe each subtree tombstone.
     pub folder_deletion_audience: BTreeMap<String, BTreeSet<UserId>>,
+    /// Active agent-to-human operational authority anchored in this Brain.
+    pub human_anchored_agent_authorities: BTreeMap<UserId, UserId>,
+    /// Durable account-cohort provenance and participant state. This is the
+    /// authoritative source for explaining why a principal has access.
+    pub account_access_cohorts: Vec<StoredAccountAccessCohort>,
+    /// Active scoped exclusions keyed by participant and Folder. The empty
+    /// Folder id sentinel represents a whole-Brain exclusion.
+    pub account_agent_exclusions: BTreeSet<(UserId, String)>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredAccountAccessCohort {
+    pub cohort_id: String,
+    pub account_id: String,
+    pub human_npub: UserId,
+    pub human_email: String,
+    pub scope_kind: String,
+    pub folder_id: Option<FolderId>,
+    pub provenance_kind: String,
+    pub status: String,
+    pub participants: Vec<StoredAccountAccessParticipant>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredAccountAccessParticipant {
+    pub npub: UserId,
+    pub relationship: String,
+    pub nip05: String,
+    pub display_name: String,
+    pub status: String,
+    pub exclusion_reason: Option<String>,
+    pub excluded_folder_ids: Vec<String>,
+}
+
+/// One account-owned agent in a Personal Brain's desired/readiness set.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredPersonalBrainAgent {
+    pub agent_npub: UserId,
+    pub agent_nip05: String,
+    pub display_name: String,
+    pub status: String,
+    pub roster_revision: u64,
+    pub blocker: Option<String>,
+}
+
+/// Result of applying one fixed mailbox cohort to a restricted Folder.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum GrantAccountCohortFolderAccessOutcome {
+    Granted,
+    AlreadyApplied,
+}
+
+/// Read-only exact plan for removing mailbox-derived restricted-Folder access.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AccountCohortFolderRemovalPlan {
+    pub cohort_ids: Vec<String>,
+    pub source_origins: Vec<(String, String)>,
+    pub participants: Vec<StoredCohortParticipant>,
+    pub removed_participant_npubs: BTreeSet<UserId>,
+    pub independently_retained_npubs: BTreeSet<UserId>,
+    pub required_recipient_npubs: BTreeSet<UserId>,
+    pub current_key_version: u32,
+    pub new_key_version: u32,
+}
+
+/// One Personal Brain agent still needing current Folder grants.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PersonalBrainAgentAdmissionPlan {
+    pub cohort_id: String,
+    pub human_npub: UserId,
+    pub human_email: String,
+    pub roster_revision: u64,
+    pub agents: Vec<StoredCohortParticipant>,
+    pub folder_key_versions: Vec<(FolderId, u32)>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ApplyPermanentAgentDepartureOutcome {
+    Applied,
+    AlreadyApplied,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PermanentAgentDeparturePlan {
+    pub account_id: String,
+    pub human_email: String,
+    pub agent_nip05: String,
+    pub agent_npub: UserId,
+    pub folders: Vec<PermanentAgentDepartureFolderPlan>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PermanentAgentDepartureFolderPlan {
+    pub folder_id: FolderId,
+    pub current_key_version: u32,
+    pub new_key_version: u32,
+    pub required_recipient_npubs: BTreeSet<UserId>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AuthenticatedHumanIntentRecord {
+    pub event_id: String,
+    pub human_npub: UserId,
+    pub acting_agent_npub: UserId,
+    pub target_agent_npub: UserId,
+    pub operation: String,
+    pub scope_kind: String,
+    pub folder_id: Option<FolderId>,
+    pub event_json: String,
+    pub consumed_at: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PersonalAgentBrainAccessPlan {
+    pub human_npub: UserId,
+    pub human_email: String,
+    pub target_agent_npub: UserId,
+    pub operation: String,
+    pub folders: Vec<PersonalAgentBrainAccessFolderPlan>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PersonalAgentBrainAccessFolderPlan {
+    pub folder_id: FolderId,
+    pub current_key_version: u32,
+    pub new_key_version: u32,
+    pub required_recipient_npubs: BTreeSet<UserId>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCohortReconciliationPlan {
+    pub operation_id: String,
+    pub brain_id: BrainId,
+    pub account_id: String,
+    pub human_npub: UserId,
+    pub human_email: String,
+    pub scope_kind: String,
+    pub folder_id: Option<FolderId>,
+    pub roster_revision: u64,
+    pub participants: Vec<StoredCohortParticipant>,
+    pub folders: Vec<AccountCohortReconciliationFolderPlan>,
+    pub pending_invitations: Vec<AccountCohortReconciliationPendingInvitation>,
+    pub expected_member_additions: Vec<UserId>,
+    pub independent_agent_npubs: Vec<UserId>,
+    pub capacity: AccountCohortReconciliationCapacity,
+    pub blocker: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCohortReconciliationPendingInvitation {
+    pub invitation_id: String,
+    pub target_kind: String,
+    pub scope_kind: String,
+    pub folder_id: Option<FolderId>,
+    pub expires_at: String,
+    pub conversion_required: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCohortReconciliationFolderPlan {
+    pub folder_id: FolderId,
+    pub key_version: u32,
+    pub current_grant_recipient_npubs: Vec<UserId>,
+    pub missing_grant_recipient_npubs: Vec<UserId>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCohortReconciliationCapacity {
+    pub members_after: usize,
+    pub member_limit: usize,
+    pub folder_access_entries_after: usize,
+    pub folder_access_entry_limit: usize,
+    pub folder_key_grants_after: usize,
+    pub folder_key_grant_limit: usize,
+    pub sync_records_after: usize,
+    pub sync_record_limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CommitAccountCohortReconciliationOutcome {
+    Committed,
+    AlreadyCommitted,
 }
 
 impl StoredBrain {
@@ -200,15 +391,22 @@ impl StoredBrain {
             .map(|member| member.user_id.clone())
             .collect::<BTreeSet<_>>();
         let owner = self.brain.owner_user_id.as_ref();
-        let personal_agent = self
-            .personal_agent
-            .as_ref()
-            .map(|relationship| &relationship.agent_npub);
+        let personal_agents = self
+            .personal_brain_agents
+            .iter()
+            .filter(|agent| agent.status == "ready")
+            .map(|agent| &agent.agent_npub)
+            .chain(
+                self.personal_agent
+                    .as_ref()
+                    .map(|relationship| &relationship.agent_npub),
+            )
+            .collect::<BTreeSet<_>>();
         self.folder_access
             .values()
             .flat_map(BTreeSet::iter)
             .filter(|user| {
-                !members.contains(*user) && owner != Some(*user) && personal_agent != Some(*user)
+                !members.contains(*user) && owner != Some(*user) && !personal_agents.contains(*user)
             })
             .cloned()
             .collect()
@@ -598,6 +796,8 @@ pub enum BrainInvitationTargetKind {
     Npub,
     /// Email-targeted bootstrap awaiting client-side claim into an npub.
     EmailBootstrap,
+    /// Fixed human-plus-account-agent participant set addressed by mailbox.
+    AccountCohort,
 }
 
 impl BrainInvitationTargetKind {
@@ -605,6 +805,7 @@ impl BrainInvitationTargetKind {
         match self {
             Self::Npub => "npub",
             Self::EmailBootstrap => "email_bootstrap",
+            Self::AccountCohort => "account_cohort",
         }
     }
 }
@@ -616,6 +817,7 @@ impl TryFrom<&str> for BrainInvitationTargetKind {
         match value {
             "npub" => Ok(Self::Npub),
             "email_bootstrap" => Ok(Self::EmailBootstrap),
+            "account_cohort" => Ok(Self::AccountCohort),
             _ => Err(StoreError::BrokenInvariant {
                 reason: format!("unknown brain invitation target kind {value}"),
             }),
@@ -673,6 +875,42 @@ pub struct StoredBrainInvitation {
     pub accepted_at: Option<String>,
     /// True when accept returned an already-consumed result for the same target.
     pub duplicate_accept: bool,
+}
+
+/// One immutable participant approved in an account-cohort invitation plan.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredCohortParticipant {
+    pub relationship: String,
+    pub name: String,
+    pub nip05: String,
+    pub npub: UserId,
+}
+
+/// Durable fixed participant set and authoritative facts behind one invitation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct StoredCohortInvitationPlan {
+    pub invitation_id: String,
+    pub plan_id: String,
+    pub account_id: String,
+    pub human_email: String,
+    pub roster_revision: u64,
+    pub scope_kind: String,
+    pub folder_id: Option<FolderId>,
+    pub participants: Vec<StoredCohortParticipant>,
+    pub exclusions_json: String,
+    pub key_versions_json: String,
+    pub actor_npub: UserId,
+    pub created_at: String,
+}
+
+/// Authoritative account snapshot committed atomically during Brain bootstrap.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BootstrapAccountCohort {
+    pub account_id: String,
+    pub human_email: String,
+    pub roster_revision: u64,
+    pub participants: Vec<StoredCohortParticipant>,
 }
 
 /// Stored npub-bound singleton Folder Share Link.
@@ -957,11 +1195,206 @@ impl BrainStore {
         Ok(StoredBrain {
             brain,
             personal_agent: self.load_personal_agent(brain_id)?,
+            personal_brain_agents: self.load_personal_brain_agents(brain_id)?,
             folder_access,
             grants: self.load_grants(brain_id)?,
             setup_incomplete_folder_ids: self.load_setup_incomplete_folder_ids(brain_id)?,
             folder_deletion_audience: self.load_folder_deletion_audience(brain_id)?,
+            human_anchored_agent_authorities: self
+                .load_human_anchored_agent_authorities(brain_id)?,
+            account_access_cohorts: self.load_account_access_cohorts(brain_id)?,
+            account_agent_exclusions: self.load_account_agent_exclusions(brain_id)?,
         })
+    }
+
+    fn load_account_access_cohorts(
+        &self,
+        brain_id: &BrainId,
+    ) -> Result<Vec<StoredAccountAccessCohort>, StoreError> {
+        let mut cohort_statement = self.conn.prepare(
+            r#"
+            SELECT id, account_id, human_npub, human_email, scope_kind,
+                   folder_id, provenance_kind, status
+            FROM account_access_cohorts
+            WHERE brain_id = ?1
+            ORDER BY created_at, id
+            "#,
+        )?;
+        let cohort_rows = cohort_statement
+            .query_map(params![brain_id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut participant_statement = self.conn.prepare(
+            r#"
+            SELECT participant_npub, relationship, nip05, display_name,
+                   status, exclusion_reason
+            FROM account_access_cohort_participants
+            WHERE cohort_id = ?1
+            ORDER BY relationship DESC, participant_npub
+            "#,
+        )?;
+        let mut exclusion_statement = self.conn.prepare(
+            r#"
+            SELECT COALESCE(folder_id, '')
+            FROM account_access_cohort_exclusions
+            WHERE cohort_id = ?1 AND participant_npub = ?2 AND active = 1
+            ORDER BY COALESCE(folder_id, '')
+            "#,
+        )?;
+        let mut cohorts = Vec::with_capacity(cohort_rows.len());
+        for (
+            cohort_id,
+            account_id,
+            human_npub,
+            human_email,
+            scope_kind,
+            folder_id,
+            provenance_kind,
+            status,
+        ) in cohort_rows
+        {
+            let rows = participant_statement.query_map(params![&cohort_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?;
+            let mut participants = Vec::new();
+            for row in rows {
+                let (npub, relationship, nip05, display_name, participant_status, reason) = row?;
+                let excluded_folder_ids = exclusion_statement
+                    .query_map(params![&cohort_id, &npub], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                participants.push(StoredAccountAccessParticipant {
+                    npub: UserId::new(npub)?,
+                    relationship,
+                    nip05,
+                    display_name,
+                    status: participant_status,
+                    exclusion_reason: reason,
+                    excluded_folder_ids,
+                });
+            }
+            cohorts.push(StoredAccountAccessCohort {
+                cohort_id,
+                account_id,
+                human_npub: UserId::new(human_npub)?,
+                human_email,
+                scope_kind,
+                folder_id: folder_id.map(FolderId::new).transpose()?,
+                provenance_kind,
+                status,
+                participants,
+            });
+        }
+        Ok(cohorts)
+    }
+
+    fn load_account_agent_exclusions(
+        &self,
+        brain_id: &BrainId,
+    ) -> Result<BTreeSet<(UserId, String)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT exclusion.participant_npub, COALESCE(exclusion.folder_id, '')
+            FROM account_access_cohort_exclusions exclusion
+            JOIN account_access_cohorts cohort ON cohort.id = exclusion.cohort_id
+            JOIN account_access_cohort_participants participant
+              ON participant.cohort_id = exclusion.cohort_id
+             AND participant.participant_npub = exclusion.participant_npub
+            WHERE cohort.brain_id = ?1
+              AND cohort.status = 'active'
+              AND participant.relationship = 'account_agent'
+              AND exclusion.active = 1
+            ORDER BY exclusion.participant_npub, COALESCE(exclusion.folder_id, '')
+            "#,
+        )?;
+        let rows = statement.query_map(params![brain_id.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut exclusions = BTreeSet::new();
+        for row in rows {
+            let (npub, folder_id) = row?;
+            exclusions.insert((UserId::new(npub)?, folder_id));
+        }
+        Ok(exclusions)
+    }
+
+    fn load_personal_brain_agents(
+        &self,
+        brain_id: &BrainId,
+    ) -> Result<Vec<StoredPersonalBrainAgent>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT agent_npub, agent_nip05, display_name, status,
+                   roster_revision, blocker
+            FROM personal_brain_agents
+            WHERE brain_id = ?1
+            ORDER BY created_at, agent_npub
+            "#,
+        )?;
+        stmt.query_map(params![brain_id.as_str()], |row| {
+            let npub = row.get::<_, String>(0)?;
+            let revision = row.get::<_, i64>(4)?;
+            Ok(StoredPersonalBrainAgent {
+                agent_npub: UserId::new(npub).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                agent_nip05: row.get(1)?,
+                display_name: row.get(2)?,
+                status: row.get(3)?,
+                roster_revision: u64::try_from(revision)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, revision))?,
+                blocker: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
+    }
+
+    fn load_human_anchored_agent_authorities(
+        &self,
+        brain_id: &BrainId,
+    ) -> Result<BTreeMap<UserId, UserId>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT authority.agent_npub, authority.human_npub
+            FROM human_anchored_agent_authorities authority
+            JOIN account_access_cohorts cohort ON cohort.id = authority.cohort_id
+            WHERE authority.brain_id = ?1
+              AND authority.status = 'active'
+              AND cohort.status = 'active'
+            ORDER BY authority.agent_npub, authority.created_at
+            "#,
+        )?;
+        let rows = stmt.query_map(params![brain_id.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut authorities = BTreeMap::new();
+        for row in rows {
+            let (agent, human) = row?;
+            authorities.insert(UserId::new(agent)?, UserId::new(human)?);
+        }
+        Ok(authorities)
     }
 
     fn load_folder_deletion_audience(
@@ -1107,10 +1540,7 @@ impl BrainStore {
         actor_npub: &UserId,
     ) -> Result<EncryptedBrainExport, StoreError> {
         let stored = self.load_brain(brain_id)?;
-        let is_personal_agent = stored
-            .personal_agent
-            .as_ref()
-            .is_some_and(|relationship| relationship.agent_npub == *actor_npub);
+        let is_personal_agent = is_ready_personal_agent(&stored, actor_npub);
         let is_member = stored
             .brain
             .members
@@ -1303,9 +1733,40 @@ impl BrainStore {
         let personal_agent = self
             .load_personal_agent(&brain.id)?
             .map(|relationship| relationship.agent_npub);
-        let required =
+        let personal_brain_agents = self
+            .load_personal_brain_agents(&brain.id)?
+            .into_iter()
+            .filter(|agent| agent.status == "ready")
+            .map(|agent| agent.agent_npub)
+            .collect::<BTreeSet<_>>();
+        let mut required =
             required_recipients(brain, folder, access_user_ids, personal_agent.as_ref())?;
-        validate_folder_grants(brain, folder, &required, grants, personal_agent.as_ref())
+        required.extend(personal_brain_agents.iter().cloned());
+        let delegated_issuer = grants
+            .first()
+            .map(|grant| &grant.issuer_npub)
+            .filter(|issuer| personal_brain_agents.contains(*issuer));
+        let anchored_authorities = self.load_human_anchored_agent_authorities(&brain.id)?;
+        for (agent, human) in &anchored_authorities {
+            if required.contains(human) {
+                required.insert(agent.clone());
+            }
+        }
+        let allow_anchored_issuer = grants.iter().all(|grant| {
+            anchored_authorities
+                .get(&grant.issuer_npub)
+                .is_some_and(|human| {
+                    brain.owner_user_id.as_ref() == Some(human) || brain.admins.contains(human)
+                })
+        });
+        validate_folder_grants(
+            brain,
+            folder,
+            &required,
+            grants,
+            delegated_issuer.or(personal_agent.as_ref()),
+            allow_anchored_issuer,
+        )
     }
 
     fn actor_has_current_source_access_and_grant(
@@ -1429,7 +1890,7 @@ impl BrainStore {
         }
         let mut rotated_folder = folder.clone();
         rotated_folder.current_key_version = rotation.new_key_version;
-        let required = required_recipients(
+        let mut required = required_recipients(
             &stored.brain,
             &rotated_folder,
             &remaining_access,
@@ -1438,6 +1899,7 @@ impl BrainStore {
                 .as_ref()
                 .map(|relationship| &relationship.agent_npub),
         )?;
+        extend_account_agent_recipients(&mut required, &stored, &folder.id);
         validate_connection_rotation_grants(
             &rotated_folder,
             &required,
@@ -2352,7 +2814,7 @@ fn validate_required_grants(
 
     for grant in grants {
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(brain, grant, None)?;
+        validate_grant_issuer(brain, grant, None, false)?;
     }
     Ok(())
 }
@@ -2363,11 +2825,12 @@ fn validate_folder_grants(
     required_recipients: &BTreeSet<UserId>,
     grants: &[FolderKeyGrantMetadata],
     personal_agent: Option<&UserId>,
+    allow_operational_authority: bool,
 ) -> Result<(), StoreError> {
     let mut provided = BTreeSet::new();
     for grant in grants {
         validate_grant_metadata(grant)?;
-        validate_grant_issuer(brain, grant, personal_agent)?;
+        validate_grant_issuer(brain, grant, personal_agent, allow_operational_authority)?;
         if grant.folder_id != folder.id {
             return Err(StoreError::BrokenInvariant {
                 reason: "grant folder id must match folder metadata".to_owned(),
@@ -2401,11 +2864,13 @@ fn validate_grant_issuer(
     brain: &Brain,
     grant: &FolderKeyGrantMetadata,
     personal_agent: Option<&UserId>,
+    allow_operational_authority: bool,
 ) -> Result<(), StoreError> {
     match brain.kind {
         BrainKind::Personal => {
             if brain.owner_user_id.as_ref() != Some(&grant.issuer_npub)
                 && personal_agent != Some(&grant.issuer_npub)
+                && !allow_operational_authority
             {
                 return Err(StoreError::BrokenInvariant {
                     reason: "personal brain grants must be issued by the owner or Personal Agent"
@@ -2414,7 +2879,7 @@ fn validate_grant_issuer(
             }
         }
         BrainKind::Organization => {
-            if !brain.admins.contains(&grant.issuer_npub) {
+            if !brain.admins.contains(&grant.issuer_npub) && !allow_operational_authority {
                 return Err(StoreError::BrokenInvariant {
                     reason: "organization folder grants must be issued by a brain admin".to_owned(),
                 });
@@ -2744,6 +3209,35 @@ fn required_recipients(
     .map_err(StoreError::from)
 }
 
+fn extend_account_agent_recipients(
+    required: &mut BTreeSet<UserId>,
+    stored: &StoredBrain,
+    folder_id: &FolderId,
+) {
+    let excluded = |agent: &UserId| {
+        stored
+            .account_agent_exclusions
+            .contains(&(agent.clone(), String::new()))
+            || stored
+                .account_agent_exclusions
+                .contains(&(agent.clone(), folder_id.to_string()))
+    };
+    if stored.brain.kind == BrainKind::Personal {
+        required.extend(
+            stored
+                .personal_brain_agents
+                .iter()
+                .filter(|agent| agent.status == "ready" && !excluded(&agent.agent_npub))
+                .map(|agent| agent.agent_npub.clone()),
+        );
+    }
+    for (agent, human) in &stored.human_anchored_agent_authorities {
+        if required.contains(human) && !excluded(agent) {
+            required.insert(agent.clone());
+        }
+    }
+}
+
 fn brain_visible_to_actor(brain: &Brain, actor_npub: &UserId) -> bool {
     match brain.kind {
         BrainKind::Personal => {
@@ -2764,16 +3258,40 @@ fn brain_visible_to_actor(brain: &Brain, actor_npub: &UserId) -> bool {
 }
 
 pub(crate) fn has_brain_operational_authority(stored: &StoredBrain, actor_npub: &UserId) -> bool {
+    if stored
+        .account_agent_exclusions
+        .contains(&(actor_npub.clone(), String::new()))
+    {
+        return false;
+    }
     match stored.brain.kind {
         BrainKind::Personal => {
             stored.brain.owner_user_id.as_ref() == Some(actor_npub)
+                || is_ready_personal_agent(stored, actor_npub)
                 || stored
-                    .personal_agent
-                    .as_ref()
-                    .is_some_and(|relationship| relationship.agent_npub == *actor_npub)
+                    .human_anchored_agent_authorities
+                    .get(actor_npub)
+                    .is_some_and(|human| stored.brain.owner_user_id.as_ref() == Some(human))
         }
-        BrainKind::Organization => stored.brain.admins.contains(actor_npub),
+        BrainKind::Organization => {
+            stored.brain.admins.contains(actor_npub)
+                || stored
+                    .human_anchored_agent_authorities
+                    .get(actor_npub)
+                    .is_some_and(|human| stored.brain.admins.contains(human))
+        }
     }
+}
+
+fn is_ready_personal_agent(stored: &StoredBrain, actor_npub: &UserId) -> bool {
+    stored
+        .personal_brain_agents
+        .iter()
+        .any(|agent| agent.status == "ready" && agent.agent_npub == *actor_npub)
+        || stored
+            .personal_agent
+            .as_ref()
+            .is_some_and(|relationship| relationship.agent_npub == *actor_npub)
 }
 
 fn folder_visible_to_actor(
@@ -2795,18 +3313,29 @@ fn folder_visible_to_actor(
         .as_ref()
         .is_some_and(|owner| owner == actor_npub);
     let is_admin = stored.brain.admins.contains(actor_npub);
-    let is_personal_agent = stored
-        .personal_agent
-        .as_ref()
-        .is_some_and(|relationship| relationship.agent_npub == *actor_npub);
+    let is_personal_agent = is_ready_personal_agent(stored, actor_npub);
     let is_member = stored
         .brain
         .members
         .iter()
         .any(|member| member.user_id == *actor_npub);
 
+    let cohort_agent_excluded = stored
+        .account_agent_exclusions
+        .contains(&(actor_npub.clone(), String::new()))
+        || stored
+            .account_agent_exclusions
+            .contains(&(actor_npub.clone(), folder_id.to_string()));
+
+    if let Some(human) = stored.human_anchored_agent_authorities.get(actor_npub) {
+        if cohort_agent_excluded {
+            return false;
+        }
+        return folder_visible_to_actor(stored, folder_id, human);
+    }
+
     if is_personal_agent {
-        return true;
+        return !cohort_agent_excluded;
     }
     if stored
         .folder_access
@@ -3059,6 +3588,56 @@ fn insert_grant(
     Ok(())
 }
 
+fn consume_authenticated_human_intent(
+    tx: &Transaction<'_>,
+    brain_id: &BrainId,
+    intent: &AuthenticatedHumanIntentRecord,
+) -> Result<(), StoreError> {
+    if !matches!(intent.operation.as_str(), "restrict" | "restore")
+        || !matches!(intent.scope_kind.as_str(), "brain" | "folder")
+        || (intent.scope_kind == "brain") != intent.folder_id.is_none()
+        || intent.event_id.trim().is_empty()
+        || intent.event_json.trim().is_empty()
+        || intent.acting_agent_npub == intent.target_agent_npub
+    {
+        return Err(StoreError::BrokenInvariant {
+            reason: "Authenticated Human Intent is incomplete or ambiguous".to_owned(),
+        });
+    }
+    let replayed = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM authenticated_human_intents WHERE event_id = ?1)",
+        params![intent.event_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if replayed {
+        return Err(StoreError::BrokenInvariant {
+            reason: "Authenticated Human Intent was already consumed".to_owned(),
+        });
+    }
+    tx.execute(
+        r#"
+        INSERT INTO authenticated_human_intents (
+            event_id, brain_id, human_npub, acting_agent_npub,
+            target_agent_npub, operation, scope_kind, folder_id,
+            event_json, consumed_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "#,
+        params![
+            intent.event_id,
+            brain_id.as_str(),
+            intent.human_npub.as_str(),
+            intent.acting_agent_npub.as_str(),
+            intent.target_agent_npub.as_str(),
+            intent.operation,
+            intent.scope_kind,
+            intent.folder_id.as_ref().map(FolderId::as_str),
+            intent.event_json,
+            intent.consumed_at,
+        ],
+    )?;
+    Ok(())
+}
+
 fn map_insert_error(
     field: &'static str,
     value: &str,
@@ -3147,6 +3726,87 @@ mod tests {
     };
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
+
+    #[test]
+    fn human_anchored_agent_authority_follows_the_humans_current_admin_role() {
+        let store = BrainStore::open_in_memory().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brains (id, kind, name, created_at) VALUES ('org', 'organization', 'Org', ?1)",
+                params!["2026-08-10T00:00:00Z"],
+            )
+            .unwrap();
+        for npub in ["npub-human", "npub-agent", "npub-second-admin"] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_members (brain_id, user_id) VALUES ('org', ?1)",
+                    params![npub],
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_admins (brain_id, user_id) VALUES ('org', 'npub-human')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_admins (brain_id, user_id) VALUES ('org', 'npub-second-admin')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO account_access_cohorts (
+                    id, brain_id, human_npub, human_email, scope_kind,
+                    provenance_kind, provenance_id, roster_revision, status,
+                    created_at, updated_at
+                ) VALUES (
+                    'cohort', 'org', 'npub-human', 'human@finite.vip', 'brain',
+                    'bootstrap', 'bootstrap-org', 1, 'active', ?1, ?1
+                )
+                "#,
+                params!["2026-08-10T00:00:00Z"],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO human_anchored_agent_authorities (
+                    cohort_id, brain_id, human_npub, agent_npub, status,
+                    created_at, updated_at
+                ) VALUES (
+                    'cohort', 'org', 'npub-human', 'npub-agent', 'active', ?1, ?1
+                )
+                "#,
+                params!["2026-08-10T00:00:00Z"],
+            )
+            .unwrap();
+
+        let brain_id = BrainId::new("org").unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(has_brain_operational_authority(&stored, &agent));
+        assert!(!stored.brain.admins.contains(&agent));
+
+        store
+            .conn
+            .execute(
+                "DELETE FROM brain_admins WHERE brain_id = 'org' AND user_id = 'npub-human'",
+                [],
+            )
+            .unwrap();
+        let demoted = store.load_brain(&brain_id).unwrap();
+        assert!(!has_brain_operational_authority(&demoted, &agent));
+    }
 
     #[test]
     fn exposes_store_crate_name() {
@@ -8384,6 +9044,74 @@ mod tests {
                     &revision_record("event-update-backup", object_id, 2, Some(1), "update"),
                 )
                 .unwrap();
+            store
+                .create_brain_invitation(
+                    &brain_id,
+                    "restore-pending-invitation",
+                    &UserId::new("npub-restore-invite").unwrap(),
+                    "restore-pending-invite-code-000001",
+                    "/v1/brain-invitation-links/restore-pending-invite-code-000001/accept",
+                    &[],
+                    &UserId::new("npub-admin").unwrap(),
+                    "2026-06-30T00:00:00Z",
+                    "2026-06-23T00:00:00Z",
+                )
+                .unwrap();
+            store
+                .conn
+                .execute_batch(
+                    r#"
+                    INSERT INTO account_access_cohorts (
+                        id, brain_id, human_npub, human_email, scope_kind, folder_id,
+                        provenance_kind, provenance_id, roster_revision, status,
+                        created_at, updated_at, account_id
+                    ) VALUES (
+                        'restore-cohort', 'acme', 'npub-human', 'human@finite.vip',
+                        'brain', NULL, 'internal_beta_reconciliation', 'restore-source',
+                        7, 'active', '2026-06-23T00:00:00Z',
+                        '2026-06-23T00:00:00Z', 'account-restore'
+                    );
+                    INSERT INTO account_access_cohort_participants (
+                        cohort_id, participant_npub, relationship, nip05, display_name,
+                        status, created_at, updated_at
+                    ) VALUES
+                        ('restore-cohort', 'npub-human', 'human', 'human@finite.vip',
+                         'Human', 'active', '2026-06-23T00:00:00Z', '2026-06-23T00:00:00Z'),
+                        ('restore-cohort', 'npub-agent', 'account_agent', 'agent@finite.vip',
+                         'Agent', 'excluded', '2026-06-23T00:00:00Z', '2026-06-23T00:00:00Z');
+                    INSERT INTO human_anchored_agent_authorities (
+                        cohort_id, brain_id, human_npub, agent_npub, status,
+                        created_at, updated_at
+                    ) VALUES (
+                        'restore-cohort', 'acme', 'npub-human', 'npub-agent', 'active',
+                        '2026-06-23T00:00:00Z', '2026-06-23T00:00:00Z'
+                    );
+                    INSERT INTO account_access_cohort_exclusions (
+                        cohort_id, participant_npub, folder_id, reason, active,
+                        created_at, updated_at
+                    ) VALUES (
+                        'restore-cohort', 'npub-agent', '', 'explicit_peer_restriction', 1,
+                        '2026-06-23T00:00:00Z', '2026-06-23T00:00:00Z'
+                    );
+                    INSERT INTO account_access_cohort_audit (
+                        id, cohort_id, action, actor_npub, anchoring_human_npub,
+                        detail_json, occurred_at
+                    ) VALUES (
+                        'restore-audit', 'restore-cohort', 'participant_brain_restricted',
+                        'npub-agent-actor', 'npub-human', '{"restored":true}',
+                        '2026-06-23T00:00:00Z'
+                    );
+                    INSERT INTO personal_brain_agents (
+                        brain_id, agent_npub, agent_nip05, display_name, status,
+                        roster_revision, blocker, created_at, updated_at
+                    ) VALUES (
+                        'acme', 'npub-agent', 'agent@finite.vip', 'Agent', 'blocked',
+                        7, 'current_folder_key_unavailable', '2026-06-23T00:00:00Z',
+                        '2026-06-23T00:00:00Z'
+                    );
+                    "#,
+                )
+                .unwrap();
         }
 
         std::fs::copy(&source_db, &restored_db).unwrap();
@@ -8393,6 +9121,24 @@ mod tests {
         assert_eq!(bootstrap.latest_sequence, 2);
         assert_eq!(bootstrap.object_count, 1);
         assert_eq!(bootstrap.objects[0].revision, 2);
+        let restored_state = restored.load_brain(&brain_id).unwrap();
+        assert_eq!(restored_state.account_access_cohorts.len(), 1);
+        assert_eq!(restored_state.human_anchored_agent_authorities.len(), 1);
+        assert_eq!(restored_state.account_agent_exclusions.len(), 1);
+        assert_eq!(restored_state.personal_brain_agents.len(), 1);
+        assert_eq!(
+            restored.list_brain_invitations(&brain_id).unwrap()[0].status,
+            LinkStatus::Pending
+        );
+        let restored_audit_count: i64 = restored
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM account_access_cohort_audit WHERE cohort_id = 'restore-cohort'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored_audit_count, 1);
 
         restored
             .conn
@@ -8408,6 +9154,64 @@ mod tests {
         assert_eq!(rebuilt.latest_sequence, 2);
         assert_eq!(rebuilt.object_count, 1);
         assert_eq!(rebuilt.objects[0].payload_json, "{\"body\":\"update\"}");
+    }
+
+    #[test]
+    fn reconciliation_capacity_blocker_is_stable_and_does_not_create_exclusions() {
+        let store = empty_org_store();
+        let brain_id = BrainId::new("acme").unwrap();
+        let human = UserId::new("npub-capacity-human").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
+                params![brain_id.as_str(), human.as_str()],
+            )
+            .unwrap();
+        for index in 0..BRAIN_CAPACITY_ENVELOPE.members.saturating_sub(2) {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
+                    params![brain_id.as_str(), format!("npub-capacity-{index}")],
+                )
+                .unwrap();
+        }
+        let cohort = BootstrapAccountCohort {
+            account_id: "account-capacity".to_owned(),
+            human_email: "capacity@finite.vip".to_owned(),
+            roster_revision: 9,
+            participants: vec![
+                StoredCohortParticipant {
+                    relationship: "human".to_owned(),
+                    name: "Capacity Human".to_owned(),
+                    nip05: "capacity@finite.vip".to_owned(),
+                    npub: human,
+                },
+                StoredCohortParticipant {
+                    relationship: "account_agent".to_owned(),
+                    name: "Capacity Agent".to_owned(),
+                    nip05: "capacity-agent@finite.vip".to_owned(),
+                    npub: UserId::new("npub-capacity-agent").unwrap(),
+                },
+            ],
+        };
+        let actor = UserId::new("npub-admin").unwrap();
+        let first = store
+            .plan_account_cohort_reconciliation(&brain_id, &cohort, None, &actor)
+            .unwrap();
+        let second = store
+            .plan_account_cohort_reconciliation(&brain_id, &cohort, None, &actor)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.blocker.as_deref(), Some("capacity_exceeded"));
+        assert_eq!(
+            first.capacity.members_after,
+            BRAIN_CAPACITY_ENVELOPE.members + 1
+        );
+        let stored = store.load_brain(&brain_id).unwrap();
+        assert!(stored.account_access_cohorts.is_empty());
+        assert!(stored.account_agent_exclusions.is_empty());
     }
 
     fn empty_org_store() -> BrainStore {

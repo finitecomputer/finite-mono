@@ -1,5 +1,13 @@
 # Zero-Plumbing Brain Creation, Folder Creation, And Trustworthy Authoring
 
+> Amended 2026-08-07 by
+> [Account-Agent Access Cohorts And Multi-Agent Personal Brains](account-agent-access-cohorts-spec.md)
+> and ADR-0045. Organization Brain bootstrap now creates one human admin plus a
+> snapshot of that human's eligible account agents as non-admin Members with
+> human-anchored authority. Existing-account email invitations use a fixed
+> human-plus-agent participant set. The identifier, external-email bootstrap,
+> and trustworthy-authoring decisions here remain in force.
+
 ## Problem Statement
 
 FiniteBrain's core collaboration workflow now works cleanly for registered
