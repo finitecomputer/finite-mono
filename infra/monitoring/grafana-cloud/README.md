@@ -134,3 +134,24 @@ NixOS closure. For `finite-agent-runtime`, it is `1` on a source host when any
 active Core-recorded Runtime uses an artifact other than the current promoted
 artifact. The exporter fails without replacing its previous metric file when
 Core evidence is unavailable or incomplete.
+
+## MVP Dashboard
+
+The managed dashboard is
+[`Finite Production MVP`](https://savvybanana1713.grafana.net/d/finite-production-mvp/finite-production-mvp).
+Its portable source is `finite-production-mvp-dashboard.json`. Import that file
+and map `DS_PROMETHEUS` to the stack's default Prometheus data source.
+
+The dashboard contains exactly the MVP views:
+
+- current public and internal status;
+- public uptime over 24 hours and 7 days;
+- public response time;
+- running component versions;
+- Runtime artifact distribution;
+- version drift.
+
+The public status and uptime panels were verified against all five Synthetic
+Monitoring targets on 2026-08-10. Internal health and version panels remain
+empty until the reviewed NixOS metrics closures and Grafana Cloud credentials
+are deployed to the production hosts.

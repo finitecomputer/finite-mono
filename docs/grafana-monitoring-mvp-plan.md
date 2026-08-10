@@ -133,16 +133,16 @@ Done when:
 
 ### 5. Build the Grafana Dashboard
 
-- [ ] Create dashboard named `Finite Production MVP`.
-- [ ] Add current production status panel.
-- [ ] Add 24h uptime chart by public target.
-- [ ] Add 7d uptime chart by public target.
-- [ ] Add response-time panel by public target.
-- [ ] Add running versions table.
-- [ ] Add Runtime artifact panel.
-- [ ] Add version drift panel.
-- [ ] Keep panel count limited to the MVP sections.
-- [ ] Export dashboard JSON or document managed-service dashboard recreation.
+- [x] Create dashboard named `Finite Production MVP`.
+- [x] Add current production status panel.
+- [x] Add 24h uptime chart by public target.
+- [x] Add 7d uptime chart by public target.
+- [x] Add response-time panel by public target.
+- [x] Add running versions table.
+- [x] Add Runtime artifact panel.
+- [x] Add version drift panel.
+- [x] Keep panel count limited to the MVP sections.
+- [x] Export dashboard JSON or document managed-service dashboard recreation.
 
 Done when:
 
@@ -193,7 +193,7 @@ explicit authorization before execution:
   `finite-lat-3`.
 - [ ] Authorize deploying the reviewed monitoring and version-metric NixOS
   changes to `finite-lat-1` and `finite-lat-3`.
-- [ ] Authorize creating or updating the `Finite Production MVP` dashboard and
+- [x] Authorize creating or updating the `Finite Production MVP` dashboard and
   saving its managed Grafana Cloud configuration.
 - [ ] Authorize rolling either host back to its previous NixOS generation if
   post-deploy health checks fail.
