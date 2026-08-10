@@ -38,10 +38,11 @@ ARG FINITE_MONO_REV=unknown
 ARG GWS_VERSION=0.22.5
 # Agent toolchains baked into the image so agents stop re-downloading them
 # into ephemeral container space at runtime. Every tool is pinned to an exact
-# version with sha256 verification (uv is a digest-pinned COPY below).
+# version with sha256 verification.
 ARG NODE_VERSION=24.19.0
 ARG BUN_VERSION=1.3.14
 ARG DENO_VERSION=2.9.5
+ARG UV_VERSION=0.12.3
 ARG PLAYWRIGHT_VERSION=1.62.0
 ARG TARGETARCH
 
@@ -83,13 +84,12 @@ RUN set -eux; \
     rm -f "/tmp/${archive}" /tmp/gws; \
     gws --version
 
-# uv ships as a static binary in its official image; copy it digest-pinned
-# (same pattern as upstream's own Dockerfile examples).
-COPY --from=ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc /uv /uvx /usr/local/bin/
-
-# node (LTS), bun, deno: exact-version archives with sha256 verification,
-# installed onto PATH so agents find them with no config. bun uses the
-# baseline x64 build so it also runs on hosts without AVX2.
+# node (LTS), bun, uv, deno: exact-version archives with sha256
+# verification, installed onto PATH so agents find them with no config.
+# bun uses the baseline x64 build so it also runs on hosts without AVX2.
+# (uv deliberately comes from the GitHub release tarball, not a
+# `COPY --from=ghcr.io/astral-sh/uv`: the CI runner's docker cannot
+# anonymously pull third-party ghcr images.)
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) \
@@ -99,6 +99,8 @@ RUN set -eux; \
         bun_sha256=a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7; \
         deno_arch=x86_64; \
         deno_sha256=8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530; \
+        uv_arch=x86_64; \
+        uv_sha256=600cf9a742aca00d292673b16b5acffaa7b8c269a364ad0c2e79498dcb1fe101; \
         ;; \
       arm64) \
         node_arch=arm64; \
@@ -107,6 +109,8 @@ RUN set -eux; \
         bun_sha256=a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b; \
         deno_arch=aarch64; \
         deno_sha256=6b7cae3a8fc4385a59dea3146fcb8bad7fea4230e0ad36a8c692afacbc254be0; \
+        uv_arch=aarch64; \
+        uv_sha256=bb66cb52e7b1823aed1183630d8d8e5c958840d584a4c55ec10a4cfc168dcca2; \
         ;; \
       *) echo "unsupported toolchain architecture: ${TARGETARCH}" >&2; exit 64 ;; \
     esac; \
@@ -130,6 +134,14 @@ RUN set -eux; \
     unzip -q "/tmp/${deno_archive}" -d /tmp/deno-dist; \
     install -m 0755 /tmp/deno-dist/deno /usr/local/bin/deno; \
     rm -rf "/tmp/${deno_archive}" /tmp/deno-dist; \
+    uv_archive="uv-${uv_arch}-unknown-linux-gnu.tar.gz"; \
+    curl -fsSLo "/tmp/${uv_archive}" \
+      "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${uv_archive}"; \
+    echo "${uv_sha256}  /tmp/${uv_archive}" | sha256sum --check -; \
+    tar -xzf "/tmp/${uv_archive}" -C /tmp; \
+    install -m 0755 "/tmp/uv-${uv_arch}-unknown-linux-gnu/uv" /usr/local/bin/uv; \
+    install -m 0755 "/tmp/uv-${uv_arch}-unknown-linux-gnu/uvx" /usr/local/bin/uvx; \
+    rm -rf "/tmp/${uv_archive}" "/tmp/uv-${uv_arch}-unknown-linux-gnu"; \
     node --version; \
     bun --version; \
     uv --version; \
