@@ -1,6 +1,6 @@
 # Grafana Monitoring MVP Requirements
 
-Status: draft
+Status: approved
 
 ## Goal
 
@@ -20,8 +20,8 @@ This MVP should work quickly. It is not a full observability platform.
   minute and curls the internal health endpoints.
 - New internal service probes must be added to `finite-healthcheck` and the
   `finite-status` contract instead of becoming one-off monitoring logic.
-- Public uptime checks may probe externally through Grafana Synthetic
-  Monitoring, Prometheus blackbox exporter, or an equivalent HTTP checker.
+- Public uptime checks run externally through Grafana Cloud Synthetic
+  Monitoring for the MVP.
 
 ## MVP Scope
 
@@ -34,8 +34,6 @@ The MVP includes:
   `finite-status --json`.
 - Software version and artifact metrics for production architecture
   components.
-- A small alert set for endpoint down, internal healthcheck failing, and version
-  mismatch.
 
 The MVP does not include:
 
@@ -44,25 +42,37 @@ The MVP does not include:
 - Business metrics.
 - Public status page.
 - Automated remediation.
+- Alert rules, notifications, paging, and ticketing integrations.
 - Per-Agent deep lifecycle dashboards beyond the current aggregate artifact and
   health status.
 - A custom incident management workflow.
 
 ## Recommended Shape
 
-Use Grafana as the UI and alerting surface. Use a Prometheus-compatible backend
-for time-series storage.
+Use Grafana Cloud as the UI and Grafana Cloud Metrics, its hosted Mimir service,
+as the Prometheus-compatible time-series backend.
 
-For speed, prefer one of these:
+Send internally collected metrics through the standard Prometheus
+`remote_write` protocol. Keep metric names and dashboard queries in Prometheus
+formats so the setup can later move to self-hosted Prometheus, Mimir, or another
+compatible backend without redesigning the metrics or dashboard. Historical
+data does not need to be migrated.
 
-- Grafana Cloud with Synthetic Monitoring and hosted Prometheus-compatible
-  metrics.
-- A small external monitoring host running Prometheus, blackbox exporter, and
-  Grafana.
+Use Grafana Cloud Synthetic Monitoring for public uptime checks. Configure only
+basic HTTP checks for the MVP:
 
-Avoid making `finite-lat-1` the only monitoring host. If anything runs on
-`finite-lat-1`, there must still be an external dead-man or uptime check that
-pages when lat1 disappears.
+- one public probe location;
+- one check every five minutes per target;
+- successful HTTP status validation;
+- standard `probe_*` metrics for dashboard queries.
+
+Do not use browser checks, scripted checks, private probes, or Synthetic
+Monitoring logs for the MVP. Store the target list and expected status behavior
+in the repository so the managed checks can later be replaced by Prometheus
+blackbox exporter with minimal changes.
+
+Avoid making `finite-lat-1` the only monitoring host. The external uptime checks
+must continue recording failures if `finite-lat-1` disappears.
 
 ## Version Metrics
 
@@ -143,6 +153,10 @@ Minimum public targets:
 - one representative `https://*.finite.chat` route
 - one representative `https://*.docs.finite.chat` route
 
+Each target must be checked from one public probe location every five minutes.
+The check only needs to validate that the endpoint returns its expected
+successful HTTP status.
+
 Internal health should be represented separately:
 
 ```text
@@ -172,19 +186,6 @@ It must have these sections:
 Keep the dashboard operational and dense. Do not add exploratory panels until
 the MVP is already working.
 
-## Alerts
-
-Create only these alerts for MVP:
-
-- Page: any critical public target has `probe_success == 0` for 2 consecutive
-  checks.
-- Page: `finite_healthcheck_success == 0` or missing for 5 minutes.
-- Ticket: `finite_component_version_mismatch == 1` for 15 minutes.
-- Ticket: version metrics are missing for any required component for 15 minutes.
-
-Alert routing can be minimal: one paging destination and one non-paging
-destination.
-
 ## Acceptance Criteria
 
 The MVP is done when:
@@ -194,10 +195,10 @@ The MVP is done when:
 - The dashboard shows current versions for every required component.
 - The dashboard shows whether the internal `finite-healthcheck` is currently
   green.
-- At least one safe test proves alert delivery works without mutating
-  production state.
 - All monitoring configuration lives in the repo or in a documented managed
   service configuration.
+- Dashboard queries use standard PromQL and standard `probe_*` metrics so they
+  remain portable to a self-hosted Prometheus-compatible setup.
 - No secret values are present in metrics, labels, dashboard JSON, or docs.
 
 ## Implementation Order
@@ -207,6 +208,5 @@ The MVP is done when:
    Prometheus-compatible metrics.
 3. Export component version and runtime artifact metrics.
 4. Create the Grafana dashboard.
-5. Add the four MVP alerts.
-6. Record the exact managed-service settings or checked-in config needed to
+5. Record the exact managed-service settings or checked-in config needed to
    recreate the setup.

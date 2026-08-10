@@ -1,6 +1,6 @@
 # Grafana Monitoring MVP Plan
 
-Status: not started
+Status: in progress
 
 Requirements: `docs/grafana-monitoring-mvp-requirements.md`
 
@@ -10,30 +10,33 @@ Ship a lean Grafana monitoring MVP for production that shows:
 
 - current software versions and deployment artifacts;
 - public endpoint uptime;
-- current internal healthcheck state;
-- a minimal alert set for obvious production failures.
+- current internal healthcheck state.
 
 Do not expand this plan into logs, traces, APM, business analytics, public
-status pages, or automated repair.
+status pages, alert notifications, paging, ticketing, or automated repair.
 
 ## Todo List
 
 ### 1. Choose the MVP Hosting Shape
 
-- [ ] Choose Grafana Cloud or a small external monitoring host.
-- [ ] Confirm the Prometheus-compatible metrics backend.
-- [ ] Confirm the public uptime probe mechanism:
-  - Grafana Synthetic Monitoring, or
-  - Prometheus blackbox exporter, or
-  - equivalent HTTP checker.
-- [ ] Confirm the paging destination and non-paging ticket destination.
-- [ ] Record chosen service names, owners, and recreation notes without secrets.
+- [x] Use Grafana Cloud as the managed monitoring host.
+- [x] Use Grafana Cloud Metrics, backed by hosted Mimir, as the
+  Prometheus-compatible metrics backend.
+- [x] Send internally collected metrics using standard Prometheus
+  `remote_write`.
+- [x] Use Grafana Cloud Synthetic Monitoring basic HTTP checks for public
+  uptime.
+- [x] Use one public probe location and a five-minute check interval.
+- [x] Record the selected services and portability requirements without
+  secrets.
 
 Done when:
 
-- The monitoring host/provider is chosen.
+- Grafana Cloud, Grafana Cloud Metrics, and Synthetic Monitoring are recorded as
+  the MVP services.
 - The setup does not depend only on `finite-lat-1`.
-- Alert destinations are known and documented by name only.
+- Metric collection uses standard Prometheus formats and can be redirected to a
+  self-hosted Prometheus-compatible backend.
 
 ### 2. Add Public Uptime Checks
 
@@ -42,6 +45,10 @@ Done when:
 - [ ] Add check for `https://brain.finite.computer`.
 - [ ] Add check for one representative `https://*.finite.chat` route.
 - [ ] Add check for one representative `https://*.docs.finite.chat` route.
+- [ ] Run all checks from one public probe location every five minutes.
+- [ ] Validate only the expected successful HTTP status.
+- [ ] Store the resolved uptime target list and expected statuses in the
+  repository.
 - [ ] Verify each check emits `probe_success`.
 - [ ] Verify each check emits response duration.
 - [ ] Verify each check records HTTP status code or equivalent result detail.
@@ -127,25 +134,7 @@ Done when:
 - A fresh operator can identify down endpoints, failing internal health, current
   versions, and version drift from one dashboard.
 
-### 6. Add MVP Alerts
-
-- [ ] Page when any critical public target has `probe_success == 0` for 2
-  consecutive checks.
-- [ ] Page when `finite_healthcheck_success == 0` for 5 minutes.
-- [ ] Page when `finite_healthcheck_success` is missing for 5 minutes.
-- [ ] Ticket when `finite_component_version_mismatch == 1` for 15 minutes.
-- [ ] Ticket when version metrics are missing for any required component for 15
-  minutes.
-- [ ] Run one safe alert-delivery test that does not mutate production state.
-- [ ] Document the alert names and destinations without secret values.
-
-Done when:
-
-- Paging and ticket delivery are proven once.
-- Alert rules are either checked into the repo or documented well enough to
-  recreate in the managed service.
-
-### 7. Final Verification
+### 6. Final Verification
 
 - [ ] Confirm public uptime is visible for at least 24 hours.
 - [ ] Confirm all required version metrics are present.
@@ -170,6 +159,8 @@ Do not start these until the MVP above is complete:
 - APM.
 - Business metrics.
 - Public status page.
+- Alert rules and notifications.
+- Paging and ticketing integrations.
 - Incident workflow automation.
 - Automated remediation.
 - Deep per-Agent lifecycle dashboards.
