@@ -55,6 +55,8 @@ const FiniteBrainProductClient = (() => {
     lastEmailInviteSecret: null,
     lastEmailInviteUrl: null,
     lastEmailInvitePostProof: null,
+    brainInvitationTransaction: null,
+    folderInvitationTransaction: null,
     brainInvitationFolderIds: new Set(),
     brainInvitations: null,
     folderShareLinks: null,
@@ -139,6 +141,8 @@ const FiniteBrainProductClient = (() => {
   const MAX_OBJECT_ID_ATTEMPTS = 1000;
   const MAX_TITLE_OCCURRENCES_PER_PAGE = 1000;
   const MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS = 100;
+  const MAX_ACCOUNT_COHORT_PARTICIPANTS = 1000;
+  const MAX_ACCOUNT_COHORT_GRANTS = 10000;
   // Keep these public-client preflight bounds aligned with finite-brain-core.
   const MAX_PERSONAL_AGENT_ROTATION_FOLDERS = 100;
   const MAX_FOLDER_ROTATION_GRANTS = 1000;
@@ -344,9 +348,38 @@ const FiniteBrainProductClient = (() => {
     if (Array.isArray(value.identities)) {
       value.identities.forEach(rememberIdentity);
     }
+    if (value.metadata && typeof value.metadata === "object") {
+      rememberIdentitiesFrom(value.metadata);
+    }
     for (const key of ["invitations", "outgoing", "incoming"]) {
       if (Array.isArray(value[key])) value[key].forEach(rememberIdentitiesFrom);
     }
+  }
+
+  function accountAccessCohortParticipantContext(metadata, targetNpub, folderId) {
+    const cohorts = Array.isArray(metadata?.accountAccessCohorts)
+      ? metadata.accountAccessCohorts
+      : [];
+    for (const cohort of cohorts) {
+      const appliesToFolder =
+        cohort?.status === "active" &&
+        (cohort.scopeKind === "brain" ||
+          (cohort.scopeKind === "folder" && cohort.folderId === folderId));
+      if (!appliesToFolder) continue;
+      const participant = (cohort.participants || []).find(
+        (candidate) =>
+          candidate?.npub === targetNpub &&
+          candidate.status === "active" &&
+          ["human", "account_agent"].includes(candidate.relationship)
+      );
+      if (participant) {
+        return {
+          humanEmail: canonicalInviteEmail(cohort.humanEmail),
+          participant,
+        };
+      }
+    }
+    return null;
   }
 
   function identityForNpub(npub) {
@@ -403,6 +436,70 @@ const FiniteBrainProductClient = (() => {
   function personalAgentEmail(metadata) {
     const agentNpub = metadata?.personalAgent?.agentNpub;
     return agentNpub ? identityMetadataForNpub(agentNpub).email : null;
+  }
+
+  function personalBrainAgentRows(metadata) {
+    const roster = Array.isArray(metadata?.personalBrainAgents)
+      ? metadata.personalBrainAgents
+      : [];
+    if (Array.isArray(metadata?.personalBrainAgents)) {
+      return roster.map((agent) => ({
+        name: String(agent?.displayName || agent?.agentNip05 || "Account agent"),
+        nip05: String(agent?.agentNip05 || ""),
+        npub: String(agent?.agentNpub || ""),
+        status: String(agent?.status || "unknown"),
+        rosterRevision: Number.isFinite(agent?.rosterRevision) ? agent.rosterRevision : null,
+        blocker: agent?.blocker ? String(agent.blocker) : null,
+        legacy: false,
+      }));
+    }
+    const agentNpub = metadata?.personalAgent?.agentNpub;
+    if (!agentNpub) return [];
+    const identity = identityMetadataForNpub(agentNpub);
+    return [{
+      name: identity.display,
+      nip05: identity.email || "",
+      npub: agentNpub,
+      status: "ready",
+      rosterRevision: null,
+      blocker: null,
+      legacy: true,
+    }];
+  }
+
+  function isReadyPersonalBrainAgent(metadata, actorNpub) {
+    if (!actorNpub) return false;
+    return personalBrainAgentRows(metadata).some(
+      (agent) => agent.npub === actorNpub && agent.status === "ready"
+    );
+  }
+
+  function humanAnchoredAuthorityForActor(metadata, actorNpub) {
+    if (!metadata || !actorNpub) return null;
+    const authority = (metadata.humanAnchoredAgentAuthorities || []).find(
+      (entry) =>
+        entry?.agentNpub === actorNpub &&
+        entry?.scope === "routine_administration" &&
+        entry?.status === "active"
+    );
+    if (!authority?.humanNpub) return null;
+    const humanStillAuthoritative = metadata.kind === "personal"
+      ? metadata.ownerUserId === authority.humanNpub
+      : (metadata.admins || []).includes(authority.humanNpub);
+    return humanStillAuthoritative ? authority : null;
+  }
+
+  function actingAgentAuthorityPresentation(metadata, actorNpub) {
+    const authority = humanAnchoredAuthorityForActor(metadata, actorNpub);
+    if (!authority) return null;
+    const actingAgent = identityMetadataForNpub(authority.agentNpub);
+    const authorizingHuman = identityMetadataForNpub(authority.humanNpub);
+    return {
+      title: `${actingAgent.display} is acting as an account agent`,
+      detail: `Routine administration is authorized by ${authorizingHuman.display}. Ownership, recovery, and whole-Brain deletion remain human-only.`,
+      actingAgentNpub: authority.agentNpub,
+      authorizingHumanNpub: authority.humanNpub,
+    };
   }
 
   async function resolveIdentityInputValue(input, message) {
@@ -628,6 +725,8 @@ const FiniteBrainProductClient = (() => {
         target.lastEmailInviteSecret ||
         target.lastEmailInviteUrl ||
         target.lastEmailInvitePostProof ||
+        target.brainInvitationTransaction ||
+        target.folderInvitationTransaction ||
         target.accessResult ||
         target.brainInvitations?.length ||
         target.folderShareLinks?.length ||
@@ -2255,6 +2354,8 @@ const FiniteBrainProductClient = (() => {
     target.lastEmailInviteSecret = null;
     target.lastEmailInviteUrl = null;
     target.lastEmailInvitePostProof = null;
+    target.brainInvitationTransaction = null;
+    target.folderInvitationTransaction = null;
     target.brainInvitationFolderIds?.clear?.();
     target.brainInvitations = null;
     target.folderShareLinks = null;
@@ -7693,6 +7794,155 @@ const FiniteBrainProductClient = (() => {
     }
 
     renderAccessResultPanel();
+    renderFolderInvitationPreview();
+  }
+
+  function appendBrainInvitationParticipant(container, participant, tone) {
+    const item = document.createElement("li");
+    item.className = "brain-invitation-participant";
+    const identity = document.createElement("span");
+    identity.className = "brain-invitation-participant-identity";
+    const name = document.createElement("strong");
+    name.textContent = participant.name;
+    const nip05 = document.createElement("span");
+    nip05.textContent = participant.nip05;
+    identity.appendChild(name);
+    identity.appendChild(nip05);
+    const status = document.createElement("span");
+    status.className = `access-status-pill ${tone}`;
+    status.textContent = participant.detail ||
+      (participant.ready ? participant.relationship : `${participant.relationship} · Not ready`);
+    item.appendChild(identity);
+    item.appendChild(status);
+    container.appendChild(item);
+  }
+
+  function renderInvitationPreview(transaction, ids, rerender) {
+    const container = $(ids.container);
+    if (!container) return;
+    const plan = transaction?.plan;
+    const included = $(ids.includedList);
+    const excluded = $(ids.excludedList);
+    const facts = $(ids.facts);
+    included?.replaceChildren?.();
+    excluded?.replaceChildren?.();
+    facts?.replaceChildren?.();
+    if (!plan) {
+      container.hidden = true;
+      setOptionalDisabled(ids.confirmButton, true);
+      safeSetHidden(ids.approvalLabel, true);
+      return;
+    }
+    container.hidden = false;
+    const approval = $(ids.approvalInput);
+    if (approval && approval.dataset.listenerBound !== "true") {
+      approval.dataset.listenerBound = "true";
+      approval.addEventListener("change", rerender);
+    }
+    const presentation = brainInvitationPlanPresentation(plan, {
+      approveReduced: approval?.checked === true,
+    });
+    const statusCopy = {
+      ready: [ids.readyLabel, "ready"],
+      reduced: ["Approval needed", "warn"],
+      capacity_blocked: ["Capacity blocked", "error"],
+      not_ready: ["Recipient not ready", "error"],
+      expired: ["Preview expired", "error"],
+    }[presentation.status] || ["Review needed", "warn"];
+    const status = $(ids.status);
+    if (status) {
+      status.textContent = statusCopy[0];
+      status.className = `access-status-pill ${statusCopy[1]}`;
+    }
+    const warnings = {
+      reduced: " Review the agents who cannot receive access, then approve the reduced set explicitly.",
+      capacity_blocked: ` This cohort does not fit. ${ids.capacityBlockedCopy}`,
+      not_ready: " Every included participant must be ready before this invitation can be sent.",
+      expired: " Preview the recipients again to create a current plan.",
+    };
+    setText(
+      ids.summary,
+      `${presentation.summary}${warnings[presentation.status] || ""}`
+    );
+    if (facts) {
+      for (const [label, value] of [
+        ["Scope", presentation.scope],
+        ["Capacity", presentation.capacity],
+        ["Roster", presentation.roster],
+        ["Expires", presentation.expiresAt ? new Date(presentation.expiresAt).toLocaleString() : "Unknown"],
+      ]) {
+        const term = document.createElement("dt");
+        term.textContent = label;
+        const detail = document.createElement("dd");
+        detail.textContent = value;
+        facts.appendChild(term);
+        facts.appendChild(detail);
+      }
+    }
+    for (const participant of presentation.included) {
+      appendBrainInvitationParticipant(
+        included,
+        participant,
+        participant.ready ? "ready" : "error"
+      );
+    }
+    for (const participant of presentation.excluded) {
+      appendBrainInvitationParticipant(excluded, participant, "warn");
+    }
+    safeSetHidden(ids.excludedGroup, presentation.excluded.length === 0);
+    safeSetHidden(
+      ids.approvalLabel,
+      !presentation.requiresExclusionApproval
+    );
+    setOptionalDisabled(
+      ids.confirmButton,
+      state.accessBusy || !presentation.canCommit
+    );
+  }
+
+  const BRAIN_INVITATION_PREVIEW_IDS = Object.freeze({
+    container: "brainInvitationPreview",
+    includedList: "brainInvitationIncludedList",
+    excludedList: "brainInvitationExcludedList",
+    facts: "brainInvitationPreviewFacts",
+    status: "brainInvitationPreviewStatus",
+    summary: "brainInvitationPreviewSummary",
+    excludedGroup: "brainInvitationExcludedGroup",
+    approvalLabel: "approveBrainInvitationExclusionsLabel",
+    approvalInput: "approveBrainInvitationExclusionsInput",
+    confirmButton: "confirmBrainInvitationButton",
+    readyLabel: "Ready to send",
+    capacityBlockedCopy: "No invitation can be sent from this preview.",
+  });
+  const FOLDER_INVITATION_PREVIEW_IDS = Object.freeze({
+    container: "folderInvitationPreview",
+    includedList: "folderInvitationIncludedList",
+    excludedList: "folderInvitationExcludedList",
+    facts: "folderInvitationPreviewFacts",
+    status: "folderInvitationPreviewStatus",
+    summary: "folderInvitationPreviewSummary",
+    excludedGroup: "folderInvitationExcludedGroup",
+    approvalLabel: "approveFolderInvitationExclusionsLabel",
+    approvalInput: "approveFolderInvitationExclusionsInput",
+    confirmButton: "confirmFolderInvitationButton",
+    readyLabel: "Ready to grant",
+    capacityBlockedCopy: "No Folder access can be granted from this preview.",
+  });
+
+  function renderBrainInvitationPreview() {
+    renderInvitationPreview(
+      state.brainInvitationTransaction,
+      BRAIN_INVITATION_PREVIEW_IDS,
+      renderBrainInvitationPreview
+    );
+  }
+
+  function renderFolderInvitationPreview() {
+    renderInvitationPreview(
+      state.folderInvitationTransaction,
+      FOLDER_INVITATION_PREVIEW_IDS,
+      renderFolderInvitationPreview
+    );
   }
 
   function renderBrainInvitationPanel() {
@@ -7722,12 +7972,24 @@ const FiniteBrainProductClient = (() => {
     });
     safeSetHidden("brainInviteConnectSignerButton", controls.connected);
     setOptionalDisabled("brainInviteConnectSignerButton", controls.connectDisabled);
-    $("createBrainInvitationButton").disabled = controls.createDisabled;
+    const createButton = $("createBrainInvitationButton");
+    createButton.disabled = controls.createDisabled;
+    try {
+      const action = brainInvitationPrimaryAction($("brainInviteRecipientEmailInput").value);
+      createButton.textContent = action === "preview"
+        ? state.brainInvitationTransaction
+          ? "Preview again"
+          : "Preview recipients"
+        : "Create invite";
+    } catch (_) {
+      createButton.textContent = "Preview recipients";
+    }
     $("getBrainInvitationButton").disabled = controls.inspectDisabled;
     setOptionalDisabled("getEmailInviteInstructionsButton", controls.emailScopeDisabled);
     $("acceptBrainInvitationButton").disabled = controls.acceptDisabled;
     $("revokeBrainInvitationButton").disabled = controls.revokeDisabled;
     setText("brainInvitationHint", controls.hint);
+    renderBrainInvitationPreview();
   }
 
   function renderAccessPanel() {
@@ -7776,9 +8038,27 @@ const FiniteBrainProductClient = (() => {
   function actorHasDestructiveAuthority(metadata, actorNpub) {
     if (!metadata || !actorNpub) return false;
     if (metadata.kind === "personal") {
-      return metadata.ownerUserId === actorNpub || metadata.personalAgent?.agentNpub === actorNpub;
+      return metadata.ownerUserId === actorNpub || isReadyPersonalBrainAgent(metadata, actorNpub);
     }
-    return (metadata.admins || []).includes(actorNpub);
+    return (
+      (metadata.admins || []).includes(actorNpub) ||
+      Boolean(humanAnchoredAuthorityForActor(metadata, actorNpub))
+    );
+  }
+
+  function folderAccessChangeRequiresAuthenticatedHumanIntent(
+    metadata,
+    actorNpub,
+    targetNpub
+  ) {
+    return Boolean(
+      metadata?.kind === "personal" &&
+        actorNpub &&
+        targetNpub &&
+        actorNpub !== targetNpub &&
+        isReadyPersonalBrainAgent(metadata, actorNpub) &&
+        isReadyPersonalBrainAgent(metadata, targetNpub)
+    );
   }
 
   function actorCanCreateFolder(metadata, sessionStatus, actorNpub) {
@@ -8125,13 +8405,52 @@ const FiniteBrainProductClient = (() => {
     renderBrainPeopleList(metadata);
     renderBrainPeopleControls(metadata);
     const actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
-    const showPersonalAgent = metadata?.kind === "personal" && metadata.ownerUserId === actorNpub;
+    const personalBrainOwnerViewing =
+      metadata?.kind === "personal" && metadata.ownerUserId === actorNpub;
+    const showPersonalAgent =
+      metadata?.kind === "personal" &&
+      (personalBrainOwnerViewing || isReadyPersonalBrainAgent(metadata, actorNpub));
+    const hasAuthoritativeAgentRoster =
+      Array.isArray(metadata?.personalBrainAgents);
+    const personalAgentRoster = personalBrainAgentRows(metadata);
     const currentAgentEmail = personalAgentEmail(metadata);
     const currentAgentUnresolved = Boolean(metadata?.personalAgent && !currentAgentEmail);
     safeSetHidden("personalAgentSection", !showPersonalAgent);
+    safeSetHidden(
+      "personalBrainAgentRosterList",
+      !showPersonalAgent || !hasAuthoritativeAgentRoster
+    );
+    safeSetHidden(
+      "legacyPersonalAgentControls",
+      !personalBrainOwnerViewing || hasAuthoritativeAgentRoster
+    );
+    const rosterList = $("personalBrainAgentRosterList");
+    rosterList?.replaceChildren?.();
+    if (showPersonalAgent && hasAuthoritativeAgentRoster && rosterList) {
+      for (const agent of personalAgentRoster) {
+        appendBrainInvitationParticipant(
+          rosterList,
+          {
+            name: agent.name,
+            nip05: agent.nip05,
+            ready: agent.status === "ready",
+            relationship: "account agent",
+            detail: agent.status === "ready"
+              ? "Current · Ready"
+              : agent.blocker || agent.status.replaceAll("_", " "),
+          },
+          agent.status === "ready" ? "ready" : "warn"
+        );
+      }
+    }
+    const readyAgentCount = personalAgentRoster.filter(
+      (agent) => agent.status === "ready"
+    ).length;
     safeSetText(
       "personalAgentCurrent",
-      metadata?.personalAgent
+      hasAuthoritativeAgentRoster
+        ? `${readyAgentCount} current account ${readyAgentCount === 1 ? "agent" : "agents"}. This roster is managed by the account; an offline runtime remains a current agent.`
+        : metadata?.personalAgent
         ? currentAgentEmail
           ? `Current: ${currentAgentEmail}`
           : "Current agent email unavailable. Changes are disabled."
@@ -8139,15 +8458,15 @@ const FiniteBrainProductClient = (() => {
     );
     setOptionalDisabled(
       "personalAgentEmailInput",
-      state.accessBusy || !showPersonalAgent || currentAgentUnresolved
+      state.accessBusy || !personalBrainOwnerViewing || hasAuthoritativeAgentRoster || currentAgentUnresolved
     );
     setOptionalDisabled(
       "replacePersonalAgentButton",
-      state.accessBusy || !showPersonalAgent || currentAgentUnresolved
+      state.accessBusy || !personalBrainOwnerViewing || hasAuthoritativeAgentRoster || currentAgentUnresolved
     );
     setOptionalDisabled(
       "removePersonalAgentButton",
-      state.accessBusy || !showPersonalAgent || !metadata?.personalAgent || currentAgentUnresolved
+      state.accessBusy || !personalBrainOwnerViewing || hasAuthoritativeAgentRoster || !metadata?.personalAgent || currentAgentUnresolved
     );
     renderBrainInvitationList();
     renderSharedFolderList();
@@ -8578,6 +8897,10 @@ const FiniteBrainProductClient = (() => {
   }
 
   function renderAccessInspector(activeRow, metadata, openedFolders) {
+    const actorNpub = state.pubkeyHex ? npubFromHex(state.pubkeyHex) : null;
+    const authority = actingAgentAuthorityPresentation(metadata, actorNpub);
+    safeSetHidden("accessAuthorityLine", !authority);
+    setText("accessAuthorityLine", authority ? `${authority.title}. ${authority.detail}` : "");
     if (!activeRow) {
       setText("accessCurrentFolder", "No folder selected");
       setText("accessSummaryLine", "Load a Brain and select a Folder to inspect access.");
@@ -8674,12 +8997,27 @@ const FiniteBrainProductClient = (() => {
 
         item.appendChild(personInfo);
 
+        const requiresAuthenticatedHumanIntent =
+          folderAccessChangeRequiresAuthenticatedHumanIntent(
+            metadata,
+            currentActorNpub(),
+            person.id
+          );
         if (person.removable && person.canMutate && canManage) {
-          const removeBtn = document.createElement("button");
-          removeBtn.className = "access-remove-person";
-          removeBtn.textContent = "Remove";
-          removeBtn.onclick = () => removePersonAccess(person.id, row.id);
-          item.appendChild(removeBtn);
+          if (requiresAuthenticatedHumanIntent) {
+            const approval = document.createElement("span");
+            approval.className = "access-person-role";
+            approval.textContent = "Owner approval required";
+            approval.title =
+              "Use the human-authorized Chat or CLI flow to change a sibling account agent's Folder access.";
+            item.appendChild(approval);
+          } else {
+            const removeBtn = document.createElement("button");
+            removeBtn.className = "access-remove-person";
+            removeBtn.textContent = "Remove";
+            removeBtn.onclick = () => removePersonAccess(person.id, row.id);
+            item.appendChild(removeBtn);
+          }
         }
 
         list.appendChild(item);
@@ -8757,7 +9095,7 @@ const FiniteBrainProductClient = (() => {
         row.accessUserIds.forEach(userId => {
           const member = metadata?.members?.find((candidate) => accessPersonId(candidate) === userId);
           const guest = metadata?.guests?.find((candidate) => accessPersonId(candidate) === userId);
-          const personalAgent = metadata?.personalAgent?.agentNpub === userId;
+          const personalAgent = isReadyPersonalBrainAgent(metadata, userId);
           addAccessListPerson(
             accessList,
             member || guest || userId,
@@ -8842,6 +9180,7 @@ const FiniteBrainProductClient = (() => {
     const shareExpiresInput = $("accessShareExpiresAtInput");
 
     if (!row) {
+      state.folderInvitationTransaction = null;
       section.hidden = true;
       section.open = false;
       if (linkListSection) linkListSection.hidden = true;
@@ -8858,6 +9197,12 @@ const FiniteBrainProductClient = (() => {
       !state.accessBusy &&
       state.signerStatus === "connected";
 
+    if (
+      state.folderInvitationTransaction?.plan?.scope?.folderId &&
+      state.folderInvitationTransaction.plan.scope.folderId !== row.id
+    ) {
+      state.folderInvitationTransaction = null;
+    }
     createShareButton.disabled = !canCreateShare;
     acceptShareButton.disabled = state.accessBusy || state.signerStatus !== "connected";
     revokeShareButton.disabled = state.accessBusy || state.signerStatus !== "connected";
@@ -8877,6 +9222,19 @@ const FiniteBrainProductClient = (() => {
         shareHint.textContent = "The selected email receives a private, single-use Folder Invitation.";
       }
     }
+    try {
+      const targetEmail = canonicalInviteEmail(shareTargetInput.value);
+      if (finiteVipEmail(targetEmail)) {
+        createShareButton.textContent = state.folderInvitationTransaction
+          ? "Preview again"
+          : "Preview recipients";
+      } else {
+        createShareButton.textContent = "Create Folder Invitation";
+      }
+    } catch (_) {
+      createShareButton.textContent = "Create Folder Invitation";
+    }
+    renderFolderInvitationPreview();
     renderFolderShareLinkList(row);
   }
 
@@ -10085,8 +10443,17 @@ const FiniteBrainProductClient = (() => {
         for (const user of accessUserIds) recipients.add(user);
       }
     }
-    if (metadata?.kind === "personal" && metadata.personalAgent?.agentNpub) {
-      recipients.add(metadata.personalAgent.agentNpub);
+    if (metadata?.kind === "personal") {
+      const roster = Array.isArray(metadata.personalBrainAgents)
+        ? metadata.personalBrainAgents
+        : [];
+      if (Array.isArray(metadata.personalBrainAgents)) {
+        for (const agent of personalBrainAgentRows(metadata)) {
+          if (agent.status === "ready" && agent.npub) recipients.add(agent.npub);
+        }
+      } else if (metadata.personalAgent?.agentNpub) {
+        recipients.add(metadata.personalAgent.agentNpub);
+      }
     }
     if (!recipients.size) recipients.add(currentActorNpub());
     return [...recipients];
@@ -10232,6 +10599,7 @@ const FiniteBrainProductClient = (() => {
       input.addEventListener("change", () => {
         if (input.checked) state.brainInvitationFolderIds.add(folder.id);
         else state.brainInvitationFolderIds.delete(folder.id);
+        clearBrainInvitationPlan();
       });
       const name = document.createElement("span");
       name.textContent = folder.path || folder.name || folder.id;
@@ -10352,8 +10720,33 @@ const FiniteBrainProductClient = (() => {
       }
     } else if (inputId === "brainInviteEmailInput") {
       state.lastEmailInvitePostProof = null;
+    } else if (
+      inputId === "brainInviteRecipientEmailInput" ||
+      inputId === "brainInviteExpiresAtInput"
+    ) {
+      clearBrainInvitationPlan();
     }
     renderBrainInvitationPanel();
+  }
+
+  function clearBrainInvitationPlan() {
+    state.brainInvitationTransaction = null;
+    const approval = $("approveBrainInvitationExclusionsInput");
+    if (approval) approval.checked = false;
+    renderBrainInvitationPreview();
+  }
+
+  function clearFolderInvitationPlan() {
+    state.folderInvitationTransaction = null;
+    const approval = $("approveFolderInvitationExclusionsInput");
+    if (approval) approval.checked = false;
+    renderFolderInvitationPreview();
+  }
+
+  function handleFolderInvitationInput() {
+    clearFolderInvitationPlan();
+    const row = activeAccessRow();
+    if (row) updateAdvancedOptions(row);
   }
 
   function brainInvitationRevokeTarget(input = {}) {
@@ -10405,6 +10798,445 @@ const FiniteBrainProductClient = (() => {
 
   function brainInvitationCreatePath(brainId) {
     return `/v1/brains/${encodeURIComponent(brainId)}/invitations`;
+  }
+
+  function brainInvitationPrimaryAction(value) {
+    const email = canonicalInviteEmail(value);
+    return finiteVipEmail(email) ? "preview" : "create";
+  }
+
+  function brainInvitationPreflightPath(brainId) {
+    return `${brainInvitationCreatePath(brainId)}/preflight`;
+  }
+
+  function folderAccountAccessRemovalPreflightPath(brainId, folderId) {
+    return `/v1/brains/${encodeURIComponent(brainId)}/folders/${encodeURIComponent(
+      folderId
+    )}/account-access/removal-preflight`;
+  }
+
+  function folderAccountAccessPath(brainId, folderId) {
+    return `/v1/brains/${encodeURIComponent(brainId)}/folders/${encodeURIComponent(
+      folderId
+    )}/account-access`;
+  }
+
+  function buildBrainInvitationPreflightRequest(input = {}) {
+    const targetEmail = canonicalInviteEmail(input.targetEmail);
+    if (!finiteVipEmail(targetEmail)) {
+      throw new Error("Account cohort preview requires a finite.vip email address");
+    }
+    const expiresAt = String(input.expiresAt || "").trim();
+    if (!expiresAt || Number.isNaN(Date.parse(expiresAt))) {
+      throw new Error("Brain invitation expiry is invalid");
+    }
+    return {
+      targetEmail,
+      folderOnly: input.folderOnly === true,
+      initialFolderAccess: initialBrainInvitationFolders(input.initialFolderAccess || []),
+      expiresAt,
+    };
+  }
+
+  function invitationExclusionDetail(reason) {
+    const normalized = String(reason || "").trim().toLowerCase();
+    return (
+      {
+        identity_provisioning_incomplete: "Identity setup is not complete yet.",
+        identity_provisioning_failed: "Identity setup needs attention before this agent can receive access.",
+        permanently_departed: "This agent has permanently left the account.",
+        retired: "This agent is retired and cannot receive new access.",
+        deleted: "This agent was deleted and cannot receive new access.",
+        unlinked: "This agent is no longer linked to the account.",
+        merely_shared: "This agent is shared with the account but is not account-owned.",
+      }[normalized] || "This agent cannot receive the requested access yet."
+    );
+  }
+
+  function validateBrainInvitationPlanWorkload(plan = {}) {
+    if (
+      !plan?.planId ||
+      !Array.isArray(plan.participants) ||
+      !Array.isArray(plan.excluded) ||
+      !Array.isArray(plan.keyVersions)
+    ) {
+      throw new Error("Invitation preview is incomplete");
+    }
+    if (!plan.participants.length) {
+      throw new Error("Invitation preview has no participants");
+    }
+    if (plan.participants.length > MAX_ACCOUNT_COHORT_PARTICIPANTS) {
+      throw new Error(
+        `Invitation preview exceeds ${MAX_ACCOUNT_COHORT_PARTICIPANTS} participants`
+      );
+    }
+    if (plan.excluded.length > MAX_ACCOUNT_COHORT_PARTICIPANTS) {
+      throw new Error(
+        `Invitation preview exceeds ${MAX_ACCOUNT_COHORT_PARTICIPANTS} exclusions`
+      );
+    }
+    if (plan.keyVersions.length > MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS) {
+      throw new Error(
+        `Invitation preview exceeds ${MAX_BRAIN_INVITE_BOOTSTRAP_FOLDERS} Folder keys`
+      );
+    }
+    const grantCount = plan.participants.length * plan.keyVersions.length;
+    if (!Number.isSafeInteger(grantCount) || grantCount > MAX_ACCOUNT_COHORT_GRANTS) {
+      throw new Error(
+        `Invitation preview exceeds ${MAX_ACCOUNT_COHORT_GRANTS} participant grants`
+      );
+    }
+    const participantNpubs = new Set();
+    const participantNip05s = new Set();
+    for (const participant of plan.participants) {
+      const identity = publicKeyIdentityFromInput(participant?.npub);
+      const nip05 = String(participant?.nip05 || "").trim().toLowerCase();
+      if (
+        !identity?.npub ||
+        !["human", "account_agent"].includes(participant?.relationship) ||
+        typeof participant?.ready !== "boolean" ||
+        !String(participant?.name || "").trim() ||
+        !looksLikeEmailIdentity(nip05) ||
+        participantNpubs.has(identity.npub) ||
+        participantNip05s.has(nip05)
+      ) {
+        throw new Error("Invitation preview participants are invalid or duplicated");
+      }
+      participantNpubs.add(identity.npub);
+      participantNip05s.add(nip05);
+    }
+    const exclusionNip05s = new Set();
+    for (const exclusion of plan.excluded) {
+      const nip05 = String(exclusion?.nip05 || "").trim().toLowerCase();
+      if (
+        !String(exclusion?.name || "").trim() ||
+        !looksLikeEmailIdentity(nip05) ||
+        !String(exclusion?.reason || "").trim() ||
+        participantNip05s.has(nip05) ||
+        exclusionNip05s.has(nip05)
+      ) {
+        throw new Error("Invitation preview exclusions are invalid or duplicated");
+      }
+      exclusionNip05s.add(nip05);
+    }
+    const folderKeys = new Set();
+    for (const key of plan.keyVersions) {
+      const folderId = String(key?.folderId || "").trim();
+      const keyVersion = Number(key?.keyVersion);
+      const identity = `${folderId}:${keyVersion}`;
+      if (
+        !folderId ||
+        !Number.isSafeInteger(keyVersion) ||
+        keyVersion < 1 ||
+        folderKeys.has(identity)
+      ) {
+        throw new Error("Invitation preview Folder keys are invalid or duplicated");
+      }
+      folderKeys.add(identity);
+    }
+    return grantCount;
+  }
+
+  function validateFolderAccountAccessRemovalPlan(plan = {}, input = {}) {
+    const listFields = [
+      "participants",
+      "removedParticipantNpubs",
+      "independentlyRetainedNpubs",
+      "requiredRecipientNpubs",
+    ];
+    if (!plan?.planId || listFields.some((field) => !Array.isArray(plan[field]))) {
+      throw new Error("Folder access removal preview is incomplete");
+    }
+    for (const field of listFields) {
+      if (plan[field].length > MAX_ACCOUNT_COHORT_PARTICIPANTS) {
+        throw new Error(
+          `Folder access removal preview exceeds ${MAX_ACCOUNT_COHORT_PARTICIPANTS} ${field}`
+        );
+      }
+    }
+    if (
+      plan.brainId !== input.brainId ||
+      plan.folderId !== input.folderId ||
+      canonicalInviteEmail(plan.targetEmail) !== canonicalInviteEmail(input.targetEmail)
+    ) {
+      throw new Error("Folder access removal preview does not match the selected mailbox and Folder");
+    }
+    const currentKeyVersion = Number(plan.currentKeyVersion);
+    const newKeyVersion = Number(plan.newKeyVersion);
+    if (
+      !Number.isSafeInteger(currentKeyVersion) ||
+      !Number.isSafeInteger(newKeyVersion) ||
+      currentKeyVersion !== Number(input.currentKeyVersion) ||
+      newKeyVersion !== currentKeyVersion + 1
+    ) {
+      throw new Error("Folder access removal preview has stale Folder Key versions");
+    }
+    const participantNpubs = new Set();
+    let human = null;
+    for (const participant of plan.participants) {
+      const npub = publicKeyIdentityFromInput(participant?.npub)?.npub;
+      if (
+        !npub ||
+        !["human", "account_agent"].includes(participant?.relationship) ||
+        !String(participant?.name || "").trim() ||
+        !looksLikeEmailIdentity(String(participant?.nip05 || "").trim()) ||
+        participantNpubs.has(npub)
+      ) {
+        throw new Error("Folder access removal participants are invalid or duplicated");
+      }
+      participantNpubs.add(npub);
+      if (participant.relationship === "human") {
+        if (human) throw new Error("Folder access removal preview has multiple human anchors");
+        human = participant;
+      }
+    }
+    if (!human || canonicalInviteEmail(human.nip05) !== canonicalInviteEmail(plan.targetEmail)) {
+      throw new Error("Folder access removal preview omitted the anchoring human");
+    }
+    const machineSets = {};
+    for (const field of listFields.slice(1)) {
+      const values = new Set();
+      for (const value of plan[field]) {
+        const npub = publicKeyIdentityFromInput(value)?.npub;
+        if (!npub || values.has(npub)) {
+          throw new Error(`Folder access removal ${field} are invalid or duplicated`);
+        }
+        values.add(npub);
+      }
+      machineSets[field] = values;
+    }
+    const removed = machineSets.removedParticipantNpubs;
+    const retained = machineSets.independentlyRetainedNpubs;
+    const required = machineSets.requiredRecipientNpubs;
+    if (!removed.size || [...removed].some((npub) => !participantNpubs.has(npub))) {
+      throw new Error("Folder access removal set must be a nonempty participant subset");
+    }
+    if (
+      [...retained].some(
+        (npub) => !participantNpubs.has(npub) || !removed.has(npub) || !required.has(npub)
+      )
+    ) {
+      throw new Error(
+        "Independently retained Folder participants must be removed cohort participants with a required grant"
+      );
+    }
+    if (
+      [...removed].some((npub) => required.has(npub) !== retained.has(npub))
+    ) {
+      throw new Error(
+        "Removed Folder participants may receive the rotated key only when independently retained"
+      );
+    }
+    return { human, currentKeyVersion, newKeyVersion };
+  }
+
+  function folderAccountAccessRemovalConfirmation(plan) {
+    const removed = new Set(plan.removedParticipantNpubs || []);
+    const retained = new Set(plan.independentlyRetainedNpubs || []);
+    const names = (values) =>
+      plan.participants
+        .filter((participant) => values.has(participant.npub))
+        .map((participant) => `${participant.name} (${participant.nip05})`);
+    const removedNames = names(removed);
+    const retainedNames = names(retained);
+    return [
+      `Remove cohort Folder access for ${removedNames.join(", ") || plan.targetEmail}?`,
+      retainedNames.length
+        ? `${retainedNames.join(", ")} will keep access from an independent grant.`
+        : "Everyone listed above will lose this Folder after one secure key rotation.",
+    ].join("\n\n");
+  }
+
+  function brainInvitationPlanPresentation(plan = {}, options = {}) {
+    const participants = Array.isArray(plan.participants) ? plan.participants : [];
+    const excluded = Array.isArray(plan.excluded) ? plan.excluded : [];
+    const capacity = plan.capacity || {};
+    const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+    const expiresAtMs = Date.parse(String(plan.expiresAt || ""));
+    const expired = !Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs;
+    const notReady = participants.filter((participant) => participant?.ready !== true);
+    const requiresExclusionApproval = excluded.length > 0;
+    let status = "ready";
+    if (expired) status = "expired";
+    else if (capacity.fits !== true) status = "capacity_blocked";
+    else if (notReady.length) status = "not_ready";
+    else if (requiresExclusionApproval) status = "reduced";
+    const canCommit =
+      status === "ready" ||
+      (status === "reduced" && options.approveReduced === true);
+    const human = participants.find((participant) => participant?.relationship === "human");
+    const agents = participants.filter(
+      (participant) => participant?.relationship === "account_agent"
+    );
+    const humanName = String(human?.name || plan.targetEmail || "Recipient").trim();
+    const agentLabel = agents.length === 1 ? "account agent" : "account agents";
+    const maximumMembers = Number(capacity.maximumMembers || 0);
+    const resultingMembers = Number(capacity.resultingMembers || 0);
+    return {
+      status,
+      canCommit,
+      requiresExclusionApproval,
+      summary: `${humanName} and ${agents.length} ${agentLabel} are included.`,
+      capacity:
+        plan.scope?.kind === "folder"
+          ? "Folder-only access does not add Brain members."
+          : `${resultingMembers.toLocaleString("en-US")} of ${maximumMembers.toLocaleString(
+              "en-US"
+            )} Brain member slots would be used.`,
+      scope:
+        plan.scope?.kind === "folder"
+          ? `Folder ${plan.scope?.folderId || ""}`.trim()
+          : `Brain ${plan.scope?.brainId || ""}`.trim(),
+      roster: `Account roster revision ${plan.rosterRevision ?? "unknown"}`,
+      expiresAt: plan.expiresAt || null,
+      included: participants.map((participant) => ({
+        name: String(participant?.name || participant?.nip05 || "Participant"),
+        nip05: String(participant?.nip05 || ""),
+        relationship:
+          participant?.relationship === "human" ? "Human" : "Account agent",
+        ready: participant?.ready === true,
+      })),
+      excluded: excluded.map((participant) => ({
+        name: String(participant?.name || participant?.nip05 || "Agent"),
+        nip05: String(participant?.nip05 || ""),
+        detail: invitationExclusionDetail(participant?.reason),
+      })),
+    };
+  }
+
+  function brainInvitationCompatibilityDetail(error) {
+    if (error?.status === 404 || error?.status === 405 || error?.status === 426) {
+      return "Update the Brain service before changing access for a Finite account. This client will not create legacy human-only access.";
+    }
+    if (error?.status === 409 && /stale|roster|plan|key version|capacity/i.test(error?.reason || "")) {
+      return "The account or Brain changed. Preview the recipients again before sending.";
+    }
+    return brainInvitationUnavailableDetail(error);
+  }
+
+  function buildBrainInvitationCommitRequest(plan, request, participantGrants, options = {}) {
+    validateBrainInvitationPlanWorkload(plan);
+    const brainId = String(options.brainId || "").trim();
+    if (!brainId || plan?.scope?.brainId !== brainId) {
+      throw new Error("Invitation preview does not match the active Brain");
+    }
+    if (
+      canonicalInviteEmail(plan?.targetEmail) !== request?.targetEmail ||
+      plan?.expiresAt !== request?.expiresAt ||
+      plan?.scope?.kind !== (request?.folderOnly ? "folder" : "brain") ||
+      (request?.folderOnly &&
+        (request?.initialFolderAccess?.length !== 1 ||
+          plan?.scope?.folderId !== request.initialFolderAccess[0]))
+    ) {
+      throw new Error("Invitation preview inputs changed; preview the recipients again");
+    }
+    const presentation = brainInvitationPlanPresentation(plan, {
+      approveReduced: options.approveReduced === true,
+      nowMs: options.nowMs,
+    });
+    if (presentation.status === "reduced" && options.approveReduced !== true) {
+      throw new Error("Explicitly approve the reduced participant set before sending");
+    }
+    if (!presentation.canCommit) {
+      throw new Error("Invitation preview is not ready to send; preview the recipients again");
+    }
+    const expected = new Set(
+      (plan.keyVersions || []).flatMap((key) =>
+        (plan.participants || []).map(
+          (participant) =>
+            `${key.folderId}:${Number(key.keyVersion)}:${participant.npub}`
+        )
+      )
+    );
+    const provided = new Set(
+      (participantGrants || []).map(
+        (entry) =>
+          `${entry?.folderId}:${Number(entry?.grant?.keyVersion)}:${entry?.grant?.recipientNpub}`
+      )
+    );
+    if (
+      expected.size !== provided.size ||
+      expected.size !== (participantGrants || []).length ||
+      [...expected].some((entry) => !provided.has(entry))
+    ) {
+      throw new Error("Invitation grants do not match the previewed recipients and Folder keys");
+    }
+    return {
+      target: request.targetEmail,
+      initialFolderAccess: [...request.initialFolderAccess],
+      expiresAt: request.expiresAt,
+      folderOnly: request.folderOnly,
+      planId: plan.planId,
+      participantGrants,
+      approvedExclusions: (plan.excluded || []).map((participant) =>
+        canonicalInviteEmail(participant.nip05)
+      ),
+    };
+  }
+
+  function buildFolderAccountAccessCommitRequest(
+    plan,
+    request,
+    participantGrants,
+    accessChangeEvent,
+    options = {}
+  ) {
+    if (!request?.folderOnly || request.initialFolderAccess?.length !== 1) {
+      throw new Error("Folder access commit requires one previewed Folder");
+    }
+    if (!accessChangeEvent || typeof accessChangeEvent !== "object") {
+      throw new Error("Folder access commit requires an authorized access-change event");
+    }
+    const invitationBody = buildBrainInvitationCommitRequest(
+      plan,
+      request,
+      participantGrants,
+      options
+    );
+    return {
+      targetEmail: invitationBody.target,
+      expiresAt: invitationBody.expiresAt,
+      planId: invitationBody.planId,
+      approvedExclusions: invitationBody.approvedExclusions,
+      participantGrants: invitationBody.participantGrants,
+      accessChangeEvent,
+    };
+  }
+
+  async function buildBrainInvitationParticipantGrants(plan, options = {}) {
+    validateBrainInvitationPlanWorkload(plan);
+    const brainId = String(options.brainId || plan?.scope?.brainId || "").trim();
+    const keyring = options.keyring || state.keyring;
+    if (!brainId || !keyring) throw new Error("Open the Brain before preparing invitation access");
+    const grants = [];
+    for (const key of plan.keyVersions || []) {
+      const keyVersion = Number(key.keyVersion);
+      const openedKey = keyring.keys.get(folderKeyId(brainId, key.folderId, keyVersion));
+      if (!openedKey?.rawKey) {
+        throw new Error(`Open the Folder Key for ${key.folderId} before sending this invitation`);
+      }
+      for (const participant of plan.participants || []) {
+        const id = await deterministicClientId("grant", [
+          brainId,
+          key.folderId,
+          String(keyVersion),
+          participant.npub,
+          plan.planId,
+        ]);
+        const grant = await buildFolderKeyGrantRequest({
+          brainId,
+          brainIdentityProvider: options.brainIdentityProvider || state.identityProvider,
+          createdAtUnix: options.createdAtUnix,
+          folderId: key.folderId,
+          id,
+          keyVersion,
+          rawKey: openedKey.rawKey,
+          recipientNpub: participant.npub,
+        });
+        grants.push({ folderId: key.folderId, grant });
+      }
+    }
+    return grants;
   }
 
   function suggestedAgentIdentityFromNavigation(search = window.location?.search || "") {
@@ -11711,6 +12543,9 @@ const FiniteBrainProductClient = (() => {
     if (metadata?.kind !== "personal" || metadata.ownerUserId !== actorNpub) {
       throw new Error("Only the Personal Brain owner can replace its Personal Agent");
     }
+    if (Array.isArray(metadata.personalBrainAgents)) {
+      throw new Error("Account agents are managed by the authoritative account roster");
+    }
     const oldAgent = metadata.personalAgent?.agentNpub;
     if (remove && !oldAgent) throw new Error("No Personal Agent is assigned");
     const oldAgentEmail = personalAgentEmail(metadata);
@@ -11786,6 +12621,18 @@ const FiniteBrainProductClient = (() => {
     const sessionEpoch = captureSessionOperationEpoch();
     const brainId = state.activeBrainId;
     const row = requireGrantableAccessRow();
+    const targetEmail = canonicalInviteEmail(targetValue);
+    if (finiteVipEmail(targetEmail)) {
+      $("accessShareTargetInput").value = targetEmail;
+      if (!$("accessShareExpiresAtInput").value) {
+        $("accessShareExpiresAtInput").value = defaultShareExpiryDateTimeLocal();
+      }
+      safeSetElement("accessAdvancedSection", (section) => {
+        section.open = true;
+      });
+      clearFolderInvitationPlan();
+      return previewFolderAccountAccessFromPanel();
+    }
     const targetNpub = await normalizedEmailNpubValue(targetValue, "Enter a valid email first");
     requireCurrentSessionEpoch(sessionEpoch);
     beginAccessOperation(sessionEpoch);
@@ -11822,12 +12669,134 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
+  async function removeFolderAccountAccessCohortFromPanel(targetEmail) {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const brainId = state.activeBrainId;
+    const row = requireRestrictedAccessRow();
+    const metadataSnapshot = state.metadata;
+    const objectSnapshot = [...state.projection.pages.values()];
+    beginAccessOperation(sessionEpoch);
+    try {
+      const plan = await protectedRequest(
+        folderAccountAccessRemovalPreflightPath(brainId, row.id),
+        {
+          method: "POST",
+          body: JSON.stringify({ targetEmail }),
+        }
+      );
+      requireCurrentSessionEpoch(sessionEpoch);
+      const validated = validateFolderAccountAccessRemovalPlan(plan, {
+        brainId,
+        folderId: row.id,
+        targetEmail,
+        currentKeyVersion: row.currentKeyVersion,
+      });
+      if (window.confirm && !window.confirm(folderAccountAccessRemovalConfirmation(plan))) {
+        setAccessResult(
+          "warn",
+          "Removal canceled",
+          "The cohort preview was read-only. Folder access and keys were not changed."
+        );
+        return plan;
+      }
+      const operationKeyring = cloneSessionKeyring(state.keyring);
+      const removal = await buildFolderAccessRemovalRequest(operationKeyring, {
+        action: "remove-folder-access",
+        brainId,
+        eventTargetNpub: validated.human.npub,
+        metadata: metadataSnapshot,
+        newKeyVersion: validated.newKeyVersion,
+        objects: objectSnapshot,
+        recipients: plan.requiredRecipientNpubs,
+        row,
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      const result = await protectedRequest(folderAccountAccessPath(brainId, row.id), {
+        method: "DELETE",
+        body: JSON.stringify({
+          targetEmail,
+          planId: plan.planId,
+          newKeyVersion: removal.newKeyVersion,
+          grants: removal.grants,
+          reencryptedRecords: removal.reencryptedRecords,
+          accessChangeEvent: removal.accessChangeEvent,
+        }),
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      state.metadata = result.metadata;
+      state.keyring = operationKeyring;
+      await openAvailableFolderKeyGrants();
+      requireCurrentSessionEpoch(sessionEpoch);
+      await pullSyncBootstrap();
+      requireCurrentSessionEpoch(sessionEpoch);
+      selectDefaultReaderTargets();
+      renderGraphView();
+      const retainedCount = (result.independentlyRetainedNpubs || []).length;
+      setAccessResult(
+        "warn",
+        "Account cohort access removed",
+        retainedCount
+          ? `${targetEmail} was removed as a cohort; ${retainedCount} independently granted ${
+              retainedCount === 1 ? "principal keeps" : "principals keep"
+            } this Folder.`
+          : `${targetEmail} and its account agents no longer have this Folder.`,
+        { "New key version": result.newKeyVersion }
+      );
+      log("Removed atomic mailbox-addressed Folder access with one key rotation.", {
+        brainId,
+        folderId: row.id,
+        newKeyVersion: result.newKeyVersion,
+        removedParticipantCount: (result.removedParticipantNpubs || []).length,
+        independentlyRetainedCount: retainedCount,
+      });
+      return result;
+    } catch (error) {
+      failAccessOperation(
+        sessionEpoch,
+        "Remove failed",
+        error,
+        brainInvitationCompatibilityDetail
+      );
+      throw error;
+    } finally {
+      finishAccessOperation(sessionEpoch);
+    }
+  }
+
   async function removeFolderAccessFromPanel(targetValue) {
     const sessionEpoch = captureSessionOperationEpoch();
     const brainId = state.activeBrainId;
     const row = requireRestrictedAccessRow();
+    const knownTargetNpub = publicKeyIdentityFromInput(targetValue)?.npub;
+    const knownTargetEmail = knownTargetNpub
+      ? identityMetadataForNpub(knownTargetNpub).email
+      : null;
     const targetNpub = await normalizedNpubValue(targetValue, "Choose a person first");
     requireCurrentSessionEpoch(sessionEpoch);
+    if (
+      folderAccessChangeRequiresAuthenticatedHumanIntent(
+        state.metadata,
+        currentActorNpub(),
+        targetNpub
+      )
+    ) {
+      throw new Error(
+        "Changing a sibling account agent's Personal Brain Folder access requires authenticated human intent from Chat or CLI. No access was changed."
+      );
+    }
+    const cohortContext = accountAccessCohortParticipantContext(
+      state.metadata,
+      targetNpub,
+      row.id
+    );
+    const participantRole = cohortContext?.participant.relationship;
+    const targetEmail =
+      (participantRole === "human" ? cohortContext?.humanEmail : null) ||
+      identityMetadataForNpub(targetNpub).email ||
+      knownTargetEmail;
+    if (participantRole === "human" && finiteVipEmail(targetEmail)) {
+      return removeFolderAccountAccessCohortFromPanel(targetEmail);
+    }
     const operationKeyring = cloneSessionKeyring(state.keyring);
     const metadataSnapshot = state.metadata;
     const objectSnapshot = [...state.projection.pages.values()];
@@ -11862,13 +12831,24 @@ const FiniteBrainProductClient = (() => {
       requireCurrentSessionEpoch(sessionEpoch);
       selectDefaultReaderTargets();
       renderGraphView();
-      setAccessResult("warn", "Access removed", `${identityDisplay(targetNpub)} was removed from ${row.path}.`);
-      log("Removed explicit Folder access with key rotation.", {
+      setAccessResult(
+        "warn",
+        participantRole === "account_agent" ? "Account agent access removed" : "Access removed",
+        participantRole === "account_agent"
+          ? `${identityDisplay(targetNpub)} was excluded from ${row.path}. The anchoring human and sibling agents keep their independent access.`
+          : `${identityDisplay(targetNpub)} was removed from ${row.path}.`
+      );
+      log(
+        participantRole === "account_agent"
+          ? "Removed targeted account agent Folder access with durable exclusion."
+          : "Removed explicit Folder access with key rotation.",
+        {
         folderId: row.id,
         keyVersion: removal.newKeyVersion,
         reencryptedPages: removal.reencryptedRecords.length,
         targetNpub: identityDisplay(targetNpub),
-      });
+        }
+      );
     } catch (error) {
       failAccessOperation(sessionEpoch, "Remove failed", error);
       throw error;
@@ -11877,99 +12857,215 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
-  async function createShareLinkFromPanel() {
+  async function previewFolderAccountAccessFromPanel() {
     const sessionEpoch = captureSessionOperationEpoch();
     const brainId = state.activeBrainId;
     const row = activeAccessRow();
     if (!row) throw new Error("Select a Folder first");
-    const targetInput = canonicalInviteEmail($("accessShareTargetInput").value);
+    const request = buildBrainInvitationPreflightRequest({
+      brainId,
+      targetEmail: $("accessShareTargetInput").value,
+      folderOnly: true,
+      initialFolderAccess: [row.id],
+      expiresAt: shareExpiryIso(),
+    });
+    clearFolderInvitationPlan();
     beginAccessOperation(sessionEpoch);
     try {
-      const expiresAt = shareExpiryIso();
-      let recipientNpub = null;
-      if (finiteVipEmail(targetInput)) {
-        try {
-          recipientNpub = (
-            await resolveIdentityInputValue(targetInput, "Enter a valid recipient email first")
-          ).npub;
-          requireCurrentSessionEpoch(sessionEpoch);
-        } catch (error) {
-          if (state.sessionEpoch !== sessionEpoch) throw error;
-          if (error?.status !== 404) throw error;
-          recipientNpub = null;
-        }
+      const plan = await protectedRequest(brainInvitationPreflightPath(brainId), {
+        method: "POST",
+        body: JSON.stringify(request),
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      validateBrainInvitationPlan(plan, request, brainId);
+      state.folderInvitationTransaction = {
+        plan,
+        request,
+        participantGrants: null,
+        commitBody: null,
+      };
+      const presentation = brainInvitationPlanPresentation(plan);
+      setAccessResult(
+        presentation.status === "ready" ? "ready" : "warn",
+        presentation.status === "ready"
+          ? "Folder recipients ready to review"
+          : "Folder recipient review needs attention",
+        `${presentation.summary} Previewing did not change Folder access or send email.`
+      );
+      renderFolderInvitationPreview();
+      log("Previewed mailbox-addressed Folder access without mutation.", {
+        brainId,
+        folderId: row.id,
+        planId: plan.planId,
+        participantCount: plan.participants.length,
+        excludedCount: plan.excluded.length,
+      });
+      return plan;
+    } catch (error) {
+      markAccessFailureHandled(error);
+      if (state.sessionEpoch === sessionEpoch) {
+        state.folderInvitationTransaction = null;
+        setAccessResult("error", "Preview unavailable", brainInvitationCompatibilityDetail(error));
+        renderFolderInvitationPreview();
       }
-      let invitation;
-      let privateInviteUrl = null;
-      if (recipientNpub) {
-        const grant = await buildAccessGrantForRow(row, recipientNpub);
+      throw error;
+    } finally {
+      finishAccessOperation(sessionEpoch);
+    }
+  }
+
+  async function confirmFolderAccountAccessFromPanel() {
+    const sessionEpoch = captureSessionOperationEpoch();
+    const brainId = state.activeBrainId;
+    const row = activeAccessRow();
+    const transaction = state.folderInvitationTransaction;
+    const plan = transaction?.plan;
+    const request = transaction?.request;
+    if (!brainId || !row || !plan || !request) {
+      throw new Error("Preview the Folder recipients before granting access");
+    }
+    const currentRequest = buildBrainInvitationPreflightRequest({
+      brainId,
+      targetEmail: $("accessShareTargetInput").value,
+      folderOnly: true,
+      initialFolderAccess: [row.id],
+      expiresAt: shareExpiryIso(),
+    });
+    if (JSON.stringify(currentRequest) !== JSON.stringify(request)) {
+      clearFolderInvitationPlan();
+      throw new Error("Folder access inputs changed; preview the recipients again");
+    }
+    const approveReduced = $("approveFolderInvitationExclusionsInput")?.checked === true;
+    beginAccessOperation(sessionEpoch);
+    try {
+      if (!transaction.participantGrants) {
+        transaction.participantGrants = await buildBrainInvitationParticipantGrants(plan, {
+          brainId,
+          keyring: state.keyring,
+        });
         requireCurrentSessionEpoch(sessionEpoch);
+      }
+      if (!transaction.commitBody) {
+        const human = plan.participants.find(
+          (participant) => participant?.relationship === "human"
+        );
         const accessChangeEvent = await buildAdminAccessChangeEvent({
           action: "grant-folder-access",
           folderId: row.id,
-          keyVersion: row.currentKeyVersion,
-          targetNpub: recipientNpub,
+          keyVersion: plan.keyVersions[0].keyVersion,
+          targetNpub: human.npub,
         });
         requireCurrentSessionEpoch(sessionEpoch);
-        invitation = await protectedRequest(
-          `/v1/brains/${encodeURIComponent(brainId)}/folders/${encodeURIComponent(row.id)}/invitations`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              recipientNpub,
-              grant,
-              accessChangeEvent,
-              expiresAt,
-            }),
-          }
+        transaction.commitBody = buildFolderAccountAccessCommitRequest(
+          plan,
+          request,
+          transaction.participantGrants,
+          accessChangeEvent,
+          { approveReduced, brainId }
         );
-      } else {
-        const sessionKeyring = state.keyring || createSessionKeyring();
-        await openAvailableFolderKeyGrants({ keyring: sessionKeyring, brainId });
-        requireCurrentSessionEpoch(sessionEpoch);
-        const request = await buildEmailBrainInvitationRequest(sessionKeyring, {
-          target: targetInput,
-          metadata: state.metadata,
-          scope: emailFolderInviteScope(row),
-          initialFolderAccess: [row.id],
-          folderOnly: true,
-          expiresAt,
-          brainId,
-        });
-        requireCurrentSessionEpoch(sessionEpoch);
-        invitation = await protectedRequest(
-          `/v1/brains/${encodeURIComponent(brainId)}/folders/${encodeURIComponent(row.id)}/invitations`,
-          {
-            method: "POST",
-            body: JSON.stringify(request.body),
-          }
-        );
-        requireCurrentSessionEpoch(sessionEpoch);
-        privateInviteUrl = emailInviteClientUrl({
-          publicBaseUrl: state.config?.publicBaseUrl,
-          inviteCode: invitation.inviteCode,
-          invitedEmail: invitation.invitedEmail || targetInput,
-          inviteSecret: request.inviteSecret,
-        });
-        state.keyring = sessionKeyring;
       }
+      const result = await protectedRequest(
+        `/v1/brains/${encodeURIComponent(brainId)}/folders/${encodeURIComponent(
+          row.id
+        )}/account-access`,
+        { method: "POST", body: JSON.stringify(transaction.commitBody) }
+      );
       requireCurrentSessionEpoch(sessionEpoch);
+      state.metadata = result.metadata;
+      rememberVisibleBrain(result.metadata);
+      clearFolderInvitationPlan();
+      const agentCount = (result.participants || []).filter(
+        (participant) => participant?.relationship === "account_agent"
+      ).length;
+      setAccessResult(
+        "ready",
+        result.outcome === "already_applied" ? "Folder access already applied" : "Folder access granted",
+        `${result.targetEmail || request.targetEmail} and ${agentCount} account ${
+          agentCount === 1 ? "agent" : "agents"
+        } can use ${row.path}.`,
+        { "Roster participants": (result.participants || []).length }
+      );
+      log("Committed atomic mailbox-addressed Folder access.", {
+        brainId,
+        folderId: row.id,
+        outcome: result.outcome,
+        participantCount: (result.participants || []).length,
+      });
+      render();
+      return result;
+    } catch (error) {
+      markAccessFailureHandled(error);
+      if (state.sessionEpoch === sessionEpoch) {
+        const stale =
+          error?.status === 409 &&
+          /stale|roster|plan|key version|capacity|exclusion/i.test(error?.reason || "");
+        if (stale) clearFolderInvitationPlan();
+        setAccessResult(
+          "error",
+          stale ? "Preview changed" : "Folder access failed",
+          brainInvitationCompatibilityDetail(error)
+        );
+      }
+      throw error;
+    } finally {
+      finishAccessOperation(sessionEpoch);
+    }
+  }
+
+  async function createShareLinkFromPanel() {
+    const targetInput = canonicalInviteEmail($("accessShareTargetInput").value);
+    if (finiteVipEmail(targetInput)) {
+      return previewFolderAccountAccessFromPanel();
+    }
+    const sessionEpoch = captureSessionOperationEpoch();
+    const brainId = state.activeBrainId;
+    const row = activeAccessRow();
+    if (!row) throw new Error("Select a Folder first");
+    beginAccessOperation(sessionEpoch);
+    try {
+      const expiresAt = shareExpiryIso();
+      const sessionKeyring = state.keyring || createSessionKeyring();
+      await openAvailableFolderKeyGrants({ keyring: sessionKeyring, brainId });
+      requireCurrentSessionEpoch(sessionEpoch);
+      const request = await buildEmailBrainInvitationRequest(sessionKeyring, {
+        target: targetInput,
+        metadata: state.metadata,
+        scope: emailFolderInviteScope(row),
+        initialFolderAccess: [row.id],
+        folderOnly: true,
+        expiresAt,
+        brainId,
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      const invitation = await protectedRequest(
+        `/v1/brains/${encodeURIComponent(brainId)}/folders/${encodeURIComponent(row.id)}/invitations`,
+        { method: "POST", body: JSON.stringify(request.body) }
+      );
+      requireCurrentSessionEpoch(sessionEpoch);
+      const privateInviteUrl = emailInviteClientUrl({
+        publicBaseUrl: state.config?.publicBaseUrl,
+        inviteCode: invitation.inviteCode,
+        invitedEmail: invitation.invitedEmail || targetInput,
+        inviteSecret: request.inviteSecret,
+      });
+      state.keyring = sessionKeyring;
       state.lastShareLinkId = invitation.id;
-      $("accessShareLinkInput").value = privateInviteUrl || invitation.id;
+      $("accessShareLinkInput").value = privateInviteUrl;
       const delivery = emailInvitationDeliveryPresentation(invitation);
       setAccessResult(
         delivery?.tone || "ready",
         delivery?.title || "Folder Invitation created",
-        delivery?.detail || `The private Folder Invitation is ready for ${identityDisplay(recipientNpub)}.`,
+        delivery?.detail || "The private Folder Invitation is ready.",
         {
           Expires: invitation.expiresAt,
           ...(delivery ? { "Email delivery": delivery.statusLabel } : {}),
-          ...(privateInviteUrl ? { "Private link": privateInviteUrl } : {}),
+          "Private link": privateInviteUrl,
         }
       );
-      log("Created Folder Invitation.", { folderId: row.id, invitationId: invitation.id });
+      log("Created external Folder Invitation.", { folderId: row.id, invitationId: invitation.id });
       await refreshFolderShareLinks(row.id);
       requireCurrentSessionEpoch(sessionEpoch);
+      return invitation;
     } catch (error) {
       failAccessOperation(sessionEpoch, "Share failed", error);
       throw error;
@@ -12035,6 +13131,191 @@ const FiniteBrainProductClient = (() => {
     }
   }
 
+  function validateBrainInvitationPlan(plan, request, brainId) {
+    validateBrainInvitationPlanWorkload(plan);
+    const expectedFolderId = request.folderOnly
+      ? request.initialFolderAccess[0]
+      : null;
+    if (
+      canonicalInviteEmail(plan.targetEmail) !== request.targetEmail ||
+      plan.scope?.kind !== (request.folderOnly ? "folder" : "brain") ||
+      plan.scope?.brainId !== brainId ||
+      (request.folderOnly &&
+        (request.initialFolderAccess.length !== 1 ||
+          plan.scope?.folderId !== expectedFolderId ||
+          plan.keyVersions.length !== 1 ||
+          plan.keyVersions[0]?.folderId !== expectedFolderId)) ||
+      plan.expiresAt !== request.expiresAt
+    ) {
+      throw new Error("Invitation preview does not match the requested mailbox and scope");
+    }
+    if (!plan.participants.some((participant) => participant?.relationship === "human")) {
+      throw new Error("Invitation preview omitted the human participant");
+    }
+    return plan;
+  }
+
+  async function previewBrainInvitationFromPanel() {
+    requireUnlockedBrainInvitationAction("previewing invitation recipients");
+    const sessionEpoch = captureSessionOperationEpoch();
+    const brainId = state.activeBrainId;
+    if (!brainId) throw new Error("Select a Brain before previewing an invitation");
+    const request = buildBrainInvitationPreflightRequest({
+      brainId,
+      targetEmail: $("brainInviteRecipientEmailInput").value,
+      initialFolderAccess: initialBrainInvitationFolders(),
+      expiresAt: brainInvitationExpiryIso(),
+    });
+    state.brainInvitationTransaction = null;
+    const approval = $("approveBrainInvitationExclusionsInput");
+    if (approval) approval.checked = false;
+    state.accessBusy = true;
+    state.accessResult = null;
+    renderBrainInvitationPanel();
+    try {
+      const plan = await protectedRequest(brainInvitationPreflightPath(brainId), {
+        method: "POST",
+        body: JSON.stringify(request),
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      validateBrainInvitationPlan(plan, request, brainId);
+      state.brainInvitationTransaction = {
+        plan,
+        request,
+        participantGrants: null,
+        commitBody: null,
+      };
+      const presentation = brainInvitationPlanPresentation(plan);
+      const tone = presentation.status === "ready" ? "ready" : "warn";
+      setAccessResult(
+        tone,
+        presentation.status === "ready" ? "Recipients ready to review" : "Recipient review needs attention",
+        `${presentation.summary} Previewing did not create an invitation or send email.`
+      );
+      renderBrainInvitationPreview();
+      log("Previewed Brain invitation recipients without mutation.", {
+        brainId,
+        planId: plan.planId,
+        participantCount: plan.participants.length,
+        excludedCount: plan.excluded.length,
+      });
+      return plan;
+    } catch (error) {
+      markAccessFailureHandled(error);
+      if (state.sessionEpoch === sessionEpoch) {
+        state.brainInvitationTransaction = null;
+        setAccessResult(
+          "error",
+          "Preview unavailable",
+          brainInvitationCompatibilityDetail(error)
+        );
+        renderBrainInvitationPreview();
+      }
+      throw error;
+    } finally {
+      if (state.sessionEpoch === sessionEpoch) {
+        state.accessBusy = false;
+        renderBrainInvitationPanel();
+      }
+    }
+  }
+
+  async function confirmBrainInvitationFromPanel() {
+    requireUnlockedBrainInvitationAction("sending an invitation");
+    const sessionEpoch = captureSessionOperationEpoch();
+    const brainId = state.activeBrainId;
+    const transaction = state.brainInvitationTransaction;
+    const plan = transaction?.plan;
+    const request = transaction?.request;
+    if (!brainId || !plan || !request) {
+      throw new Error("Preview the invitation recipients before sending");
+    }
+    const currentRequest = buildBrainInvitationPreflightRequest({
+      brainId,
+      targetEmail: $("brainInviteRecipientEmailInput").value,
+      initialFolderAccess: initialBrainInvitationFolders(),
+      expiresAt: brainInvitationExpiryIso(),
+    });
+    if (JSON.stringify(currentRequest) !== JSON.stringify(request)) {
+      clearBrainInvitationPlan();
+      throw new Error("Invitation inputs changed; preview the recipients again");
+    }
+    const approveReduced = $("approveBrainInvitationExclusionsInput")?.checked === true;
+    state.accessBusy = true;
+    state.accessResult = null;
+    renderBrainInvitationPanel();
+    try {
+      if (!transaction.participantGrants) {
+        transaction.participantGrants = await buildBrainInvitationParticipantGrants(plan, {
+            brainId,
+            keyring: state.keyring,
+          });
+        requireCurrentSessionEpoch(sessionEpoch);
+      }
+      if (!transaction.commitBody) {
+        transaction.commitBody = buildBrainInvitationCommitRequest(
+          plan,
+          request,
+          transaction.participantGrants,
+          { approveReduced, brainId }
+        );
+      }
+      const invitation = await protectedRequest(brainInvitationCreatePath(brainId), {
+        method: "POST",
+        body: JSON.stringify(transaction.commitBody),
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      rememberBrainInvitationSelection(invitation);
+      const agentNames = (invitation.participants || [])
+        .filter((participant) => participant?.relationship === "account_agent")
+        .map((participant) => participant.name)
+        .filter(Boolean);
+      const participantSummary = agentNames.length
+        ? `Invited ${request.targetEmail} and ${agentNames.length} of their agents: ${agentNames.join(
+            ", "
+          )}.`
+        : `Invited ${request.targetEmail}.`;
+      const delivery = invitation.deliveryStatus === "sent"
+        ? " One invitation email was sent to the human mailbox."
+        : invitation.deliveryStatus === "not_configured"
+          ? " Email delivery is not configured; use the invitation handoff shown below."
+          : "";
+      clearBrainInvitationPlan();
+      setAccessResult("ready", "Invitation sent", `${participantSummary}${delivery}`, {
+        "Invite Code": invitation.inviteCode,
+        Expires: invitation.expiresAt,
+        Recipient: invitation.invitedEmail || request.targetEmail,
+      });
+      log("Committed account cohort Brain invitation.", {
+        invitationId: invitation.id,
+        brainId,
+        participantCount: (invitation.participants || []).length,
+      });
+      await refreshBrainAdminLists();
+      requireCurrentSessionEpoch(sessionEpoch);
+      return invitation;
+    } catch (error) {
+      markAccessFailureHandled(error);
+      if (state.sessionEpoch === sessionEpoch) {
+        const stale =
+          error?.status === 409 &&
+          /stale|roster|plan|key version|capacity|exclusion/i.test(error?.reason || "");
+        if (stale) clearBrainInvitationPlan();
+        setAccessResult(
+          "error",
+          stale ? "Preview changed" : "Invite failed",
+          brainInvitationCompatibilityDetail(error)
+        );
+      }
+      throw error;
+    } finally {
+      if (state.sessionEpoch === sessionEpoch) {
+        state.accessBusy = false;
+        renderBrainInvitationPanel();
+      }
+    }
+  }
+
   async function createBrainInvitationFromPanel() {
     requireUnlockedBrainInvitationAction("creating an invitation");
     const sessionEpoch = state.sessionEpoch;
@@ -12042,48 +13323,30 @@ const FiniteBrainProductClient = (() => {
     const metadata = state.metadata;
     const publicBaseUrl = state.config?.publicBaseUrl;
     const targetInput = canonicalInviteEmail($("brainInviteRecipientEmailInput").value);
+    if (finiteVipEmail(targetInput)) {
+      throw new Error("Preview the human and account-agent recipients before sending this invitation");
+    }
     state.accessBusy = true;
     state.accessResult = null;
     render();
     try {
       let body;
       let localInviteSecret = null;
-      let targetLabel = targetInput;
-      let resolvedNpub = null;
-      if (finiteVipEmail(targetInput)) {
-        try {
-          resolvedNpub = (await resolveIdentityInputValue(targetInput, "Enter a valid email address first")).npub;
-          requireCurrentSessionEpoch(sessionEpoch);
-        } catch (error) {
-          if (state.sessionEpoch !== sessionEpoch) throw error;
-          resolvedNpub = null;
-        }
-      }
-      if (resolvedNpub) {
-        body = JSON.stringify(
-          buildBrainInvitationRequest({
-            targetNpub: resolvedNpub,
-            initialFolderAccess: initialBrainInvitationFolders(),
-            expiresAt: brainInvitationExpiryIso(),
-          })
-        );
-        targetLabel = targetInput;
-      } else {
-        const sessionKeyring = state.keyring || createSessionKeyring();
-        await openAvailableFolderKeyGrants({ keyring: sessionKeyring, brainId });
-        requireCurrentSessionEpoch(sessionEpoch);
-        const request = await buildEmailBrainInvitationRequest(sessionKeyring, {
-          target: targetInput,
-          metadata,
-          initialFolderAccess: initialBrainInvitationFolders(),
-          expiresAt: brainInvitationExpiryIso(),
-          brainId,
-        });
-        requireCurrentSessionEpoch(sessionEpoch);
-        body = JSON.stringify(request.body);
-        localInviteSecret = request.inviteSecret;
-        state.keyring = sessionKeyring;
-      }
+      const targetLabel = targetInput;
+      const sessionKeyring = state.keyring || createSessionKeyring();
+      await openAvailableFolderKeyGrants({ keyring: sessionKeyring, brainId });
+      requireCurrentSessionEpoch(sessionEpoch);
+      const request = await buildEmailBrainInvitationRequest(sessionKeyring, {
+        target: targetInput,
+        metadata,
+        initialFolderAccess: initialBrainInvitationFolders(),
+        expiresAt: brainInvitationExpiryIso(),
+        brainId,
+      });
+      requireCurrentSessionEpoch(sessionEpoch);
+      body = JSON.stringify(request.body);
+      localInviteSecret = request.inviteSecret;
+      state.keyring = sessionKeyring;
       requireCurrentSessionEpoch(sessionEpoch);
       const invitation = await protectedRequest(
         brainInvitationCreatePath(brainId),
@@ -12135,6 +13398,13 @@ const FiniteBrainProductClient = (() => {
         render();
       }
     }
+  }
+
+  async function submitBrainInvitationPrimaryAction() {
+    const action = brainInvitationPrimaryAction($("brainInviteRecipientEmailInput").value);
+    return action === "preview"
+      ? previewBrainInvitationFromPanel()
+      : createBrainInvitationFromPanel();
   }
 
   async function inspectBrainInvitationFromPanel() {
@@ -12646,6 +13916,12 @@ const FiniteBrainProductClient = (() => {
         log("Failed to create Folder Invitation.", { error: error.message });
       });
     });
+    onOptionalClick("confirmFolderInvitationButton", () => {
+      confirmFolderAccountAccessFromPanel().catch((error) => {
+        reportClientActionFailure(error);
+        log("Failed to grant mailbox-addressed Folder access.", { error: error.message });
+      });
+    });
     onOptionalClick("acceptShareLinkButton", () => {
       acceptShareLinkFromPanel().catch((error) => {
         reportClientActionFailure(error);
@@ -12659,9 +13935,15 @@ const FiniteBrainProductClient = (() => {
       });
     });
     onOptionalClick("createBrainInvitationButton", () => {
-      createBrainInvitationFromPanel().catch((error) => {
+      submitBrainInvitationPrimaryAction().catch((error) => {
         reportClientActionFailure(error);
-        log("Failed to create Brain invitation.", { error: error.message });
+        log("Failed to preview or create Brain invitation.", { error: error.message });
+      });
+    });
+    onOptionalClick("confirmBrainInvitationButton", () => {
+      confirmBrainInvitationFromPanel().catch((error) => {
+        reportClientActionFailure(error);
+        log("Failed to commit Brain invitation.", { error: error.message });
       });
     });
     onOptionalClick("copyBrainInviteUrlButton", () => {
@@ -12710,11 +13992,17 @@ const FiniteBrainProductClient = (() => {
       bindPrimaryFormAction(inputId);
     }
     for (const inputId of [
+      "brainInviteRecipientEmailInput",
+      "brainInviteExpiresAtInput",
       "brainInviteCodeInput",
       "brainInviteEmailInput",
     ]) {
       const input = $(inputId);
       if (input) input.addEventListener("input", () => handleBrainInvitationInput(inputId));
+    }
+    for (const inputId of ["accessShareTargetInput", "accessShareExpiresAtInput"]) {
+      const input = $(inputId);
+      if (input) input.addEventListener("input", handleFolderInvitationInput);
     }
     $("sidebarSearchInput").addEventListener("input", () => {
       if (state.searchHighlight) {
@@ -13039,6 +14327,8 @@ const FiniteBrainProductClient = (() => {
     applyBrainUpdateNotification,
     installSessionAssetDownloadUrl,
     actorHasDestructiveAuthority,
+    folderAccessChangeRequiresAuthenticatedHumanIntent,
+    actingAgentAuthorityPresentation,
     actorCanCreateFolder,
     adminAccessChangeTags,
     buildAdminAccessChangeEvent,
@@ -13055,7 +14345,11 @@ const FiniteBrainProductClient = (() => {
     buildEmailInviteClaimProofEvent,
     buildEmailInviteClaimRequest,
     buildEmailBrainInvitationRequest,
+    buildBrainInvitationCommitRequest,
+    buildBrainInvitationParticipantGrants,
+    buildFolderAccountAccessCommitRequest,
     buildBrainInvitationRequest,
+    buildBrainInvitationPreflightRequest,
     buildGraphProjection,
     canonicalAdminAccessChangePayload,
     canonicalEmailInviteAuthorizationPayload,
@@ -13095,7 +14389,11 @@ const FiniteBrainProductClient = (() => {
     folderCreationHierarchy,
     folderCreationParent,
     folderRecipientsForAccess,
+    folderAccountAccessPath,
+    folderAccountAccessRemovalConfirmation,
+    folderAccountAccessRemovalPreflightPath,
     validateFolderRotationFanout,
+    validateFolderAccountAccessRemovalPlan,
     folderSubtreeSummary,
     folderShareLinkRows,
     graphEmptyStateCopy,
@@ -13146,6 +14444,7 @@ const FiniteBrainProductClient = (() => {
     pagePathLabel,
     pageStatsForText,
     personalBrainAgentConfirmationMessage,
+    personalBrainAgentRows,
     personalBrainIdForPubkey,
     plaintextDevelopmentGrantFromExportGrant,
     plaintextGrantFromGiftWrappedExportGrant,
@@ -13194,10 +14493,15 @@ const FiniteBrainProductClient = (() => {
     workspaceChromeState,
     workspaceTabTitle,
     brainInvitationAcceptPath,
+    brainInvitationCompatibilityDetail,
     brainInvitationCreatePath,
     brainInvitationIdentifierHint,
     brainInvitationLinkPath,
     brainInvitationPanelState,
+    brainInvitationPrimaryAction,
+    brainInvitationPlanPresentation,
+    validateBrainInvitationPlanWorkload,
+    brainInvitationPreflightPath,
     brainInvitationRevokePath,
     brainInvitationRevokeTarget,
     brainInvitationRows,

@@ -14,6 +14,15 @@ This verifies:
 - Product Client assets are served by the Rust app/server.
 - Product Client JS contains the NIP-07, encrypted Page loop, graph/replay, OKF
   import, sync projection, and Session Lock seams.
+- Finite VIP Brain invitations and mailbox-addressed Folder access use a
+  mutation-free account-cohort preview before a separate explicit commit;
+  external-email bootstrap invitations retain their existing client-owned key
+  handoff.
+- Personal Brain metadata renders every current account agent and Folder grant
+  fanout uses the authoritative roster's `ready` agents (with singular metadata
+  only as an old-server fallback). Human-anchored Organization agent
+  authority is shown as delegated routine administration, never ownership or
+  recovery authority.
 - Session Lock clears in-memory keys, decrypted projections, drafts, prepared
   writes, import plans, invite secrets, and rendered plaintext; explicit resume
   reopens grants through the connected Member Identity.
@@ -57,7 +66,8 @@ Expected result:
 - `/client/config.json` reports the configured public base URL and Nostr auth
   kind.
 - `/client/app.js` contains the trusted-client seams for auth, crypto, sync,
-  graph/replay, and OKF import execution.
+  graph/replay, OKF import execution, invitation preflight, and explicit cohort
+  commit.
 - `/client/app.css` contains Product Client styling.
 
 ## Required Gates
@@ -105,6 +115,14 @@ The verifier checks that:
   access/share panel projection work against the fixture.
 - the Product Client exposes explicit locked, resume, and lock states without
   persisting readable client state.
+- the Finite VIP Brain and Folder forms expose the read-only human/account-agent
+  cohort, exclusions, readiness, scope, capacity, roster revision, and expiry
+  before enabling a separate **Send invitation** action;
+- the client refuses a reduced recipient set until the user explicitly approves
+  every displayed excluded NIP-05 identity, and refuses stale, expired, or
+  capacity-blocked plans without silently falling back to a legacy write;
+- a backend without the cohort preflight route produces an update-required
+  message and sends no invitation request.
 
 Then open the local Product Client:
 
@@ -126,6 +144,39 @@ Expected Product Client behavior:
   right-click Folder/Page actions.
 - Can parse OKF bundles, plan conflicts, rewrite copied relative links, and
   upload imported Pages through encrypted object writes.
+- Entering a `finite.vip` mailbox changes the primary action to **Preview
+  recipients**. Previewing does not create an invitation, alter the pending
+  invitation list, or send email.
+- The preview names the human and each account agent separately, shows agents
+  excluded or not ready without treating an offline runtime as departed, and
+  keeps raw participant npubs out of normal copy.
+- A reduced preview requires explicit approval before **Send invitation** is
+  enabled. A stale roster/key/capacity response consumes the plan and requires
+  a new preview. Success reports one shared-mailbox delivery status.
+- Mailbox-addressed restricted-Folder access commits once through the atomic
+  Folder account-access route with the human and included agents; it never
+  decomposes the cohort into per-npub mutations.
+- Removing mailbox-addressed restricted-Folder access first previews the
+  friendly human/agent cohort and any independently retained principals, then
+  removes cohort provenance and rotates the Folder key once through the atomic
+  account-access route. Machine planning npubs stay out of confirmation copy.
+- Removing one included account agent uses the targeted-principal Folder access
+  route and one key rotation. The returned `accountAccessCohorts` participant
+  keeps `relationship: account_agent` and records the Folder in
+  `excludedFolderIds`; the human and sibling agents retain their access. A
+  Managed Agent NIP-05 is never submitted as the human mailbox target.
+- A ready Personal Brain agent does not receive a browser **Remove** action for
+  a distinct ready sibling agent. That change requires short-lived, exact-scope
+  Authenticated Human Intent from the human-authorized Chat/CLI transport; the
+  Product Client neither prompts for nor fabricates it. Owner-human removal
+  continues to use the existing rotation request without the optional proof.
+- Personal Brains with `personalBrainAgents` show the complete account-managed
+  roster and suppress the legacy single-agent replacement controls. Older
+  metadata with only `personalAgent` remains readable.
+- When the connected principal is listed in
+  `humanAnchoredAgentAuthorities`, the Access surface identifies the acting
+  agent and authorizing human. Routine controls follow the human's current role;
+  ownership, recovery, and whole-Brain deletion stay human-only.
 - **Lock session** hides protected content and clears keys, opened grants,
   decrypted Pages, local drafts, graph/search projections, prepared writes,
   import state, invite secrets, and rendered plaintext without deleting or
@@ -168,10 +219,19 @@ For a staging server:
 
 Portable v1 is a hard cut:
 
+- The account-cohort controls in this client depend on ADR 0045 and the additive
+  metadata/routes landing in the account-agent cohort backend change. Without
+  those fields and routes, the new authority path remains inert and Finite VIP
+  mailbox writes fail closed; do not treat this frontend branch alone as a
+  supersession of ADR 0016.
+
 - Do not add legacy route compatibility.
 - Do not add old runtime migration shims to this Product Client parity PR.
 - Do not move plaintext OKF import/search onto the server.
 - Do not weaken encrypted object route requirements to ease old-client testing.
 - Do not add durable browser plaintext/key caches as a restart convenience.
-- Do not add human-versus-agent authorization behavior: the signer represents a
-  Member Identity regardless of which controller operates it.
+- Do not infer agent authority from Organization membership. Use only the
+  explicit active `humanAnchoredAgentAuthorities` projection and re-check the
+  authorizing human's current role.
+- Do not collapse a human and account agent into one principal, key, grant, or
+  audit identity.

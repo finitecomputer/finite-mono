@@ -211,6 +211,13 @@ function checkStaticShell() {
     "accessShareTargetInput",
     "accessShareExpiresAtInput",
     "createShareLinkButton",
+    "folderInvitationPreview",
+    "folderInvitationPreviewStatus",
+    "folderInvitationPreviewFacts",
+    "folderInvitationIncludedList",
+    "folderInvitationExcludedList",
+    "approveFolderInvitationExclusionsInput",
+    "confirmFolderInvitationButton",
     "accessShareLinkInput",
     "acceptShareLinkButton",
     "revokeShareLinkButton",
@@ -234,6 +241,16 @@ function checkStaticShell() {
     "brainInviteFoldersOptions",
     "brainInviteExpiresAtInput",
     "createBrainInvitationButton",
+    "brainInvitationPreview",
+    "brainInvitationPreviewStatus",
+    "brainInvitationPreviewFacts",
+    "brainInvitationIncludedList",
+    "brainInvitationExcludedList",
+    "approveBrainInvitationExclusionsInput",
+    "confirmBrainInvitationButton",
+    "personalBrainAgentRosterList",
+    "legacyPersonalAgentControls",
+    "accessAuthorityLine",
     "revokeBrainInvitationButton",
     "brainInviteUrlOutput",
     "brainInviteUrlInput",
@@ -356,13 +373,18 @@ function checkStaticShell() {
     ".brain-management-section",
     ".access-brain-admin",
     ".access-field",
-    ".access-checkbox",
     ".access-share-hint",
     ".access-link-status",
     ".access-busy-status",
     ".brain-invite-url-output",
+    ".brain-invitation-preview",
+    ".brain-invitation-preview-facts",
+    ".brain-invitation-participant-list",
+    ".brain-invitation-exclusion-approval",
+    ".access-status-pill",
+    ".access-authority-line",
+    ".personal-brain-agent-list",
     ".access-content-panel.is-busy",
-    ".access-badge",
     ".note-content-empty",
     ".note-markdown",
     ".editor-slash-menu",
@@ -414,6 +436,24 @@ function checkStaticShell() {
     "addBrainAdminFromPanel",
     "buildFolderAccessRemovalRequest",
     "buildEmailBrainInvitationRequest",
+    "buildBrainInvitationPreflightRequest",
+    "buildBrainInvitationCommitRequest",
+    "buildBrainInvitationParticipantGrants",
+    "buildFolderAccountAccessCommitRequest",
+    "validateBrainInvitationPlanWorkload",
+    "brainInvitationPreflightPath",
+    "brainInvitationPlanPresentation",
+    "brainInvitationCompatibilityDetail",
+    "previewBrainInvitationFromPanel",
+    "confirmBrainInvitationFromPanel",
+    "previewFolderAccountAccessFromPanel",
+    "confirmFolderAccountAccessFromPanel",
+    "folderAccountAccessRemovalPreflightPath",
+    "validateFolderAccountAccessRemovalPlan",
+    "removeFolderAccountAccessCohortFromPanel",
+    "personalBrainAgentRows",
+    "humanAnchoredAuthorityForActor",
+    "actingAgentAuthorityPresentation",
     "copyToClipboard",
     "copyBrainInviteUrl",
     "buildEmailInviteClaimRequest",
@@ -450,6 +490,31 @@ function checkStaticShell() {
     html,
     /id="brainInviteUrlOutput"[^>]*hidden/,
     "Product Client HTML must keep generated invite URLs hidden before an unlocked session creates one"
+  );
+  assert.match(
+    html,
+    /id="brainInvitationPreview"[\s\S]{0,180}hidden/,
+    "Product Client HTML must keep the mutation-free cohort preview hidden until a plan exists"
+  );
+  assert.match(
+    html,
+    /id="folderInvitationPreview"[\s\S]{0,220}hidden/,
+    "Product Client HTML must keep mailbox-addressed Folder access preview hidden until a plan exists"
+  );
+  assert.match(
+    js,
+    /folders\/\$\{encodeURIComponent\([\s\S]{0,220}\/account-access/,
+    "Finite mailbox Folder access must commit through the atomic cohort route"
+  );
+  assert.match(
+    js,
+    /function brainInvitationPrimaryAction\(value\)[\s\S]{0,180}finiteVipEmail\(email\) \? "preview" : "create"/,
+    "Finite VIP mailboxes must enter cohort preview instead of the legacy direct writer"
+  );
+  assert.match(
+    js,
+    /async function createBrainInvitationFromPanel\(\)[\s\S]{0,500}if \(finiteVipEmail\(targetInput\)\) \{\s*throw new Error\("Preview the human and account-agent recipients/,
+    "The external-email creation path must refuse a Finite VIP mailbox without a cohort plan"
   );
   assert.match(
     html,

@@ -112,6 +112,7 @@
                 <div class="access-header">
                   <h3 id="accessCurrentFolder">No folder selected</h3>
                   <p id="accessSummaryLine" class="access-summary">Load a Brain and select a Folder to inspect access.</p>
+                  <p id="accessAuthorityLine" class="access-authority-line" hidden></p>
                 </div>
               </div>
             </div>
@@ -196,6 +197,42 @@
                         />
                       </label>
                       <button id="createShareLinkButton" type="button" class="access-primary-button">Create Folder Invitation</button>
+                      <section
+                        id="folderInvitationPreview"
+                        class="brain-invitation-preview folder-invitation-preview"
+                        aria-labelledby="folderInvitationPreviewTitle"
+                        hidden
+                      >
+                        <div class="brain-invitation-preview-heading">
+                          <div>
+                            <p class="access-eyebrow">Folder access preview</p>
+                            <h5 id="folderInvitationPreviewTitle">Review everyone receiving this Folder</h5>
+                          </div>
+                          <span id="folderInvitationPreviewStatus" class="access-status-pill" data-tone="muted">Not reviewed</span>
+                        </div>
+                        <p id="folderInvitationPreviewSummary" class="access-field-hint" aria-live="polite"></p>
+                        <dl id="folderInvitationPreviewFacts" class="brain-invitation-preview-facts"></dl>
+                        <div class="brain-invitation-preview-groups">
+                          <section aria-labelledby="folderInvitationIncludedTitle">
+                            <h6 id="folderInvitationIncludedTitle">Included</h6>
+                            <ul id="folderInvitationIncludedList" class="brain-invitation-participant-list"></ul>
+                          </section>
+                          <section id="folderInvitationExcludedGroup" aria-labelledby="folderInvitationExcludedTitle" hidden>
+                            <h6 id="folderInvitationExcludedTitle">Not included</h6>
+                            <ul id="folderInvitationExcludedList" class="brain-invitation-participant-list"></ul>
+                          </section>
+                        </div>
+                        <label id="approveFolderInvitationExclusionsLabel" class="brain-invitation-exclusion-approval" hidden>
+                          <input id="approveFolderInvitationExclusionsInput" type="checkbox" />
+                          <span>I understand the listed agents will not receive this Folder.</span>
+                        </label>
+                        <div class="access-button-row brain-invitation-preview-actions">
+                          <button id="confirmFolderInvitationButton" class="access-primary-button" type="button" disabled>
+                            Grant Folder access
+                          </button>
+                          <span class="access-field-hint">Previewing does not change Folder access or send email.</span>
+                        </div>
+                      </section>
                     </div>
 
                     <div class="access-share-existing">
@@ -262,9 +299,45 @@
                         />
                       </label>
                       <div class="access-button-row">
-                        <button id="createBrainInvitationButton" type="button">Create invite</button>
+                        <button id="createBrainInvitationButton" type="button">Preview recipients</button>
                         <button id="revokeBrainInvitationButton" class="danger-action" type="button">Revoke invite</button>
                       </div>
+                      <section
+                        id="brainInvitationPreview"
+                        class="brain-invitation-preview"
+                        aria-labelledby="brainInvitationPreviewTitle"
+                        hidden
+                      >
+                        <div class="brain-invitation-preview-heading">
+                          <div>
+                            <p class="access-eyebrow">Invitation preview</p>
+                            <h5 id="brainInvitationPreviewTitle">Review everyone receiving access</h5>
+                          </div>
+                          <span id="brainInvitationPreviewStatus" class="access-status-pill" data-tone="muted">Not reviewed</span>
+                        </div>
+                        <p id="brainInvitationPreviewSummary" class="access-field-hint" aria-live="polite"></p>
+                        <dl id="brainInvitationPreviewFacts" class="brain-invitation-preview-facts"></dl>
+                        <div class="brain-invitation-preview-groups">
+                          <section aria-labelledby="brainInvitationIncludedTitle">
+                            <h6 id="brainInvitationIncludedTitle">Included</h6>
+                            <ul id="brainInvitationIncludedList" class="brain-invitation-participant-list"></ul>
+                          </section>
+                          <section id="brainInvitationExcludedGroup" aria-labelledby="brainInvitationExcludedTitle" hidden>
+                            <h6 id="brainInvitationExcludedTitle">Not included</h6>
+                            <ul id="brainInvitationExcludedList" class="brain-invitation-participant-list"></ul>
+                          </section>
+                        </div>
+                        <label id="approveBrainInvitationExclusionsLabel" class="brain-invitation-exclusion-approval" hidden>
+                          <input id="approveBrainInvitationExclusionsInput" type="checkbox" />
+                          <span>I understand the listed agents will not receive this access.</span>
+                        </label>
+                        <div class="access-button-row brain-invitation-preview-actions">
+                          <button id="confirmBrainInvitationButton" class="access-primary-button" type="button" disabled>
+                            Send invitation
+                          </button>
+                          <span class="access-field-hint">Previewing does not create an invitation or send email.</span>
+                        </div>
+                      </section>
                       <div id="brainInviteUrlOutput" class="brain-invite-url-output" hidden>
                         <label class="access-field">
                           <span>Private invite link</span>
@@ -376,17 +449,20 @@
             <div class="access-state-stack" aria-label="Access details">
               <section id="personalAgentSection" class="brain-management-section" hidden>
                 <div class="access-section-header">
-                  <span class="section-title">Personal Agent</span>
+                  <span class="section-title">Account agents</span>
                 </div>
                 <p id="personalAgentCurrent" class="access-field-hint"></p>
-                <label class="access-field">
-                  <span>Replacement agent email</span>
-                  <input id="personalAgentEmailInput" type="email" autocomplete="email" inputmode="email" placeholder="agent@finite.computer" />
-                </label>
-                <p class="access-field-hint">Replacing or removing the agent securely updates access. Your Brain and content stay intact.</p>
-                <div class="access-button-row">
-                  <button id="replacePersonalAgentButton" type="button" disabled>Replace agent</button>
-                  <button id="removePersonalAgentButton" type="button" class="danger" disabled>Remove agent</button>
+                <ul id="personalBrainAgentRosterList" class="brain-invitation-participant-list personal-brain-agent-list" hidden></ul>
+                <div id="legacyPersonalAgentControls">
+                  <label class="access-field">
+                    <span>Replacement agent email</span>
+                    <input id="personalAgentEmailInput" type="email" autocomplete="email" inputmode="email" placeholder="agent@finite.computer" />
+                  </label>
+                  <p class="access-field-hint">Replacing or removing the agent securely updates access. Your Brain and content stay intact.</p>
+                  <div class="access-button-row">
+                    <button id="replacePersonalAgentButton" type="button" disabled>Replace agent</button>
+                    <button id="removePersonalAgentButton" type="button" class="danger" disabled>Remove agent</button>
+                  </div>
                 </div>
               </section>
 

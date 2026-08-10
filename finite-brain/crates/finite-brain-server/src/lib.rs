@@ -3176,6 +3176,7 @@ mod tests {
 
     #[tokio::test]
     async fn product_client_serves_spine_assets_and_config() {
+        const MAX_PRODUCT_CLIENT_JS_BYTES: usize = 640 * 1024;
         let router = test_router();
 
         let client_response = router
@@ -3372,7 +3373,7 @@ mod tests {
             js_response.headers().get(CACHE_CONTROL).unwrap(),
             "no-store, max-age=0"
         );
-        let js_body = to_bytes(js_response.into_body(), 512 * 1024)
+        let js_body = to_bytes(js_response.into_body(), MAX_PRODUCT_CLIENT_JS_BYTES)
             .await
             .expect("client js body");
         let js_body = std::str::from_utf8(&js_body).expect("client js utf8");

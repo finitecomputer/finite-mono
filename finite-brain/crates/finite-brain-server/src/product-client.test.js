@@ -96,6 +96,7 @@ class TestURL extends URL {
   }
 }
 const context = {
+  AbortController,
   TextDecoder,
   TextEncoder,
   Uint8Array,
@@ -329,6 +330,174 @@ assert.equal(
   JSON.stringify([personalOwner, personalReplacement, personalCollaborator].sort()),
   "Personal Agent rotation recipients must preserve explicit Folder collaborators"
 );
+const currentPersonalAgent = client.npubFromHex("15".repeat(32));
+const blockedPersonalAgent = client.npubFromHex("16".repeat(32));
+const personalAgentSetMetadata = {
+  kind: "personal",
+  ownerUserId: personalOwner,
+  personalAgent: { agentNpub: personalReplacement },
+  personalBrainAgents: [
+    {
+      agentNpub: currentPersonalAgent,
+      agentNip05: "waffle@finite.vip",
+      displayName: "Waffle",
+      status: "ready",
+      rosterRevision: 14,
+    },
+    {
+      agentNpub: blockedPersonalAgent,
+      agentNip05: "crumpet@finite.vip",
+      displayName: "Crumpet",
+      status: "identity_provisioning_incomplete",
+      rosterRevision: 14,
+      blocker: "Identity setup is not complete",
+    },
+  ],
+};
+assert.equal(
+  JSON.stringify(client.folderRecipientsForAccess("owner", [], personalAgentSetMetadata).sort()),
+  JSON.stringify([personalOwner, currentPersonalAgent].sort()),
+  "An authoritative roster must exclude a stale singular Personal Agent from new Folder grants"
+);
+const emptyPersonalAgentSetMetadata = {
+  ...personalAgentSetMetadata,
+  personalBrainAgents: [],
+};
+assert.equal(
+  JSON.stringify(client.personalBrainAgentRows(emptyPersonalAgentSetMetadata)),
+  JSON.stringify([]),
+  "An authoritative empty roster must not revive a stale singular Personal Agent"
+);
+assert.equal(
+  JSON.stringify(
+    client.folderRecipientsForAccess("owner", [], emptyPersonalAgentSetMetadata)
+  ),
+  JSON.stringify([personalOwner]),
+  "New Folder keys must exclude a departed singular agent when the authoritative roster is empty"
+);
+assert.equal(
+  client.actorHasDestructiveAuthority(emptyPersonalAgentSetMetadata, personalReplacement),
+  false,
+  "An empty authoritative roster must revoke the stale singular agent's operational authority"
+);
+assert.equal(
+  client.actorHasDestructiveAuthority(personalAgentSetMetadata, currentPersonalAgent),
+  true,
+  "Every ready agent in the additive Personal Brain Agent Set has operational authority"
+);
+assert.equal(
+  client.actorHasDestructiveAuthority(personalAgentSetMetadata, blockedPersonalAgent),
+  false,
+  "A blocked roster entry must not gain operational authority"
+);
+assert.equal(
+  client.folderAccessChangeRequiresAuthenticatedHumanIntent(
+    personalAgentSetMetadata,
+    currentPersonalAgent,
+    blockedPersonalAgent
+  ),
+  false,
+  "A blocked target is not a ready peer-agent authority change"
+);
+const readySiblingAgent = client.npubFromHex("17".repeat(32));
+const peerAgentMetadata = {
+  ...personalAgentSetMetadata,
+  personalBrainAgents: [
+    ...personalAgentSetMetadata.personalBrainAgents,
+    {
+      agentNpub: readySiblingAgent,
+      agentNip05: "biscuit@finite.vip",
+      displayName: "Biscuit",
+      status: "ready",
+      rosterRevision: 14,
+    },
+  ],
+};
+assert.equal(
+  client.folderAccessChangeRequiresAuthenticatedHumanIntent(
+    peerAgentMetadata,
+    currentPersonalAgent,
+    readySiblingAgent
+  ),
+  true,
+  "One ready Personal Brain agent changing a sibling requires authenticated human intent"
+);
+assert.equal(
+  client.folderAccessChangeRequiresAuthenticatedHumanIntent(
+    peerAgentMetadata,
+    personalOwner,
+    readySiblingAgent
+  ),
+  false,
+  "The direct owner-human path must not attach unused authenticated human intent"
+);
+assert.equal(
+  client.folderAccessChangeRequiresAuthenticatedHumanIntent(
+    peerAgentMetadata,
+    currentPersonalAgent,
+    currentPersonalAgent
+  ),
+  false,
+  "Authenticated human intent applies only to a distinct target agent"
+);
+assert.equal(
+  JSON.stringify(client.personalBrainAgentRows(personalAgentSetMetadata)),
+  JSON.stringify([
+    {
+      name: "Waffle",
+      nip05: "waffle@finite.vip",
+      npub: currentPersonalAgent,
+      status: "ready",
+      rosterRevision: 14,
+      blocker: null,
+      legacy: false,
+    },
+    {
+      name: "Crumpet",
+      nip05: "crumpet@finite.vip",
+      npub: blockedPersonalAgent,
+      status: "identity_provisioning_incomplete",
+      rosterRevision: 14,
+      blocker: "Identity setup is not complete",
+      legacy: false,
+    },
+  ]),
+  "Personal Brain metadata must render the full agent roster without collapsing it to the legacy singular relationship"
+);
+const organizationAgentAuthority = {
+  kind: "organization",
+  admins: [personalOwner],
+  members: [personalOwner, currentPersonalAgent],
+  humanAnchoredAgentAuthorities: [
+    {
+      agentNpub: currentPersonalAgent,
+      humanNpub: personalOwner,
+      scope: "routine_administration",
+      status: "active",
+    },
+  ],
+};
+assert.equal(
+  client.actorHasDestructiveAuthority(organizationAgentAuthority, currentPersonalAgent),
+  true,
+  "An explicitly active human-anchored agent receives routine Organization administration"
+);
+assert.equal(
+  client.actorHasDestructiveAuthority(
+    { ...organizationAgentAuthority, admins: [] },
+    currentPersonalAgent
+  ),
+  false,
+  "Agent authority must disappear when the authorizing human no longer holds the required role"
+);
+const authorityPresentation = client.actingAgentAuthorityPresentation(
+  organizationAgentAuthority,
+  currentPersonalAgent
+);
+assert.equal(authorityPresentation.actingAgentNpub, currentPersonalAgent);
+assert.equal(authorityPresentation.authorizingHumanNpub, personalOwner);
+assert.match(authorityPresentation.detail, /routine administration/i);
+assert.match(authorityPresentation.detail, /ownership, recovery, and whole-Brain deletion remain human-only/i);
 assert.match(
   source,
   /const operationKeyring = cloneSessionKeyring\(state\.keyring\);[\s\S]*?buildFolderAccessRemovalRequest\(operationKeyring,[\s\S]*?await protectedRequest\([\s\S]*?state\.keyring = operationKeyring;/,
@@ -439,7 +608,7 @@ function invitationPanelTestSeams() {
   };
   const seamSource = source.replace(
     "  return {\n    accessActionRoute,",
-    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, buildBrainInvitationRequest, handleBrainInvitationInput, initialBrainInvitationFolders, rememberIdentity, renderBrainAccessManagement, renderBrainInvitationFolderOptions, renderBrainInvitationList, renderBrainInvitationPanel, renderFolderShareLinkList, replacePersonalAgentFromPanel, resetBrainSessionState, revokeBrainInvitationById });\n\n  return {\n    accessActionRoute,"
+    "  window.__FINITE_BRAIN_CAPTURE_INVITATION_TEST_SEAMS__?.({ state, buildBrainInvitationRequest, confirmBrainInvitationFromPanel, confirmFolderAccountAccessFromPanel, createShareLinkFromPanel, grantFolderAccessFromPanel, handleBrainInvitationInput, initialBrainInvitationFolders, previewBrainInvitationFromPanel, previewFolderAccountAccessFromPanel, rememberIdentity, removeFolderAccessFromPanel, renderBrainAccessManagement, renderBrainInvitationFolderOptions, renderBrainInvitationList, renderBrainInvitationPanel, renderBrainInvitationPreview, renderFolderInvitationPreview, renderFolderShareLinkList, renderWhoHasAccessList, replacePersonalAgentFromPanel, resetBrainSessionState, revokeBrainInvitationById });\n\n  return {\n    accessActionRoute,"
   );
   assert.notEqual(seamSource, source, "The invitation test must capture the Product Client's real panel seams");
   vm.runInNewContext(seamSource, testContext, { filename: "product-client-invitation-panel.test.js" });
@@ -1760,6 +1929,14 @@ const sessionState = {
   sessionStatus: "unlocked",
   signerStatus: "connected",
   brainInvitations: [{ invitedEmail: "invitee@example.com" }],
+  brainInvitationTransaction: {
+    plan: { targetEmail: "invitee@finite.vip" },
+    participantGrants: [{ wrappedEventJson: "wrapped-brain-grant-sentinel" }],
+  },
+  folderInvitationTransaction: {
+    plan: { targetEmail: "invitee@finite.vip" },
+    participantGrants: [{ wrappedEventJson: "wrapped-folder-grant-sentinel" }],
+  },
 };
 client.clearSessionSecretsAndPlaintext(sessionState);
 assert.equal(sessionState.sessionStatus, "locked");
@@ -1777,6 +1954,8 @@ assert.equal(sessionState.identityByNpub.size, 0);
 assert.equal(sessionState.accessResult, null);
 assert.equal(sessionState.clientActionFeedback, null);
 assert.equal(sessionState.brainInvitations, null);
+assert.equal(sessionState.brainInvitationTransaction, null);
+assert.equal(sessionState.folderInvitationTransaction, null);
 assert.equal(sessionState.folderShareLinks, null);
 assert.equal(sessionState.lastEmailInviteSecret, null);
 assert.equal(sessionState.lastEmailInviteUrl, null);
@@ -4904,6 +5083,419 @@ function brainNotificationBehaviorTestSeams(options = {}) {
     })
   );
   assert.equal(client.brainInvitationCreatePath("smoke org"), "/v1/brains/smoke%20org/invitations");
+  assert.equal(
+    client.brainInvitationPreflightPath("smoke org"),
+    "/v1/brains/smoke%20org/invitations/preflight"
+  );
+  const cohortPlanRequest = client.buildBrainInvitationPreflightRequest({
+    brainId: "smoke org",
+    targetEmail: "Paul@Finite.VIP",
+    initialFolderAccess: ["restricted", "restricted"],
+    expiresAt: "2026-08-17T12:00:00.000Z",
+  });
+  assert.equal(
+    JSON.stringify(cohortPlanRequest),
+    JSON.stringify({
+      targetEmail: "paul@finite.vip",
+      folderOnly: false,
+      initialFolderAccess: ["restricted"],
+      expiresAt: "2026-08-17T12:00:00.000Z",
+    }),
+    "Finite VIP mailbox preview must bind the exact public request without creating an invitation"
+  );
+  const readyCohortPlan = {
+    planId: "cohort-plan-ready",
+    targetEmail: "paul@finite.vip",
+    scope: { kind: "brain", brainId: "smoke org" },
+    rosterRevision: 12,
+    participants: [
+      {
+        relationship: "human",
+        name: "Paul",
+        nip05: "paul@finite.vip",
+        npub: client.inviteUnwrapKeypairFromSecret("21".padStart(64, "0")).npub,
+        ready: true,
+      },
+      {
+        relationship: "account_agent",
+        name: "Waffle",
+        nip05: "waffle@finite.vip",
+        npub: client.inviteUnwrapKeypairFromSecret("22".padStart(64, "0")).npub,
+        ready: true,
+      },
+      {
+        relationship: "account_agent",
+        name: "Biscuit",
+        nip05: "biscuit@finite.vip",
+        npub: client.inviteUnwrapKeypairFromSecret("23".padStart(64, "0")).npub,
+        ready: true,
+      },
+    ],
+    excluded: [],
+    keyVersions: [{ folderId: "general", keyVersion: 4 }],
+    capacity: { fits: true, resultingMembers: 5, maximumMembers: 1000 },
+    expiresAt: "2026-08-17T12:00:00.000Z",
+  };
+  const readyCohortPresentation = client.brainInvitationPlanPresentation(readyCohortPlan, {
+    nowMs: Date.parse("2026-08-10T12:00:00.000Z"),
+  });
+  assert.equal(readyCohortPresentation.status, "ready");
+  assert.equal(readyCohortPresentation.canCommit, true);
+  assert.equal(readyCohortPresentation.requiresExclusionApproval, false);
+  assert.match(readyCohortPresentation.summary, /Paul and 2 account agents/);
+  assert.match(readyCohortPresentation.capacity, /5 of 1,000/);
+  assert.doesNotMatch(
+    JSON.stringify(readyCohortPresentation),
+    /npub1/,
+    "Normal preview copy must not expose raw participant npubs"
+  );
+  assert.throws(
+    () =>
+      client.validateBrainInvitationPlanWorkload({
+        ...readyCohortPlan,
+        participants: Array.from({ length: 1001 }, () => readyCohortPlan.participants[0]),
+      }),
+    /exceeds 1000 participants/i,
+    "Oversized participant arrays must fail before any grant fanout"
+  );
+  assert.throws(
+    () =>
+      client.validateBrainInvitationPlanWorkload({
+        ...readyCohortPlan,
+        keyVersions: Array.from({ length: 101 }, (_, index) => ({
+          folderId: `folder-${index}`,
+          keyVersion: 1,
+        })),
+      }),
+    /exceeds 100 Folder keys/i,
+    "Oversized key-version arrays must fail before any key lookup"
+  );
+  assert.throws(
+    () =>
+      client.validateBrainInvitationPlanWorkload({
+        ...readyCohortPlan,
+        participants: Array.from({ length: 101 }, () => readyCohortPlan.participants[0]),
+        keyVersions: Array.from({ length: 100 }, (_, index) => ({
+          folderId: `folder-${index}`,
+          keyVersion: 1,
+        })),
+      }),
+    /exceeds 10000 participant grants/i,
+    "The participant-by-key product must be bounded independently"
+  );
+  assert.throws(
+    () =>
+      client.validateBrainInvitationPlanWorkload({
+        ...readyCohortPlan,
+        participants: [{ ...readyCohortPlan.participants[0], npub: "not-an-npub" }],
+      }),
+    /participants are invalid/i,
+    "Malformed server plans must fail closed before signing or encryption"
+  );
+  assert.throws(
+    () =>
+      client.validateBrainInvitationPlanWorkload({
+        ...readyCohortPlan,
+        excluded: [{ name: "Crumpet", nip05: "not-an-email", reason: "retired" }],
+      }),
+    /exclusions are invalid/i,
+    "Malformed exclusions must fail before canonicalization or commit construction"
+  );
+  assert.throws(
+    () =>
+      client.validateBrainInvitationPlanWorkload({
+        ...readyCohortPlan,
+        excluded: [
+          {
+            name: "Duplicate Paul",
+            nip05: readyCohortPlan.participants[0].nip05,
+            reason: "retired",
+          },
+        ],
+      }),
+    /exclusions are invalid or duplicated/i,
+    "An exclusion must not duplicate an included participant identity"
+  );
+
+  const reducedCohortPlan = {
+    ...readyCohortPlan,
+    planId: "cohort-plan-reduced",
+    excluded: [
+      {
+        name: "Crumpet",
+        nip05: "crumpet@finite.vip",
+        reason: "identity_provisioning_incomplete",
+      },
+    ],
+  };
+  const reducedCohortPresentation = client.brainInvitationPlanPresentation(reducedCohortPlan, {
+    nowMs: Date.parse("2026-08-10T12:00:00.000Z"),
+  });
+  assert.equal(reducedCohortPresentation.status, "reduced");
+  assert.equal(reducedCohortPresentation.canCommit, false);
+  assert.equal(reducedCohortPresentation.requiresExclusionApproval, true);
+  assert.match(reducedCohortPresentation.excluded[0].detail, /identity setup is not complete/i);
+  assert.equal(
+    client.brainInvitationPlanPresentation(reducedCohortPlan, {
+      approveReduced: true,
+      nowMs: Date.parse("2026-08-10T12:00:00.000Z"),
+    }).canCommit,
+    true,
+    "Only explicit reduced-set approval may enable commit"
+  );
+
+  assert.equal(
+    client.brainInvitationPlanPresentation(
+      {
+        ...readyCohortPlan,
+        participants: [
+          readyCohortPlan.participants[0],
+          { ...readyCohortPlan.participants[1], ready: false },
+        ],
+      },
+      { nowMs: Date.parse("2026-08-10T12:00:00.000Z") }
+    ).status,
+    "not_ready",
+    "A participant still in the approved set must be ready before commit"
+  );
+  assert.equal(
+    client.brainInvitationPlanPresentation(
+      {
+        ...readyCohortPlan,
+        capacity: { fits: false, resultingMembers: 1001, maximumMembers: 1000 },
+      },
+      { nowMs: Date.parse("2026-08-10T12:00:00.000Z") }
+    ).status,
+    "capacity_blocked"
+  );
+  assert.equal(
+    client.brainInvitationPlanPresentation(readyCohortPlan, {
+      nowMs: Date.parse("2026-08-18T12:00:00.000Z"),
+    }).status,
+    "expired"
+  );
+  assert.match(
+    client.brainInvitationCompatibilityDetail({ status: 404 }),
+    /update.*Brain/i,
+    "A server without cohort preflight must produce an update-required result"
+  );
+  assert.equal(client.brainInvitationPrimaryAction("paul@finite.vip"), "preview");
+  assert.equal(client.brainInvitationPrimaryAction("friend@example.com"), "create");
+  assert.match(
+    client.brainInvitationCompatibilityDetail({
+      status: 409,
+      reason: "invitation plan is stale; review the returned preflight again",
+    }),
+    /preview.*again/i
+  );
+  const readyParticipantGrants = readyCohortPlan.participants.map((participant, index) => ({
+    folderId: "general",
+    grant: {
+      id: `grant-${index + 1}`,
+      keyVersion: 4,
+      recipientNpub: participant.npub,
+      wrappedEventJson: `wrapped-${index + 1}`,
+      createdAt: "2026-08-10T12:00:00.000Z",
+    },
+  }));
+  const readyCommitBody = client.buildBrainInvitationCommitRequest(
+    readyCohortPlan,
+    cohortPlanRequest,
+    readyParticipantGrants,
+    {
+      brainId: "smoke org",
+      nowMs: Date.parse("2026-08-10T12:00:00.000Z"),
+    }
+  );
+  assert.equal(readyCommitBody.target, "paul@finite.vip");
+  assert.equal(readyCommitBody.planId, "cohort-plan-ready");
+  assert.equal(readyCommitBody.folderOnly, false);
+  assert.equal(readyCommitBody.participantGrants.length, 3);
+  assert.equal(JSON.stringify(readyCommitBody.approvedExclusions), JSON.stringify([]));
+  const folderPlanRequest = client.buildBrainInvitationPreflightRequest({
+    brainId: "smoke org",
+    targetEmail: "paul@finite.vip",
+    folderOnly: true,
+    initialFolderAccess: ["restricted"],
+    expiresAt: "2026-08-17T12:00:00.000Z",
+  });
+  const folderCohortPlan = {
+    ...readyCohortPlan,
+    planId: "cohort-plan-folder",
+    scope: { kind: "folder", brainId: "smoke org", folderId: "restricted" },
+    keyVersions: [{ folderId: "restricted", keyVersion: 7 }],
+  };
+  const folderParticipantGrants = folderCohortPlan.participants.map((participant, index) => ({
+    folderId: "restricted",
+    grant: {
+      id: `folder-grant-${index + 1}`,
+      keyVersion: 7,
+      recipientNpub: participant.npub,
+      wrappedEventJson: `wrapped-folder-${index + 1}`,
+      createdAt: "2026-08-10T12:00:00.000Z",
+    },
+  }));
+  assert.match(
+    client.brainInvitationPlanPresentation(folderCohortPlan, {
+      nowMs: Date.parse("2026-08-10T12:00:00.000Z"),
+    }).capacity,
+    /does not add Brain members/i,
+    "Folder-only preview must not imply that guest access consumes Brain membership"
+  );
+  const folderRemovalPlan = {
+    planId: "cohort-removal-plan",
+    brainId: "smoke org",
+    folderId: "restricted",
+    targetEmail: "paul@finite.vip",
+    participants: folderCohortPlan.participants,
+    removedParticipantNpubs: folderCohortPlan.participants.map(
+      (participant) => participant.npub
+    ),
+    independentlyRetainedNpubs: [folderCohortPlan.participants[2].npub],
+    requiredRecipientNpubs: [
+      client.npubFromHex("31".repeat(32)),
+      folderCohortPlan.participants[2].npub,
+    ],
+    currentKeyVersion: 7,
+    newKeyVersion: 8,
+  };
+  assert.equal(
+    client.validateFolderAccountAccessRemovalPlan(folderRemovalPlan, {
+      brainId: "smoke org",
+      folderId: "restricted",
+      targetEmail: "paul@finite.vip",
+      currentKeyVersion: 7,
+    }).human.npub,
+    folderCohortPlan.participants[0].npub
+  );
+  const folderRemovalCopy =
+    client.folderAccountAccessRemovalConfirmation(folderRemovalPlan);
+  assert.match(folderRemovalCopy, /Paul.*Waffle.*Biscuit/s);
+  assert.match(folderRemovalCopy, /Biscuit.*keep access/s);
+  assert.doesNotMatch(
+    folderRemovalCopy,
+    /npub1/,
+    "Folder removal confirmation must use friendly identities, not machine planning npubs"
+  );
+  assert.throws(
+    () =>
+      client.validateFolderAccountAccessRemovalPlan(
+        { ...folderRemovalPlan, newKeyVersion: 9 },
+        {
+          brainId: "smoke org",
+          folderId: "restricted",
+          targetEmail: "paul@finite.vip",
+          currentKeyVersion: 7,
+        }
+      ),
+    /stale Folder Key versions/i
+  );
+  const folderRemovalValidationInput = {
+    brainId: "smoke org",
+    folderId: "restricted",
+    targetEmail: "paul@finite.vip",
+    currentKeyVersion: 7,
+  };
+  assert.throws(
+    () =>
+      client.validateFolderAccountAccessRemovalPlan(
+        {
+          ...folderRemovalPlan,
+          removedParticipantNpubs: [client.npubFromHex("32".repeat(32))],
+          independentlyRetainedNpubs: [],
+        },
+        folderRemovalValidationInput
+      ),
+    /nonempty participant subset/i,
+    "Every machine removal identity must appear in friendly confirmation participants"
+  );
+  assert.throws(
+    () =>
+      client.validateFolderAccountAccessRemovalPlan(
+        {
+          ...folderRemovalPlan,
+          requiredRecipientNpubs: [client.npubFromHex("31".repeat(32))],
+        },
+        folderRemovalValidationInput
+      ),
+    /independently retained.*required grant/i,
+    "An independently retained participant must receive the rotated Folder key"
+  );
+  assert.throws(
+    () =>
+      client.validateFolderAccountAccessRemovalPlan(
+        {
+          ...folderRemovalPlan,
+          independentlyRetainedNpubs: [],
+        },
+        folderRemovalValidationInput
+      ),
+    /only when independently retained/i,
+    "A revoked cohort participant must not be silently re-granted the rotated key"
+  );
+  const folderAccessChangeEvent = { id: "folder-access-event", sig: "signed" };
+  const folderCommitBody = client.buildFolderAccountAccessCommitRequest(
+    folderCohortPlan,
+    folderPlanRequest,
+    folderParticipantGrants,
+    folderAccessChangeEvent,
+    {
+      brainId: "smoke org",
+      nowMs: Date.parse("2026-08-10T12:00:00.000Z"),
+    }
+  );
+  assert.equal(
+    JSON.stringify(folderCommitBody),
+    JSON.stringify({
+      targetEmail: "paul@finite.vip",
+      expiresAt: "2026-08-17T12:00:00.000Z",
+      planId: "cohort-plan-folder",
+      approvedExclusions: [],
+      participantGrants: folderParticipantGrants,
+      accessChangeEvent: folderAccessChangeEvent,
+    }),
+    "Folder cohort commit must preserve one atomic participant-aware write"
+  );
+  assert.throws(
+    () =>
+      client.buildBrainInvitationCommitRequest(
+        reducedCohortPlan,
+        cohortPlanRequest,
+        readyParticipantGrants,
+        {
+          brainId: "smoke org",
+          nowMs: Date.parse("2026-08-10T12:00:00.000Z"),
+        }
+      ),
+    /explicitly approve/i
+  );
+  assert.equal(
+    JSON.stringify(
+      client.buildBrainInvitationCommitRequest(
+        reducedCohortPlan,
+        cohortPlanRequest,
+        readyParticipantGrants,
+        {
+          approveReduced: true,
+          brainId: "smoke org",
+          nowMs: Date.parse("2026-08-10T12:00:00.000Z"),
+        }
+      ).approvedExclusions
+    ),
+    JSON.stringify(["crumpet@finite.vip"]),
+    "Reduced-set commit must carry the exact preview exclusion set"
+  );
+  assert.match(htmlSource, /id="brainInvitationPreview"/);
+  assert.match(htmlSource, /id="confirmBrainInvitationButton"/);
+  assert.match(htmlSource, /id="approveBrainInvitationExclusionsInput"/);
+  assert.match(
+    source,
+    /onOptionalClick\("confirmBrainInvitationButton",[\s\S]{0,180}confirmBrainInvitationFromPanel/
+  );
+  assert.match(
+    source,
+    /"brainInviteRecipientEmailInput",\s*"brainInviteExpiresAtInput",[\s\S]{0,160}handleBrainInvitationInput/
+  );
   assert.equal(client.brainInvitationLinkPath("invite/code"), "/v1/brain-invitation-links/invite%2Fcode");
   assert.equal(client.brainInvitationAcceptPath("invite/code"), "/v1/brain-invitation-links/invite%2Fcode/accept");
   assert.equal(client.emailInviteBootstrapPath("invite/code"), "/v1/brain-invitation-links/invite%2Fcode/bootstrap");
@@ -5069,8 +5661,8 @@ function brainNotificationBehaviorTestSeams(options = {}) {
   );
   assert.match(
     source,
-    /for \(const inputId of \[\s*"brainInviteCodeInput",\s*"brainInviteEmailInput",\s*\]\) \{[\s\S]{0,180}handleBrainInvitationInput\(inputId\)/,
-    "Visible invitation inputs must update the panel as the member changes the code or email"
+    /for \(const inputId of \[\s*"brainInviteRecipientEmailInput",\s*"brainInviteExpiresAtInput",\s*"brainInviteCodeInput",\s*"brainInviteEmailInput",\s*\]\) \{[\s\S]{0,180}handleBrainInvitationInput\(inputId\)/,
+    "Visible invitation inputs must update or invalidate the panel as the member changes the request"
   );
 
   const invitationPanel = invitationPanelTestSeams();
@@ -5213,6 +5805,61 @@ function brainNotificationBehaviorTestSeams(options = {}) {
   assert.equal(invitationElement("replacePersonalAgentButton").disabled, false);
   assert.equal(invitationElement("removePersonalAgentButton").disabled, false);
 
+  invitationState.metadata = {
+    brainId: "personal-owner",
+    kind: "personal",
+    ownerUserId: authorNpub,
+    personalAgent: { agentNpub: otherNpub },
+    personalBrainAgents: [
+      {
+        agentNpub: currentPersonalAgent,
+        agentNip05: "waffle@finite.vip",
+        displayName: "Waffle",
+        status: "ready",
+        rosterRevision: 14,
+      },
+      {
+        agentNpub: blockedPersonalAgent,
+        agentNip05: "crumpet@finite.vip",
+        displayName: "Crumpet",
+        status: "identity_provisioning_incomplete",
+        rosterRevision: 14,
+        blocker: "Identity setup is not complete",
+      },
+    ],
+  };
+  invitationPanel.seams.renderBrainAccessManagement(invitationState.metadata);
+  assert.equal(invitationElement("personalBrainAgentRosterList").hidden, false);
+  assert.equal(invitationElement("legacyPersonalAgentControls").hidden, true);
+  assert.match(invitationElement("personalAgentCurrent").textContent, /1 current account agent/i);
+  assert.match(invitationElement("personalAgentCurrent").textContent, /offline runtime remains a current agent/i);
+  assert.match(
+    renderedText(invitationElement("personalBrainAgentRosterList")),
+    /Waffle.*Current.*Ready.*Crumpet.*Identity setup is not complete/i
+  );
+  assert.doesNotMatch(
+    renderedText(invitationElement("personalBrainAgentRosterList")),
+    /npub1/,
+    "The authoritative Personal Brain agent roster must use friendly identity copy"
+  );
+  await assert.rejects(
+    () => invitationPanel.seams.replacePersonalAgentFromPanel(true),
+    /managed by the authoritative account roster/i
+  );
+  invitationState.pubkeyHex = "15".repeat(32);
+  invitationPanel.seams.renderBrainAccessManagement(invitationState.metadata);
+  assert.equal(
+    invitationElement("personalAgentSection").hidden,
+    false,
+    "A ready acting agent can see the Personal Brain's distinct account-agent roster"
+  );
+  assert.equal(
+    invitationElement("legacyPersonalAgentControls").hidden,
+    true,
+    "An acting agent must not receive legacy owner-only replacement controls"
+  );
+  invitationState.pubkeyHex = "00".repeat(32);
+
   invitationState.accessBusy = false;
   invitationState.metadata = { kind: "organization" };
   invitationState.sessionStatus = "locked";
@@ -5262,6 +5909,987 @@ function brainNotificationBehaviorTestSeams(options = {}) {
     () => invitationPanel.seams.revokeBrainInvitationById("invitation-pending-row"),
     /Brain is locked\. Open the Brain before revoking an invitation/
   );
+
+  const cohortPreviewPanel = invitationPanelTestSeams();
+  const cohortPreviewState = cohortPreviewPanel.seams.state;
+  const cohortPreviewElement = (id) =>
+    cohortPreviewPanel.context.document.getElementById(id);
+  const cohortActorKeypair = client.inviteUnwrapKeypairFromSecret("31".padStart(64, "0"));
+  const cohortActorHex = cohortActorKeypair.publicKeyHex;
+  const cohortActorNpub = cohortActorKeypair.npub;
+  cohortPreviewPanel.context.window.nostr.getPublicKey = async () => cohortActorHex;
+  cohortPreviewPanel.context.window.nostr.signEvent = async (event) => ({
+    ...event,
+    id: "cohort-preview-signed",
+    pubkey: cohortActorHex,
+    sig: "cohort-preview-signature",
+  });
+  cohortPreviewState.activeBrainId = "cohort-brain";
+  cohortPreviewState.brainInvitations = [
+    {
+      id: "existing-invitation",
+      inviteCode: "invite-existing",
+      expiresAt: "2026-08-20T12:00:00.000Z",
+      status: "pending",
+      userId: client.npubFromHex("32".repeat(32)),
+    },
+  ];
+  cohortPreviewState.config = {
+    authScheme: "Nostr",
+    publicBaseUrl: "http://finite.test",
+  };
+  cohortPreviewState.metadata = {
+    brainId: "cohort-brain",
+    kind: "organization",
+    admins: [cohortActorNpub],
+    members: [cohortActorNpub],
+    folders: [
+      {
+        id: "general",
+        path: "General",
+        access: "all_members",
+        currentKeyVersion: 4,
+      },
+    ],
+  };
+  cohortPreviewState.pubkeyHex = cohortActorHex;
+  cohortPreviewState.sessionEpoch = 82;
+  cohortPreviewState.sessionStatus = "unlocked";
+  cohortPreviewState.signerStatus = "connected";
+  cohortPreviewElement("brainInviteRecipientEmailInput").value =
+    "paul@finite.vip";
+  cohortPreviewElement("brainInviteExpiresAtInput").value =
+    "2026-08-17T12:00";
+  const previewRequests = [];
+  cohortPreviewPanel.context.fetch = async (requestPath, options) => {
+    previewRequests.push({ requestPath, options });
+    const request = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ...readyCohortPlan,
+          scope: { kind: "brain", brainId: "cohort-brain" },
+          expiresAt: request.expiresAt,
+        }),
+    };
+  };
+  const previewResult = await cohortPreviewPanel.seams.previewBrainInvitationFromPanel();
+  assert.equal(previewResult.planId, "cohort-plan-ready");
+  assert.equal(previewRequests.length, 1);
+  assert.equal(
+    previewRequests[0].requestPath,
+    "/v1/brains/cohort-brain/invitations/preflight"
+  );
+  assert.equal(previewRequests[0].options.method, "POST");
+  assert.equal(
+    JSON.parse(previewRequests[0].options.body).targetEmail,
+    "paul@finite.vip"
+  );
+  assert.equal(
+    JSON.stringify(cohortPreviewState.brainInvitations),
+    JSON.stringify([
+      {
+        id: "existing-invitation",
+        inviteCode: "invite-existing",
+        expiresAt: "2026-08-20T12:00:00.000Z",
+        status: "pending",
+        userId: client.npubFromHex("32".repeat(32)),
+      },
+    ]),
+    "Preview must not create or replace invitation state"
+  );
+  assert.equal(cohortPreviewElement("brainInvitationPreview").hidden, false);
+  assert.match(
+    renderedText(cohortPreviewElement("brainInvitationIncludedList")),
+    /Paul.*Waffle.*Biscuit/
+  );
+  assert.doesNotMatch(
+    renderedText(cohortPreviewElement("brainInvitationPreview")),
+    /npub1/,
+    "The rendered recipient review must keep raw npubs out of normal copy"
+  );
+  assert.equal(cohortPreviewElement("confirmBrainInvitationButton").disabled, false);
+
+  const cohortPreviewClient =
+    cohortPreviewPanel.context.window.FiniteBrainProductClient;
+  cohortPreviewPanel.context.window.nostr.nip44 = {
+    encrypt: fakeEncrypt,
+    decrypt: fakeDecrypt,
+  };
+  cohortPreviewState.keyring = cohortPreviewClient.createSessionKeyring();
+  await cohortPreviewClient.openFolderKeyGrantPlaintext(
+    cohortPreviewState.keyring,
+    {
+      version: "finite-folder-key-grant-v1",
+      brainId: "cohort-brain",
+      folderId: "general",
+      keyVersion: 4,
+      issuerNpub: cohortActorNpub,
+      recipientNpub: cohortActorNpub,
+      folderKey,
+      issuedAt: "2026-08-10T12:00:00.000Z",
+    }
+  );
+  const commitRequests = [];
+  cohortPreviewPanel.context.fetch = async (requestPath, options = {}) => {
+    commitRequests.push({ requestPath, options });
+    if (
+      requestPath === "/v1/brains/cohort-brain/invitations" &&
+      options.method === "POST"
+    ) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            id: "invitation-cohort-ready",
+            brainId: "cohort-brain",
+            inviteCode: "invite-cohort-ready",
+            status: "pending",
+            targetKind: "account_cohort",
+            invitedEmail: "paul@finite.vip",
+            planId: "cohort-plan-ready",
+            participants: readyCohortPlan.participants,
+            excluded: [],
+            deliveryStatus: "sent",
+            expiresAt: cohortPreviewState.brainInvitationTransaction.plan.expiresAt,
+          }),
+      };
+    }
+    if (requestPath === "/v1/brains/cohort-brain/invitations") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ invitations: [] }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ outgoing: [], incoming: [] }),
+    };
+  };
+  const committedInvitation =
+    await cohortPreviewPanel.seams.confirmBrainInvitationFromPanel();
+  assert.equal(committedInvitation.id, "invitation-cohort-ready");
+  const commitRequest = commitRequests.find(
+    (request) =>
+      request.requestPath === "/v1/brains/cohort-brain/invitations" &&
+      request.options.method === "POST"
+  );
+  assert.ok(commitRequest, "Explicit Send must commit through the invitation collection");
+  const committedBody = JSON.parse(commitRequest.options.body);
+  assert.equal(committedBody.planId, "cohort-plan-ready");
+  assert.equal(committedBody.participantGrants.length, 3);
+  assert.equal(
+    new Set(
+      committedBody.participantGrants.map(
+        (entry) => entry.grant.recipientNpub
+      )
+    ).size,
+    3,
+    "Each distinct participant receives its own encrypted Folder Key Grant"
+  );
+  assert.equal(JSON.stringify(committedBody.approvedExclusions), JSON.stringify([]));
+  assert.doesNotMatch(JSON.stringify(committedBody), /inviteSecret|folderKey/i);
+  assert.equal(
+    cohortPreviewState.brainInvitationTransaction,
+    null,
+    "Successful commit consumes the in-memory preview"
+  );
+
+  const peerAgentPanel = invitationPanelTestSeams();
+  const peerAgentState = peerAgentPanel.seams.state;
+  const peerAgentClient = peerAgentPanel.context.window.FiniteBrainProductClient;
+  const peerOwnerIdentity = client.inviteUnwrapKeypairFromSecret("36".padStart(64, "0"));
+  const peerActorIdentity = client.inviteUnwrapKeypairFromSecret("37".padStart(64, "0"));
+  const peerSiblingIdentity = client.inviteUnwrapKeypairFromSecret("38".padStart(64, "0"));
+  const peerAgentRow = {
+    id: "peer-private",
+    path: "Peer private",
+    access: "restricted",
+    accessUserIds: [peerSiblingIdentity.npub],
+    currentKeyVersion: 7,
+  };
+  peerAgentState.activeBrainId = "personal-peer-brain";
+  peerAgentState.activeAccessFolderId = peerAgentRow.id;
+  peerAgentState.selectedFolderId = peerAgentRow.id;
+  peerAgentState.config = {
+    authScheme: "Nostr",
+    publicBaseUrl: "http://finite.test",
+  };
+  peerAgentState.metadata = {
+    brainId: "personal-peer-brain",
+    kind: "personal",
+    ownerUserId: peerOwnerIdentity.npub,
+    personalBrainAgents: [
+      {
+        agentNpub: peerActorIdentity.npub,
+        agentNip05: "waffle@finite.vip",
+        displayName: "Waffle",
+        status: "ready",
+        rosterRevision: 14,
+      },
+      {
+        agentNpub: peerSiblingIdentity.npub,
+        agentNip05: "biscuit@finite.vip",
+        displayName: "Biscuit",
+        status: "ready",
+        rosterRevision: 14,
+      },
+    ],
+    identities: [],
+    folders: [peerAgentRow],
+  };
+  peerAgentState.pubkeyHex = peerActorIdentity.publicKeyHex;
+  peerAgentState.sessionEpoch = 84;
+  peerAgentState.sessionStatus = "unlocked";
+  peerAgentState.signerStatus = "connected";
+  peerAgentState.keyring = peerAgentClient.createSessionKeyring();
+  peerAgentPanel.context.window.nostr.getPublicKey = async () =>
+    peerAgentState.pubkeyHex;
+  peerAgentPanel.context.window.nostr.signEvent = async (event) => ({
+    ...event,
+    id: "peer-agent-signed",
+    pubkey: peerAgentState.pubkeyHex,
+    sig: "peer-agent-signature",
+  });
+  peerAgentPanel.context.window.nostr.nip44 = {
+    encrypt: fakeEncrypt,
+    decrypt: fakeDecrypt,
+  };
+  peerAgentPanel.seams.rememberIdentity({
+    npub: peerSiblingIdentity.npub,
+    nip05: "biscuit@finite.vip",
+    display: "Biscuit",
+  });
+  await peerAgentClient.openFolderKeyGrantPlaintext(peerAgentState.keyring, {
+    version: "finite-folder-key-grant-v1",
+    brainId: "personal-peer-brain",
+    folderId: peerAgentRow.id,
+    keyVersion: 7,
+    issuerNpub: peerOwnerIdentity.npub,
+    recipientNpub: peerActorIdentity.npub,
+    folderKey,
+    issuedAt: "2026-08-10T12:00:00.000Z",
+  });
+  peerAgentPanel.seams.renderWhoHasAccessList(
+    peerAgentRow,
+    peerAgentState.metadata,
+    new Set([peerAgentRow.id])
+  );
+  const descendantElements = (node) => [
+    node,
+    ...(node.children || []).flatMap(descendantElements),
+  ];
+  const siblingAccessRow = peerAgentPanel.context.document
+    .getElementById("accessWhoHasList")
+    .children.find((item) => renderedText(item).includes("biscuit@finite.vip"));
+  assert.ok(siblingAccessRow, "The ready sibling must remain visible in Folder access");
+  assert.equal(
+    descendantElements(siblingAccessRow).some(
+      (element) => element.className === "access-remove-person"
+    ),
+    false,
+    "A ready acting agent must not receive a browser Remove control for a ready sibling"
+  );
+  assert.match(renderedText(siblingAccessRow), /Owner approval required/);
+
+  let peerAgentMutationRequests = 0;
+  peerAgentPanel.context.fetch = async () => {
+    peerAgentMutationRequests += 1;
+    throw new Error("peer-agent mutation must fail before fetch");
+  };
+  await assert.rejects(
+    () => peerAgentPanel.seams.removeFolderAccessFromPanel(peerSiblingIdentity.npub),
+    /requires authenticated human intent from Chat or CLI/i
+  );
+  assert.equal(
+    peerAgentMutationRequests,
+    0,
+    "Peer-agent restriction without authenticated human intent must send no request"
+  );
+
+  peerAgentState.pubkeyHex = peerOwnerIdentity.publicKeyHex;
+  const ownerRemovalRequests = [];
+  peerAgentPanel.context.fetch = async (requestPath, options = {}) => {
+    ownerRemovalRequests.push({ requestPath, options });
+    if (
+      requestPath ===
+        `/v1/admin/brains/personal-peer-brain/folders/peer-private/access/${peerSiblingIdentity.npub}` &&
+      options.method === "DELETE"
+    ) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            ...peerAgentState.metadata,
+            folders: [
+              {
+                ...peerAgentRow,
+                accessUserIds: [],
+                currentKeyVersion: 8,
+              },
+            ],
+          }),
+      };
+    }
+    if (requestPath.endsWith("/export")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({ brain: { id: "personal-peer-brain" }, keyGrants: [] }),
+      };
+    }
+    if (requestPath.endsWith("/sync/bootstrap")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ latestSequence: 0, objects: [] }),
+      };
+    }
+    throw new Error(`Unexpected owner removal request: ${requestPath}`);
+  };
+  await peerAgentPanel.seams.removeFolderAccessFromPanel(peerSiblingIdentity.npub);
+  assert.equal(
+    ownerRemovalRequests.find((request) => request.options.method === "DELETE")
+      ?.requestPath,
+    `/v1/admin/brains/personal-peer-brain/folders/peer-private/access/${peerSiblingIdentity.npub}`,
+    "The owner-human control must keep using the existing targeted rotation route"
+  );
+
+  const folderCohortPanel = invitationPanelTestSeams();
+  const folderCohortState = folderCohortPanel.seams.state;
+  const folderCohortElement = (id) =>
+    folderCohortPanel.context.document.getElementById(id);
+  folderCohortPanel.context.window.nostr.getPublicKey = async () => cohortActorHex;
+  folderCohortPanel.context.window.nostr.signEvent = async (event) => ({
+    ...event,
+    id: "folder-cohort-signed",
+    pubkey: cohortActorHex,
+    sig: "folder-cohort-signature",
+  });
+  folderCohortPanel.context.window.nostr.nip44 = {
+    encrypt: fakeEncrypt,
+    decrypt: fakeDecrypt,
+  };
+  folderCohortState.activeBrainId = "cohort-brain";
+  folderCohortState.activeAccessFolderId = "restricted";
+  folderCohortState.selectedFolderId = "restricted";
+  folderCohortState.config = {
+    authScheme: "Nostr",
+    publicBaseUrl: "http://finite.test",
+  };
+  const folderMetadata = {
+    brainId: "cohort-brain",
+    name: "Cohort Brain",
+    kind: "organization",
+    admins: [cohortActorNpub],
+    members: [cohortActorNpub],
+    identities: [],
+    accountAccessCohorts: [
+      {
+        cohortId: "cohort-folder-paul",
+        humanNpub: folderCohortPlan.participants[0].npub,
+        humanEmail: "paul@finite.vip",
+        scopeKind: "folder",
+        folderId: "restricted",
+        provenanceKind: "folder_account_access",
+        status: "active",
+        participants: folderCohortPlan.participants.map((participant) => ({
+          npub: participant.npub,
+          relationship: participant.relationship,
+          nip05: participant.nip05,
+          displayName: participant.name,
+          status: "active",
+          exclusionReason: null,
+          excludedFolderIds: [],
+        })),
+      },
+    ],
+    folders: [
+      {
+        id: "restricted",
+        path: "Restricted",
+        access: "restricted",
+        accessUserIds: [],
+        currentKeyVersion: 7,
+      },
+    ],
+  };
+  folderCohortState.metadata = folderMetadata;
+  folderCohortState.pubkeyHex = cohortActorHex;
+  folderCohortState.sessionEpoch = 83;
+  folderCohortState.sessionStatus = "unlocked";
+  folderCohortState.signerStatus = "connected";
+  folderCohortState.folderShareLinks = [{ id: "existing-folder-invitation" }];
+  folderCohortElement("accessShareTargetInput").value = "paul@finite.vip";
+  folderCohortElement("accessShareExpiresAtInput").value = "2026-08-17T12:00";
+  const folderPreviewRequests = [];
+  folderCohortPanel.context.fetch = async (requestPath, options) => {
+    folderPreviewRequests.push({ requestPath, options });
+    const request = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ...folderCohortPlan,
+          scope: {
+            kind: "folder",
+            brainId: "cohort-brain",
+            folderId: "restricted",
+          },
+          expiresAt: request.expiresAt,
+        }),
+    };
+  };
+  const folderPreview = await folderCohortPanel.seams.createShareLinkFromPanel();
+  assert.equal(folderPreview.planId, "cohort-plan-folder");
+  assert.equal(folderPreviewRequests.length, 1);
+  assert.equal(
+    folderPreviewRequests[0].requestPath,
+    "/v1/brains/cohort-brain/invitations/preflight"
+  );
+  assert.equal(
+    JSON.stringify(JSON.parse(folderPreviewRequests[0].options.body)),
+    JSON.stringify({
+      targetEmail: "paul@finite.vip",
+      folderOnly: true,
+      initialFolderAccess: ["restricted"],
+      expiresAt: new Date("2026-08-17T12:00").toISOString(),
+    }),
+    "Finite mailbox Folder access must preview exactly one Folder without mutation"
+  );
+  assert.equal(
+    JSON.stringify(folderCohortState.folderShareLinks),
+    JSON.stringify([{ id: "existing-folder-invitation" }]),
+    "Folder preflight must not create or replace an invitation"
+  );
+  assert.equal(folderCohortElement("folderInvitationPreview").hidden, false);
+  assert.match(
+    renderedText(folderCohortElement("folderInvitationIncludedList")),
+    /Paul.*Waffle.*Biscuit/
+  );
+  assert.equal(folderCohortElement("confirmFolderInvitationButton").disabled, false);
+
+  folderCohortState.keyring =
+    folderCohortPanel.context.window.FiniteBrainProductClient.createSessionKeyring();
+  await folderCohortPanel.context.window.FiniteBrainProductClient.openFolderKeyGrantPlaintext(
+    folderCohortState.keyring,
+    {
+      version: "finite-folder-key-grant-v1",
+      brainId: "cohort-brain",
+      folderId: "restricted",
+      keyVersion: 7,
+      issuerNpub: cohortActorNpub,
+      recipientNpub: cohortActorNpub,
+      folderKey,
+      issuedAt: "2026-08-10T12:00:00.000Z",
+    }
+  );
+  const folderCommitRequests = [];
+  folderCohortPanel.context.fetch = async (requestPath, options) => {
+    folderCommitRequests.push({ requestPath, options });
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          brainId: "cohort-brain",
+          folderId: "restricted",
+          targetEmail: "paul@finite.vip",
+          outcome: "granted",
+          participants: folderCohortPlan.participants,
+          excluded: [],
+          metadata: {
+            ...folderMetadata,
+            folders: [
+              {
+                ...folderMetadata.folders[0],
+                accessUserIds: folderCohortPlan.participants.map(
+                  (participant) => participant.npub
+                ),
+              },
+            ],
+          },
+        }),
+    };
+  };
+  const folderCommit =
+    await folderCohortPanel.seams.confirmFolderAccountAccessFromPanel();
+  assert.equal(folderCommit.outcome, "granted");
+  assert.equal(folderCommitRequests.length, 1);
+  assert.equal(
+    folderCommitRequests[0].requestPath,
+    "/v1/brains/cohort-brain/folders/restricted/account-access"
+  );
+  const folderCommittedBody = JSON.parse(folderCommitRequests[0].options.body);
+  assert.equal(folderCommittedBody.targetEmail, "paul@finite.vip");
+  assert.equal(folderCommittedBody.planId, "cohort-plan-folder");
+  assert.equal(folderCommittedBody.participantGrants.length, 3);
+  assert.equal(JSON.stringify(folderCommittedBody.approvedExclusions), JSON.stringify([]));
+  assert.equal(folderCommittedBody.accessChangeEvent.kind, 30078);
+  assert.doesNotMatch(JSON.stringify(folderCommittedBody), /inviteSecret|folderKey/i);
+  assert.equal(
+    folderCohortState.folderInvitationTransaction,
+    null,
+    "Atomic Folder commit must consume the immutable preview"
+  );
+  assert.equal(
+    folderCohortState.metadata.folders[0].accessUserIds.length,
+    3,
+    "The participant-aware metadata receipt becomes the next frontend projection"
+  );
+  folderCohortElement("accessShareExpiresAtInput").value = "2026-08-17T12:00";
+  const directGrantEntryRequests = [];
+  folderCohortPanel.context.fetch = async (requestPath, options) => {
+    directGrantEntryRequests.push({ requestPath, options });
+    const request = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ...folderCohortPlan,
+          scope: {
+            kind: "folder",
+            brainId: "cohort-brain",
+            folderId: "restricted",
+          },
+          expiresAt: request.expiresAt,
+        }),
+    };
+  };
+  await folderCohortPanel.seams.grantFolderAccessFromPanel("paul@finite.vip");
+  assert.equal(directGrantEntryRequests.length, 1);
+  assert.equal(
+    directGrantEntryRequests[0].requestPath,
+    "/v1/brains/cohort-brain/invitations/preflight",
+    "The visible direct-grant form must converge on the same cohort preflight"
+  );
+  assert.doesNotMatch(
+    directGrantEntryRequests[0].requestPath,
+    /\/v1\/admin\//,
+    "A Finite mailbox must never reach the legacy single-npub Folder writer"
+  );
+  assert.equal(folderCohortElement("accessShareTargetInput").value, "paul@finite.vip");
+  assert.equal(folderCohortElement("accessAdvancedSection").open, true);
+
+  const committedCohortMetadata = folderCohortState.metadata;
+  const committedCohortKeyring = folderCohortState.keyring;
+  const independentHumanNpub = client.inviteUnwrapKeypairFromSecret(
+    "35".padStart(64, "0")
+  ).npub;
+  folderCohortPanel.seams.rememberIdentity({
+    npub: independentHumanNpub,
+    nip05: "independent@finite.vip",
+    display: "Independent human",
+  });
+  folderCohortState.metadata = {
+    ...committedCohortMetadata,
+    accountAccessCohorts: [],
+    folders: [
+      {
+        ...committedCohortMetadata.folders[0],
+        accessUserIds: [independentHumanNpub],
+      },
+    ],
+  };
+  folderCohortElement("accessShareTargetInput").value = "independent@finite.vip";
+  folderCohortPanel.context.fetch = async (_requestPath, options = {}) => {
+    const request = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          ...folderCohortPlan,
+          planId: "canceled-independent-preview",
+          targetEmail: "independent@finite.vip",
+          participants: [
+            {
+              relationship: "human",
+              name: "Independent human",
+              nip05: "independent@finite.vip",
+              npub: independentHumanNpub,
+              ready: true,
+            },
+          ],
+          scope: {
+            kind: "folder",
+            brainId: "cohort-brain",
+            folderId: "restricted",
+          },
+          expiresAt: request.expiresAt,
+        }),
+    };
+  };
+  await folderCohortPanel.seams.previewFolderAccountAccessFromPanel();
+  folderCohortState.folderInvitationTransaction = null;
+  const independentRemovalRequests = [];
+  folderCohortPanel.context.fetch = async (requestPath, options = {}) => {
+    independentRemovalRequests.push({ requestPath, options });
+    if (
+      requestPath ===
+        `/v1/admin/brains/cohort-brain/folders/restricted/access/${independentHumanNpub}` &&
+      options.method === "DELETE"
+    ) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            ...folderCohortState.metadata,
+            folders: [
+              {
+                ...folderCohortState.metadata.folders[0],
+                currentKeyVersion: 8,
+                accessUserIds: [],
+              },
+            ],
+          }),
+      };
+    }
+    if (requestPath.endsWith("/export")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ brain: { id: "cohort-brain" }, keyGrants: [] }),
+      };
+    }
+    if (requestPath.endsWith("/sync/bootstrap")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ latestSequence: 0, objects: [] }),
+      };
+    }
+    throw new Error(`Unexpected independent removal request: ${requestPath}`);
+  };
+  await folderCohortPanel.seams.removeFolderAccessFromPanel(independentHumanNpub);
+  assert.equal(
+    independentRemovalRequests.find((request) => request.options.method === "DELETE")
+      ?.requestPath,
+    `/v1/admin/brains/cohort-brain/folders/restricted/access/${independentHumanNpub}`,
+    "A canceled cohort preview must not change an independent principal into a mailbox cohort"
+  );
+  folderCohortState.metadata = committedCohortMetadata;
+  folderCohortState.keyring = committedCohortKeyring;
+
+  const targetedAgent = folderCohortPlan.participants[1];
+  const siblingAgent = folderCohortPlan.participants[2];
+  const keyringBeforeTargetedRemoval = folderCohortState.keyring;
+  const targetedRemovalRequests = [];
+  folderCohortPanel.context.fetch = async (requestPath, options = {}) => {
+    targetedRemovalRequests.push({ requestPath, options });
+    if (
+      requestPath ===
+        `/v1/admin/brains/cohort-brain/folders/restricted/access/${targetedAgent.npub}` &&
+      options.method === "DELETE"
+    ) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            ...folderCohortState.metadata,
+            folders: [
+              {
+                ...folderCohortState.metadata.folders[0],
+                currentKeyVersion: 8,
+                accessUserIds: [
+                  folderCohortPlan.participants[0].npub,
+                  siblingAgent.npub,
+                ],
+              },
+            ],
+            accountAccessCohorts: [
+              {
+                ...folderCohortState.metadata.accountAccessCohorts[0],
+                participants:
+                  folderCohortState.metadata.accountAccessCohorts[0].participants.map(
+                    (participant) =>
+                      participant.npub === targetedAgent.npub
+                        ? {
+                            ...participant,
+                            exclusionReason: "targeted_folder_revocation",
+                            excludedFolderIds: ["restricted"],
+                          }
+                        : participant
+                  ),
+              },
+            ],
+          }),
+      };
+    }
+    if (requestPath.endsWith("/export")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ brain: { id: "cohort-brain" }, keyGrants: [] }),
+      };
+    }
+    if (requestPath.endsWith("/sync/bootstrap")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ latestSequence: 0, objects: [] }),
+      };
+    }
+    throw new Error(`Unexpected targeted Folder removal request: ${requestPath}`);
+  };
+  await folderCohortPanel.seams.removeFolderAccessFromPanel(targetedAgent.npub);
+  const targetedRemovalCommit = targetedRemovalRequests.find(
+    (request) => request.options.method === "DELETE"
+  );
+  assert.ok(targetedRemovalCommit, "An included agent must use targeted-principal removal");
+  assert.equal(
+    targetedRemovalCommit.requestPath,
+    `/v1/admin/brains/cohort-brain/folders/restricted/access/${targetedAgent.npub}`
+  );
+  assert.doesNotMatch(
+    targetedRemovalCommit.requestPath,
+    /account-access/,
+    "An agent NIP-05 must never be misclassified as the anchoring human mailbox"
+  );
+  const targetedRemovalBody = JSON.parse(targetedRemovalCommit.options.body);
+  assert.equal(targetedRemovalBody.newKeyVersion, 8);
+  assert.equal(targetedRemovalBody.grants.length, 3);
+  assert.equal(
+    folderCohortState.metadata.accountAccessCohorts[0].participants.find(
+      (participant) => participant.npub === targetedAgent.npub
+    ).excludedFolderIds[0],
+    "restricted",
+    "The durable projection must retain targeted Folder exclusion after reload"
+  );
+  assert.ok(
+    folderCohortState.metadata.folders[0].accessUserIds.includes(siblingAgent.npub),
+    "Targeted removal must preserve sibling agent access"
+  );
+  assert.ok(
+    folderCohortState.metadata.folders[0].accessUserIds.includes(
+      folderCohortPlan.participants[0].npub
+    ),
+    "Targeted removal must preserve the anchoring human"
+  );
+
+  folderCohortState.metadata = {
+    ...folderMetadata,
+    folders: [
+      {
+        ...folderMetadata.folders[0],
+        accessUserIds: folderCohortPlan.participants.map(
+          (participant) => participant.npub
+        ),
+      },
+    ],
+  };
+  folderCohortState.keyring = keyringBeforeTargetedRemoval;
+
+  const folderRemovalHuman = folderCohortPlan.participants[0];
+  folderCohortPanel.seams.rememberIdentity({
+    npub: folderRemovalHuman.npub,
+    nip05: folderRemovalHuman.nip05,
+    display: folderRemovalHuman.name,
+  });
+  const liveFolderRemovalPlan = {
+    ...folderRemovalPlan,
+    brainId: "cohort-brain",
+    requiredRecipientNpubs: [cohortActorNpub, folderCohortPlan.participants[2].npub],
+  };
+  let folderRemovalPrompt = "";
+  folderCohortPanel.context.window.confirm = (message) => {
+    folderRemovalPrompt = message;
+    return true;
+  };
+  const folderRemovalRequests = [];
+  folderCohortPanel.context.fetch = async (requestPath, options = {}) => {
+    folderRemovalRequests.push({ requestPath, options });
+    if (requestPath.endsWith("/account-access/removal-preflight")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(liveFolderRemovalPlan),
+      };
+    }
+    if (requestPath.endsWith("/account-access") && options.method === "DELETE") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            brainId: "cohort-brain",
+            folderId: "restricted",
+            targetEmail: "paul@finite.vip",
+            removedParticipantNpubs: liveFolderRemovalPlan.removedParticipantNpubs,
+            independentlyRetainedNpubs: liveFolderRemovalPlan.independentlyRetainedNpubs,
+            newKeyVersion: 8,
+            metadata: {
+              ...folderMetadata,
+              folders: [
+                {
+                  ...folderMetadata.folders[0],
+                  accessUserIds: [folderCohortPlan.participants[2].npub],
+                  currentKeyVersion: 8,
+                },
+              ],
+            },
+          }),
+      };
+    }
+    if (requestPath.endsWith("/export")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ brain: { id: "cohort-brain" }, keyGrants: [] }),
+      };
+    }
+    if (requestPath.endsWith("/sync/bootstrap")) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ latestSequence: 0, objects: [] }),
+      };
+    }
+    throw new Error(`Unexpected Folder removal request: ${requestPath}`);
+  };
+  const folderRemovalResult = await folderCohortPanel.seams.removeFolderAccessFromPanel(
+    folderRemovalHuman.npub
+  );
+  assert.equal(folderRemovalResult.newKeyVersion, 8);
+  assert.match(folderRemovalPrompt, /Paul.*Waffle.*Biscuit/s);
+  assert.doesNotMatch(folderRemovalPrompt, /npub1/);
+  const folderRemovalCommit = folderRemovalRequests.find(
+    (request) => request.requestPath.endsWith("/account-access")
+  );
+  assert.ok(folderRemovalCommit, "Cohort removal must commit through one atomic Folder route");
+  const folderRemovalBody = JSON.parse(folderRemovalCommit.options.body);
+  assert.equal(folderRemovalBody.targetEmail, "paul@finite.vip");
+  assert.equal(folderRemovalBody.planId, "cohort-removal-plan");
+  assert.equal(folderRemovalBody.newKeyVersion, 8);
+  assert.equal(folderRemovalBody.grants.length, 2);
+  assert.equal(folderRemovalBody.reencryptedRecords.length, 0);
+  assert.equal(folderRemovalBody.accessChangeEvent.kind, 30078);
+  assert.equal(
+    folderRemovalRequests.filter(
+      (request) => request.requestPath.endsWith("/account-access")
+    ).length,
+    1,
+    "Mailbox cohort removal must rotate once rather than deleting principals one at a time"
+  );
+
+  cohortPreviewState.brainInvitationTransaction = {
+    plan: reducedCohortPlan,
+    request: cohortPlanRequest,
+    participantGrants: null,
+    commitBody: null,
+  };
+  cohortPreviewPanel.seams.renderBrainInvitationPreview();
+  assert.equal(cohortPreviewElement("brainInvitationExcludedGroup").hidden, false);
+  assert.match(
+    renderedText(cohortPreviewElement("brainInvitationExcludedList")),
+    /Crumpet.*Identity setup is not complete/i
+  );
+  assert.equal(cohortPreviewElement("confirmBrainInvitationButton").disabled, true);
+  cohortPreviewElement("approveBrainInvitationExclusionsInput").checked = true;
+  cohortPreviewElement("approveBrainInvitationExclusionsInput").dispatch("change");
+  assert.equal(
+    cohortPreviewElement("confirmBrainInvitationButton").disabled,
+    false,
+    "Explicit checkbox approval enables the exact reduced-set commit"
+  );
+
+  cohortPreviewElement("brainInviteRecipientEmailInput").value =
+    "changed@finite.vip";
+  cohortPreviewPanel.seams.handleBrainInvitationInput(
+    "brainInviteRecipientEmailInput"
+  );
+  assert.equal(
+    cohortPreviewState.brainInvitationTransaction,
+    null,
+    "Changing an input after preview must discard the immutable plan"
+  );
+  assert.equal(cohortPreviewElement("brainInvitationPreview").hidden, true);
+
+  const oldBackendPanel = invitationPanelTestSeams();
+  const oldBackendState = oldBackendPanel.seams.state;
+  const oldBackendElement = (id) =>
+    oldBackendPanel.context.document.getElementById(id);
+  oldBackendPanel.context.window.nostr.getPublicKey = async () => cohortActorHex;
+  oldBackendPanel.context.window.nostr.signEvent = async (event) => ({
+    ...event,
+    id: "old-backend-signed",
+    pubkey: cohortActorHex,
+    sig: "old-backend-signature",
+  });
+  oldBackendState.activeBrainId = "cohort-brain";
+  oldBackendState.config = {
+    authScheme: "Nostr",
+    publicBaseUrl: "http://finite.test",
+  };
+  oldBackendState.metadata = cohortPreviewState.metadata;
+  oldBackendState.pubkeyHex = cohortActorHex;
+  oldBackendState.sessionEpoch = 19;
+  oldBackendState.sessionStatus = "unlocked";
+  oldBackendState.signerStatus = "connected";
+  oldBackendElement("brainInviteRecipientEmailInput").value = "paul@finite.vip";
+  oldBackendElement("brainInviteExpiresAtInput").value = "2026-08-17T12:00";
+  const oldBackendRequests = [];
+  oldBackendPanel.context.fetch = async (requestPath, options) => {
+    oldBackendRequests.push({ requestPath, options });
+    return {
+      ok: false,
+      status: 404,
+      text: async () => JSON.stringify({ error: "not found" }),
+    };
+  };
+  await assert.rejects(
+    () => oldBackendPanel.seams.previewBrainInvitationFromPanel(),
+    /not found/
+  );
+  assert.equal(oldBackendRequests.length, 1);
+  assert.match(oldBackendRequests[0].requestPath, /\/invitations\/preflight$/);
+  assert.equal(oldBackendState.brainInvitationTransaction, null);
+  assert.match(oldBackendState.accessResult.detail, /update the Brain service/i);
+  assert.match(oldBackendState.accessResult.detail, /will not create legacy human-only access/i);
+
+  cohortPreviewElement("brainInviteRecipientEmailInput").value = "paul@finite.vip";
+  const stalePreviewExpiresAt = new Date("2026-08-17T12:00").toISOString();
+  cohortPreviewState.brainInvitationTransaction = {
+    plan: {
+      ...readyCohortPlan,
+      scope: { kind: "brain", brainId: "cohort-brain" },
+      expiresAt: stalePreviewExpiresAt,
+    },
+    request: {
+      targetEmail: "paul@finite.vip",
+      folderOnly: false,
+      initialFolderAccess: [],
+      expiresAt: stalePreviewExpiresAt,
+    },
+    participantGrants: null,
+    commitBody: null,
+  };
+  cohortPreviewPanel.context.fetch = async () => ({
+    ok: false,
+    status: 409,
+    text: async () => JSON.stringify({ error: "invitation plan is stale after roster revision" }),
+  });
+  await assert.rejects(
+    () => cohortPreviewPanel.seams.confirmBrainInvitationFromPanel(),
+    /invitation plan is stale/
+  );
+  assert.equal(
+    cohortPreviewState.brainInvitationTransaction,
+    null,
+    "A stale commit must discard the immutable plan before any retry"
+  );
+  assert.match(cohortPreviewState.accessResult.detail, /preview the recipients again/i);
 
   const nip44VectorSender = client.inviteUnwrapKeypairFromSecret("2".padStart(64, "0"));
   assert.equal(
