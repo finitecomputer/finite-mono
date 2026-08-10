@@ -49,6 +49,8 @@ pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
     include_str!("../migrations/runtime_upgrade_rollback_rescue.sql");
 const DEFAULT_AGENT_CREATION_LEASE_SECONDS: i64 = 10 * 60;
 const MAX_AGENT_CREATION_LEASE_SECONDS: i64 = 60 * 60;
+pub const MAX_BRAIN_ACCOUNT_AGENTS: usize = 64;
+pub const MAX_BRAIN_AGENT_DEPARTURE_FACTS: usize = 256;
 const DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE: &str = "finite-private-generous-v2";
 const DEFAULT_FINITE_PRIVATE_BURST_WINDOW_SECONDS: i64 = 5 * 60 * 60;
 const DEFAULT_FINITE_PRIVATE_BURST_LIMIT_UNITS: i64 = 100_000_000;
@@ -429,6 +431,8 @@ pub struct StoreErrorDetail {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
+    #[error("account-agent authority fanout exceeds the supported limit")]
+    BrainAccountAgentFanoutExceeded,
     #[error("verified email is required")]
     MissingVerifiedEmail,
     #[error("WorkOS user id is required")]

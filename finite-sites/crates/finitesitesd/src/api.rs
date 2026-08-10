@@ -361,7 +361,7 @@ async fn create_hosted_requester_assertion(
     let request: HostedRequesterAssertionRequest = parse_json_body(&body)?;
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     engine
-        .create_hosted_requester_assertion(&request, now_unix())
+        .create_hosted_requester_assertion(&request, now_unix(), Some(expected_token.as_bytes()))
         .map(Json)
         .map_err(ApiError::from)
 }

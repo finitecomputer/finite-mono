@@ -482,6 +482,22 @@ pub struct PreviewPermanentAgentDepartureRequest {
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PendingPermanentAgentDepartureResponse {
+    pub fact_id: String,
+    pub human_email: String,
+    pub agent_nip05: String,
+    pub departure_kind: String,
+    pub occurred_at: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPermanentAgentDeparturesResponse {
+    pub departures: Vec<PendingPermanentAgentDepartureResponse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PermanentAgentDepartureFolderResponse {
     pub folder_id: String,
     pub current_key_version: u32,
@@ -824,6 +840,19 @@ pub struct PreviewBrainInvitationRequest {
     #[serde(default)]
     pub initial_folder_access: Vec<String>,
     pub expires_at: String,
+    /// Account-agent mailboxes the inviter has explicitly chosen to omit.
+    /// These exclusions are validated and bound into the immutable plan id.
+    #[serde(default)]
+    pub approved_exclusions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPendingInvitationConversionRequest {
+    /// Account-agent mailboxes the inviter has explicitly chosen to omit.
+    /// Empty preserves the full eligible cohort.
+    #[serde(default)]
+    pub approved_exclusions: Vec<String>,
 }
 
 /// Resource scope cryptographically bound into an invitation plan.
@@ -871,6 +900,36 @@ pub struct InvitationPlanCapacityResponse {
     pub fits: bool,
     pub resulting_members: usize,
     pub maximum_members: usize,
+    pub resulting_folder_access_entries: usize,
+    pub maximum_folder_access_entries: usize,
+    pub resulting_folder_key_grants: usize,
+    pub maximum_folder_key_grants: usize,
+    pub resulting_sync_records: usize,
+    pub maximum_sync_records: usize,
+    pub resulting_pending_invitations: usize,
+    pub maximum_pending_invitations: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<String>,
+}
+
+/// Authoritative participant set removed by one exact member removal. This is
+/// intentionally a preflight because cohort overlap and independent grants
+/// cannot be reconstructed safely from the metadata projection alone.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewMemberRemovalResponse {
+    pub brain_id: String,
+    pub target_npub: String,
+    pub removed_participant_npubs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_access_removals: Vec<PreviewMemberRemovalFolderAccessResponse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewMemberRemovalFolderAccessResponse {
+    pub folder_id: String,
+    pub removed_participant_npubs: Vec<String>,
 }
 
 /// Stable, mutation-free account-cohort invitation preview.

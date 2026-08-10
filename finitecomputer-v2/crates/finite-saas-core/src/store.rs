@@ -73,7 +73,7 @@ use crate::{
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
@@ -536,10 +536,19 @@ impl CoreStore {
     pub async fn brain_permanent_agent_departures(
         &self,
         verified_email: &str,
+        managed_agent_nip05s: &BTreeSet<String>,
     ) -> CoreResult<Option<BrainPermanentAgentDepartureFacts>> {
         match self {
-            Self::Memory(store) => store.brain_permanent_agent_departures(verified_email).await,
-            Self::Postgres(store) => store.brain_permanent_agent_departures(verified_email).await,
+            Self::Memory(store) => {
+                store
+                    .brain_permanent_agent_departures(verified_email, managed_agent_nip05s)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .brain_permanent_agent_departures(verified_email, managed_agent_nip05s)
+                    .await
+            }
         }
     }
 
@@ -1268,10 +1277,24 @@ impl MemoryCoreStore {
             return Ok(None);
         };
         let mut revision = roster_revision_from_timestamp(&user.updated_at);
+        for departure in state
+            .brain_agent_departure_facts
+            .values()
+            .filter(|fact| fact.account_id == account_id)
+        {
+            revision = revision.max(roster_revision_from_timestamp(&departure.occurred_at));
+        }
         let mut agents = state
             .projects
             .values()
             .filter(|project| project.owner_user_id == user.id)
+            .filter(|project| {
+                !state
+                    .brain_agent_departure_facts
+                    .values()
+                    .any(|fact| fact.principal_binding_reference == project.id)
+            })
+            .take(crate::MAX_BRAIN_ACCOUNT_AGENTS + 1)
             .filter_map(|project| {
                 let managed_agent_nip05 = project.agent_email.clone()?;
                 revision = revision.max(roster_revision_from_timestamp(&project.updated_at));
@@ -1295,6 +1318,9 @@ impl MemoryCoreStore {
                 })
             })
             .collect::<Vec<_>>();
+        if agents.len() > crate::MAX_BRAIN_ACCOUNT_AGENTS {
+            return Err(crate::CoreError::BrainAccountAgentFanoutExceeded);
+        }
         agents.sort_by(|left, right| left.managed_agent_nip05.cmp(&right.managed_agent_nip05));
         Ok(Some(BrainAccountAgentRoster {
             account_id,
@@ -1307,6 +1333,7 @@ impl MemoryCoreStore {
     pub async fn brain_permanent_agent_departures(
         &self,
         verified_email: &str,
+        managed_agent_nip05s: &BTreeSet<String>,
     ) -> CoreResult<Option<BrainPermanentAgentDepartureFacts>> {
         let email = verified_email.trim().to_ascii_lowercase();
         let state = self.state.lock().await;
@@ -1320,13 +1347,19 @@ impl MemoryCoreStore {
             .brain_agent_departure_facts
             .values()
             .filter(|fact| fact.account_id == account_id)
+            .filter(|fact| {
+                managed_agent_nip05s.is_empty()
+                    || managed_agent_nip05s.contains(&fact.managed_agent_nip05)
+            })
             .cloned()
             .collect::<Vec<_>>();
         facts.sort_by(|left, right| {
-            left.occurred_at
-                .cmp(&right.occurred_at)
-                .then_with(|| left.fact_id.cmp(&right.fact_id))
+            right
+                .occurred_at
+                .cmp(&left.occurred_at)
+                .then_with(|| right.fact_id.cmp(&left.fact_id))
         });
+        facts.truncate(crate::MAX_BRAIN_AGENT_DEPARTURE_FACTS);
         Ok(Some(BrainPermanentAgentDepartureFacts {
             account_id,
             human_mailbox: email,
@@ -2222,11 +2255,23 @@ impl PostgresCoreStore {
         };
         let user_id: String = user.get("id");
         let mut revision = roster_revision_from_timestamp(&user.get::<_, String>("updated_at"));
+        if let Some(departure_at) = client
+            .query_one(
+                "SELECT MAX(occurred_at)::text FROM brain_agent_departure_facts WHERE account_id = $1",
+                &[&user.get::<_, String>("workos_user_id")],
+            )
+            .await
+            .map_err(store_error)?
+            .get::<_, Option<String>>(0)
+        {
+            revision = revision.max(roster_revision_from_timestamp(&departure_at));
+        }
         let rows = client
             .query(
                 "SELECT p.id, p.display_name, p.agent_email, p.updated_at::text AS project_updated_at,
                         latest.status AS creation_status,
-                        latest.updated_at::text AS creation_updated_at
+                        latest.updated_at::text AS creation_updated_at,
+                        departure.occurred_at::text AS departure_occurred_at
                  FROM projects p
                  LEFT JOIN LATERAL (
                      SELECT status, updated_at
@@ -2235,12 +2280,25 @@ impl PostgresCoreStore {
                      ORDER BY updated_at DESC, id DESC
                      LIMIT 1
                  ) latest ON TRUE
-                 WHERE p.owner_user_id = $1 AND p.agent_email IS NOT NULL
-                 ORDER BY p.agent_email",
-                &[&user_id],
+                 LEFT JOIN LATERAL (
+                     SELECT occurred_at
+                     FROM brain_agent_departure_facts
+                     WHERE principal_binding_reference = p.id
+                     ORDER BY occurred_at DESC, fact_id DESC
+                     LIMIT 1
+                 ) departure ON TRUE
+                 WHERE p.owner_user_id = $1
+                   AND p.agent_email IS NOT NULL
+                   AND departure.occurred_at IS NULL
+                 ORDER BY p.agent_email
+                 LIMIT $2",
+                &[&user_id, &((crate::MAX_BRAIN_ACCOUNT_AGENTS + 1) as i64)],
             )
             .await
             .map_err(store_error)?;
+        if rows.len() > crate::MAX_BRAIN_ACCOUNT_AGENTS {
+            return Err(crate::CoreError::BrainAccountAgentFanoutExceeded);
+        }
         let mut agents = Vec::with_capacity(rows.len());
         for row in rows {
             revision = revision.max(roster_revision_from_timestamp(
@@ -2274,6 +2332,7 @@ impl PostgresCoreStore {
     pub async fn brain_permanent_agent_departures(
         &self,
         verified_email: &str,
+        managed_agent_nip05s: &BTreeSet<String>,
     ) -> CoreResult<Option<BrainPermanentAgentDepartureFacts>> {
         let email = verified_email.trim().to_ascii_lowercase();
         let client = self.connection().await?;
@@ -2290,17 +2349,41 @@ impl PostgresCoreStore {
             return Ok(None);
         };
         let account_id: String = user.get("workos_user_id");
-        let rows = client
-            .query(
-                "SELECT fact_id, account_id, human_mailbox, managed_agent_nip05,
+        let rows = if managed_agent_nip05s.is_empty() {
+            client
+                .query(
+                    "SELECT fact_id, account_id, human_mailbox, managed_agent_nip05,
                         principal_binding_reference, departure_kind, occurred_at::text
                  FROM brain_agent_departure_facts
                  WHERE account_id = $1
-                 ORDER BY occurred_at, fact_id",
-                &[&account_id],
-            )
-            .await
-            .map_err(store_error)?;
+                 ORDER BY occurred_at DESC, fact_id DESC
+                 LIMIT $2",
+                    &[
+                        &account_id,
+                        &(crate::MAX_BRAIN_AGENT_DEPARTURE_FACTS as i64),
+                    ],
+                )
+                .await
+                .map_err(store_error)?
+        } else {
+            let managed_agent_nip05s = managed_agent_nip05s.iter().cloned().collect::<Vec<_>>();
+            client
+                .query(
+                    "SELECT fact_id, account_id, human_mailbox, managed_agent_nip05,
+                        principal_binding_reference, departure_kind, occurred_at::text
+                 FROM brain_agent_departure_facts
+                 WHERE account_id = $1 AND managed_agent_nip05 = ANY($2)
+                 ORDER BY occurred_at DESC, fact_id DESC
+                 LIMIT $3",
+                    &[
+                        &account_id,
+                        &managed_agent_nip05s,
+                        &(crate::MAX_BRAIN_AGENT_DEPARTURE_FACTS as i64),
+                    ],
+                )
+                .await
+                .map_err(store_error)?
+        };
         let facts = rows
             .into_iter()
             .map(|row| BrainPermanentAgentDepartureFact {
@@ -10112,6 +10195,121 @@ mod tests {
             stop: true,
             runtime_retirement: false,
         })
+    }
+
+    #[tokio::test]
+    async fn memory_roster_never_reenrolls_a_permanently_departed_agent() {
+        let memory = MemoryCoreStore::default();
+        {
+            let mut state = memory.state.lock().await;
+            state.users.insert(
+                "user-1".to_owned(),
+                CoreUser {
+                    id: "user-1".to_owned(),
+                    email: "paul@finite.vip".to_owned(),
+                    status: crate::UserLinkStatus::Linked,
+                    workos_user_id: Some("workos-paul".to_owned()),
+                    created_at: "2026-08-01T00:00:00Z".to_owned(),
+                    updated_at: "2026-08-01T00:00:00Z".to_owned(),
+                },
+            );
+            state.projects.insert(
+                "project-waffle".to_owned(),
+                Project {
+                    id: "project-waffle".to_owned(),
+                    customer_org_id: "org-paul".to_owned(),
+                    owner_user_id: "user-1".to_owned(),
+                    display_name: "Waffle".to_owned(),
+                    agent_email: Some("waffle@finite.vip".to_owned()),
+                    import_candidate_id: None,
+                    hosting_tier: None,
+                    placement: None,
+                    created_at: "2026-08-01T00:00:00Z".to_owned(),
+                    updated_at: "2026-08-01T00:00:00Z".to_owned(),
+                },
+            );
+            state.brain_agent_departure_facts.insert(
+                "departure-waffle".to_owned(),
+                BrainPermanentAgentDepartureFact {
+                    fact_id: "departure-waffle".to_owned(),
+                    account_id: "workos-paul".to_owned(),
+                    human_mailbox: "paul@finite.vip".to_owned(),
+                    managed_agent_nip05: "waffle@finite.vip".to_owned(),
+                    principal_binding_reference: "project-waffle".to_owned(),
+                    departure_kind: "retired".to_owned(),
+                    occurred_at: "2026-08-02T00:00:00Z".to_owned(),
+                },
+            );
+        }
+
+        let roster = memory
+            .brain_account_agent_roster("paul@finite.vip")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(roster.agents.is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_departure_intake_returns_the_newest_bounded_window() {
+        let memory = MemoryCoreStore::default();
+        {
+            let mut state = memory.state.lock().await;
+            state.users.insert(
+                "user-departures".to_owned(),
+                CoreUser {
+                    id: "user-departures".to_owned(),
+                    email: "departures@finite.vip".to_owned(),
+                    status: crate::UserLinkStatus::Linked,
+                    workos_user_id: Some("workos-departures".to_owned()),
+                    created_at: "2026-08-01T00:00:00Z".to_owned(),
+                    updated_at: "2026-08-01T00:00:00Z".to_owned(),
+                },
+            );
+            for index in 0..=crate::MAX_BRAIN_AGENT_DEPARTURE_FACTS {
+                let fact_id = format!("departure-{index:04}");
+                state.brain_agent_departure_facts.insert(
+                    fact_id.clone(),
+                    BrainPermanentAgentDepartureFact {
+                        fact_id,
+                        account_id: "workos-departures".to_owned(),
+                        human_mailbox: "departures@finite.vip".to_owned(),
+                        managed_agent_nip05: format!("agent-{index:04}@finite.vip"),
+                        principal_binding_reference: format!("project-{index:04}"),
+                        departure_kind: "retired".to_owned(),
+                        occurred_at: format!("2026-08-02T00:{:02}:{:02}Z", index / 60, index % 60),
+                    },
+                );
+            }
+        }
+
+        let departures = memory
+            .brain_permanent_agent_departures("departures@finite.vip", &BTreeSet::new())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            departures.facts.len(),
+            crate::MAX_BRAIN_AGENT_DEPARTURE_FACTS
+        );
+        assert_eq!(departures.facts[0].fact_id, "departure-0256");
+        assert!(
+            departures
+                .facts
+                .iter()
+                .all(|fact| fact.fact_id != "departure-0000")
+        );
+
+        let relevant = memory
+            .brain_permanent_agent_departures(
+                "departures@finite.vip",
+                &BTreeSet::from(["agent-0000@finite.vip".to_owned()]),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(relevant.facts.len(), 1);
+        assert_eq!(relevant.facts[0].fact_id, "departure-0000");
     }
 
     #[tokio::test]

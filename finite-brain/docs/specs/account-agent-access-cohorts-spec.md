@@ -60,7 +60,7 @@ separate capability and never blocks agent launch, chat, or unrelated work.
 Agents exercise routine administration through durable **Human-Anchored Agent
 Authority**, not copied independent admin roles. Standing authority covers
 normal work. Changing another account agent's Personal Brain access requires
-action-specific **Authenticated Human Intent**, while ownership transfer,
+one-use **Authenticated Human Intent**, while ownership transfer,
 Recovery Set changes, and whole-Brain deletion remain directly human-operated.
 
 Quietly reconcile the existing internal-beta population into Account Access
@@ -183,9 +183,9 @@ Grants.
     sovereign actions.
 52. As a user, I want to tell one agent to restrict or restore another agent's
     Personal Brain access, so that agent-first UX includes agent management.
-53. As a security reviewer, I want peer-agent access changes bound to
-    Authenticated Human Intent, so that an agent cannot remove peers
-    autonomously.
+53. As a security reviewer, I want peer-agent access changes to consume a
+    fresh authenticated human-turn capability, so that background work cannot
+    remove peers and one human turn cannot authorize multiple changes.
 54. As a user, I want no extra Product Client click for Authenticated Human
     Intent, so that the authenticated conversation remains the interface.
 55. As a Personal Brain owner, I want every eligible account agent to use my
@@ -312,9 +312,11 @@ Grants.
   Agent Authority, invitations, Membership, Folder Access, Folder Key Grants,
   exclusions, admissions, revocations, audit, readiness, and reconciliation.
 - Finite Chat supplies Authenticated Human Intent for sensitive agent-operated
-  changes. The proof is bound to the human, acting agent, resource, scope,
-  operation, freshness, and replay protection. Agent-supplied prose is not
-  authority.
+  changes. The one-use capability is bound to the human, acting agent,
+  freshness, and replay protection; Brain records the exact route-derived
+  action that consumes it. The personal-agent trust model assigns semantic
+  translation of the human's words to the agent, and agent-supplied prose is
+  not independently verified authority.
 - Finite Skills renders structured Brain outcomes and teaches the agent-first
   flow. It never enumerates account agents itself, infers ownership, parses
   human-facing prose for principals, or claims success beyond the service
@@ -336,8 +338,10 @@ Grants.
 - Pending invitation uniqueness includes invitation kind and exact resource
   scope. One Brain invitation and one or more distinct Folder invitations to
   the same Finite VIP Mailbox Address may coexist. An exact same-scope retry
-  returns the prior invitation and delivery receipt rather than creating a
-  duplicate or sending another email.
+  returns the prior immutable plan, invitation, and delivery receipt rather
+  than excluding its reservation to construct a second plan or sending another
+  email. Changing that scope's participant exclusions requires revoking the
+  pending invitation first.
 - A fully ready preflight may commit immediately as the normal one-command happy
   path. Only blockers requiring a reduced set add a confirmation turn.
 - Invitation creation persists the fixed Invitation Participant Set and every
@@ -416,7 +420,10 @@ Grants.
 - Permanent account departure ends Human-Anchored Agent Authority and Personal
   Brain Agent Access, removes cohort-derived relationships, rotates every
   affected current Folder Key, and preserves the human Brain and content.
-  Temporary runtime lifecycle never triggers this flow.
+  Temporary runtime lifecycle never triggers this flow. The agent supervisor
+  polls `GET /v1/brains/{brainId}/permanent-agent-departures` before admission
+  reconciliation and applies each unapplied fact through the existing exact
+  preflight/commit boundary.
 - Peer-agent removal, restriction, or restoration inside a Personal Brain is
   agent-operable only with Authenticated Human Intent. Normal content and
   sharing work uses standing authority. Ownership transfer, Recovery Set
@@ -443,9 +450,13 @@ Grants.
   update guidance.
 - Peer-agent Personal Brain restriction and restoration accept
   `authenticatedHumanIntent` only on exact-npub `DELETE|PUT` Folder access and
-  whole-Brain Personal Agent access routes. The CLI signs this exact-scope,
-  short-lived, one-use proof from the authenticated human's current chat lease;
-  Product Client invitation flows require no extra click.
+  whole-Brain Personal Agent access routes. Finite Chat mints a short-lived,
+  server-verifiable requester assertion for the authenticated human and acting
+  agent. Brain combines that proof with the exact route-derived target, scope,
+  and operation, persists the canonical composite, and consumes the requester
+  assertion id once regardless of which action is attempted. Neither the CLI
+  nor the agent supplies an authoritative action binding or handles the human's
+  private key. Product Client invitation flows require no extra click.
 - The reconciliation inventory includes pending legacy invitations. A pending
   invitation to a resolvable Finite VIP Mailbox Address keeps its identifier,
   expiry, resource kind, and exact Brain or Folder scope but gains a fixed
@@ -459,6 +470,10 @@ Grants.
 - Reconciliation first produces a read-only inventory and plan. It validates
   identity resolution, agent eligibility, capacity, current grant coverage,
   trusted-client key availability, and the exact target state before mutation.
+- Legacy Organization agent membership is not blanket-classified as
+  independent during schema migration. Reconciliation records an independent
+  legacy source only when its reviewed plan found existing direct Folder or
+  grant evidence; otherwise bootstrap/cohort provenance remains authoritative.
 - The reconciliation atomic unit for a Member is one Brain plus every Folder
   that human can access there. A Folder-only Guest is one Folder unit. Separate
   Brains may complete or retry independently.
@@ -471,7 +486,7 @@ Grants.
   mutation.
 - Cohort Access Cutover is coordinated across Core, Identity, Brain, Chat,
   Product Client, CLI, Runtime skill delivery, and reconciliation tooling.
-- The server advertises cohort-write capability. After cutover, old clients may
+- `GET /health` advertises `account_cohort_writes_v1` in `capabilities`. After cutover, old clients may
   continue compatible reads, sync, and chat but receive update-required for
   invitation, membership, Folder access, Personal Agent, and collaboration
   writes that could create legacy state.
@@ -481,10 +496,45 @@ Grants.
   creation without a current cohort preflight does the same. Explicit raw-npub
   writes remain available for intentionally narrow access, including targeted
   removal of one cohort agent with a durable exclusion.
-- Capacity is evaluated over the full resulting Member, Guest, Folder Access,
-  Folder Key Grant, invitation, and audit state. Interactive preflight may offer
-  explicit exclusions; quiet reconciliation never chooses an exclusion and
-  leaves a capacity-blocked unit unchanged.
+- Exact-npub Member removal first calls
+  `POST /v1/admin/brains/{brainId}/members/{targetNpub}/removal-preflight`.
+  The response's `removedParticipantNpubs` is the authoritative rotation set;
+  clients must not infer it from the metadata projection because independent
+  membership, an explicit admin role, and overlapping cohorts can retain
+  individual participants. The anchoring human must still have their own admin
+  role revoked before removal.
+  `folderAccessRemovals` additionally names retained Members whose
+  cohort-derived access ends in each Folder, so clients rotate exactly the
+  affected Folder recipients without treating those identities as removed
+  Members.
+- Capacity is evaluated over the full resulting Member, Guest/Folder Access,
+  Folder Key Grant, sync-record, and pending-invitation state, including the
+  exact distinct resources reserved by every other unexpired pending cohort
+  plan. Expired plans reserve nothing, overlaps are counted once, and commit
+  rechecks the complete envelope inside the serialized write transaction.
+  SQLite capacity guards make every competing Member, Folder Access, Folder
+  Key Grant, and sync-record writer honor those reservations until expiry or
+  terminal invitation state.
+  Interactive preflight may offer
+  explicit account-agent exclusions (the CLI uses `--exclude-agent` with
+  `--approve-reduced`). Those exclusions are supplied to preflight, validated
+  as eligible account agents or echoed as already-required readiness
+  exclusions, removed from the returned participant set, and
+  hashed into the immutable plan id; commit must echo the exact returned
+  exclusion set. Quiet reconciliation never chooses an exclusion and
+  leaves a capacity-blocked unit unchanged. Account-agent fanout is bounded at
+  64 principals per account. Brain supplies the at-most-64 active managed
+  agent NIP-05s when polling Core; Core filters for those principals before
+  returning at most 256 facts. The empty-filter compatibility request returns
+  the newest 256 facts. Brain then filters already-applied facts locally, so
+  unrelated later departures cannot starve an older Brain-relevant fact and
+  no lifetime fact-count cliff exists.
+- Permanent-departure polling chunks each account's active managed-agent set
+  into at-most-64-principal Core requests; a Brain may contain more than 64
+  accounts or stale cohort participants without disabling known revocation.
+- Every accepted administrative control performed through Human-Anchored Agent Authority
+  writes an audit record in the same transaction, naming both the acting agent
+  and anchoring human alongside the signed record id and type.
 - Durable cohort, authority, readiness, exclusion, admission, departure,
   dismissal, and reconciliation records participate in sync, backup, export
   where appropriate, and empty-target recovery. Historical audit remains even
@@ -535,9 +585,10 @@ Grants.
   during a Core outage, while new admissions fail closed without fresh facts and
   a replayed Permanent Agent Departure Fact revokes known authority.
 - Authenticated Human Intent cases prove a human can ask one agent to restrict
-  or restore another, the action is bound to the exact human/agent/resource and
-  rejects replay, and agent-supplied text or background execution cannot satisfy
-  the requirement.
+  or restore another, Brain stores the exact server-derived action, the
+  human-turn assertion rejects replay or rebinding to a second action, and
+  background execution without a fresh authenticated turn cannot satisfy the
+  requirement.
 - Personal Brain process cases start with multiple current account agents,
   prove every ready agent can discover, sync, read, write, share, and delete
   content, and prove the human remains sole owner.
@@ -608,6 +659,10 @@ Grants.
 
 - Sharing a human private key with an agent or representing an agent signature
   as human-signed.
+- Cryptographically proving that the human's natural-language words
+  semantically requested the agent-selected action. The personal agent is a
+  trusted delegate for that translation; deployments that treat the agent as
+  adversarial must require a structured human confirmation surface instead.
 - Turning an email, Account Access Cohort, or Account Agent Set into a signing
   principal.
 - Granting independent owner or admin roles to every account agent.

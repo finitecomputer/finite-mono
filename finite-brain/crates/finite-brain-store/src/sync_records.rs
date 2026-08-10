@@ -191,6 +191,68 @@ pub(crate) fn insert_sync_record(
             input.record_event_kind()
         ],
     )?;
+    // Human-Anchored Agent Authority is standing authority, but attribution
+    // must remain explicit and durable for every accepted action. Record the
+    // active anchoring human beside the agent's signed event in the same
+    // transaction as the authoritative sync record.
+    let delegated_authorities = if matches!(input, SyncRecordInput::Control(_)) {
+        let mut statement = tx.prepare(
+            r#"
+            SELECT authority.cohort_id, authority.human_npub
+            FROM human_anchored_agent_authorities authority
+            JOIN account_access_cohorts cohort ON cohort.id = authority.cohort_id
+            WHERE authority.brain_id = ?1
+              AND authority.agent_npub = ?2
+              AND authority.status = 'active'
+              AND cohort.status = 'active'
+              AND NOT EXISTS (
+                  SELECT 1 FROM brain_admins admin
+                  WHERE admin.brain_id = authority.brain_id
+                    AND admin.user_id = authority.agent_npub
+              )
+            ORDER BY authority.cohort_id
+            LIMIT 65
+            "#,
+        )?;
+        statement
+            .query_map(
+                params![brain_id.as_str(), input.actor_npub().as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    if delegated_authorities.len() > 64 {
+        return Err(StoreError::CapacityExceeded {
+            limit: "human_anchored_agent_authorities".to_owned(),
+            max: 64,
+            current: delegated_authorities.len(),
+        });
+    }
+    for (cohort_id, human_npub) in delegated_authorities {
+        tx.execute(
+            r#"
+            INSERT OR IGNORE INTO account_access_cohort_audit (
+                id, cohort_id, action, actor_npub, anchoring_human_npub,
+                detail_json, occurred_at
+            ) VALUES (?1, ?2, 'delegated_sync_action', ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                format!("audit-{cohort_id}-{}-delegated", input.record_event_id()),
+                cohort_id,
+                input.actor_npub().as_str(),
+                human_npub,
+                serde_json::json!({
+                    "recordEventId": input.record_event_id(),
+                    "recordType": input.record_type().as_storage_str(),
+                    "sequence": sequence,
+                })
+                .to_string(),
+                current_timestamp(),
+            ],
+        )?;
+    }
     Ok(())
 }
 

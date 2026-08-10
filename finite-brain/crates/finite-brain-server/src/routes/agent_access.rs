@@ -1,5 +1,114 @@
 use crate::*;
 
+pub(crate) async fn list_pending_permanent_agent_departures_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath(brain_id): AxumPath<String>,
+) -> Result<Json<PendingPermanentAgentDeparturesResponse>, ApiError> {
+    let actor = UserId::new(validate_request_auth(
+        &state, &headers, &method, &uri, None,
+    )?)?;
+    let brain_id = BrainId::new(brain_id)?;
+    let cohorts = {
+        let store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, actor.as_str())?;
+        let mut cohorts = BTreeMap::<String, BTreeSet<String>>::new();
+        for cohort in stored
+            .account_access_cohorts
+            .into_iter()
+            .filter(|cohort| cohort.status == "active" && cohort.scope_kind == "brain")
+        {
+            cohorts
+                .entry(cohort.human_email.to_ascii_lowercase())
+                .or_default()
+                .extend(
+                    cohort
+                        .participants
+                        .into_iter()
+                        .filter(|participant| {
+                            participant.status == "active"
+                                && participant.relationship == "account_agent"
+                        })
+                        .map(|participant| participant.nip05.to_ascii_lowercase()),
+                );
+        }
+        if cohorts.len() > BRAIN_CAPACITY_ENVELOPE.members {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Brain account cohort fanout exceeds the Brain member envelope",
+            ));
+        }
+        cohorts
+    };
+    let authorities = state.agent_bootstrap_authorities.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Brain account-agent authority is not configured",
+        )
+    })?;
+    let mut pending = Vec::new();
+    'accounts: for (human_email, active_agents) in cohorts {
+        if active_agents.is_empty() {
+            continue;
+        }
+        let active_agents = active_agents.into_iter().collect::<Vec<_>>();
+        for agent_page in active_agents.chunks(64) {
+            let response: CorePermanentAgentDepartureFactsResponse = post_authority_json(
+                &format!(
+                    "{}/api/core/v1/brain/permanent-agent-departures",
+                    authorities.core_base_url
+                ),
+                "Authorization",
+                &format!("Bearer {}", authorities.core_token),
+                &serde_json::json!({
+                    "verifiedEmail": human_email,
+                    "managedAgentNip05s": agent_page,
+                }),
+                "Finite Core permanent Agent departures",
+            )
+            .await?;
+            if canonical_email(&response.human_mailbox)? != human_email {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "Finite Core returned mismatched departure facts",
+                ));
+            }
+            for fact in response.facts {
+                if pending.len() >= 256 {
+                    // Return one bounded page. The supervisor applies it before
+                    // polling again, so already-applied facts fall out and later
+                    // accounts make deterministic forward progress.
+                    break 'accounts;
+                }
+                let applied = {
+                    let store = state.store.lock().map_err(lock_error)?;
+                    store.permanent_agent_departure_applied(&brain_id, &fact.fact_id)?
+                };
+                if !applied && agent_page.contains(&fact.managed_agent_nip05.to_ascii_lowercase()) {
+                    pending.push(PendingPermanentAgentDepartureResponse {
+                        fact_id: fact.fact_id,
+                        human_email: human_email.clone(),
+                        agent_nip05: fact.managed_agent_nip05,
+                        departure_kind: fact.departure_kind,
+                        occurred_at: fact.occurred_at,
+                    });
+                }
+            }
+        }
+    }
+    pending.sort_by(|left, right| {
+        left.occurred_at
+            .cmp(&right.occurred_at)
+            .then_with(|| left.fact_id.cmp(&right.fact_id))
+    });
+    Ok(Json(PendingPermanentAgentDeparturesResponse {
+        departures: pending,
+    }))
+}
+
 async fn permanent_agent_departure_plan(
     state: &ServerState,
     brain_id: &BrainId,
@@ -21,31 +130,75 @@ async fn permanent_agent_departure_plan(
             "Brain account-agent authority is not configured",
         )
     })?;
-    let departures: CorePermanentAgentDepartureFactsResponse = post_authority_json(
-        &format!(
-            "{}/api/core/v1/brain/permanent-agent-departures",
-            authorities.core_base_url
-        ),
-        "Authorization",
-        &format!("Bearer {}", authorities.core_token),
-        &serde_json::json!({ "verifiedEmail": human_email }),
-        "Finite Core permanent Agent departures",
-    )
-    .await?;
-    if departures.account_id.trim().is_empty()
-        || canonical_email(&departures.human_mailbox)? != human_email
-    {
+    let active_agents = {
+        let store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(brain_id)?;
+        ensure_brain_admin(&stored, actor.as_str())?;
+        stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.human_email.eq_ignore_ascii_case(&human_email)
+            })
+            .flat_map(|cohort| &cohort.participants)
+            .filter(|participant| {
+                participant.status == "active" && participant.relationship == "account_agent"
+            })
+            .map(|participant| participant.nip05.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>()
+    };
+    if active_agents.is_empty() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "Finite Core returned mismatched departure facts",
+            "departure fact is not associated with an active bounded account cohort",
         ));
     }
-    let fact = departures
-        .facts
-        .into_iter()
-        .find(|fact| fact.fact_id == fact_id)
+    let active_agents = active_agents.into_iter().collect::<Vec<_>>();
+    let mut account_id = None::<String>;
+    let mut selected_fact = None;
+    for agent_page in active_agents.chunks(64) {
+        let departures: CorePermanentAgentDepartureFactsResponse = post_authority_json(
+            &format!(
+                "{}/api/core/v1/brain/permanent-agent-departures",
+                authorities.core_base_url
+            ),
+            "Authorization",
+            &format!("Bearer {}", authorities.core_token),
+            &serde_json::json!({
+                "verifiedEmail": human_email,
+                "managedAgentNip05s": agent_page,
+            }),
+            "Finite Core permanent Agent departures",
+        )
+        .await?;
+        if departures.account_id.trim().is_empty()
+            || canonical_email(&departures.human_mailbox)? != human_email
+            || account_id
+                .as_ref()
+                .is_some_and(|account_id| account_id != &departures.account_id)
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "Finite Core returned mismatched departure facts",
+            ));
+        }
+        account_id = Some(departures.account_id.clone());
+        if let Some(fact) = departures
+            .facts
+            .into_iter()
+            .find(|fact| fact.fact_id == fact_id)
+        {
+            selected_fact = Some(fact);
+            break;
+        }
+    }
+    let account_id = account_id
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "departure account was not found"))?;
+    let fact = selected_fact
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "departure fact not found"))?;
-    if fact.account_id != departures.account_id
+    if fact.account_id != account_id
         || canonical_email(&fact.human_mailbox)? != human_email
         || !matches!(
             fact.departure_kind.as_str(),
@@ -456,6 +609,7 @@ pub(crate) async fn restrict_personal_agent_brain_access_handler(
             ));
         }
         validate_authenticated_human_intent_value(
+            &state,
             request.authenticated_human_intent,
             &stored,
             &brain_id,
@@ -588,6 +742,7 @@ pub(crate) async fn restore_personal_agent_brain_access_handler(
         let stored = store.load_brain(&brain_id)?;
         ensure_brain_admin(&stored, actor.as_str())?;
         validate_authenticated_human_intent_value(
+            &state,
             request.authenticated_human_intent,
             &stored,
             &brain_id,

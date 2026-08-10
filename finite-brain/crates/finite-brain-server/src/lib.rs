@@ -16,6 +16,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(test)]
 use finite_brain_core::FolderRole;
 use finite_brain_core::{
@@ -47,6 +48,7 @@ use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
     NostrPrimitiveError, NostrPublicKey, validate_gift_wrap, verify_event_integrity,
 };
+use hmac::{Hmac, Mac};
 use nostr::Event;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -117,6 +119,8 @@ pub struct HealthStatus {
     pub status: String,
     pub core_crate: String,
     pub store_crate: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// Public Product Client runtime config.
@@ -162,6 +166,7 @@ pub struct ServerState {
     invite_mailer: Option<BrainInviteMailer>,
     smoke_nip07_signer_secret: Option<Arc<str>>,
     agent_bootstrap_authorities: Option<AgentBootstrapAuthorities>,
+    authenticated_requester_assertion_secret: Option<Arc<[u8]>>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
 }
 
@@ -311,6 +316,7 @@ impl ServerState {
             invite_mailer: None,
             smoke_nip07_signer_secret: None,
             agent_bootstrap_authorities: None,
+            authenticated_requester_assertion_secret: None,
             brain_updates,
         }
     }
@@ -428,6 +434,19 @@ impl ServerState {
                 identity_base_url: Arc::from(identity_base_url),
                 identity_token: Arc::from(identity_token),
             });
+        }
+        self
+    }
+
+    /// Verify the short-lived requester assertion Finite Chat transports for
+    /// an authenticated hosted human turn.
+    pub fn with_authenticated_requester_assertion_secret(
+        mut self,
+        secret: impl AsRef<[u8]>,
+    ) -> Self {
+        let secret = secret.as_ref();
+        if !secret.is_empty() {
+            self.authenticated_requester_assertion_secret = Some(Arc::from(secret));
         }
         self
     }
@@ -628,6 +647,7 @@ pub fn health_status() -> HealthStatus {
         status: "ok".to_owned(),
         core_crate: finite_brain_core::crate_name().to_owned(),
         store_crate: finite_brain_store::crate_name().to_owned(),
+        capabilities: vec!["account_cohort_writes_v1".to_owned()],
     }
 }
 
@@ -789,6 +809,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
                 .put(commit_personal_brain_agent_admissions_handler),
         )
         .route(
+            "/brains/{brain_id}/permanent-agent-departures",
+            get(list_pending_permanent_agent_departures_handler),
+        )
+        .route(
             "/brains/{brain_id}/permanent-agent-departures/{fact_id}/preflight",
             post(preview_permanent_agent_departure_handler),
         )
@@ -940,6 +964,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
 
 fn low_level_signed_api_router() -> Router<ServerState> {
     Router::new()
+        .route(
+            "/brains/{brain_id}/members/{target_npub}/removal-preflight",
+            post(preview_member_removal_handler),
+        )
         .route(
             "/brains/{brain_id}/members/{target_npub}",
             axum::routing::put(add_member_handler).delete(remove_member_handler),
@@ -2267,23 +2295,24 @@ fn validate_admin_access_change_value(
     Ok((event, payload))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AuthenticatedHumanIntentPayload {
     version: String,
     brain_id: String,
     human_npub: String,
+    human_email: String,
     acting_agent_npub: String,
     target_agent_npub: String,
     operation: String,
     scope_kind: String,
     folder_id: Option<String>,
-    nonce: String,
-    expires_at: String,
+    hosted_requester_assertion: String,
 }
 
 #[allow(clippy::too_many_arguments)]
 fn validate_authenticated_human_intent_value(
+    state: &ServerState,
     value: serde_json::Value,
     stored: &StoredBrain,
     brain_id: &BrainId,
@@ -2304,44 +2333,19 @@ fn validate_authenticated_human_intent_value(
                 "Authenticated Human Intent applies only to Personal Brain peer Agents",
             )
         })?;
-    let event = event_from_value(value)?;
-    if event.kind.as_u16() != APP_SPECIFIC_KIND {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            format!("Authenticated Human Intent event must be kind {APP_SPECIFIC_KIND}"),
-        ));
-    }
-    verify_event_integrity(&event).map_err(|error| {
+    let payload: AuthenticatedHumanIntentPayload = serde_json::from_value(value).map_err(|_| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
-            format!("Authenticated Human Intent event failed verification: {error}"),
+            "Authenticated Human Intent did not parse",
         )
     })?;
-    let signer = UserId::new(
-        NostrPublicKey::from_protocol(event.pubkey)
-            .to_npub()
-            .map_err(nostr_identity_error)?,
-    )?;
-    if signer != *owner {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "Authenticated Human Intent must be signed by the Personal Brain owner",
-        ));
-    }
-    let payload: AuthenticatedHumanIntentPayload =
-        serde_json::from_str(&event.content).map_err(|_| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "Authenticated Human Intent content did not parse",
-            )
-        })?;
     let expected_scope = if folder_id.is_some() {
         "folder"
     } else {
         "brain"
     };
     let expected_folder = folder_id.map(FolderId::as_str);
-    if payload.version != "finite-brain-authenticated-human-intent-v1"
+    if payload.version != "finite-brain-authenticated-human-intent-v2"
         || payload.brain_id != brain_id.as_str()
         || payload.human_npub != owner.as_str()
         || payload.acting_agent_npub != acting_agent_npub.as_str()
@@ -2349,52 +2353,160 @@ fn validate_authenticated_human_intent_value(
         || payload.operation != operation
         || payload.scope_kind != expected_scope
         || payload.folder_id.as_deref() != expected_folder
-        || payload.nonce.len() != 32
-        || !payload.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "Authenticated Human Intent does not match the exact peer Agent change",
         ));
     }
-    let expires_at = OffsetDateTime::parse(&payload.expires_at, &Rfc3339).map_err(|_| {
+    let human_email = canonical_email(&payload.human_email)?;
+    let secret = state
+        .authenticated_requester_assertion_secret
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Authenticated Human Intent verification is not configured",
+            )
+        })?;
+    let (encoded_claims, supplied_mac) = payload
+        .hosted_requester_assertion
+        .split_once('.')
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Authenticated Human Intent requester assertion is invalid",
+            )
+        })?;
+    let supplied_mac = decode_hex_32(supplied_mac).ok_or_else(|| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
-            "Authenticated Human Intent expiresAt must be RFC 3339",
+            "Authenticated Human Intent requester assertion is invalid",
         )
     })?;
-    let expires_at_unix = expires_at.unix_timestamp();
-    let created_at_unix = i64::try_from(event.created_at.as_secs()).map_err(|_| {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).map_err(|_| {
         ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "Authenticated Human Intent created_at is outside the supported range",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Authenticated Human Intent verification is not configured",
         )
     })?;
-    let now_unix = i64::try_from(now_unix_seconds).unwrap_or(i64::MAX);
-    const MAX_INTENT_LIFETIME_SECONDS: i64 = 10 * 60;
-    const MAX_CLOCK_SKEW_SECONDS: i64 = 60;
-    if created_at_unix > now_unix.saturating_add(MAX_CLOCK_SKEW_SECONDS)
-        || expires_at_unix <= now_unix
-        || expires_at_unix <= created_at_unix
-        || expires_at_unix.saturating_sub(created_at_unix) > MAX_INTENT_LIFETIME_SECONDS
-    {
+    mac.update(encoded_claims.as_bytes());
+    mac.verify_slice(&supplied_mac).map_err(|_| {
+        ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Authenticated Human Intent requester assertion failed verification",
+        )
+    })?;
+    let claims = URL_SAFE_NO_PAD
+        .decode(encoded_claims)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Authenticated Human Intent requester assertion is invalid",
+            )
+        })?;
+    let claim_parts = claims.split('|').collect::<Vec<_>>();
+    if claim_parts.len() != 6 {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
+            "Authenticated Human Intent requester assertion is invalid",
+        ));
+    }
+    let assertion_expires_at = claim_parts[1].parse::<u64>().map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Authenticated Human Intent requester assertion is invalid",
+        )
+    })?;
+    let expected_email_hash = format!("{:x}", Sha256::digest(human_email.as_bytes()));
+    let human_hex = NostrPublicKey::parse(owner.as_str())
+        .map_err(nostr_identity_error)?
+        .to_hex();
+    let acting_agent_hex = NostrPublicKey::parse(acting_agent_npub.as_str())
+        .map_err(nostr_identity_error)?
+        .to_hex();
+    if claim_parts[0] != "finite-requester-v1"
+        || claim_parts[2] != expected_email_hash
+        || claim_parts[3] != human_hex
+        || claim_parts[4] != acting_agent_hex
+        || claim_parts[5].len() != 64
+        || !claim_parts[5].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Authenticated Human Intent requester assertion does not match this human and Agent",
+        ));
+    }
+    if assertion_expires_at <= now_unix_seconds
+        || assertion_expires_at > now_unix_seconds.saturating_add(10 * 60)
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
             "Authenticated Human Intent is expired or outside its allowed freshness window",
         ));
     }
+    // The authority is the composite of a Sites-signed, one-use authenticated
+    // human turn and the exact route-derived action. Never trust or persist an
+    // Agent-supplied action projection as the authoritative intent record.
+    // Bind one-use consumption to the canonical signed claims, not to the
+    // caller's spelling of the hexadecimal MAC. Hex decoding accepts either
+    // case, so hashing the raw assertion would make case-only replay possible.
+    let event_id = format!("{:x}", Sha256::digest(encoded_claims.as_bytes()));
+    let canonical_mac = supplied_mac
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let canonical_assertion = format!("{encoded_claims}.{canonical_mac}");
+    let event_json = serde_json::to_string(&serde_json::json!({
+        "version": payload.version,
+        "hostedRequesterAssertion": canonical_assertion,
+        "canonicalAction": {
+            "brainId": brain_id.as_str(),
+            "humanNpub": owner.as_str(),
+            "humanEmail": human_email,
+            "actingAgentNpub": acting_agent_npub.as_str(),
+            "targetAgentNpub": target_agent_npub.as_str(),
+            "operation": operation,
+            "scopeKind": expected_scope,
+            "folderId": expected_folder,
+        },
+    }))
+    .map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Authenticated Human Intent serialization failed",
+        )
+    })?;
+    // One authenticated turn can authorize at most one exact peer-Agent
+    // change. The unique id deliberately excludes the action so a caller
+    // cannot obtain a second mutation by presenting the same turn differently.
     Ok(AuthenticatedHumanIntentRecord {
-        event_id: event.id.to_hex(),
+        event_id,
         human_npub: owner.clone(),
         acting_agent_npub: acting_agent_npub.clone(),
         target_agent_npub: target_agent_npub.clone(),
         operation: operation.to_owned(),
         scope_kind: expected_scope.to_owned(),
         folder_id: folder_id.cloned(),
-        event_json: event.as_json(),
+        event_json,
         consumed_at: format_unix_timestamp(now_unix_seconds)
             .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned()),
     })
+}
+
+fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut output = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)? as u8;
+        let low = (pair[1] as char).to_digit(16)? as u8;
+        output[index] = (high << 4) | low;
+    }
+    Some(output)
 }
 
 fn personal_peer_agent_change(stored: &StoredBrain, actor: &UserId, target: &UserId) -> bool {
@@ -3123,6 +3235,16 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use tower::ServiceExt;
 
+    #[allow(dead_code)]
+    mod frozen_n_minus_one_cli {
+        use serde::{Deserialize, Serialize};
+
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/finite-brain-cli-0903b426-metadata-models.rs"
+        ));
+    }
+
     const TEST_NOW: u64 = 1_780_000_000;
     const TEST_BASE_URL: &str = "http://finite.test";
 
@@ -3135,6 +3257,7 @@ mod tests {
                 status: "ok".to_owned(),
                 core_crate: "finite-brain-core".to_owned(),
                 store_crate: "finite-brain-store".to_owned(),
+                capabilities: vec!["account_cohort_writes_v1".to_owned()],
             }
         );
     }
@@ -4230,8 +4353,23 @@ mod tests {
             ),
         })
         .to_string();
+        let removal_preview = authed_request(
+            router.clone(),
+            &owner_keys,
+            "POST",
+            &format!("/v1/admin/brains/acme/members/{agent_npub}/removal-preflight"),
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(removal_preview.status(), StatusCode::OK);
+        let removal_preview: PreviewMemberRemovalResponse = read_json(removal_preview).await;
+        assert_eq!(
+            removal_preview.removed_participant_npubs,
+            vec![agent_npub.clone()]
+        );
         let removed = authed_request(
-            router,
+            router.clone(),
             &owner_keys,
             "DELETE",
             &format!("/v1/admin/brains/acme/members/{agent_npub}"),
@@ -4248,6 +4386,107 @@ mod tests {
                 .human_anchored_agent_authorities
                 .iter()
                 .all(|authority| authority.agent_npub != agent_npub)
+        );
+
+        let promote = authed_request(
+            router.clone(),
+            &owner_keys,
+            "PUT",
+            &format!("/v1/admin/brains/acme/roles/admin/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "accessChangeEvent": admin_event(
+                        &owner_keys,
+                        "acme",
+                        "promote-surviving-admin",
+                        AdminAccessAction::AddAdmin,
+                        None,
+                        Some(sibling_agent_npub.as_str()),
+                        None,
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(promote.status(), StatusCode::OK);
+        let demote_owner = authed_request(
+            router.clone(),
+            &sibling_agent_keys,
+            "DELETE",
+            &format!("/v1/admin/brains/acme/roles/admin/{owner_npub}"),
+            Some(
+                serde_json::json!({
+                    "accessChangeEvent": admin_event(
+                        &sibling_agent_keys,
+                        "acme",
+                        "demote-cohort-human",
+                        AdminAccessAction::RemoveAdmin,
+                        None,
+                        Some(owner_npub.as_str()),
+                        None,
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(demote_owner.status(), StatusCode::OK);
+        let human_removal_preview = authed_request(
+            router.clone(),
+            &sibling_agent_keys,
+            "POST",
+            &format!("/v1/admin/brains/acme/members/{owner_npub}/removal-preflight"),
+            None,
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(human_removal_preview.status(), StatusCode::OK);
+        let human_removal_preview: PreviewMemberRemovalResponse =
+            read_json(human_removal_preview).await;
+        assert_eq!(
+            human_removal_preview
+                .removed_participant_npubs
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([owner_npub.clone()])
+        );
+        let remove_human = authed_request(
+            router,
+            &sibling_agent_keys,
+            "DELETE",
+            &format!("/v1/admin/brains/acme/members/{owner_npub}"),
+            Some(
+                serde_json::json!({
+                    "rotations": [],
+                    "mountRotations": [],
+                    "accessChangeEvent": admin_event(
+                        &sibling_agent_keys,
+                        "acme",
+                        "remove-cohort-human",
+                        AdminAccessAction::RemoveMember,
+                        None,
+                        Some(owner_npub.as_str()),
+                        None,
+                    ),
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 6,
+        )
+        .await;
+        assert_eq!(remove_human.status(), StatusCode::OK);
+        let removed: BrainMetadataResponse = read_json(remove_human).await;
+        assert!(!removed.members.contains(&owner_npub));
+        assert!(removed.members.contains(&sibling_agent_npub));
+        assert!(removed.admins.contains(&sibling_agent_npub));
+        assert!(
+            removed
+                .human_anchored_agent_authorities
+                .iter()
+                .all(|authority| authority.human_npub != owner_npub)
         );
         identity_server.join().unwrap();
         core_server.join().unwrap();
@@ -5102,6 +5341,22 @@ mod tests {
                     }],
                 }),
             ),
+            (
+                "/api/core/v1/brain/permanent-agent-departures",
+                serde_json::json!({
+                    "accountId": "user_workos_owner",
+                    "humanMailbox": owner_email,
+                    "facts": [{
+                        "factId": "departure-new-agent",
+                        "accountId": "user_workos_owner",
+                        "humanMailbox": owner_email,
+                        "managedAgentNip05": "new-agent@finite.vip",
+                        "principalBindingReference": "project-new-agent",
+                        "departureKind": "retired",
+                        "occurredAt": "2026-08-10T12:00:00Z",
+                    }],
+                }),
+            ),
         ]);
         let router = router_with_state(
             test_state()
@@ -5409,6 +5664,16 @@ mod tests {
             "00000000000000000000000000000004",
             TEST_NOW + 600,
         );
+        let mut rebound_restore_intent = second_restrict_intent.clone();
+        rebound_restore_intent["operation"] = serde_json::json!("restore");
+        let assertion = rebound_restore_intent["hostedRequesterAssertion"]
+            .as_str()
+            .unwrap();
+        let (encoded_claims, mac) = assertion.split_once('.').unwrap();
+        let upper_mac = mac.to_ascii_uppercase();
+        assert_ne!(upper_mac, mac);
+        rebound_restore_intent["hostedRequesterAssertion"] =
+            serde_json::json!(format!("{encoded_claims}.{upper_mac}"));
         let restricted_again = authed_request(
             router.clone(),
             &agent_keys,
@@ -5440,6 +5705,41 @@ mod tests {
         .await;
         assert_eq!(restricted_again.status(), StatusCode::OK);
 
+        let rebound_restore = authed_request(
+            router.clone(),
+            &agent_keys,
+            "PUT",
+            &format!("/v1/admin/brains/personal/folders/all-agents/access/{sibling_agent_npub}"),
+            Some(
+                serde_json::json!({
+                    "grant": folder_key_grant_value(
+                        "peer-restore-sibling-v3-rebound",
+                        3,
+                        sibling_agent_npub.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &agent_keys,
+                        "personal",
+                        "peer-restore-rebound",
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("all-agents"),
+                        Some(sibling_agent_npub.as_str()),
+                        Some(3),
+                    ),
+                    "authenticatedHumanIntent": rebound_restore_intent,
+                })
+                .to_string(),
+            ),
+            TEST_NOW + 25,
+        )
+        .await;
+        assert_error(
+            rebound_restore,
+            StatusCode::BAD_REQUEST,
+            "Authenticated Human Intent was already consumed",
+        )
+        .await;
+
         let replayed_restore = authed_request(
             router.clone(),
             &agent_keys,
@@ -5465,7 +5765,7 @@ mod tests {
                 })
                 .to_string(),
             ),
-            TEST_NOW + 25,
+            TEST_NOW + 26,
         )
         .await;
         assert_error(
@@ -5724,6 +6024,20 @@ mod tests {
         .await;
         let new_agent_brains: VisibleBrainsResponse = read_json(new_agent_brains).await;
         assert_eq!(new_agent_brains.brains[0].role, "personal_agent");
+
+        let pending = authed_request(
+            router.clone(),
+            &owner_keys,
+            "GET",
+            "/v1/brains/personal/permanent-agent-departures",
+            None,
+            TEST_NOW + 7,
+        )
+        .await;
+        assert_eq!(pending.status(), StatusCode::OK);
+        let pending: PendingPermanentAgentDeparturesResponse = read_json(pending).await;
+        assert_eq!(pending.departures.len(), 1);
+        assert_eq!(pending.departures[0].fact_id, "departure-new-agent");
 
         let preflight = authed_request(
             router.clone(),
@@ -7090,6 +7404,13 @@ mod tests {
         )
         .await;
         assert_eq!(list.status(), StatusCode::OK);
+        let list_body = axum::body::to_bytes(list.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let frozen_list: frozen_n_minus_one_cli::VisibleBrainsResponse =
+            serde_json::from_slice(&list_body).expect("frozen N-1 Brain list reader remains valid");
+        assert_eq!(frozen_list.brains.len(), 1);
+        assert_eq!(frozen_list.brains[0].brain_id, "personal");
 
         let metadata = authed_request(
             router.clone(),
@@ -7101,6 +7422,22 @@ mod tests {
         )
         .await;
         assert_eq!(metadata.status(), StatusCode::OK);
+        // Parse with the checked-in, verbatim N-1 CLI model artifact rather
+        // than a candidate-defined approximation of the old reader.
+        let metadata_body = axum::body::to_bytes(metadata.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let frozen: frozen_n_minus_one_cli::BrainMetadataView =
+            serde_json::from_slice(&metadata_body)
+                .expect("frozen N-1 parser accepts additive fields");
+        assert_eq!(frozen.brain_id, "personal");
+        assert_eq!(frozen.kind, "personal");
+        assert_eq!(
+            frozen.owner_user_id.as_deref(),
+            Some(npub(&owner_keys).as_str())
+        );
+        assert!(frozen.members.is_empty());
+        assert!(frozen.admins.is_empty());
 
         let singular = authed_request(
             router.clone(),
@@ -12404,7 +12741,9 @@ mod tests {
 
     fn test_state() -> ServerState {
         let store = BrainStore::open_in_memory().unwrap();
-        ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+        ServerState::new(store, TEST_BASE_URL)
+            .with_auth_clock(TEST_NOW, 60)
+            .with_authenticated_requester_assertion_secret(b"test-requester-assertion-secret")
     }
 
     fn personal_test_state(owner_keys: &Keys, agent_keys: &Keys) -> ServerState {
@@ -12423,7 +12762,9 @@ mod tests {
                 &test_rfc3339(),
             )
             .unwrap();
-        ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60)
+        ServerState::new(store, TEST_BASE_URL)
+            .with_auth_clock(TEST_NOW, 60)
+            .with_authenticated_requester_assertion_secret(b"test-requester-assertion-secret")
     }
 
     fn personal_test_router(owner_keys: &Keys, agent_keys: &Keys) -> Router {
@@ -13258,31 +13599,36 @@ mod tests {
         folder_id: Option<&str>,
         nonce: &str,
         expires_at_unix: u64,
-    ) -> Event {
-        sign_app_event(
-            owner_keys,
-            serde_json::json!({
-                "version": "finite-brain-authenticated-human-intent-v1",
-                "brainId": brain_id,
-                "humanNpub": npub(owner_keys),
-                "actingAgentNpub": acting_agent_npub,
-                "targetAgentNpub": target_agent_npub,
-                "operation": operation,
-                "scopeKind": if folder_id.is_some() { "folder" } else { "brain" },
-                "folderId": folder_id,
-                "nonce": nonce,
-                "expiresAt": format_unix_timestamp(expires_at_unix).unwrap(),
-            })
-            .to_string(),
-            vec![
-                vec![
-                    "d".to_owned(),
-                    format!("finite-brain-authenticated-human-intent:{brain_id}:{nonce}"),
-                ],
-                vec!["brain".to_owned(), brain_id.to_owned()],
-                vec!["operation".to_owned(), operation.to_owned()],
-            ],
-        )
+    ) -> serde_json::Value {
+        let human_email = "owner@finite.vip";
+        let email_hash = format!("{:x}", Sha256::digest(human_email.as_bytes()));
+        let human_hex = NostrPublicKey::from_protocol(owner_keys.public_key()).to_hex();
+        let acting_hex = NostrPublicKey::parse(acting_agent_npub).unwrap().to_hex();
+        let nonce = format!("{:x}", Sha256::digest(nonce.as_bytes()));
+        let claims = format!(
+            "finite-requester-v1|{expires_at_unix}|{email_hash}|{human_hex}|{acting_hex}|{nonce}"
+        );
+        let encoded = URL_SAFE_NO_PAD.encode(claims.as_bytes());
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-requester-assertion-secret").unwrap();
+        mac.update(encoded.as_bytes());
+        let assertion = format!("{encoded}.{:x}", mac.finalize().into_bytes());
+        let scope_kind = if folder_id.is_some() {
+            "folder"
+        } else {
+            "brain"
+        };
+        serde_json::json!({
+            "version": "finite-brain-authenticated-human-intent-v2",
+            "brainId": brain_id,
+            "humanNpub": npub(owner_keys),
+            "humanEmail": human_email,
+            "actingAgentNpub": acting_agent_npub,
+            "targetAgentNpub": target_agent_npub,
+            "operation": operation,
+            "scopeKind": scope_kind,
+            "folderId": folder_id,
+            "hostedRequesterAssertion": assertion,
+        })
     }
 
     fn admin_access_change_tags(input: &AdminAccessChangeValidation) -> Vec<Vec<String>> {

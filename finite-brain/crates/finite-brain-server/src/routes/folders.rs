@@ -42,9 +42,10 @@ pub(crate) async fn grant_account_cohort_folder_access_handler(
         folder_only: true,
         initial_folder_access: vec![folder_id.to_string()],
         expires_at: request.expires_at.clone(),
+        approved_exclusions: request.approved_exclusions.clone(),
     };
     let (preview, account_id) =
-        build_invitation_preview(&state, &actor, &brain_id, preview_request).await?;
+        build_invitation_preview(&state, &actor, &brain_id, preview_request, false).await?;
     if preview.plan_id != request.plan_id {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -67,6 +68,12 @@ pub(crate) async fn grant_account_cohort_folder_access_handler(
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "the exact reduced participant set requires explicit approval",
+        ));
+    }
+    if !preview.capacity.fits {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "the preflight participant set exceeds Brain capacity",
         ));
     }
     let expected_grants = preview
@@ -636,6 +643,7 @@ pub(crate) async fn grant_folder_access_handler(
                 .contains(&(target.clone(), folder_id.to_string()));
         let authenticated_human_intent = match (peer_restore, request.authenticated_human_intent) {
             (true, Some(value)) => Some(validate_authenticated_human_intent_value(
+                &state,
                 value,
                 &stored,
                 &brain_id,
@@ -769,6 +777,7 @@ pub(crate) async fn remove_folder_access_handler(
                 )
             })?;
             Some(validate_authenticated_human_intent_value(
+                &state,
                 value,
                 &stored,
                 &brain_id,

@@ -38,6 +38,9 @@ in
       EnvironmentFile = [
         "/etc/finite/identity-operator.env"
         "/etc/finite/brain-authority.env"
+        # Shared server-only key used to verify exact-scope requester
+        # assertions minted by Sites for authenticated Finite Chat turns.
+        "/etc/finite/sites-viewer-session.env"
         # Existing send-only Resend credential shared with Sites and Identity.
         # Brain still owns its invitation content and access policy.
         mailEnvironmentFile

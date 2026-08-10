@@ -1874,6 +1874,12 @@ async fn operator_resolve_brain_participants(
     let Some(human_pubkey) = hex::decode32(&account_pubkey) else {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid_stored_pubkey");
     };
+    if request.managed_agent_names.len() > MAX_BRAIN_ACCOUNT_AGENTS {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "managed_agent_fanout_exceeded",
+        );
+    }
     let mut seen_names = std::collections::BTreeSet::new();
     let mut seen_principals = std::collections::BTreeSet::from([account_pubkey]);
     let mut agents = Vec::with_capacity(request.managed_agent_names.len());
@@ -2299,6 +2305,8 @@ struct OperatorResolveBrainParticipantsRequest {
     human_mailbox: String,
     managed_agent_names: Vec<String>,
 }
+
+const MAX_BRAIN_ACCOUNT_AGENTS: usize = 64;
 
 #[derive(Debug, Serialize)]
 struct OperatorResolveBrainParticipantsResponse {

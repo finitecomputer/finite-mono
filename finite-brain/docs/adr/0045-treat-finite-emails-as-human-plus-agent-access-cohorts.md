@@ -29,7 +29,9 @@ matter.
 If a participant is not ready, no invitation is sent yet. The inviting agent or
 client returns one minimal explanation and asks whether to send to the reduced
 set. An explicit yes fixes that exclusion in the invitation. The approved
-participant set is frozen when the invitation is sent; agents created later do
+exclusions are supplied to preflight itself, so the returned participants,
+capacity outcome, exclusions, and plan id are one immutable decision rather
+than a commit-time rewrite. The approved participant set is frozen when the invitation is sent; agents created later do
 not inherit access from that consumed invitation. If an approved participant
 becomes permanently ineligible before acceptance, the recipient may explicitly
 narrow acceptance to the remaining set. Narrowing can only remove authority,
@@ -83,15 +85,34 @@ standing authorization for normal work. Routine operations do not require a
 human signature, approval click, or live call to Core. This preserves Brain and
 chat availability during dependency outages. Adding, removing, or changing an
 agent requires fresh authoritative account facts, and a known permanent agent
-departure revokes cohort-derived access and rotates affected Folder Keys.
+departure is discovered by the normal agent supervisor, then revokes
+cohort-derived access and rotates affected Folder Keys through Brain's exact
+preflight/commit boundary. Every administrative control accepted through delegated
+authority is audited with both the acting agent and anchoring human.
 Temporary stops, restarts, relocation, and transient failures do not revoke
 access.
 
-Changing another account agent's Personal Brain access is human-authorized but
-may remain agent-operated. The acting agent must carry action-specific
-Authenticated Human Intent from an authenticated conversation. Brain records
-both the authorizing human and acting agent. Ownership transfer, Recovery Set
-changes, and whole-Brain deletion remain directly human-operated.
+Brain polls permanent departures with its bounded active managed-agent NIP-05
+set. Core applies that relevance filter before its 256-fact response bound, so
+unrelated account history cannot age a still-relevant revocation out of view.
+
+Changing another account agent's Personal Brain access is fresh-human-turn
+gated but remains agent-operated. The acting agent must carry one-use
+Authenticated Human Intent from an authenticated conversation. Finite Chat mints a
+short-lived server-verifiable requester assertion for the exact human and
+acting agent. Brain combines it with the route-derived target, scope, and
+operation, consumes the assertion id once regardless of attempted action, and
+persists that canonical composite without receiving the human's private key.
+Brain records both the authorizing human and acting agent. Ownership
+transfer, Recovery Set changes, and whole-Brain deletion remain directly
+human-operated.
+
+This deliberately trusts the personal agent to translate the human's natural
+language into the selected operation. The assertion proves the fresh human
+turn, exact human and acting agent, and one-use boundary; it does not
+cryptographically prove the semantics of the human's words. An adversarial-
+agent threat model would require an additional structured human confirmation
+surface, which this agent-first, no-extra-click decision does not add.
 
 Removing the human from a Brain or Folder removes cohort-derived agent access
 at the same scope. Independently authorized access survives. An authorized

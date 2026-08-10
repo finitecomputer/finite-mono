@@ -212,6 +212,7 @@ pub struct StoredAccountAccessCohort {
     pub scope_kind: String,
     pub folder_id: Option<FolderId>,
     pub provenance_kind: String,
+    pub provenance_id: String,
     pub status: String,
     pub participants: Vec<StoredAccountAccessParticipant>,
 }
@@ -373,6 +374,32 @@ pub struct AccountCohortReconciliationCapacity {
     pub folder_key_grant_limit: usize,
     pub sync_records_after: usize,
     pub sync_record_limit: usize,
+}
+
+/// Exact current counters used by mutation preflights. Each value corresponds
+/// to one SQLite capacity guard and is read with bounded aggregate queries.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct BrainCapacityUsage {
+    pub members: usize,
+    pub folder_access_entries: usize,
+    pub folder_key_grants: usize,
+    pub sync_records: usize,
+    pub pending_invitations: usize,
+}
+
+/// Exact unexpired pending-plan resources that are not already committed.
+/// Preflights use these keys to avoid double-counting overlapping invitations.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct BrainCapacityReservations {
+    pub members: BTreeSet<String>,
+    pub folder_access_entries: BTreeSet<(String, String)>,
+    pub folder_key_grants: BTreeSet<(String, u32, String)>,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct MemberRemovalAccessPlan {
+    pub removed_members: BTreeSet<UserId>,
+    pub folder_access_removals: BTreeMap<FolderId, BTreeSet<UserId>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1214,7 +1241,7 @@ impl BrainStore {
         let mut cohort_statement = self.conn.prepare(
             r#"
             SELECT id, account_id, human_npub, human_email, scope_kind,
-                   folder_id, provenance_kind, status
+                   folder_id, provenance_kind, provenance_id, status
             FROM account_access_cohorts
             WHERE brain_id = ?1
             ORDER BY created_at, id
@@ -1231,6 +1258,7 @@ impl BrainStore {
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1261,6 +1289,7 @@ impl BrainStore {
             scope_kind,
             folder_id,
             provenance_kind,
+            provenance_id,
             status,
         ) in cohort_rows
         {
@@ -1298,6 +1327,7 @@ impl BrainStore {
                 scope_kind,
                 folder_id: folder_id.map(FolderId::new).transpose()?,
                 provenance_kind,
+                provenance_id,
                 status,
                 participants,
             });
@@ -3729,7 +3759,7 @@ mod tests {
 
     #[test]
     fn human_anchored_agent_authority_follows_the_humans_current_admin_role() {
-        let store = BrainStore::open_in_memory().unwrap();
+        let mut store = BrainStore::open_in_memory().unwrap();
         store
             .conn
             .execute(
@@ -3796,6 +3826,30 @@ mod tests {
         let stored = store.load_brain(&brain_id).unwrap();
         assert!(has_brain_operational_authority(&stored, &agent));
         assert!(!stored.brain.admins.contains(&agent));
+
+        let delegated_record = SyncRecordInput::Control(ControlSyncRecord {
+            record_event_id: "delegated-event".to_owned(),
+            record_type: SyncRecordType::BrainAdminAccessChange,
+            folder_id: None,
+            actor_npub: agent.clone(),
+            client_created_at: "2026-08-10T00:00:01Z".to_owned(),
+            payload_json: "{}".to_owned(),
+            record_event_kind: 27_235,
+        });
+        let tx = store.conn.transaction().unwrap();
+        sync_records::insert_sync_record(&tx, &brain_id, 1, &delegated_record).unwrap();
+        tx.commit().unwrap();
+        let audit: (String, String, String) = store
+            .conn
+            .query_row(
+                "SELECT actor_npub, anchoring_human_npub, detail_json FROM account_access_cohort_audit WHERE action = 'delegated_sync_action'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(audit.0, "npub-agent");
+        assert_eq!(audit.1, "npub-human");
+        assert!(audit.2.contains("delegated-event"));
 
         store
             .conn
@@ -8690,6 +8744,173 @@ mod tests {
     }
 
     #[test]
+    fn human_removal_preserves_a_cohort_agent_with_independent_npub_membership() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let human = UserId::new("npub-cohort-human").unwrap();
+        let agent = UserId::new("npub-cohort-agent").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2), (?1, ?3)",
+                params![brain_id.as_str(), human.as_str(), agent.as_str()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO account_access_cohorts (
+                    id, brain_id, account_id, human_npub, human_email, scope_kind,
+                    folder_id, provenance_kind, provenance_id, roster_revision,
+                    status, created_at, updated_at
+                ) VALUES (
+                    'cohort-independent', ?1, 'account-independent', ?2,
+                    'human@finite.vip', 'brain', NULL, 'invitation',
+                    'invitation-independent', 1, 'active', ?3, ?3
+                )
+                "#,
+                params![brain_id.as_str(), human.as_str(), current_timestamp()],
+            )
+            .unwrap();
+        for (npub, relationship, nip05, name) in [
+            (&human, "human", "human@finite.vip", "Human"),
+            (&agent, "account_agent", "agent@finite.vip", "Agent"),
+        ] {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO account_access_cohort_participants (
+                        cohort_id, participant_npub, relationship, nip05,
+                        display_name, status, created_at, updated_at
+                    ) VALUES ('cohort-independent', ?1, ?2, ?3, ?4, 'active', ?5, ?5)
+                    "#,
+                    params![
+                        npub.as_str(),
+                        relationship,
+                        nip05,
+                        name,
+                        current_timestamp()
+                    ],
+                )
+                .unwrap();
+        }
+        let restricted = FolderId::new("private-project").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO folder_access (brain_id, folder_id, user_id) VALUES (?1, ?2, ?3)",
+                params![brain_id.as_str(), restricted.as_str(), agent.as_str()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO folder_access_sources (
+                    brain_id, folder_id, user_id, source_kind, source_id, created_at
+                ) VALUES (?1, ?2, ?3, 'invitation', 'invitation-independent', ?4)
+                "#,
+                params![
+                    brain_id.as_str(),
+                    restricted.as_str(),
+                    agent.as_str(),
+                    current_timestamp()
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .member_removal_participants(&brain_id, &human)
+                .unwrap(),
+            BTreeSet::from([human.clone(), agent.clone()])
+        );
+        store.add_member(&brain_id, &agent).unwrap();
+        assert_eq!(
+            store
+                .member_removal_participants(&brain_id, &human)
+                .unwrap(),
+            BTreeSet::from([human.clone()])
+        );
+        let access_plan = store.member_removal_access_plan(&brain_id, &human).unwrap();
+        assert_eq!(access_plan.removed_members, BTreeSet::from([human.clone()]));
+        assert_eq!(
+            access_plan.folder_access_removals,
+            BTreeMap::from([(restricted, BTreeSet::from([agent]))])
+        );
+    }
+
+    #[test]
+    fn human_removal_preserves_a_cohort_agent_with_an_independent_admin_role() {
+        let mut store = org_store_with_access_test_folders();
+        let brain_id = BrainId::new("acme").unwrap();
+        let human = UserId::new("npub-admin-cohort-human").unwrap();
+        let agent = UserId::new("npub-admin-cohort-agent").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2), (?1, ?3)",
+                params![brain_id.as_str(), human.as_str(), agent.as_str()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO account_access_cohorts (
+                    id, brain_id, account_id, human_npub, human_email, scope_kind,
+                    folder_id, provenance_kind, provenance_id, roster_revision,
+                    status, created_at, updated_at
+                ) VALUES (
+                    'cohort-independent-admin', ?1, 'account-independent-admin', ?2,
+                    'human-admin@finite.vip', 'brain', NULL, 'bootstrap',
+                    'bootstrap-independent-admin', 1, 'active', ?3, ?3
+                )
+                "#,
+                params![brain_id.as_str(), human.as_str(), current_timestamp()],
+            )
+            .unwrap();
+        for (npub, relationship, nip05, name) in [
+            (&human, "human", "human-admin@finite.vip", "Human Admin"),
+            (
+                &agent,
+                "account_agent",
+                "agent-admin@finite.vip",
+                "Agent Admin",
+            ),
+        ] {
+            store
+                .conn
+                .execute(
+                    r#"
+                    INSERT INTO account_access_cohort_participants (
+                        cohort_id, participant_npub, relationship, nip05,
+                        display_name, status, created_at, updated_at
+                    ) VALUES ('cohort-independent-admin', ?1, ?2, ?3, ?4, 'active', ?5, ?5)
+                    "#,
+                    params![
+                        npub.as_str(),
+                        relationship,
+                        nip05,
+                        name,
+                        current_timestamp()
+                    ],
+                )
+                .unwrap();
+        }
+        store.add_admin(&brain_id, &agent).unwrap();
+
+        assert_eq!(
+            store
+                .member_removal_participants(&brain_id, &human)
+                .unwrap(),
+            BTreeSet::from([human])
+        );
+    }
+
+    #[test]
     fn member_add_rolls_back_when_its_control_record_conflicts() {
         let mut store = org_store_with_access_test_folders();
         let brain_id = BrainId::new("acme").unwrap();
@@ -8937,6 +9158,184 @@ mod tests {
     }
 
     #[test]
+    fn invitation_capacity_reserves_pending_cohort_resources_without_double_counting_retry() {
+        let store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let baseline = store
+            .brain_invitation_capacity_usage(&brain_id, None, "2026-06-23T00:00:00Z")
+            .unwrap();
+        let folder_id = store.load_brain(&brain_id).unwrap().brain.folders[0]
+            .id
+            .to_string();
+        let participants = serde_json::json!([{
+            "relationship": "human",
+            "name": "Reserved Human",
+            "nip05": "reserved@finite.vip",
+            "npub": "npub-reserved",
+        }])
+        .to_string();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO brain_invitations (
+                    id, brain_id, target_kind, invited_email, status, invite_code,
+                    accept_path, initial_folder_access_json, created_by_npub,
+                    expires_at, created_at, updated_at, folder_only
+                ) VALUES (
+                    'pending-cohort', 'acme', 'account_cohort',
+                    'reserved@finite.vip', 'pending', 'reserved-invite-code',
+                    '/accept/reserved', ?1, 'npub-admin',
+                    '2026-06-30T00:00:00Z', '2026-06-23T00:00:00Z',
+                    '2026-06-23T00:00:00Z', 0
+                )
+                "#,
+                params![serde_json::json!([folder_id]).to_string()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO cohort_invitation_plans (
+                    invitation_id, plan_id, account_id, human_email,
+                    roster_revision, scope_kind, participants_json,
+                    exclusions_json, key_versions_json, actor_npub, created_at
+                ) VALUES (
+                    'pending-cohort', 'reserved-plan', 'account-reserved',
+                    'reserved@finite.vip', 1, 'brain', ?1, '[]', '[]',
+                    'npub-admin', '2026-06-23T00:00:00Z'
+                )
+                "#,
+                params![participants],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO cohort_invitation_grants (
+                    invitation_id, grant_id, folder_id, key_version,
+                    issuer_npub, recipient_npub, format, wrapped_event_json,
+                    created_at, record_event_id, record_payload_json,
+                    record_event_kind
+                ) VALUES (
+                    'pending-cohort', 'reserved-grant', ?1, 1,
+                    'npub-admin', 'npub-reserved', 'NIP-59', '{}',
+                    '2026-06-23T00:00:00Z', 'reserved-record',
+                    '{"recordType":"folder_key_grant"}', 30078
+                )
+                "#,
+                params![folder_id],
+            )
+            .unwrap();
+
+        let reserved = store
+            .brain_invitation_capacity_usage(&brain_id, None, "2026-06-23T00:00:00Z")
+            .unwrap();
+        assert_eq!(reserved.members, baseline.members + 1);
+        assert_eq!(
+            reserved.folder_access_entries,
+            baseline.folder_access_entries + 1
+        );
+        assert_eq!(reserved.folder_key_grants, baseline.folder_key_grants + 1);
+        assert_eq!(reserved.sync_records, baseline.sync_records + 1);
+        assert_eq!(
+            reserved.pending_invitations,
+            baseline.pending_invitations + 1
+        );
+
+        let exact_retry = store
+            .brain_invitation_capacity_usage(
+                &brain_id,
+                Some("pending-cohort"),
+                "2026-06-23T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(exact_retry.members, baseline.members);
+        assert_eq!(
+            exact_retry.folder_access_entries,
+            baseline.folder_access_entries
+        );
+        assert_eq!(exact_retry.folder_key_grants, baseline.folder_key_grants);
+        assert_eq!(exact_retry.sync_records, baseline.sync_records);
+        assert_eq!(
+            exact_retry.pending_invitations,
+            baseline.pending_invitations + 1
+        );
+
+        let expired = store
+            .brain_invitation_capacity_usage(&brain_id, None, "2026-06-30T00:00:00Z")
+            .unwrap();
+        assert_eq!(expired, baseline);
+    }
+
+    #[test]
+    fn pending_cohort_member_reservation_is_honored_by_ordinary_member_writes() {
+        let mut store = empty_org_store();
+        let brain_id = BrainId::new("acme").unwrap();
+        for index in 0..BRAIN_CAPACITY_ENVELOPE.members.saturating_sub(2) {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
+                    params![brain_id.as_str(), format!("npub-capacity-{index}")],
+                )
+                .unwrap();
+        }
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let expires_at = (OffsetDateTime::now_utc() + time::Duration::days(7))
+            .format(&Rfc3339)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO brain_invitations (
+                    id, brain_id, user_id, target_kind, invited_email, status,
+                    invite_code, accept_path, initial_folder_access_json,
+                    created_by_npub, expires_at, created_at, updated_at, folder_only
+                ) VALUES (
+                    'reserved-member-invitation', ?1, 'npub-reserved-member',
+                    'account_cohort', 'reserved@finite.vip', 'pending',
+                    'reserved-member-code', '/accept/reserved-member', '[]',
+                    'npub-admin', ?2, ?3, ?3, 0
+                )
+                "#,
+                params![brain_id.as_str(), expires_at, now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO cohort_invitation_plans (
+                    invitation_id, plan_id, account_id, human_email,
+                    roster_revision, scope_kind, participants_json,
+                    exclusions_json, key_versions_json, actor_npub, created_at
+                ) VALUES (
+                    'reserved-member-invitation', 'reserved-member-plan',
+                    'reserved-account', 'reserved@finite.vip', 1, 'brain',
+                    '[{"relationship":"human","name":"Reserved","nip05":"reserved@finite.vip","npub":"npub-reserved-member"}]',
+                    '[]', '[]', 'npub-admin', ?1
+                )
+                "#,
+                params![now],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store
+                .add_member(&brain_id, &UserId::new("npub-unreserved").unwrap())
+                .unwrap_err(),
+            StoreError::CapacityExceeded { .. }
+        ));
+        store
+            .add_member(&brain_id, &UserId::new("npub-reserved-member").unwrap())
+            .unwrap();
+    }
+
+    #[test]
     fn sync_pull_caps_large_client_limits() {
         let mut store = store_with_strategy_folder();
         let brain_id = BrainId::new("acme").unwrap();
@@ -9109,6 +9508,21 @@ mod tests {
                         7, 'current_folder_key_unavailable', '2026-06-23T00:00:00Z',
                         '2026-06-23T00:00:00Z'
                     );
+                    INSERT INTO brain_member_independent_sources (
+                        brain_id, user_id, source_kind, source_id, created_at
+                    ) VALUES (
+                        'acme', 'npub-agent', 'direct_npub', 'npub-agent',
+                        '2026-06-23T00:00:00Z'
+                    );
+                    INSERT INTO account_agent_departure_facts (
+                        fact_id, brain_id, account_id, agent_nip05, agent_npub,
+                        departure_kind, occurred_at, applied_at, result_json
+                    ) VALUES (
+                        'departure-restore', 'acme', 'account-restore',
+                        'departed@finite.vip', 'npub-departed', 'retired',
+                        '2026-06-22T00:00:00Z', '2026-06-23T00:00:00Z',
+                        '{"outcome":"applied"}'
+                    );
                     "#,
                 )
                 .unwrap();
@@ -9139,6 +9553,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(restored_audit_count, 1);
+        let restored_independent_sources: i64 = restored
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM brain_member_independent_sources WHERE brain_id = 'acme' AND user_id = 'npub-agent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored_independent_sources, 1);
+        assert!(
+            restored
+                .permanent_agent_departure_applied(&brain_id, "departure-restore")
+                .unwrap()
+        );
 
         restored
             .conn

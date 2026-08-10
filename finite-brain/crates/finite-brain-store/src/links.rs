@@ -10,7 +10,288 @@ const BRAIN_INVITATION_SELECT: &str = r#"
     FROM brain_invitations
 "#;
 
+fn capacity_count(
+    conn: &Connection,
+    table: &str,
+    predicate: &str,
+    brain_id: &BrainId,
+    now: &str,
+) -> Result<usize, StoreError> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE brain_id = ?1 {predicate}");
+    let value = if predicate.contains("?2") {
+        conn.query_row(&sql, params![brain_id.as_str(), now], |row| {
+            row.get::<_, i64>(0)
+        })?
+    } else {
+        conn.query_row(&sql, params![brain_id.as_str()], |row| row.get::<_, i64>(0))?
+    };
+    usize::try_from(value).map_err(|_| StoreError::BrokenInvariant {
+        reason: format!("negative or oversized {table} capacity count"),
+    })
+}
+
+fn brain_invitation_capacity_reservations_on(
+    conn: &Connection,
+    brain_id: &BrainId,
+    excluding_cohort_invitation_id: Option<&str>,
+    now: &str,
+) -> Result<BrainCapacityReservations, StoreError> {
+    let args = params![brain_id.as_str(), excluding_cohort_invitation_id, now];
+    let mut member_statement = conn.prepare(
+        r#"
+        SELECT DISTINCT json_extract(participant.value, '$.npub')
+        FROM cohort_invitation_plans plan
+        JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+             json_each(plan.participants_json) participant
+        WHERE invitation.brain_id = ?1 AND invitation.status = 'pending'
+          AND julianday(invitation.expires_at) > julianday(?3)
+          AND plan.scope_kind = 'brain'
+          AND (?2 IS NULL OR plan.invitation_id <> ?2)
+          AND NOT EXISTS (
+              SELECT 1 FROM brain_members member
+              WHERE member.brain_id = ?1
+                AND member.user_id = json_extract(participant.value, '$.npub')
+          )
+        "#,
+    )?;
+    let members = member_statement
+        .query_map(args, |row| row.get::<_, String>(0))?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+
+    let mut access_statement = conn.prepare(
+        r#"
+        SELECT DISTINCT candidate.folder_id, candidate.user_id
+        FROM (
+            SELECT plan.folder_id AS folder_id,
+                   json_extract(participant.value, '$.npub') AS user_id
+            FROM cohort_invitation_plans plan
+            JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+                 json_each(plan.participants_json) participant
+            WHERE invitation.brain_id = ?1 AND invitation.status = 'pending'
+              AND julianday(invitation.expires_at) > julianday(?3)
+              AND plan.scope_kind = 'folder'
+              AND (?2 IS NULL OR plan.invitation_id <> ?2)
+            UNION
+            SELECT folder.value AS folder_id,
+                   json_extract(participant.value, '$.npub') AS user_id
+            FROM cohort_invitation_plans plan
+            JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+                 json_each(plan.participants_json) participant,
+                 json_each(invitation.initial_folder_access_json) folder
+            WHERE invitation.brain_id = ?1 AND invitation.status = 'pending'
+              AND julianday(invitation.expires_at) > julianday(?3)
+              AND plan.scope_kind = 'brain'
+              AND (?2 IS NULL OR plan.invitation_id <> ?2)
+        ) candidate
+        WHERE NOT EXISTS (
+            SELECT 1 FROM folder_access access
+            WHERE access.brain_id = ?1 AND access.folder_id = candidate.folder_id
+              AND access.user_id = candidate.user_id
+        )
+        "#,
+    )?;
+    let folder_access_entries = access_statement
+        .query_map(
+            params![brain_id.as_str(), excluding_cohort_invitation_id, now],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+
+    let mut grant_statement = conn.prepare(
+        r#"
+        SELECT DISTINCT grant.folder_id, grant.key_version, grant.recipient_npub
+        FROM cohort_invitation_grants grant
+        JOIN brain_invitations invitation ON invitation.id = grant.invitation_id
+        WHERE invitation.brain_id = ?1 AND invitation.status = 'pending'
+          AND julianday(invitation.expires_at) > julianday(?3)
+          AND (?2 IS NULL OR grant.invitation_id <> ?2)
+          AND NOT EXISTS (
+              SELECT 1 FROM folder_key_grants current_grant
+              WHERE current_grant.brain_id = ?1
+                AND current_grant.folder_id = grant.folder_id
+                AND current_grant.key_version = grant.key_version
+                AND current_grant.recipient_npub = grant.recipient_npub
+          )
+        "#,
+    )?;
+    let folder_key_grants = grant_statement
+        .query_map(
+            params![brain_id.as_str(), excluding_cohort_invitation_id, now],
+            |row| {
+                let version = row.get::<_, i64>(1)?;
+                let version = u32::try_from(version).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?;
+                Ok((row.get::<_, String>(0)?, version, row.get::<_, String>(2)?))
+            },
+        )?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(BrainCapacityReservations {
+        members,
+        folder_access_entries,
+        folder_key_grants,
+    })
+}
+
+fn brain_invitation_capacity_usage_on(
+    conn: &Connection,
+    brain_id: &BrainId,
+    excluding_cohort_invitation_id: Option<&str>,
+    now: &str,
+) -> Result<BrainCapacityUsage, StoreError> {
+    let reservations = brain_invitation_capacity_reservations_on(
+        conn,
+        brain_id,
+        excluding_cohort_invitation_id,
+        now,
+    )?;
+    let grants = reservations.folder_key_grants.len();
+    Ok(BrainCapacityUsage {
+        members: capacity_count(conn, "brain_members", "", brain_id, now)?
+            .saturating_add(reservations.members.len()),
+        folder_access_entries: capacity_count(conn, "folder_access", "", brain_id, now)?
+            .saturating_add(reservations.folder_access_entries.len()),
+        folder_key_grants: capacity_count(conn, "folder_key_grants", "", brain_id, now)?
+            .saturating_add(grants),
+        sync_records: capacity_count(
+            conn,
+            "brain_record_index",
+            "AND COALESCE(json_extract(payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone'",
+            brain_id,
+            now,
+        )?
+        .saturating_add(grants),
+        pending_invitations: capacity_count(
+            conn,
+            "brain_invitations",
+            "AND status = 'pending' AND julianday(expires_at) > julianday(?2)",
+            brain_id,
+            now,
+        )?,
+    })
+}
+
+fn revoke_expired_pending_invitations_on(
+    conn: &Connection,
+    brain_id: &BrainId,
+    now: &str,
+) -> Result<(), StoreError> {
+    conn.execute(
+        "UPDATE brain_invitations SET status = 'revoked', updated_at = ?2
+         WHERE brain_id = ?1 AND status = 'pending'
+           AND julianday(expires_at) <= julianday(?2)",
+        params![brain_id.as_str(), now],
+    )?;
+    Ok(())
+}
+
+fn enforce_invitation_capacity_on(
+    conn: &Connection,
+    brain_id: &BrainId,
+    now: &str,
+) -> Result<(), StoreError> {
+    let usage = brain_invitation_capacity_usage_on(conn, brain_id, None, now)?;
+    for (limit, max, current) in [
+        (
+            "brain_members",
+            BRAIN_CAPACITY_ENVELOPE.members,
+            usage.members,
+        ),
+        (
+            "folder_access",
+            BRAIN_CAPACITY_ENVELOPE.folder_access_entries,
+            usage.folder_access_entries,
+        ),
+        (
+            "folder_key_grants",
+            BRAIN_CAPACITY_ENVELOPE.folder_key_grants,
+            usage.folder_key_grants,
+        ),
+        (
+            "sync_records",
+            BRAIN_CAPACITY_ENVELOPE.sync_records - BRAIN_CAPACITY_ENVELOPE.folders,
+            usage.sync_records,
+        ),
+        (
+            "pending_invitations",
+            BRAIN_CAPACITY_ENVELOPE.invitations,
+            usage.pending_invitations,
+        ),
+    ] {
+        if current > max {
+            return Err(StoreError::CapacityExceeded {
+                limit: limit.to_owned(),
+                max,
+                current,
+            });
+        }
+    }
+    Ok(())
+}
+
 impl BrainStore {
+    /// Resolve an exact immutable cohort plan for idempotent HTTP retry.
+    pub fn load_account_cohort_invitation_by_plan_id(
+        &self,
+        brain_id: &BrainId,
+        plan_id: &str,
+    ) -> Result<Option<StoredBrainInvitation>, StoreError> {
+        let invitation_id = self
+            .conn
+            .query_row(
+                r#"
+                SELECT plan.invitation_id
+                FROM cohort_invitation_plans plan
+                JOIN brain_invitations invitation ON invitation.id = plan.invitation_id
+                WHERE plan.plan_id = ?1 AND invitation.brain_id = ?2
+                "#,
+                params![plan_id, brain_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        invitation_id
+            .map(|invitation_id| self.load_brain_invitation(&invitation_id))
+            .transpose()
+    }
+
+    /// Read the capacity counters affected by an account-cohort invitation.
+    /// Aggregate SQL keeps this independent of the number of historical rows.
+    pub fn brain_invitation_capacity_usage(
+        &self,
+        brain_id: &BrainId,
+        excluding_cohort_invitation_id: Option<&str>,
+        now: &str,
+    ) -> Result<BrainCapacityUsage, StoreError> {
+        self.require_brain_exists(brain_id)?;
+        validate_link_timestamp("now", now)?;
+        brain_invitation_capacity_usage_on(
+            &self.conn,
+            brain_id,
+            excluding_cohort_invitation_id,
+            now,
+        )
+    }
+
+    pub fn brain_invitation_capacity_reservations(
+        &self,
+        brain_id: &BrainId,
+        excluding_cohort_invitation_id: Option<&str>,
+        now: &str,
+    ) -> Result<BrainCapacityReservations, StoreError> {
+        self.require_brain_exists(brain_id)?;
+        validate_link_timestamp("now", now)?;
+        brain_invitation_capacity_reservations_on(
+            &self.conn,
+            brain_id,
+            excluding_cohort_invitation_id,
+            now,
+        )
+    }
+
     /// Persist one immutable account-cohort invitation and all encrypted grants
     /// needed to make its approved participants readable at acceptance time.
     #[allow(clippy::too_many_arguments)]
@@ -85,22 +366,24 @@ impl BrainStore {
                 reason: "cohort invitation participants are invalid or duplicated".to_owned(),
             });
         }
+        let missing_members = participants
+            .iter()
+            .filter(|participant| {
+                !stored
+                    .brain
+                    .members
+                    .iter()
+                    .any(|member| member.user_id == participant.npub)
+            })
+            .count();
         if !folder_only
-            && stored
-                .brain
-                .members
-                .len()
-                .saturating_add(participants.len())
+            && stored.brain.members.len().saturating_add(missing_members)
                 > BRAIN_CAPACITY_ENVELOPE.members
         {
             return Err(StoreError::CapacityExceeded {
                 limit: "brain_members".to_owned(),
                 max: BRAIN_CAPACITY_ENVELOPE.members,
-                current: stored
-                    .brain
-                    .members
-                    .len()
-                    .saturating_add(participants.len()),
+                current: stored.brain.members.len().saturating_add(missing_members),
             });
         }
         let scope = email_bootstrap_scope(&stored.brain, initial_folder_access, folder_only)?;
@@ -166,7 +449,10 @@ impl BrainStore {
             }
         })?;
         let initial_folder_access_json = folder_id_vec_json(initial_folder_access)?;
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        revoke_expired_pending_invitations_on(&tx, brain_id, created_at)?;
         tx.execute(
             r#"
             INSERT INTO brain_invitations (
@@ -249,6 +535,7 @@ impl BrainStore {
                 ],
             )?;
         }
+        enforce_invitation_capacity_on(&tx, brain_id, created_at)?;
         tx.commit()?;
         self.load_brain_invitation(id)
     }
@@ -305,6 +592,22 @@ impl BrainStore {
                     .to_owned(),
             });
         }
+        validate_link_timestamp("expiresAt", &invitation.expires_at)?;
+        let expires = OffsetDateTime::parse(&invitation.expires_at, &Rfc3339).map_err(|_| {
+            StoreError::BrokenInvariant {
+                reason: "expiresAt must be an RFC3339 timestamp".to_owned(),
+            }
+        })?;
+        let converted = OffsetDateTime::parse(converted_at, &Rfc3339).map_err(|_| {
+            StoreError::BrokenInvariant {
+                reason: "convertedAt must be an RFC3339 timestamp".to_owned(),
+            }
+        })?;
+        if expires <= converted {
+            return Err(StoreError::BrokenInvariant {
+                reason: "expired invitation cannot be converted".to_owned(),
+            });
+        }
         let human_email = canonical_invited_email(human_email)?;
         if invitation.invited_email.as_deref() != Some(human_email.as_str()) {
             return Err(StoreError::BrokenInvariant {
@@ -344,22 +647,24 @@ impl BrainStore {
                 reason: "converted invitation participants are invalid or duplicated".to_owned(),
             });
         }
+        let missing_members = participants
+            .iter()
+            .filter(|participant| {
+                !stored
+                    .brain
+                    .members
+                    .iter()
+                    .any(|member| member.user_id == participant.npub)
+            })
+            .count();
         if !invitation.folder_only
-            && stored
-                .brain
-                .members
-                .len()
-                .saturating_add(participants.len())
+            && stored.brain.members.len().saturating_add(missing_members)
                 > BRAIN_CAPACITY_ENVELOPE.members
         {
             return Err(StoreError::CapacityExceeded {
                 limit: "brain_members".to_owned(),
                 max: BRAIN_CAPACITY_ENVELOPE.members,
-                current: stored
-                    .brain
-                    .members
-                    .len()
-                    .saturating_add(participants.len()),
+                current: stored.brain.members.len().saturating_add(missing_members),
             });
         }
         let scope = email_bootstrap_scope(
@@ -432,6 +737,7 @@ impl BrainStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        revoke_expired_pending_invitations_on(&tx, brain_id, converted_at)?;
         let changed = tx.execute(
             r#"
             UPDATE brain_invitations
@@ -525,6 +831,7 @@ impl BrainStore {
                 converted_at,
             ],
         )?;
+        enforce_invitation_capacity_on(&tx, brain_id, converted_at)?;
         tx.commit()?;
         self.load_brain_invitation(invitation_id)
     }
@@ -1201,6 +1508,7 @@ impl BrainStore {
             .participants
             .iter()
             .any(|participant| participant.npub == *actor)
+            || removed_participants.contains_key(actor)
         {
             return Err(StoreError::UnavailableLink {
                 kind: "account cohort invitation",

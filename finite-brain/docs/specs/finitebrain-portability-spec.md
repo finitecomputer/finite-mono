@@ -984,8 +984,8 @@ every current Folder is readable, and existing participants remain available.
 A permanent account-agent departure removes cohort-derived authority and
 rotates every affected current Folder Key atomically. Temporary stops,
 restarts, relocation, and health failures do not change access. A human may ask
-one agent to restrict or restore another, but the operation requires
-action-specific Authenticated Human Intent and records both the authorizing
+one agent to restrict or restore another, but the operation requires one-use
+Authenticated Human Intent bound to the server-derived action and records both the authorizing
 human and acting agent. No operation claims to erase plaintext or prior keys
 already retained.
 

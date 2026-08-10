@@ -756,6 +756,10 @@ pub(crate) async fn remove_member_handler(
     let brain_id = BrainId::new(brain_id)?;
     let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
+    let removed_participants = {
+        let store = state.store.lock().map_err(lock_error)?;
+        store.member_removal_participants(&brain_id, &target)?
+    };
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
         &brain_id,
@@ -845,9 +849,57 @@ pub(crate) async fn remove_member_handler(
         )
     })?;
     for affected_brain_id in notification_brain_ids {
-        notification_state.publish_access_update_for(&affected_brain_id, target.as_str());
+        for removed in &removed_participants {
+            notification_state.publish_access_update_for(&affected_brain_id, removed.as_str());
+        }
     }
     Ok(Json(response))
+}
+
+pub(crate) async fn preview_member_removal_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
+) -> Result<Json<PreviewMemberRemovalResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    reject_legacy_finite_vip_principal_write(&target_npub)?;
+    let brain_id = BrainId::new(brain_id)?;
+    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
+    let target = UserId::new(target_identity.npub)?;
+    let (removed_participant_npubs, folder_access_removals) = {
+        let store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        let access_plan = store.member_removal_access_plan(&brain_id, &target)?;
+        (
+            access_plan
+                .removed_members
+                .into_iter()
+                .map(|participant| participant.to_string())
+                .collect(),
+            access_plan
+                .folder_access_removals
+                .into_iter()
+                .map(
+                    |(folder_id, participants)| PreviewMemberRemovalFolderAccessResponse {
+                        folder_id: folder_id.to_string(),
+                        removed_participant_npubs: participants
+                            .into_iter()
+                            .map(|participant| participant.to_string())
+                            .collect(),
+                    },
+                )
+                .collect(),
+        )
+    };
+    Ok(Json(PreviewMemberRemovalResponse {
+        brain_id: brain_id.to_string(),
+        target_npub: target.to_string(),
+        removed_participant_npubs,
+        folder_access_removals,
+    }))
 }
 
 pub(crate) async fn add_admin_handler(
@@ -958,7 +1010,7 @@ pub(crate) async fn preview_brain_invitation_handler(
     let request: PreviewBrainInvitationRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     let brain_id = BrainId::new(brain_id)?;
-    let (preview, _) = build_invitation_preview(&state, &actor, &brain_id, request).await?;
+    let (preview, _) = build_invitation_preview(&state, &actor, &brain_id, request, false).await?;
     Ok(Json(preview))
 }
 
@@ -968,11 +1020,30 @@ pub(crate) async fn preview_pending_invitation_conversion_handler(
     method: Method,
     OriginalUri(uri): OriginalUri,
     AxumPath((brain_id, invitation_id)): AxumPath<(String, String)>,
+    body: Bytes,
 ) -> Result<Json<PreviewBrainInvitationResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    let actor = validate_request_auth(
+        &state,
+        &headers,
+        &method,
+        &uri,
+        (!body.is_empty()).then_some(&body),
+    )?;
+    let request = if body.is_empty() {
+        PreviewPendingInvitationConversionRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?
+    };
     let brain_id = BrainId::new(brain_id)?;
-    let (preview, _, _) =
-        pending_invitation_conversion_preview(&state, &actor, &brain_id, &invitation_id).await?;
+    let (preview, _, _) = pending_invitation_conversion_preview(
+        &state,
+        &actor,
+        &brain_id,
+        &invitation_id,
+        request.approved_exclusions,
+    )
+    .await?;
     Ok(Json(preview))
 }
 
@@ -981,6 +1052,7 @@ async fn pending_invitation_conversion_preview(
     actor: &str,
     brain_id: &BrainId,
     invitation_id: &str,
+    approved_exclusions: Vec<String>,
 ) -> Result<
     (
         PreviewBrainInvitationResponse,
@@ -1030,7 +1102,9 @@ async fn pending_invitation_conversion_preview(
                 .map(ToString::to_string)
                 .collect(),
             expires_at: invitation.expires_at.clone(),
+            approved_exclusions,
         },
+        true,
     )
     .await?;
     preview.plan_id = format!(
@@ -1084,18 +1158,18 @@ pub(crate) async fn convert_pending_invitation_handler(
         return Ok(Json(response));
     }
 
-    let (preview, account_id, invitation) =
-        pending_invitation_conversion_preview(&state, &actor, &brain_id, &invitation_id).await?;
+    let (preview, account_id, invitation) = pending_invitation_conversion_preview(
+        &state,
+        &actor,
+        &brain_id,
+        &invitation_id,
+        request.approved_exclusions.clone(),
+    )
+    .await?;
     if preview.plan_id != request.plan_id {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "invitation conversion plan is stale; review preflight again",
-        ));
-    }
-    if !preview.capacity.fits {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "the full account cohort exceeds Brain capacity; invitation remains pending",
         ));
     }
     let expected_exclusions = preview
@@ -1116,11 +1190,18 @@ pub(crate) async fn convert_pending_invitation_handler(
             "the exact reduced participant set requires explicit approval",
         ));
     }
+    if !preview.capacity.fits {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "the preflight participant set exceeds Brain capacity",
+        ));
+    }
+    let included_participants = preview.participants.iter().collect::<Vec<_>>();
     let expected_grants = preview
         .key_versions
         .iter()
         .flat_map(|key| {
-            preview.participants.iter().map(move |participant| {
+            included_participants.iter().map(move |participant| {
                 (
                     key.folder_id.clone(),
                     key.key_version,
@@ -1157,8 +1238,7 @@ pub(crate) async fn convert_pending_invitation_handler(
         .iter()
         .map(folder_key_grant_sync_record)
         .collect::<Result<Vec<_>, _>>()?;
-    let participants = preview
-        .participants
+    let participants = included_participants
         .iter()
         .map(|participant| {
             Ok(StoredCohortParticipant {
@@ -1169,6 +1249,7 @@ pub(crate) async fn convert_pending_invitation_handler(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
+    let stored_exclusions = preview.excluded.clone();
     let invitation = {
         let mut store = state.store.lock().map_err(lock_error)?;
         store.convert_pending_email_invitation_to_account_cohort(
@@ -1179,7 +1260,7 @@ pub(crate) async fn convert_pending_invitation_handler(
             &preview.target_email,
             preview.roster_revision,
             &participants,
-            &serde_json::to_string(&preview.excluded).map_err(|_| {
+            &serde_json::to_string(&stored_exclusions).map_err(|_| {
                 ApiError::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "invitation exclusions did not serialize",
@@ -1210,6 +1291,7 @@ pub(crate) async fn build_invitation_preview(
     actor: &str,
     brain_id: &BrainId,
     request: PreviewBrainInvitationRequest,
+    replaces_pending_invitation: bool,
 ) -> Result<(PreviewBrainInvitationResponse, String), ApiError> {
     let target_email = canonical_email(&request.target_email)?;
     if !finite_vip_email(&target_email) {
@@ -1221,6 +1303,17 @@ pub(crate) async fn build_invitation_preview(
     OffsetDateTime::parse(&request.expires_at, &Rfc3339)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "expiresAt must be RFC 3339"))?;
     let selected_folders = selected_folder_ids(&request.initial_folder_access)?;
+    let approved_exclusions = request
+        .approved_exclusions
+        .iter()
+        .map(|nip05| canonical_email(nip05))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if approved_exclusions.len() != request.approved_exclusions.len() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "approvedExclusions must not contain duplicates",
+        ));
+    }
     if request.folder_only && selected_folders.len() != 1 {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -1233,8 +1326,171 @@ pub(crate) async fn build_invitation_preview(
             "Brain account-agent authority is not configured",
         )
     })?;
+    let capacity_now = server_timestamp(state);
+    let capacity_now_value = OffsetDateTime::parse(&capacity_now, &Rfc3339).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server clock produced an invalid timestamp",
+        )
+    })?;
 
-    let (key_versions, current_members) = {
+    if !replaces_pending_invitation {
+        let existing = {
+            let store = state.store.lock().map_err(lock_error)?;
+            let stored = store.load_brain(brain_id)?;
+            ensure_brain_admin(&stored, actor)?;
+            for folder_id in &selected_folders {
+                if !stored
+                    .brain
+                    .folders
+                    .iter()
+                    .any(|folder| folder.id == *folder_id)
+                {
+                    return Err(ApiError::new(StatusCode::NOT_FOUND, "Folder not found"));
+                }
+            }
+            let invitation =
+                store
+                    .list_brain_invitations(brain_id)?
+                    .into_iter()
+                    .find(|invitation| {
+                        invitation.status == LinkStatus::Pending
+                            && OffsetDateTime::parse(&invitation.expires_at, &Rfc3339)
+                                .is_ok_and(|expires_at| expires_at > capacity_now_value)
+                            && invitation.target_kind == BrainInvitationTargetKind::AccountCohort
+                            && invitation.invited_email.as_deref() == Some(target_email.as_str())
+                            && invitation.folder_only == request.folder_only
+                            && invitation.initial_folder_access == selected_folders
+                    });
+            invitation
+                .map(|invitation| {
+                    let plan = store
+                        .load_cohort_invitation_plan(&invitation.id)?
+                        .ok_or_else(|| StoreError::BrokenInvariant {
+                            reason: "pending account-cohort invitation has no immutable plan"
+                                .to_owned(),
+                        })?;
+                    let usage =
+                        store.brain_invitation_capacity_usage(brain_id, None, &capacity_now)?;
+                    Ok::<_, StoreError>((invitation, plan, usage))
+                })
+                .transpose()?
+        };
+        if let Some((invitation, plan, usage)) = existing {
+            let exclusions =
+                serde_json::from_str::<Vec<InvitationPlanExclusionResponse>>(&plan.exclusions_json)
+                    .map_err(|_| {
+                        ApiError::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "stored invitation exclusions are invalid",
+                        )
+                    })?;
+            let stored_explicit_exclusions = exclusions
+                .iter()
+                .filter(|exclusion| exclusion.reason == "explicit_capacity_reduction")
+                .map(|exclusion| canonical_email(&exclusion.nip05))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let stored_required_exclusions = exclusions
+                .iter()
+                .filter(|exclusion| exclusion.reason != "explicit_capacity_reduction")
+                .map(|exclusion| canonical_email(&exclusion.nip05))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let requested_explicit_exclusions = approved_exclusions
+                .difference(&stored_required_exclusions)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if stored_explicit_exclusions != requested_explicit_exclusions {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "a pending invitation already exists for this scope; revoke it before changing agent exclusions",
+                ));
+            }
+            let key_versions = serde_json::from_str::<Vec<InvitationPlanKeyVersionResponse>>(
+                &plan.key_versions_json,
+            )
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "stored invitation key versions are invalid",
+                )
+            })?;
+            let maximum_sync_records =
+                BRAIN_CAPACITY_ENVELOPE.sync_records - BRAIN_CAPACITY_ENVELOPE.folders;
+            let mut blockers = Vec::new();
+            if usage.members > BRAIN_CAPACITY_ENVELOPE.members {
+                blockers.push("members".to_owned());
+            }
+            if usage.folder_access_entries > BRAIN_CAPACITY_ENVELOPE.folder_access_entries {
+                blockers.push("folder_access_entries".to_owned());
+            }
+            if usage.folder_key_grants > BRAIN_CAPACITY_ENVELOPE.folder_key_grants {
+                blockers.push("folder_key_grants".to_owned());
+            }
+            if usage.sync_records > maximum_sync_records {
+                blockers.push("sync_records".to_owned());
+            }
+            if usage.pending_invitations > BRAIN_CAPACITY_ENVELOPE.invitations {
+                blockers.push("pending_invitations".to_owned());
+            }
+            let capacity = InvitationPlanCapacityResponse {
+                fits: blockers.is_empty(),
+                resulting_members: usage.members,
+                maximum_members: BRAIN_CAPACITY_ENVELOPE.members,
+                resulting_folder_access_entries: usage.folder_access_entries,
+                maximum_folder_access_entries: BRAIN_CAPACITY_ENVELOPE.folder_access_entries,
+                resulting_folder_key_grants: usage.folder_key_grants,
+                maximum_folder_key_grants: BRAIN_CAPACITY_ENVELOPE.folder_key_grants,
+                resulting_sync_records: usage.sync_records,
+                maximum_sync_records,
+                resulting_pending_invitations: usage.pending_invitations,
+                maximum_pending_invitations: BRAIN_CAPACITY_ENVELOPE.invitations,
+                blockers,
+            };
+            return Ok((
+                PreviewBrainInvitationResponse {
+                    plan_id: plan.plan_id,
+                    target_email,
+                    scope: InvitationPlanScopeResponse {
+                        kind: if request.folder_only {
+                            "folder"
+                        } else {
+                            "brain"
+                        }
+                        .to_owned(),
+                        brain_id: brain_id.to_string(),
+                        folder_id: request.folder_only.then(|| selected_folders[0].to_string()),
+                    },
+                    roster_revision: plan.roster_revision,
+                    participants: plan
+                        .participants
+                        .into_iter()
+                        .map(|participant| InvitationPlanParticipantResponse {
+                            relationship: participant.relationship,
+                            name: participant.name,
+                            nip05: participant.nip05,
+                            npub: participant.npub.to_string(),
+                            ready: true,
+                        })
+                        .collect(),
+                    excluded: exclusions,
+                    key_versions,
+                    capacity,
+                    expires_at: invitation.expires_at,
+                },
+                plan.account_id,
+            ));
+        }
+    }
+
+    let (
+        key_versions,
+        current_members,
+        current_folder_access,
+        current_grants,
+        capacity_usage,
+        capacity_reservations,
+        matching_pending_invitation,
+    ) = {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(brain_id)?;
         ensure_brain_admin(&stored, actor)?;
@@ -1271,7 +1527,72 @@ pub(crate) async fn build_invitation_preview(
             .iter()
             .map(|member| member.user_id.to_string())
             .collect::<BTreeSet<_>>();
-        (key_versions, current_members)
+        let current_folder_access = stored
+            .folder_access
+            .iter()
+            .map(|(folder_id, users)| {
+                (
+                    folder_id.to_string(),
+                    users
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let current_grants = stored
+            .grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.folder_id.to_string(),
+                    grant.key_version,
+                    grant.recipient_npub.to_string(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let matching_pending_invitation = replaces_pending_invitation
+            .then(|| {
+                store
+                    .list_brain_invitations(brain_id)?
+                    .into_iter()
+                    .find(|invitation| {
+                        invitation.status == LinkStatus::Pending
+                            && OffsetDateTime::parse(&invitation.expires_at, &Rfc3339)
+                                .is_ok_and(|expires_at| expires_at > capacity_now_value)
+                            && invitation.target_kind == BrainInvitationTargetKind::EmailBootstrap
+                            && invitation.invited_email.as_deref() == Some(target_email.as_str())
+                            && invitation.folder_only == request.folder_only
+                            && invitation.initial_folder_access == selected_folders
+                    })
+                    .map(|invitation| invitation.id)
+                    .ok_or_else(|| {
+                        ApiError::new(
+                            StatusCode::CONFLICT,
+                            "pending mailbox invitation changed before conversion preflight",
+                        )
+                    })
+            })
+            .transpose()?;
+        let capacity_usage = store.brain_invitation_capacity_usage(
+            brain_id,
+            matching_pending_invitation.as_deref(),
+            &capacity_now,
+        )?;
+        let capacity_reservations = store.brain_invitation_capacity_reservations(
+            brain_id,
+            matching_pending_invitation.as_deref(),
+            &capacity_now,
+        )?;
+        (
+            key_versions,
+            current_members,
+            current_folder_access,
+            current_grants,
+            capacity_usage,
+            capacity_reservations,
+            matching_pending_invitation,
+        )
     };
 
     let roster: CoreAccountAgentRosterResponse = post_authority_json(
@@ -1387,7 +1708,7 @@ pub(crate) async fn build_invitation_preview(
         ));
     }
 
-    let excluded = roster
+    let mut excluded = roster
         .agents
         .iter()
         .filter(|agent| !agent.eligible)
@@ -1404,19 +1725,125 @@ pub(crate) async fn build_invitation_preview(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
+
+    let excludable_agents = participants
+        .iter()
+        .filter(|participant| participant.relationship == "account_agent")
+        .map(|participant| participant.nip05.clone())
+        .collect::<BTreeSet<_>>();
+    let already_excluded = excluded
+        .iter()
+        .map(|participant| participant.nip05.clone())
+        .collect::<BTreeSet<_>>();
+    if !approved_exclusions
+        .iter()
+        .all(|nip05| excludable_agents.contains(nip05) || already_excluded.contains(nip05))
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "approvedExclusions may name only eligible account agents in this preflight",
+        ));
+    }
+    let mut explicitly_excluded = participants
+        .iter()
+        .filter(|participant| approved_exclusions.contains(&participant.nip05))
+        .map(|participant| InvitationPlanExclusionResponse {
+            name: participant.name.clone(),
+            nip05: participant.nip05.clone(),
+            reason: "explicit_capacity_reduction".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    participants.retain(|participant| !approved_exclusions.contains(&participant.nip05));
+    excluded.append(&mut explicitly_excluded);
+
     let added_members = if request.folder_only {
         0
     } else {
         participants
             .iter()
-            .filter(|participant| !current_members.contains(&participant.npub))
+            .filter(|participant| {
+                !current_members.contains(&participant.npub)
+                    && !capacity_reservations.members.contains(&participant.npub)
+            })
             .count()
     };
-    let resulting_members = current_members.len().saturating_add(added_members);
+    let resulting_members = capacity_usage.members.saturating_add(added_members);
+    let folder_access_additions = selected_folders
+        .iter()
+        .map(|folder_id| {
+            participants
+                .iter()
+                .filter(|participant| {
+                    !current_folder_access
+                        .get(folder_id.as_str())
+                        .is_some_and(|users| users.contains(&participant.npub))
+                        && !capacity_reservations
+                            .folder_access_entries
+                            .contains(&(folder_id.to_string(), participant.npub.clone()))
+                })
+                .count()
+        })
+        .sum::<usize>();
+    let resulting_folder_access_entries = capacity_usage
+        .folder_access_entries
+        .saturating_add(folder_access_additions);
+    let missing_grants = key_versions
+        .iter()
+        .flat_map(|key| {
+            participants.iter().map(move |participant| {
+                (
+                    key.folder_id.clone(),
+                    key.key_version,
+                    participant.npub.clone(),
+                )
+            })
+        })
+        .filter(|grant| {
+            !current_grants.contains(grant)
+                && !capacity_reservations.folder_key_grants.contains(grant)
+        })
+        .count();
+    let resulting_folder_key_grants = capacity_usage
+        .folder_key_grants
+        .saturating_add(missing_grants);
+    let resulting_sync_records = capacity_usage.sync_records.saturating_add(missing_grants);
+    let resulting_pending_invitations =
+        capacity_usage
+            .pending_invitations
+            .saturating_add(usize::from(
+                !replaces_pending_invitation && matching_pending_invitation.is_none(),
+            ));
+    let mut blockers = Vec::new();
+    if resulting_members > BRAIN_CAPACITY_ENVELOPE.members {
+        blockers.push("members".to_owned());
+    }
+    if resulting_folder_access_entries > BRAIN_CAPACITY_ENVELOPE.folder_access_entries {
+        blockers.push("folder_access_entries".to_owned());
+    }
+    if resulting_folder_key_grants > BRAIN_CAPACITY_ENVELOPE.folder_key_grants {
+        blockers.push("folder_key_grants".to_owned());
+    }
+    let maximum_sync_records =
+        BRAIN_CAPACITY_ENVELOPE.sync_records - BRAIN_CAPACITY_ENVELOPE.folders;
+    if resulting_sync_records > maximum_sync_records {
+        blockers.push("sync_records".to_owned());
+    }
+    if resulting_pending_invitations > BRAIN_CAPACITY_ENVELOPE.invitations {
+        blockers.push("pending_invitations".to_owned());
+    }
     let capacity = InvitationPlanCapacityResponse {
-        fits: resulting_members <= BRAIN_CAPACITY_ENVELOPE.members,
+        fits: blockers.is_empty(),
         resulting_members,
         maximum_members: BRAIN_CAPACITY_ENVELOPE.members,
+        resulting_folder_access_entries,
+        maximum_folder_access_entries: BRAIN_CAPACITY_ENVELOPE.folder_access_entries,
+        resulting_folder_key_grants,
+        maximum_folder_key_grants: BRAIN_CAPACITY_ENVELOPE.folder_key_grants,
+        resulting_sync_records,
+        maximum_sync_records,
+        resulting_pending_invitations,
+        maximum_pending_invitations: BRAIN_CAPACITY_ENVELOPE.invitations,
+        blockers,
     };
     let scope = InvitationPlanScopeResponse {
         kind: if request.folder_only {
@@ -1503,24 +1930,34 @@ pub(crate) async fn create_brain_invitation_handler(
                     "Finite VIP mailbox invitations now include the human and their ready account agents; update the client and run invitation preflight before retrying",
                 )
             })?;
+        let existing = {
+            let store = state.store.lock().map_err(lock_error)?;
+            let stored = store.load_brain(&brain_id)?;
+            ensure_brain_admin(&stored, &actor)?;
+            store.load_account_cohort_invitation_by_plan_id(&brain_id, plan_id)?
+        };
+        if let Some(invitation) = existing {
+            let delivery_status = deliver_email_invitation(&state, &invitation)?;
+            let mut response = brain_invitation_response(invitation);
+            response.delivery_status = delivery_status;
+            attach_invitation_public_url(&state, &mut response);
+            let store = state.store.lock().map_err(lock_error)?;
+            enrich_brain_invitation_identities(&store, &mut response)?;
+            return Ok(Json(response));
+        }
         let preview_request = PreviewBrainInvitationRequest {
             target_email: target_input.clone(),
             folder_only: request.folder_only,
             initial_folder_access: request.initial_folder_access.clone(),
             expires_at: request.expires_at.clone(),
+            approved_exclusions: request.approved_exclusions.clone(),
         };
         let (preview, account_id) =
-            build_invitation_preview(&state, &actor, &brain_id, preview_request).await?;
+            build_invitation_preview(&state, &actor, &brain_id, preview_request, false).await?;
         if preview.plan_id != plan_id {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 "invitation plan is stale; review the returned preflight again",
-            ));
-        }
-        if !preview.capacity.fits {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "the full account cohort exceeds Brain capacity",
             ));
         }
         let expected_exclusions = preview
@@ -1541,11 +1978,18 @@ pub(crate) async fn create_brain_invitation_handler(
                 "the exact reduced participant set requires explicit approval",
             ));
         }
+        if !preview.capacity.fits {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "the preflight participant set exceeds Brain capacity",
+            ));
+        }
+        let included_participants = preview.participants.iter().collect::<Vec<_>>();
         let expected_grants = preview
             .key_versions
             .iter()
             .flat_map(|key| {
-                preview.participants.iter().map(move |participant| {
+                included_participants.iter().map(move |participant| {
                     (
                         key.folder_id.clone(),
                         key.key_version,
@@ -1583,8 +2027,7 @@ pub(crate) async fn create_brain_invitation_handler(
             .iter()
             .map(folder_key_grant_sync_record)
             .collect::<Result<Vec<_>, _>>()?;
-        let participants = preview
-            .participants
+        let participants = included_participants
             .iter()
             .map(|participant| {
                 Ok(StoredCohortParticipant {
@@ -1616,6 +2059,7 @@ pub(crate) async fn create_brain_invitation_handler(
             16,
         );
         let accept_path = format!("/v1/brain-invitation-links/{invite_code}/accept");
+        let stored_exclusions = preview.excluded.clone();
         let invitation = {
             let mut store = state.store.lock().map_err(lock_error)?;
             store.create_account_cohort_invitation(
@@ -1626,7 +2070,7 @@ pub(crate) async fn create_brain_invitation_handler(
                 &preview.target_email,
                 preview.roster_revision,
                 &participants,
-                &serde_json::to_string(&preview.excluded).map_err(|_| {
+                &serde_json::to_string(&stored_exclusions).map_err(|_| {
                     ApiError::new(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "invitation exclusions did not serialize",

@@ -50,7 +50,7 @@ use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::env;
 use std::path::PathBuf;
@@ -345,6 +345,8 @@ pub struct BrainAccountAgentRosterRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BrainPermanentAgentDeparturesRequest {
     pub verified_email: String,
+    #[serde(default)]
+    pub managed_agent_nip05s: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1190,9 +1192,27 @@ async fn brain_permanent_agent_departures(
     require_service_auth(&state, &headers)?;
     let email = normalize_owner_email(Some(&request.verified_email))
         .ok_or_else(|| ApiError::bad_request("invalid verified human email"))?;
+    if request.managed_agent_nip05s.len() > crate::MAX_BRAIN_ACCOUNT_AGENTS {
+        return Err(ApiError::bad_request(
+            "managed Agent departure filter exceeds the supported fanout",
+        ));
+    }
+    let managed_agent_nip05s = request
+        .managed_agent_nip05s
+        .iter()
+        .map(|email| {
+            normalize_owner_email(Some(email))
+                .ok_or_else(|| ApiError::bad_request("invalid managed Agent NIP-05 filter"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if managed_agent_nip05s.len() != request.managed_agent_nip05s.len() {
+        return Err(ApiError::bad_request(
+            "managed Agent NIP-05 filters must be unique",
+        ));
+    }
     let facts = state
         .store
-        .brain_permanent_agent_departures(&email)
+        .brain_permanent_agent_departures(&email, &managed_agent_nip05s)
         .await?
         .ok_or_else(|| ApiError::not_found("account agent departure facts not found"))?;
     Ok(Json(facts))

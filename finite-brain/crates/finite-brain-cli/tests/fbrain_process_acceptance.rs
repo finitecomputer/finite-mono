@@ -2718,11 +2718,16 @@ fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     smoke.pass();
 
     smoke.enter("nativeEmailCollaboration");
-    let target = "beta@finite.vip";
     let ensure = run(
         &home_a,
         &tree_a,
-        &["collaborator", "ensure-admin", "--target", target, "--json"],
+        &[
+            "collaborator",
+            "ensure-admin",
+            "--target",
+            &target_npub,
+            "--json",
+        ],
     );
     assert!(
         ensure.status.success(),

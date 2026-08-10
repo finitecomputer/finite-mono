@@ -488,8 +488,12 @@ impl BrainStore {
         self.load_core_brain(brain_id)?;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
+            "INSERT OR IGNORE INTO brain_members (brain_id, user_id) VALUES (?1, ?2)",
             params![brain_id.as_str(), user_id.as_str()],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO brain_member_independent_sources (brain_id, user_id, source_kind, source_id, created_at) VALUES (?1, ?2, 'direct_npub', ?2, ?3)",
+            params![brain_id.as_str(), user_id.as_str(), current_timestamp()],
         )?;
         sync_records::append_sync_records(&tx, brain_id, control_records)?;
         tx.commit()?;

@@ -219,9 +219,197 @@ impl BrainStore {
             )?;
         }
 
+        if !migration_applied(&tx, 25)? {
+            tx.execute_batch(SCHEMA_V25)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![25, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
+        if !migration_applied(&tx, 26)? {
+            tx.execute_batch(&pending_cohort_capacity_guard_schema())?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![26, MIGRATION_TIMESTAMP],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
+}
+
+const SCHEMA_V25: &str = r#"
+CREATE TABLE brain_member_independent_sources (
+    brain_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('direct_npub', 'legacy')),
+    source_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (brain_id, user_id, source_kind, source_id),
+    FOREIGN KEY (brain_id) REFERENCES brains(id) ON DELETE CASCADE
+);
+"#;
+
+fn pending_cohort_capacity_guard_schema() -> String {
+    let limits = BRAIN_CAPACITY_ENVELOPE;
+    format!(
+        r#"
+DROP TRIGGER IF EXISTS capacity_brain_members;
+DROP TRIGGER IF EXISTS capacity_sync_records;
+DROP TRIGGER IF EXISTS capacity_folder_access;
+DROP TRIGGER IF EXISTS capacity_folder_key_grants;
+DROP TRIGGER IF EXISTS capacity_brain_invitations;
+
+CREATE VIEW active_pending_cohort_member_reservations AS
+SELECT DISTINCT invitation.brain_id,
+       json_extract(participant.value, '$.npub') AS user_id
+FROM cohort_invitation_plans plan
+JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+     json_each(plan.participants_json) participant
+WHERE invitation.status = 'pending'
+  AND julianday(invitation.expires_at) > julianday('now')
+  AND plan.scope_kind = 'brain';
+
+CREATE VIEW active_pending_cohort_access_reservations AS
+SELECT DISTINCT candidate.brain_id, candidate.folder_id, candidate.user_id
+FROM (
+    SELECT invitation.brain_id, plan.folder_id,
+           json_extract(participant.value, '$.npub') AS user_id
+    FROM cohort_invitation_plans plan
+    JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+         json_each(plan.participants_json) participant
+    WHERE invitation.status = 'pending'
+      AND julianday(invitation.expires_at) > julianday('now')
+      AND plan.scope_kind = 'folder'
+    UNION
+    SELECT invitation.brain_id, folder.value,
+           json_extract(participant.value, '$.npub') AS user_id
+    FROM cohort_invitation_plans plan
+    JOIN brain_invitations invitation ON invitation.id = plan.invitation_id,
+         json_each(plan.participants_json) participant,
+         json_each(invitation.initial_folder_access_json) folder
+    WHERE invitation.status = 'pending'
+      AND julianday(invitation.expires_at) > julianday('now')
+      AND plan.scope_kind = 'brain'
+) candidate;
+
+CREATE VIEW active_pending_cohort_grant_reservations AS
+SELECT DISTINCT invitation.brain_id, grant.folder_id, grant.key_version,
+       grant.recipient_npub
+FROM cohort_invitation_grants grant
+JOIN brain_invitations invitation ON invitation.id = grant.invitation_id
+WHERE invitation.status = 'pending'
+  AND julianday(invitation.expires_at) > julianday('now');
+
+CREATE TRIGGER capacity_brain_members
+BEFORE INSERT ON brain_members
+WHEN (
+    (SELECT COUNT(*) FROM brain_members WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM active_pending_cohort_member_reservations reservation
+     WHERE reservation.brain_id = NEW.brain_id
+       AND NOT EXISTS (
+           SELECT 1 FROM brain_members current
+           WHERE current.brain_id = reservation.brain_id
+             AND current.user_id = reservation.user_id
+       )) -
+    (SELECT EXISTS(
+        SELECT 1 FROM active_pending_cohort_member_reservations reservation
+        WHERE reservation.brain_id = NEW.brain_id
+          AND reservation.user_id = NEW.user_id
+    ))
+) >= {members}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_members:{members}');
+END;
+
+CREATE TRIGGER capacity_folder_access
+BEFORE INSERT ON folder_access
+WHEN (
+    (SELECT COUNT(*) FROM folder_access WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM active_pending_cohort_access_reservations reservation
+     WHERE reservation.brain_id = NEW.brain_id
+       AND NOT EXISTS (
+           SELECT 1 FROM folder_access current
+           WHERE current.brain_id = reservation.brain_id
+             AND current.folder_id = reservation.folder_id
+             AND current.user_id = reservation.user_id
+       )) -
+    (SELECT EXISTS(
+        SELECT 1 FROM active_pending_cohort_access_reservations reservation
+        WHERE reservation.brain_id = NEW.brain_id
+          AND reservation.folder_id = NEW.folder_id
+          AND reservation.user_id = NEW.user_id
+    ))
+) >= {folder_access_entries}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_access_entries:{folder_access_entries}');
+END;
+
+CREATE TRIGGER capacity_folder_key_grants
+BEFORE INSERT ON folder_key_grants
+WHEN (
+    (SELECT COUNT(*) FROM folder_key_grants WHERE brain_id = NEW.brain_id) +
+    (SELECT COUNT(*) FROM active_pending_cohort_grant_reservations reservation
+     WHERE reservation.brain_id = NEW.brain_id
+       AND NOT EXISTS (
+           SELECT 1 FROM folder_key_grants current
+           WHERE current.brain_id = reservation.brain_id
+             AND current.folder_id = reservation.folder_id
+             AND current.key_version = reservation.key_version
+             AND current.recipient_npub = reservation.recipient_npub
+       )) -
+    (SELECT EXISTS(
+        SELECT 1 FROM active_pending_cohort_grant_reservations reservation
+        WHERE reservation.brain_id = NEW.brain_id
+          AND reservation.folder_id = NEW.folder_id
+          AND reservation.key_version = NEW.key_version
+          AND reservation.recipient_npub = NEW.recipient_npub
+    ))
+) >= {folder_key_grants}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:folder_key_grants:{folder_key_grants}');
+END;
+
+CREATE TRIGGER capacity_sync_records
+BEFORE INSERT ON brain_record_index
+WHEN COALESCE(json_extract(NEW.payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone'
+AND (
+    (SELECT COUNT(*) FROM brain_record_index
+     WHERE brain_id = NEW.brain_id
+       AND COALESCE(json_extract(payload_json, '$.recordType'), '') <> 'folder_subtree_tombstone') +
+    (SELECT COUNT(*) FROM active_pending_cohort_grant_reservations reservation
+     WHERE reservation.brain_id = NEW.brain_id
+       AND NOT EXISTS (
+           SELECT 1 FROM folder_key_grants current
+           WHERE current.brain_id = reservation.brain_id
+             AND current.folder_id = reservation.folder_id
+             AND current.key_version = reservation.key_version
+             AND current.recipient_npub = reservation.recipient_npub
+       ))
+) >= {ordinary_sync_records}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:sync_records:{ordinary_sync_records}');
+END;
+
+CREATE TRIGGER capacity_brain_invitations
+BEFORE INSERT ON brain_invitations
+WHEN NEW.status = 'pending' AND (
+    SELECT COUNT(*) FROM brain_invitations
+    WHERE brain_id = NEW.brain_id AND status = 'pending'
+      AND julianday(expires_at) > julianday('now')
+) >= {invitations}
+BEGIN
+    SELECT RAISE(ABORT, 'finite_capacity:brain_invitations:{invitations}');
+END;
+"#,
+        members = limits.members,
+        folder_access_entries = limits.folder_access_entries,
+        folder_key_grants = limits.folder_key_grants,
+        ordinary_sync_records = limits.sync_records - limits.folders,
+        invitations = limits.invitations,
+    )
 }
 
 const SCHEMA_V24: &str = r#"
@@ -1851,13 +2039,28 @@ mod tests {
             .unwrap();
         assert_eq!(preserved_payload, r#"{"ciphertext":"preserved"}"#);
 
+        let legacy_member_source: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM brain_member_independent_sources
+                    WHERE brain_id = 'legacy-organization'
+                      AND user_id = 'npub-owner'
+                      AND source_kind = 'legacy'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!legacy_member_source);
+
         let latest_version: i64 = store
             .conn
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 24);
+        assert_eq!(latest_version, 26);
 
         let old_table_count: i64 = store
             .conn

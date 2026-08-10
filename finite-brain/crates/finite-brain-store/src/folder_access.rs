@@ -816,6 +816,24 @@ impl BrainStore {
         )
     }
 
+    pub fn member_removal_participants(
+        &self,
+        brain_id: &BrainId,
+        target: &UserId,
+    ) -> Result<BTreeSet<UserId>, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        self.member_removal_participants_preserving_independent(&stored, target)
+    }
+
+    pub fn member_removal_access_plan(
+        &self,
+        brain_id: &BrainId,
+        target: &UserId,
+    ) -> Result<MemberRemovalAccessPlan, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        self.member_removal_access_plan_for_stored(&stored, target)
+    }
+
     /// Remove a Member and append every affected Brain's signed control records atomically.
     #[allow(clippy::too_many_arguments)]
     pub fn remove_member_with_rotations_and_control_records(
@@ -842,17 +860,24 @@ impl BrainStore {
                 })),
         )?;
         let stored = self.load_brain(brain_id)?;
-        if stored.brain.admins.contains(removed_user_id) {
+        let access_plan = self.member_removal_access_plan_for_stored(&stored, removed_user_id)?;
+        let removed_user_ids = access_plan.removed_members;
+        let folder_access_removals = access_plan.folder_access_removals;
+        if removed_user_ids
+            .iter()
+            .any(|removed| stored.brain.admins.contains(removed))
+        {
             return Err(StoreError::BrokenInvariant {
                 reason: "remove admin role before removing member".to_owned(),
             });
         }
-        if !stored
-            .brain
-            .members
-            .iter()
-            .any(|member| member.user_id == *removed_user_id)
-        {
+        if removed_user_ids.iter().any(|removed| {
+            !stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == *removed)
+        }) {
             return Err(StoreError::BrokenInvariant {
                 reason: "brain member does not exist".to_owned(),
             });
@@ -860,7 +885,29 @@ impl BrainStore {
         let mut post_removal_brain = stored.brain.clone();
         post_removal_brain
             .members
-            .retain(|member| member.user_id != *removed_user_id);
+            .retain(|member| !removed_user_ids.contains(&member.user_id));
+        let mut post_removal = stored.clone();
+        post_removal.brain = post_removal_brain.clone();
+        for (folder_id, removed_access) in &folder_access_removals {
+            if let Some(access) = post_removal.folder_access.get_mut(folder_id) {
+                access.retain(|participant| !removed_access.contains(participant));
+            }
+        }
+        for cohort in &mut post_removal.account_access_cohorts {
+            if cohort.status == "active"
+                && cohort.scope_kind == "brain"
+                && cohort.participants.iter().any(|participant| {
+                    participant.relationship == "human"
+                        && participant.status == "active"
+                        && participant.npub == *removed_user_id
+                })
+            {
+                cohort.status = "revoked".to_owned();
+                for participant in &mut cohort.participants {
+                    participant.status = "revoked".to_owned();
+                }
+            }
+        }
         let personal_agent = stored
             .personal_agent
             .as_ref()
@@ -873,7 +920,11 @@ impl BrainStore {
                 .cloned()
                 .unwrap_or_default();
             if required_recipients(&stored.brain, folder, &access, personal_agent)?
-                .contains(removed_user_id)
+                .iter()
+                .any(|recipient| removed_user_ids.contains(recipient))
+                || folder_access_removals
+                    .get(&folder.id)
+                    .is_some_and(|participants| !participants.is_empty())
             {
                 expected_folders.insert(folder.id.clone());
             }
@@ -888,11 +939,14 @@ impl BrainStore {
                     .to_owned(),
             });
         }
-        let expected_mounts = self
-            .list_active_destination_mounts_for_participant(brain_id, removed_user_id)?
-            .into_iter()
-            .map(|connection| connection.id)
-            .collect::<BTreeSet<_>>();
+        let mut expected_mounts = BTreeSet::new();
+        for removed in &removed_user_ids {
+            expected_mounts.extend(
+                self.list_active_destination_mounts_for_participant(brain_id, removed)?
+                    .into_iter()
+                    .map(|connection| connection.id),
+            );
+        }
         let supplied_mounts = mount_rotations
             .iter()
             .map(|rotation| rotation.connection_id.clone())
@@ -925,7 +979,9 @@ impl BrainStore {
                 .get(&rotation.folder_id)
                 .cloned()
                 .unwrap_or_default();
-            remaining_access.remove(removed_user_id);
+            if let Some(removed_access) = folder_access_removals.get(&rotation.folder_id) {
+                remaining_access.retain(|recipient| !removed_access.contains(recipient));
+            }
             let mut rotated_folder = folder.clone();
             rotated_folder.current_key_version = rotation.new_key_version;
             let mut required = required_recipients(
@@ -934,7 +990,7 @@ impl BrainStore {
                 &remaining_access,
                 personal_agent,
             )?;
-            extend_account_agent_recipients(&mut required, &stored, &folder.id);
+            extend_account_agent_recipients(&mut required, &post_removal, &folder.id);
             validate_folder_grants(
                 &post_removal_brain,
                 &rotated_folder,
@@ -959,14 +1015,17 @@ impl BrainStore {
             let connection = self.load_shared_folder_connection(&rotation.connection_id)?;
             if connection.destination_brain_id != *brain_id
                 || connection.status != SharedFolderConnectionStatus::Active
-                || !connection.member_npubs.contains(removed_user_id)
+                || !connection
+                    .member_npubs
+                    .iter()
+                    .any(|member| removed_user_ids.contains(member))
             {
                 return Err(StoreError::BrokenInvariant {
                     reason: "member removal Mount rotation does not match active destination participation"
                         .to_owned(),
                 });
             }
-            let must_revoke = connection.destination_admin_npub == *removed_user_id;
+            let must_revoke = removed_user_ids.contains(&connection.destination_admin_npub);
             if rotation.revoke_mount != must_revoke {
                 return Err(StoreError::BrokenInvariant {
                     reason: if must_revoke {
@@ -997,10 +1056,12 @@ impl BrainStore {
             }
             let removed = if must_revoke {
                 connection.managed_access_npubs.clone()
-            } else if connection.managed_access_npubs.contains(removed_user_id) {
-                BTreeSet::from([removed_user_id.clone()])
             } else {
-                BTreeSet::new()
+                connection
+                    .managed_access_npubs
+                    .intersection(&removed_user_ids)
+                    .cloned()
+                    .collect()
             };
             if removed.is_empty() {
                 mounted_removals.push((connection, removed));
@@ -1062,6 +1123,40 @@ impl BrainStore {
         }
 
         let tx = self.conn.transaction()?;
+        let revoked_invitation_sources = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.participants.iter().any(|participant| {
+                        participant.relationship == "human"
+                            && participant.status == "active"
+                            && participant.npub == *removed_user_id
+                    })
+                    && cohort.provenance_kind == "invitation"
+            })
+            .map(|cohort| cohort.provenance_id.clone())
+            .collect::<BTreeSet<_>>();
+        for source_id in &revoked_invitation_sources {
+            tx.execute(
+                "DELETE FROM folder_access_sources WHERE brain_id = ?1 AND source_kind = 'invitation' AND source_id = ?2",
+                params![brain_id.as_str(), source_id],
+            )?;
+        }
+        tx.execute(
+            r#"
+            DELETE FROM folder_access
+            WHERE brain_id = ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM folder_access_sources source
+                  WHERE source.brain_id = folder_access.brain_id
+                    AND source.folder_id = folder_access.folder_id
+                    AND source.user_id = folder_access.user_id
+              )
+            "#,
+            params![brain_id.as_str()],
+        )?;
         for rotation in rotations {
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
@@ -1159,20 +1254,56 @@ impl BrainStore {
                     params![rotation.connection_id, updated_at],
                 )?;
             } else {
-                tx.execute(
-                    "DELETE FROM shared_folder_connection_members WHERE connection_id = ?1 AND member_npub = ?2",
-                    params![rotation.connection_id, removed_user_id.as_str()],
-                )?;
+                for removed in &removed_user_ids {
+                    tx.execute(
+                        "DELETE FROM shared_folder_connection_members WHERE connection_id = ?1 AND member_npub = ?2",
+                        params![rotation.connection_id, removed.as_str()],
+                    )?;
+                }
             }
         }
-        tx.execute(
-            "DELETE FROM folder_access WHERE brain_id = ?1 AND user_id = ?2",
-            params![brain_id.as_str(), removed_user_id.as_str()],
-        )?;
-        tx.execute(
-            "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
-            params![brain_id.as_str(), removed_user_id.as_str()],
-        )?;
+        for removed in &removed_user_ids {
+            tx.execute(
+                "DELETE FROM brain_member_independent_sources WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), removed.as_str()],
+            )?;
+            tx.execute(
+                "DELETE FROM folder_access WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), removed.as_str()],
+            )?;
+            tx.execute(
+                "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), removed.as_str()],
+            )?;
+        }
+        let removed_human_cohort_ids = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.participants.iter().any(|participant| {
+                        participant.relationship == "human"
+                            && participant.status == "active"
+                            && participant.npub == *removed_user_id
+                    })
+            })
+            .map(|cohort| cohort.cohort_id.clone())
+            .collect::<Vec<_>>();
+        for cohort_id in &removed_human_cohort_ids {
+            tx.execute(
+                "UPDATE account_access_cohorts SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
+                params![cohort_id, updated_at],
+            )?;
+            tx.execute(
+                "UPDATE account_access_cohort_participants SET status = 'revoked', exclusion_reason = 'anchoring_human_removed', updated_at = ?2 WHERE cohort_id = ?1",
+                params![cohort_id, updated_at],
+            )?;
+            tx.execute(
+                "UPDATE human_anchored_agent_authorities SET status = 'revoked', updated_at = ?2 WHERE cohort_id = ?1",
+                params![cohort_id, updated_at],
+            )?;
+        }
         tx.execute(
             r#"
             UPDATE account_access_cohort_participants
@@ -1217,6 +1348,169 @@ impl BrainStore {
         tx.commit()?;
         Ok(())
     }
+
+    fn member_removal_participants_preserving_independent(
+        &self,
+        stored: &StoredBrain,
+        target: &UserId,
+    ) -> Result<BTreeSet<UserId>, StoreError> {
+        let target_cohorts = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.participants.iter().any(|participant| {
+                        participant.relationship == "human"
+                            && participant.status == "active"
+                            && participant.npub == *target
+                    })
+            })
+            .map(|cohort| cohort.cohort_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let candidates = member_removal_participants(stored, target);
+        let mut removed = BTreeSet::new();
+        for participant in candidates {
+            if &participant == target {
+                removed.insert(participant);
+                continue;
+            }
+            let independent = self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM brain_member_independent_sources WHERE brain_id = ?1 AND user_id = ?2)",
+                    params![stored.brain.id.as_str(), participant.as_str()],
+                    |row| row.get::<_, bool>(0),
+                )?;
+            let other_cohort = stored.account_access_cohorts.iter().any(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && !target_cohorts.contains(cohort.cohort_id.as_str())
+                    && cohort.participants.iter().any(|candidate| {
+                        candidate.relationship == "account_agent"
+                            && candidate.status == "active"
+                            && candidate.npub == participant
+                    })
+            });
+            let independent_admin = stored.brain.admins.contains(&participant);
+            if !independent && !other_cohort && !independent_admin {
+                removed.insert(participant);
+            }
+        }
+        Ok(removed)
+    }
+
+    fn member_removal_access_plan_for_stored(
+        &self,
+        stored: &StoredBrain,
+        target: &UserId,
+    ) -> Result<MemberRemovalAccessPlan, StoreError> {
+        let removed_members =
+            self.member_removal_participants_preserving_independent(stored, target)?;
+        let target_cohorts = stored
+            .account_access_cohorts
+            .iter()
+            .filter(|cohort| {
+                cohort.status == "active"
+                    && cohort.scope_kind == "brain"
+                    && cohort.participants.iter().any(|participant| {
+                        participant.relationship == "human"
+                            && participant.status == "active"
+                            && participant.npub == *target
+                    })
+            })
+            .collect::<Vec<_>>();
+        let retained_cohort_agents = target_cohorts
+            .iter()
+            .flat_map(|cohort| &cohort.participants)
+            .filter(|participant| {
+                participant.relationship == "account_agent"
+                    && participant.status == "active"
+                    && !removed_members.contains(&participant.npub)
+            })
+            .map(|participant| participant.npub.clone())
+            .collect::<BTreeSet<_>>();
+        let revoked_invitation_sources = target_cohorts
+            .iter()
+            .filter(|cohort| cohort.provenance_kind == "invitation")
+            .map(|cohort| cohort.provenance_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut statement = self.conn.prepare(
+            "SELECT folder_id, user_id, source_kind, source_id FROM folder_access_sources WHERE brain_id = ?1",
+        )?;
+        let sources = statement
+            .query_map(params![stored.brain.id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut removals = BTreeMap::<FolderId, BTreeSet<UserId>>::new();
+        for (folder_id, participants) in &stored.folder_access {
+            for participant in participants {
+                if removed_members.contains(participant) {
+                    removals
+                        .entry(folder_id.clone())
+                        .or_default()
+                        .insert(participant.clone());
+                    continue;
+                }
+                if !retained_cohort_agents.contains(participant) {
+                    continue;
+                }
+                let matching = sources.iter().filter(|(source_folder, source_user, _, _)| {
+                    source_folder == folder_id.as_str() && source_user == participant.as_str()
+                });
+                let mut revoked = false;
+                let mut retained = false;
+                for (_, _, source_kind, source_id) in matching {
+                    if source_kind == "invitation"
+                        && revoked_invitation_sources.contains(source_id.as_str())
+                    {
+                        revoked = true;
+                    } else {
+                        retained = true;
+                    }
+                }
+                if revoked && !retained {
+                    removals
+                        .entry(folder_id.clone())
+                        .or_default()
+                        .insert(participant.clone());
+                }
+            }
+        }
+        Ok(MemberRemovalAccessPlan {
+            removed_members,
+            folder_access_removals: removals,
+        })
+    }
+}
+
+fn member_removal_participants(stored: &StoredBrain, target: &UserId) -> BTreeSet<UserId> {
+    let mut removed = BTreeSet::from([target.clone()]);
+    for cohort in &stored.account_access_cohorts {
+        let target_is_human = cohort.status == "active"
+            && cohort.scope_kind == "brain"
+            && cohort.participants.iter().any(|participant| {
+                participant.relationship == "human"
+                    && participant.status == "active"
+                    && participant.npub == *target
+            });
+        if target_is_human {
+            removed.extend(
+                cohort
+                    .participants
+                    .iter()
+                    .filter(|participant| participant.status == "active")
+                    .map(|participant| participant.npub.clone()),
+            );
+        }
+    }
+    removed
 }
 
 fn validate_folder_grant_control_records(

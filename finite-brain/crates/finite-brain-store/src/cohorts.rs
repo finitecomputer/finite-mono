@@ -1922,6 +1922,19 @@ impl BrainStore {
             if participant.relationship != "account_agent" {
                 continue;
             }
+            if reviewed.independent_agent_npubs.contains(&participant.npub)
+                && reviewed.scope_kind == "brain"
+                && stored_before.brain.kind == BrainKind::Organization
+            {
+                tx.execute(
+                    r#"
+                    INSERT OR IGNORE INTO brain_member_independent_sources (
+                        brain_id, user_id, source_kind, source_id, created_at
+                    ) VALUES (?1, ?2, 'legacy', ?2, ?3)
+                    "#,
+                    params![reviewed.brain_id.as_str(), participant.npub.as_str(), now,],
+                )?;
+            }
             if reviewed.scope_kind == "brain" {
                 if stored_before.brain.kind == BrainKind::Organization {
                     tx.execute(

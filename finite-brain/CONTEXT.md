@@ -329,16 +329,25 @@ Impersonation.
 
 ### Authenticated Human Intent
 
-The action-specific proof that an authenticated human directly asked an Agent
-Principal to perform a sensitive but agent-operable Brain action. It binds the
-human, acting agent, target, scope, and intended operation; conversational text
-supplied by the agent is not proof. It requires no human private-key signature
-or Product Client click. Personal Brain changes that remove, restrict, or
+The one-use discretionary capability that proves an Agent Principal is acting
+inside a fresh authenticated human turn before one sensitive Brain action.
+Finite Chat's signed assertion binds the human, acting agent, freshness, and
+nonce; Brain combines it with the exact route-derived target, scope, and
+operation and consumes the assertion id atomically, regardless of which action
+is attempted. Agent-supplied conversational text or an Agent-computed binding
+is not proof that the human's words semantically requested that exact action;
+the product's personal-agent trust model assigns that translation to the
+agent. It requires no human private-key signature or Product Client
+click. Personal Brain changes that remove, restrict, or
 restore another account agent require this intent, while normal Brain work uses
 standing authority and ownership transfer, Recovery Set changes, and
 whole-Brain deletion remain directly human-operated. Product audit records both
 the authorizing human and acting agent. _Avoid_: Agent Assertion, Human
 Impersonation, Manual Approval Click.
+
+The assertion id is derived from the canonical signed claims rather than the
+caller-provided hexadecimal MAC spelling, so case-normalized encodings cannot
+bypass one-use consumption.
 
 ### Durable Agent Authority Record
 
