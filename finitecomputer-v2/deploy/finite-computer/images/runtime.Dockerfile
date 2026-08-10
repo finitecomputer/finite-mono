@@ -36,6 +36,13 @@ ARG HERMES_AGENT_DIST_URL=https://github.com/NousResearch/hermes-agent/archive/r
 ARG HERMES_AGENT_DIST_SHA256=370542c7219faba6300905c3b419e14e6508a31ac698a1a5174e0386990834be
 ARG FINITE_MONO_REV=unknown
 ARG GWS_VERSION=0.22.5
+# Agent toolchains baked into the image so agents stop re-downloading them
+# into ephemeral container space at runtime. Every tool is pinned to an exact
+# version with sha256 verification (uv is a digest-pinned COPY below).
+ARG NODE_VERSION=24.19.0
+ARG BUN_VERSION=1.3.14
+ARG DENO_VERSION=2.9.5
+ARG PLAYWRIGHT_VERSION=1.62.0
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.title="Finite Computer v2 Agent Runtime"
@@ -52,6 +59,7 @@ RUN apt-get update \
       openssh-client \
       restic \
       ripgrep \
+      unzip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
@@ -75,6 +83,58 @@ RUN set -eux; \
     rm -f "/tmp/${archive}" /tmp/gws; \
     gws --version
 
+# uv ships as a static binary in its official image; copy it digest-pinned
+# (same pattern as upstream's own Dockerfile examples).
+COPY --from=ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc /uv /uvx /usr/local/bin/
+
+# node (LTS), bun, deno: exact-version archives with sha256 verification,
+# installed onto PATH so agents find them with no config. bun uses the
+# baseline x64 build so it also runs on hosts without AVX2.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) \
+        node_arch=x64; \
+        node_sha256=f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4; \
+        bun_arch=x64-baseline; \
+        bun_sha256=a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7; \
+        deno_arch=x86_64; \
+        deno_sha256=8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530; \
+        ;; \
+      arm64) \
+        node_arch=arm64; \
+        node_sha256=d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f; \
+        bun_arch=aarch64; \
+        bun_sha256=a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b; \
+        deno_arch=aarch64; \
+        deno_sha256=6b7cae3a8fc4385a59dea3146fcb8bad7fea4230e0ad36a8c692afacbc254be0; \
+        ;; \
+      *) echo "unsupported toolchain architecture: ${TARGETARCH}" >&2; exit 64 ;; \
+    esac; \
+    node_archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"; \
+    curl -fsSLo "/tmp/${node_archive}" \
+      "https://nodejs.org/dist/v${NODE_VERSION}/${node_archive}"; \
+    echo "${node_sha256}  /tmp/${node_archive}" | sha256sum --check -; \
+    tar -xzf "/tmp/${node_archive}" -C /usr/local --strip-components=1; \
+    rm -f "/tmp/${node_archive}"; \
+    bun_archive="bun-linux-${bun_arch}.zip"; \
+    curl -fsSLo "/tmp/${bun_archive}" \
+      "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${bun_archive}"; \
+    echo "${bun_sha256}  /tmp/${bun_archive}" | sha256sum --check -; \
+    unzip -q "/tmp/${bun_archive}" -d /tmp; \
+    install -m 0755 "/tmp/bun-linux-${bun_arch}/bun" /usr/local/bin/bun; \
+    rm -rf "/tmp/${bun_archive}" "/tmp/bun-linux-${bun_arch}"; \
+    deno_archive="deno-${deno_arch}-unknown-linux-gnu.zip"; \
+    curl -fsSLo "/tmp/${deno_archive}" \
+      "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/${deno_archive}"; \
+    echo "${deno_sha256}  /tmp/${deno_archive}" | sha256sum --check -; \
+    unzip -q "/tmp/${deno_archive}" -d /tmp/deno-dist; \
+    install -m 0755 /tmp/deno-dist/deno /usr/local/bin/deno; \
+    rm -rf "/tmp/${deno_archive}" /tmp/deno-dist; \
+    node --version; \
+    bun --version; \
+    uv --version; \
+    deno --version
+
 RUN python -m venv /runtime/hermes-venv \
     && /runtime/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
     && test "${HERMES_AGENT_VERSION}" = "0.20.0" \
@@ -85,6 +145,7 @@ RUN python -m venv /runtime/hermes-venv \
       "google-api-python-client==2.198.0" \
       "google-auth-oauthlib==1.4.0" \
       "google-auth-httplib2==0.4.0" \
+      "playwright==${PLAYWRIGHT_VERSION}" \
     && mkdir -p /tmp/hermes-dist \
     && tar -xzf /tmp/hermes-agent.tar.gz -C /tmp/hermes-dist --strip-components=1 \
     && cd /tmp/hermes-dist \
@@ -97,6 +158,14 @@ RUN python -m venv /runtime/hermes-venv \
     && ln -sf /runtime/hermes-venv/bin/hermes /usr/local/bin/hermes \
     && ln -sf /runtime/hermes-venv/bin/hermes-agent /usr/local/bin/hermes-agent \
     && ln -sf /runtime/hermes-venv/bin/hermes-acp /usr/local/bin/hermes-acp
+
+# Pre-install headless chromium (plus its Debian runtime deps) into a shared
+# browsers path so agents never download a browser at runtime.
+RUN set -eux; \
+    /runtime/hermes-venv/bin/playwright install-deps chromium; \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
+      /runtime/hermes-venv/bin/playwright install chromium; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/finitechat
 COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat
@@ -131,6 +200,7 @@ RUN chmod +x \
 RUN ln -sf /runtime/bin/finite /usr/local/bin/finite
 
 ENV PATH="/runtime/hermes-venv/bin:/usr/local/bin:${PATH}"
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 ENV FINITECHAT_HOME=/data/agent
 # Shared Finite identity contract: identity.json on the durable mount.
 ENV FINITE_HOME=/data/agent

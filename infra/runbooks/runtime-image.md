@@ -304,7 +304,8 @@ in `infra/tinfoil/README.md`.
 ## VERIFY
 
 1. Smoke evidence and the publication report name the same monorepo SHA,
-   Hermes `0.20.0`, Runtime image digest, CLIs, plugin, and bundled Finite
+   Hermes `0.20.0`, Runtime image digest, CLIs, bundled agent toolchains
+   (node, bun, uv, deno, playwright/chromium), plugin, and bundled Finite
    Skills source.
 2. After promotion: the next runner-launched Kata Runtime comes up ready within
    `FC_RUNNER_RUNTIME_READY_TIMEOUT_SECS` and runs the new image. TODO:

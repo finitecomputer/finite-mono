@@ -26,6 +26,7 @@ CANONICAL_DOCKERFILE_ANCHORS = (
     "ENV FBRAIN_WORKING_TREE_ROOT=/data/workspace/finitebrain",
     "ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer",
     "ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer",
+    "ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers",
     'ENTRYPOINT ["/opt/agent-entrypoint.sh"]',
 )
 
