@@ -68,7 +68,7 @@ and TLS cutover.
 - [x] Add an Ubuntu 24.04 installer that generates secrets only on the VPS.
 - [x] Add a temporary raw-IP mode that refuses plaintext remote write.
 - [x] Add static, Prometheus, blackbox, Caddy, and Compose validation.
-- [ ] Run `infra/monitoring/self-hosted/install-ubuntu` on the VPS.
+- [x] Run `infra/monitoring/self-hosted/install-ubuntu` on the VPS.
 - [ ] Run `/opt/finite-monitoring/verify` in raw-IP mode.
 - [ ] Point the two DNS records at the VPS.
 - [ ] Rerun the installer in DNS mode and verify TLS.
