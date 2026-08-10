@@ -150,8 +150,9 @@ Core evidence is unavailable or incomplete.
 
 The managed dashboard is
 [`Finite Production MVP`](https://savvybanana1713.grafana.net/d/finite-production-mvp/finite-production-mvp).
-Its portable source is `finite-production-mvp-dashboard.json`. Import that file
-and map `DS_PROMETHEUS` to the stack's default Prometheus data source.
+Its provider-neutral source moved to
+`../self-hosted/grafana/dashboards/finite-production-mvp.json`. The self-hosted
+stack provisions its `finite-prometheus` data source UID automatically.
 
 The dashboard contains exactly the MVP views:
 
