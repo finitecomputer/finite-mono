@@ -177,11 +177,11 @@ introduce a second probe loop. The first dashboard should show the same service
 list as `infra/nixos/modules/monitoring.nix`.
 
 Grafana Alloy should scrape the loopback-only node exporter once per minute and
-send the retained health metrics through standard Prometheus `remote_write`.
-For this MVP, retain only the two `finite_*` health families plus `up`,
-`node_textfile_scrape_error`, and `node_textfile_mtime_seconds`. The latter two
-make collector failure and stale health output visible without adding another
-custom metric.
+send the retained MVP metrics through standard Prometheus `remote_write`. Retain
+only the health, component version, Runtime artifact, version mismatch, `up`,
+`node_textfile_scrape_error`, and `node_textfile_mtime_seconds` families. The
+latter two make collector failure and stale textfile output visible without
+adding another custom metric.
 
 ## Dashboard Requirements
 

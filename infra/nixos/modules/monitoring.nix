@@ -5,13 +5,39 @@
 #   journalctl -u finite-healthcheck   # is the box healthy?
 {
   config,
+  finitePackages,
   lib,
   pkgs,
   ...
 }:
 let
-  grafanaCloudEnvironmentFile = "/etc/finite/grafana-cloud-metrics.env";
   healthMetricsDirectory = "/run/finite-monitoring";
+  revision =
+    if config.system.configurationRevision == null then "" else config.system.configurationRevision;
+  prometheusEscape = lib.replaceStrings [ "\\" "\"" "\n" ] [ "\\\\" "\\\"" "\\n" ];
+  versionMetric =
+    {
+      component,
+      version,
+      source,
+      gitSha ? "",
+      imageDigest ? "",
+    }:
+    ''
+      finite_component_build_info{host="${prometheusEscape config.networking.hostName}",component="${prometheusEscape component}",version="${prometheusEscape version}",git_sha="${prometheusEscape gitSha}",image_digest="${prometheusEscape imageDigest}",source="${source}"} 1
+      finite_component_version_mismatch{host="${prometheusEscape config.networking.hostName}",component="${prometheusEscape component}"} 0
+    '';
+  last = values: builtins.elemAt values (builtins.length values - 1);
+  imageDigest = image: if lib.hasInfix "@" image then last (lib.splitString "@" image) else "";
+  imageVersion =
+    image:
+    let
+      digest = imageDigest image;
+    in
+    if digest != "" then digest else last (lib.splitString ":" image);
+  dashboardImage = config.virtualisation.oci-containers.containers.finite-saas-dashboard.image;
+  searxngImage = config.virtualisation.oci-containers.containers.searxng.image;
+  firecrawlImage = config.virtualisation.oci-containers.containers.firecrawl-api.image;
   probedServiceUnits = [
     "finite-saas-core.service"
     "podman-finite-saas-dashboard.service"
@@ -25,56 +51,78 @@ let
   ];
 in
 {
-  services.prometheus.exporters.node = {
+  imports = [ ./metrics.nix ];
+
+  finite.metrics = {
     enable = true;
-    listenAddress = "127.0.0.1";
-    port = 9100;
-    enabledCollectors = [ "textfile" ];
-    extraFlags = [ "--collector.textfile.directory=${healthMetricsDirectory}" ];
-  };
-
-  services.alloy = {
-    enable = true;
-    environmentFile = grafanaCloudEnvironmentFile;
-    extraFlags = [ "--disable-reporting" ];
-  };
-  environment.etc."alloy/config.alloy".text = ''
-    prometheus.scrape "finite_internal_health" {
-      targets = [{
-        "__address__" = "127.0.0.1:9100",
-        "instance"    = "${config.networking.hostName}",
-        "job"         = "finite-internal-health",
-      }]
-
-      scrape_interval = "60s"
-      scrape_timeout  = "10s"
-      forward_to      = [prometheus.relabel.finite_mvp.receiver]
-    }
-
-    prometheus.relabel "finite_mvp" {
-      forward_to = [prometheus.remote_write.grafana_cloud.receiver]
-
-      rule {
-        action        = "keep"
-        source_labels = ["__name__"]
-        regex         = "finite_healthcheck_success|finite_service_health_status|node_textfile_mtime_seconds|node_textfile_scrape_error|up"
+    collectRuntimeArtifacts = true;
+    staticVersionMetrics = lib.concatMapStrings versionMetric [
+      {
+        component = "finite-saas-core";
+        version = finitePackages.finite-saas-core.version;
+        gitSha = revision;
+        source = "nix";
       }
-    }
-
-    prometheus.remote_write "grafana_cloud" {
-      endpoint {
-        url = sys.env("GRAFANA_CLOUD_PROMETHEUS_URL")
-
-        basic_auth {
-          username = sys.env("GRAFANA_CLOUD_PROMETHEUS_USERNAME")
-          password = sys.env("GRAFANA_CLOUD_PROMETHEUS_PASSWORD")
-        }
+      {
+        component = "finite-saas-dashboard";
+        version = imageVersion dashboardImage;
+        imageDigest = imageDigest dashboardImage;
+        source = "image";
       }
-    }
-  '';
-  systemd.services.alloy = {
-    after = [ "prometheus-node-exporter.service" ];
-    wants = [ "prometheus-node-exporter.service" ];
+      {
+        component = "finitechat-server";
+        version = finitePackages.finitechat-server.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "finitechat-hosted-device";
+        version = finitePackages.finitechat-hosted-device.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "finite-brain";
+        version = finitePackages.finite-brain.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "finite-saas-sites";
+        version = finitePackages.finitesitesd.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "searxng";
+        version = imageVersion searxngImage;
+        imageDigest = imageDigest searxngImage;
+        source = "image";
+      }
+      {
+        component = "firecrawl";
+        version = imageVersion firecrawlImage;
+        imageDigest = imageDigest firecrawlImage;
+        source = "image";
+      }
+      {
+        component = "postgres";
+        version = config.services.postgresql.package.version;
+        source = "nix";
+      }
+      {
+        component = "finite-saas-runner";
+        version = finitePackages.finite-saas-runner.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "nixos-system-profile";
+        version = config.system.nixos.version;
+        gitSha = revision;
+        source = "nix";
+      }
+    ];
   };
 
   systemd.services.finite-healthcheck = {
@@ -90,9 +138,7 @@ in
     serviceConfig = {
       Type = "oneshot";
       DynamicUser = true;
-      RuntimeDirectory = "finite-monitoring";
-      RuntimeDirectoryMode = "0755";
-      RuntimeDirectoryPreserve = "yes";
+      SupplementaryGroups = [ "finite-monitoring" ];
       # Keep slow or wedged local endpoints from extending an activation
       # indefinitely even though each probe has its own curl timeout.
       TimeoutStartSec = "2min";
@@ -141,7 +187,7 @@ in
         fi
         printf 'finite_healthcheck_success{host="%s"} %s\n' \
           "$host" "$aggregate" >> "$metrics_tmp"
-        chmod 0644 "$metrics_tmp"
+        chmod 0640 "$metrics_tmp"
         mv -f "$metrics_tmp" "$metrics_file"
         metrics_tmp=
       }

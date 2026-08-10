@@ -50,12 +50,23 @@
         sourceRoot = ./.;
       };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
+      sourceRevision =
+        if self ? rev then
+          self.rev
+        else if self ? dirtyRev then
+          self.dirtyRev
+        else
+          null;
+      revisionModule = {
+        system.configurationRevision = sourceRevision;
+      };
       runnerSpecialArgs = {
         finitePackages = finitePackagesLinux;
         kataPackages = kataPackagesLinux;
       };
       lat3Modules = [
         disko.nixosModules.disko
+        revisionModule
         ./infra/nixos/hosts/finite-lat-3
       ];
 
@@ -157,6 +168,7 @@
         specialArgs = runnerSpecialArgs;
         modules = [
           disko.nixosModules.disko
+          revisionModule
           ./infra/nixos/hosts/finite-lat-1
         ];
       };

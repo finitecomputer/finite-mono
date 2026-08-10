@@ -97,6 +97,7 @@ runner-host-contract:
 finite-status-contract:
     python3 scripts/check_finite_status_contract.py
     python3 -m unittest discover -s scripts/tests -p 'test_finite_status.py'
+    python3 -m unittest discover -s scripts/tests -p 'test_finite_runtime_metrics.py'
 
 # Static contract: every Identity Authority route the fsite CLI calls is on
 # the service-owned public surface (public_router); the edge proxies, never

@@ -101,24 +101,28 @@ Done when:
 
 ### 4. Export Version and Artifact Metrics
 
-- [ ] Export `finite_component_build_info` for `finite-saas-core`.
-- [ ] Export `finite_component_build_info` for `finite-saas-dashboard`.
-- [ ] Export `finite_component_build_info` for `finitechat-server`.
-- [ ] Export `finite_component_build_info` for `finitechat-hosted-device`.
-- [ ] Export `finite_component_build_info` for `finite-brain`.
-- [ ] Export `finite_component_build_info` for `finite-saas-sites`.
-- [ ] Export `finite_component_build_info` for `searxng`.
-- [ ] Export `finite_component_build_info` for `firecrawl`.
-- [ ] Export `finite_component_build_info` for `postgres`.
-- [ ] Export `finite_component_build_info` for `finite-saas-runner`.
-- [ ] Export `finite_component_build_info` for `finite-agent-runtime`.
-- [ ] Export host NixOS system profile info for `finite-lat-1`.
-- [ ] Export host NixOS system profile info for `finite-lat-3`.
-- [ ] Export `finite_runtime_artifact_info` for promoted Runtime artifact state.
-- [ ] Export `finite_component_version_mismatch` for required components.
-- [ ] Verify versions come from deployed state, not hand-maintained dashboard
+- [x] Export `finite_component_build_info` for `finite-saas-core`.
+- [x] Export `finite_component_build_info` for `finite-saas-dashboard`.
+- [x] Export `finite_component_build_info` for `finitechat-server`.
+- [x] Export `finite_component_build_info` for `finitechat-hosted-device`.
+- [x] Export `finite_component_build_info` for `finite-brain`.
+- [x] Export `finite_component_build_info` for `finite-saas-sites`.
+- [x] Export `finite_component_build_info` for `searxng`.
+- [x] Export `finite_component_build_info` for `firecrawl`.
+- [x] Export `finite_component_build_info` for `postgres`.
+- [x] Export `finite_component_build_info` for `finite-saas-runner`.
+- [x] Export `finite_component_build_info` for `finite-agent-runtime`.
+- [x] Export host NixOS system profile info for `finite-lat-1`.
+- [x] Export host NixOS system profile info for `finite-lat-3`.
+- [x] Export `finite_runtime_artifact_info` for promoted Runtime artifact state.
+- [x] Export `finite_component_version_mismatch` for required components.
+- [x] Verify versions come from deployed state, not hand-maintained dashboard
   values.
-- [ ] Verify no version metric exposes secrets or private user data.
+- [x] Verify no version metric exposes secrets or private user data.
+- [ ] Install the Grafana Cloud metrics credential on `finite-lat-3` and deploy
+  the reviewed version-metric closures to `finite-lat-1` and `finite-lat-3`.
+- [ ] Verify all configured version and Runtime artifact metrics in Grafana
+  Cloud.
 
 Done when:
 
@@ -185,10 +189,11 @@ explicit authorization before execution:
 - [ ] Authorize creating a stack-scoped Grafana Cloud access-policy token with
   only `metrics:write` permission.
 - [ ] Authorize installing the root-owned, mode `0600`
-  `/etc/finite/grafana-cloud-metrics.env` credential file on `finite-lat-1`.
+  `/etc/finite/grafana-cloud-metrics.env` credential file on `finite-lat-1` and
+  `finite-lat-3`.
 - [ ] Authorize deploying the reviewed monitoring and version-metric NixOS
-  changes to `finite-lat-1`.
+  changes to `finite-lat-1` and `finite-lat-3`.
 - [ ] Authorize creating or updating the `Finite Production MVP` dashboard and
   saving its managed Grafana Cloud configuration.
-- [ ] Authorize rolling `finite-lat-1` back to its previous NixOS generation if
+- [ ] Authorize rolling either host back to its previous NixOS generation if
   post-deploy health checks fail.

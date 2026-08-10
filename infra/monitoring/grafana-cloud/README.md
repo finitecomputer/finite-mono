@@ -57,8 +57,9 @@ dashboard queries on standard `probe_*` metrics and preserve the `job`,
 
 ## Internal Health Metrics
 
-`infra/nixos/modules/monitoring.nix` owns the internal-health pipeline for
-`finite-lat-1`:
+`infra/nixos/modules/monitoring.nix` owns the internal-health publisher for
+`finite-lat-1`, while `infra/nixos/modules/metrics.nix` owns the shared
+loopback scrape and remote-write transport:
 
 1. `finite-healthcheck` runs the existing internal endpoint probes and writes
    `finite-healthcheck.prom` atomically after every attempt.
@@ -102,6 +103,34 @@ GRAFANA_CLOUD_PROMETHEUS_PASSWORD=<stack-scoped metrics:write token>
 ```
 
 The file is a deployment prerequisite and never belongs in this repository.
-The access-policy token needs only the `metrics:write` scope. Redirecting the
-URL and credentials to a self-hosted Prometheus-compatible receiver does not
-change the emitted metrics or dashboard PromQL.
+Install it independently on `finite-lat-1` and `finite-lat-3`. The access-policy
+token needs only the `metrics:write` scope. Redirecting the URL and credentials
+to a self-hosted Prometheus-compatible receiver does not change the emitted
+metrics or dashboard PromQL.
+
+## Version And Artifact Metrics
+
+Each evaluated NixOS closure renders a static Prometheus textfile containing its
+native package versions, host system profile, and configured image tags or
+digests. Nix links that file into node exporter's textfile directory during
+activation, so static versions need no process or timer. These are deployment
+facts, not values maintained in Grafana.
+
+Only `finite-lat-1` runs `finite-runtime-metrics` every five minutes. It reuses
+the read-only Core query path from `scripts/finite-status` to publish the current
+promoted artifact and active source-host distribution. No Runtime process
+inspection or second inventory service is part of the MVP.
+
+The retained metric families are:
+
+```promql
+finite_component_build_info
+finite_component_version_mismatch
+finite_runtime_artifact_info
+```
+
+`finite_component_version_mismatch` is `0` for components fixed by the active
+NixOS closure. For `finite-agent-runtime`, it is `1` on a source host when any
+active Core-recorded Runtime uses an artifact other than the current promoted
+artifact. The exporter fails without replacing its previous metric file when
+Core evidence is unavailable or incomplete.

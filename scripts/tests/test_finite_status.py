@@ -55,17 +55,18 @@ class FiniteStatusTests(unittest.TestCase):
         output = "\n".join(
             [
                 "__FINITE_STATUS_ARTIFACTS__",
-                "artifact-v2,v2,2026-08-01T00:00:00Z,",
+                "artifact-v2,ghcr.io/finite/runtime@sha256:2222,v2,git-v2,0.2.0,2026-08-01T00:00:00Z,",
                 "__FINITE_STATUS_DISTRIBUTION__",
                 "finite-lat-1,v2,1",
                 "__FINITE_STATUS_RUNTIMES__",
-                "finite-lat-1,runtime-a,project-a,machine-a,Agent A,v2,active,2026-08-01T00:00:00Z",
+                "finite-lat-1,artifact-v2,runtime-a,project-a,machine-a,Agent A,v2,active,2026-08-01T00:00:00Z",
             ]
         )
         completed = subprocess.CompletedProcess(["psql"], 0, output, "")
         with mock.patch.object(finite_status, "run_read_only", return_value=completed) as run:
             result = finite_status.psql_query_sets({})
         self.assertEqual(len(result["runtimes"]), 1)
+        self.assertEqual(result["runtimes"][0]["runtime_artifact_id"], "artifact-v2")
         call = run.call_args
         sql = call.kwargs["input_text"]
         self.assertTrue(sql.startswith("BEGIN TRANSACTION READ ONLY;"))

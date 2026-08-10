@@ -102,7 +102,8 @@ CONTRACT: dict[str, Any] = {
     },
 }
 
-ARTIFACTS_QUERY = """select id, version_label, promoted_at, retired_at
+ARTIFACTS_QUERY = """select id, reference, version_label, source_git_sha, finitec_version,
+       promoted_at, retired_at
   from runtime_artifacts order by created_at desc;"""
 
 # This query is deliberately byte-for-byte equivalent to the operator-verified
@@ -113,6 +114,7 @@ DISTRIBUTION_QUERY = """select ar.source_host_id, ra.version_label, count(*)
   group by 1,2 order by 1,2;"""
 
 RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
+       ar.runtime_artifact_id,
        ar.id as agent_runtime_id,
        ar.project_id,
        ar.source_machine_id,
@@ -258,7 +260,15 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
         (
             "artifacts",
             ARTIFACTS_QUERY,
-            ["id", "version_label", "promoted_at", "retired_at"],
+            [
+                "id",
+                "reference",
+                "version_label",
+                "source_git_sha",
+                "finitec_version",
+                "promoted_at",
+                "retired_at",
+            ],
         ),
         (
             "distribution",
@@ -270,6 +280,7 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
             RUNTIME_DETAILS_QUERY,
             [
                 "source_host_id",
+                "runtime_artifact_id",
                 "agent_runtime_id",
                 "project_id",
                 "source_machine_id",
@@ -798,6 +809,17 @@ def combine_status(statuses: list[str]) -> str:
     return "green"
 
 
+def target_runtime_artifact(artifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next(
+        (
+            artifact
+            for artifact in artifacts
+            if artifact.get("promoted_at") and not artifact.get("retired_at")
+        ),
+        None,
+    )
+
+
 def build_fleet(
     core: dict[str, Any] | None,
     now: datetime,
@@ -807,14 +829,7 @@ def build_fleet(
     if core is None:
         return {"status": "unknown", "error": error or "Core evidence unavailable"}
     artifacts = core.get("artifacts", [])
-    target = next(
-        (
-            artifact
-            for artifact in artifacts
-            if artifact.get("promoted_at") and not artifact.get("retired_at")
-        ),
-        None,
-    )
+    target = target_runtime_artifact(artifacts)
     if target is None:
         return {"status": "unknown", "error": "no promoted, non-retired Runtime artifact"}
 
