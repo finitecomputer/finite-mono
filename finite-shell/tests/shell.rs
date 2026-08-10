@@ -16,7 +16,7 @@ use finite_service_directory::{
 };
 use finite_shell::control::{ShellRuntime, ctl_roundtrip};
 use finite_shell::generations::{StageRequest, read_link_version, stage_payload};
-use finite_shell::state::{FlipOutcome, FlipRecord, PollAction, SharedState};
+use finite_shell::state::{FlipKind, FlipOutcome, FlipRecord, PollAction, SharedState};
 use finite_shell::{SHELL_VERSION, ShellError, ShellSettings, health};
 
 fn test_signing_key() -> SigningKey {
@@ -782,6 +782,7 @@ async fn boot_reconciles_an_interrupted_flip_from_the_symlinks() {
                 to: "v2".to_owned(),
                 at: "2026-08-06T00:00:00Z".to_owned(),
                 outcome: FlipOutcome::InProgress,
+                kind: FlipKind::Flip,
                 prior_previous: None,
                 detail: None,
             });
@@ -872,6 +873,7 @@ async fn boot_reruns_the_gate_for_a_committed_broken_flip_and_rolls_back() {
                 to: "v2-broken".to_owned(),
                 at: "2026-08-06T00:00:00Z".to_owned(),
                 outcome: FlipOutcome::InProgress,
+                kind: FlipKind::Flip,
                 prior_previous: None,
                 detail: None,
             });
@@ -897,6 +899,290 @@ async fn boot_reruns_the_gate_for_a_committed_broken_flip_and_rolls_back() {
         Some("v1")
     );
     wait_for_marker(&settings, "one").await;
+    rebooted.shutdown().await;
+}
+
+/// Fix 3(a): reconcile must leave a committed interrupted flip `InProgress`
+/// while the boot gate rerun is running — never finalize it as terminal
+/// `Interrupted` first. Otherwise a second crash *during* the rerun would, on
+/// the next boot, see a terminal record and adopt the unverified generation
+/// without re-gating. We observe the on-disk record mid-rerun and require it to
+/// still be `InProgress` (with reconcile's committed annotation), then confirm
+/// it resolves to a real outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_committed_interrupted_flip_stays_in_progress_until_the_boot_rerun_resolves() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(root.path());
+    let seed = pack_payload(root.path(), "v1", "one", false);
+    install_seed(&settings, &seed);
+    // Long enough that the rerun's health-gate window (against the broken
+    // candidate) is comfortably observable.
+    settings.health_timeout = Duration::from_secs(2);
+    let runtime = ShellRuntime::boot(settings.clone()).await.unwrap();
+    let layout = settings.layout();
+    wait_for_marker(&settings, "one").await;
+    let broken = pack_payload(root.path(), "v2-broken", "broken", true);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&broken, false),
+    )
+    .await
+    .unwrap();
+    runtime.shutdown().await;
+
+    // A crash after the commit point, before the health gate resolved.
+    finite_shell::generations::set_link_version(&layout.previous_link(), "v1").unwrap();
+    finite_shell::generations::set_link_version(&layout.current_link(), "v2-broken").unwrap();
+    runtime
+        .state
+        .update(|state| {
+            state.last_flip = Some(FlipRecord {
+                from: Some("v1".to_owned()),
+                to: "v2-broken".to_owned(),
+                at: "2026-08-06T00:00:00Z".to_owned(),
+                outcome: FlipOutcome::InProgress,
+                kind: FlipKind::Flip,
+                prior_previous: None,
+                detail: None,
+            });
+        })
+        .unwrap();
+
+    let state_path = layout.state_path();
+    let boot_settings = settings.clone();
+    let boot_task = tokio::spawn(async move { ShellRuntime::boot(boot_settings).await });
+
+    // While the rerun is in flight, reconcile's committed annotation must be
+    // present AND the outcome must still be InProgress — proving the record was
+    // not prematurely made terminal.
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = finite_shell::state::SharedState::load(&state_path).snapshot();
+            if let Some(flip) = snapshot.last_flip
+                && flip
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("the swap had committed"))
+            {
+                return flip.outcome;
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    })
+    .await
+    .expect("reconcile must annotate the committed interrupted flip during the rerun");
+    assert_eq!(
+        observed,
+        FlipOutcome::InProgress,
+        "a committed interrupted flip must stay InProgress across the boot rerun \
+         so a second crash re-reconciles instead of adopting an unverified generation"
+    );
+
+    let rebooted = boot_task.await.unwrap().unwrap();
+    let flip = wait_for_flip_outcome(&rebooted.state, FlipOutcome::RolledBack).await;
+    assert!(flip.detail.unwrap().contains("boot gate rerun failed"));
+    assert!(rebooted.state.snapshot().is_bad("v2-broken"));
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v1")
+    );
+    rebooted.shutdown().await;
+}
+
+/// Fix 3(b): an interrupted ROLLBACK whose boot gate rerun fails must NOT
+/// bad-list its target — the target is the known-good generation we were
+/// retreating to. The "rollback never marks bad" invariant the live path
+/// enforces must also hold on the crash-reconcile path.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_rollback_never_bad_lists_its_target() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(root.path());
+    let seed = pack_payload(root.path(), "v2", "two", false);
+    install_seed(&settings, &seed);
+    settings.health_timeout = Duration::from_millis(800);
+    let runtime = ShellRuntime::boot(settings.clone()).await.unwrap();
+    let layout = settings.layout();
+    wait_for_marker(&settings, "two").await;
+
+    // Put a (broken) rollback target on disk. Staging only verifies + unpacks;
+    // brokenness surfaces only when its agentd is started at the rerun gate.
+    let target = pack_payload(root.path(), "v1-broken", "brokentarget", true);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&target, false),
+    )
+    .await
+    .unwrap();
+    runtime.shutdown().await;
+
+    // A crash after a rollback (v2 → v1-broken) committed its symlink swap but
+    // before the gate resolved: current=v1-broken, previous=v2 (the swap wrote
+    // `previous = from`), prior_previous=v1-broken.
+    finite_shell::generations::set_link_version(&layout.current_link(), "v1-broken").unwrap();
+    finite_shell::generations::set_link_version(&layout.previous_link(), "v2").unwrap();
+    runtime
+        .state
+        .update(|state| {
+            state.last_flip = Some(FlipRecord {
+                from: Some("v2".to_owned()),
+                to: "v1-broken".to_owned(),
+                at: "2026-08-06T00:00:00Z".to_owned(),
+                outcome: FlipOutcome::InProgress,
+                kind: FlipKind::Rollback,
+                prior_previous: Some("v1-broken".to_owned()),
+                detail: None,
+            });
+        })
+        .unwrap();
+
+    let rebooted = ShellRuntime::boot(settings.clone()).await.unwrap();
+    let flip = wait_for_flip_outcome(&rebooted.state, FlipOutcome::RolledBack).await;
+    let state = rebooted.state.snapshot();
+    assert!(
+        !state.is_bad("v1-broken"),
+        "an interrupted rollback must never bad-list the generation it retreated to"
+    );
+    assert!(state.bad.is_empty(), "no version should be bad-listed");
+    assert_eq!(flip.to, "v1-broken");
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v2"),
+        "restoration returns to the rollback's from generation"
+    );
+    wait_for_marker(&settings, "two").await;
+    rebooted.shutdown().await;
+}
+
+/// Fix 3(c): a crash in the precommit window (the flip wrote `previous = from`
+/// but never committed `current`) must restore `previous` to `prior_previous`
+/// at boot, so the genuine N−1 generation survives the boot-time prune and
+/// stays selectable for rollback.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_precommit_crash_restores_previous_and_keeps_the_real_n_minus_1() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, runtime) = boot_seeded(root.path(), "v1", "one").await;
+    let layout = settings.layout();
+    wait_for_marker(&settings, "one").await;
+
+    // Advance to N = v2 so v1 becomes N−1.
+    let v2 = pack_payload(root.path(), "v2", "two", false);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&v2, false),
+    )
+    .await
+    .unwrap();
+    authed_request(&runtime, json!({ "verb": "flip" })).await;
+    wait_for_flip_outcome(&runtime.state, FlipOutcome::Success).await;
+    wait_for_marker(&settings, "two").await;
+    // Stage N+1 = v3.
+    let v3 = pack_payload(root.path(), "v3", "three", false);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&v3, false),
+    )
+    .await
+    .unwrap();
+    assert!(layout.generation_dir("v1").is_dir());
+    runtime.shutdown().await;
+
+    // Precommit crash of a flip v2 → v3: `previous` was retargeted at the
+    // outgoing v2, but `current` never committed (still v2). prior_previous is
+    // the real N−1 = v1.
+    finite_shell::generations::set_link_version(&layout.previous_link(), "v2").unwrap();
+    runtime
+        .state
+        .update(|state| {
+            state.last_flip = Some(FlipRecord {
+                from: Some("v2".to_owned()),
+                to: "v3".to_owned(),
+                at: "2026-08-06T00:00:00Z".to_owned(),
+                outcome: FlipOutcome::InProgress,
+                kind: FlipKind::Flip,
+                prior_previous: Some("v1".to_owned()),
+                detail: None,
+            });
+        })
+        .unwrap();
+
+    let rebooted = ShellRuntime::boot(settings.clone()).await.unwrap();
+    let state = rebooted.state.snapshot();
+    assert_eq!(state.last_flip.unwrap().outcome, FlipOutcome::Interrupted);
+    assert_eq!(
+        read_link_version(&layout.previous_link()).as_deref(),
+        Some("v1"),
+        "the precommit reconcile must restore previous to prior_previous (the real N−1)"
+    );
+    assert!(
+        layout.generation_dir("v1").is_dir(),
+        "the real N−1 generation must survive the boot-time prune"
+    );
+    assert_eq!(
+        read_link_version(&layout.current_link()).as_deref(),
+        Some("v2")
+    );
+    wait_for_marker(&settings, "two").await;
+    rebooted.shutdown().await;
+}
+
+/// Fix 3(d): if the generation being restored won't reach a running state, the
+/// outcome is `failed_open`, not `rolled_back`. A supervisor handle merely
+/// existing is not proof the old generation came back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_whose_agentd_never_runs_is_failed_open_not_rolled_back() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(root.path());
+    // The seed itself is broken so the restore target's agentd never runs.
+    let seed = pack_payload(root.path(), "v1-broken", "brokenseed", true);
+    install_seed(&settings, &seed);
+    settings.health_timeout = Duration::from_millis(800);
+    let runtime = ShellRuntime::boot(settings.clone()).await.unwrap();
+    let layout = settings.layout();
+    let broken = pack_payload(root.path(), "v2-broken", "broken", true);
+    stage_payload(
+        &settings,
+        &layout,
+        &runtime.state,
+        &stage_request_for(&broken, false),
+    )
+    .await
+    .unwrap();
+    runtime.shutdown().await;
+
+    // A committed interrupted flip v1-broken → v2-broken. The rerun gate fails
+    // (v2-broken never runs), restoration targets v1-broken — which also never
+    // runs — so restoration cannot be verified.
+    finite_shell::generations::set_link_version(&layout.previous_link(), "v1-broken").unwrap();
+    finite_shell::generations::set_link_version(&layout.current_link(), "v2-broken").unwrap();
+    runtime
+        .state
+        .update(|state| {
+            state.last_flip = Some(FlipRecord {
+                from: Some("v1-broken".to_owned()),
+                to: "v2-broken".to_owned(),
+                at: "2026-08-06T00:00:00Z".to_owned(),
+                outcome: FlipOutcome::InProgress,
+                kind: FlipKind::Flip,
+                prior_previous: None,
+                detail: None,
+            });
+        })
+        .unwrap();
+
+    let rebooted = ShellRuntime::boot(settings.clone()).await.unwrap();
+    let flip = wait_for_flip_outcome(&rebooted.state, FlipOutcome::FailedOpen).await;
+    assert!(
+        flip.detail.unwrap().contains("restoration also failed"),
+        "a restore whose agentd never runs must be failed_open"
+    );
     rebooted.shutdown().await;
 }
 
@@ -1526,6 +1812,7 @@ fn healthz_replicates_health_server_py_fields_and_adds_shell_fields() {
                 to: "v2".to_owned(),
                 at: "2026-08-06T00:00:00Z".to_owned(),
                 outcome: FlipOutcome::Success,
+                kind: FlipKind::Flip,
                 prior_previous: None,
                 detail: None,
             });

@@ -471,9 +471,12 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     // SIGTERM takes the same graceful path as ctrl_c: finite-shell quiesces a
     // flip by SIGTERM-ing agentd's process group, and the supervisor's
     // TERM-then-KILL drain is what gives Hermes/bridge/finitechat their bounded
-    // window to finish mid-stream writes. (The group signal also reaches the
-    // children directly; the drain tolerates a child that has already exited —
-    // its `wait()` just returns immediately.)
+    // window to finish mid-stream writes. shutdown() JOINS the supervise tasks
+    // before returning, so run_daemon does not return (dropping the runtime and
+    // kill_on_drop-SIGKILLing the children) until that drain has actually
+    // completed — the window is held open, not merely signalled. (The group
+    // signal also reaches the children directly; the drain tolerates a child
+    // that has already exited — its `wait()` just returns immediately.)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         result = &mut delivery_worker => {

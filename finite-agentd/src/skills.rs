@@ -995,6 +995,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_converge_applies_the_channel_skills_head_once_and_dedups_unchanged() {
+        use finite_service_directory::ServiceDirectoryV1;
+
+        let dir = tempfile::tempdir().unwrap();
+        let packed = packed_bundle(dir.path());
+        let bundle_base = serve_bytes(vec![
+            (
+                "/skills-demo.tar.gz".to_owned(),
+                std::fs::read(&packed.tarball_path).unwrap(),
+            ),
+            (
+                "/skills-demo.tar.gz.manifest.json".to_owned(),
+                std::fs::read(&packed.manifest_path).unwrap(),
+            ),
+        ])
+        .await;
+        let directory_base = serve_bytes(vec![(
+            "/api/core/v1/service-directory".to_owned(),
+            signed_directory_bytes(Some(&bundle_base), &packed),
+        )])
+        .await;
+        let invocations = dir.path().join("cli-invocations");
+        let cli = write_fake_cli(
+            dir.path(),
+            &format!(
+                "printf 'run\\n' >> {}\nprintf '%s\\n' '{{\"applied\": true, \"skillCount\": 1, \"treeDigest\": \"ignored\"}}'",
+                invocations.display()
+            ),
+        );
+        let agent_home = dir.path().join("agent-home");
+        let mut config = daemon_config(&agent_home, &cli);
+        config.service_directory_url =
+            Some(format!("{directory_base}/api/core/v1/service-directory"));
+        // The channel the shell recorded beside its socket.
+        let shell_dir = dir.path().join("shell");
+        std::fs::create_dir_all(&shell_dir).unwrap();
+        std::fs::write(shell_dir.join("channel"), "canary\n").unwrap();
+        config.shell_socket = shell_dir.join("shell.sock");
+
+        let directory = ServiceDirectoryV1::from_verified_json_bytes(
+            &signed_directory_bytes(Some(&bundle_base), &packed),
+            &test_signing_key().verifying_key(),
+        )
+        .unwrap();
+
+        // First tick applies the head through the verified sync path.
+        crate::directory::converge_channel_skills(&config, &directory).await;
+        assert_eq!(
+            std::fs::read_to_string(&invocations)
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "the first converge must apply the head"
+        );
+        let marker =
+            std::fs::read_to_string(agent_home.join("agentd/applied-skills-head")).unwrap();
+        assert!(marker.contains(&packed.manifest.artifact_id));
+        assert!(marker.contains(&packed.manifest.tarball_sha256));
+
+        // Second tick with an unchanged head does no work (the marker dedups
+        // before any fetch or CLI run).
+        crate::directory::converge_channel_skills(&config, &directory).await;
+        assert_eq!(
+            std::fs::read_to_string(&invocations)
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "an unchanged head must not re-apply"
+        );
+    }
+
+    #[tokio::test]
     async fn the_cli_entry_records_failures_and_fails_closed_without_a_release_key() {
         let dir = tempfile::tempdir().unwrap();
         let cli = write_fake_cli(dir.path(), "exit 7");

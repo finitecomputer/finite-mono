@@ -34,6 +34,13 @@ pub const PAYLOAD_BUNDLE_KIND: &str = "payload_bundle";
 /// fleet.
 pub const DIRECTORY_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How far into the future a `generated_at` may sit before it is rejected. A
+/// validly-signed but future-dated document would otherwise pass the max-age
+/// check (now − future is negative) and then become the monotonic replay
+/// floor, freezing all updates until wall-clock time catches up. 5 minutes
+/// absorbs ordinary clock skew while bounding that freeze.
+pub const DIRECTORY_MAX_FUTURE_SKEW: Duration = Duration::from_secs(5 * 60);
+
 const DEFAULT_FETCH_CAP_BYTES: usize = 64 * 1024;
 const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -62,6 +69,14 @@ pub enum DirectoryError {
          last-seen floor {floor}"
     )]
     Replayed { generated_at: String, floor: String },
+    #[error(
+        "service directory is future-dated: generated_at {generated_at} is more than \
+         {max_skew_secs}s ahead of now"
+    )]
+    Future {
+        generated_at: String,
+        max_skew_secs: u64,
+    },
 }
 
 /// One advertised service: where to reach it and, optionally, what client
@@ -165,13 +180,23 @@ impl ServiceDirectoryV1 {
     }
 
     /// Anti-replay max-age check: refuse a document generated more than
-    /// `max_age` before now (see [`DIRECTORY_MAX_AGE`]).
+    /// `max_age` before now (see [`DIRECTORY_MAX_AGE`]), and refuse one dated
+    /// more than [`DIRECTORY_MAX_FUTURE_SKEW`] in the future — a future
+    /// timestamp trivially passes the max-age test and would otherwise poison
+    /// the monotonic replay floor.
     pub fn check_max_age(&self, max_age: Duration) -> Result<(), DirectoryError> {
         let generated_at = self.generated_at_time()?;
-        if OffsetDateTime::now_utc() - generated_at > max_age {
+        let now = OffsetDateTime::now_utc();
+        if now - generated_at > max_age {
             return Err(DirectoryError::Expired {
                 generated_at: self.generated_at.clone(),
                 max_age_secs: max_age.as_secs(),
+            });
+        }
+        if (generated_at - now).whole_seconds() > DIRECTORY_MAX_FUTURE_SKEW.as_secs() as i64 {
+            return Err(DirectoryError::Future {
+                generated_at: self.generated_at.clone(),
+                max_skew_secs: DIRECTORY_MAX_FUTURE_SKEW.as_secs(),
             });
         }
         Ok(())
@@ -680,6 +705,28 @@ mod tests {
             .unwrap();
         // An unparseable persisted floor never wedges convergence.
         directory.check_not_older_than("not a timestamp").unwrap();
+    }
+
+    #[test]
+    fn a_future_dated_directory_is_refused_before_it_can_poison_the_floor() {
+        // Well beyond the 5-minute skew tolerance: a validly-signed but
+        // future-dated document must be rejected distinctly, not admitted as
+        // "not stale" (now − future is negative) and then frozen in as the
+        // monotonic replay floor.
+        let future_at = (OffsetDateTime::now_utc() + Duration::from_secs(60 * 60))
+            .format(&Rfc3339)
+            .unwrap();
+        let directory = signed_directory_generated_at(&future_at);
+        let error = directory.check_max_age(DIRECTORY_MAX_AGE).unwrap_err();
+        assert!(matches!(error, DirectoryError::Future { .. }));
+
+        // Inside the tolerance (a minute ahead): ordinary clock skew is fine.
+        let near = (OffsetDateTime::now_utc() + Duration::from_secs(60))
+            .format(&Rfc3339)
+            .unwrap();
+        signed_directory_generated_at(&near)
+            .check_max_age(DIRECTORY_MAX_AGE)
+            .unwrap();
     }
 
     #[tokio::test]

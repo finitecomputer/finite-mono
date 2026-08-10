@@ -6,7 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::task::JoinHandle;
 
 use crate::AgentdError;
 
@@ -50,10 +51,22 @@ enum ProcessAction {
     Stop,
 }
 
+/// Overall cap on the graceful drain. Each supervise task already bounds its
+/// own child at 10s (TERM→KILL), so joining is naturally bounded; this cap only
+/// guards against a stuck child hanging the shell's flip forever. After it
+/// elapses `shutdown()` returns and lets the shell's group-KILL sweep finish
+/// the remainder.
+const SHUTDOWN_DRAIN_CAP: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct SupervisorHandle {
     hermes_tx: mpsc::Sender<ProcessAction>,
     all_txs: Arc<Vec<mpsc::Sender<ProcessAction>>>,
+    // Join handles for the supervise tasks. `shutdown()` drains this so the
+    // graceful TERM→KILL window each task holds open is actually awaited before
+    // returning — without joining them the tokio runtime drops on return and
+    // `kill_on_drop(true)` SIGKILLs every child milliseconds after TERM.
+    supervise_joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
     status: Arc<RwLock<SupervisorStatus>>,
 }
 
@@ -103,9 +116,23 @@ impl SupervisorHandle {
     }
 
     pub async fn shutdown(&self) {
+        // 1. Ask every supervise task to stop its child gracefully.
         for tx in self.all_txs.iter() {
             let _ = tx.send(ProcessAction::Stop).await;
         }
+        // 2. Actually hold the drain window open: join the supervise tasks so
+        //    each child's TERM→KILL drain completes before we return. Bounded by
+        //    SHUTDOWN_DRAIN_CAP so a wedged child can't hang the flip forever.
+        let joins: Vec<JoinHandle<()>> = {
+            let mut guard = self.supervise_joins.lock().await;
+            std::mem::take(&mut *guard)
+        };
+        let drain = async {
+            for join in joins {
+                let _ = join.await;
+            }
+        };
+        let _ = tokio::time::timeout(SHUTDOWN_DRAIN_CAP, drain).await;
     }
 }
 
@@ -119,20 +146,35 @@ pub fn start_supervisor(
     let (sidecar_tx, sidecar_rx) = mpsc::channel(4);
     let (hermes_tx, hermes_rx) = mpsc::channel(4);
     let mut all_txs = vec![sidecar_tx, hermes_tx.clone()];
+    // Supervise-task join handles, awaited by shutdown() so each child's
+    // graceful TERM→KILL drain actually completes before run_daemon returns.
+    let mut supervise_joins: Vec<JoinHandle<()>> = Vec::new();
 
-    tokio::spawn(supervise_process(sidecar, sidecar_rx, Arc::clone(&status)));
+    supervise_joins.push(tokio::spawn(supervise_process(
+        sidecar,
+        sidecar_rx,
+        Arc::clone(&status),
+    )));
     // Best-effort slot: supervised (restart with backoff, SIGTERM drain on
     // shutdown/flip) but deliberately outside the readiness contract.
     if let Some(brain_sync) = brain_sync {
         let (brain_tx, brain_rx) = mpsc::channel(4);
         all_txs.push(brain_tx);
-        tokio::spawn(supervise_process(brain_sync, brain_rx, Arc::clone(&status)));
+        supervise_joins.push(tokio::spawn(supervise_process(
+            brain_sync,
+            brain_rx,
+            Arc::clone(&status),
+        )));
     }
     match health {
         Some(health) => {
             let (health_tx, health_rx) = mpsc::channel(4);
             all_txs.push(health_tx);
-            tokio::spawn(supervise_process(health, health_rx, Arc::clone(&status)));
+            supervise_joins.push(tokio::spawn(supervise_process(
+                health,
+                health_rx,
+                Arc::clone(&status),
+            )));
         }
         None => {
             // finite-shell serves /healthz itself. The status contract
@@ -156,11 +198,16 @@ pub fn start_supervisor(
             });
         }
     }
-    tokio::spawn(supervise_process(hermes, hermes_rx, Arc::clone(&status)));
+    supervise_joins.push(tokio::spawn(supervise_process(
+        hermes,
+        hermes_rx,
+        Arc::clone(&status),
+    )));
 
     SupervisorHandle {
         hermes_tx,
         all_txs: Arc::new(all_txs),
+        supervise_joins: Arc::new(Mutex::new(supervise_joins)),
         status,
     }
 }
@@ -403,18 +450,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_delivers_a_real_sigterm_that_children_can_trap_and_drain_on() {
+    async fn shutdown_holds_the_drain_window_open_until_a_slow_child_exits_cleanly() {
         // The graceful path agentd's own SIGTERM handler routes through:
         // supervisor.shutdown() must deliver SIGTERM in-process (no `kill`
-        // binary exists in the runtime image) and give the child its bounded
-        // window to finish work before any SIGKILL.
+        // binary exists in the runtime image) AND actually hold the drain
+        // window open — joining the supervise task — until the child finishes.
+        // The child here traps TERM and drains for ~1s before writing its
+        // marker; if shutdown() were still fire-and-forget the runtime would
+        // drop and kill_on_drop would SIGKILL the child, so the marker must
+        // already exist the instant shutdown() returns (no polling).
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("drained");
         let script = dir.path().join("trapper.sh");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ntrap 'echo drained > {}; exit 0' TERM\nsleep 30 & wait\n",
+                "#!/bin/sh\ntrap 'sleep 1; echo drained > {}; exit 0' TERM\nsleep 30 & wait\n",
                 marker.display()
             ),
         )
@@ -440,13 +491,11 @@ mod tests {
 
         handle.shutdown().await;
 
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !marker.exists() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the child must observe SIGTERM and drain, not be SIGKILLed");
+        // No polling: shutdown() must not return until the slow drain finished.
+        assert!(
+            marker.exists(),
+            "shutdown() returned before the child's drain completed — the window was not held open"
+        );
     }
 
     #[tokio::test]

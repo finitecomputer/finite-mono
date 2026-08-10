@@ -273,3 +273,37 @@ Deliberately deferred as premature at current fleet scale: progressive-wave
 promotion, automatic head demotion (the fleet view's bad-list visibility +
 a human is today's circuit breaker), non-root payload processes, external
 user-journey sentinels as product.
+
+## Deferred from the 2026-08-10 re-reviews (tracked, not forgotten)
+
+Accepted as real but deliberately NOT pre-merge at ~50-agent scale (both
+reviewers agreed these are follow-ups). Do not let them evaporate:
+
+- **Wedged-but-connected gateway signal (Class 2) — top follow-up.** agentd
+  must expose last-inbound vs last-gateway-turn so a wedged-but-"running"
+  gateway is visible in healthz → telemetry → fleet view. This is the
+  difference between preventing the last incident's *mechanics* and its
+  *symptoms*.
+- **Digest-based fencing.** The convergence fence compares `version_label`,
+  which is not unique; compare artifact-id/digest against the immutable
+  channel head / N−1 identities, and bad-list by digest. (Digest is already
+  plumbed to Core as evidence.)
+- **Flip-gate depth.** Gate parses agentd process states / a loopback probe so
+  an immediately-broken Hermes fails the flip (distinct from the deferred
+  Class-2 wedge).
+- **Control socket becomes a real boundary** only when payloads run non-root
+  (USER directive / SO_PEERCRED); today it is groundwork.
+- **Corrupt-state recovery mode.** state.json corruption after a commit
+  currently degrades to first-boot; enter a diagnosable recovery mode or
+  reconstruct from independently retained verified generation metadata.
+- **Python accessor verification.** finite_service_directory.py trusts the
+  shell-written cache; verify signature/key_id/age on read, or expose
+  resolved verified values through agentd.
+- Smaller: skills verify→adopt TOCTOU (pass the verified digest into the
+  apply step), live re-hash of generations at flip/boot, bad-list Vec cap,
+  telemetry registry entry pruning.
+- **Transition-readiness (post-merge, gated):** production payload/skills
+  publishing workflow (bundle storage + channel advance, not just the seed);
+  the three acceptance smokes as required jobs (blocked on a Linux/Docker
+  equivalent — the Apple-Container path is developer-machine-only); a Kata
+  generations proof.

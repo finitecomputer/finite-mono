@@ -183,6 +183,9 @@ pub fn set_link_version(link: &Path, version: &str) -> Result<(), ShellError> {
     let _ = fs::remove_file(&temporary);
     std::os::unix::fs::symlink(version, &temporary)?;
     fs::rename(&temporary, link)?;
+    // Fsync the parent so the symlink swap (the flip commit point) is durable
+    // across power loss, not just the tmp symlink's contents.
+    crate::state::fsync_dir(parent)?;
     Ok(())
 }
 

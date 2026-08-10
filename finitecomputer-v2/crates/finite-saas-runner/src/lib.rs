@@ -396,11 +396,19 @@ struct PayloadTelemetryEntry {
     /// throttle key.
     #[serde(default)]
     last_attempt_unix_ms: Option<u64>,
-    /// The Agent Principal this endpoint answered with on the first
-    /// successful read (trust-on-first-use, seconds after launch verified
-    /// the port). Host ports get reallocated across stops — the 2026-08-07
-    /// port-squat class — so every later read must present the same npub or
-    /// its report is dropped rather than attributed to this runtime.
+    /// The Agent Principal bound to this runtime, pinned from the
+    /// launch-verified `/contact` read (the same npub the identity binding
+    /// observed and Core recorded). It is authoritative: every telemetry read
+    /// must present exactly this npub or the report is dropped rather than
+    /// attributed to this runtime — host ports get reallocated across stops
+    /// (the 2026-08-07 port-squat class), so there is no trust-on-first-use.
+    ///
+    /// `None` only for legacy launches whose facts exposed no principal (older
+    /// images, or relocations before durable-pin backfill lands). Those fall
+    /// back to a first-read pin that still requires the *response* to carry a
+    /// principal and match thereafter; an unbound response is never reported.
+    /// Backfilling the pin for the existing fleet must come from Core/durable
+    /// identity, never this mutable contact port.
     #[serde(default)]
     agent_npub: Option<String>,
 }
@@ -595,6 +603,10 @@ where
                         now: None,
                     },
                 );
+                // The Agent Principal the identity binding verified from the
+                // launched runtime's /contact — carried forward to pin the
+                // telemetry entry so a later port-squat cannot wear this name.
+                let mut launch_verified_npub: Option<String> = None;
                 let launch_result = match launch_result {
                     Ok(_) => match self.wait_for_launch_readiness(&facts.source_machine_id) {
                         Ok(()) => match if lease.request.relocation.is_some() {
@@ -602,36 +614,42 @@ where
                             // restored state exposes the existing Agent
                             // Principal. Rebinding it after Core switches the
                             // Runtime host would add a fallible post-commit
-                            // step to the relocation boundary.
-                            Ok(())
+                            // step to the relocation boundary. (The pin is left
+                            // to durable-identity backfill, not re-read here.)
+                            Ok(None)
                         } else {
                             self.bind_agent_identity(&lease, &facts)
                         } {
-                            Ok(()) => self.queue.complete_agent_creation(
-                                &request_id,
-                                CompleteAgentCreationRequestInput {
-                                    request_id: request_id.clone(),
-                                    runner_id: self.runner_id.clone(),
-                                    lease_token: lease_token.clone(),
-                                    source_host_id: facts.source_host_id.clone(),
-                                    source_machine_id: facts.source_machine_id.clone(),
-                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                    state_schema_version: facts.state_schema_version.clone(),
-                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                    contact_endpoint: facts.contact_endpoint.clone(),
-                                    display_name: facts.display_name.clone(),
-                                    hostname: facts.hostname.clone(),
-                                    runtime_host: facts.runtime_host.clone(),
-                                    runtime_status: Some(RuntimeSummaryStatus::Online),
-                                    active_inference_profile: facts
-                                        .active_inference_profile
-                                        .clone(),
-                                    hermes_available: facts.hermes_available,
-                                    published_app_urls: facts.published_app_urls.clone(),
-                                    runtime_capabilities: Some(runtime_capabilities),
-                                    now: None,
-                                },
-                            ),
+                            Ok(verified_npub) => {
+                                launch_verified_npub = verified_npub;
+                                self.queue.complete_agent_creation(
+                                    &request_id,
+                                    CompleteAgentCreationRequestInput {
+                                        request_id: request_id.clone(),
+                                        runner_id: self.runner_id.clone(),
+                                        lease_token: lease_token.clone(),
+                                        source_host_id: facts.source_host_id.clone(),
+                                        source_machine_id: facts.source_machine_id.clone(),
+                                        runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                        state_schema_version: facts.state_schema_version.clone(),
+                                        provider_runtime_handle: facts
+                                            .provider_runtime_handle
+                                            .clone(),
+                                        contact_endpoint: facts.contact_endpoint.clone(),
+                                        display_name: facts.display_name.clone(),
+                                        hostname: facts.hostname.clone(),
+                                        runtime_host: facts.runtime_host.clone(),
+                                        runtime_status: Some(RuntimeSummaryStatus::Online),
+                                        active_inference_profile: facts
+                                            .active_inference_profile
+                                            .clone(),
+                                        hermes_available: facts.hermes_available,
+                                        published_app_urls: facts.published_app_urls.clone(),
+                                        runtime_capabilities: Some(runtime_capabilities),
+                                        now: None,
+                                    },
+                                )
+                            }
                             Err(error) => Err(error),
                         },
                         Err(error) => Err(error),
@@ -640,7 +658,10 @@ where
                 };
                 match launch_result {
                     Ok(completed) => {
-                        self.record_payload_telemetry_target(&facts);
+                        self.record_payload_telemetry_target(
+                            &facts,
+                            launch_verified_npub.as_deref(),
+                        );
                         Ok(RunOnceOutcome::Launched {
                             request_id,
                             runtime_id: completed.request.agent_runtime_id,
@@ -699,7 +720,11 @@ where
     /// registry entry survives on disk because `run_cycle` rebuilds the
     /// runner every cycle. Best-effort: a write failure loses telemetry, not
     /// the launch.
-    fn record_payload_telemetry_target(&self, facts: &RuntimeLaunchFacts) {
+    fn record_payload_telemetry_target(
+        &self,
+        facts: &RuntimeLaunchFacts,
+        launch_verified_npub: Option<&str>,
+    ) {
         let Some(config) = &self.payload_telemetry else {
             return;
         };
@@ -710,9 +735,12 @@ where
             source_machine_id: facts.source_machine_id.clone(),
             contact_endpoint,
             last_attempt_unix_ms: None,
-            // Pinned on the first successful read, seconds from now while the
-            // launch-verified port is still certainly this runtime's.
-            agent_npub: None,
+            // Pinned from the launch-verified /contact identity binding, so the
+            // very first telemetry read is already held to this npub — no
+            // trust-on-first-use window. `None` only for legacy launches that
+            // exposed no principal (older facts / relocations); those fall back
+            // to a response-pinned check that still refuses unbound reports.
+            agent_npub: launch_verified_npub.map(str::to_string),
         };
         if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry) {
             eprintln!(
@@ -771,11 +799,13 @@ where
                     .map(str::to_string)
             };
             // Identity gate: never attribute a response to this runtime
-            // unless it presents the pinned Agent Principal. Ports are
-            // reallocated across stops (the 2026-08-07 port-squat class);
-            // a squatter's health must not wear this agent's name in the
-            // fleet view. Dropped reports leave the runtime's telemetry
-            // stale, which the convergence fence surfaces as `stale`.
+            // unless it presents the pinned Agent Principal. The pin is
+            // authoritative — set from the launch-verified /contact identity,
+            // not trust-on-first-use — because ports are reallocated across
+            // stops (the 2026-08-07 port-squat class) and a squatter's health
+            // must not wear this agent's name in the fleet view. Dropped
+            // reports leave the runtime's telemetry stale, which the
+            // convergence fence surfaces as `stale`.
             let observed_npub = field("agent_npub")
                 .or_else(|| field("npub"))
                 .filter(|value| value.starts_with("npub1"));
@@ -797,7 +827,24 @@ where
                     );
                     continue;
                 }
+                (None, None) => {
+                    // Legacy fallback (no launch-verified pin) AND the response
+                    // carries no principal: never silently report unbound — the
+                    // fleet view would show identity-less data. Wait for a
+                    // principal (or a Core-driven durable-pin backfill).
+                    eprintln!(
+                        "warning: payload telemetry response for {} carries no \
+                         Agent Principal and none was pinned at launch; \
+                         dropping report",
+                        entry.source_machine_id
+                    );
+                    continue;
+                }
                 (None, Some(observed)) => {
+                    // Legacy fallback only: no principal was pinned at launch
+                    // (older facts / relocations). Pin the first principal the
+                    // response presents and require every later read to match.
+                    // Not TOFU for current launches — those arrive pinned.
                     entry.agent_npub = Some(observed.clone());
                     if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry)
                     {
@@ -808,7 +855,8 @@ where
                         );
                     }
                 }
-                _ => {}
+                // Launch-pinned identity matched the response: report it.
+                (Some(_), Some(_)) => {}
             }
             // The shell's bad list rides along as evidence for the fleet
             // view ("N agents refused vX"). Absent for pre-shell images,
@@ -842,13 +890,16 @@ where
         }
     }
 
+    /// Verify and bind the launched runtime's Agent Principal, returning the
+    /// verified npub so callers can pin telemetry to it. `Ok(None)` when this
+    /// managed agent has no email to bind (nothing was verified).
     fn bind_agent_identity(
         &self,
         lease: &AgentCreationLease,
         facts: &RuntimeLaunchFacts,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<Option<String>, RunnerError> {
         let Some(agent_email) = lease.project.agent_email.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let config = self.agent_identity_authority.as_ref().ok_or_else(|| {
             RunnerError::AgentIdentityBinding(
@@ -909,7 +960,7 @@ where
                 "Identity Authority returned a mismatched binding".to_string(),
             ));
         }
-        Ok(())
+        Ok(Some(agent_npub.to_string()))
     }
 
     fn run_runtime_control(
@@ -5026,8 +5077,10 @@ mod tests {
         let server = std::thread::spawn(move || {
             // First telemetry pass: a shell-image health body (the shell
             // serves the same JSON on /contact, 503 while flipping — still a
-            // valid source). Second pass: a pre-shell body without the
-            // generation fields.
+            // valid source) carrying its Agent Principal, which pins the
+            // telemetry entry. Second pass: an unprincipalled body — now
+            // dropped, because a pinned entry never attributes an identity-less
+            // response.
             let (mut first, _) = listener.accept().unwrap();
             let request = read_http_request(&mut first);
             assert!(request.starts_with("GET /contact "));
@@ -5036,6 +5089,7 @@ mod tests {
                 503,
                 &serde_json::json!({
                     "ready": false,
+                    "agent_npub": "npub1owner",
                     "payload_version": "devfinity-v2",
                     "payload_digest": "d".repeat(64),
                     "shell_version": "0.1.0",
@@ -5083,8 +5137,8 @@ mod tests {
         assert!(registry_dir.join(format!("{machine_id}.json")).is_file());
         assert!(runner.queue.payload_reports.is_empty());
 
-        // Next cycle forwards the shell fields; the one after tolerates a
-        // pre-shell body by reporting absent fields.
+        // Next cycle pins the runtime's principal and forwards the shell
+        // fields; the one after drops an unprincipalled body outright.
         assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
         assert_eq!(runner.queue.payload_reports.len(), 1);
         let report = &runner.queue.payload_reports[0];
@@ -5101,23 +5155,20 @@ mod tests {
             Some(vec!["devfinity-v3-broken".to_string()])
         );
 
+        // An unprincipalled response against a pinned entry is dropped, not
+        // reported: no identity-less data ever reaches the fleet view.
         assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
-        assert_eq!(runner.queue.payload_reports.len(), 2);
-        let report = &runner.queue.payload_reports[1];
-        assert_eq!(report.payload_version_label, None);
-        assert_eq!(report.payload_digest, None);
-        assert_eq!(report.shell_version, None);
-        assert_eq!(report.release_channel, None);
         assert_eq!(
-            report.bad_versions, None,
-            "a pre-shell body has no payload_generations; absent, not empty"
+            runner.queue.payload_reports.len(),
+            1,
+            "an identity-less response must be dropped once an identity is pinned"
         );
         server.join().unwrap();
 
         // The stub is gone: an unreachable runtime is skipped, never an
         // error, and never a report of stale data.
         assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
-        assert_eq!(runner.queue.payload_reports.len(), 2);
+        assert_eq!(runner.queue.payload_reports.len(), 1);
     }
 
     #[test]
@@ -5128,7 +5179,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let bodies = [
-                // 1: pins the Agent Principal (trust-on-first-use).
+                // 1: legacy fallback (this launch exposed no pin) — the first
+                // principal-bearing response pins the Agent Principal.
                 serde_json::json!({
                     "agent_npub": "npub1owner", "payload_version": "v1", "channel": "canary",
                 }),
@@ -5201,6 +5253,80 @@ mod tests {
     }
 
     #[test]
+    fn payload_telemetry_requires_the_launch_pinned_identity_with_no_tofu() {
+        // An entry pinned at launch (the authoritative path) never accepts an
+        // unprincipalled first response: the very first read is already held to
+        // the pinned npub, so there is no trust-on-first-use window a squatter
+        // could exploit.
+        let work_root = tempfile::tempdir().unwrap();
+        let registry_dir = work_root.path().join("payload-telemetry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let bodies = [
+                // 1: no principal at all — dropped even though this is the
+                // first read, because launch already pinned the identity.
+                serde_json::json!({ "payload_version": "v9" }),
+                // 2: a squatter on the reallocated port — dropped.
+                serde_json::json!({
+                    "agent_npub": "npub1squatter", "payload_version": "v9", "channel": "stable",
+                }),
+                // 3: the launch-verified owner — reported.
+                serde_json::json!({
+                    "agent_npub": "npub1owner", "payload_version": "v2", "channel": "canary",
+                }),
+            ];
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_request(&mut stream);
+                write_http_json(&mut stream, 200, &body.to_string());
+            }
+        });
+
+        // Pre-seed a registry entry pinned from launch (as
+        // record_payload_telemetry_target now does with the verified npub).
+        let entry = PayloadTelemetryEntry {
+            source_machine_id: "finite-agent_pinned".to_string(),
+            contact_endpoint: format!("http://{address}/contact"),
+            last_attempt_unix_ms: None,
+            agent_npub: Some("npub1owner".to_string()),
+        };
+        write_payload_telemetry_entry(&registry_dir, &entry).unwrap();
+
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::idle(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1", "lease-2", "lease-3", "lease-4"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_payload_telemetry(Some(PayloadTelemetryConfig {
+            registry_dir: registry_dir.clone(),
+            interval: Duration::ZERO,
+            http_timeout: Duration::from_secs(1),
+        }));
+
+        // 1: unprincipalled first response is dropped (no TOFU).
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert!(runner.queue.payload_reports.is_empty());
+        // 2: squatter dropped.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert!(runner.queue.payload_reports.is_empty());
+        // 3: the launch-verified owner is reported.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+        assert_eq!(
+            runner.queue.payload_reports[0]
+                .payload_version_label
+                .as_deref(),
+            Some("v2")
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
     fn payload_telemetry_is_throttled_per_runtime_and_off_without_config() {
         let work_root = tempfile::tempdir().unwrap();
         let registry_dir = work_root.path().join("payload-telemetry");
@@ -5212,7 +5338,10 @@ mod tests {
             write_http_json(
                 &mut only,
                 200,
-                &serde_json::json!({ "ready": true, "payload_version": "v1" }).to_string(),
+                &serde_json::json!({
+                    "ready": true, "agent_npub": "npub1owner", "payload_version": "v1",
+                })
+                .to_string(),
             );
         });
 

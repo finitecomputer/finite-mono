@@ -53,15 +53,35 @@ pub enum FlipOutcome {
     Interrupted,
 }
 
+/// Whether a transition advances to a new generation (a flip) or retreats to
+/// a known-good one (a rollback). Persisted so a crash-interrupted transition
+/// can be reconciled correctly at boot — in particular, an interrupted
+/// rollback must never bad-list the generation it was retreating to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FlipKind {
+    /// Advancing to a candidate; a failed health gate marks the target bad.
+    #[default]
+    Flip,
+    /// Retreating to a known-good generation; never marks a target bad.
+    Rollback,
+}
+
 /// One flip (or rollback) transition. `prior_previous` remembers what
 /// `previous` pointed at before the flip so a health-gate rollback can
-/// restore it exactly.
+/// restore it exactly. `kind` records whether this was a flip or a rollback so
+/// a crash-interrupted transition reconciles without bad-listing a rollback's
+/// known-good target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlipRecord {
     pub from: Option<String>,
     pub to: String,
     pub at: String,
     pub outcome: FlipOutcome,
+    /// Defaults to `Flip` for records written before the field existed (the
+    /// pre-existing, bad-list-on-failure behavior).
+    #[serde(default)]
+    pub kind: FlipKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_previous: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,7 +240,8 @@ impl SharedState {
     }
 }
 
-/// Atomic JSON write: tempfile in the destination directory, fsync, rename.
+/// Atomic JSON write: tempfile in the destination directory, fsync, rename,
+/// then fsync the parent directory so the rename itself survives power loss.
 pub fn write_atomic_json(path: &Path, value: &impl Serialize) -> Result<(), ShellError> {
     let parent = path
         .parent()
@@ -234,7 +255,35 @@ pub fn write_atomic_json(path: &Path, value: &impl Serialize) -> Result<(), Shel
     temporary
         .persist(path)
         .map_err(|error| ShellError::Io(error.error))?;
+    fsync_dir(parent)?;
     Ok(())
+}
+
+/// Fsync a directory so a rename into it is durable across power loss. Best
+/// effort on filesystems that reject directory fsync (e.g. some virtiofs
+/// binds): a failure to open/sync the directory is not fatal, matching how the
+/// shell tolerates the virtiofs socket-chmod refusal.
+pub fn fsync_dir(dir: &Path) -> Result<(), ShellError> {
+    match fs::File::open(dir) {
+        Ok(handle) => {
+            if let Err(error) = handle.sync_all() {
+                eprintln!(
+                    "finite-shell: directory fsync on {} was not honored ({error}); \
+                     the rename is not power-loss durable on this filesystem",
+                    dir.display()
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!(
+                "finite-shell: could not open {} to fsync it ({error}); \
+                 the rename is not power-loss durable on this filesystem",
+                dir.display()
+            );
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

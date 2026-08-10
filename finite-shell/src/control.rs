@@ -26,7 +26,9 @@ use crate::generations::{
     self, PAYLOAD_AGENTD_RELATIVE, StageRequest, contained_generation_dir, read_link_version,
     remove_link, set_link_version,
 };
-use crate::state::{BadGeneration, FlipOutcome, FlipRecord, SeedRecord, SharedState, now_rfc3339};
+use crate::state::{
+    BadGeneration, FlipKind, FlipOutcome, FlipRecord, SeedRecord, SharedState, now_rfc3339,
+};
 use crate::supervise::{AgentdSpec, AgentdSupervisor, start_agentd};
 use crate::{
     CONTROL_TOKEN_ENV, DataLayout, SHELL_VERSION, ShellError, ShellSettings, fixup, health, shims,
@@ -45,14 +47,15 @@ pub struct ShellRuntime {
     /// Serializes stage/flip/rollback across the socket verbs AND the
     /// autonomous channel poller; a transition in progress refuses another.
     pub(crate) transition_gate: Arc<TokioMutex<()>>,
-    /// The per-boot control-socket token. Honest threat model: the token
-    /// file is 0600 root-owned, but payload processes also run as root
-    /// today, so the file alone is a weak boundary — the real boundary for
-    /// LLM-spawned children is that agentd receives the token only via env
-    /// and scrubs it from every child it spawns. This de-fangs "a
-    /// prompt-injected payload process execs `finite-shell ctl rollback` in
-    /// a loop" without claiming more than it delivers; SO_PEERCRED +
-    /// non-root payloads are the real fix and remain future work.
+    /// The per-boot control-socket token. Honest threat model: this is
+    /// groundwork, NOT a boundary today. The token file is 0600 root-owned and
+    /// agentd receives the token only via env and scrubs it from every child it
+    /// spawns — but payload processes all run as root today, and `finite-shell
+    /// ctl` itself falls back to reading the same 0600 token file, so a
+    /// prompt-injected payload can just run `ctl rollback` and read the token
+    /// directly. The env-scrub mechanism only becomes a real boundary once
+    /// payloads run non-root (with SO_PEERCRED on the socket); until then it
+    /// prevents nothing on its own.
     control_token: Arc<String>,
     /// Rate limit for unauthorized-request log lines (unix seconds of the
     /// last line): a rejected caller in a loop must not fill the log.
@@ -182,11 +185,20 @@ impl ShellRuntime {
     }
 
     /// If state.json says a flip was in progress, the shell died mid-flip.
-    /// The symlinks are the truth: record where they actually landed. When
-    /// the swap had NOT committed the old generation simply boots
-    /// (`Interrupted`). When it HAD committed, the adopted generation never
-    /// passed its health gate — the returned record tells boot to rerun the
-    /// gate instead of trusting an unverified candidate.
+    /// The symlinks are the truth: record where they actually landed.
+    ///
+    /// When the swap had NOT committed, the old generation simply boots. The
+    /// record becomes terminal (`Interrupted`) and — because the transition
+    /// may have already retargeted `previous` at the outgoing generation
+    /// before crashing (losing the real N−1) — `previous` is restored to
+    /// `prior_previous` so nothing prunes the genuine rollback target.
+    ///
+    /// When the swap HAD committed, the adopted generation never passed its
+    /// health gate. The record is deliberately LEFT `InProgress` (not written
+    /// terminal): the returned record tells boot to rerun the gate, and a
+    /// crash during that rerun must re-reconcile rather than adopt an
+    /// unverified generation behind a terminal state. `rerun_gate_for_adopted_flip`
+    /// writes the real terminal outcome once the gate resolves.
     fn reconcile_interrupted_flip(&self) -> Result<Option<FlipRecord>, ShellError> {
         let snapshot = self.state.snapshot();
         let Some(flip) = snapshot.last_flip else {
@@ -197,24 +209,31 @@ impl ShellRuntime {
         }
         let actual_current = read_link_version(&self.layout.current_link());
         let committed = actual_current.as_deref() == Some(flip.to.as_str());
-        self.state.update(|state| {
-            if let Some(record) = state.last_flip.as_mut() {
-                record.outcome = FlipOutcome::Interrupted;
-                record.detail = Some(format!(
-                    "shell restarted mid-flip; symlinks say current={} ({})",
-                    actual_current.as_deref().unwrap_or("<none>"),
-                    if committed {
-                        "the swap had committed; the health gate reruns at boot"
-                    } else {
-                        "the swap had not committed"
-                    }
-                ));
+        if !committed {
+            // Precommit crash window: the transition wrote `previous = from`
+            // (== the still-current generation) but never committed `current`.
+            // Restore `previous` to what it pointed at before the flip so the
+            // genuine N−1 rollback target survives the boot-time prune.
+            match &flip.prior_previous {
+                Some(previous) => {
+                    set_link_version(&self.layout.previous_link(), previous)?;
+                }
+                None => remove_link(&self.layout.previous_link())?,
             }
+        }
+        self.state.update(|state| {
             if committed {
-                // The swap was the commit point; the staged generation was
-                // consumed. Its digest is the only record of what `current`
-                // now points at; without it (e.g. an interrupted rollback)
-                // the digest is honestly unknown.
+                // Leave the outcome InProgress; only annotate. The staged
+                // generation was consumed by the commit, so its digest is the
+                // only record of what `current` now points at (honestly
+                // unknown for an interrupted rollback, which had no staged).
+                if let Some(record) = state.last_flip.as_mut() {
+                    record.detail = Some(format!(
+                        "shell restarted mid-flip; symlinks say current={} \
+                         (the swap had committed; the health gate reruns at boot)",
+                        actual_current.as_deref().unwrap_or("<none>"),
+                    ));
+                }
                 let staged_digest = state
                     .staged
                     .as_ref()
@@ -224,6 +243,14 @@ impl ShellRuntime {
                     state.staged = None;
                 }
                 state.current_digest = staged_digest;
+            } else if let Some(record) = state.last_flip.as_mut() {
+                record.outcome = FlipOutcome::Interrupted;
+                record.detail = Some(format!(
+                    "shell restarted mid-flip; symlinks say current={} \
+                     (the swap had not committed; previous restored to {:?})",
+                    actual_current.as_deref().unwrap_or("<none>"),
+                    flip.prior_previous,
+                ));
             }
         })?;
         Ok(committed.then_some(flip))
@@ -259,7 +286,12 @@ impl ShellRuntime {
                             // generation; no verified digest for it is on
                             // record.
                             state.current_digest = None;
-                            if !state.is_bad(&flip.to) {
+                            // Only a flip bad-lists its target. An interrupted
+                            // rollback was retreating TO a known-good
+                            // generation — bad-listing it would violate the
+                            // "rollback never marks bad" invariant the live
+                            // path enforces.
+                            if flip.kind == FlipKind::Flip && !state.is_bad(&flip.to) {
                                 state.bad.push(BadGeneration {
                                     version_label: flip.to.clone(),
                                     reason: reason.clone(),
@@ -561,7 +593,7 @@ impl ShellRuntime {
             )));
         }
         let from = read_link_version(&self.layout.current_link());
-        self.begin_flip_record(&from, &to)?;
+        self.begin_flip_record(&from, &to, FlipKind::Flip)?;
         let runtime = self.clone();
         let flip_to = to.clone();
         tokio::spawn(async move {
@@ -583,7 +615,7 @@ impl ShellRuntime {
             )));
         }
         let from = read_link_version(&self.layout.current_link());
-        self.begin_flip_record(&from, &to)?;
+        self.begin_flip_record(&from, &to, FlipKind::Rollback)?;
         let runtime = self.clone();
         let rollback_to = to.clone();
         tokio::spawn(async move {
@@ -619,7 +651,12 @@ impl ShellRuntime {
         Ok(json!({ "ok": true, "channel": channel }))
     }
 
-    fn begin_flip_record(&self, from: &Option<String>, to: &str) -> Result<(), ShellError> {
+    fn begin_flip_record(
+        &self,
+        from: &Option<String>,
+        to: &str,
+        kind: FlipKind,
+    ) -> Result<(), ShellError> {
         let prior_previous = read_link_version(&self.layout.previous_link());
         self.state.update(|state| {
             state.last_flip = Some(FlipRecord {
@@ -627,6 +664,7 @@ impl ShellRuntime {
                 to: to.to_owned(),
                 at: now_rfc3339(),
                 outcome: FlipOutcome::InProgress,
+                kind,
                 prior_previous,
                 detail: None,
             });
@@ -706,8 +744,10 @@ impl ShellRuntime {
     }
 
     /// Restoration is only claimed when it is verifiable: `current` points
-    /// at the expected generation and (when one exists) its agentd
-    /// supervision is live again.
+    /// at the expected generation and (when one exists) its agentd actually
+    /// reaches a running state again. A supervisor handle merely existing is
+    /// not enough — a spawn-failing or crash-looping old generation must be
+    /// reported `failed_open`, never `rolled_back`.
     async fn verify_restored(&self, expected_current: &Option<String>) -> Result<(), ShellError> {
         let actual = read_link_version(&self.layout.current_link());
         if actual != *expected_current {
@@ -715,12 +755,33 @@ impl ShellRuntime {
                 "current points at {actual:?}, expected {expected_current:?}"
             )));
         }
-        if expected_current.is_some() && self.agentd_supervision().await.is_none() {
+        if expected_current.is_some() && !self.wait_for_agentd_running().await {
             return Err(ShellError::Supervisor(
-                "the previous generation's agentd is not supervised".to_owned(),
+                "the restored generation's agentd did not reach a running state".to_owned(),
             ));
         }
         Ok(())
+    }
+
+    /// Poll agentd supervision until it reports running (the same predicate the
+    /// health gate uses) or the health timeout elapses. Returns false if the
+    /// child never runs, or is crash-looping.
+    async fn wait_for_agentd_running(&self) -> bool {
+        let deadline = tokio::time::Instant::now() + self.settings.health_timeout;
+        loop {
+            if let Some(status) = self.agentd_supervision().await {
+                if status.crash_looping {
+                    return false;
+                }
+                if status.state == "running" && status.pid.is_some() {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(self.settings.health_gate_poll).await;
+        }
     }
 
     async fn transition_inner(
