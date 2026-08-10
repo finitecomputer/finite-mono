@@ -31,7 +31,17 @@ use crate::connections::{
     ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, TelegramApproveRequest,
     TelegramConnectRequest, TelegramHomeRequest,
 };
+use crate::directory::{SERVICE_DIRECTORY_URL_ENV, spawn_directory_refresher};
 use crate::ledger::{CommandDecision, Ledger, hex_digest};
+use crate::payload::{
+    DEFAULT_SHELL_SOCKET, PAYLOAD_SET_CHANNEL_SCHEMA, PAYLOAD_STAGE_SCHEMA,
+    PayloadSetChannelRequest, PayloadSettings, PayloadStageRequest, SHELL_SOCKET_ENV, payload_flip,
+    payload_rollback, payload_set_channel, payload_stage, payload_status,
+};
+use crate::skills::{
+    ALLOW_INSECURE_BUNDLE_URL_ENV, DEFAULT_FINITE_CLI_PATH, FINITE_CLI_PATH_ENV,
+    RELEASE_PUBLIC_KEY_ENV, SKILLS_SYNC_SCHEMA, SkillsSyncRequest, SkillsSyncSettings, sync_skills,
+};
 use crate::supervisor::{ProcessSpec, SupervisorHandle, SupervisorStatus, start_supervisor};
 use crate::transport::BridgeClient;
 
@@ -53,6 +63,12 @@ const SPECIALIZATION_BUNDLE_ENV: &str = "FINITE_SPECIALIZATION_BUNDLE";
 const SPECIALIZATION_WORKER_API_KEY_ENV: &str = "FINITE_SPECIALIZATION_WORKER_API_KEY";
 const UNVERIFIED_HERMES_GENERATION: u64 = u64::MAX;
 
+/// Set by finite-shell for its supervised agentd: the real (versioned) root
+/// of the active payload generation. When present, the daemon's default
+/// program paths resolve inside the payload instead of the legacy fixed
+/// image paths (`/opt`, `/runtime`, `/usr/local/bin`).
+pub(crate) const PAYLOAD_ROOT_ENV: &str = "FINITE_PAYLOAD_ROOT";
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct StartupSpecializationBundleConfig {
     pub bundle_id: String,
@@ -69,6 +85,16 @@ impl std::fmt::Debug for StartupSpecializationBundleConfig {
     }
 }
 
+/// The legacy in-payload Python health server. Absent when finite-shell
+/// serves `/healthz` itself (the shell-supervised payload world): the daemon
+/// then reports the `health` supervision slot as delegated instead of
+/// spawning a second, port-conflicting server.
+#[derive(Debug, Clone)]
+pub struct HealthServerSpec {
+    pub python: PathBuf,
+    pub script: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub agent_home: PathBuf,
@@ -80,10 +106,28 @@ pub struct DaemonConfig {
     pub hermes_command: PathBuf,
     pub hermes_probe_python: PathBuf,
     pub hermes_probe_script: PathBuf,
-    pub health_python: PathBuf,
-    pub health_script: PathBuf,
+    pub health_server: Option<HealthServerSpec>,
     pub authorized_accounts: BTreeSet<String>,
     pub specialization_bundle: Option<StartupSpecializationBundleConfig>,
+    pub release_public_key: Option<String>,
+    pub allow_insecure_bundle_url: bool,
+    pub finite_cli: PathBuf,
+    /// Core's signed service directory endpoint. When set, the daemon
+    /// refreshes `<agent home>/service-directory.json` periodically and
+    /// `agent.skills.sync` accepts the channel form.
+    pub service_directory_url: Option<String>,
+    /// finite-shell's control socket, the transport for `agent.payload.*`.
+    pub shell_socket: PathBuf,
+    /// The shell's per-boot control-socket token
+    /// (`FINITE_SHELL_CONTROL_TOKEN`), forwarded on every shell request and
+    /// scrubbed from every supervised child's environment.
+    pub shell_control_token: Option<String>,
+    /// The payload's `fbrain` binary, when the daemon owns the Brain sync
+    /// supervisor slot. The legacy image's entrypoint.sh runs the
+    /// `fbrain daemon supervise` restart loop itself; under finite-shell that
+    /// entrypoint is gone, so the daemon supervises it — payload-root-gated
+    /// so the legacy image never double-runs it.
+    pub brain_sync_bin: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,39 +181,76 @@ impl DaemonConfig {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .collect();
+        // Payload-relative defaults: under finite-shell (FINITE_PAYLOAD_ROOT
+        // set) the daemon's helpers live inside the generation; the legacy
+        // absolute image paths remain the fallback for the pre-shell image.
+        let payload_root = std::env::var(PAYLOAD_ROOT_ENV)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let payload_default = |relative: &str, legacy: &str| -> PathBuf {
+            payload_root
+                .as_ref()
+                .map(|root| root.join(relative))
+                .unwrap_or_else(|| PathBuf::from(legacy))
+        };
+        let hermes_gateway =
+            payload_default("opt/run_hermes_gateway.sh", "/opt/run_hermes_gateway.sh");
+        // The shell serves /healthz itself; only the legacy image (no payload
+        // root) or an explicit override still spawns the Python server.
+        let health_script = std::env::var("FINITE_AGENTD_HEALTH_SCRIPT").ok();
+        let health_server = match (&payload_root, health_script) {
+            (_, Some(script)) => Some(HealthServerSpec {
+                python: PathBuf::from(
+                    std::env::var("FINITE_AGENTD_HEALTH_PYTHON")
+                        .unwrap_or_else(|_| "python".to_owned()),
+                ),
+                script: PathBuf::from(script),
+            }),
+            (Some(_), None) => None,
+            (None, None) => Some(HealthServerSpec {
+                python: PathBuf::from(
+                    std::env::var("FINITE_AGENTD_HEALTH_PYTHON")
+                        .unwrap_or_else(|_| "python".to_owned()),
+                ),
+                script: PathBuf::from("/opt/health_server.py"),
+            }),
+        };
+        // Brain sync supervision (entrypoint.sh's old duty): on by default in
+        // the shell-payload world, disabled by an explicitly falsy
+        // FINITE_BRAIN_SYNC_SUPERVISOR (the entrypoint's own toggle), and
+        // absent when the payload ships no fbrain.
+        let brain_sync_enabled = !std::env::var("FINITE_BRAIN_SYNC_SUPERVISOR")
+            .is_ok_and(|value| matches!(value.trim(), "0" | "false" | "no"));
+        let brain_sync_bin = payload_root
+            .as_ref()
+            .filter(|_| brain_sync_enabled)
+            .map(|root| root.join("bin/fbrain"))
+            .filter(|bin| bin.is_file());
         Ok(Self {
             agent_home,
             hermes_home,
             bridge_url: format!("http://{bridge_addr}"),
             bridge_addr,
-            finitechat_bin: PathBuf::from(
-                std::env::var("FINITECHAT_BIN")
-                    .unwrap_or_else(|_| "/usr/local/bin/finitechat".to_owned()),
-            ),
-            prepare_command: PathBuf::from(
-                std::env::var("FINITE_AGENTD_PREPARE_COMMAND")
-                    .unwrap_or_else(|_| "/opt/run_hermes_gateway.sh".to_owned()),
-            ),
-            hermes_command: PathBuf::from(
-                std::env::var("FINITE_AGENTD_HERMES_COMMAND")
-                    .unwrap_or_else(|_| "/opt/run_hermes_gateway.sh".to_owned()),
-            ),
-            hermes_probe_python: PathBuf::from(
-                std::env::var("FINITE_AGENTD_HERMES_PROBE_PYTHON")
-                    .unwrap_or_else(|_| "python".to_owned()),
-            ),
-            hermes_probe_script: PathBuf::from(
-                std::env::var("FINITE_AGENTD_HERMES_PROBE_SCRIPT")
-                    .unwrap_or_else(|_| "/opt/probe_hermes_vision.py".to_owned()),
-            ),
-            health_python: PathBuf::from(
-                std::env::var("FINITE_AGENTD_HEALTH_PYTHON")
-                    .unwrap_or_else(|_| "python".to_owned()),
-            ),
-            health_script: PathBuf::from(
-                std::env::var("FINITE_AGENTD_HEALTH_SCRIPT")
-                    .unwrap_or_else(|_| "/opt/health_server.py".to_owned()),
-            ),
+            finitechat_bin: std::env::var("FINITECHAT_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| payload_default("bin/finitechat", "/usr/local/bin/finitechat")),
+            prepare_command: std::env::var("FINITE_AGENTD_PREPARE_COMMAND")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| hermes_gateway.clone()),
+            hermes_command: std::env::var("FINITE_AGENTD_HERMES_COMMAND")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| hermes_gateway),
+            hermes_probe_python: std::env::var("FINITE_AGENTD_HERMES_PROBE_PYTHON")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| payload_default("hermes-venv/bin/python", "python")),
+            hermes_probe_script: std::env::var("FINITE_AGENTD_HERMES_PROBE_SCRIPT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    payload_default("opt/probe_hermes_vision.py", "/opt/probe_hermes_vision.py")
+                }),
+            health_server,
             authorized_accounts,
             specialization_bundle: startup_specialization_bundle_from_values(
                 std::env::var(SPECIALIZATION_BUNDLE_ENV).ok().as_deref(),
@@ -177,10 +258,48 @@ impl DaemonConfig {
                     .ok()
                     .as_deref(),
             )?,
-        })
+            release_public_key: std::env::var(RELEASE_PUBLIC_KEY_ENV)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            allow_insecure_bundle_url: std::env::var(ALLOW_INSECURE_BUNDLE_URL_ENV)
+                .is_ok_and(|value| value == "1"),
+            finite_cli: std::env::var(FINITE_CLI_PATH_ENV)
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| payload_default("bin/finite", DEFAULT_FINITE_CLI_PATH)),
+            service_directory_url: std::env::var(SERVICE_DIRECTORY_URL_ENV)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            shell_socket: PathBuf::from(
+                std::env::var(SHELL_SOCKET_ENV).unwrap_or_else(|_| DEFAULT_SHELL_SOCKET.to_owned()),
+            ),
+            shell_control_token: std::env::var(crate::payload::SHELL_CONTROL_TOKEN_ENV)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            brain_sync_bin,
+        }
+        .with_token_file_fallback())
     }
 
-    fn state_dir(&self) -> PathBuf {
+    /// One-shot CLI invocations (`container exec finite-agentd payload-...`)
+    /// do not inherit the supervised daemon's environment; like
+    /// `finite-shell ctl`, they read the 0600 token file beside the shell
+    /// socket instead (they run as root via container exec).
+    fn with_token_file_fallback(mut self) -> Self {
+        if self.shell_control_token.is_none()
+            && let Some(dir) = self.shell_socket.parent()
+        {
+            self.shell_control_token = fs::read_to_string(dir.join("control-token"))
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+        }
+        self
+    }
+
+    pub(crate) fn state_dir(&self) -> PathBuf {
         self.agent_home.join("agentd")
     }
 
@@ -301,6 +420,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         sidecar_spec(&config),
         health_spec(&config),
         hermes_spec(&config),
+        brain_sync_spec(&config),
     );
     let verified_hermes_generation = Arc::new(AtomicU64::new(UNVERIFIED_HERMES_GENERATION));
     spawn_startup_specialization_verifier(
@@ -321,10 +441,14 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         startup_specialization_desired.clone(),
         Arc::clone(&verified_hermes_generation),
     );
+    // First refresh on daemon start, then every 15 minutes (jittered).
+    spawn_directory_refresher(&config);
 
     wait_for_bridge(&bridge).await?;
     let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
     spawn_delivery_stream(bridge.clone(), delivery_tx);
+    let skills_sync = SkillsSyncSettings::from_daemon_config(&config);
+    let payload = PayloadSettings::from_daemon_config(&config);
     let executor = CommandExecutor {
         identity,
         ledger,
@@ -337,17 +461,33 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         supervisor: supervisor.clone(),
         startup_specialization_desired,
         verified_hermes_generation,
+        skills_sync,
+        payload,
     };
 
     let delivery_worker =
         run_delivery_loop(delivery_rx, |delivery| executor.handle_delivery(delivery));
     tokio::pin!(delivery_worker);
+    // SIGTERM takes the same graceful path as ctrl_c: finite-shell quiesces a
+    // flip by SIGTERM-ing agentd's process group, and the supervisor's
+    // TERM-then-KILL drain is what gives Hermes/bridge/finitechat their bounded
+    // window to finish mid-stream writes. shutdown() JOINS the supervise tasks
+    // before returning, so run_daemon does not return (dropping the runtime and
+    // kill_on_drop-SIGKILLing the children) until that drain has actually
+    // completed — the window is held open, not merely signalled. (The group
+    // signal also reaches the children directly; the drain tolerates a child
+    // that has already exited — its `wait()` just returns immediately.)
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         result = &mut delivery_worker => {
             result
         }
         signal = tokio::signal::ctrl_c() => {
             signal?;
+            supervisor.shutdown().await;
+            Ok(())
+        }
+        _ = sigterm.recv() => {
             supervisor.shutdown().await;
             Ok(())
         }
@@ -516,6 +656,8 @@ struct CommandExecutor {
     supervisor: SupervisorHandle,
     startup_specialization_desired: Option<AeonSpecializationDesiredStateV1>,
     verified_hermes_generation: Arc<AtomicU64>,
+    skills_sync: SkillsSyncSettings,
+    payload: PayloadSettings,
 }
 
 impl CommandExecutor {
@@ -592,22 +734,22 @@ impl CommandExecutor {
                 self.ledger.finish_command(&request.request_id, &result)?;
                 result
             } else {
-                failure_result(request, AgentdError::Unauthorized)
+                failure_result(request, &AgentdError::Unauthorized)
             }
         } else if !authorized {
-            failure_result(request, AgentdError::Unauthorized)
+            failure_result(request, &AgentdError::Unauthorized)
         } else {
             match self.ledger.begin_command(request) {
                 Ok(CommandDecision::Replay(result)) => result,
                 Ok(CommandDecision::Execute | CommandDecision::Resume) => {
                     let result = match self.execute(request).await {
                         Ok(body) => success_result(request, body)?,
-                        Err(error) => failure_result(request, error),
+                        Err(error) => failure_result(request, &error),
                     };
                     self.ledger.finish_command(&request.request_id, &result)?;
                     result
                 }
-                Err(error) => failure_result(request, error),
+                Err(error) => failure_result(request, &error),
             }
         };
 
@@ -653,6 +795,34 @@ impl CommandExecutor {
             "agent.connections.status" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(serde_json::to_value(self.connection_manager.status()?)?)
+            }
+            "agent.skills.sync" => {
+                let body = parse_body::<SkillsSyncRequest>(request, SKILLS_SYNC_SCHEMA)?;
+                sync_skills(&self.skills_sync, &body).await
+            }
+            "agent.payload.status" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                payload_status(&self.payload).await
+            }
+            "agent.payload.stage" => {
+                let body = parse_body::<PayloadStageRequest>(request, PAYLOAD_STAGE_SCHEMA)?;
+                payload_stage(&self.payload, &body).await
+            }
+            // The results are the shell's immediate flip_started /
+            // rollback_started acknowledgements: this agentd dies mid-flip,
+            // and the outcome is visible via agent.payload.status afterwards.
+            "agent.payload.flip" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                payload_flip(&self.payload).await
+            }
+            "agent.payload.rollback" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                payload_rollback(&self.payload).await
+            }
+            "agent.payload.set-channel" => {
+                let body =
+                    parse_body::<PayloadSetChannelRequest>(request, PAYLOAD_SET_CHANNEL_SCHEMA)?;
+                payload_set_channel(&self.payload, &body).await
             }
             "agent.inference.apply" => {
                 let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
@@ -928,7 +1098,7 @@ fn parse_body<T: DeserializeOwned>(
     })
 }
 
-fn success_result(
+pub(crate) fn success_result(
     request: &RuntimeCommandRequestV1,
     body: Value,
 ) -> Result<RuntimeCommandResultV1, AgentdError> {
@@ -949,7 +1119,10 @@ fn success_result(
     Ok(result)
 }
 
-fn failure_result(request: &RuntimeCommandRequestV1, error: AgentdError) -> RuntimeCommandResultV1 {
+pub(crate) fn failure_result(
+    request: &RuntimeCommandRequestV1,
+    error: &AgentdError,
+) -> RuntimeCommandResultV1 {
     RuntimeCommandResultV1 {
         payload_kind: RuntimeCommandPayloadKindV1::Result,
         request_id: request.request_id.clone(),
@@ -981,7 +1154,7 @@ fn validate_hermes_config(hermes_home: &Path) -> Result<(), AgentdError> {
     }
 }
 
-fn load_agent_identity(agent_home: &Path) -> Result<DeviceRef, AgentdError> {
+pub(crate) fn load_agent_identity(agent_home: &Path) -> Result<DeviceRef, AgentdError> {
     let config =
         serde_json::from_slice::<AgentConfigFile>(&fs::read(agent_home.join("config.json"))?)?;
     Ok(DeviceRef::new(config.account_id, config.device_id))
@@ -1010,13 +1183,38 @@ fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
     }
 }
 
-fn health_spec(config: &DaemonConfig) -> ProcessSpec {
-    ProcessSpec {
+/// `None` when finite-shell serves `/healthz` itself: the supervisor then
+/// reports the `health` slot as delegated-running instead of spawning a
+/// second server that would fight the shell for the port.
+fn health_spec(config: &DaemonConfig) -> Option<ProcessSpec> {
+    config.health_server.as_ref().map(|health| ProcessSpec {
         name: "health",
-        program: config.health_python.clone(),
-        args: vec![config.health_script.display().to_string()],
+        program: health.python.clone(),
+        args: vec![health.script.display().to_string()],
         environment: BTreeMap::new(),
+    })
+}
+
+/// The Brain sync supervisor (`fbrain daemon supervise`), entrypoint.sh's old
+/// restart loop moved into supervision: agent-side Working Tree edits only
+/// reach the Brain server through this process. Not part of the readiness
+/// contract (health checks the finitechat/health/hermes slots), so a
+/// crash-looping fbrain surfaces in status.json without flapping `ready`.
+fn brain_sync_spec(config: &DaemonConfig) -> Option<ProcessSpec> {
+    let program = config.brain_sync_bin.clone()?;
+    // entrypoint.sh created the tree root before its first supervise run.
+    if let Ok(root) = std::env::var("FBRAIN_WORKING_TREE_ROOT") {
+        let root = root.trim();
+        if !root.is_empty() {
+            let _ = fs::create_dir_all(root);
+        }
     }
+    Some(ProcessSpec {
+        name: "brain_sync",
+        program,
+        args: vec!["daemon".to_owned(), "supervise".to_owned()],
+        environment: BTreeMap::new(),
+    })
 }
 
 fn hermes_spec(config: &DaemonConfig) -> ProcessSpec {

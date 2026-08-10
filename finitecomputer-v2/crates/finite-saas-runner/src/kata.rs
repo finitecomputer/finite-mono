@@ -4264,6 +4264,7 @@ esac
             state_schema_version: "state-v1".to_string(),
             base_image: None,
             recover_known_good_chat: false,
+            content_sha256: None,
             created_at: "2026-07-10T00:00:00Z".to_string(),
             promoted_at: Some("2026-07-10T00:01:00Z".to_string()),
             retired_at: None,

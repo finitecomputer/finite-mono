@@ -1,6 +1,15 @@
 # Build context is the staged finite-mono checkout produced by
 # finitecomputer-v2/scripts/build_runtime_image.py. Rust artifacts are built
 # together from the one root workspace and lockfile.
+#
+# The script drives a two-phase build (ADR 0006 payload generations):
+#   1. the `finite-payload` stage assembles the payload rootfs at /payload;
+#      the script extracts it and packs + signs the seed bundle on the build
+#      host (images carry no signing key), writing the result into the build
+#      context as seed-payload/;
+#   2. the final stage is the shell image: finite-shell as PID 1 plus the
+#      signed seed payload at /seed, verified by the shell at first boot
+#      against the runtime-provided FINITE_RELEASE_PUBLIC_KEY.
 
 FROM rust:1.88-trixie AS finite-rust-builder
 WORKDIR /build
@@ -13,6 +22,9 @@ COPY finite-agentd ./finite-agentd
 COPY finite-brain ./finite-brain
 COPY finite-identity ./finite-identity
 COPY finite-nostr ./finite-nostr
+COPY finite-release ./finite-release
+COPY finite-service-directory ./finite-service-directory
+COPY finite-shell ./finite-shell
 COPY finitecomputer-v2/crates ./finitecomputer-v2/crates
 COPY finitechat ./finitechat
 COPY finite-sites ./finite-sites
@@ -20,9 +32,17 @@ RUN cargo build --locked --release \
       --package finite-agentd \
       --package finitechat-cli \
       --package fsite-cli \
-      --package finite-brain-cli
+      --package finite-brain-cli \
+      --package finite-shell \
+      --package finite-release
 
-FROM python:3.13-slim-trixie
+# ---------------------------------------------------------------------------
+# Payload rootfs: everything the agent iterates on, staged/flipped by
+# finite-shell as one generation. Built FROM the same python base as the
+# shell image so the Hermes venv's pyvenv.cfg home points at the shell-owned
+# interpreter location (/usr/local/bin); the shell's per-generation fixup
+# handles the versioned on-disk paths after every unpack.
+FROM python:3.13-slim-trixie AS finite-payload
 ARG HERMES_AGENT_VERSION=0.20.0
 # Upstream retired the PyPI/brew channels in v0.20.0 (v2026.8.3); supported
 # channels are now the shell installer, Docker, and Nix. We install from the
@@ -34,6 +54,88 @@ ARG HERMES_AGENT_VERSION=0.20.0
 # known gaps tracked on the bump PR, to close before the fleet rollout.
 ARG HERMES_AGENT_DIST_URL=https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.8.3.tar.gz
 ARG HERMES_AGENT_DIST_SHA256=370542c7219faba6300905c3b419e14e6508a31ac698a1a5174e0386990834be
+
+# Build-stage-only fetch tooling; the payload ships none of it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /payload/hermes-venv \
+    && /payload/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
+    && test "${HERMES_AGENT_VERSION}" = "0.20.0" \
+    && curl -fsSLo /tmp/hermes-agent.tar.gz "${HERMES_AGENT_DIST_URL}" \
+    && echo "${HERMES_AGENT_DIST_SHA256}  /tmp/hermes-agent.tar.gz" | sha256sum --check - \
+    && HERMES_NIX_BUILD=1 /payload/hermes-venv/bin/pip install --no-cache-dir \
+      "hermes-agent[messaging] @ file:///tmp/hermes-agent.tar.gz" \
+      "google-api-python-client==2.198.0" \
+      "google-auth-oauthlib==1.4.0" \
+      "google-auth-httplib2==0.4.0" \
+    # The v0.20.0 wheel build drops every non-Python file (package-data only
+    # covers hermes_cli schemas + gateway assets), so plugin manifests never
+    # install and the plugin manager discovers zero bundled plugins —
+    # web_search/web_extract report "no provider configured" even with keys.
+    # Overlay the source tree's data files into site-packages so the
+    # installed layout matches what their Nix/uv2nix channel ships.
+    && mkdir -p /tmp/hermes-dist \
+    && tar -xzf /tmp/hermes-agent.tar.gz -C /tmp/hermes-dist --strip-components=1 \
+    && cd /tmp/hermes-dist \
+    && find agent tools hermes_cli gateway tui_gateway cron acp_adapter plugins providers \
+        -type f ! -name "*.py" ! -name "*.pyc" ! -path "*/__pycache__/*" -print0 \
+        | tar --null -cf - --files-from - \
+        | tar -xf - -C /payload/hermes-venv/lib/python3.13/site-packages/ \
+    && cd / \
+    && rm -rf /tmp/hermes-dist /tmp/hermes-agent.tar.gz
+
+# Payload bundles admit only relative in-tree symlinks. Replace the venv's
+# interpreter entries (absolute symlinks to the base python) with stub files;
+# finite-shell's fixup repoints every `python*` bin entry at the shell python
+# after each unpack, seed included.
+RUN set -eux; \
+    for name in /payload/hermes-venv/bin/python*; do \
+      rm -f "$name"; \
+      printf '%s\n' 'finite-shell fixup repoints this at the shell python' > "$name"; \
+    done
+
+COPY --from=finite-rust-builder /build/target/release/finite-agentd /payload/bin/finite-agentd
+COPY --from=finite-rust-builder /build/target/release/finitechat /payload/bin/finitechat
+COPY --from=finite-rust-builder /build/target/release/fsite /payload/bin/fsite
+COPY --from=finite-rust-builder /build/target/release/fbrain /payload/bin/fbrain
+COPY finitechat/containers/agent/finite.py /payload/bin/finite
+
+COPY finitechat/integrations/hermes/finitechat /payload/hermes-plugin/finitechat
+COPY finite-skills/skills /payload/finite-skills
+COPY finitechat/containers/agent/run_hermes_gateway.sh /payload/opt/run_hermes_gateway.sh
+COPY finitechat/containers/agent/reconcile_hermes_config.py /payload/opt/reconcile_hermes_config.py
+COPY finitechat/containers/agent/recover_chat_boot.py /payload/opt/recover_chat_boot.py
+COPY finitechat/containers/agent/probe_hermes_vision.py /payload/opt/probe_hermes_vision.py
+COPY finitechat/containers/agent/finite_service_directory.py /payload/opt/finite_service_directory.py
+
+# `bin/` entries become /usr/local/bin shims maintained by the shell, so
+# `container exec hermes|finitechat|finite ...` keeps working across
+# generations; the relative symlinks keep the Hermes entrypoints reachable
+# from agentd's generation-scoped PATH.
+RUN chmod +x \
+      /payload/bin/finite \
+      /payload/opt/run_hermes_gateway.sh \
+      /payload/opt/reconcile_hermes_config.py \
+      /payload/opt/recover_chat_boot.py \
+      /payload/opt/probe_hermes_vision.py \
+    && ln -s ../hermes-venv/bin/hermes /payload/bin/hermes \
+    && ln -s ../hermes-venv/bin/hermes-agent /payload/bin/hermes-agent \
+    && ln -s ../hermes-venv/bin/hermes-acp /payload/bin/hermes-acp
+
+# The pack step runs this stage as a container on the build host, so the
+# release tooling must be reachable there without touching /payload.
+COPY --from=finite-rust-builder /build/target/release/finite-release /usr/local/bin/finite-release
+
+# ---------------------------------------------------------------------------
+# Shell image: the only fixed layer. finite-shell is PID 1; it verifies and
+# unpacks the seed payload on first boot, serves /healthz + /contact, and
+# supervises the active generation's finite-agentd.
+FROM python:3.13-slim-trixie
+# The venv (and hermes itself) live in the payload stage now; this ARG only
+# feeds the provenance label below.
+ARG HERMES_AGENT_VERSION=0.20.0
 ARG FINITE_MONO_REV=unknown
 ARG GWS_VERSION=0.22.5
 ARG TARGETARCH
@@ -75,62 +177,15 @@ RUN set -eux; \
     rm -f "/tmp/${archive}" /tmp/gws; \
     gws --version
 
-RUN python -m venv /runtime/hermes-venv \
-    && /runtime/hermes-venv/bin/pip install --no-cache-dir --upgrade pip \
-    && test "${HERMES_AGENT_VERSION}" = "0.20.0" \
-    && curl -fsSLo /tmp/hermes-agent.tar.gz "${HERMES_AGENT_DIST_URL}" \
-    && echo "${HERMES_AGENT_DIST_SHA256}  /tmp/hermes-agent.tar.gz" | sha256sum --check - \
-    && HERMES_NIX_BUILD=1 /runtime/hermes-venv/bin/pip install --no-cache-dir \
-      "hermes-agent[messaging] @ file:///tmp/hermes-agent.tar.gz" \
-      "google-api-python-client==2.198.0" \
-      "google-auth-oauthlib==1.4.0" \
-      "google-auth-httplib2==0.4.0" \
-    && mkdir -p /tmp/hermes-dist \
-    && tar -xzf /tmp/hermes-agent.tar.gz -C /tmp/hermes-dist --strip-components=1 \
-    && cd /tmp/hermes-dist \
-    && find agent tools hermes_cli gateway tui_gateway cron acp_adapter plugins providers \
-        -type f ! -name "*.py" ! -name "*.pyc" ! -path "*/__pycache__/*" -print0 \
-        | tar --null -cf - --files-from - \
-        | tar -xf - -C /runtime/hermes-venv/lib/python3.13/site-packages/ \
-    && cd / \
-    && rm -rf /tmp/hermes-dist /tmp/hermes-agent.tar.gz \
-    && ln -sf /runtime/hermes-venv/bin/hermes /usr/local/bin/hermes \
-    && ln -sf /runtime/hermes-venv/bin/hermes-agent /usr/local/bin/hermes-agent \
-    && ln -sf /runtime/hermes-venv/bin/hermes-acp /usr/local/bin/hermes-acp
+COPY --from=finite-rust-builder /build/target/release/finite-shell /usr/local/bin/finite-shell
 
-COPY --from=finite-rust-builder /build/target/release/finitechat /usr/local/bin/finitechat
-COPY --from=finite-rust-builder /build/target/release/finitechat /runtime/bin/finitechat
-COPY --from=finite-rust-builder /build/target/release/finite-agentd /usr/local/bin/finite-agentd
-COPY --from=finite-rust-builder /build/target/release/finite-agentd /runtime/bin/finite-agentd
-COPY --from=finite-rust-builder /build/target/release/fsite /usr/local/bin/fsite
-COPY --from=finite-rust-builder /build/target/release/fsite /runtime/bin/fsite
-COPY --from=finite-rust-builder /build/target/release/fbrain /usr/local/bin/fbrain
-COPY --from=finite-rust-builder /build/target/release/fbrain /runtime/bin/fbrain
-COPY finitechat/containers/agent/finite.py /runtime/bin/finite
+# The signed seed payload: packed and signed on the build host by
+# build_runtime_image.py (the image carries no signing key). The shell
+# verifies it against the runtime-provided FINITE_RELEASE_PUBLIC_KEY before
+# the first unpack; an unverifiable seed never reaches /data.
+COPY seed-payload/payload.tar.gz /seed/payload.tar.gz
+COPY seed-payload/payload.tar.gz.manifest.json /seed/payload.tar.gz.manifest.json
 
-COPY finitechat/integrations/hermes/finitechat /runtime/hermes-plugin/finitechat
-COPY finite-skills/skills /runtime/finite-skills
-COPY finitechat/containers/agent/entrypoint.sh /opt/agent-entrypoint.sh
-COPY finitechat/containers/agent/health_server.py /opt/health_server.py
-COPY finitechat/containers/agent/reconcile_hermes_config.py /opt/reconcile_hermes_config.py
-COPY finitechat/containers/agent/recover_chat_boot.py /opt/recover_chat_boot.py
-COPY finitechat/containers/agent/probe_hermes_vision.py /opt/probe_hermes_vision.py
-COPY finitechat/containers/agent/run_hermes_gateway.sh /opt/run_hermes_gateway.sh
-COPY finitecomputer-v2/deploy/finite-computer/runtime-template/healthcheck.sh /runtime/healthcheck.sh
-COPY finitecomputer-v2/deploy/finite-computer/runtime-template/README.md /runtime/README.md
-
-RUN chmod +x \
-      /opt/agent-entrypoint.sh \
-      /opt/health_server.py \
-      /opt/reconcile_hermes_config.py \
-      /opt/recover_chat_boot.py \
-      /opt/probe_hermes_vision.py \
-      /opt/run_hermes_gateway.sh \
-      /runtime/bin/finite \
-      /runtime/healthcheck.sh
-RUN ln -sf /runtime/bin/finite /usr/local/bin/finite
-
-ENV PATH="/runtime/hermes-venv/bin:/usr/local/bin:${PATH}"
 ENV FINITECHAT_HOME=/data/agent
 # Shared Finite identity contract: identity.json on the durable mount.
 ENV FINITE_HOME=/data/agent
@@ -153,6 +208,6 @@ ENV FINITECHAT_HERMES_INBOUND_STREAM=1
 ENV FINITE_AGENTD_REQUIRED=1
 
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 CMD ["/runtime/healthcheck.sh"]
-ENTRYPOINT ["/opt/agent-entrypoint.sh"]
-CMD ["/runtime/bin/finite-agentd", "serve"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+  CMD ["curl", "-fsS", "--max-time", "4", "http://127.0.0.1:8080/healthz"]
+ENTRYPOINT ["/usr/local/bin/finite-shell", "run"]

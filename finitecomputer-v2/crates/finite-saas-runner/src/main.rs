@@ -10,8 +10,8 @@ use finite_saas_runner::{
     DEFAULT_FINITE_PRIVATE_BASE_URL, DEFAULT_FINITE_PRIVATE_MODEL,
     DEFAULT_FINITE_PRIVATE_SPECIALIZATION_BUNDLE, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig,
     DockerLauncher, EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig,
-    KataLauncher, KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource,
-    RunOnceOutcome, RuntimeLauncher, SpecializationBundleRuntimeDefaults,
+    KataLauncher, KataRetirementConfig, PayloadTelemetryConfig, PhalaConfig, PhalaLauncher,
+    RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher, SpecializationBundleRuntimeDefaults,
     durable_state_manifest_sha256,
 };
 use std::collections::BTreeMap;
@@ -212,6 +212,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
     let runtime_environment = optional_runtime_environment()?;
     let runtime_secret_environment = optional_runtime_secret_environment()?;
     let agent_identity_authority = optional_agent_identity_authority()?;
+    let payload_telemetry = optional_payload_telemetry()?;
     // This identifies the adapter offered by this worker. Placement remains
     // project-selected in Core; product code never toggles a process-global
     // backend to change an existing agent's runtime.
@@ -270,6 +271,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority: agent_identity_authority.clone(),
+                    payload_telemetry: payload_telemetry.clone(),
                 },
             )?
         }
@@ -334,6 +336,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority: agent_identity_authority.clone(),
+                    payload_telemetry: payload_telemetry.clone(),
                 },
             )?
         }
@@ -396,6 +399,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority: agent_identity_authority.clone(),
+                    payload_telemetry: payload_telemetry.clone(),
                 },
             )?
         }
@@ -438,6 +442,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority: agent_identity_authority.clone(),
+                    payload_telemetry: payload_telemetry.clone(),
                 },
             )?
         }
@@ -490,6 +495,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                     runtime_environment,
                     runtime_secret_environment,
                     agent_identity_authority,
+                    payload_telemetry,
                 },
             )?
         }
@@ -558,6 +564,7 @@ struct RunOnceConfig {
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
     agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
+    payload_telemetry: Option<PayloadTelemetryConfig>,
 }
 
 fn run_once_with_launcher<L>(
@@ -588,11 +595,34 @@ where
     })
     .with_runtime_environment(config.runtime_environment)?
     .with_runtime_secret_environment(config.runtime_secret_environment)?
-    .with_runtime_ready_polling(config.runtime_ready_timeout, config.runtime_ready_interval);
+    .with_runtime_ready_polling(config.runtime_ready_timeout, config.runtime_ready_interval)
+    .with_payload_telemetry(config.payload_telemetry);
     if let Some(identity_authority) = config.agent_identity_authority {
         runner = runner.with_agent_identity_authority(identity_authority)?;
     }
     runner.run_once().map_err(Into::into)
+}
+
+/// Payload telemetry (shell /healthz -> runner -> Core, payload-generations
+/// plan M4): on by default wherever the runner has a work root for the
+/// on-disk registry. FC_RUNNER_PAYLOAD_TELEMETRY_INTERVAL_SECS=0 disables
+/// it; providers without FC_RUNNER_WORK_ROOT (Phala) never report.
+fn optional_payload_telemetry() -> Result<Option<PayloadTelemetryConfig>> {
+    let interval_secs = optional_u64("FC_RUNNER_PAYLOAD_TELEMETRY_INTERVAL_SECS", 30)?;
+    let Some(work_root) = optional_env_value("FC_RUNNER_WORK_ROOT") else {
+        return Ok(None);
+    };
+    if interval_secs == 0 {
+        return Ok(None);
+    }
+    Ok(Some(PayloadTelemetryConfig {
+        registry_dir: PathBuf::from(work_root).join("payload-telemetry"),
+        interval: Duration::from_secs(interval_secs),
+        http_timeout: Duration::from_secs(optional_u64(
+            "FC_RUNNER_PAYLOAD_TELEMETRY_HTTP_TIMEOUT_SECS",
+            5,
+        )?),
+    }))
 }
 
 fn optional_agent_identity_authority() -> Result<Option<AgentIdentityAuthorityConfig>> {

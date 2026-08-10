@@ -39,6 +39,7 @@ enum ManagedProcess {
     FiniteSites,
     FiniteIdentity,
     FiniteBrain,
+    SkillsReleases,
     RuntimeImage,
     FinitePrivateLimiter,
     AppleNetworkProbe,
@@ -49,7 +50,7 @@ enum ManagedProcess {
 }
 
 impl ManagedProcess {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 18] = [
         Self::ProcessCompose,
         Self::WorkosFixture,
         Self::RustBuild,
@@ -60,6 +61,7 @@ impl ManagedProcess {
         Self::FiniteSites,
         Self::FiniteIdentity,
         Self::FiniteBrain,
+        Self::SkillsReleases,
         Self::RuntimeImage,
         Self::FinitePrivateLimiter,
         Self::AppleNetworkProbe,
@@ -81,6 +83,7 @@ impl ManagedProcess {
             Self::FiniteSites => "finitesites",
             Self::FiniteIdentity => "finite-identity",
             Self::FiniteBrain => "finite-brain",
+            Self::SkillsReleases => "skills-releases",
             Self::RuntimeImage => "runtime-image",
             Self::FinitePrivateLimiter => "finite-private-limiter",
             Self::AppleNetworkProbe => "apple-network-probe",
@@ -140,6 +143,17 @@ impl StackProfile {
 
     fn is_test_infrastructure(self) -> bool {
         matches!(self, Self::TestInfrastructure)
+    }
+
+    /// Parse the `DEVFINITY_PROFILE` value a running stack exports.
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "apple-saas" => Some(Self::AppleSaas),
+            "docker-saas" => Some(Self::DockerSaas),
+            "services-only" => Some(Self::ServicesOnly),
+            "test-infrastructure" => Some(Self::TestInfrastructure),
+            _ => None,
+        }
     }
 }
 
@@ -335,6 +349,19 @@ pub struct Stack {
     workos_mode: WorkosMode,
     apple_host_access: AppleHostAccess,
     apple_container_name_prefix: String,
+    /// Hex ed25519 release verification key generated per run; present once
+    /// `prepare_host_environment` has ensured the run's release keypair.
+    release_public_key: Option<String>,
+    /// Hex ed25519 release signing seed for the same run keypair; Core signs
+    /// the service directory with it.
+    release_signing_key: Option<String>,
+    /// `FINITE_SHELL_POLL_INTERVAL_SECS` for agent containers, controlled by
+    /// `DEVFINITY_SHELL_POLL_INTERVAL_SECS`. Defaults per smoke variant: "0"
+    /// (poller off) normally — so the flip/skills smokes' manual stage/flip
+    /// can never race the poller — and "5" when
+    /// `DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE=1` drives autonomous
+    /// convergence.
+    shell_poll_interval_secs: String,
 }
 
 #[derive(Debug, Clone)]
@@ -349,6 +376,7 @@ struct Ports {
     finite_brain: u16,
     finite_private_limiter: u16,
     workos_fixture: u16,
+    skills_releases: u16,
     runtime_agent: u16,
 }
 
@@ -368,6 +396,23 @@ impl Stack {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "finite-devfinity".to_string());
+        let shell_poll_interval_secs = std::env::var("DEVFINITY_SHELL_POLL_INTERVAL_SECS")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                // Variant-controlled default: the autoconverge smoke needs a
+                // fast poller; every other variant keeps it off so manual
+                // stage/flip driving cannot race it.
+                if std::env::var("DEVFINITY_PAYLOAD_AUTOCONVERGE_SMOKE").as_deref() == Ok("1") {
+                    "5".to_string()
+                } else {
+                    "0".to_string()
+                }
+            });
+        if shell_poll_interval_secs.parse::<u64>().is_err() {
+            bail!("DEVFINITY_SHELL_POLL_INTERVAL_SECS must be an integer seconds value");
+        }
         Ok(Self {
             repo_root,
             process_compose_file: run_dir.join("process-compose.yaml"),
@@ -388,6 +433,7 @@ impl Stack {
                 finite_brain: offset_port(18790, port_offset)?,
                 finite_private_limiter: offset_port(18002, port_offset)?,
                 workos_fixture: offset_port(14199, port_offset)?,
+                skills_releases: offset_port(18791, port_offset)?,
                 runtime_agent: runtime_agent_port,
             },
             postgres_instance_id: random_postgres_instance_id()?,
@@ -403,6 +449,9 @@ impl Stack {
             workos_mode: WorkosMode::Fixture,
             apple_host_access: AppleHostAccess::default(),
             apple_container_name_prefix,
+            release_public_key: None,
+            release_signing_key: None,
+            shell_poll_interval_secs,
         })
     }
 
@@ -433,11 +482,44 @@ impl Stack {
     /// Apple Container stack. This never installs software and never invokes
     /// sudo. The official host DNS bridge remains an explicit developer choice;
     /// when it is absent we derive the vmnet gateway that Apple assigned.
+    /// The runner counts every container matching its owned name prefix —
+    /// running or stopped — against `FC_RUNNER_MAX_SANDBOXES` (1 here), and
+    /// reports the resulting `CapacityUnavailable` silently each cycle. A
+    /// leftover from an earlier run therefore stalls agent creation with no
+    /// error anywhere; fail fast with the container names instead.
+    fn ensure_runner_sandbox_slot_free(&self) -> Result<()> {
+        let prefix = format!("{}-", self.apple_container_name_prefix);
+        let listing = command_stdout(
+            Command::new("container").args(["list", "--all", "--quiet"]),
+            "list Apple Containers for the runner slot preflight",
+        )?;
+        let owned: Vec<String> = listing
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(&prefix))
+            .map(str::to_string)
+            .collect();
+        if !owned.is_empty() {
+            bail!(
+                "the Agent Runner's only sandbox slot is already occupied by leftover \
+                 container(s) [{}] from an earlier run; agent creation would stall \
+                 silently (the runner reports CapacityUnavailable without logging). \
+                 Free the slot with `container stop <name>` (if running) and \
+                 `container delete <name>` — durable /data directories are never \
+                 deleted with compute — or set DEVFINITY_APPLE_CONTAINER_NAME_PREFIX \
+                 to run under a different prefix.",
+                owned.join(", ")
+            );
+        }
+        Ok(())
+    }
+
     pub fn prepare_host_environment(&mut self, dry_run: bool) -> Result<()> {
         if !self.profile.includes_runtime() {
-            if self.fresh_services_state {
-                return Ok(());
-            }
+            // Core signs the service directory in every profile, so even the
+            // portable services-only stack needs the run's release keypair.
+            self.release_public_key = Some(self.ensure_release_keys()?);
+            self.release_signing_key = Some(self.read_release_signing_key()?);
             return Ok(());
         }
         if self.fresh_services_state {
@@ -482,6 +564,12 @@ impl Stack {
                 }
             }
             self.apple_host_access = detect_apple_host_access()?;
+            // Only when actually starting the stack: helper flows (e.g.
+            // publish-skills) prepare with dry_run against an already-up
+            // stack whose own agent container legitimately owns the slot.
+            if !dry_run {
+                self.ensure_runner_sandbox_slot_free()?;
+            }
         }
 
         if !dry_run {
@@ -501,6 +589,11 @@ impl Stack {
                 )?;
             }
         }
+        // The generated Core/Runner RuntimeSpec environment carries this run's
+        // release verification key into every launched agent container, so the
+        // keypair must exist before the process-compose config is written.
+        self.release_public_key = Some(self.ensure_release_keys()?);
+        self.release_signing_key = Some(self.read_release_signing_key()?);
         Ok(())
     }
 
@@ -522,6 +615,7 @@ impl Stack {
                 self.finite_identity_dir(),
                 self.finite_brain_dir(),
                 self.finite_home_dir(),
+                self.skills_releases_dir(),
                 self.runtime_image_dir(),
                 self.runner_dir(),
                 self.workos_fixture_dir(),
@@ -1078,6 +1172,7 @@ impl Stack {
         self.write_finitesites(&mut yaml);
         self.write_finite_identity(&mut yaml);
         self.write_finite_brain(&mut yaml);
+        self.write_skills_releases(&mut yaml);
         if self.profile.includes_runtime() {
             self.write_runtime_image(&mut yaml);
             if self.inference_mode == InferenceMode::ChainedLimiter {
@@ -1308,21 +1403,21 @@ wait "$postgres_pid"
         }
         let mut core_environment = vec![
             ("FC_CORE_DATABASE_URL", self.database_url()),
-            ("FC_CORE_BIND", format!("127.0.0.1:{}", self.ports.core)),
+            // Bound like the other container-consumed services: agents fetch
+            // the signed service directory straight from Core.
+            (
+                "FC_CORE_BIND",
+                format!("{}:{}", self.service_bind_host(), self.ports.core),
+            ),
             ("WORKOS_CLIENT_ID", self.workos_mode.client_id().to_string()),
             (
                 "FC_WORKOS_OPERATOR_ORG_ID",
                 self.workos_mode.operator_org_id().to_string(),
             ),
+            ("FC_CORE_RUNTIME_ENV_JSON", self.runtime_env_json()),
             (
-                "FC_CORE_RUNTIME_ENV_JSON",
-                serde_json::json!({
-                    "FINITE_SITES_API": self.finitesites_api_url(),
-                    "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
-                    "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
-                    "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
-                })
-                .to_string(),
+                "FC_CORE_SERVICE_DIRECTORY_SERVICES_JSON",
+                self.service_directory_services_json(),
             ),
             (
                 "FC_CORE_AGENT_CREATION_PLACEMENT_JSON",
@@ -1333,6 +1428,11 @@ wait "$postgres_pid"
                 .to_string(),
             ),
         ];
+        if let Some(release_signing_key) = &self.release_signing_key {
+            // The run's release seed also signs the service directory (one
+            // key family locally, exactly as in production).
+            core_environment.push(("FC_CORE_RELEASE_SIGNING_KEY", release_signing_key.clone()));
+        }
         if self.workos_mode.is_fixture() {
             core_environment.extend([
                 ("WORKOS_API_BASE_URL", self.workos_fixture_url()),
@@ -1569,6 +1669,76 @@ wait "$postgres_pid"
         );
     }
 
+    /// The non-secret RuntimeSpec environment shared by Core (`FC_CORE_RUNTIME_ENV_JSON`)
+    /// and Runner (`FC_RUNNER_RUNTIME_ENV_JSON`). When the run's release
+    /// keypair exists, agent containers also receive the verification key for
+    /// signed skills/payload bundles and the dev-only plain-http escape hatch
+    /// (devfinity hosts bundles over local HTTP).
+    fn runtime_env_json(&self) -> String {
+        let mut environment = serde_json::json!({
+            "FINITE_SITES_API": self.finitesites_api_url(),
+            "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
+            "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
+            "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
+        });
+        if let Some(release_public_key) = &self.release_public_key {
+            environment["FINITE_RELEASE_PUBLIC_KEY"] = serde_json::json!(release_public_key);
+            environment["FINITE_ALLOW_INSECURE_BUNDLE_URL"] = serde_json::json!("1");
+            // Agents verify the directory with the same run key, so the URL
+            // only ships alongside it.
+            environment["FINITE_SERVICE_DIRECTORY_URL"] =
+                serde_json::json!(self.service_directory_url());
+            // Autonomous channel convergence (M4): variant-controlled, off by
+            // default so manual stage/flip smokes never race the poller.
+            environment["FINITE_SHELL_POLL_INTERVAL_SECS"] =
+                serde_json::json!(self.shell_poll_interval_secs);
+        }
+        environment.to_string()
+    }
+
+    /// Core's signed service-directory endpoint as agent containers reach it.
+    fn service_directory_url(&self) -> String {
+        format!("{}/api/core/v1/service-directory", self.runtime_core_url())
+    }
+
+    /// The `services` map Core advertises through the signed directory, in
+    /// the same container-reachable host-access forms the runtime env uses.
+    /// Client version expectations are stubs until services enforce floors.
+    fn service_directory_services_json(&self) -> String {
+        let client_version = serde_json::json!({ "min": "0.0.0", "current": "0.0.0" });
+        let entry = |base_url: String| serde_json::json!({ "base_url": base_url, "client_version": client_version });
+        serde_json::json!({
+            "core": entry(self.runtime_core_url()),
+            "chat": entry(self.runtime_finitechat_url()),
+            "sites": entry(self.finitesites_api_url()),
+            "brain": entry(self.runtime_finite_brain_url()),
+            "identity": entry(self.runtime_finite_identity_url()),
+            "finite_private": entry(self.runtime_limiter_root_url()),
+        })
+        .to_string()
+    }
+
+    fn write_skills_releases(&self, yaml: &mut String) {
+        let process = ManagedProcess::SkillsReleases;
+        let command = format!(
+            "exec python3 -m http.server --bind {} --directory {} {}",
+            self.service_bind_host(),
+            shell_quote(&self.skills_releases_dir().display().to_string()),
+            self.ports.skills_releases,
+        );
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Serve signed local skills/payload bundles over HTTP",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(yaml, process, &[command], &[]);
+        self.write_http_probe(yaml, "/", self.ports.skills_releases, 1, 2, 3, 45);
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: always");
+    }
+
     fn write_finite_identity(&self, yaml: &mut String) {
         let process = ManagedProcess::FiniteIdentity;
         let command = vec![
@@ -1612,17 +1782,28 @@ wait "$postgres_pid"
         } else {
             "apple-container"
         };
+        // Agents must boot a verified seed payload: the image build packs and
+        // signs the seed with this run's release key (the same key agents get
+        // as FINITE_RELEASE_PUBLIC_KEY through the runtime env).
         let command = format!(
             concat!(
                 "exec python3 finitecomputer-v2/scripts/build_runtime_image.py ",
                 "--engine {} ",
                 "--image-ref {} ",
                 "--context-dir {} ",
+                "--seed-signing-key {} ",
                 "--report {}"
             ),
             engine,
             shell_quote(RUNTIME_IMAGE_REF),
             shell_quote(&context.display().to_string()),
+            shell_quote(
+                &self
+                    .release_keys_dir()
+                    .join("release.key")
+                    .display()
+                    .to_string()
+            ),
             shell_quote(&report.display().to_string()),
         );
         let _ = writeln!(yaml, "  {process}:");
@@ -1702,6 +1883,7 @@ wait "$postgres_pid"
         let mut urls = vec![
             format!("{}/health", self.runtime_finitechat_url()),
             format!("{}/api/v1/healthz", self.finitesites_api_url()),
+            format!("{}/", self.runtime_skills_releases_url()),
         ];
         if self.inference_mode == InferenceMode::ChainedLimiter {
             urls.push(format!("{}/health", self.runtime_limiter_root_url()));
@@ -1751,6 +1933,8 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteChat);
         let _ = writeln!(yaml, "        condition: process_healthy");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteSites);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::SkillsReleases);
         let _ = writeln!(yaml, "        condition: process_healthy");
         if self.inference_mode == InferenceMode::ChainedLimiter {
             let _ = writeln!(yaml, "      {}:", ManagedProcess::FinitePrivateLimiter);
@@ -1880,16 +2064,7 @@ wait "$postgres_pid"
                     "FC_RUNNER_FINITECHAT_SERVER_URL",
                     self.runtime_finitechat_url(),
                 ),
-                (
-                    "FC_RUNNER_RUNTIME_ENV_JSON",
-                    serde_json::json!({
-                        "FINITE_SITES_API": self.finitesites_api_url(),
-                        "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
-                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
-                        "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
-                    })
-                    .to_string(),
-                ),
+                ("FC_RUNNER_RUNTIME_ENV_JSON", self.runtime_env_json()),
                 (
                     "FC_RUNNER_APPLE_CONTAINER_NAME_PREFIX",
                     self.apple_container_name_prefix.clone(),
@@ -2588,6 +2763,10 @@ wait "$postgres_pid"
                         vec![String::from("finite-identityd"), String::from("serve")]
                     }
                     ManagedProcess::FiniteBrain => vec![String::from("finite-brain")],
+                    ManagedProcess::SkillsReleases => vec![
+                        String::from("http.server"),
+                        self.skills_releases_dir().display().to_string(),
+                    ],
                     ManagedProcess::RuntimeImage => vec![
                         String::from("python3"),
                         String::from("build_runtime_image.py"),
@@ -2713,6 +2892,12 @@ wait "$postgres_pid"
                 self.ports.dashboard,
                 "/healthz",
             ),
+            check_http_service(
+                ManagedProcess::SkillsReleases,
+                "127.0.0.1",
+                self.ports.skills_releases,
+                "/",
+            ),
         ];
         if self.profile.includes_runtime() && self.inference_mode == InferenceMode::ChainedLimiter {
             checks.push(check_http_service(
@@ -2744,7 +2929,8 @@ wait "$postgres_pid"
                 "finitesites_api={}\n",
                 "finitesites_base=http://*.sites.localhost:{}\n",
                 "finite_identity={}\n",
-                "finite_brain={}\n"
+                "finite_brain={}\n",
+                "skills_releases=http://127.0.0.1:{}\n"
             ),
             self.profile.as_str(),
             self.workos_mode.as_str(),
@@ -2755,7 +2941,8 @@ wait "$postgres_pid"
             self.finitesites_api_url(),
             self.ports.finitesites,
             self.finite_identity_url(),
-            self.finite_brain_url()
+            self.finite_brain_url(),
+            self.ports.skills_releases
         );
         if self.profile.includes_runtime() {
             let _ = writeln!(
@@ -2771,6 +2958,27 @@ wait "$postgres_pid"
 
     fn core_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.ports.core)
+    }
+
+    /// Core's base URL as agent containers reach it. Profiles without a
+    /// runtime publish for host-local consumers instead.
+    fn runtime_core_url(&self) -> String {
+        let host = if self.profile.includes_runtime() {
+            self.apple_host_access.runtime_host.as_str()
+        } else {
+            "127.0.0.1"
+        };
+        format!("http://{host}:{}", self.ports.core)
+    }
+
+    /// Finite Identity's base URL in the same container-reachable form.
+    fn runtime_finite_identity_url(&self) -> String {
+        let host = if self.profile.includes_runtime() {
+            self.apple_host_access.runtime_host.as_str()
+        } else {
+            "127.0.0.1"
+        };
+        format!("http://{host}:{}", self.ports.finite_identity)
     }
 
     fn dashboard_url(&self) -> String {
@@ -2801,6 +3009,17 @@ wait "$postgres_pid"
             "http://{}:{}",
             self.apple_host_access.runtime_host, self.ports.finite_private_limiter
         )
+    }
+
+    /// The bundle-hosting base URL as agent containers reach it. Profiles
+    /// without a runtime publish for host-local consumers instead.
+    fn runtime_skills_releases_url(&self) -> String {
+        let host = if self.profile.includes_runtime() {
+            self.apple_host_access.runtime_host.as_str()
+        } else {
+            "127.0.0.1"
+        };
+        format!("http://{host}:{}", self.ports.skills_releases)
     }
 
     fn service_bind_host(&self) -> String {
@@ -2942,6 +3161,14 @@ wait "$postgres_pid"
 
     fn runtime_image_dir(&self) -> PathBuf {
         self.process_state_dir(ManagedProcess::RuntimeImage)
+    }
+
+    fn skills_releases_dir(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::SkillsReleases)
+    }
+
+    fn release_keys_dir(&self) -> PathBuf {
+        self.run_dir.join("release-keys")
     }
 
     fn runner_dir(&self) -> PathBuf {
@@ -3109,6 +3336,430 @@ wait "$postgres_pid"
         }
         values
     }
+
+    /// Create this run's release signing keypair once and reuse it afterwards.
+    /// Returns the hex-encoded verification key.
+    fn ensure_release_keys(&self) -> Result<String> {
+        let dir = self.release_keys_dir();
+        let signing_key = dir.join("release.key");
+        let public_key = dir.join("release.pub");
+        if signing_key.is_file() != public_key.is_file() {
+            bail!(
+                "devfinity release keypair at {} is incomplete; remove the directory and rerun",
+                dir.display()
+            );
+        }
+        if !signing_key.is_file() {
+            fs::create_dir_all(&dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+            command_stdout(
+                Command::new("cargo")
+                    .args(["run", "--quiet", "-p", "finite-release", "--", "keygen"])
+                    .arg("--out-dir")
+                    .arg(&dir)
+                    .current_dir(&self.repo_root),
+                "generate the devfinity release signing keypair",
+            )?;
+        }
+        let value = fs::read_to_string(&public_key)
+            .with_context(|| format!("failed to read {}", public_key.display()))?;
+        let value = value.trim().to_ascii_lowercase();
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!(
+                "devfinity release public key at {} is not 64 hex characters",
+                public_key.display()
+            );
+        }
+        Ok(value)
+    }
+
+    /// Read this run's release signing seed (hex) for Core's directory
+    /// signing. `ensure_release_keys` must have run first.
+    fn read_release_signing_key(&self) -> Result<String> {
+        let signing_key = self.release_keys_dir().join("release.key");
+        let value = fs::read_to_string(&signing_key)
+            .with_context(|| format!("failed to read {}", signing_key.display()))?;
+        let value = value.trim().to_ascii_lowercase();
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            bail!(
+                "devfinity release signing key at {} is not 64 hex characters",
+                signing_key.display()
+            );
+        }
+        Ok(value)
+    }
+
+    /// Pack and sign a skills tree with this run's release key, host it from
+    /// the `skills-releases` static server, register it as a promoted Core
+    /// `skills_bundle` artifact, and point the canary channel at it. Prints
+    /// one JSON object describing the published bundle to stdout.
+    pub fn publish_skills(&self, source: Option<&Path>, version_label: Option<&str>) -> Result<()> {
+        let source = source
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.repo_root.join("finite-skills/skills"));
+        if !source.is_dir() {
+            bail!("skills source {} is not a directory", source.display());
+        }
+        let release_public_key = self.ensure_release_keys()?;
+        let signing_key = self.release_keys_dir().join("release.key");
+        let releases_dir = self.skills_releases_dir();
+        fs::create_dir_all(&releases_dir)
+            .with_context(|| format!("failed to create {}", releases_dir.display()))?;
+
+        // The artifact id and default version label derive from the tree's
+        // content digest (no wall clock): a probe pack learns the digest, the
+        // real pack bakes the content-addressed identity into the manifest.
+        let probe_dir = tempfile::Builder::new()
+            .prefix("skills-publish-probe-")
+            .tempdir_in(&self.run_dir)
+            .context("failed to create a skills publish probe directory")?;
+        let probe = self.pack_skills_bundle(
+            &source,
+            "devfinity-skills-probe",
+            "probe",
+            &signing_key,
+            probe_dir.path(),
+        )?;
+        let tree_digest = json_string_field(&probe, "treeDigest")?;
+        let content_prefix = tree_digest
+            .get(..12)
+            .context("finite-release reported a malformed treeDigest")?;
+        let artifact_id = format!("devfinity-skills-{content_prefix}");
+        let version_label = version_label
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("devfinity-{content_prefix}"));
+
+        let packed = self.pack_skills_bundle(
+            &source,
+            &artifact_id,
+            &version_label,
+            &signing_key,
+            &releases_dir,
+        )?;
+        let tarball_sha256 = json_string_field(&packed, "tarballSha256")?;
+        let base_url = self.runtime_skills_releases_url();
+        let tarball_url = format!("{base_url}/{artifact_id}.tar.gz");
+        // Append convention: the manifest URL is the tarball URL plus
+        // `.manifest.json`, exactly as the service directory derives it.
+        let manifest_url = format!("{tarball_url}.manifest.json");
+
+        self.run_core_cli(
+            &[
+                "runtime-artifact-upsert",
+                "--artifact-id",
+                &artifact_id,
+                "--kind",
+                "skills_bundle",
+                "--reference",
+                &tarball_url,
+                "--version-label",
+                &version_label,
+                "--state-schema-version",
+                "finite-skills-tree-v1",
+                "--content-sha256",
+                &tarball_sha256,
+                "--promoted",
+            ],
+            "register the skills bundle as a promoted Core artifact",
+        )?;
+        self.run_core_cli(
+            &[
+                "release-channel-set",
+                "--channel",
+                "canary",
+                "--kind",
+                "skills_bundle",
+                "--artifact-id",
+                &artifact_id,
+            ],
+            "set the canary skills channel head",
+        )?;
+
+        println!(
+            "{}",
+            serde_json::json!({
+                "artifactId": artifact_id,
+                "versionLabel": version_label,
+                "tarballUrl": tarball_url,
+                "manifestUrl": manifest_url,
+                "tarballSha256": tarball_sha256,
+                "treeDigest": tree_digest,
+                "tarballPath": releases_dir.join(format!("{artifact_id}.tar.gz")),
+                "manifestPath": releases_dir.join(format!("{artifact_id}.tar.gz.manifest.json")),
+                "releasePublicKey": release_public_key,
+            })
+        );
+        Ok(())
+    }
+
+    /// Extract the payload rootfs from the runtime image build (or take an
+    /// explicit `--source` tree, e.g. a smoke-crafted broken payload), pack
+    /// and sign it with this run's release key, host it from the
+    /// `skills-releases` static server, register it as a promoted Core
+    /// `payload_bundle` artifact, and point the canary channel at it. Prints
+    /// one JSON object describing the published bundle to stdout.
+    pub fn publish_payload(
+        &self,
+        source: Option<&Path>,
+        version_label: Option<&str>,
+    ) -> Result<()> {
+        let release_public_key = self.ensure_release_keys()?;
+        let signing_key = self.release_keys_dir().join("release.key");
+        let releases_dir = self.skills_releases_dir();
+        fs::create_dir_all(&releases_dir)
+            .with_context(|| format!("failed to create {}", releases_dir.display()))?;
+
+        let source_tree = match source {
+            Some(path) => path.to_path_buf(),
+            None => self.emit_payload_rootfs()?,
+        };
+        if !source_tree.join("bin/finite-agentd").is_file() {
+            bail!(
+                "payload source {} does not contain bin/finite-agentd",
+                source_tree.display()
+            );
+        }
+        let min_shell_version = self.finite_shell_version()?;
+
+        // The default version label is content-addressed (no wall clock): a
+        // probe pack learns the tree digest, the real pack bakes the
+        // content-addressed identity into the manifest. An explicit label
+        // (smoke "v2"/"broken" publishes) skips the probe.
+        let version_label = match version_label {
+            Some(label) => label.to_owned(),
+            None => {
+                let probe_dir = tempfile::Builder::new()
+                    .prefix("payload-publish-probe-")
+                    .tempdir_in(&self.run_dir)
+                    .context("failed to create a payload publish probe directory")?;
+                let probe = self.pack_payload_bundle(
+                    &source_tree,
+                    "devfinity-payload-probe",
+                    "probe",
+                    &min_shell_version,
+                    &signing_key,
+                    probe_dir.path(),
+                )?;
+                let tree_digest = json_string_field(&probe, "treeDigest")?;
+                let content_prefix = tree_digest
+                    .get(..12)
+                    .context("finite-release reported a malformed treeDigest")?;
+                format!("devfinity-{content_prefix}")
+            }
+        };
+        let artifact_id = format!("finite-agent-payload-{version_label}");
+
+        let packed = self.pack_payload_bundle(
+            &source_tree,
+            &artifact_id,
+            &version_label,
+            &min_shell_version,
+            &signing_key,
+            &releases_dir,
+        )?;
+        let tarball_sha256 = json_string_field(&packed, "tarballSha256")?;
+        let tree_digest = json_string_field(&packed, "treeDigest")?;
+        let base_url = self.runtime_skills_releases_url();
+        let tarball_url = format!("{base_url}/{artifact_id}.tar.gz");
+        // Append convention: the manifest URL is the tarball URL plus
+        // `.manifest.json`, exactly as the service directory derives it.
+        let manifest_url = format!("{tarball_url}.manifest.json");
+
+        self.run_core_cli(
+            &[
+                "runtime-artifact-upsert",
+                "--artifact-id",
+                &artifact_id,
+                "--kind",
+                "payload_bundle",
+                "--reference",
+                &tarball_url,
+                "--version-label",
+                &version_label,
+                "--state-schema-version",
+                "finite-payload-tree-v1",
+                "--content-sha256",
+                &tarball_sha256,
+                "--promoted",
+            ],
+            "register the payload bundle as a promoted Core artifact",
+        )?;
+        self.run_core_cli(
+            &[
+                "release-channel-set",
+                "--channel",
+                "canary",
+                "--kind",
+                "payload_bundle",
+                "--artifact-id",
+                &artifact_id,
+            ],
+            "set the canary payload channel head",
+        )?;
+
+        println!(
+            "{}",
+            serde_json::json!({
+                "artifactId": artifact_id,
+                "versionLabel": version_label,
+                "minShellVersion": min_shell_version,
+                "tarballUrl": tarball_url,
+                "manifestUrl": manifest_url,
+                "tarballSha256": tarball_sha256,
+                "treeDigest": tree_digest,
+                "tarballPath": releases_dir.join(format!("{artifact_id}.tar.gz")),
+                "manifestPath": releases_dir.join(format!("{artifact_id}.tar.gz.manifest.json")),
+                "payloadRootfs": source_tree,
+                "releasePublicKey": release_public_key,
+            })
+        );
+        Ok(())
+    }
+
+    /// `build_runtime_image.py --emit-payload`: build only the payload stage
+    /// (warm cache after the stack's own image build) and copy the UNSIGNED
+    /// payload rootfs to `<run>/payload-publish/payload`.
+    fn emit_payload_rootfs(&self) -> Result<PathBuf> {
+        let emit_root = self.run_dir.join("payload-publish");
+        fs::create_dir_all(&emit_root)
+            .with_context(|| format!("failed to create {}", emit_root.display()))?;
+        let engine = if self.profile == StackProfile::DockerSaas {
+            "docker"
+        } else {
+            "apple-container"
+        };
+        command_stdout(
+            Command::new("python3")
+                .arg("finitecomputer-v2/scripts/build_runtime_image.py")
+                .args(["--engine", engine, "--image-ref", RUNTIME_IMAGE_REF])
+                .arg("--context-dir")
+                .arg(self.runtime_image_dir().join("context"))
+                .arg("--emit-payload")
+                .arg(&emit_root)
+                .current_dir(&self.repo_root),
+            "emit the payload rootfs from the runtime image build",
+        )?;
+        Ok(emit_root.join("payload"))
+    }
+
+    /// finite-shell's crate version: published payloads' `min_shell_version`.
+    fn finite_shell_version(&self) -> Result<String> {
+        let manifest_path = self.repo_root.join("finite-shell/Cargo.toml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        manifest
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "version").then(|| value.trim().trim_matches('"').to_owned())
+            })
+            .context("finite-shell/Cargo.toml has no version")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pack_payload_bundle(
+        &self,
+        source: &Path,
+        artifact_id: &str,
+        version_label: &str,
+        min_shell_version: &str,
+        signing_key: &Path,
+        out_dir: &Path,
+    ) -> Result<serde_json::Value> {
+        let stdout = command_stdout(
+            Command::new("cargo")
+                .args([
+                    "run",
+                    "--quiet",
+                    "-p",
+                    "finite-release",
+                    "--",
+                    "pack-payload",
+                ])
+                .arg("--source")
+                .arg(source)
+                .args([
+                    "--artifact-id",
+                    artifact_id,
+                    "--version-label",
+                    version_label,
+                    "--min-shell-version",
+                    min_shell_version,
+                ])
+                .arg("--signing-key")
+                .arg(signing_key)
+                .arg("--out-dir")
+                .arg(out_dir)
+                .current_dir(&self.repo_root),
+            "pack the payload bundle with finite-release",
+        )?;
+        parse_last_json_line(&stdout).context("finite-release pack-payload printed no JSON result")
+    }
+
+    fn pack_skills_bundle(
+        &self,
+        source: &Path,
+        artifact_id: &str,
+        version_label: &str,
+        signing_key: &Path,
+        out_dir: &Path,
+    ) -> Result<serde_json::Value> {
+        let stdout = command_stdout(
+            Command::new("cargo")
+                .args([
+                    "run",
+                    "--quiet",
+                    "-p",
+                    "finite-release",
+                    "--",
+                    "pack-skills",
+                ])
+                .arg("--source")
+                .arg(source)
+                .args([
+                    "--artifact-id",
+                    artifact_id,
+                    "--version-label",
+                    version_label,
+                ])
+                .arg("--signing-key")
+                .arg(signing_key)
+                .arg("--out-dir")
+                .arg(out_dir)
+                .current_dir(&self.repo_root),
+            "pack the skills bundle with finite-release",
+        )?;
+        parse_last_json_line(&stdout).context("finite-release pack-skills printed no JSON result")
+    }
+
+    fn run_core_cli(&self, args: &[&str], label: &str) -> Result<serde_json::Value> {
+        let stdout = command_stdout(
+            Command::new("cargo")
+                .args(["run", "--quiet", "-p", "finite-saas-core", "--"])
+                .args(args)
+                .env("FC_CORE_DATABASE_URL", self.database_url())
+                .current_dir(&self.repo_root),
+            label,
+        )?;
+        serde_json::from_str(stdout.trim()).with_context(|| {
+            format!("finite-saas-core printed invalid JSON while trying to {label}")
+        })
+    }
+}
+
+fn parse_last_json_line(stdout: &str) -> Option<serde_json::Value> {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+}
+
+fn json_string_field(value: &serde_json::Value, field: &str) -> Result<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .with_context(|| format!("finite-release output is missing {field}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4284,6 +4935,137 @@ mod tests {
     }
 
     #[test]
+    fn prepared_release_key_reaches_core_and_runner_runtime_env() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        stack.release_public_key = Some("ab".repeat(32));
+        let yaml = stack.process_compose_yaml();
+
+        let expected_key = format!("FINITE_RELEASE_PUBLIC_KEY\\\":\\\"{}", "ab".repeat(32));
+        for env_name in ["FC_CORE_RUNTIME_ENV_JSON", "FC_RUNNER_RUNTIME_ENV_JSON"] {
+            let value = yaml
+                .lines()
+                .find(|line| line.contains(env_name))
+                .unwrap_or_else(|| panic!("{env_name} missing from generated yaml"));
+            assert!(value.contains(&expected_key), "{env_name}: {value}");
+            assert!(
+                value.contains("FINITE_ALLOW_INSECURE_BUNDLE_URL\\\":\\\"1"),
+                "{env_name}: {value}"
+            );
+            // Agents fetch the signed directory straight from Core over the
+            // container-reachable host.
+            assert!(
+                value.contains(
+                    "FINITE_SERVICE_DIRECTORY_URL\\\":\\\"http://host.container.internal:14200/api/core/v1/service-directory"
+                ),
+                "{env_name}: {value}"
+            );
+            // The shell's channel poller ships variant-controlled and stays
+            // off unless a variant turns it on (autoconverge smoke: 5).
+            assert!(
+                value.contains("FINITE_SHELL_POLL_INTERVAL_SECS\\\":\\\"0"),
+                "{env_name}: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_poll_interval_is_variant_controlled_in_the_runtime_env() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        stack.release_public_key = Some("ab".repeat(32));
+        stack.shell_poll_interval_secs = "5".to_string();
+        let yaml = stack.process_compose_yaml();
+        for env_name in ["FC_CORE_RUNTIME_ENV_JSON", "FC_RUNNER_RUNTIME_ENV_JSON"] {
+            let value = yaml
+                .lines()
+                .find(|line| line.contains(env_name))
+                .unwrap_or_else(|| panic!("{env_name} missing from generated yaml"));
+            assert!(
+                value.contains("FINITE_SHELL_POLL_INTERVAL_SECS\\\":\\\"5"),
+                "{env_name}: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_serves_the_service_directory_for_containers_and_signs_with_the_run_seed() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity")).unwrap();
+        stack.release_public_key = Some("ab".repeat(32));
+        stack.release_signing_key = Some("cd".repeat(32));
+        let yaml = stack.process_compose_yaml();
+
+        // Core binds the shared service host so containers can reach the
+        // directory endpoint.
+        assert!(yaml.contains("FC_CORE_BIND=127.0.0.1:14200"));
+        assert!(yaml.contains(&format!("FC_CORE_RELEASE_SIGNING_KEY={}", "cd".repeat(32))));
+        let services = yaml
+            .lines()
+            .find(|line| line.contains("FC_CORE_SERVICE_DIRECTORY_SERVICES_JSON"))
+            .expect("services json missing from generated yaml");
+        for service in [
+            "core",
+            "chat",
+            "sites",
+            "brain",
+            "identity",
+            "finite_private",
+        ] {
+            assert!(
+                services.contains(&format!("\\\"{service}\\\"")),
+                "{services}"
+            );
+        }
+        // Container-reachable host-access forms, same as the runtime env.
+        assert!(
+            services
+                .contains("sites\\\":{\\\"base_url\\\":\\\"http://host.container.internal:18789"),
+            "{services}"
+        );
+        assert!(
+            services
+                .contains("core\\\":{\\\"base_url\\\":\\\"http://host.container.internal:14200"),
+            "{services}"
+        );
+        assert!(services.contains("client_version"), "{services}");
+    }
+
+    #[test]
+    fn services_only_profile_serves_the_directory_for_host_local_consumers() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity"))
+            .unwrap()
+            .with_profile(StackProfile::ServicesOnly);
+        stack.release_signing_key = Some("cd".repeat(32));
+        let yaml = stack.process_compose_yaml();
+        assert!(yaml.contains("FC_CORE_BIND=127.0.0.1:14200"));
+        assert!(yaml.contains("FC_CORE_RELEASE_SIGNING_KEY"));
+        let services = yaml
+            .lines()
+            .find(|line| line.contains("FC_CORE_SERVICE_DIRECTORY_SERVICES_JSON"))
+            .expect("services json missing from generated yaml");
+        assert!(
+            services.contains("sites\\\":{\\\"base_url\\\":\\\"http://127.0.0.1:18789"),
+            "{services}"
+        );
+        assert_eq!(
+            stack.service_directory_url(),
+            "http://127.0.0.1:14200/api/core/v1/service-directory"
+        );
+    }
+
+    #[test]
+    fn services_only_profile_hosts_skills_releases_on_loopback() {
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity"))
+            .unwrap()
+            .with_profile(StackProfile::ServicesOnly);
+        let yaml = stack.process_compose_yaml();
+        assert!(yaml.contains("skills-releases:"));
+        assert!(yaml.contains("python3 -m http.server --bind 127.0.0.1 --directory"));
+        assert_eq!(
+            stack.runtime_skills_releases_url(),
+            "http://127.0.0.1:18791"
+        );
+    }
+
+    #[test]
     fn local_workos_env_reads_only_supported_names() {
         let dir =
             std::env::temp_dir().join(format!("devfinity-test-workos-env-{}", std::process::id()));
@@ -4377,8 +5159,18 @@ mod tests {
         assert!(
             yaml.contains("finitechat:\n    description: \"Local Finite Chat delivery server\"")
         );
-        assert_eq!(yaml.matches("restart: always").count(), 3);
+        assert_eq!(yaml.matches("restart: always").count(), 4);
         assert!(yaml.contains("workos-fixture:"));
+        assert!(yaml.contains("skills-releases:"));
+        assert!(yaml.contains("python3 -m http.server --bind 127.0.0.1 --directory"));
+        assert!(yaml.contains("skills-releases' 18791"));
+        assert!(yaml.contains("http://host.container.internal:18791/"));
+        assert!(
+            yaml.contains("skills-releases:\n        condition: process_healthy"),
+            "the apple network probe must prove containers reach the bundle host"
+        );
+        // Without a prepared release keypair the runtime env must not claim one.
+        assert!(!yaml.contains("FINITE_RELEASE_PUBLIC_KEY"));
         assert!(yaml.contains("workos-fixture --listen 127.0.0.1:14199"));
         assert!(yaml.contains("finitesites:"));
         assert!(yaml.contains("finite-brain:"));
@@ -4425,6 +5217,9 @@ mod tests {
         assert!(yaml.contains("dashboard:"));
         assert!(yaml.contains("runtime-image:"));
         assert!(yaml.contains("--engine apple-container"));
+        // Agents must boot a verified seed payload signed with the run key.
+        assert!(yaml.contains("--seed-signing-key"));
+        assert!(yaml.contains("release-keys/release.key"));
         assert!(yaml.contains("apple-network-probe:"));
         assert!(yaml.contains("seq 1 120"));
         assert!(yaml.contains("runtime-artifact:"));

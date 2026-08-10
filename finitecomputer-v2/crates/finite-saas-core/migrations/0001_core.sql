@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE TABLE IF NOT EXISTS runtime_artifacts (
   id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('oci_image')),
+  kind TEXT NOT NULL CHECK (kind IN ('oci_image', 'skills_bundle', 'payload_bundle')),
   reference TEXT NOT NULL,
   version_label TEXT NOT NULL,
   source_git_sha TEXT,
@@ -161,12 +161,12 @@ BEGIN
       WHERE runtime_artifact_id IN (
         SELECT id
         FROM runtime_artifacts
-        WHERE kind NOT IN ('oci_image')
+        WHERE kind NOT IN ('oci_image', 'skills_bundle', 'payload_bundle')
       );
   END IF;
 
   DELETE FROM runtime_artifacts
-    WHERE kind NOT IN ('oci_image');
+    WHERE kind NOT IN ('oci_image', 'skills_bundle', 'payload_bundle');
 END $$;
 
 DO $$
@@ -182,7 +182,7 @@ BEGIN
 
   ALTER TABLE runtime_artifacts
     ADD CONSTRAINT runtime_artifacts_kind_check
-    CHECK (kind IN ('oci_image'));
+    CHECK (kind IN ('oci_image', 'skills_bundle', 'payload_bundle'));
 END $$;
 
 CREATE TABLE IF NOT EXISTS agent_runtimes (

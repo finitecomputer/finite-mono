@@ -55,39 +55,85 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository_owner }}/agent-runtime
           VERSION: ${{ inputs.version }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FINITE_RELEASE_SIGNING_KEY: ${{ secrets.FINITE_RELEASE_SIGNING_KEY }}
+          FINITE_RELEASE_PUBLIC_KEY: ${{ vars.FINITE_RELEASE_PUBLIC_KEY }}
           FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
           FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
         run: |
           VERSION_REF="$IMAGE:$VERSION"
+          PAYLOAD_REF="$VERSION_REF-payload"
           SHA_REF="$IMAGE:sha-$GITHUB_SHA"
           test -z "$(git status --porcelain)"
+          if [ -z "$FINITE_RELEASE_SIGNING_KEY" ] || [ -z "$FINITE_RELEASE_PUBLIC_KEY" ]; then
+            echo "::error::runtime image publication requires FINITE_RELEASE_SIGNING_KEY (secret) and FINITE_RELEASE_PUBLIC_KEY (var): the image ships a signed seed payload"
+            exit 1
+          fi
+          umask 077
+          # Key material lives in a trap-cleaned tempdir so no failure point in
+          # this step can leave it behind on the self-hosted runner.
+          SIGNING_KEY_DIR="$(mktemp -d)"
+          trap 'rm -rf "$SIGNING_KEY_DIR"' EXIT
+          SIGNING_KEY_FILE="$SIGNING_KEY_DIR/seed-signing.key"
+          printf '%s\n' "$FINITE_RELEASE_SIGNING_KEY" > "$SIGNING_KEY_FILE"
           finitecomputer-v2/scripts/build_runtime_image.py \
             --image-ref "$VERSION_REF" \
             --hermes-agent-version "$HERMES_AGENT_VERSION" \
             --platform linux/amd64 \
+            --seed-signing-key "$SIGNING_KEY_FILE" \
+            --seed-version-label "$VERSION" \
             --report finitecomputer-v2/runtime-image-report.json
+          # Drop the key as soon as signing is done; the trap remains as the
+          # backstop for every earlier failure point.
+          rm -rf "$SIGNING_KEY_DIR"
 
           LOCAL_IMAGE_ID="$(docker image inspect "$VERSION_REF" --format '{{.Id}}')"
           test -n "$LOCAL_IMAGE_ID"
           test "$(docker image inspect "$VERSION_REF" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["image_metadata"]["id"])')" = "$LOCAL_IMAGE_ID"
+          test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["payloadVersionLabel"])')" = "$VERSION"
+          # Shell image: PID 1 machinery plus the signed seed, nothing else
+          # runtime-mutable.
           docker run --rm --entrypoint /bin/sh "$VERSION_REF" -ec '
-            test "$(/runtime/hermes-venv/bin/python -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "0.20.0"
-            /runtime/bin/finitechat --help >/dev/null
-            /runtime/bin/finite-agentd --help >/dev/null
-            /runtime/bin/fsite describe workflow publish-static-site --output json >/dev/null
-            /runtime/bin/fbrain --help >/dev/null
-            test -x /runtime/bin/finite
-            /runtime/hermes-venv/bin/python -c '\''import googleapiclient, google_auth_httplib2, google_auth_oauthlib'\''
-            /runtime/hermes-venv/bin/python -m py_compile /runtime/hermes-plugin/finitechat/adapter.py
-            /runtime/hermes-venv/bin/python -c '\''from hermes_cli.plugins import discover_plugins; discover_plugins(); from agent.web_search_registry import list_providers; names = [p.name for p in list_providers()]; assert "firecrawl" in names, names'\''
-            /runtime/hermes-venv/bin/python -c '\''import runpy; adapter = runpy.run_path("/runtime/hermes-plugin/finitechat/adapter.py"); assert adapter["FINITE_PLATFORM_NAME"] == "finitechat"'\''
-            test -f /runtime/hermes-plugin/finitechat/plugin.yaml
-            find /runtime/finite-skills -name SKILL.md -type f -print -quit | grep -q .
-            test -f /runtime/finite-skills/software-development/finitebrain/SKILL.md
+            test -x /usr/local/bin/finite-shell
+            /usr/local/bin/finite-shell --help >/dev/null
+            test -f /seed/payload.tar.gz
+            test -f /seed/payload.tar.gz.manifest.json
+            gws --version >/dev/null
             test "$FINITECHAT_HERMES_INBOUND_STREAM" = "1"
           '
+          # Payload stage: the bits agents iterate on. The venv python entries
+          # are fixup stubs, so module checks run through the base interpreter
+          # with the venv site-packages on the path.
+          docker run --rm --entrypoint /bin/sh "$PAYLOAD_REF" -ec '
+            site="$(echo /payload/hermes-venv/lib/python3.*/site-packages)"
+            PYTHONPATH="$site" python3 -c '\''import importlib.metadata; assert importlib.metadata.version("hermes-agent") == "0.20.0"'\''
+            PYTHONPATH="$site" python3 -c '\''import googleapiclient, google_auth_httplib2, google_auth_oauthlib'\''
+            PYTHONPATH="$site" python3 -c '\''from hermes_cli.plugins import discover_plugins; discover_plugins(); from agent.web_search_registry import list_providers; names = [p.name for p in list_providers()]; assert "firecrawl" in names, names'\''
+            /payload/bin/finitechat --help >/dev/null
+            /payload/bin/finite-agentd --help >/dev/null
+            /payload/bin/fsite describe workflow publish-static-site --output json >/dev/null
+            /payload/bin/fbrain --help >/dev/null
+            test -x /payload/bin/finite
+            python3 -m py_compile /payload/hermes-plugin/finitechat/adapter.py
+            python3 -c '\''import runpy; adapter = runpy.run_path("/payload/hermes-plugin/finitechat/adapter.py"); assert adapter["FINITE_PLATFORM_NAME"] == "finitechat"'\''
+            test -f /payload/hermes-plugin/finitechat/plugin.yaml
+            find /payload/finite-skills -name SKILL.md -type f -print -quit | grep -q .
+            test -f /payload/finite-skills/software-development/finitebrain/SKILL.md
+          '
+          # The exact seed bytes in the image about to be pushed must verify
+          # against the fleet verification key runtimes will boot with.
+          SEED_DIR="$(mktemp -d)"
+          seed_container="$(docker create "$VERSION_REF")"
+          docker cp "$seed_container:/seed/payload.tar.gz" "$SEED_DIR/payload.tar.gz"
+          docker cp "$seed_container:/seed/payload.tar.gz.manifest.json" "$SEED_DIR/payload.tar.gz.manifest.json"
+          docker rm "$seed_container" >/dev/null
+          docker run --rm --volume "$SEED_DIR:/verify" --entrypoint finite-release "$PAYLOAD_REF" \
+            verify-payload \
+            --tarball /verify/payload.tar.gz \
+            --manifest /verify/payload.tar.gz.manifest.json \
+            --public-key "$FINITE_RELEASE_PUBLIC_KEY"
+          rm -rf "$SEED_DIR"
           (
             cd finitechat
             python3 -m unittest \
@@ -107,6 +153,7 @@ jobs:
           fi
           finitechat/scripts/hermes-durable-home-docker-smoke.py \
             --image "$LOCAL_IMAGE_ID" \
+            --payload-image "$PAYLOAD_REF" \
             --report target/runtime-image-durable-smoke/report.json
           test "$(docker image inspect "$VERSION_REF" --format '{{.Id}}')" = "$LOCAL_IMAGE_ID"
           test "$(python3 -c 'import json; print(json.load(open("finitechat/target/runtime-image-durable-smoke/report.json"))["facts"]["image_id"])')" = "$LOCAL_IMAGE_ID"

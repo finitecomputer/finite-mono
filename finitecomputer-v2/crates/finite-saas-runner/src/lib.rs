@@ -7,9 +7,10 @@ use finite_saas_core::{
     RegisterAgentCreationRuntimeInput, RelayHeartbeat, RenewRuntimeControlRequestInput,
     RetryRuntimeControlRequestInput, RunnerClass, RunnerLeaseCapacity, RuntimeArtifact,
     RuntimeArtifactKind, RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeCapabilitiesV1,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePlacement,
-    RuntimeResourceClass, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope, RuntimeSpecV1,
-    RuntimeSummaryStatus, api::RecordProviderOperationTransitionRequest,
+    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimePayloadReportRequest,
+    RuntimePayloadStatus, RuntimePlacement, RuntimeResourceClass, RuntimeRetirementSnapshotReceipt,
+    RuntimeSpecEnvelope, RuntimeSpecV1, RuntimeSummaryStatus,
+    api::RecordProviderOperationTransitionRequest,
     runtime_relay_token_hash as hash_runtime_relay_token,
 };
 #[cfg(test)]
@@ -366,6 +367,50 @@ pub struct AgentCreationRunner<Q, L, T> {
     runtime_environment: BTreeMap<String, String>,
     runtime_secret_environment: BTreeMap<String, String>,
     agent_identity_authority: Option<AgentIdentityAuthorityConfig>,
+    payload_telemetry: Option<PayloadTelemetryConfig>,
+}
+
+/// Payload generation telemetry (payload-generations plan M4): the runner is
+/// the only component that both reaches every owned runtime's `/contact`
+/// endpoint and holds a Core credential, so it forwards what each runtime's
+/// shell reports running. The registry of owned runtimes is a directory of
+/// small JSON files under the runner work root — `run_cycle` reconstructs
+/// the whole runner every cycle, so the registry must survive on disk.
+#[derive(Debug, Clone)]
+pub struct PayloadTelemetryConfig {
+    /// Where the per-runtime registry entries live
+    /// (`<work_root>/payload-telemetry`).
+    pub registry_dir: PathBuf,
+    /// Per-runtime minimum spacing between report attempts.
+    pub interval: Duration,
+    /// Bound on the `/contact` fetch.
+    pub http_timeout: Duration,
+}
+
+/// One owned runtime the runner reports payload telemetry for.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PayloadTelemetryEntry {
+    source_machine_id: String,
+    contact_endpoint: String,
+    /// Unix milliseconds of the last report attempt (success or not); the
+    /// throttle key.
+    #[serde(default)]
+    last_attempt_unix_ms: Option<u64>,
+    /// The Agent Principal bound to this runtime, pinned from the
+    /// launch-verified `/contact` read (the same npub the identity binding
+    /// observed and Core recorded). It is authoritative: every telemetry read
+    /// must present exactly this npub or the report is dropped rather than
+    /// attributed to this runtime — host ports get reallocated across stops
+    /// (the 2026-08-07 port-squat class), so there is no trust-on-first-use.
+    ///
+    /// `None` only for legacy launches whose facts exposed no principal (older
+    /// images, or relocations before durable-pin backfill lands). Those fall
+    /// back to a first-read pin that still requires the *response* to carry a
+    /// principal and match thereafter; an unbound response is never reported.
+    /// Backfilling the pin for the existing fleet must come from Core/durable
+    /// identity, never this mutable contact port.
+    #[serde(default)]
+    agent_npub: Option<String>,
 }
 
 impl<Q, L, T> AgentCreationRunner<Q, L, T>
@@ -397,7 +442,15 @@ where
             runtime_environment: BTreeMap::new(),
             runtime_secret_environment: BTreeMap::new(),
             agent_identity_authority: None,
+            payload_telemetry: None,
         })
+    }
+
+    /// Enable payload telemetry forwarding (owned runtimes' shell `/healthz`
+    /// fields → Core) with the given registry directory and cadence.
+    pub fn with_payload_telemetry(mut self, config: Option<PayloadTelemetryConfig>) -> Self {
+        self.payload_telemetry = config;
+        self
     }
 
     pub fn with_runtime_ready_polling(mut self, timeout: Duration, interval: Duration) -> Self {
@@ -450,6 +503,9 @@ where
 
     pub fn run_once(&mut self) -> Result<RunOnceOutcome, RunnerError> {
         self.launcher.validate_ready()?;
+        // Best-effort, throttled per runtime: telemetry must never fail or
+        // slow the lease cycle beyond its own bounded HTTP timeouts.
+        self.forward_payload_telemetry();
         let lease_token = self.lease_tokens.next_lease_token()?;
         let source_host_id = self.launcher.source_host_id().map(str::to_string);
         let runtime_capabilities = self.launcher.runtime_capabilities();
@@ -547,6 +603,10 @@ where
                         now: None,
                     },
                 );
+                // The Agent Principal the identity binding verified from the
+                // launched runtime's /contact — carried forward to pin the
+                // telemetry entry so a later port-squat cannot wear this name.
+                let mut launch_verified_npub: Option<String> = None;
                 let launch_result = match launch_result {
                     Ok(_) => match self.wait_for_launch_readiness(&facts.source_machine_id) {
                         Ok(()) => match if lease.request.relocation.is_some() {
@@ -554,36 +614,42 @@ where
                             // restored state exposes the existing Agent
                             // Principal. Rebinding it after Core switches the
                             // Runtime host would add a fallible post-commit
-                            // step to the relocation boundary.
-                            Ok(())
+                            // step to the relocation boundary. (The pin is left
+                            // to durable-identity backfill, not re-read here.)
+                            Ok(None)
                         } else {
                             self.bind_agent_identity(&lease, &facts)
                         } {
-                            Ok(()) => self.queue.complete_agent_creation(
-                                &request_id,
-                                CompleteAgentCreationRequestInput {
-                                    request_id: request_id.clone(),
-                                    runner_id: self.runner_id.clone(),
-                                    lease_token: lease_token.clone(),
-                                    source_host_id: facts.source_host_id.clone(),
-                                    source_machine_id: facts.source_machine_id.clone(),
-                                    runtime_artifact_id: facts.runtime_artifact_id.clone(),
-                                    state_schema_version: facts.state_schema_version.clone(),
-                                    provider_runtime_handle: facts.provider_runtime_handle.clone(),
-                                    contact_endpoint: facts.contact_endpoint.clone(),
-                                    display_name: facts.display_name.clone(),
-                                    hostname: facts.hostname.clone(),
-                                    runtime_host: facts.runtime_host.clone(),
-                                    runtime_status: Some(RuntimeSummaryStatus::Online),
-                                    active_inference_profile: facts
-                                        .active_inference_profile
-                                        .clone(),
-                                    hermes_available: facts.hermes_available,
-                                    published_app_urls: facts.published_app_urls.clone(),
-                                    runtime_capabilities: Some(runtime_capabilities),
-                                    now: None,
-                                },
-                            ),
+                            Ok(verified_npub) => {
+                                launch_verified_npub = verified_npub;
+                                self.queue.complete_agent_creation(
+                                    &request_id,
+                                    CompleteAgentCreationRequestInput {
+                                        request_id: request_id.clone(),
+                                        runner_id: self.runner_id.clone(),
+                                        lease_token: lease_token.clone(),
+                                        source_host_id: facts.source_host_id.clone(),
+                                        source_machine_id: facts.source_machine_id.clone(),
+                                        runtime_artifact_id: facts.runtime_artifact_id.clone(),
+                                        state_schema_version: facts.state_schema_version.clone(),
+                                        provider_runtime_handle: facts
+                                            .provider_runtime_handle
+                                            .clone(),
+                                        contact_endpoint: facts.contact_endpoint.clone(),
+                                        display_name: facts.display_name.clone(),
+                                        hostname: facts.hostname.clone(),
+                                        runtime_host: facts.runtime_host.clone(),
+                                        runtime_status: Some(RuntimeSummaryStatus::Online),
+                                        active_inference_profile: facts
+                                            .active_inference_profile
+                                            .clone(),
+                                        hermes_available: facts.hermes_available,
+                                        published_app_urls: facts.published_app_urls.clone(),
+                                        runtime_capabilities: Some(runtime_capabilities),
+                                        now: None,
+                                    },
+                                )
+                            }
                             Err(error) => Err(error),
                         },
                         Err(error) => Err(error),
@@ -591,10 +657,16 @@ where
                     Err(error) => Err(error),
                 };
                 match launch_result {
-                    Ok(completed) => Ok(RunOnceOutcome::Launched {
-                        request_id,
-                        runtime_id: completed.request.agent_runtime_id,
-                    }),
+                    Ok(completed) => {
+                        self.record_payload_telemetry_target(
+                            &facts,
+                            launch_verified_npub.as_deref(),
+                        );
+                        Ok(RunOnceOutcome::Launched {
+                            request_id,
+                            runtime_id: completed.request.agent_runtime_id,
+                        })
+                    }
                     Err(error) => {
                         let failure_message = error.to_string();
                         let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
@@ -644,13 +716,190 @@ where
         }
     }
 
+    /// Remember a successfully launched runtime as a telemetry target. The
+    /// registry entry survives on disk because `run_cycle` rebuilds the
+    /// runner every cycle. Best-effort: a write failure loses telemetry, not
+    /// the launch.
+    fn record_payload_telemetry_target(
+        &self,
+        facts: &RuntimeLaunchFacts,
+        launch_verified_npub: Option<&str>,
+    ) {
+        let Some(config) = &self.payload_telemetry else {
+            return;
+        };
+        let Some(contact_endpoint) = facts.contact_endpoint.clone() else {
+            return;
+        };
+        let entry = PayloadTelemetryEntry {
+            source_machine_id: facts.source_machine_id.clone(),
+            contact_endpoint,
+            last_attempt_unix_ms: None,
+            // Pinned from the launch-verified /contact identity binding, so the
+            // very first telemetry read is already held to this npub — no
+            // trust-on-first-use window. `None` only for legacy launches that
+            // exposed no principal (older facts / relocations); those fall back
+            // to a response-pinned check that still refuses unbound reports.
+            agent_npub: launch_verified_npub.map(str::to_string),
+        };
+        if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry) {
+            eprintln!(
+                "warning: payload telemetry registration for {} failed: {error}",
+                facts.source_machine_id
+            );
+        }
+    }
+
+    /// Forward each due runtime's shell-reported payload fields to Core.
+    /// Reads `/contact` (the same health body as `/healthz`, served even at
+    /// 503 while a flip is in progress), tolerates pre-shell images by
+    /// reporting absent fields, and skips unreachable runtimes until their
+    /// next interval.
+    fn forward_payload_telemetry(&mut self) {
+        let Some(config) = self.payload_telemetry.clone() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&config.registry_dir) else {
+            return;
+        };
+        let now_ms = unix_millis_now();
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(mut entry) = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<PayloadTelemetryEntry>(&bytes).ok())
+            else {
+                continue;
+            };
+            if entry.last_attempt_unix_ms.is_some_and(|last| {
+                now_ms.saturating_sub(last) < config.interval.as_millis() as u64
+            }) {
+                continue;
+            }
+            entry.last_attempt_unix_ms = Some(now_ms);
+            if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry) {
+                eprintln!(
+                    "warning: payload telemetry entry for {} was not updated: {error}",
+                    entry.source_machine_id
+                );
+            }
+            let Some(health) =
+                fetch_runtime_health_json(&entry.contact_endpoint, config.http_timeout)
+            else {
+                // Unreachable this tick (stopped container, mid-restart):
+                // try again after the interval.
+                continue;
+            };
+            let field = |name: &str| {
+                health
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            };
+            // Identity gate: never attribute a response to this runtime
+            // unless it presents the pinned Agent Principal. The pin is
+            // authoritative — set from the launch-verified /contact identity,
+            // not trust-on-first-use — because ports are reallocated across
+            // stops (the 2026-08-07 port-squat class) and a squatter's health
+            // must not wear this agent's name in the fleet view. Dropped
+            // reports leave the runtime's telemetry stale, which the
+            // convergence fence surfaces as `stale`.
+            let observed_npub = field("agent_npub")
+                .or_else(|| field("npub"))
+                .filter(|value| value.starts_with("npub1"));
+            match (&entry.agent_npub, &observed_npub) {
+                (Some(pinned), Some(observed)) if pinned != observed => {
+                    eprintln!(
+                        "warning: payload telemetry identity mismatch for {}: \
+                         pinned {pinned} but {} answered with {observed} — \
+                         dropping report (possible port squat)",
+                        entry.source_machine_id, entry.contact_endpoint
+                    );
+                    continue;
+                }
+                (Some(_), None) => {
+                    eprintln!(
+                        "warning: payload telemetry response for {} carries no \
+                         Agent Principal; dropping report",
+                        entry.source_machine_id
+                    );
+                    continue;
+                }
+                (None, None) => {
+                    // Legacy fallback (no launch-verified pin) AND the response
+                    // carries no principal: never silently report unbound — the
+                    // fleet view would show identity-less data. Wait for a
+                    // principal (or a Core-driven durable-pin backfill).
+                    eprintln!(
+                        "warning: payload telemetry response for {} carries no \
+                         Agent Principal and none was pinned at launch; \
+                         dropping report",
+                        entry.source_machine_id
+                    );
+                    continue;
+                }
+                (None, Some(observed)) => {
+                    // Legacy fallback only: no principal was pinned at launch
+                    // (older facts / relocations). Pin the first principal the
+                    // response presents and require every later read to match.
+                    // Not TOFU for current launches — those arrive pinned.
+                    entry.agent_npub = Some(observed.clone());
+                    if let Err(error) = write_payload_telemetry_entry(&config.registry_dir, &entry)
+                    {
+                        eprintln!(
+                            "warning: payload telemetry identity pin for {} was not \
+                             persisted: {error}",
+                            entry.source_machine_id
+                        );
+                    }
+                }
+                // Launch-pinned identity matched the response: report it.
+                (Some(_), Some(_)) => {}
+            }
+            // The shell's bad list rides along as evidence for the fleet
+            // view ("N agents refused vX"). Absent for pre-shell images,
+            // whose /healthz has no payload_generations object.
+            let bad_versions = health
+                .get("payload_generations")
+                .and_then(|generations| generations.get("bad"))
+                .and_then(serde_json::Value::as_array)
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                });
+            let request = RuntimePayloadReportRequest {
+                source_machine_id: entry.source_machine_id.clone(),
+                payload_version_label: field("payload_version"),
+                payload_digest: field("payload_digest"),
+                shell_version: field("shell_version"),
+                release_channel: field("channel"),
+                bad_versions,
+                now: None,
+            };
+            if let Err(error) = self.queue.report_runtime_payload(&request) {
+                eprintln!(
+                    "warning: payload telemetry report for {} failed: {error}",
+                    entry.source_machine_id
+                );
+            }
+        }
+    }
+
+    /// Verify and bind the launched runtime's Agent Principal, returning the
+    /// verified npub so callers can pin telemetry to it. `Ok(None)` when this
+    /// managed agent has no email to bind (nothing was verified).
     fn bind_agent_identity(
         &self,
         lease: &AgentCreationLease,
         facts: &RuntimeLaunchFacts,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<Option<String>, RunnerError> {
         let Some(agent_email) = lease.project.agent_email.as_deref() else {
-            return Ok(());
+            return Ok(None);
         };
         let config = self.agent_identity_authority.as_ref().ok_or_else(|| {
             RunnerError::AgentIdentityBinding(
@@ -711,7 +960,7 @@ where
                 "Identity Authority returned a mismatched binding".to_string(),
             ));
         }
-        Ok(())
+        Ok(Some(agent_npub.to_string()))
     }
 
     fn run_runtime_control(
@@ -1189,6 +1438,14 @@ pub trait AgentCreationQueue {
         request_id: &str,
         input: FailAgentCreationRequestInput,
     ) -> Result<AgentCreationRequest, RunnerError>;
+
+    /// Forward one runtime's shell-reported payload telemetry
+    /// (payload-generations plan M4). The source host is bound by the
+    /// runner credential on the Core side.
+    fn report_runtime_payload(
+        &mut self,
+        input: &RuntimePayloadReportRequest,
+    ) -> Result<(), RunnerError>;
 }
 
 pub trait ProviderOperationJournal {
@@ -2040,6 +2297,12 @@ fn reserved_runtime_environment_key(key: &str) -> bool {
 }
 
 fn secret_runtime_environment_key(key: &str) -> bool {
+    // Public verification material passes through the non-secret channel even
+    // though its name ends in KEY. Keep this allowlist in lockstep with Core's
+    // `runtime_spec_secret_environment_key`.
+    if key == "FINITE_RELEASE_PUBLIC_KEY" {
+        return false;
+    }
     ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"]
         .iter()
         .any(|part| key.split('_').any(|segment| segment == *part))
@@ -2291,6 +2554,67 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
             &format!("/api/core/v1/agent-creation-requests/{}/fail", request_id),
             &input,
         )
+    }
+
+    fn report_runtime_payload(
+        &mut self,
+        input: &RuntimePayloadReportRequest,
+    ) -> Result<(), RunnerError> {
+        let _: RuntimePayloadStatus =
+            self.post_json("/api/core/v1/runtime-payload-reports", input)?;
+        Ok(())
+    }
+}
+
+/// Atomically write one payload-telemetry registry entry
+/// (`<registry_dir>/<machine>.json`, tempfile + rename).
+fn write_payload_telemetry_entry(
+    registry_dir: &Path,
+    entry: &PayloadTelemetryEntry,
+) -> Result<(), RunnerError> {
+    if entry.source_machine_id.is_empty()
+        || !entry
+            .source_machine_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(RunnerError::RuntimeLaunch(format!(
+            "machine id {:?} is not a safe registry file name",
+            entry.source_machine_id
+        )));
+    }
+    std::fs::create_dir_all(registry_dir).map_err(|error| {
+        RunnerError::RuntimeLaunch(format!("payload telemetry registry is unusable: {error}"))
+    })?;
+    let path = registry_dir.join(format!("{}.json", entry.source_machine_id));
+    let temporary = registry_dir.join(format!(".{}.json.tmp", entry.source_machine_id));
+    let bytes = serde_json::to_vec_pretty(entry).map_err(|error| {
+        RunnerError::RuntimeLaunch(format!(
+            "payload telemetry entry is unserializable: {error}"
+        ))
+    })?;
+    std::fs::write(&temporary, bytes)
+        .and_then(|()| std::fs::rename(&temporary, &path))
+        .map_err(|error| {
+            RunnerError::RuntimeLaunch(format!("payload telemetry entry write failed: {error}"))
+        })
+}
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+/// GET a runtime health body. The shell serves the same JSON on `/contact`
+/// and `/healthz` with 200 when ready and 503 otherwise — both carry the
+/// generation fields, so a 503 body is still a valid report source.
+fn fetch_runtime_health_json(url: &str, timeout: Duration) -> Option<serde_json::Value> {
+    match ureq::get(url).timeout(timeout).call() {
+        Ok(response) => response.into_json().ok(),
+        Err(ureq::Error::Status(_, response)) => response.into_json().ok(),
+        Err(_) => None,
     }
 }
 
@@ -4744,6 +5068,325 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn payload_telemetry_registers_launches_and_forwards_healthz_fields() {
+        let work_root = tempfile::tempdir().unwrap();
+        let registry_dir = work_root.path().join("payload-telemetry");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // First telemetry pass: a shell-image health body (the shell
+            // serves the same JSON on /contact, 503 while flipping — still a
+            // valid source) carrying its Agent Principal, which pins the
+            // telemetry entry. Second pass: an unprincipalled body — now
+            // dropped, because a pinned entry never attributes an identity-less
+            // response.
+            let (mut first, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut first);
+            assert!(request.starts_with("GET /contact "));
+            write_http_json(
+                &mut first,
+                503,
+                &serde_json::json!({
+                    "ready": false,
+                    "agent_npub": "npub1owner",
+                    "payload_version": "devfinity-v2",
+                    "payload_digest": "d".repeat(64),
+                    "shell_version": "0.1.0",
+                    "channel": "canary",
+                    "payload_generations": {
+                        "current": "devfinity-v2",
+                        "previous": "devfinity-v1",
+                        "staged": null,
+                        "bad": ["devfinity-v3-broken"],
+                    },
+                })
+                .to_string(),
+            );
+            let (mut second, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut second);
+            assert!(request.starts_with("GET /contact "));
+            write_http_json(
+                &mut second,
+                200,
+                &serde_json::json!({ "ready": true }).to_string(),
+            );
+        });
+
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let machine_id = facts.source_machine_id.clone();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1", "lease-2", "lease-3", "lease-4"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_payload_telemetry(Some(PayloadTelemetryConfig {
+            registry_dir: registry_dir.clone(),
+            interval: Duration::ZERO,
+            http_timeout: Duration::from_secs(1),
+        }));
+
+        // The launch registers the runtime as a telemetry target on disk
+        // (run_cycle rebuilds the runner every cycle, so memory won't do).
+        let outcome = runner.run_once().unwrap();
+        assert!(matches!(outcome, RunOnceOutcome::Launched { .. }));
+        assert!(registry_dir.join(format!("{machine_id}.json")).is_file());
+        assert!(runner.queue.payload_reports.is_empty());
+
+        // Next cycle pins the runtime's principal and forwards the shell
+        // fields; the one after drops an unprincipalled body outright.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+        let report = &runner.queue.payload_reports[0];
+        assert_eq!(report.source_machine_id, machine_id);
+        assert_eq!(
+            report.payload_version_label.as_deref(),
+            Some("devfinity-v2")
+        );
+        assert_eq!(report.payload_digest, Some("d".repeat(64)));
+        assert_eq!(report.shell_version.as_deref(), Some("0.1.0"));
+        assert_eq!(report.release_channel.as_deref(), Some("canary"));
+        assert_eq!(
+            report.bad_versions,
+            Some(vec!["devfinity-v3-broken".to_string()])
+        );
+
+        // An unprincipalled response against a pinned entry is dropped, not
+        // reported: no identity-less data ever reaches the fleet view.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(
+            runner.queue.payload_reports.len(),
+            1,
+            "an identity-less response must be dropped once an identity is pinned"
+        );
+        server.join().unwrap();
+
+        // The stub is gone: an unreachable runtime is skipped, never an
+        // error, and never a report of stale data.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+    }
+
+    #[test]
+    fn payload_telemetry_pins_identity_and_drops_squatters() {
+        let work_root = tempfile::tempdir().unwrap();
+        let registry_dir = work_root.path().join("payload-telemetry");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let bodies = [
+                // 1: legacy fallback (this launch exposed no pin) — the first
+                // principal-bearing response pins the Agent Principal.
+                serde_json::json!({
+                    "agent_npub": "npub1owner", "payload_version": "v1", "channel": "canary",
+                }),
+                // 2: a different agent answering on the reallocated port —
+                // the 2026-08-07 port-squat class. Must be dropped.
+                serde_json::json!({
+                    "agent_npub": "npub1squatter", "payload_version": "v9", "channel": "stable",
+                }),
+                // 3: pinned entry, response with no principal at all: dropped.
+                serde_json::json!({ "payload_version": "v9" }),
+                // 4: the rightful owner again: reported.
+                serde_json::json!({
+                    "agent_npub": "npub1owner", "payload_version": "v2", "channel": "canary",
+                }),
+            ];
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_request(&mut stream);
+                write_http_json(&mut stream, 200, &body.to_string());
+            }
+        });
+
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let machine_id = facts.source_machine_id.clone();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1", "lease-2", "lease-3", "lease-4", "lease-5"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_payload_telemetry(Some(PayloadTelemetryConfig {
+            registry_dir: registry_dir.clone(),
+            interval: Duration::ZERO,
+            http_timeout: Duration::from_secs(1),
+        }));
+
+        assert!(matches!(
+            runner.run_once().unwrap(),
+            RunOnceOutcome::Launched { .. }
+        ));
+
+        // 1: first read pins the principal and reports.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+        let entry: PayloadTelemetryEntry = serde_json::from_slice(
+            &std::fs::read(registry_dir.join(format!("{machine_id}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry.agent_npub.as_deref(), Some("npub1owner"));
+
+        // 2 + 3: the squatter and the principal-less body are both dropped.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+
+        // 4: the rightful owner reports again.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 2);
+        assert_eq!(
+            runner.queue.payload_reports[1]
+                .payload_version_label
+                .as_deref(),
+            Some("v2")
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn payload_telemetry_requires_the_launch_pinned_identity_with_no_tofu() {
+        // An entry pinned at launch (the authoritative path) never accepts an
+        // unprincipalled first response: the very first read is already held to
+        // the pinned npub, so there is no trust-on-first-use window a squatter
+        // could exploit.
+        let work_root = tempfile::tempdir().unwrap();
+        let registry_dir = work_root.path().join("payload-telemetry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let bodies = [
+                // 1: no principal at all — dropped even though this is the
+                // first read, because launch already pinned the identity.
+                serde_json::json!({ "payload_version": "v9" }),
+                // 2: a squatter on the reallocated port — dropped.
+                serde_json::json!({
+                    "agent_npub": "npub1squatter", "payload_version": "v9", "channel": "stable",
+                }),
+                // 3: the launch-verified owner — reported.
+                serde_json::json!({
+                    "agent_npub": "npub1owner", "payload_version": "v2", "channel": "canary",
+                }),
+            ];
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_request(&mut stream);
+                write_http_json(&mut stream, 200, &body.to_string());
+            }
+        });
+
+        // Pre-seed a registry entry pinned from launch (as
+        // record_payload_telemetry_target now does with the verified npub).
+        let entry = PayloadTelemetryEntry {
+            source_machine_id: "finite-agent_pinned".to_string(),
+            contact_endpoint: format!("http://{address}/contact"),
+            last_attempt_unix_ms: None,
+            agent_npub: Some("npub1owner".to_string()),
+        };
+        write_payload_telemetry_entry(&registry_dir, &entry).unwrap();
+
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::idle(),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FixedLeaseTokens::new(["lease-1", "lease-2", "lease-3", "lease-4"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_payload_telemetry(Some(PayloadTelemetryConfig {
+            registry_dir: registry_dir.clone(),
+            interval: Duration::ZERO,
+            http_timeout: Duration::from_secs(1),
+        }));
+
+        // 1: unprincipalled first response is dropped (no TOFU).
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert!(runner.queue.payload_reports.is_empty());
+        // 2: squatter dropped.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert!(runner.queue.payload_reports.is_empty());
+        // 3: the launch-verified owner is reported.
+        assert!(matches!(runner.run_once().unwrap(), RunOnceOutcome::Idle));
+        assert_eq!(runner.queue.payload_reports.len(), 1);
+        assert_eq!(
+            runner.queue.payload_reports[0]
+                .payload_version_label
+                .as_deref(),
+            Some("v2")
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn payload_telemetry_is_throttled_per_runtime_and_off_without_config() {
+        let work_root = tempfile::tempdir().unwrap();
+        let registry_dir = work_root.path().join("payload-telemetry");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut only, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut only);
+            write_http_json(
+                &mut only,
+                200,
+                &serde_json::json!({
+                    "ready": true, "agent_npub": "npub1owner", "payload_version": "v1",
+                })
+                .to_string(),
+            );
+        });
+
+        let mut facts = RuntimeLaunchFacts::sample();
+        facts.contact_endpoint = Some(format!("http://{address}/contact"));
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_123")),
+            FakeLauncher::ready(facts.clone()),
+            FixedLeaseTokens::new(["lease-1", "lease-2", "lease-3"]),
+            "runner-1",
+            300,
+        )
+        .unwrap()
+        .with_payload_telemetry(Some(PayloadTelemetryConfig {
+            registry_dir: registry_dir.clone(),
+            interval: Duration::from_secs(3600),
+            http_timeout: Duration::from_secs(1),
+        }));
+        runner.run_once().unwrap();
+        runner.run_once().unwrap();
+        runner.run_once().unwrap();
+        assert_eq!(
+            runner.queue.payload_reports.len(),
+            1,
+            "one report inside the interval, however many cycles run"
+        );
+        server.join().unwrap();
+
+        // Without config (no work root / interval 0 upstream) nothing is
+        // registered or fetched.
+        let disabled_root = tempfile::tempdir().unwrap();
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_lease(sample_lease("agent_request_456")),
+            FakeLauncher::ready(facts),
+            FixedLeaseTokens::new(["lease-1", "lease-2"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+        runner.run_once().unwrap();
+        runner.run_once().unwrap();
+        assert!(runner.queue.payload_reports.is_empty());
+        assert!(!disabled_root.path().join("payload-telemetry").exists());
+    }
+
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {
         stream
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -5236,7 +5879,7 @@ mod tests {
     }
 
     #[test]
-    fn production_runtime_image_uses_data_mount_and_finitechat_entrypoint() {
+    fn production_runtime_image_uses_data_mount_and_finite_shell_entrypoint() {
         let dockerfile = read_repo_file("deploy/finite-computer/images/runtime.Dockerfile");
 
         assert!(dockerfile.contains("ENV FINITECHAT_HOME=/data/agent"));
@@ -5249,7 +5892,11 @@ mod tests {
         assert!(
             dockerfile.contains("ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer")
         );
-        assert!(dockerfile.contains("ENTRYPOINT [\"/opt/agent-entrypoint.sh\"]"));
+        // ADR 0006: finite-shell is PID 1 and everything else rides in the
+        // signed seed payload it verifies at boot.
+        assert!(dockerfile.contains("ENTRYPOINT [\"/usr/local/bin/finite-shell\", \"run\"]"));
+        assert!(dockerfile.contains("COPY seed-payload/payload.tar.gz /seed/payload.tar.gz"));
+        assert!(!dockerfile.contains("agent-entrypoint.sh"));
         assert!(!dockerfile.contains("finitechat-entrypoint.sh"));
         assert!(!dockerfile.contains("/finite-state"));
     }
@@ -5636,10 +6283,14 @@ mod tests {
 
     #[test]
     fn opaque_runtime_environment_is_bounded_non_secret_and_cannot_override_contract() {
-        let valid = BTreeMap::from([(
-            "FINITE_SITES_API".to_string(),
-            "http://192.168.64.1:18789".to_string(),
-        )]);
+        let valid = BTreeMap::from([
+            (
+                "FINITE_SITES_API".to_string(),
+                "http://192.168.64.1:18789".to_string(),
+            ),
+            // Public verification material rides the non-secret channel.
+            ("FINITE_RELEASE_PUBLIC_KEY".to_string(), "ab".repeat(32)),
+        ]);
         validate_runtime_environment(&valid).unwrap();
         let restart_options = RuntimeRestartOptions::new(valid.clone()).unwrap();
 
@@ -5994,6 +6645,7 @@ mod tests {
         heartbeat_checks: Vec<String>,
         completed: Vec<CompleteAgentCreationRequestInput>,
         failed: Vec<FailAgentCreationRequestInput>,
+        payload_reports: Vec<RuntimePayloadReportRequest>,
     }
 
     impl FakeQueue {
@@ -6018,6 +6670,7 @@ mod tests {
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                payload_reports: Vec::new(),
             }
         }
 
@@ -6042,6 +6695,7 @@ mod tests {
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                payload_reports: Vec::new(),
             }
         }
 
@@ -6066,6 +6720,7 @@ mod tests {
                 heartbeat_checks: Vec::new(),
                 completed: Vec::new(),
                 failed: Vec::new(),
+                payload_reports: Vec::new(),
             }
         }
 
@@ -6220,6 +6875,14 @@ mod tests {
         ) -> Result<AgentCreationRequest, RunnerError> {
             self.failed.push(input);
             Ok(sample_lease("agent_request_123").request)
+        }
+
+        fn report_runtime_payload(
+            &mut self,
+            input: &RuntimePayloadReportRequest,
+        ) -> Result<(), RunnerError> {
+            self.payload_reports.push(input.clone());
+            Ok(())
         }
     }
 
@@ -6657,6 +7320,7 @@ mod tests {
             state_schema_version: "state-v1".to_string(),
             base_image: None,
             recover_known_good_chat: false,
+            content_sha256: None,
             created_at: "2026-05-25T13:00:00Z".to_string(),
             promoted_at: Some("2026-05-25T13:01:00Z".to_string()),
             retired_at: None,

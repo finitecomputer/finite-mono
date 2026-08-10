@@ -92,6 +92,8 @@ in
     pname = "finite-saas-core";
     dir = "finitecomputer-v2/crates/finite-saas-core";
     sourcePaths = [
+      "finite-release"
+      "finite-service-directory"
       "finitecomputer-v2/crates/finite-core"
       "finitecomputer-v2/crates/finite-saas-core"
     ];
@@ -100,6 +102,8 @@ in
     pname = "finite-saas-runner";
     dir = "finitecomputer-v2/crates/finite-saas-runner";
     sourcePaths = [
+      "finite-release"
+      "finite-service-directory"
       "finitecomputer-v2/crates/finite-core"
       "finitecomputer-v2/crates/finite-saas-core"
       "finitecomputer-v2/crates/finite-saas-runner"
@@ -145,6 +149,8 @@ in
     dir = "finite-agentd";
     sourcePaths = [
       "finite-agentd"
+      "finite-release"
+      "finite-service-directory"
       "finitechat/crates/finitechat-proto"
     ];
   };
