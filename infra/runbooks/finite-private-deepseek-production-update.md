@@ -73,13 +73,42 @@ Runtime that explicitly sends `glm-5-2` remains compatible.
 7. Record an exact new satellite commit, release tag, deployment artifact,
    Tinfoil hash, and candidate SHA-256 in `compat/matrix.toml` in the same
    reviewed promotion change.
-8. On an isolated evaluation target running the exact release candidate, run a
-   fixed, version-controlled prompt corpus against both the candidate and the
-   hosted DeepSeek reference with identical request parameters. Retain the
-   corpus revision, sanitized raw outputs, response metadata, and blinded
-   review report. A reviewer must explicitly record that no material
-   correctness, instruction-following, reasoning, or tool-calling regression
-   was found; any material regression or unresolved disagreement stops the
+8. On an isolated evaluation target running the exact release candidate, run
+   the fixed scored corpus in `scripts/check_deepseek_v4_0731_quality.py`
+   against both lanes. The hosted reference must be DeepSeek's hosted
+   V4-Flash-0731 service; record its endpoint hostname, advertised model, and
+   returned model/fingerprint fields with the reports. Keep both JSON reports
+   under `.local-state/deepseek-quality/$TARGET_TAG/` and require every case at
+   both `high` and `max` effort to pass:
+
+   ```bash
+   export TARGET_TAG='REPLACE_WITH_EXACT_MEASURED_TAG'
+   export CANDIDATE_ENDPOINT='REPLACE_WITH_ISOLATED_CANDIDATE_BASE_URL'
+   export DEEPSEEK_HOSTED_ENDPOINT='REPLACE_WITH_HOSTED_REFERENCE_BASE_URL'
+   export DEEPSEEK_HOSTED_MODEL='REPLACE_WITH_HOSTED_REFERENCE_MODEL'
+   QUALITY_DIR=".local-state/deepseek-quality/$TARGET_TAG"
+   mkdir -p "$QUALITY_DIR"
+   chmod 700 "$QUALITY_DIR"
+
+   python3 scripts/check_deepseek_v4_0731_quality.py \
+     --endpoint "$CANDIDATE_ENDPOINT/v1" \
+     --model deepseek-v4-flash-0731 \
+     --lane self-hosted \
+     > "$QUALITY_DIR/candidate.json"
+
+   python3 scripts/check_deepseek_v4_0731_quality.py \
+     --endpoint "$DEEPSEEK_HOSTED_ENDPOINT/v1" \
+     --model "$DEEPSEEK_HOSTED_MODEL" \
+     --api-key-env DEEPSEEK_HOSTED_API_KEY \
+     --lane deepseek-hosted \
+     > "$QUALITY_DIR/hosted-reference.json"
+   ```
+
+   The script sends the same version-controlled cases and sampling parameters
+   to both lanes, checks deterministic correctness, instruction following,
+   parsed reasoning, and tool selection, emits the
+   `finite-deepseek-quality-v1` report schema, and never accepts or records raw
+   keys. Any failed case or unresolved reference-identity mismatch stops the
    rollout.
 9. Obtain explicit approval for the exact measured tag and the eight-GPU
    maintenance interruption. Passing tests is not rollout authority.

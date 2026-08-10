@@ -92,8 +92,9 @@ fleet status.
 The migration is complete only when `scripts/finite-status --json` is green,
 the stable route passes attestation/auth/inference/accounting checks, every
 active Runtime reader has converged, the old generated route has zero reads for
-the approved observation window, and the old route remains available through
-the rollback boundary. Retain the status outputs and reader inventory.
+the approved observation window, and the exact prior release/settings are
+retained with a proven procedure to recreate the prior container identity.
+Retain the status outputs and reader inventory.
 
 ## ROLLBACK
 
