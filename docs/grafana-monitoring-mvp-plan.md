@@ -155,8 +155,8 @@ Done when:
 - [ ] Confirm public uptime is visible for at least 24 hours.
 - [ ] Confirm all required version metrics are present.
 - [ ] Confirm internal `finite-healthcheck` state is visible and current.
-- [ ] Confirm dashboard JSON or managed-service recreation notes are stored.
-- [ ] Confirm no secrets appear in metrics, labels, dashboard JSON, or docs.
+- [x] Confirm dashboard JSON or managed-service recreation notes are stored.
+- [x] Confirm no secrets appear in metrics, labels, dashboard JSON, or docs.
 - [ ] Run `scripts/finite-status --json` as retained evidence, if appropriate
   for the rollout.
 - [ ] Update this plan status to `complete`.
@@ -186,7 +186,7 @@ Do not start these until the MVP above is complete:
 These actions change production systems or managed-service state and require
 explicit authorization before execution:
 
-- [ ] Authorize creating a stack-scoped Grafana Cloud access-policy token with
+- [x] Authorize creating a stack-scoped Grafana Cloud access-policy token with
   only `metrics:write` permission.
 - [ ] Authorize installing the root-owned, mode `0600`
   `/etc/finite/grafana-cloud-metrics.env` credential file on `finite-lat-1` and

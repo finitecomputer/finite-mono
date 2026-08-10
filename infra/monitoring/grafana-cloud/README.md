@@ -102,6 +102,17 @@ GRAFANA_CLOUD_PROMETHEUS_USERNAME=<Grafana Cloud Prometheus username>
 GRAFANA_CLOUD_PROMETHEUS_PASSWORD=<stack-scoped metrics:write token>
 ```
 
+The Grafana Cloud objects created for this transport on 2026-08-10 are:
+
+- stack: `savvybanana1713`;
+- access policy: `finite-production-metrics-write`;
+- access-policy scope: `metrics:write` only;
+- token name: `finite-production-alloy`;
+- token expiration: no expiry.
+
+The token value is displayed once by Grafana Cloud and is not stored in this
+repository.
+
 The file is a deployment prerequisite and never belongs in this repository.
 Install it independently on `finite-lat-1` and `finite-lat-3`. The access-policy
 token needs only the `metrics:write` scope. Redirecting the URL and credentials
