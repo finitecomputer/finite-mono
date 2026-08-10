@@ -66,7 +66,8 @@ sudo env \
 The installer uses Docker's official Ubuntu apt repository, generates or reuses
 the Grafana and metrics-write credentials on the VPS, copies the stack to
 `/opt/finite-monitoring`, pulls digest-pinned images, and starts the services.
-It does not print either credential.
+It synchronizes Grafana's persisted admin account to the password file without
+printing either credential.
 
 After DNS resolves and Caddy has obtained certificates:
 
@@ -119,3 +120,6 @@ documentation.
 The secret directory is `root:root 0700`. The Grafana password file is
 `root:472 0640` so the official Grafana container's unprivileged UID/GID can
 read its mounted copy; the other files are `root:root 0600`.
+
+The Grafana password file is authoritative. Rerunning `install-ubuntu` resets
+the persisted `admin` account to that file's value.

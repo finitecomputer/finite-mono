@@ -217,6 +217,26 @@ docker run --rm --network none \
   "${CADDY_IMAGE}" caddy validate \
   --config /etc/caddy/active.Caddyfile --adapter caddyfile --envfile /run/secrets/caddy_env
 docker compose --env-file "${ENV_FILE}" up -d --remove-orphans
+
+grafana_password="$(<"${GRAFANA_PASSWORD_FILE}")"
+grafana_reset_complete=0
+grafana_reset_output=""
+for _ in {1..30}; do
+  if grafana_reset_output="$(docker compose --env-file "${ENV_FILE}" exec -T grafana \
+    grafana cli --homepath /usr/share/grafana --config /etc/grafana/grafana.ini \
+    admin reset-admin-password "${grafana_password}" 2>&1)"; then
+    grafana_reset_complete=1
+    break
+  fi
+  sleep 2
+done
+unset grafana_password
+if [[ "${grafana_reset_complete}" -ne 1 ]]; then
+  echo "failed to synchronize the Grafana admin password:" >&2
+  echo "${grafana_reset_output}" >&2
+  exit 1
+fi
+
 docker compose --env-file "${ENV_FILE}" ps
 
 cat <<EOF

@@ -92,6 +92,7 @@ def main() -> None:
     require(installer, 'chown root:472 "${GRAFANA_PASSWORD_FILE}"', "installer")
     require(installer, 'chmod 0640 "${GRAFANA_PASSWORD_FILE}"', "installer")
     require(installer, "caddy validate", "installer")
+    require(installer, "admin reset-admin-password", "installer")
     require(installer, 'MONITORING_MODE must be \'ip\' or \'dns\'', "installer")
     require(installer, 'REMOTE_WRITE_UNAUTHENTICATED_STATUS="426"', "installer")
 
