@@ -171,8 +171,6 @@ legacy-repo deploy is part of the path.
 set -euo pipefail
 ssh root@64.34.82.77 systemctl is-active finite-brain-app
 ssh root@64.34.82.77 curl -fsS http://127.0.0.1:3015/health
-ssh root@64.34.82.77 \
-  "curl -fsS http://127.0.0.1:3015/health | jq -e '.capabilities | index(\"account_cohort_writes_v1\") != null'"
 curl -fsS https://brain.finite.computer/health
 curl -fsS -o /dev/null -w '%{http_code}\n' https://brain.finite.computer/client
 curl -fsS -o /dev/null -w '%{http_code}\n' https://finite.computer/client
@@ -205,6 +203,28 @@ delivery as `sent`; both emails must contain the invite code and public
 instructions but no URL fragment or Invite Secret. Copy the private invite link
 from the unlocked Product Client as the required separate client-only channel,
 then revoke both disposable invitations after verification.
+
+For the `fbrain/v0.3.0` account-cohort cutover, the disposable acceptance proof
+must additionally use an operator-owned Finite VIP account with one human and
+at least two eligible Agent Principals:
+
+1. Preview one mailbox-addressed Brain invitation and retain the immutable plan
+   facts showing the human and both agents. Preview must not mutate membership,
+   grants, invitation state, or email delivery.
+2. Commit once, observe one mailbox delivery, and accept through one included
+   agent. Prove the human and both agents can independently sync and decrypt the
+   intended Brain and restricted Folder with their distinct keys.
+3. Apply one scoped agent exclusion or one synthetic permanent-departure fact
+   through the documented preflight/commit path. Prove the affected Folder key
+   version advances once, the targeted agent loses current access, and the
+   human plus sibling agent retain readable content.
+4. Revoke the disposable invitation/access and retain only redacted receipts.
+   Do not use customer state or treat an operator-selected row as authority to
+   choose durable user data.
+
+If a safely disposable two-agent account, exact backup boundary, or any one of
+these proofs is unavailable, the rollout is not successful. Stop without
+reconciliation or other production repair.
 
 ## Rollback
 

@@ -12,6 +12,7 @@ on:
       - "fbrain/v*"
 
 permissions:
+  checks: read
   contents: write
 
 env:
@@ -35,6 +36,23 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify release commit and coordinated client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          conclusion="$(gh api \
+            "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs" \
+            --jq '[.check_runs[] | select(.name == "CI gate")] | sort_by(.completed_at) | last | .conclusion // ""')"
+          test "$conclusion" = success
+          grep -Fq 'function brainInvitationPreflightPath' \
+            finite-brain/crates/finite-brain-server/src/product-client.js
+          grep -Fq 'function confirmBrainInvitationFromPanel' \
+            finite-brain/crates/finite-brain-server/src/product-client.js
 
       - name: Verify release version and compatibility declaration
         shell: bash
