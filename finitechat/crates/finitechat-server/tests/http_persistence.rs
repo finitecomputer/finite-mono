@@ -6860,10 +6860,7 @@ async fn sqlite_snapshot_save_prunes_ops_covered_by_previous_snapshot() {
     // The second snapshot prunes exactly the ops its predecessor covered.
     let (second_snapshot_seq, min_op_seq) = query_seqs(&db_path);
     assert!(second_snapshot_seq > first_snapshot_seq);
-    assert_eq!(
-        min_op_seq.expect("tail ops remain"),
-        first_snapshot_seq + 1
-    );
+    assert_eq!(min_op_seq.expect("tail ops remain"), first_snapshot_seq + 1);
 
     let app = persistent_app(&db_path);
     let response = post_json(
