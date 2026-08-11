@@ -6,6 +6,10 @@ import path from "node:path";
 import {
   ONE_TIME_KEY_WARNING,
   canAccessAdminOps,
+  finitePrivateAccountForProject,
+  finitePrivateAssignableProfiles,
+  finitePrivateProfileLabel,
+  groupAdminRuntimesByOwner,
   heartbeatAgeLabel,
   oneTimeKeyDisplay,
   oneTimeKeyError,
@@ -29,6 +33,71 @@ test("heartbeatAgeLabel formats ages and degrades safely", () => {
   assert.equal(heartbeatAgeLabel("2026-07-02T11:45:00Z", now), "15m ago");
   assert.equal(heartbeatAgeLabel("2026-07-02T02:00:00Z", now), "10h ago");
   assert.equal(heartbeatAgeLabel("2026-06-28T12:00:00Z", now), "4d ago");
+});
+
+test("Finite Private helpers keep the curated 1x/5x order and exact project correlation", () => {
+  const profiles = finitePrivateAssignableProfiles([
+    { id: "finite-private-generous-5x-v1", burst_limit_units: 500_000_000 },
+    { id: "legacy-custom", burst_limit_units: 7 },
+    { id: "finite-private-generous-v2", burst_limit_units: 100_000_000 },
+  ]);
+  assert.deepEqual(
+    profiles.map((profile) => profile.id),
+    ["finite-private-generous-v2", "finite-private-generous-5x-v1"]
+  );
+  assert.equal(
+    finitePrivateProfileLabel(profiles[0].id),
+    "1× · 100M units / 5h"
+  );
+  assert.equal(
+    finitePrivateProfileLabel(profiles[1].id),
+    "5× · 500M units / 5h"
+  );
+
+  const accounts = [
+    { email: "a@example.test", projects: [{ id: "project-a" }] },
+    { email: "b@example.test", projects: [{ id: "project-b" }] },
+  ];
+  assert.equal(
+    finitePrivateAccountForProject(accounts, "project-b")?.email,
+    "b@example.test"
+  );
+  assert.equal(finitePrivateAccountForProject(accounts, "project-missing"), null);
+});
+
+test("admin runtimes group into one sorted card per owner", () => {
+  const groups = groupAdminRuntimesByOwner([
+    { owner_email: "z@example.test", project_id: "project-z" },
+    { owner_email: "A@Example.Test", project_id: "project-a-1" },
+    { owner_email: "a@example.test", project_id: "project-a-2" },
+  ]);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].email, "a@example.test");
+  assert.deepEqual(
+    groups[0].runtimes.map((runtime) => runtime.project_id),
+    ["project-a-1", "project-a-2"]
+  );
+  assert.equal(groups[1].email, "z@example.test");
+});
+
+test("admin page has three tabs and enriches user cards instead of separate grant/key lists", async () => {
+  const source = await readFile(
+    path.resolve(process.cwd(), "src/app/dashboard/admin/page.tsx"),
+    "utf8"
+  );
+  assert.match(source, /<TabsTrigger value="users">Users<\/TabsTrigger>/u);
+  assert.match(source, /<TabsTrigger value="invites">Invites<\/TabsTrigger>/u);
+  assert.match(
+    source,
+    /<TabsTrigger value="finite-private">Finite Private<\/TabsTrigger>/u
+  );
+  assert.match(source, /function ProvisionedUserCard/u);
+  assert.match(source, /function FinitePrivateAccountControls/u);
+  assert.match(source, />\s*Reset usage\s*</u);
+  assert.match(source, /AdminFinitePrivateProfileForm/u);
+  assert.match(source, /Finite Private details unavailable/u);
+  assert.doesNotMatch(source, /function AdminGrantList/u);
+  assert.doesNotMatch(source, /function AdminKeyList/u);
 });
 
 test("oneTimeKeyDisplay only renders for a real issued key", () => {

@@ -19,14 +19,20 @@ import {
   adminOpsRestartRuntimeAction,
 } from "@/app/actions";
 import {
+  AdminFinitePrivateProfileForm,
   AdminFriendKeyIssueForm,
   AdminLaunchCodeBatchIssueForm,
   AdminRotateKeyForm,
   ConfirmSubmitButton,
 } from "@/components/admin-ops-forms";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   canAccessAdminOps,
+  finitePrivateAccountForProject,
+  finitePrivateAssignableProfiles,
+  finitePrivateProfileLabel,
+  groupAdminRuntimesByOwner,
   heartbeatAgeLabel,
   launchCodeHostingTierLabel,
 } from "@/lib/admin-ops";
@@ -40,8 +46,9 @@ import {
   type CoreAdminRuntimeOverview,
   type CoreAdminRuntimesResult,
   type CoreFinitePrivateAdminStateResult,
+  type CoreFinitePrivateAdminAccount,
   type CoreFinitePrivateApiKey,
-  type CoreFinitePrivateGrant,
+  type CoreFinitePrivateLimitProfile,
   type CoreLaunchCodeBatchDetails,
   type CoreLaunchCodeBatchesResult,
   type CoreRuntimeStatus,
@@ -77,9 +84,22 @@ export default async function AdminOpsPage() {
         </div>
       </section>
 
-      <ProvisionedBoxesPanel result={runtimes} />
-      <LaunchCodeBatchesPanel result={launchCodeBatches} />
-      <FinitePrivateOpsPanel result={finitePrivate} />
+      <Tabs defaultValue="users" className="gap-4">
+        <TabsList aria-label="Admin sections">
+          <TabsTrigger value="users">Users</TabsTrigger>
+          <TabsTrigger value="invites">Invites</TabsTrigger>
+          <TabsTrigger value="finite-private">Finite Private</TabsTrigger>
+        </TabsList>
+        <TabsContent value="users">
+          <ProvisionedBoxesPanel result={runtimes} finitePrivate={finitePrivate} />
+        </TabsContent>
+        <TabsContent value="invites">
+          <LaunchCodeBatchesPanel result={launchCodeBatches} />
+        </TabsContent>
+        <TabsContent value="finite-private">
+          <FinitePrivateOpsPanel result={finitePrivate} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
@@ -198,7 +218,15 @@ function heartbeatLabel(lastHeartbeatAt: string | null | undefined) {
   return heartbeatAgeLabel(lastHeartbeatAt, Date.now());
 }
 
-function ProvisionedBoxesPanel({ result }: { result: CoreAdminRuntimesResult }) {
+function ProvisionedBoxesPanel({
+  result,
+  finitePrivate,
+}: {
+  result: CoreAdminRuntimesResult;
+  finitePrivate: CoreFinitePrivateAdminStateResult;
+}) {
+  const userGroups = groupAdminRuntimesByOwner(result.runtimes ?? []);
+  const profiles = finitePrivateAssignableProfiles(finitePrivate.state?.profiles);
   return (
     <section className="ocean-utility-card">
       <div className="ocean-utility-card__header">
@@ -206,10 +234,10 @@ function ProvisionedBoxesPanel({ result }: { result: CoreAdminRuntimesResult }) 
           <ServerIcon className="size-5" />
         </span>
         <div>
-          <h2 className="ocean-utility-card__title">Provisioned boxes</h2>
+          <h2 className="ocean-utility-card__title">Users</h2>
           <p className="text-sm text-muted-foreground">
-            Every agent runtime Core knows about, with restart and recovery
-            controls.
+            Each account with its agents, runtime controls, Finite Private
+            usage, assigned limit, and keys in one place.
           </p>
         </div>
       </div>
@@ -220,26 +248,94 @@ function ProvisionedBoxesPanel({ result }: { result: CoreAdminRuntimesResult }) 
         </div>
       ) : result.error ? (
         <div className="ocean-empty-state">{result.error}</div>
-      ) : !result.runtimes || result.runtimes.length === 0 ? (
-        <div className="ocean-empty-state">No provisioned boxes yet.</div>
+      ) : userGroups.length === 0 ? (
+        <div className="ocean-empty-state">No users with provisioned agents yet.</div>
       ) : (
         <div className="grid gap-3">
-          {result.runtimes.map((runtime) => (
-            <ProvisionedBoxRow key={runtime.agent_runtime_id} runtime={runtime} />
-          ))}
+          {userGroups.map((group) => {
+            const account = group.runtimes
+              .map((runtime) =>
+                finitePrivateAccountForProject(
+                  finitePrivate.state?.accounts,
+                  runtime.project_id
+                )
+              )
+              .find((candidate) => candidate !== null) ?? null;
+            return (
+              <ProvisionedUserCard
+                key={group.key}
+                email={group.email}
+                runtimes={group.runtimes}
+                finitePrivateAccount={account}
+                finitePrivateDetailsAvailable={
+                  finitePrivate.state?.accounts !== undefined
+                }
+                profiles={profiles}
+              />
+            );
+          })}
         </div>
       )}
     </section>
   );
 }
 
-function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
+function ProvisionedUserCard({
+  email,
+  runtimes,
+  finitePrivateAccount,
+  finitePrivateDetailsAvailable,
+  profiles,
+}: {
+  email: string | null;
+  runtimes: CoreAdminRuntimeOverview[];
+  finitePrivateAccount: CoreFinitePrivateAdminAccount | null;
+  finitePrivateDetailsAvailable: boolean;
+  profiles: CoreFinitePrivateLimitProfile[];
+}) {
+  return (
+    <article className="grid gap-4 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="font-semibold text-foreground">{email ?? "Unknown account"}</h3>
+          <p className="text-xs text-muted-foreground">
+            {runtimes.length} agent{runtimes.length === 1 ? "" : "s"}
+          </p>
+        </div>
+        {finitePrivateAccount ? (
+          <span className="rounded-full border border-emerald-400/40 px-2 py-0.5 text-xs text-emerald-400">
+            Finite Private {finitePrivateAccount.grant.status}
+          </span>
+        ) : (
+          <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
+            {finitePrivateDetailsAvailable
+              ? "No Finite Private grant"
+              : "Finite Private details unavailable"}
+          </span>
+        )}
+      </div>
+      <div className="grid gap-3">
+        {runtimes.map((runtime) => (
+          <ProvisionedRuntimeRow key={runtime.agent_runtime_id} runtime={runtime} />
+        ))}
+      </div>
+      {finitePrivateAccount ? (
+        <FinitePrivateAccountControls
+          account={finitePrivateAccount}
+          profiles={profiles}
+        />
+      ) : null}
+    </article>
+  );
+}
+
+function ProvisionedRuntimeRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
   const canRestart = coreAdminRuntimeSupportsRestart(runtime);
   const canRecover = coreAdminRuntimeSupportsRecovery(runtime);
   const canUpgrade = coreAdminRuntimeSupportsUpgrade(runtime);
 
   return (
-    <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4 md:grid-cols-[minmax(0,1fr)_auto]">
+    <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-black/10 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate font-semibold text-foreground">
@@ -257,9 +353,6 @@ function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
           ) : null}
         </div>
         <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
-          <span className="truncate">
-            owner {runtime.owner_email ?? "unknown"}
-          </span>
           <span className="truncate font-mono">
             {runtime.source_host_id} / {runtime.source_machine_id}
           </span>
@@ -339,6 +432,108 @@ function ProvisionedBoxRow({ runtime }: { runtime: CoreAdminRuntimeOverview }) {
   );
 }
 
+function FinitePrivateAccountControls({
+  account,
+  profiles,
+}: {
+  account: CoreFinitePrivateAdminAccount;
+  profiles: CoreFinitePrivateLimitProfile[];
+}) {
+  const grant = account.grant;
+  return (
+    <div className="grid gap-3 border-t border-border pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="flex flex-wrap items-center gap-2 font-semibold text-foreground">
+            <ShieldCheckIcon className="size-4" />
+            Finite Private
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {finitePrivateProfileLabel(grant.limit_profile_id)} · {grant.current_window_used_units.toLocaleString()} units used
+          </p>
+        </div>
+        <form action={adminOpsResetFinitePrivateWindowAction}>
+          <input type="hidden" name="grantId" value={grant.id} />
+          <ConfirmSubmitButton
+            variant="outline"
+            size="sm"
+            pendingLabel="Resetting..."
+            confirmMessage={`Reset Finite Private usage for ${account.email}?`}
+          >
+            <RotateCcwIcon />
+            Reset usage
+          </ConfirmSubmitButton>
+        </form>
+      </div>
+
+      {profiles.length > 0 ? (
+        <AdminFinitePrivateProfileForm
+          grantId={grant.id}
+          currentProfileId={grant.limit_profile_id}
+          profiles={profiles}
+        />
+      ) : null}
+
+      <div className="grid gap-2">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Keys
+        </div>
+        {account.apiKeys.length === 0 ? (
+          <div className="text-sm text-muted-foreground">No keys assigned to this account.</div>
+        ) : (
+          account.apiKeys.map((apiKey) => (
+            <FinitePrivateAccountKey
+              key={apiKey.id}
+              apiKey={apiKey}
+              account={account}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FinitePrivateAccountKey({
+  apiKey,
+  account,
+}: {
+  apiKey: CoreFinitePrivateApiKey;
+  account: CoreFinitePrivateAdminAccount;
+}) {
+  const project = account.projects.find((candidate) => candidate.id === apiKey.project_id);
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-3 rounded-[var(--radius-card-inner)] border border-border bg-black/10 p-3">
+      <div className="min-w-0 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="truncate font-mono text-foreground">{apiKey.id}</span>
+          <span className="rounded-full border border-border px-2 py-0.5">{apiKey.status}</span>
+        </div>
+        <div className="mt-1">
+          {project ? `${project.displayName} key` : "Account key"}
+        </div>
+      </div>
+      {apiKey.status === "active" ? (
+        <div className="flex flex-wrap items-start gap-2">
+          <AdminRotateKeyForm keyId={apiKey.id} />
+          <form action={adminOpsRevokeFinitePrivateKeyAction}>
+            <input type="hidden" name="keyId" value={apiKey.id} />
+            <ConfirmSubmitButton
+              variant="outline"
+              size="sm"
+              pendingLabel="Revoking..."
+              confirmMessage="Revoke this Finite Private key? Anything using it stops working."
+            >
+              <BanIcon />
+              Revoke
+            </ConfirmSubmitButton>
+          </form>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function FinitePrivateOpsPanel({
   result,
 }: {
@@ -351,6 +546,7 @@ function FinitePrivateOpsPanel({
     state?.apiKeys.filter((key) => key.status === "active").length ?? 0;
   const usedUnits =
     state?.grants.reduce((total, grant) => total + grant.current_window_used_units, 0) ?? 0;
+  const profiles = finitePrivateAssignableProfiles(state?.profiles);
 
   return (
     <section className="ocean-utility-card">
@@ -361,8 +557,8 @@ function FinitePrivateOpsPanel({
         <div>
           <h2 className="ocean-utility-card__title">Finite Private</h2>
           <p className="text-sm text-muted-foreground">
-            Issue friend keys, rotate or revoke keys, and reset burst windows.
-            Weekly limits are a rolling window and have no reset control.
+            Mint standalone friends-and-family keys for testing. Account grant,
+            usage, profile, and key controls live on each card in Users.
           </p>
         </div>
       </div>
@@ -390,121 +586,9 @@ function FinitePrivateOpsPanel({
             </div>
           </div>
 
-          <AdminFriendKeyIssueForm />
-
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <AdminGrantList grants={state.grants} />
-            <AdminKeyList apiKeys={state.apiKeys} />
-          </div>
+          <AdminFriendKeyIssueForm profiles={profiles} />
         </div>
       ) : null}
     </section>
-  );
-}
-
-function AdminGrantList({ grants }: { grants: CoreFinitePrivateGrant[] }) {
-  return (
-    <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4">
-      <div className="flex items-center gap-2 font-semibold text-foreground">
-        <ShieldCheckIcon className="size-4" />
-        Grants
-      </div>
-      {grants.length === 0 ? (
-        <div className="ocean-empty-state">No grants yet.</div>
-      ) : (
-        <div className="grid gap-3">
-          {grants.map((grant) => (
-            <div
-              key={grant.id}
-              className="grid gap-2 rounded-[var(--radius-card-inner)] border border-border bg-black/10 p-3"
-            >
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="truncate font-mono text-sm text-foreground">{grant.id}</span>
-                  <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
-                    {grant.status}
-                  </span>
-                </div>
-                <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
-                  <span className="truncate font-mono">user {grant.user_id}</span>
-                  <span className="truncate font-mono">profile {grant.limit_profile_id}</span>
-                  <span>{grant.current_window_used_units} burst units used</span>
-                </div>
-              </div>
-              <form action={adminOpsResetFinitePrivateWindowAction}>
-                <input type="hidden" name="grantId" value={grant.id} />
-                <ConfirmSubmitButton
-                  variant="outline"
-                  size="sm"
-                  pendingLabel="Resetting..."
-                  confirmMessage="Reset the current burst window for this grant?"
-                >
-                  <RotateCcwIcon />
-                  Reset burst window
-                </ConfirmSubmitButton>
-              </form>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AdminKeyList({ apiKeys }: { apiKeys: CoreFinitePrivateApiKey[] }) {
-  return (
-    <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4">
-      <div className="flex items-center gap-2 font-semibold text-foreground">
-        <ShieldCheckIcon className="size-4" />
-        Keys
-      </div>
-      {apiKeys.length === 0 ? (
-        <div className="ocean-empty-state">No keys yet.</div>
-      ) : (
-        <div className="grid gap-3">
-          {apiKeys.map((apiKey) => (
-            <div
-              key={apiKey.id}
-              className="grid gap-2 rounded-[var(--radius-card-inner)] border border-border bg-black/10 p-3"
-            >
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="truncate font-mono text-sm text-foreground">{apiKey.id}</span>
-                  <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
-                    {apiKey.status}
-                  </span>
-                </div>
-                <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
-                  <span className="truncate font-mono">grant {apiKey.grant_id}</span>
-                  {apiKey.project_id ? (
-                    <span className="truncate font-mono">project {apiKey.project_id}</span>
-                  ) : null}
-                  {apiKey.agent_runtime_id ? (
-                    <span className="truncate font-mono">runtime {apiKey.agent_runtime_id}</span>
-                  ) : null}
-                </div>
-              </div>
-              {apiKey.status === "active" ? (
-                <div className="flex flex-wrap items-start gap-2">
-                  <AdminRotateKeyForm keyId={apiKey.id} />
-                  <form action={adminOpsRevokeFinitePrivateKeyAction}>
-                    <input type="hidden" name="keyId" value={apiKey.id} />
-                    <ConfirmSubmitButton
-                      variant="outline"
-                      size="sm"
-                      pendingLabel="Revoking..."
-                      confirmMessage="Revoke this Finite Private key? Anything using it stops working."
-                    >
-                      <BanIcon />
-                      Revoke
-                    </ConfirmSubmitButton>
-                  </form>
-                </div>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }

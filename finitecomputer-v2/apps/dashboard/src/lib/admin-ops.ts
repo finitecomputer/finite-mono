@@ -7,6 +7,55 @@ export type AdminOpsViewer = {
   isAdmin: boolean;
 };
 
+export const FINITE_PRIVATE_1X_PROFILE_ID = "finite-private-generous-v2";
+export const FINITE_PRIVATE_5X_PROFILE_ID = "finite-private-generous-5x-v1";
+
+export type FinitePrivateProfileOption = {
+  id: string;
+  burst_limit_units: number;
+};
+
+export function finitePrivateAssignableProfiles<T extends FinitePrivateProfileOption>(
+  profiles: T[] | null | undefined
+): T[] {
+  const byId = new Map((profiles ?? []).map((profile) => [profile.id, profile]));
+  return [FINITE_PRIVATE_1X_PROFILE_ID, FINITE_PRIVATE_5X_PROFILE_ID]
+    .map((id) => byId.get(id))
+    .filter((profile): profile is T => Boolean(profile));
+}
+
+export function finitePrivateProfileLabel(profileId: string): string {
+  if (profileId === FINITE_PRIVATE_1X_PROFILE_ID) return "1× · 100M units / 5h";
+  if (profileId === FINITE_PRIVATE_5X_PROFILE_ID) return "5× · 500M units / 5h";
+  return profileId;
+}
+
+export function finitePrivateAccountForProject<
+  T extends { projects: Array<{ id: string }> },
+>(accounts: T[] | null | undefined, projectId: string): T | null {
+  return (
+    (accounts ?? []).find((account) =>
+      account.projects.some((project) => project.id === projectId)
+    ) ?? null
+  );
+}
+
+export function groupAdminRuntimesByOwner<
+  T extends { owner_email?: string | null; project_id: string },
+>(runtimes: T[]): Array<{ key: string; email: string | null; runtimes: T[] }> {
+  const groups = new Map<string, { key: string; email: string | null; runtimes: T[] }>();
+  for (const runtime of runtimes) {
+    const email = runtime.owner_email?.trim().toLowerCase() || null;
+    const key = email ?? `unknown:${runtime.project_id}`;
+    const group = groups.get(key) ?? { key, email, runtimes: [] };
+    group.runtimes.push(runtime);
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((left, right) =>
+    (left.email ?? left.key).localeCompare(right.email ?? right.key)
+  );
+}
+
 export function canAccessAdminOps(viewer: AdminOpsViewer | null | undefined): boolean {
   return Boolean(viewer?.isAdmin);
 }

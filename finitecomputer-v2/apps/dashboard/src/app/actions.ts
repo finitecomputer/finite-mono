@@ -11,6 +11,7 @@ import {
   type OneTimeLaunchCodeActionState,
 } from "@/lib/admin-ops";
 import {
+  adminAssignCoreFinitePrivateLimitProfile,
   adminIssueCoreLaunchCodeBatch,
   adminIssueCoreFinitePrivateFriendKey,
   adminRecoverCoreRuntime,
@@ -435,6 +436,15 @@ export async function adminOpsRevokeFinitePrivateKeyAction(formData: FormData) {
 export async function adminOpsResetFinitePrivateWindowAction(formData: FormData) {
   await requireAdminViewer("reset Finite Private burst windows");
   await adminResetCoreFinitePrivateWindow(String(formData.get("grantId") ?? ""));
+  revalidatePath("/dashboard/admin");
+}
+
+export async function adminOpsAssignFinitePrivateLimitProfileAction(formData: FormData) {
+  await requireAdminViewer("assign Finite Private limit profiles");
+  await adminAssignCoreFinitePrivateLimitProfile({
+    grantId: String(formData.get("grantId") ?? ""),
+    limitProfileId: String(formData.get("limitProfileId") ?? ""),
+  });
   revalidatePath("/dashboard/admin");
 }
 

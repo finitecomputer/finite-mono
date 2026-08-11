@@ -281,6 +281,13 @@ Core creates the default `finite-private-generous-v2` profile with:
 - burst limit: 100,000,000 units
 - weekly limit: uncapped
 
+Core also creates the operator-assignable `finite-private-generous-5x-v1`
+profile with the same five-hour window and uncapped weekly limit, but a
+500,000,000-unit burst limit. Assigning either profile changes only the
+grant's durable profile reference: it preserves current usage, window start,
+window epoch, grant status, and every issued key. Usage reset remains a
+separate explicit action.
+
 Existing grants are migrated from `finite-private-generous` to the v2 profile.
 The old profile is also held at 100,000,000 units so an N-1 Core replay cannot
 silently restore the previous default.

@@ -23,18 +23,19 @@ as actor.
 
 1. An Account Auth member of Finite's configured operator organization opens
    `/dashboard/admin`. Non-admins get a 404.
-2. The page shows the provisioned-boxes table from
-   `GET /api/core/v1/admin/runtimes`: project, owner email, source host and
-   machine id, artifact id/version, runtime status, last-heartbeat age, Hermes
-   availability, published URLs, and the active Finite Private key count.
+2. The page has three tabs: **Users**, **Invites**, and **Finite Private**.
+   Users groups `GET /api/core/v1/admin/runtimes` by owner account and enriches
+   each existing account card with the matching grant, usage, assignable 1x/5x
+   profile, and all account/project/runtime-scoped keys from the account-centric
+   Finite Private admin state. It never asks the operator to correlate separate
+   user, grant, and key lists.
 3. Row actions Restart and Recover (with a confirm step) create the same
    runtime control requests the owner-scoped buttons create; the runner
    leases and completes them through the unchanged
    `/api/core/v1/runtime-control-requests/*` machinery.
-4. The Finite Private panel shows the admin-state summary (grants, keys,
-   burst usage) and offers: friend-key issue by email (grant approve + key
-   issue in one step), per-key rotate and revoke, and per-grant burst window
-   reset.
+4. The Invites tab owns Launch Code batches. The Finite Private tab is the
+   standalone friends-and-family test-key minting surface plus summary metrics.
+   Existing account grant/key controls live only on Users cards.
 5. Issue and rotate return the raw key exactly once. The dashboard shows it
    once with a copy button and a "you will not see this again" note. The raw
    key lives only in the action response and the page's in-memory state; Core
@@ -59,6 +60,13 @@ the exact configured operator organization):
 | POST | `/api/core/v1/admin/finite-private/keys/{key_id}/rotate` | Rotate a key; returns new raw key once |
 | POST | `/api/core/v1/admin/finite-private/keys/{key_id}/revoke` | Revoke a key |
 | POST | `/api/core/v1/admin/finite-private/grants/{grant_id}/window-reset` | Reset the current burst window |
+| POST | `/api/core/v1/admin/finite-private/grants/{grant_id}/limit-profile` | Assign the durable 1x or 5x profile without resetting usage |
+
+The existing admin-authorized
+`GET /api/core/v1/finite-private/admin-state` response adds `accounts` and
+`profiles` while retaining the flat `grants` and `apiKeys` fields for an
+additive mixed-version rollout. Each account includes its verified email,
+grant, keys, and exact project/runtime bindings.
 
 ## Source Of Truth
 
@@ -67,6 +75,7 @@ Core owns:
 - the `FC_WORKOS_OPERATOR_ORG_ID` predicate and all admin authorization decisions
 - runtime control requests, whichever surface created them
 - Finite Private grant/key state and burst window accounting
+- the account-to-grant-to-key correlation and assignable limit-profile catalog
 - the admin audit log (`finite_private_admin_audit_events`), which now also
   records runtime admin actions with the admin's email as `actor`
 
@@ -129,6 +138,8 @@ Admin Ops v0 is accepted when:
   every service credential, while accepting the configured operator org.
 - Core tests prove each admin endpoint works for admins and is rejected for
   non-admins.
+- Core tests prove profile assignment preserves usage/window state and that
+  admin state correlates accounts, grants, keys, projects, and runtimes.
 - Core tests prove admin restart/recover skip the owner check but create the
   same control request shape the runner leases and completes through the
   existing endpoints.
@@ -142,8 +153,9 @@ Admin Ops v0 is accepted when:
 - The devfinity-managed `just test` Postgres harness covers the new store
   methods (overview read, admin restart lease round trip, friend key
   issue/rotate/revoke, window reset, audit persistence) against Postgres.
-- Dashboard tests cover the admin gate helper, heartbeat-age formatting, and
-  the one-time key display logic as pure helpers.
+- Dashboard tests cover the admin gate helper, heartbeat-age formatting,
+  one-time key display, exact project correlation, owner grouping, curated
+  1x/5x profile ordering, and the three-tab single-card information architecture.
 - Gates pass: `cargo fmt --check`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `just test`, and dashboard `npm ci`, `npm run lint`,
   `npm test`, `npm run build`.
