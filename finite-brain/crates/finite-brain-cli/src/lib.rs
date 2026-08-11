@@ -1253,6 +1253,19 @@ fn filesystem_notification_reason(
     if !path.starts_with(root) {
         return None;
     }
+    // Observation traffic is not a local update. The supervisor's own event
+    // handling scans every open Working Tree, and a sync scan reads Working
+    // Tree contents; on filesystems where inotify reports access events
+    // (virtiofs/FUSE reports OPEN/CLOSE_NOWRITE for directory scans), those
+    // reads arrive here as Access events. Treating them as updates feeds the
+    // watcher straight back into the handler and the loop never quiesces —
+    // each event triggers a scan whose reads generate the next event
+    // (observed in production as ~3.6k open/close cycles per second per
+    // supervised root, burning a host core per VM). Only content and
+    // lifecycle changes may schedule sync work.
+    if matches!(event_kind, notify::EventKind::Access(_)) {
+        return None;
+    }
     let internal = path
         .components()
         .any(|part| part.as_os_str() == ".finitebrain");
@@ -4458,6 +4471,41 @@ mod tests {
                 Path::new("/brain"),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn filesystem_hints_ignore_observation_traffic() {
+        // Directory scans and content reads performed by the supervisor's own
+        // event handling must not re-queue sync work, or the watcher and the
+        // handler amplify each other indefinitely.
+        for kind in [
+            notify::EventKind::Access(notify::event::AccessKind::Open(
+                notify::event::AccessMode::Any,
+            )),
+            notify::EventKind::Access(notify::event::AccessKind::Read),
+            notify::EventKind::Access(notify::event::AccessKind::Close(
+                notify::event::AccessMode::Read,
+            )),
+        ] {
+            for path in [Path::new("/brain"), Path::new("/brain/page.md")] {
+                assert_eq!(
+                    filesystem_notification_reason(&kind, path, Path::new("/brain")),
+                    None,
+                    "{kind:?} on {path:?} must not schedule sync work"
+                );
+            }
+        }
+        // Content changes still schedule sync work.
+        assert_eq!(
+            filesystem_notification_reason(
+                &notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                    notify::event::DataChange::Content,
+                )),
+                Path::new("/brain/page.md"),
+                Path::new("/brain"),
+            ),
+            Some("local_updated")
         );
     }
 
