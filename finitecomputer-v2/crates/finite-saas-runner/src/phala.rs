@@ -11,7 +11,6 @@ use super::{
     FINITE_PRIVATE_PROFILE_ID, ProviderOperationJournal, RunnerError, RuntimeLaunchFacts,
     RuntimeLaunchOptions, RuntimeLauncher, RuntimeRestartOptions, RuntimeUpgradeFacts,
     control_runtime_spec, creation_runtime_spec, docker_equivalent_runtime_env,
-    hash_runtime_relay_token, random_runtime_bootstrap_token,
     state_preserving_runtime_capabilities, wait_for_http_json_ready,
 };
 use crate::phala_inventory::{
@@ -464,9 +463,6 @@ impl PhalaLauncher {
             .trim_end_matches('/')
             .to_string();
         let contact_url = format!("{base_url}/contact");
-        let runtime_bootstrap_token = random_runtime_bootstrap_token();
-        let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         Ok(RuntimeLaunchFacts {
             source_host_id: config.source_host_id.clone(),
             source_machine_id: correlation_name.to_string(),
@@ -474,7 +470,6 @@ impl PhalaLauncher {
             state_schema_version: config.runtime_state_schema_version.clone(),
             provider_runtime_handle: Some(handle.core_envelope()),
             contact_endpoint: Some(contact_url.clone()),
-            runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: None,
             runtime_host: Some(base_url),
@@ -554,10 +549,6 @@ impl RuntimeLauncher for PhalaLauncher {
 
     fn runner_class(&self) -> RunnerClass {
         RunnerClass::Phala
-    }
-
-    fn uses_core_runtime_heartbeat(&self) -> bool {
-        false
     }
 
     fn runner_capacity(&self) -> RunnerLeaseCapacity {

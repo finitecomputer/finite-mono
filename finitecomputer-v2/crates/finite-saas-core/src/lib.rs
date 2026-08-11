@@ -564,14 +564,6 @@ pub enum CoreError {
     AgentCreationRequestNotCancellable,
     #[error("source machine id is required")]
     MissingSourceMachineId,
-    #[error("runtime relay token hash is required")]
-    MissingRuntimeRelayTokenHash,
-    #[error("runtime relay token is required")]
-    MissingRuntimeRelayToken,
-    #[error("runtime relay token is invalid")]
-    InvalidRuntimeRelayToken,
-    #[error("runtime heartbeat was not found")]
-    RuntimeHeartbeatNotFound,
     #[error("runtime artifact id is required")]
     MissingRuntimeArtifactId,
     #[error("runtime artifact reference is required")]
@@ -859,41 +851,6 @@ pub struct RuntimeArtifact {
     pub created_at: String,
     pub promoted_at: Option<String>,
     pub retired_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RuntimeRelayCredential {
-    pub agent_runtime_id: String,
-    pub token_hash: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RuntimeStatusSnapshot {
-    pub agent_runtime_id: String,
-    pub status: RuntimeSummaryStatus,
-    pub last_heartbeat_at: Option<String>,
-    pub runtime_host: String,
-    pub active_inference_profile: Option<String>,
-    pub hermes_available: Option<bool>,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelayHeartbeat {
-    pub ok: bool,
-    #[serde(rename = "machineId")]
-    pub machine_id: String,
-    #[serde(rename = "lastSeenAt")]
-    pub last_seen_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelayEventsOutput {
-    #[serde(rename = "machineId")]
-    pub machine_id: String,
-    pub events: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2031,7 +1988,6 @@ pub struct RegisterAgentCreationRuntimeInput {
     pub contact_endpoint: Option<String>,
     #[serde(default)]
     pub runtime_capabilities: Option<RuntimeCapabilitiesEnvelope>,
-    pub runtime_relay_token_hash: String,
     pub display_name: Option<String>,
     pub hostname: Option<String>,
     pub runtime_host: Option<String>,
@@ -2953,19 +2909,6 @@ fn current_time_iso() -> CoreResult<String> {
 
 fn parse_time(value: &str) -> CoreResult<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).map_err(|_| CoreError::InvalidTimestamp)
-}
-
-pub fn runtime_relay_token_hash(value: &str) -> CoreResult<String> {
-    hash_runtime_relay_token(value)
-}
-
-fn hash_runtime_relay_token(value: &str) -> CoreResult<String> {
-    let token = trim_to_option(Some(value)).ok_or(CoreError::MissingRuntimeRelayToken)?;
-    let digest = Sha256::digest(token.as_bytes());
-    Ok(digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>())
 }
 
 fn hash_finite_private_api_key(value: &str) -> CoreResult<String> {
@@ -4026,8 +3969,6 @@ mod tests {
                             ..RuntimeCapabilitiesV1::default()
                         },
                     )),
-                    runtime_relay_token_hash: runtime_relay_token_hash("phala-runtime-token")
-                        .unwrap(),
                     display_name: None,
                     hostname: None,
                     runtime_host: None,
@@ -4839,7 +4780,6 @@ mod tests {
                             ..*kata_runtime_capabilities().v1()
                         },
                     )),
-                    runtime_relay_token_hash: runtime_relay_token_hash("ledger-relay").unwrap(),
                     display_name: None,
                     hostname: None,
                     runtime_host: None,
@@ -5359,7 +5299,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_serve_runtime_must_publish_relay_heartbeat_before_running() {
+    async fn self_serve_registration_launches_then_completion_marks_running() {
         with_isolated_postgres(|db| async move {
             let launch_code = issue_test_launch_code(&db).await;
             promote_runtime_artifact(&db).await;
@@ -5386,9 +5326,6 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let runtime_token = "runtime-token-1";
-            let token_hash = runtime_relay_token_hash(runtime_token).unwrap();
-
             let register_input = RegisterAgentCreationRuntimeInput {
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
@@ -5405,7 +5342,6 @@ mod tests {
                 )),
                 contact_endpoint: Some("https://oslo-agent.example.com/contact/".to_string()),
                 runtime_capabilities: Some(kata_runtime_capabilities()),
-                runtime_relay_token_hash: token_hash,
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -5434,24 +5370,6 @@ mod tests {
                 Some("https://oslo-agent.example.com/contact")
             );
             assert_eq!(runtime.provider_runtime_handle_history.len(), 1);
-            assert!(
-                db.runtime_heartbeat_for_machine("oslo-agent-001")
-                    .await
-                    .is_err()
-            );
-
-            let heartbeat = db.record_runtime_heartbeat(runtime_token).await.unwrap();
-            assert_eq!(heartbeat.machine_id, "oslo-agent-001");
-            let events = db.relay_events_for_runtime(runtime_token).await.unwrap();
-            assert_eq!(events.machine_id, "oslo-agent-001");
-            assert!(events.events.is_empty());
-            assert_eq!(
-                db.runtime_heartbeat_for_machine("oslo-agent-001")
-                    .await
-                    .unwrap()
-                    .last_seen_at,
-                heartbeat.last_seen_at
-            );
 
             let completion_input = CompleteAgentCreationRequestInput {
                 request_id: lease.request.id,
@@ -5746,7 +5664,9 @@ mod tests {
                 .id
                 .clone();
             assert_eq!(db.visible_projects_for_user(&user_id).await.len(), 2);
-            let relay_hash = runtime_relay_token_hash("destroy-test-relay-token").unwrap();
+            // A legacy relay credential row: nothing writes these anymore, but
+            // destroy still clears any left behind by earlier Core generations.
+            let relay_hash = "ab".repeat(32);
             db.exec(&format!(
                 "INSERT INTO runtime_relay_credentials \
                  (agent_runtime_id, token_hash, created_at, updated_at) \
@@ -6483,7 +6403,6 @@ mod tests {
                 provider_runtime_handle: None,
                 contact_endpoint: None,
                 runtime_capabilities: Some(kata_runtime_capabilities()),
-                runtime_relay_token_hash: runtime_relay_token_hash("runtime-token-1").unwrap(),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("oslo-host-1".to_string()),
@@ -6497,7 +6416,6 @@ mod tests {
             .unwrap();
 
             assert_eq!(db.table_len("agent_runtimes").await, 1);
-            assert_eq!(db.table_len("runtime_relay_credentials").await, 1);
             assert_eq!(db.table_len("project_runtime_links").await, 1);
 
             let failed = db
@@ -6515,13 +6433,7 @@ mod tests {
             assert_eq!(failed.status, AgentCreationRequestStatus::Failed);
             assert!(failed.agent_runtime_id.is_none());
             assert!(db.all_agent_runtimes().await.is_empty());
-            assert!(db.all("runtime_relay_credentials").await.is_empty());
             assert!(db.all("project_runtime_links").await.is_empty());
-            assert!(
-                db.runtime_heartbeat_for_machine("oslo-agent-001")
-                    .await
-                    .is_err()
-            );
         })
         .await;
     }
@@ -8753,7 +8665,6 @@ mod tests {
                 provider_runtime_handle: None,
                 contact_endpoint: Some("http://oslo-host-3:4201/contact".to_string()),
                 runtime_capabilities: Some(kata_runtime_capabilities()),
-                runtime_relay_token_hash: "relay-token-hash".to_string(),
                 display_name: None,
                 hostname: None,
                 runtime_host: Some("http://oslo-host-3:4201".to_string()),

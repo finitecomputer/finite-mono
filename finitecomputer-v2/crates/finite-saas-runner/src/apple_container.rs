@@ -402,9 +402,6 @@ impl AppleContainerLauncher {
         options: &RuntimeLaunchOptions,
         plan: AppleContainerLaunchPlan,
     ) -> Result<RuntimeLaunchFacts, RunnerError> {
-        let runtime_bootstrap_token = random_runtime_bootstrap_token();
-        let runtime_relay_token_hash = hash_runtime_relay_token(&runtime_bootstrap_token)
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         Ok(RuntimeLaunchFacts {
             source_host_id: self.config.source_host_id.clone(),
             source_machine_id: plan.container_name,
@@ -412,7 +409,6 @@ impl AppleContainerLauncher {
             state_schema_version: self.config.runtime_state_schema_version.clone(),
             provider_runtime_handle: None,
             contact_endpoint: Some(plan.contact_url.clone()),
-            runtime_relay_token_hash,
             display_name: Some(lease.project.display_name.clone()),
             hostname: None,
             runtime_host: Some(plan.public_base_url),
@@ -521,10 +517,6 @@ impl RuntimeLauncher for AppleContainerLauncher {
             }
         }
         Ok(())
-    }
-
-    fn uses_core_runtime_heartbeat(&self) -> bool {
-        false
     }
 
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
