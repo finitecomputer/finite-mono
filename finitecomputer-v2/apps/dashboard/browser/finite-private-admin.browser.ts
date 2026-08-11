@@ -78,9 +78,13 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     });
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/admin`);
+    await page.getByRole("heading", { name: "Users" }).waitFor({ state: "visible" });
+    await page.getByText(/fp_grant_1/u).waitFor({ state: "visible" });
+    await page.getByText(/fp_key_1/u).waitFor({ state: "visible" });
+    await page.getByRole("tab", { name: "Finite Private" }).click();
     await page.getByRole("heading", { name: "Finite Private" }).waitFor({ state: "visible" });
-    await page.getByText("fp_grant_1", { exact: true }).waitFor({ state: "visible" });
-    await page.getByText("fp_key_1", { exact: true }).waitFor({ state: "visible" });
+    await page.getByRole("tab", { name: "Invites" }).click();
+    await page.getByRole("heading", { name: "Launch Codes" }).waitFor({ state: "visible" });
     await page.getByText("Legacy Standard batch", { exact: true }).waitFor({ state: "visible" });
     await page.getByText("Confidential batch", { exact: true }).waitFor({ state: "visible" });
     await page.getByText("Standard batch details", { exact: true }).waitFor({ state: "visible" });
@@ -189,7 +193,30 @@ async function handleCoreRequest(
   }
 
   if (request.method === "GET" && request.url === "/api/core/v1/admin/runtimes") {
-    writeJson(response, 200, []);
+    writeJson(response, 200, [
+      {
+        project_display_name: "Private Agent",
+        owner_email: "private@finite.vip",
+        project_id: "project_private",
+        agent_runtime_id: "runtime_private",
+        source_host_id: "finite-host-browser",
+        source_machine_id: "finite-kata-browser",
+        runtime_artifact_id: "artifact_browser",
+        runtime_artifact_version_label: "browser-test",
+        runtime_status: "online",
+        last_heartbeat_at: "2026-05-28T12:00:00Z",
+        runtime_updated_at: "2026-05-28T12:01:00Z",
+        hermes_available: true,
+        published_app_urls: [],
+        active_finite_private_key_count: 1,
+        runtime_link_active: true,
+        runtime_capabilities: {
+          restart: true,
+          recover_known_good_chat: true,
+          runtime_upgrade: false,
+        },
+      },
+    ]);
     return;
   }
 
