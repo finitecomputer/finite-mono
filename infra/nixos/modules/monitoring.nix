@@ -1,13 +1,43 @@
 # Born observed (single-server-plan.md watch-list item 5): node-exporter on
-# loopback for a future scraper, plus a health-check timer that curls every
-# service's health endpoint and fails LOUDLY into the journal.
+# loopback, plus a health-check timer that curls every service's health
+# endpoint, fails LOUDLY into the journal, and publishes machine-scoped
+# Prometheus metrics through node-exporter's textfile collector.
 #   journalctl -u finite-healthcheck   # is the box healthy?
-#
-# TODO: dead-man's-switch ping URL — pick a provider (e.g. healthchecks.io),
-# put the URL in /etc/finite/monitoring.env as DEADMAN_PING_URL, and curl it
-# at the end of the health check on success, so silence pages someone.
-{ pkgs, ... }:
+{
+  config,
+  finitePackages,
+  lib,
+  pkgs,
+  ...
+}:
 let
+  healthMetricsDirectory = "/run/finite-monitoring";
+  revision =
+    if config.system.configurationRevision == null then "" else config.system.configurationRevision;
+  prometheusEscape = lib.replaceStrings [ "\\" "\"" "\n" ] [ "\\\\" "\\\"" "\\n" ];
+  versionMetric =
+    {
+      component,
+      version,
+      source,
+      gitSha ? "",
+      imageDigest ? "",
+    }:
+    ''
+      finite_component_build_info{host="${prometheusEscape config.networking.hostName}",component="${prometheusEscape component}",version="${prometheusEscape version}",git_sha="${prometheusEscape gitSha}",image_digest="${prometheusEscape imageDigest}",source="${source}"} 1
+      finite_component_version_mismatch{host="${prometheusEscape config.networking.hostName}",component="${prometheusEscape component}"} 0
+    '';
+  last = values: builtins.elemAt values (builtins.length values - 1);
+  imageDigest = image: if lib.hasInfix "@" image then last (lib.splitString "@" image) else "";
+  imageVersion =
+    image:
+    let
+      digest = imageDigest image;
+    in
+    if digest != "" then digest else last (lib.splitString ":" image);
+  dashboardImage = config.virtualisation.oci-containers.containers.finite-saas-dashboard.image;
+  searxngImage = config.virtualisation.oci-containers.containers.searxng.image;
+  firecrawlImage = config.virtualisation.oci-containers.containers.firecrawl-api.image;
   probedServiceUnits = [
     "finite-saas-core.service"
     "podman-finite-saas-dashboard.service"
@@ -21,10 +51,78 @@ let
   ];
 in
 {
-  services.prometheus.exporters.node = {
+  imports = [ ./metrics.nix ];
+
+  finite.metrics = {
     enable = true;
-    listenAddress = "127.0.0.1";
-    port = 9100;
+    collectRuntimeArtifacts = true;
+    staticVersionMetrics = lib.concatMapStrings versionMetric [
+      {
+        component = "finite-saas-core";
+        version = finitePackages.finite-saas-core.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "finite-saas-dashboard";
+        version = imageVersion dashboardImage;
+        imageDigest = imageDigest dashboardImage;
+        source = "image";
+      }
+      {
+        component = "finitechat-server";
+        version = finitePackages.finitechat-server.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "finitechat-hosted-device";
+        version = finitePackages.finitechat-hosted-device.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "finite-brain";
+        version = finitePackages.finite-brain.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "finite-saas-sites";
+        version = finitePackages.finitesitesd.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "searxng";
+        version = imageVersion searxngImage;
+        imageDigest = imageDigest searxngImage;
+        source = "image";
+      }
+      {
+        component = "firecrawl";
+        version = imageVersion firecrawlImage;
+        imageDigest = imageDigest firecrawlImage;
+        source = "image";
+      }
+      {
+        component = "postgres";
+        version = config.services.postgresql.package.version;
+        source = "nix";
+      }
+      {
+        component = "finite-saas-runner";
+        version = finitePackages.finite-saas-runner.version;
+        gitSha = revision;
+        source = "nix";
+      }
+      {
+        component = "nixos-system-profile";
+        version = config.system.nixos.version;
+        gitSha = revision;
+        source = "nix";
+      }
+    ];
   };
 
   systemd.services.finite-healthcheck = {
@@ -40,29 +138,63 @@ in
     serviceConfig = {
       Type = "oneshot";
       DynamicUser = true;
+      SupplementaryGroups = [ "finite-monitoring" ];
       # Keep slow or wedged local endpoints from extending an activation
       # indefinitely even though each probe has its own curl timeout.
       TimeoutStartSec = "2min";
     };
     script = ''
-      set -u
+      set -eu
       max_attempts=13
       retry_delay_seconds=5
       attempt=1
       deadline=$((SECONDS + 60))
+      host=${lib.escapeShellArg config.networking.hostName}
+      metrics_dir="''${FINITE_HEALTHCHECK_METRICS_DIRECTORY:-${healthMetricsDirectory}}"
+      metrics_file="$metrics_dir/finite-healthcheck.prom"
+      metrics_tmp=
+      trap 'rm -f "$metrics_tmp"' EXIT
+
+      begin_metrics() {
+        metrics_tmp=$(mktemp "$metrics_file.tmp.XXXXXX")
+        {
+          echo '# HELP finite_healthcheck_success Whether every internal health endpoint passed the latest check.'
+          echo '# TYPE finite_healthcheck_success gauge'
+          echo '# HELP finite_service_health_status Whether an internal service endpoint passed the latest check.'
+          echo '# TYPE finite_service_health_status gauge'
+        } > "$metrics_tmp"
+      }
 
       check() {
         name=$1; shift
         if curl -fsS --max-time 10 -o /dev/null "$@"; then
           echo "OK   $name"
+          status=1
         else
           echo "$failure_prefix $name ($*)" >&2
           fail=1
+          status=0
         fi
+        printf 'finite_service_health_status{host="%s",service="%s"} %s\n' \
+          "$host" "$name" "$status" >> "$metrics_tmp"
+      }
+
+      publish_metrics() {
+        if [ "$fail" -eq 0 ]; then
+          aggregate=1
+        else
+          aggregate=0
+        fi
+        printf 'finite_healthcheck_success{host="%s"} %s\n' \
+          "$host" "$aggregate" >> "$metrics_tmp"
+        chmod 0640 "$metrics_tmp"
+        mv -f "$metrics_tmp" "$metrics_file"
+        metrics_tmp=
       }
 
       while :; do
         fail=0
+        begin_metrics
         if [ "$attempt" -ge "$max_attempts" ] || [ "$SECONDS" -ge "$deadline" ]; then
           failure_prefix=FAIL
         else
@@ -79,6 +211,7 @@ in
         check firecrawl           http://127.0.0.1:3002/v0/health/readiness
         check node-exporter       http://127.0.0.1:9100/metrics
 
+        publish_metrics
         if [ "$fail" -eq 0 ]; then
           exit 0
         fi
