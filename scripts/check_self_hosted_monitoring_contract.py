@@ -56,7 +56,7 @@ def main() -> None:
         "scrape_timeout: 3s",
         "time: 15d",
         "size: 20GB",
-        "probe: hetzner-monitoring",
+        "probe: self-hosted-monitoring",
         "module: [http_404]",
         "probe_success|probe_duration_seconds|probe_http_status_code",
     ):

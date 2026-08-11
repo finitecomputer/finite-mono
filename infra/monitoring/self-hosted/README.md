@@ -21,7 +21,7 @@ to pull and apply future reviewed updates. The
 `infra/monitoring/self-hosted/` directory is self-contained and can instead be
 copied to the VPS by itself.
 
-Before using raw-IP mode, restrict inbound port 80 in the Hetzner firewall to
+Before using raw-IP mode, restrict inbound port 80 in the provider firewall to
 your current public IP. Grafana login credentials travel over plaintext HTTP
 in this temporary mode. Do not leave port 80 open to the internet.
 
@@ -49,7 +49,7 @@ panels begin populating immediately. Raw-IP mode deliberately returns HTTP
 
 Create DNS `A` records for `monitoring.finite.computer` and
 `metrics-ingest.finite.computer` pointing to the VPS public IPv4 address. Keep
-ports 80 and 443 public in the Hetzner firewall and restrict port 22 to operator
+ports 80 and 443 public in the provider firewall and restrict port 22 to operator
 IP addresses. Do not expose ports 3000, 9090, or 9115.
 
 From a checkout of this repository on the VPS, run:

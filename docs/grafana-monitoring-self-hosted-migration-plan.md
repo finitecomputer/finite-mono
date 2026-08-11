@@ -16,7 +16,7 @@ availability, monitoring backups, or host-performance dashboards.
 
 ## Chosen Shape
 
-- Provider: Hetzner Cloud.
+- Provider: dedicated Ubuntu 24.04 VPS.
 - Operating system: Ubuntu 24.04 LTS on x86_64.
 - Storage: the VPS local disk; no separate volume is required for the MVP.
 - UI: Grafana OSS.
@@ -37,7 +37,7 @@ Grafana anonymous access and public sign-up are disabled.
 
 Before DNS is available, the same stack can run in temporary raw-IP mode. This
 serves Grafana over HTTP for operator validation but returns `426 TLS Required`
-from remote write. The Hetzner firewall must restrict port 80 to the operator's
+from remote write. The provider firewall must restrict port 80 to the operator's
 current public IP in this mode. LAT credentials must not be sent until the DNS
 and TLS cutover.
 

@@ -17,7 +17,7 @@ scrape_configs:
     static_configs:
       - targets: [https://finite.computer]
         labels:
-          probe: hetzner-monitoring
+          probe: self-hosted-monitoring
     relabel_configs: &blackbox_relabel
       - source_labels: [__address__]
         target_label: __param_target
@@ -37,9 +37,10 @@ scrape_configs:
     static_configs:
       - targets: [https://chat.finite.computer/health]
         labels:
-          probe: hetzner-monitoring
+          probe: self-hosted-monitoring
     relabel_configs: *blackbox_relabel
     metric_relabel_configs: *probe_metrics
+
 
   - job_name: brain.finite.computer
     metrics_path: /probe
@@ -48,7 +49,7 @@ scrape_configs:
     static_configs:
       - targets: [https://brain.finite.computer/health]
         labels:
-          probe: hetzner-monitoring
+          probe: self-hosted-monitoring
     relabel_configs: *blackbox_relabel
     metric_relabel_configs: *probe_metrics
 
@@ -59,7 +60,7 @@ scrape_configs:
     static_configs:
       - targets: [https://finitechat-native-mockup.finite.chat/]
         labels:
-          probe: hetzner-monitoring
+          probe: self-hosted-monitoring
     relabel_configs: *blackbox_relabel
     metric_relabel_configs: *probe_metrics
 
@@ -70,7 +71,6 @@ scrape_configs:
     static_configs:
       - targets: [https://uptime-probe.docs.finite.chat/]
         labels:
-          probe: hetzner-monitoring
+          probe: self-hosted-monitoring
     relabel_configs: *blackbox_relabel
     metric_relabel_configs: *probe_metrics
-
