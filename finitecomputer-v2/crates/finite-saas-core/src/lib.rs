@@ -2940,7 +2940,15 @@ pub(crate) fn provider_operation_allows_generic_failure(
 }
 
 fn current_time_iso() -> CoreResult<String> {
-    Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
+    // Truncate to microseconds: TIMESTAMPTZ stores exactly six fractional
+    // digits, so a nanosecond-precision stamp would round on write and stop
+    // round-tripping byte-for-byte (macOS clocks tick in microseconds, which
+    // hid this; Linux exposes it).
+    let now = OffsetDateTime::now_utc();
+    let now = now
+        .replace_nanosecond(now.nanosecond() / 1_000 * 1_000)
+        .expect("truncating nanoseconds cannot leave the valid range");
+    Ok(now.format(&Rfc3339)?)
 }
 
 fn parse_time(value: &str) -> CoreResult<OffsetDateTime> {
@@ -3352,6 +3360,19 @@ mod tests {
                 );
             })+
         };
+    }
+
+    /// TIMESTAMPTZ stores six fractional digits, so any stamp Core generates
+    /// with more would round on write and no longer round-trip byte-for-byte.
+    /// On macOS the clock ticks in microseconds and this can never fire; on
+    /// Linux (CI, production) nanosecond stamps are real.
+    #[test]
+    fn current_time_iso_never_exceeds_postgres_microsecond_precision() {
+        for _ in 0..1_000 {
+            let stamp = current_time_iso().unwrap();
+            let parsed = parse_time(&stamp).unwrap();
+            assert_eq!(parsed.nanosecond() % 1_000, 0, "{stamp}");
+        }
     }
 
     /// `wire_enum!` now generates serde, `as_str`, and `parse_*` from one
