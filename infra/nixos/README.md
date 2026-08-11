@@ -290,9 +290,9 @@ The complete custody and operator-copy gate is
 [`../runbooks/lat1-catastrophic-recovery-copy.md`](../runbooks/lat1-catastrophic-recovery-copy.md).
 
 Finite Brain reads `/etc/finite/identity-operator.env`,
-`/etc/finite/brain-authority.env`, and the send-only Resend credential from
-`/etc/finite-saas/sites.env`; the Product Client and Agent Runtime never
-receive any of those credentials.
+`/etc/finite/brain-authority.env`, `/etc/finite/sites-viewer-session.env`, and
+the send-only Resend credential from `/etc/finite-saas/sites.env`; the Product
+Client and Agent Runtime never receive any of those credentials.
 
 ## Google Workspace OAuth production setup
 

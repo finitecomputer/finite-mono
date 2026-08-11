@@ -27,6 +27,29 @@ the database without a byte-for-byte rollback copy.
 - The previous NixOS generation and source Brain service remain available for
   rollback until the lat1 Product Client and `fbrain` proofs pass.
 
+For the `fbrain/v0.3.0` account-cohort cutover, also require all of the
+following before activation:
+
+- `ssh -T root@64.34.82.77 finite-status --json` has been retained and all four
+  sections are green. This is the required pre-rollout platform record.
+- `/etc/finite/sites-viewer-session.env` exists as a non-empty root-only file
+  and names `FINITE_SITES_VIEWER_SESSION_TOKEN`. Never print its value. Brain,
+  Sites, and the dashboard must receive the same server-only secret.
+- Core migration `0017_brain_agent_departure_facts.sql` is present in the exact
+  reviewed closure. Core applies it on startup; do not manufacture or edit its
+  rows as a deployment step.
+- A canonical Agent Runtime image built from the same reviewed source commit
+  has passed its image smoke. Because that image contains both `fbrain` and the
+  managed FiniteBrain skill, upgrade the intended Agent cohort before enabling
+  the server cutover. N-1 agents keep compatible reads, sync, and chat, but
+  access writers that could recreate legacy state deliberately receive
+  update-required.
+- The Brain SQLite backup and the platform Recovery Snapshot/Borg boundary are
+  both green. Do not run `fbrain brain reconcile-cohort`, `convert-invitation`,
+  or any other existing-state mutation during deployment. Reconciliation is a
+  later, separately authorized operation with its own immutable plan and
+  `--backup-reference`.
+
 ## First migration from smoke
 
 1. On smoke, make a SQLite online backup (or briefly stop the service if the
@@ -148,6 +171,8 @@ legacy-repo deploy is part of the path.
 set -euo pipefail
 ssh root@64.34.82.77 systemctl is-active finite-brain-app
 ssh root@64.34.82.77 curl -fsS http://127.0.0.1:3015/health
+ssh root@64.34.82.77 \
+  "curl -fsS http://127.0.0.1:3015/health | jq -e '.capabilities | index(\"account_cohort_writes_v1\") != null'"
 curl -fsS https://brain.finite.computer/health
 curl -fsS -o /dev/null -w '%{http_code}\n' https://brain.finite.computer/client
 curl -fsS -o /dev/null -w '%{http_code}\n' https://finite.computer/client
@@ -162,6 +187,16 @@ and completes a real `/_admin/*` request through the dashboard while signing
 for `https://brain.finite.computer`. Then run `fbrain doctor` and a write/read
 proof from an authorized Nostr identity against
 `https://brain.finite.computer`.
+
+After the Product Client, CLI, and disposable invitation proofs pass, retain
+the post-rollout platform record:
+
+```sh
+ssh -T root@64.34.82.77 finite-status --json
+```
+
+The `finite-brain-cohort-writes` HTTP probe must be green. A healthy process
+without `account_cohort_writes_v1` is not a successful account-cohort rollout.
 
 For an invite-delivery change, use a disposable Brain and an operator-owned
 inbox. Create one email-targeted Brain Invitation and one email-targeted Folder

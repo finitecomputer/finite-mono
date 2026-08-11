@@ -50,10 +50,14 @@ CONTRACT: dict[str, Any] = {
             "finitechat-server": "http://127.0.0.1:8788/health",
             "hosted-web-device": "http://127.0.0.1:38918/healthz",
             "finite-brain": "http://127.0.0.1:3015/health",
+            "finite-brain-cohort-writes": "http://127.0.0.1:3015/health",
             "finitesitesd": "http://127.0.0.1:8787/api/v1/healthz",
             "searxng": "http://127.0.0.1:8080/healthz",
             "firecrawl": "http://127.0.0.1:3002/v0/health/readiness",
             "node-exporter": "http://127.0.0.1:9100/metrics",
+        },
+        "required_capabilities": {
+            "finite-brain-cohort-writes": "account_cohort_writes_v1",
         },
     },
     "runner": {

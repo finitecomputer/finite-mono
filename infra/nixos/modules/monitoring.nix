@@ -36,6 +36,7 @@ in
     path = [
       pkgs.coreutils
       pkgs.curl
+      pkgs.jq
     ];
     serviceConfig = {
       Type = "oneshot";
@@ -61,6 +62,19 @@ in
         fi
       }
 
+      check_finite_brain_cohort_writes() {
+        endpoint=http://127.0.0.1:3015/health
+        if body="$(curl -fsS --max-time 10 "$endpoint")" \
+          && printf '%s' "$body" \
+            | jq -e '(.capabilities // []) | index("account_cohort_writes_v1") != null' \
+              >/dev/null; then
+          echo "OK   finite-brain-cohort-writes"
+        else
+          echo "$failure_prefix finite-brain-cohort-writes ($endpoint missing account_cohort_writes_v1)" >&2
+          fail=1
+        fi
+      }
+
       while :; do
         fail=0
         if [ "$attempt" -ge "$max_attempts" ] || [ "$SECONDS" -ge "$deadline" ]; then
@@ -74,6 +88,7 @@ in
         check finitechat-server   http://127.0.0.1:8788/health
         check hosted-web-device   http://127.0.0.1:38918/healthz
         check finite-brain        http://127.0.0.1:3015/health
+        check_finite_brain_cohort_writes
         check finitesitesd        -H "Host: api.finite.chat" http://127.0.0.1:8787/api/v1/healthz
         check searxng             http://127.0.0.1:8080/healthz
         check firecrawl           http://127.0.0.1:3002/v0/health/readiness
